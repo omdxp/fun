@@ -1006,7 +1006,243 @@ fn genericArgSpellings(allocator: Allocator, type_str: []const u8) ?[]const []co
     return out.toOwnedSlice() catch null;
 }
 
-pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token) !void {
+/// A raw-TEXT scan for `imp path.to.module;` / `imp ..relative.path;` specs
+/// (the text between `imp` and the terminating `;`, with any internal
+/// whitespace stripped), for a file that hasn't been lexed yet -- used by
+/// `rebuildIndex` to discover direct imports BEFORE the real index exists,
+/// so their own enum declarations (see `scanEnumVariantPayloadsFromText`)
+/// can be merged in and the real index only needs to be built ONCE, not
+/// once normally and once more after learning about cross-file enums.
+/// Best-effort like its sibling: doesn't understand string literals or
+/// comments containing something that looks like `imp ...;`.
+pub fn scanImportSpecsFromText(allocator: Allocator, text: []const u8) ![][]const u8 {
+    var out = ArrayList([]const u8).init(allocator);
+    errdefer out.deinit();
+
+    const isIdentStart = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphabetic(c) or c == '_';
+        }
+    }.call;
+    const isIdentCont = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.call;
+    const isSpecChar = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
+        }
+    }.call;
+
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+            i += 1;
+            continue;
+        }
+        if (!isIdentStart(c)) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < text.len and isIdentCont(text[i])) i += 1;
+        const word = text[start..i];
+        if (!std.mem.eql(u8, word, "imp")) continue;
+        // Must be followed by whitespace, not e.g. an identifier like
+        // `impl` or `important` (already excluded by isIdentCont above,
+        // but a following '.'/other spec char right after "imp" with NO
+        // separating whitespace would also be wrong -- require at least
+        // one space/tab before the spec).
+        if (i >= text.len or !(text[i] == ' ' or text[i] == '\t')) continue;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
+        const spec_start = i;
+        while (i < text.len and isSpecChar(text[i])) i += 1;
+        if (i > spec_start) {
+            try out.append(try allocator.dupe(u8, text[spec_start..i]));
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// A raw-TEXT equivalent of `prescanEnumVariantPayloads`, for a file that
+/// hasn't (and won't) be run through the real lexer for this purpose --
+/// `rebuildIndex` uses this to pull a directly-imported file's own enum
+/// declarations (via its already-loaded `Doc.text`) into a merged map, so a
+/// `fit`-arm destructuring binding (`.Impl(i) ->`) resolves its type even
+/// when the enum itself lives in a different file (the common shape for a
+/// large enum living in its own module) -- see `buildIndexFromTextAt`'s
+/// `extra_variant_payloads` parameter. Best-effort, matching the rest of
+/// this file's philosophy: skips `//` and `/* */` comments, but doesn't
+/// understand string literals containing `{`/`(`/`//`-like sequences (rare
+/// inside a plain enum declaration's own body in practice).
+pub fn scanEnumVariantPayloadsFromText(allocator: Allocator, text: []const u8, map: *std.StringHashMap([]const u8)) !void {
+    var ambiguous = std.StringHashMap(void).init(allocator);
+    defer ambiguous.deinit();
+
+    const isIdentStart = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphabetic(c) or c == '_';
+        }
+    }.call;
+    const isIdentCont = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.call;
+
+    // Advances past whitespace and comments starting at `i`; returns the
+    // index of the next real content byte (or `text.len`).
+    const skipTrivia = struct {
+        fn call(s: []const u8, start: usize) usize {
+            var j = start;
+            while (j < s.len) {
+                const c = s[j];
+                if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                    j += 1;
+                    continue;
+                }
+                if (c == '/' and j + 1 < s.len and s[j + 1] == '/') {
+                    j += 2;
+                    while (j < s.len and s[j] != '\n') j += 1;
+                    continue;
+                }
+                if (c == '/' and j + 1 < s.len and s[j + 1] == '*') {
+                    j += 2;
+                    while (j + 1 < s.len and !(s[j] == '*' and s[j + 1] == '/')) j += 1;
+                    j = if (j + 1 < s.len) j + 2 else s.len;
+                    continue;
+                }
+                break;
+            }
+            return j;
+        }
+    }.call;
+
+    const readIdent = struct {
+        fn call(s: []const u8, start: usize) ?struct { name: []const u8, end: usize } {
+            if (start >= s.len or !isIdentStart(s[start])) return null;
+            var j = start + 1;
+            while (j < s.len and isIdentCont(s[j])) j += 1;
+            return .{ .name = s[start..j], .end = j };
+        }
+    }.call;
+
+    var i: usize = 0;
+    while (i < text.len) {
+        i = skipTrivia(text, i);
+        if (i >= text.len) break;
+        const kw = readIdent(text, i) orelse {
+            i += 1;
+            continue;
+        };
+        if (!std.mem.eql(u8, kw.name, "enum")) {
+            i = kw.end;
+            continue;
+        }
+        var j = skipTrivia(text, kw.end);
+        const name_id = readIdent(text, j) orelse {
+            i = j;
+            continue;
+        };
+        const enum_name = name_id.name;
+        j = skipTrivia(text, name_id.end);
+
+        // Skip an optional `<...>` generic type-parameter list.
+        if (j < text.len and text[j] == '<') {
+            var angle: i64 = 0;
+            while (j < text.len) : (j += 1) {
+                if (text[j] == '<') angle += 1;
+                if (text[j] == '>') {
+                    angle -= 1;
+                    if (angle <= 0) {
+                        j += 1;
+                        break;
+                    }
+                }
+            }
+            j = skipTrivia(text, j);
+        }
+        if (j >= text.len or text[j] != '{') {
+            i = j;
+            continue;
+        }
+        j += 1;
+
+        var depth: i64 = 1;
+        while (j < text.len and depth > 0) {
+            j = skipTrivia(text, j);
+            if (j >= text.len) break;
+            if (text[j] == '{') {
+                depth += 1;
+                j += 1;
+                continue;
+            }
+            if (text[j] == '}') {
+                depth -= 1;
+                j += 1;
+                continue;
+            }
+            if (depth != 1) {
+                j += 1;
+                continue;
+            }
+            const vid = readIdent(text, j) orelse {
+                j += 1;
+                continue;
+            };
+            const vname = vid.name;
+            const after_v = skipTrivia(text, vid.end);
+            if (after_v >= text.len or text[after_v] != '(') {
+                j = vid.end;
+                continue;
+            }
+            // First payload type spelling: from right after `(` up to the
+            // first top-level `,` or `)`, trimmed.
+            var k = after_v + 1;
+            const type_start = skipTrivia(text, k);
+            var pdepth: i64 = 1;
+            var type_end = type_start;
+            k = type_start;
+            while (k < text.len and pdepth > 0) : (k += 1) {
+                const c = text[k];
+                if (c == '(') pdepth += 1;
+                if (c == ')') {
+                    pdepth -= 1;
+                    if (pdepth == 0) break;
+                }
+                if (c == ',' and pdepth == 1) break;
+                if (!(c == ' ' or c == '\t' or c == '\r' or c == '\n')) type_end = k + 1;
+            }
+            if (type_end > type_start) {
+                const ptype = text[type_start..type_end];
+                const qkey = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ enum_name, vname });
+                try map.put(qkey, try allocator.dupe(u8, ptype));
+                if (map.contains(vname)) {
+                    try ambiguous.put(try allocator.dupe(u8, vname), {});
+                } else {
+                    try map.put(try allocator.dupe(u8, vname), try allocator.dupe(u8, ptype));
+                }
+            }
+            // Skip to the matching `)` of this variant's own parens.
+            var pd: i64 = 1;
+            var m = after_v + 1;
+            while (m < text.len and pd > 0) : (m += 1) {
+                if (text[m] == '(') pd += 1;
+                if (text[m] == ')') pd -= 1;
+            }
+            j = m;
+        }
+        i = j;
+    }
+
+    var ait = ambiguous.keyIterator();
+    while (ait.next()) |key| _ = map.remove(key.*);
+}
+
+pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token, extra_variant_payloads: ?*const std.StringHashMap([]const u8)) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
 
@@ -1055,6 +1291,34 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     var variant_payload_map = std.StringHashMap([]const u8).init(allocator);
     defer variant_payload_map.deinit();
     try prescanEnumVariantPayloads(allocator, tokens, &variant_payload_map);
+    // Directly-imported files' own enum declarations (an enum living in its
+    // own module is the common case for a large one) -- merged in AFTER
+    // this file's own scan so a local declaration always wins on a name
+    // collision. See `buildIndexFromTextAt`'s doc comment for how the
+    // caller computes this.
+    //
+    // Skip a payload that's a bare, unbound generic type param (`T`, `E`,
+    // a lone uppercase letter that isn't a builtin type name) -- that's
+    // the imported enum's own UNSUBSTITUTED template spelling (e.g.
+    // `Result<T, E>`'s `Ok(T)`), and inserting it here would make this
+    // binding's type look "already resolved" (non-null) to everything
+    // downstream, when it actually still needs the separate query-time
+    // engine's substitution (mapping `T` to the fit SUBJECT's own concrete
+    // arg, e.g. `JsonValue`) to be correct. That engine already handles
+    // the cross-file generic case correctly on its own; merging here was
+    // observed to regress it (hover showed the bare `T`/`E` again) by
+    // preempting it with a wrong-but-non-null answer. Fine to merge a
+    // CONCRETE payload type (`Impl(ImplNode)`) -- there's no better
+    // mechanism for that case, cross-file or not.
+    if (extra_variant_payloads) |extra| {
+        var eit = extra.iterator();
+        while (eit.next()) |entry| {
+            const v = entry.value_ptr.*;
+            if (v.len == 1 and std.ascii.isUpper(v[0]) and !isBuiltinTypeName(v)) continue;
+            if (variant_payload_map.contains(entry.key_ptr.*)) continue;
+            try variant_payload_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
 
     // Generic enum type params (`Result` -> ["T"]), so a bare type-param payload
     // (`Ok(T)`) can be substituted with the fit subject's concrete arg.

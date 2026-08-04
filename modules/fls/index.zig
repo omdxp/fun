@@ -180,7 +180,7 @@ pub fn maybeCleanupFlsTempDir(dir: *std.Io.Dir) void {
 }
 
 pub fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
-    return buildIndexFromTextAt(allocator, text, null, .open_document);
+    return buildIndexFromTextAt(allocator, text, null, .open_document, null);
 }
 
 pub const IndexBuildScope = enum {
@@ -188,7 +188,17 @@ pub const IndexBuildScope = enum {
     background,
 };
 
-pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8, scope: IndexBuildScope) !*Index {
+/// `extra_variant_payloads`: enum-variant-payload types (`Impl` ->
+/// `ImplNode`) gathered from files this one directly imports, merged into
+/// the local scan so a `fit`-arm destructuring binding (`.Impl(i) ->`)
+/// resolves its type even when the enum itself is declared in a different
+/// file -- `rebuildIndex` computes this with a plain text scan (see
+/// `token_index.scanImportSpecsFromText`/`scanEnumVariantPayloadsFromText`)
+/// BEFORE calling this, so the real index only needs to be built once;
+/// `null` from every other caller, which is exactly what the local-only
+/// fallback (this file's own `enum` declarations, always scanned
+/// regardless) needs.
+pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8, scope: IndexBuildScope, extra_variant_payloads: ?*const std.StringHashMap([]const u8)) !*Index {
     // Parsing while typing regularly hits syntax errors.
     // Use an arena for the full compiler pipeline and for all index allocations.
     // This avoids per-token frees (which are brittle if anything is corrupted) and
@@ -388,7 +398,7 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
     // Always do lexer-driven indexing first (robust while typing), then optionally
     // overlay/replace globals+locals with AST-backed symbols.
     var symbols_token = ArrayList(SymbolLite).init(tmp_alloc);
-    try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items());
+    try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items(), extra_variant_payloads);
 
     if (parse_ok) {
         // Keep member/field symbols from the lexer scan (AST lacks positions for some of these).

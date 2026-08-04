@@ -10733,16 +10733,100 @@ pub const LspServer = struct {
         if (self.docs.getPtr(uri)) |dp| dp.last_diag_ms = nowMs();
     }
 
-    fn rebuildIndex(self: *LspServer, uri: []const u8) !void {
-        const doc_ptr = self.docs.getPtr(uri) orelse return;
-        const scope: IndexBuildScope = if (doc_ptr.version > 0) .open_document else .background;
+    fn rebuildIndex(self: *LspServer, uri: []const u8) anyerror!void {
+        const scope: IndexBuildScope = blk: {
+            const doc_ptr = self.docs.getPtr(uri) orelse return;
+            break :blk if (doc_ptr.version > 0) .open_document else .background;
+        };
 
-        // Build the new index first; if it fails, keep the old one so completion doesn't "die" mid-edit.
-        const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null, scope) catch |err| {
+        // A `fit`-arm destructuring binding (`.Impl(i) ->`) only resolves its
+        // type when the enum's OWN declaration is in THIS file's own tokens
+        // (see `token_index.prescanEnumVariantPayloads`'s per-file scan) --
+        // when the enum lives in a directly-imported file instead (the
+        // common shape for a large enum living in its own module), the
+        // binding's type, and anything inferred FROM it (e.g. a `for` loop's
+        // own item type, guessed from an `i.field`-shaped iterable), falls
+        // through to unknown. Discover direct imports via a plain TEXT scan
+        // (no real index needed yet) and pull in their own enum
+        // declarations BEFORE the one real index build below, so this only
+        // ever builds the index once per call.
+        //
+        // IMPORTANT: `self.docs.getPtr(uri)` returns a pointer into
+        // `self.docs`' own backing array. `ensureDocIndexedFromDisk` below
+        // inserts new entries (one per not-yet-seen import) via `upsertDoc`
+        // -> `self.docs.put(...)`, which can trigger a hashmap grow/rehash
+        // that FREES the old backing array -- invalidating any `*Doc`
+        // obtained before it. An earlier version of this fix held such a
+        // pointer across this exact loop and read its `.text` field
+        // afterward, which after a rehash reads freed memory: a corrupted
+        // slice (garbage ptr/len) silently flows into the DOWNSTREAM
+        // buildIndexFromTextAt's temp-file write, which then fails the
+        // write syscall with EINVAL -- a real crash, not a hang, and it
+        // only reproduced with enough transitively-imported files to
+        // actually force a rehash (small test fixtures never triggered it).
+        // Fix: never hold a `*Doc`/`.text` slice across a mutating call;
+        // re-fetch fresh immediately before each use instead (matching how
+        // the rest of this function already treats `uri`, not a cached
+        // pointer, as the source of truth after `ensureImportsIndexed`).
+        // NOTE: a compound-field cross-file lookup (so `for m : i.methods`
+        // resolves `m`'s type even when `i`'s compound's `methods` field is
+        // declared in a different file) was tried here too, by ALSO
+        // threading the imported file's own already-built `Index.symbols`
+        // through to `findMemberFieldType`/`findMemberReturnType`. That
+        // caused 4 real regressions: those symbols are the imported
+        // TEMPLATE's raw, unsubstituted form, and matching against them
+        // preempts the separate query-time engine that correctly
+        // substitutes a generic type param (`Result<T>`'s `T` ->
+        // `JsonValue`) with the CALLER's own concrete instantiation --
+        // hover started showing the bare `T` again instead of falling
+        // through to null so that better mechanism still ran. Left as a
+        // known, deliberately deferred follow-up; needs a design that only
+        // consults the imported symbols when the receiver definitely isn't
+        // a generic instantiation, not a blanket merge.
+        var extra_payloads = std.StringHashMap([]const u8).init(self.allocator);
+        defer extra_payloads.deinit();
+        {
+            const scan_text = (self.docs.getPtr(uri) orelse return).text;
+            const specs = token_idx.scanImportSpecsFromText(self.allocator, scan_text) catch &.{};
+            defer {
+                for (specs) |s| self.allocator.free(s);
+                self.allocator.free(specs);
+            }
+            for (specs) |spec| {
+                const target_uri = self.resolveImportUri(uri, spec) catch continue;
+                if (target_uri) |tu| {
+                    defer self.allocator.free(tu);
+                    self.ensureDocIndexedFromDisk(tu) catch continue;
+                    // Re-fetched: `ensureDocIndexedFromDisk` may have just
+                    // rehashed `self.docs`, so `scan_text`'s own `doc_ptr`
+                    // (captured above, before any of this loop's inserts)
+                    // must never be read again -- only `tu`'s freshly
+                    // looked-up entry, obtained AFTER that insert, is safe.
+                    const idoc = self.docs.get(tu) orelse continue;
+                    token_idx.scanEnumVariantPayloadsFromText(self.allocator, idoc.text, &extra_payloads) catch {};
+                }
+            }
+        }
+
+        // Build the new index; if it fails, keep the old one so completion doesn't "die" mid-edit.
+        // Fresh lookup (see the big comment above -- the loop just above this
+        // may have rehashed `self.docs`, so the `scope`-computing lookup at
+        // the top of this function is no longer safe to reuse here).
+        const build_text = (self.docs.getPtr(uri) orelse return).text;
+        const extra_ptr: ?*const std.StringHashMap([]const u8) = if (extra_payloads.count() > 0) &extra_payloads else null;
+        const new_idx = buildIndexFromTextAt(self.allocator, build_text, null, scope, extra_ptr) catch |err| {
             self.log("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
             return;
         };
 
+        // Fresh lookup again: `buildIndexFromTextAt` itself does no mutation
+        // of `self.docs`, but re-fetching here costs nothing and keeps this
+        // function's discipline uniform (never hold a `*Doc` across ANY
+        // call that could plausibly grow to touch `self.docs` later).
+        const doc_ptr = self.docs.getPtr(uri) orelse {
+            new_idx.deinit();
+            return;
+        };
         if (doc_ptr.index) |idx| idx.deinit();
         doc_ptr.index = new_idx;
         self.ensureImportsIndexed(uri);

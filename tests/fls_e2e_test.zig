@@ -8069,3 +8069,100 @@ test "fls e2e: hover on a function-type parameter that is NOT the first paramete
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
 }
+
+test "fls e2e: a fit-arm destructuring binding resolves its type when the enum comes from an imported file" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/felfr") catch {};
+    const defs_path = ".zig-cache/felfr/defs.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, defs_path) catch {};
+
+    // Regression: `.Impl(i) ->` (a fit-arm destructuring binding) only
+    // resolved its type when the enum's OWN declaration (`Impl(ImplNode)`)
+    // was in the SAME file being scanned (`prescanEnumVariantPayloads`'s
+    // per-file token scan). Declared here in a SEPARATE, imported file
+    // instead -- the common shape for a large enum living in its own
+    // module (e.g. this repo's own selfhost/ast/ast.fn + codegen.fn) --
+    // `i`'s type previously fell through to unknown.
+    //
+    // NOTE: a further-reaching version of this fix also tried resolving
+    // `i.methods`-shaped iterable field types cross-file (so a `for m :
+    // i.methods` loop's OWN item `m` would resolve too), but that
+    // regressed 4 OTHER tests -- it matched against the imported file's
+    // raw, unsubstituted generic template symbols, preempting the separate
+    // query-time engine that correctly substitutes a generic type param
+    // with the caller's own concrete instantiation. Deliberately scoped
+    // back to just the fit-binding itself; the field-access follow-on is a
+    // known, deferred gap needing a more careful design.
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, defs_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
+            "compound ImplNode {\n" ++
+                "  str type_name;\n" ++
+                "}\n\n" ++
+                "enum NodeKind {\n" ++
+                "  Impl(ImplNode),\n" ++
+                "}\n",
+        );
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp felfr.defs;\n\n" ++
+        "fun handle(NodeKind k) num {\n" ++
+        "  fit k {\n" ++
+        "    .Impl(i) -> {\n" ++
+        "      let x = i;\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-cross-file-variant-binding.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover at the binding's OWN declaration site (`.Impl(i) ->`).
+    const decl_pos = try findPosition(doc_text, ".Impl(i)", 0);
+    const decl_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, decl_pos.line, decl_pos.col + 6 },
+    );
+    defer allocator.free(decl_params);
+    const decl_hid = try lsp.request("textDocument/hover", decl_params);
+    var decl_res = try lsp.waitResponse(decl_hid, 15000);
+    defer decl_res.deinit();
+    const decl_val = try jsonResultFromResponseObj(decl_res.parsed.value.object);
+    try expectHoverContains(allocator, decl_val, "ImplNode");
+
+    // Hover at a USE site inside the arm's body (`let x = i;`).
+    const use_pos = try findPosition(doc_text, "let x = i;", 0);
+    const use_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, use_pos.line, use_pos.col + 8 },
+    );
+    defer allocator.free(use_params);
+    const use_hid = try lsp.request("textDocument/hover", use_params);
+    var use_res = try lsp.waitResponse(use_hid, 15000);
+    defer use_res.deinit();
+    const use_val = try jsonResultFromResponseObj(use_res.parsed.value.object);
+    try expectHoverContains(allocator, use_val, "ImplNode");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
