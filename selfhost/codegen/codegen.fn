@@ -548,6 +548,25 @@ pub compound Codegen {
   Vec<str> type_subst_param_names;
   Vec<str> type_subst_arg_type_strs;
   Vec<bin> type_subst_arg_is_pointer;
+  // Each argument's OWN full, structural `DataType*` (the SAME AST-
+  // owned pointer `type_subst_arg_type_strs`/`type_subst_arg_is_
+  // pointer` were themselves flattened FROM), parallel to those two --
+  // kept SEPARATELY because a bare-param substitution previously always
+  // rebuilt a brand-new `DataType` from just the flat mangled STRING
+  // (`type_subst_arg_type_strs.get(i)`), which is a dead end for a
+  // FURTHER-generic argument (substituting `T` -> `Vec<GenericEnum
+  // VariantTemplate>` inside `Vec<T>.get()`, e.g., a real shape hit
+  // continuing the stage-2 self-compilation attempt): the rebuilt
+  // `DataType` had NO `generic_args` of its own, only the already-
+  // mangled flat name ("Vec__GenericEnumVariantTemplate") as an opaque
+  // `type_str` -- so a LATER consumer needing the substituted type's
+  // OWN structure (`emit_for_iter`'s "what's this Vec's element type"
+  // check, e.g.) had nothing to work with. `resolve_type_subst` now
+  // prefers copying the FULL entry here (when present) over the flat-
+  // string reconstruction, which is kept only as a fallback for call
+  // sites (mostly hand-built unit tests) that populate the OLDER two
+  // arrays directly without this one.
+  Vec<DataType*> type_subst_arg_dtypes;
   // Where a lazily-monomorphized struct/enum typedef or generic impl
   // method definition should land in `self.state.out`, instead of at
   // whatever position happens to be CURRENT when it's first triggered
@@ -617,6 +636,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_param_names.init(0);
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
+  g.type_subst_arg_dtypes.init(0);
   g.hoist_insert_pos = .None;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
@@ -760,6 +780,20 @@ impl Codegen {
     if dt.generic_args.len == 0 {
       for i : 0..self.type_subst_param_names.len {
         if equals(self.type_subst_param_names.get(i), dt.type_str) {
+          // Prefer the argument's OWN full, structural `DataType* (see
+          // `Codegen.type_subst_arg_dtypes`'s doc comment for why the
+          // flat-string reconstruction below loses a FURTHER-generic
+          // argument's own structure, e.g. substituting `T` ->
+          // `Vec<GenericEnumVariantTemplate>`). Falls back to the flat
+          // strings for a call site that only ever populated those
+          // (mostly hand-built unit tests, never a further-generic
+          // argument in practice).
+          if i < self.type_subst_arg_dtypes.len {
+            let arg_dt = self.type_subst_arg_dtypes.get(i);
+            DataType out2 = *arg_dt;
+            out2.pointer_depth = out2.pointer_depth + dt.pointer_depth;
+            ret out2;
+          }
           DataType out = dtype_new();
           out.type_str = self.type_subst_arg_type_strs.get(i);
           out.flags = dt.flags;
@@ -784,6 +818,15 @@ impl Codegen {
       if a.generic_args.len == 0 {
         for i : 0..self.type_subst_param_names.len {
           if equals(self.type_subst_param_names.get(i), a.type_str) {
+            if i < self.type_subst_arg_dtypes.len {
+              let arg_dt2 = self.type_subst_arg_dtypes.get(i);
+              DataType* sub2 = malloc(sizeof(DataType));
+              *sub2 = *arg_dt2;
+              sub2.pointer_depth = sub2.pointer_depth + a.pointer_depth;
+              new_args.push(sub2);
+              substituted = true;
+              break;
+            }
             DataType* sub = malloc(sizeof(DataType));
             *sub = dtype_new();
             sub.type_str = self.type_subst_arg_type_strs.get(i);
@@ -954,6 +997,8 @@ impl Codegen {
     arg_type_names.init(0);
     Vec<bin> arg_is_pointer;
     arg_is_pointer.init(0);
+    Vec<DataType*> arg_dtypes;
+    arg_dtypes.init(0);
     num ai = 0;
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
@@ -981,6 +1026,13 @@ impl Codegen {
       }
       arg_type_names.push(arg_name);
       arg_is_pointer.push(arg_ptr);
+      // `arg` itself (this position's OWN full, structural `DataType*`,
+      // e.g. `Vec<GenericEnumVariantTemplate>` in full, not just its
+      // already-mangled name above) -- see `Codegen.type_subst_arg_
+      // dtypes`'s own doc comment for why keeping this (not just the
+      // flattened name/pointer-ness) matters for a FURTHER-generic
+      // argument.
+      arg_dtypes.push(arg);
       ai = ai + 1;
     }
     str mangled_name = name_sb.build();
@@ -1120,7 +1172,8 @@ impl Codegen {
       dt.type_str,
       mangled_name,
       arg_type_names,
-      arg_is_pointer
+      arg_is_pointer,
+      arg_dtypes
     );
     ret .Some(mangled_name);
   }
@@ -1167,6 +1220,8 @@ impl Codegen {
     arg_type_names.init(0);
     Vec<bin> arg_is_pointer;
     arg_is_pointer.init(0);
+    Vec<DataType*> arg_dtypes;
+    arg_dtypes.init(0);
     num ai = 0;
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
@@ -1190,6 +1245,10 @@ impl Codegen {
       }
       arg_type_names.push(arg_name);
       arg_is_pointer.push(arg_ptr);
+      // See `ensure_compound_instantiated`'s own doc comment for why
+      // this position's OWN full, structural `DataType*` is kept
+      // alongside the flattened name/pointer-ness above.
+      arg_dtypes.push(arg);
       ai = ai + 1;
     }
     str mangled_name = name_sb.build();
@@ -1252,7 +1311,8 @@ impl Codegen {
       dt.type_str,
       mangled_name,
       arg_type_names,
-      arg_is_pointer
+      arg_is_pointer,
+      arg_dtypes
     );
     ret .Some(mangled_name);
   }
@@ -1380,7 +1440,8 @@ impl Codegen {
     str base_name,
     str mangled_name,
     Vec<str> arg_type_names,
-    Vec<bin> arg_is_pointer
+    Vec<bin> arg_is_pointer,
+    Vec<DataType*> arg_dtypes
   ) {
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
@@ -1389,8 +1450,10 @@ impl Codegen {
             let prev_params = self.type_subst_param_names;
             let prev_arg_names = self.type_subst_arg_type_strs;
             let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            let prev_arg_dtypes = self.type_subst_arg_dtypes;
             self.type_subst_param_names = i.type_params;
             self.type_subst_arg_type_strs = arg_type_names;
+            self.type_subst_arg_dtypes = arg_dtypes;
             self.type_subst_arg_is_pointer = arg_is_pointer;
 
             StringBuilder pfx = string_builder_init(16);
@@ -1528,6 +1591,7 @@ impl Codegen {
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
             self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
           }
         }
         _ -> {}
