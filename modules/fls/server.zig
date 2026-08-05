@@ -240,13 +240,32 @@ fn buildFieldTypeTextFromTokensLite(allocator: Allocator, tokens: []const TokenL
                 continue;
             }
 
-            if (isLitePunct(t, '>')) {
-                generic_depth -= 1;
-                buf.append('>') catch return null;
-                if (generic_depth == 0) {
-                    cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
-                    break;
+            // An N-deep-nested generic's closing brackets (`Vec<Vec<Vec<T>>
+            // >`) lex as ONE run of `>` characters merged into a single
+            // operator token (maximal munch: `>>`, `>>>`, ...), not N
+            // separate `>` tokens -- see `skipGenericArgsLite`'s identical
+            // handling/comment. Closes one nesting level per '>' CHARACTER
+            // in the token (not per token), generalizing to any depth
+            // rather than special-casing exactly two.
+            const close_run: usize = blk: {
+                if (t.kind != .symbol and t.kind != .operator) break :blk 0;
+                if (t.text.len == 0) break :blk 0;
+                for (t.text) |c| {
+                    if (c != '>') break :blk 0;
                 }
+                break :blk t.text.len;
+            };
+            if (close_run > 0) {
+                var c: usize = 0;
+                while (c < close_run) : (c += 1) {
+                    generic_depth -= 1;
+                    buf.append('>') catch return null;
+                    if (generic_depth == 0) {
+                        cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
+                        break;
+                    }
+                }
+                if (generic_depth <= 0) break;
                 continue;
             }
 
@@ -1838,7 +1857,7 @@ pub const LspServer = struct {
             if (types.isVariableLike(d.kind) and (d.detail == null or let_infer_detail)) {
                 // `guessVariableType` now also resolves `fit`-arm payload bindings
                 // (incl. imported generic enums), so a single call covers all cases.
-                const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
+                const vt = d.value_type orelse self.guessVariableTypeConcrete(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
                         const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
@@ -1900,7 +1919,7 @@ pub const LspServer = struct {
             }
             if (!printed_detail) {
                 if (types.isVariableLike(d.kind)) {
-                    const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
+                    const vt = d.value_type orelse self.guessVariableTypeConcrete(idx, uri, tok.text, pos);
                     if (vt) |vts| {
                         const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
                         try buf.print("```fun\n{s}{s} {s}\n```\n", .{ const_prefix, vts, tok.text });
@@ -1939,7 +1958,7 @@ pub const LspServer = struct {
             }
             try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else {
-            if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
+            if (self.guessVariableTypeConcrete(idx, uri, tok.text, pos)) |vt| {
                 try buf.print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
             }
         }
@@ -5052,6 +5071,88 @@ pub const LspServer = struct {
                 (if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text);
         }
         return best;
+    }
+
+    /// Like `guessVariableType`, but for HOVER DISPLAY specifically: keeps a
+    /// matched declaration's own concrete generic-arg suffix (`Vec<Vec<num>>`)
+    /// instead of collapsing it to the bare base name (`Vec`). A separate
+    /// function rather than a parameter on `guessVariableType` itself --
+    /// that one is called from 15+ sites that rely on its EXISTING "always
+    /// returns the bare base name" contract for member/method lookups
+    /// (matching against `impl TypeName { ... }`, indexed by base name, not
+    /// a concrete instantiation string); changing its return value broadly
+    /// would break those. This duplicates the same fallback token-scan
+    /// (`guessVariableType`'s own comment explains why it deliberately
+    /// returns the base name there) but reconstructs the full type text via
+    /// `buildFieldTypeTextFromTokensLite` for its own "best" result instead.
+    /// Falls back to `guessVariableType` itself when no match is found here
+    /// (e.g. the symbol-table path above it, which already carries a full,
+    /// correctly-substituted `value_type` for non-field/property kinds).
+    fn guessVariableTypeConcrete(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
+        var best: ?[]const u8 = null;
+
+        var i: usize = 0;
+        while (i + 1 < idx.tokens.len) : (i += 1) {
+            const t_type = idx.tokens[i];
+            if (!rangeStartLessOrEqual(t_type.range, at)) break;
+
+            const is_type_tok = (t_type.kind == .keyword and utils.keyword_is_datatype(t_type.text)) or t_type.kind == .identifier;
+            if (!is_type_tok) continue;
+
+            if (i > 0 and idx.tokens[i - 1].kind == .keyword) {
+                const kw = idx.tokens[i - 1].text;
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
+                    continue;
+                }
+            }
+
+            var name_i: usize = i + 1;
+            while (name_i < idx.tokens.len) {
+                const tt = idx.tokens[name_i];
+                if (tt.kind == .comment) {
+                    name_i += 1;
+                    continue;
+                }
+                if ((tt.kind == .symbol or tt.kind == .operator) and std.mem.eql(u8, tt.text, "<")) {
+                    name_i = skipGenericArgsLite(idx.tokens, name_i);
+                    continue;
+                }
+                if ((tt.kind == .operator or tt.kind == .symbol) and (std.mem.eql(u8, tt.text, "*") or std.mem.eql(u8, tt.text, "&"))) {
+                    name_i += 1;
+                    continue;
+                }
+                break;
+            }
+            if (name_i >= idx.tokens.len) continue;
+
+            // A generic arg (`Vec` inside `Vec<Vec<num>>`) is itself a bare
+            // identifier that would otherwise look EXACTLY like its own
+            // standalone `Type name;` declaration candidate to this scanner
+            // on a LATER loop iteration, once `i` naturally advances into
+            // it -- and `skipGenericArgsLite`, entered fresh at that inner
+            // position (depth 0, expecting to close only ITS OWN one
+            // level), over-closes on the shared `>>` token and can land
+            // `name_i` on the SAME real field name by coincidence. Since
+            // `best` gets overwritten on every match (last one wins), that
+            // spurious inner "declaration" then clobbers the correct outer
+            // one with just its own (incomplete) nested slice (`Vec<num>`
+            // instead of the full `Vec<Vec<num>>`). Skipping straight past
+            // the whole consumed span whenever generic args were present
+            // (`name_i` jumped ahead of `i + 1`) keeps every inner
+            // identifier from ever being independently reconsidered.
+            defer if (name_i > i + 1) {
+                i = name_i - 1;
+            };
+
+            const t_name = idx.tokens[name_i];
+            if (t_name.kind != .identifier) continue;
+            if (!std.mem.eql(u8, t_name.text, var_name)) continue;
+            if (!rangeStartLessOrEqual(t_name.range, at)) continue;
+
+            best = self.reconstructFnTypeSignatureIfPresent(idx, i) orelse
+                (if (t_type.kind == .identifier) buildFieldTypeTextFromTokensLite(self.allocator, idx.tokens, i) orelse t_type.text else t_type.text);
+        }
+        return best orelse self.guessVariableType(idx, preferred_uri, var_name, at);
     }
 
     fn parseTypeNameFromParamLabel(self: *LspServer, label: []const u8) ?[]const u8 {

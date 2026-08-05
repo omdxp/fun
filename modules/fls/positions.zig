@@ -309,12 +309,36 @@ pub fn concreteGenericTypeAtToken(allocator: Allocator, tokens: []const TokenLit
             continue;
         }
 
-        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">")) {
+        // An N-deep-nested generic's closing brackets (`Vec<Vec<Vec<T>>>`)
+        // lex as ONE run of `>` characters merged into a single operator
+        // token (maximal munch: `>>`, `>>>`, ...), not N separate `>`
+        // tokens -- see `skipGenericArgsLite`'s identical handling/comment.
+        // Closes one nesting level per '>' CHARACTER in the token (not per
+        // token), so this generalizes to any depth rather than special-
+        // casing exactly two. Without this, `depth` never reaches 0 for a
+        // multi-`>`-closed type: the loop would fall through to the plain
+        // `out.appendSlice(t.text)` below, appending the run of `>`s as
+        // literal type text, then run off the end of the token stream and
+        // return null -- a real bug (hover on a nested-generic field/local
+        // showed only the outer type name, e.g. "Vec" instead of
+        // "Vec<Vec<num>>").
+        const close_run: usize = blk: {
+            if (t.kind != .symbol and t.kind != .operator) break :blk 0;
+            if (t.text.len == 0) break :blk 0;
+            for (t.text) |c| {
+                if (c != '>') break :blk 0;
+            }
+            break :blk t.text.len;
+        };
+        if (close_run > 0) {
             if (depth <= 0) break;
-            depth -= 1;
-            try out.append('>');
-            if (depth == 0) {
-                return try out.toOwnedSlice();
+            var c: usize = 0;
+            while (c < close_run) : (c += 1) {
+                depth -= 1;
+                try out.append('>');
+                if (depth == 0) {
+                    return try out.toOwnedSlice();
+                }
             }
             continue;
         }
