@@ -456,6 +456,21 @@ pub compound Codegen {
   // `maybe_instantiate_generic_impl_methods` would need to resolve the
   // SUBSTITUTED return type, not the template's raw `T`).
   Vec<DataType*> impl_method_rtype;
+  // Each entry's OWN declared PARAMETER types (positional, excluding
+  // the implicit `self` receiver), parallel to the arrays above -- lets
+  // `emit_method_call` resolve a bare enum-variant shorthand
+  // (`self.local_dtype.push(.None)`, e.g. `ensure_compound_
+  // instantiated`'s own real body found continuing the stage-2 self-
+  // compilation attempt) passed as a METHOD CALL argument against the
+  // callee's own declared parameter type at that position, the exact
+  // same thing `lookup_function_param_type`/`emit_call` already do for
+  // a PLAIN function call -- `emit_method_call` had no equivalent at
+  // all before this, rejecting every bare shorthand passed to a
+  // method. Populated for both a plain impl's methods
+  // (`register_impl_methods`) and a generic impl's own monomorphized
+  // methods (`maybe_instantiate_generic_impl_methods`, substituted the
+  // same way `impl_method_rtype` already is there).
+  Vec<Vec<DataType *>> impl_method_param_types;
   // A PLAIN top-level function's own name and its parameters' OWN
   // declared types (positional, parallel Vecs) -- lets `emit_call`
   // resolve a bare enum-variant shorthand (`.Parse`) passed as a CALL
@@ -618,6 +633,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
   g.impl_method_rtype.init(0);
+  g.impl_method_param_types.init(0);
   g.function_names.init(0);
   g.function_param_types.init(0);
   g.function_rtypes.init(0);
@@ -1500,11 +1516,26 @@ impl Codegen {
             for m : i.methods {
               str tmpl_name = "";
               DataType* tmpl_rtype = nil;
+              Vec<DataType*> tmpl_param_dtypes;
+              tmpl_param_dtypes.init(0);
               fit m.kind {
                 .Function(fnv) -> {
                   tmpl_name = fnv.name;
                   if fnv.has_rtype {
                     tmpl_rtype = fnv.rtype;
+                  }
+                  if fnv.has_args {
+                    bin skipped_tmpl_self = false;
+                    for arg : fnv.args {
+                      if !skipped_tmpl_self {
+                        skipped_tmpl_self = true;
+                        continue;
+                      }
+                      fit arg.kind {
+                        .Variable(v) -> { tmpl_param_dtypes.push(v.var_type); }
+                        _ -> {}
+                      }
+                    }
                   }
                 }
                 _ -> {}
@@ -1535,7 +1566,25 @@ impl Codegen {
                 recorded_rtype = malloc(sizeof(DataType));
                 *recorded_rtype = substituted_rtype;
               }
-              self.record_impl_method(mangled_name, bare_name, new_name, recorded_rtype);
+              // Each param's OWN substituted type too (`Vec<T>.push(T
+              // value)`'s bare `T` -> the concrete instantiation's own
+              // arg, e.g.) -- see `Codegen.impl_method_param_types`'s
+              // doc comment.
+              Vec<DataType*> recorded_param_types;
+              recorded_param_types.init(0);
+              for pdt : tmpl_param_dtypes {
+                DataType substituted_pdt = self.resolve_type_subst(*pdt);
+                DataType* recorded_pdt = malloc(sizeof(DataType));
+                *recorded_pdt = substituted_pdt;
+                recorded_param_types.push(recorded_pdt);
+              }
+              self.record_impl_method(
+                mangled_name,
+                bare_name,
+                new_name,
+                recorded_rtype,
+                recorded_param_types
+              );
 
               // `hoist_insert_pos` (if set) is a position measured
               // against the OUTER, now-swapped-away buffer -- suspending
@@ -1933,14 +1982,23 @@ impl Codegen {
   }
 
   // Records one impl method's owning type, bare name, fully mangled
-  // C call-site name, and OWN declared return type (`nil` when unknown,
+  // C call-site name, OWN declared return type (`nil` when unknown,
   // e.g. a generic impl's method -- see `Codegen.impl_method_rtype`'s
-  // doc comment) -- see `Codegen.impl_method_owner_type`'s doc comment.
-  record_impl_method(str owner_type, str bare_name, str mangled_name, DataType* rtype) {
+  // doc comment), and OWN declared parameter types (excluding the
+  // implicit `self` -- see `Codegen.impl_method_param_types`'s doc
+  // comment) -- see `Codegen.impl_method_owner_type`'s doc comment.
+  record_impl_method(
+    str owner_type,
+    str bare_name,
+    str mangled_name,
+    DataType* rtype,
+    Vec<DataType*> param_types
+  ) {
     self.impl_method_owner_type.push(owner_type);
     self.impl_method_bare_name.push(bare_name);
     self.impl_method_mangled_name.push(mangled_name);
     self.impl_method_rtype.push(rtype);
+    self.impl_method_param_types.push(param_types);
   }
 
   // Looks up `bare_name`'s OWN declared return type on the known
@@ -1960,6 +2018,29 @@ impl Codegen {
           ret .None;
         }
         ret .Some(rtype);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up `bare_name`'s OWN declared parameter type at `arg_index`
+  // (excluding `self`) on the known impl-implementing type
+  // `owner_type` -- see `Codegen.impl_method_param_types`'s doc
+  // comment. `.None` means either the method isn't recognized, or
+  // `arg_index` is out of range for it.
+  lookup_impl_method_param_type(str owner_type, str bare_name, num arg_index) Option<DataType*> {
+    num i = 0;
+    for i < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
+        self.impl_method_bare_name.get(i),
+        bare_name
+      ) {
+        let param_types = self.impl_method_param_types.get(i);
+        if arg_index >= param_types.len {
+          ret .None;
+        }
+        ret .Some(param_types.get(arg_index));
       }
       i = i + 1;
     }
@@ -2593,12 +2674,34 @@ impl Codegen {
     args.init(0);
     defer args.free();
     self.flatten_call_args(args_node, &args);
+    num arg_idx = 0;
     for arg : args {
       self.state.write(", ");
+      // A bare enum-variant shorthand (`self.local_dtype.push(.None)`,
+      // e.g.) resolves against the callee METHOD's own declared
+      // parameter type at this position -- see `Codegen.impl_method_
+      // param_types`'s doc comment for why this needed its own
+      // lookup/tracking, mirroring `emit_call`'s identical handling for
+      // a PLAIN function call exactly. An unresolvable callee/position
+      // leaves `expected_enum_type`/`expected_compound_type` untouched,
+      // same as every other site.
+      let ptype = self.lookup_impl_method_param_type(recv_r.type_name, method_name, arg_idx);
+      str prev_expected = self.expected_enum_type;
+      str prev_expected_compound = self.expected_compound_type;
+      if ptype.is_some() {
+        let resolved = self.resolve_type_name(*ptype.unwrap());
+        if resolved.is_some() {
+          self.expected_enum_type = resolved.unwrap();
+          self.expected_compound_type = resolved.unwrap();
+        }
+      }
       let aerr = self.emit_expr(*arg);
+      self.expected_enum_type = prev_expected;
+      self.expected_compound_type = prev_expected_compound;
       if aerr.is_some() {
         ret aerr;
       }
+      arg_idx = arg_idx + 1;
     }
     self.state.write(")");
     ret .None;
@@ -3231,8 +3334,25 @@ impl Codegen {
           // just `__let_infer__` (never a real enum name), so a bare
           // shorthand initializer still correctly fails to resolve
           // rather than guessing.
+          // 
+          // Resolved via `resolve_type_name`, NOT the bare `v.var_type.
+          // type_str` directly (`Option<DataType> ptype = .None;`,
+          // e.g. -- `ensure_enum_instantiated`'s own real body found
+          // continuing the stage-2 self-compilation attempt): for a
+          // GENERIC declared type, the bare type_str is just the
+          // unresolved template name ("Option"), which `enum_has_
+          // variant` never recognizes -- only the mangled concrete
+          // instantiation ("Option__DataType") is ever registered.
+          // `resolve_type_name` is a no-op passthrough for a NON-generic
+          // type (including the `let`-inference sentinel above), so
+          // this doesn't change behavior for either of those.
           let prev_expected = self.expected_enum_type;
-          self.expected_enum_type = v.var_type.type_str;
+          let resolved_decl_type = self.resolve_type_name(*v.var_type);
+          if resolved_decl_type.is_some() {
+            self.expected_enum_type = resolved_decl_type.unwrap();
+          } else {
+            self.expected_enum_type = v.var_type.type_str;
+          }
           let verr = self.emit_expr(*v.val);
           self.expected_enum_type = prev_expected;
           if verr.is_some() {
@@ -3742,16 +3862,77 @@ impl Codegen {
         subj_is_pointer = self.lookup_local_is_pointer(name).unwrap_or(false);
       }
       .Unary(u) -> {
-        if u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
-          ret .Some(CodegenErrorKind.UnsupportedNode);
-        }
-        fit u.operand.kind {
-          .Identifier(name) -> {
-            subj_name = name;
-            subj_type = self.lookup_local_type_name(name);
-            subj_is_pointer = true;
+        // `fit await self.foo(...) { ... }` (e.g. `std/fs.fn`'s real
+        // `copy_file_with_progress_cancellable` body, found continuing
+        // the stage-2 self-compilation attempt) -- the subject is an
+        // `await`-wrapped call, not a plain identifier/indirection/call.
+        // Resolves the callee's own return type via the EXACT SAME two
+        // lookups the plain "()"-call case below uses (a bare-
+        // identifier plain function, or a `recv.method()` chain), then
+        // hoists a temp `__auto_type __fit_subj` holding the LOWERED
+        // await call (`emit_await`, not a plain `emit_expr`/
+        // `emit_method_call`) -- same reasoning as that case's own doc
+        // comment for why a call subject needs one at all.
+        if equals(u.op, "await") {
+          ExprNode await_call;
+          fit u.operand.kind {
+            .Expression(ac) -> { await_call = ac; }
+            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
           }
-          _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          if !equals(await_call.op, "()") || !await_call.has_left || !await_call.has_right {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          Option<DataType*> await_rtype = .None;
+          fit await_call.left.kind {
+            .Identifier(fn_name) -> { await_rtype = self.lookup_function_rtype(fn_name); }
+            .Expression(recv_e2) -> {
+              if equals(recv_e2.op, ".") && recv_e2.has_left && recv_e2.has_right {
+                let recv_chain2 = self.resolve_field_chain(recv_e2.left);
+                if recv_chain2.is_some() {
+                  str method_name2 = "";
+                  fit recv_e2.right.kind {
+                    .Identifier(n2) -> { method_name2 = n2; }
+                    _ -> {}
+                  }
+                  if !equals(method_name2, "") {
+                    await_rtype = self.lookup_impl_method_rtype(
+                      recv_chain2.unwrap().type_name,
+                      method_name2
+                    );
+                  }
+                }
+              }
+            }
+            _ -> {}
+          }
+          if await_rtype.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          let resolved_await_rtype = self.resolve_type_name(*await_rtype.unwrap());
+          if resolved_await_rtype.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write("__auto_type __fit_subj = ");
+          let awerr = self.emit_await(u.operand);
+          if awerr.is_some() {
+            ret awerr;
+          }
+          self.state.write(";\n");
+          self.state.write_indent();
+          subj_name = "__fit_subj";
+          subj_type = resolved_await_rtype;
+          subj_is_pointer = false;
+        } elif u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        } else {
+          fit u.operand.kind {
+            .Identifier(name) -> {
+              subj_name = name;
+              subj_type = self.lookup_local_type_name(name);
+              subj_is_pointer = true;
+            }
+            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          }
         }
       }
       .Expression(dot_e) -> {
@@ -5690,17 +5871,32 @@ impl Codegen {
         for m : i.methods {
           str mangled_name = "";
           DataType* rtype = nil;
+          Vec<DataType*> param_types;
+          param_types.init(0);
           fit m.kind {
             .Function(fnv) -> {
               mangled_name = fnv.name;
               if fnv.has_rtype {
                 rtype = fnv.rtype;
               }
+              if fnv.has_args {
+                bin skipped_self = false;
+                for arg : fnv.args {
+                  if !skipped_self {
+                    skipped_self = true;
+                    continue;
+                  }
+                  fit arg.kind {
+                    .Variable(v) -> { param_types.push(v.var_type); }
+                    _ -> {}
+                  }
+                }
+              }
             }
             _ -> {}
           }
           let bare_name = strip_prefix(mangled_name, prefix);
-          self.record_impl_method(i.type_name, bare_name, mangled_name, rtype);
+          self.record_impl_method(i.type_name, bare_name, mangled_name, rtype, param_types);
         }
       }
       _ -> {}
@@ -8035,7 +8231,9 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
   DataType* opt_rtype = malloc(sizeof(DataType));
   *opt_rtype = dtype_new();
   opt_rtype.type_str = "Opt";
-  g.record_impl_method("Holder", "get_opt", "Holder__get_opt", opt_rtype);
+  Vec<DataType*> get_opt_param_types;
+  get_opt_param_types.init(0);
+  g.record_impl_method("Holder", "get_opt", "Holder__get_opt", opt_rtype, get_opt_param_types);
 
   Node* recv = malloc(sizeof(Node));
   *recv = node_new(NodeKind.Identifier("h"));
@@ -8139,11 +8337,14 @@ test "emit_statement emits a fit over a method-call subject with a CHAINED field
   DataType* opt_rtype = malloc(sizeof(DataType));
   *opt_rtype = dtype_new();
   opt_rtype.type_str = "Opt";
+  Vec<DataType*> token_peek_prev_n_param_types;
+  token_peek_prev_n_param_types.init(0);
   g.record_impl_method(
     "ParseState",
     "token_peek_prev_n",
     "ParseState__token_peek_prev_n",
-    opt_rtype
+    opt_rtype,
+    token_peek_prev_n_param_types
   );
 
   Node* self_ident = malloc(sizeof(Node));
