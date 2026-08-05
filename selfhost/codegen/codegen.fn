@@ -496,6 +496,17 @@ pub compound Codegen {
   Vec<Vec<str>> generic_compound_field_names;
   Vec<Vec<str>> generic_compound_field_type_names;
   Vec<Vec<bin>> generic_compound_field_is_pointer;
+  // Each field's OWN full pre-substitution `DataType*` (the same AST
+  // node `emit_compound` read `field_type_names`'s string from,
+  // KEEPING its own `generic_args` -- unlike `field_type_names`, which
+  // only ever kept the bare `type_str`, silently dropping them). Needed
+  // so `ensure_compound_instantiated` can substitute a field whose OWN
+  // type is ITSELF a nested generic instantiation using one of the
+  // template's own params (`Map<T, bin> map;` inside `compound Set<T>`,
+  // e.g.) via `resolve_type_subst`, not just a BARE occurrence of a
+  // param (`T value;`) -- see `ensure_compound_instantiated`'s own doc
+  // comment for the substitution this enables.
+  Vec<Vec<DataType *>> generic_compound_field_dtypes;
   // A generic ENUM template (`enum Option<T> { ... }`): its name,
   // type-param names, and each variant's OWN pre-substitution template
   // shape -- recorded by `emit_enum` when it sees `has_type_params`,
@@ -597,6 +608,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.generic_compound_field_names.init(0);
   g.generic_compound_field_type_names.init(0);
   g.generic_compound_field_is_pointer.init(0);
+  g.generic_compound_field_dtypes.init(0);
   g.generic_enum_names.init(0);
   g.generic_enum_type_params.init(0);
   g.generic_enum_variants.init(0);
@@ -984,6 +996,7 @@ impl Codegen {
     let field_names = self.generic_compound_field_names.get(template_idx);
     let field_type_names = self.generic_compound_field_type_names.get(template_idx);
     let field_is_pointer = self.generic_compound_field_is_pointer.get(template_idx);
+    let field_dtypes = self.generic_compound_field_dtypes.get(template_idx);
 
     Vec<str> resolved_field_names;
     resolved_field_names.init(0);
@@ -992,18 +1005,33 @@ impl Codegen {
     Vec<bin> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
 
-    CodegenState typedef_scratch = codegen_state_new();
-    CodegenState* saved_state = self.state;
-    self.state = &typedef_scratch;
-    self.state.write("typedef struct ");
-    self.state.write(mangled_name);
-    self.state.write(" {\n");
+    // Pass 1: resolve every field's substituted type NAME/pointer-ness
+    // BEFORE `self.state` gets swapped to the scratch buffer below. A
+    // field whose OWN type is ITSELF a nested generic instantiation
+    // using one of the template's own params (`Map<T, bin> map;` inside
+    // `compound Set<T>`, e.g. `std/set.fn`'s real shape) needs
+    // `resolve_type_name` -- which, for a genuinely NEW nested
+    // instantiation, recurses right back into `ensure_compound_
+    // instantiated` (or `ensure_enum_instantiated`) for THAT type. If
+    // that recursive call's own `emit_hoisted` ran with `self.state`
+    // already pointed at THIS instantiation's in-progress scratch
+    // buffer (as it would if this resolution happened inline in pass 2
+    // below), it would splice into that scratch buffer using a
+    // `hoist_insert_pos` computed against the REAL output buffer's own
+    // (much larger) length -- an out-of-bounds splice, crashing in
+    // `emit_hoisted`/`StringBuilder.append` (confirmed via a real
+    // backtrace during development). Resolving everything first, with
+    // `self.state` still pointing at whatever it legitimately was
+    // before this call, keeps every recursive `emit_hoisted` call
+    // splicing into the SAME buffer `hoist_insert_pos` was measured
+    // against.
     num fi = 0;
     for fi < field_names.len {
       str ftype = field_type_names.get(fi);
       bin fptr = field_is_pointer.get(fi);
       str resolved_type = ftype;
       bin resolved_ptr = fptr;
+      bin matched_bare_param = false;
       num pi = 0;
       for pi < type_params.len {
         if equals(type_params.get(pi), ftype) {
@@ -1016,22 +1044,64 @@ impl Codegen {
           // `T value;` field has `fptr == false`, so this is a no-op for
           // that (far more common) shape -- unchanged from before.
           resolved_ptr = arg_is_pointer.get(pi) || fptr;
+          matched_bare_param = true;
           break;
         }
         pi = pi + 1;
       }
-      self.state.write("  ");
-      self.write_type_name(resolved_type);
-      if resolved_ptr {
-        self.state.write("*");
+      // `ftype`/`field_type_names` only ever recorded a field's bare
+      // base name ("Map"), silently dropping its own generic args --
+      // `field_dtypes` (the field's full, un-mangled `DataType*`, kept
+      // alongside the bare name) lets this reuse the EXACT SAME
+      // substitution machinery a generic impl method's own body already
+      // gets (`resolve_type_subst`/`resolve_type_name`, temporarily
+      // pointed at THIS instantiation's own param/arg mapping) instead
+      // of re-deriving a parallel substitution scheme here.
+      if !matched_bare_param {
+        let field_dt = field_dtypes.get(fi);
+        if field_dt.generic_args.len > 0 {
+          let prev_params = self.type_subst_param_names;
+          let prev_arg_names = self.type_subst_arg_type_strs;
+          let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+          self.type_subst_param_names = type_params;
+          self.type_subst_arg_type_strs = arg_type_names;
+          self.type_subst_arg_is_pointer = arg_is_pointer;
+          let nested_name = self.resolve_type_name(*field_dt);
+          self.type_subst_param_names = prev_params;
+          self.type_subst_arg_type_strs = prev_arg_names;
+          self.type_subst_arg_is_pointer = prev_arg_ptrs;
+          if nested_name.is_some() {
+            resolved_type = nested_name.unwrap();
+            resolved_ptr = dtype_is_pointer(*field_dt) || fptr;
+          }
+        }
       }
-      self.state.write(" ");
-      self.state.write(field_names.get(fi));
-      self.state.write(";\n");
       resolved_field_names.push(field_names.get(fi));
       resolved_field_type_names.push(resolved_type);
       resolved_field_is_pointer.push(resolved_ptr);
       fi = fi + 1;
+    }
+
+    // Pass 2: write the struct body verbatim from the already-resolved
+    // vectors above -- no further resolution (and so no further
+    // recursive instantiation) happens while `self.state` is swapped.
+    CodegenState typedef_scratch = codegen_state_new();
+    CodegenState* saved_state = self.state;
+    self.state = &typedef_scratch;
+    self.state.write("typedef struct ");
+    self.state.write(mangled_name);
+    self.state.write(" {\n");
+    num wi = 0;
+    for wi < resolved_field_names.len {
+      self.state.write("  ");
+      self.write_type_name(resolved_field_type_names.get(wi));
+      if resolved_field_is_pointer.get(wi) {
+        self.state.write("*");
+      }
+      self.state.write(" ");
+      self.state.write(resolved_field_names.get(wi));
+      self.state.write(";\n");
+      wi = wi + 1;
     }
     self.state.write("} ");
     self.state.write(mangled_name);
@@ -4874,16 +4944,20 @@ impl Codegen {
         field_is_pointer.init(0);
 
         if c.has_type_params {
+          Vec<DataType*> field_template_dtypes;
+          field_template_dtypes.init(0);
           for f : c.fields {
             field_names.push(f.name);
             field_type_names.push(f.dtype.type_str);
             field_is_pointer.push(dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype));
+            field_template_dtypes.push(f.dtype);
           }
           self.generic_compound_names.push(c.name);
           self.generic_compound_type_params.push(c.type_params);
           self.generic_compound_field_names.push(field_names);
           self.generic_compound_field_type_names.push(field_type_names);
           self.generic_compound_field_is_pointer.push(field_is_pointer);
+          self.generic_compound_field_dtypes.push(field_template_dtypes);
           ret .None;
         }
 
