@@ -3833,11 +3833,42 @@ impl Codegen {
               .Identifier(vn) -> { variant_name = vn; }
               _ -> {}
             }
-            if have_enum_name && self.enum_has_variant(enum_name, variant_name) {
+            // An EXPLICIT `EnumName.Variant` condition (`Option.Some(x)
+            // ->`, e.g. `std/set.fn`'s real `to_string` body) writes the
+            // enum's own BARE TEMPLATE name when the subject is a
+            // generic enum -- there's no C symbol spelled "Option" for
+            // `enum_has_variant` to recognize, only the MONOMORPHIZED
+            // instantiation's own mangled name ("Option__num", already
+            // resolved into `subj_type` above). The bare-shorthand form
+            // (`.Some(x) ->`, `dot_e.left` a `.Blank` above) doesn't hit
+            // this at all -- it already falls back to `subj_type`
+            // directly, with no template-name prefix to conflict with.
+            // Recognizing a written template name against a
+            // monomorphized subject just needs the same mangling
+            // convention `ensure_enum_instantiated` itself always
+            // produces (`<base>__<arg1>__...`): if the plain lookup
+            // fails, but `enum_name` is a known generic template AND
+            // `subj_type` is one of ITS OWN concrete instantiations
+            // (its mangled name starts with `enum_name + "__"`), treat
+            // the condition as matching `subj_type`'s own variant
+            // instead.
+            bin has_variant = self.enum_has_variant(enum_name, variant_name);
+            str effective_enum_name = enum_name;
+            if !has_variant && have_enum_name && subj_type.is_some() {
+              let subj = subj_type.unwrap();
+              StringBuilder tmpl_pfx = string_builder_init(16);
+              tmpl_pfx.append(enum_name);
+              tmpl_pfx.append("__");
+              if starts_with(subj, tmpl_pfx.build()) && self.enum_has_variant(subj, variant_name) {
+                has_variant = true;
+                effective_enum_name = subj;
+              }
+            }
+            if have_enum_name && has_variant {
               let eerr = self.emit_fit_enum_branch(
                 subj_name,
                 subj_is_pointer,
-                enum_name,
+                effective_enum_name,
                 variant_name,
                 br,
                 wrote_branch
