@@ -5928,6 +5928,43 @@ impl Codegen {
         _ -> {}
       }
     }
+    // Forces a CONCRETE monomorphizing impl's own target type (`impl
+    // Vec<num> { ... }`, `i.concrete_dtype` holding the real `Vec<num>`
+    // DataType this was mangled FROM -- see `ImplNode.concrete_dtype`'s
+    // own doc comment) to be instantiated NOW, before this impl's own
+    // method bodies are emitted below. Positioned AFTER the enum/
+    // compound pass above (so `Vec<T>`'s own TEMPLATE is registered by
+    // now -- `ensure_compound_instantiated`/`ensure_enum_instantiated`
+    // both need that) but BEFORE the impl-body pass below: a method's
+    // own implicit `self` parameter is already a bare, non-generic
+    // `Vec__num*` (see `_parse_impl_method`'s `self`-injection), so
+    // referencing `self.<field>` inside such a method NEVER goes
+    // through the ordinary "a generic_args-bearing DataType triggers
+    // lazy instantiation" path at all -- without this, `Vec__num`'s own
+    // field records only exist if something ELSE in the program
+    // happens to instantiate `Vec<num>` first, which isn't guaranteed
+    // (a real bug found via `std/set.fn`'s own `impl Set<num> as
+    // Display`, whose `self.map.len` failed to resolve when nothing
+    // else in the compiled program's import graph had already used
+    // `Set<num>`). Tries compound first, then enum (either the target
+    // is a generic compound or a generic tagged-union enum); neither
+    // matching is not an error here -- a plain, already-non-generic
+    // impl's `has_concrete_dtype` is simply false and skips this
+    // entirely.
+    for n : nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_type_params && i.has_concrete_dtype {
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            let forced_compound = self.ensure_compound_instantiated(*i.concrete_dtype);
+            if forced_compound.is_none() {
+              self.ensure_enum_instantiated(*i.concrete_dtype);
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {

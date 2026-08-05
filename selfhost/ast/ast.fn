@@ -610,6 +610,24 @@ pub compound ImplNode {
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
   bin has_quirk_concrete_instantiation;
+  // Set when this impl targets a CONCRETE instantiation of an already-
+  // generic type (`impl Vec<num> { ... }`, `type_name` above already
+  // mangled to `Vec__num` for that case) -- the full, un-mangled
+  // DataType (`Vec<num>`, base name + real generic args) this was
+  // mangled FROM, so codegen can force `Vec__num`'s own struct/enum
+  // definition (and field records) to exist before this impl's own
+  // method bodies are emitted, even when nothing ELSE in the program
+  // happens to have already triggered that instantiation first (a
+  // method referencing `self.<field>` needs the field records to
+  // exist; `self`'s own dtype is already a bare, non-generic
+  // `Vec__num*` by this point -- see `_parse_impl_method`'s own `self`-
+  // injection -- so it never goes through the ordinary "generic_args
+  // triggers lazy instantiation" path at all). Absent for a plain impl
+  // on an already-non-generic type (`impl Foo { ... }`) or a genuinely
+  // generic template impl (`impl Vec<T> { ... }`, `has_type_params`
+  // true instead).
+  DataType* concrete_dtype;
+  bin has_concrete_dtype;
   Vec<Node*> methods;
 }
 
@@ -624,6 +642,8 @@ pub fun impl_node_new() ImplNode {
   i.has_quirk_name = false;
   i.quirk_concrete_instantiation = "";
   i.has_quirk_concrete_instantiation = false;
+  i.concrete_dtype = nil;
+  i.has_concrete_dtype = false;
   i.methods.init(0);
   ret i;
 }

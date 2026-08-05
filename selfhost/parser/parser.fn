@@ -4804,7 +4804,7 @@ impl Parser {
       // `skip_generic_args_tokens` -- pure lookahead, a no-op when there's
       // no `<` there at all -- the same helper `looks_like_compound_init`
       // uses to look past a possibly-generic type name.
-      //
+      // 
       // Deliberately narrower than the original for this slice: no
       // module-alias-qualified type segments (`alias.Type name;`) --
       // needs its own extra lookahead and isn't reachable by anything
@@ -5533,6 +5533,8 @@ impl Parser {
     Vec<Vec<str>> type_param_forced_insts;
     type_param_forced_insts.init(0);
     str type_name = base_type_name;
+    DataType* impl_concrete_dt = nil;
+    bin has_impl_concrete_dt = false;
 
     if self.state.next_token_is_angle_open() {
       if self.state.impl_generic_args_are_params() {
@@ -5552,6 +5554,8 @@ impl Parser {
           ret gaerr;
         }
         type_name = _mangled_dtype_name(concrete_dt);
+        impl_concrete_dt = concrete_dt;
+        has_impl_concrete_dt = true;
       }
     } else {
       let tperr = self.state.parse_type_params_with_constraints(
@@ -5652,6 +5656,8 @@ impl Parser {
     impln.has_quirk_name = has_quirk_name;
     impln.quirk_concrete_instantiation = quirk_concrete_instantiation;
     impln.has_quirk_concrete_instantiation = has_quirk_concrete_instantiation;
+    impln.concrete_dtype = impl_concrete_dt;
+    impln.has_concrete_dtype = has_impl_concrete_dt;
     impln.methods = methods;
 
     Node node = node_new(NodeKind.Impl(impln));
