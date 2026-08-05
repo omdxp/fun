@@ -2474,11 +2474,9 @@ impl Codegen {
   // `recv.method(args...)`; see `emit_async_function_support`'s own doc
   // comment for what these ultimately call). Lowers to a call to that
   // callee's own "call helper" (`__fun_async_call_<mangled name>`)
-  // instead of the callee's plain mangled name -- everything else
-  // (argument emission, receiver self-arg handling) is IDENTICAL to an
-  // ordinary `emit_call`/`emit_method_call`, just re-derived here rather
-  // than shared, since both of those write their OWN callee name
-  // directly with no seam to intercept.
+  // instead of the callee's plain mangled name -- see
+  // `emit_async_or_fork_call`'s own doc comment for how the receiver/
+  // mangled-name resolution works.
   // 
   // Deliberately narrow for this slice: no generic PLAIN async function
   // instantiation (`maybe_instantiate_generic_function`) -- only a
@@ -2487,9 +2485,34 @@ impl Codegen {
   // inside `impl<T> Channel<T>`; `emit_method_call`'s own resolution
   // already returns the correctly mangled per-instantiation name via
   // `lookup_impl_method`, so nothing extra is needed for that case to
-  // work). No `fork`/dynamic-quirk-dispatch handling either, matching
+  // work). No dynamic-quirk-dispatch handling, matching
   // `emit_async_function_support`'s own scope.
   emit_await(Node* operand) Option<CodegenErrorKind> {
+    ret self.emit_async_or_fork_call(operand, "__fun_async_call_");
+  }
+
+  // `fork expr;` -- `expr` (the parser's own `StatementFork` payload, a
+  // call directly, no `Unary` wrapper the way `await`'s operand has --
+  // see `parse_statement`'s `"fork"` dispatch in parser.fn) is
+  // fire-and-forget: enqueued onto the scheduler (`__fun_go`, see
+  // `emit_async_function_support`'s own fork-helper section) rather than
+  // spawned-and-joined. Otherwise identical lowering to `await`, just
+  // `__fun_fork_call_` instead of `__fun_async_call_` -- see
+  // `emit_async_or_fork_call`'s own doc comment.
+  emit_fork_stmt(Node* expr) Option<CodegenErrorKind> {
+    ret self.emit_async_or_fork_call(expr, "__fun_fork_call_");
+  }
+
+  // Shared lowering for `await f(args...)`/`await recv.method(args...)`
+  // and `fork f(args...)`/`fork recv.method(args...)` -- both rewrite a
+  // call to `<prefix><mangled callee name>(args...)`, with the SAME
+  // receiver/self-arg handling an ordinary (non-async) call already
+  // gets (reusing `resolve_field_chain`/`lookup_impl_method`, matching
+  // `emit_call`/`emit_method_call`'s own resolution exactly) -- neither
+  // of those two functions has a seam to intercept just the callee NAME
+  // they write, so this is a separate (if structurally near-identical)
+  // implementation rather than a shared call.
+  emit_async_or_fork_call(Node* operand, str prefix) Option<CodegenErrorKind> {
     fit operand.kind {
       .Expression(e) -> {
         if !equals(e.op, "()") || !e.has_left || !e.has_right {
@@ -2497,7 +2520,7 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(name) -> {
-            self.state.write("__fun_async_call_");
+            self.state.write(prefix);
             self.state.write(name);
             self.state.write("(");
             Vec<Node*> args;
@@ -2533,7 +2556,7 @@ impl Codegen {
               _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
             }
             let registered = self.lookup_impl_method(recv_r.type_name, method_name);
-            self.state.write("__fun_async_call_");
+            self.state.write(prefix);
             if registered.is_some() {
               self.state.write(registered.unwrap());
             } else {
@@ -3192,6 +3215,15 @@ impl Codegen {
         // ends (`emit_statements`' fall-through, or a `ret` anywhere
         // inside it -- see `Codegen.defer_stack`'s doc comment).
         self.defer_stack.push(body);
+        ret .None;
+      }
+      .StatementFork(expr) -> {
+        self.state.write_indent();
+        let ferr = self.emit_fork_stmt(expr);
+        if ferr.is_some() {
+          ret ferr;
+        }
+        self.state.write(";\n");
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
@@ -4152,11 +4184,16 @@ impl Codegen {
   // "payload" struct holding its args plus its result, an entry
   // trampoline that runs on a dedicated OS thread and unpacks/repacks
   // through that payload, a spawn helper, an await helper (join +
-  // extract result + free), and a call helper -- the thing `await expr`
-  // actually calls (see `emit_expr`'s `"await"` case). Matches the
-  // original implementation's identical mechanism exactly: there is no
-  // state machine or coroutine transform anywhere -- `await` is "spawn a
-  // thread running the whole function body, then immediately join it."
+  // extract result + free), a call helper -- the thing `await expr`
+  // actually calls (see `emit_await`'s own doc comment) -- and, when
+  // `fork` is used anywhere in the program, a SECOND entry/call pair
+  // (reusing the same payload struct) that `fork expr;` calls instead
+  // (see `emit_fork_stmt`'s own doc comment). Matches the original
+  // implementation's identical mechanism exactly: there is no state
+  // machine or coroutine transform anywhere -- `await` is "spawn a
+  // thread running the whole function body, then immediately join it,"
+  // and `fork` is "enqueue the whole function body onto the scheduler's
+  // worker pool, don't wait for it."
   // `emit_name` is the function's OWN final emitted C name (its bare
   // name for a plain function, or the fully mangled name for a generic
   // impl method instantiation -- see `emit_function_named`'s own
@@ -4172,11 +4209,9 @@ impl Codegen {
   // ordinary (non-wrapped) definition being emitted right after this
   // returns (see `emit_function_named`'s own call site).
   // 
-  // Deliberately narrower than the original for this slice: no `fork`
-  // support (a completely separate mechanism -- the scheduler/worker
-  // pool -- with no interaction with `await` at all) and no rejection
-  // diagnostic for a call to a known-async function that's neither
-  // `await`ed nor `fork`ed (a validation nicety, not load-bearing for
+  // Deliberately narrower than the original for this slice: no
+  // rejection diagnostic for a call to a known-async function that's
+  // neither `await`ed nor `fork`ed (a validation nicety, not load-bearing for
   // correct codegen); a function-pointer-typed argument
   // (`v.var_type.has_fn_sig`) is also rejected outright rather than
   // supported, since nothing this slice needs passes one to an async
@@ -4431,6 +4466,93 @@ impl Codegen {
           self.state.write("(__payload, __thr);\n");
         }
         self.state.write("}\n\n");
+
+        // 6. Fork support -- only when `fork` is used ANYWHERE in the
+        // program (not just on THIS function specifically; matches the
+        // original's identical `if (self.uses_fork)` gate). Reuses the
+        // SAME payload struct as above. The entry runs the function then
+        // frees the payload itself (no join, no result capture -- the
+        // result is discarded, `fork` is fire-and-forget); the call
+        // helper enqueues onto the scheduler (`__fun_go`, see
+        // `write_prelude`'s scheduler-runtime block) instead of
+        // spawning+joining, with the same malloc-failure degrade-to-sync
+        // fallback as the await call helper.
+        if self.uses_fork {
+          self.state.write("static void __fun_fork_entry_");
+          self.state.write(emit_name);
+          self.state.write("(void* __arg) {\n");
+          self.state.write("  ");
+          self.state.write(payload_name);
+          self.state.write("* __payload = (");
+          self.state.write(payload_name);
+          self.state.write("*)__arg;\n");
+          self.state.write("  ");
+          self.state.write(emit_name);
+          self.state.write("(");
+          ai = 0;
+          for ai < arg_names.len {
+            if ai > 0 {
+              self.state.write(", ");
+            }
+            self.state.write("__payload->__arg");
+            self.state.write(format_num(ai));
+            ai = ai + 1;
+          }
+          self.state.write(");\n");
+          self.state.write("  free(__payload);\n");
+          self.state.write("}\n");
+
+          self.state.write("static void __fun_fork_call_");
+          self.state.write(emit_name);
+          self.state.write("(");
+          ai = 0;
+          for ai < arg_names.len {
+            if ai > 0 {
+              self.state.write(", ");
+            }
+            let fpt = self.write_type(*arg_dtypes.get(ai));
+            if fpt.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            self.state.write(" ");
+            self.state.write(arg_names.get(ai));
+            ai = ai + 1;
+          }
+          if arg_names.len == 0 {
+            self.state.write("void");
+          }
+          self.state.write(") {\n");
+          self.state.write("  ");
+          self.state.write(payload_name);
+          self.state.write("* __payload = malloc(sizeof(");
+          self.state.write(payload_name);
+          self.state.write("));\n");
+          self.state.write("  if (__payload == NULL) { ");
+          self.state.write(emit_name);
+          self.state.write("(");
+          ai = 0;
+          for ai < arg_names.len {
+            if ai > 0 {
+              self.state.write(", ");
+            }
+            self.state.write(arg_names.get(ai));
+            ai = ai + 1;
+          }
+          self.state.write("); return; }\n");
+          ai = 0;
+          for ai < arg_names.len {
+            self.state.write("  __payload->__arg");
+            self.state.write(format_num(ai));
+            self.state.write(" = ");
+            self.state.write(arg_names.get(ai));
+            self.state.write(";\n");
+            ai = ai + 1;
+          }
+          self.state.write("  __fun_go(__fun_fork_entry_");
+          self.state.write(emit_name);
+          self.state.write(", __payload);\n");
+          self.state.write("}\n\n");
+        }
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -5498,52 +5620,211 @@ impl Codegen {
     // a lone `ch.recv()` with no sender) -- `std/channel.fn` calls
     // `__fun_wd_enter_wait`/`__fun_wd_leave_wait` around every blocking wait
     // unconditionally, so these three symbols must always exist regardless
-    // of whether `fork` is used. This minimal, self-contained watchdog
-    // (no task queue to track, since nothing is scheduled -- just "at least
-    // one blocking wait open, no progress for the configured threshold") is
-    // ALWAYS what gets emitted today; the M:N scheduler's own alternative
-    // watchdog (gated on `self.uses_fork`, once `fork` support itself is
-    // ported) is a later slice of this port. Dormant unless
+    // of whether `fork` is used. When `fork` ISN'T used anywhere, this
+    // minimal, self-contained watchdog (no task queue to track, since
+    // nothing is scheduled -- just "at least one blocking wait open, no
+    // progress for the configured threshold") is emitted; when `fork` IS
+    // used, `emit_scheduler_runtime` below emits its OWN alternative
+    // watchdog (integrated with the scheduler's task queue) instead, and
+    // defines the same three symbols there. Dormant unless
     // FUN_DEADLOCK_WATCHDOG_MS is set. Byte-for-byte copy of the original
     // implementation's own text for this block.
-    self.state.write(`typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
-    `static __fun_wd_state __fun_g_wd;
+    if self.uses_fork {
+      self.emit_scheduler_runtime();
+    } else {
+      self.state.write(`typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+      `static __fun_wd_state __fun_g_wd;
+      `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+      `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+      `}
+      `static void* __fun_wd_thread(void* unused){ (void)unused;
+      `  long long last_seq=-1; long long stall_ms=0;
+      `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+      `  for(;;){
+      `#ifdef _WIN32
+      `    Sleep((DWORD)step);
+      `#else
+      `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+      `#endif
+      `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+      `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+      `    last_seq=seq;
+      `    if(stall_ms>=__fun_g_wd.threshold_ms){
+      `      __fun_wd_warn((long long)blk, 0, stall_ms);
+      `      if(__fun_g_wd.abort_on_fire) abort();
+      `      stall_ms=0;
+      `    }
+      `  }
+      `}
+      `void __fun_wd_enter_wait(void){
+      `  if(!__fun_g_wd.started){
+      `    __fun_g_wd.started=1;
+      `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+      `    long long wm=(w && w[0])?atoll(w):0;
+      `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+      `    const char* a=getenv("FUN_DEADLOCK_ABORT");
+      `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+      `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+      `  }
+      `  if(!__fun_g_wd.armed) return;
+      `  __fun_g_wd.blocked++;
+      `}
+      `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+      ``);
+    }
+  }
+
+  // Emits the M:N cooperative task scheduler runtime used by `fork`: a
+  // fixed pool of OS worker threads (sized to the CPU count) drains a
+  // shared FIFO task queue; each `fork f(args)` enqueues one task (a
+  // function pointer plus a heap-allocated argument payload, see
+  // `emit_async_function_support`'s own fork-helper section) which a
+  // worker pops and runs to completion. Genuine M:N scheduling (many
+  // cheap `fork` tasks onto a few OS threads), not one-thread-per-fork
+  // the way `await` is. The pool starts lazily on the first fork;
+  // `__fun_sched_wait_idle()` blocks until every queued task has run --
+  // deliberately NOT wired up to run automatically at every `main` exit
+  // point yet (the original's own `emit_fork_wait_idle_if_main`), so an
+  // orphaned `fork` with no other synchronization (no `WaitGroup`/
+  // channel recv afterward) isn't guaranteed to finish before `main`
+  // returns -- every real use in this codebase's own stdlib (`std/task.
+  // fn`/`std/testing.fn`/`std/process.fn`) already synchronizes via a
+  // `WaitGroup`/channel, so this doesn't block getting `fork` itself
+  // working. Cooperative, not preemptive: a task that blocks (e.g. on a
+  // channel op) holds its worker -- the yield points are the blocking
+  // primitives. Reuses the prelude's `__fun_thread_start`/
+  // `__fun_thread_t` (already emitted above, POSIX + Windows both).
+  // Byte-for-byte copy of the original implementation's own text.
+  emit_scheduler_runtime() {
+    self.state.write(` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
+    `typedef void (*__fun_task_fn)(void*);
+    `typedef struct __fun_task { __fun_task_fn fn; void* arg; } __fun_task;
+    `#ifdef _WIN32
+    `typedef CRITICAL_SECTION __fun_sched_mtx; typedef CONDITION_VARIABLE __fun_sched_cv;
+    `static void __fun_sched_mtx_init(__fun_sched_mtx* m){InitializeCriticalSection(m);}
+    `static void __fun_sched_mtx_lock(__fun_sched_mtx* m){EnterCriticalSection(m);}
+    `static void __fun_sched_mtx_unlock(__fun_sched_mtx* m){LeaveCriticalSection(m);}
+    `static void __fun_sched_cv_init(__fun_sched_cv* c){InitializeConditionVariable(c);}
+    `static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){SleepConditionVariableCS(c, m, INFINITE);}
+    `static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
+    `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
+    `static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
+    `#else
+    `typedef pthread_mutex_t __fun_sched_mtx; typedef pthread_cond_t __fun_sched_cv;
+    `static void __fun_sched_mtx_init(__fun_sched_mtx* m){pthread_mutex_init(m,NULL);}
+    `static void __fun_sched_mtx_lock(__fun_sched_mtx* m){pthread_mutex_lock(m);}
+    `static void __fun_sched_mtx_unlock(__fun_sched_mtx* m){pthread_mutex_unlock(m);}
+    `static void __fun_sched_cv_init(__fun_sched_cv* c){pthread_cond_init(c,NULL);}
+    `static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){pthread_cond_wait(c,m);}
+    `static void __fun_sched_cv_signal(__fun_sched_cv* c){pthread_cond_signal(c);}
+    `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){pthread_cond_broadcast(c);}
+    `#include <unistd.h>
+    `#include <time.h>
+    `static int __fun_cpu_count(void){long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0?(int)n:1;}
+    `#endif
+    `#define __FUN_SCHED_QCAP 4096
+    `typedef struct __fun_sched {
+    `  __fun_sched_mtx mu; __fun_sched_cv not_empty; __fun_sched_cv not_full; __fun_sched_cv idle;
+    `  __fun_task q[__FUN_SCHED_QCAP]; int head, tail, count;
+    `  long long pending;
+    `  int started, shutting_down, nworkers;
+    `  int wd_armed; long long wd_threshold_ms; int wd_abort;
+    `  int blocked; long long progress_seq;
+    `} __fun_sched;
+    `static __fun_sched __fun_g_sched;
     `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
     `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
     `}
-    `static void* __fun_wd_thread(void* unused){ (void)unused;
-    `  long long last_seq=-1; long long stall_ms=0;
-    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+    `void __fun_wd_enter_wait(void){ if(!__fun_g_sched.wd_armed) return; __fun_sched_mtx_lock(&__fun_g_sched.mu); __fun_g_sched.blocked++; __fun_sched_mtx_unlock(&__fun_g_sched.mu); }
+    `void __fun_wd_leave_wait(void){ if(!__fun_g_sched.wd_armed) return; __fun_sched_mtx_lock(&__fun_g_sched.mu); if(__fun_g_sched.blocked>0)__fun_g_sched.blocked--; __fun_g_sched.progress_seq++; __fun_sched_mtx_unlock(&__fun_g_sched.mu); }
+    `static void* __fun_sched_watchdog(void* unused){ (void)unused;
+    `  long long last_seq = -1; long long stall_ms = 0;
+    `  long long step = __fun_g_sched.wd_threshold_ms/4; if(step<1) step=1; if(step>1000) step=1000;
     `  for(;;){
     `#ifdef _WIN32
     `    Sleep((DWORD)step);
     `#else
     `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
     `#endif
-    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
-    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+    `    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `    long long pend=__fun_g_sched.pending; int blk=__fun_g_sched.blocked; int nw=__fun_g_sched.nworkers;
+    `    long long seq=__fun_g_sched.progress_seq; int down=__fun_g_sched.shutting_down;
+    `    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+    `    if(down) return NULL;
+    `    (void)nw;
+    `    if(pend>0 && blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
     `    last_seq=seq;
-    `    if(stall_ms>=__fun_g_wd.threshold_ms){
-    `      __fun_wd_warn((long long)blk, 0, stall_ms);
-    `      if(__fun_g_wd.abort_on_fire) abort();
+    `    if(stall_ms>=__fun_g_sched.wd_threshold_ms){
+    `      __fun_wd_warn((long long)blk, pend, stall_ms);
+    `      if(__fun_g_sched.wd_abort) abort();
     `      stall_ms=0;
     `    }
     `  }
     `}
-    `void __fun_wd_enter_wait(void){
-    `  if(!__fun_g_wd.started){
-    `    __fun_g_wd.started=1;
-    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
-    `    long long wm=(w && w[0])?atoll(w):0;
-    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
-    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
-    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
-    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `static void* __fun_sched_worker(void* unused){ (void)unused;
+    `  for(;;){
+    `    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `    while(__fun_g_sched.count==0 && !__fun_g_sched.shutting_down)
+    `      __fun_sched_cv_wait(&__fun_g_sched.not_empty, &__fun_g_sched.mu);
+    `    if(__fun_g_sched.count==0 && __fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); return NULL; }
+    `    __fun_task t = __fun_g_sched.q[__fun_g_sched.head];
+    `    __fun_g_sched.head = (__fun_g_sched.head+1) % __FUN_SCHED_QCAP;
+    `    __fun_g_sched.count--;
+    `    if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
+    `    __fun_sched_cv_signal(&__fun_g_sched.not_full);
+    `    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+    `    if(t.fn) t.fn(t.arg);
+    `    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `    __fun_g_sched.pending--;
+    `    if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
+    `    if(__fun_g_sched.pending==0) __fun_sched_cv_broadcast(&__fun_g_sched.idle);
+    `    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
     `  }
-    `  if(!__fun_g_wd.armed) return;
-    `  __fun_g_wd.blocked++;
     `}
-    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    `static void __fun_sched_init_once(void){
+    `  static int once=0; if(once) return; once=1;
+    `  __fun_sched_mtx_init(&__fun_g_sched.mu);
+    `  __fun_sched_cv_init(&__fun_g_sched.not_empty);
+    `  __fun_sched_cv_init(&__fun_g_sched.not_full);
+    `  __fun_sched_cv_init(&__fun_g_sched.idle);
+    `  { const char* w = getenv("FUN_DEADLOCK_WATCHDOG_MS");
+    `    long long wm = (w && w[0]) ? atoll(w) : 0;
+    `    __fun_g_sched.wd_armed = (wm > 0) ? 1 : 0;
+    `    __fun_g_sched.wd_threshold_ms = (wm > 0) ? wm : 0;
+    `    const char* a = getenv("FUN_DEADLOCK_ABORT");
+    `    __fun_g_sched.wd_abort = (a && a[0]=='1') ? 1 : 0;
+    `    __fun_g_sched.blocked = 0; __fun_g_sched.progress_seq = 0; }
+    `}
+    `static void __fun_sched_ensure_started(void){
+    `  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `  if(!__fun_g_sched.started){
+    `    __fun_g_sched.started=1; __fun_g_sched.head=__fun_g_sched.tail=__fun_g_sched.count=0;
+    `    __fun_g_sched.pending=0; __fun_g_sched.shutting_down=0;
+    `    int n=__fun_cpu_count(); if(n<1)n=1; if(n>64)n=64; __fun_g_sched.nworkers=n;
+    `    for(int i=0;i<n;i++){ __fun_thread_t th; __fun_thread_start(&th, __fun_sched_worker, NULL); }
+    `    if(__fun_g_sched.wd_armed){ __fun_thread_t wt; __fun_thread_start(&wt, __fun_sched_watchdog, NULL); }
+    `  }
+    `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+    `}
+    `static void __fun_go(__fun_task_fn fn, void* arg){
+    `  __fun_sched_init_once(); __fun_sched_ensure_started();
+    `  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `  while(__fun_g_sched.count==__FUN_SCHED_QCAP && !__fun_g_sched.shutting_down)
+    `    __fun_sched_cv_wait(&__fun_g_sched.not_full, &__fun_g_sched.mu);
+    `  if(__fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); if(fn) fn(arg); return; }
+    `  __fun_g_sched.q[__fun_g_sched.tail].fn=fn; __fun_g_sched.q[__fun_g_sched.tail].arg=arg;
+    `  __fun_g_sched.tail=(__fun_g_sched.tail+1)%__FUN_SCHED_QCAP; __fun_g_sched.count++; __fun_g_sched.pending++;
+    `  if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
+    `  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
+    `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+    `}
+    `static void __fun_sched_wait_idle(void){
+    `  if(!__fun_g_sched.started) return;
+    `  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+    `  while(__fun_g_sched.pending>0) __fun_sched_cv_wait(&__fun_g_sched.idle, &__fun_g_sched.mu);
+    `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+    `}
+    `
     ``);
   }
 
@@ -5593,6 +5874,36 @@ impl Codegen {
         _ -> {}
       }
     }
+    // Top-level `const`/`let` globals are emitted BEFORE enums/compounds
+    // -- not just before impls/functions, as an earlier version of this
+    // ordering had it. Every OTHER pass here can lazily HOIST a
+    // monomorphized generic definition to whatever `self.state.out.len()`
+    // happens to be at the moment it's first triggered (see
+    // `Codegen.hoist_insert_pos`'s doc comment) -- and that first trigger
+    // can fire as early as the ENUM/COMPOUND pass itself (e.g. a plain
+    // compound field whose type is a generic instantiation, `compound
+    // WaitGroup { Channel<num> done_ch; }`-shaped). A global emitted
+    // AFTER that point would land textually LATER than a hoisted method
+    // body that already references it -- a real bug found via `std/task
+    // .fn`'s own real `WaitGroup`, whose generic `Channel<num>` field
+    // triggers `Channel<T>`'s methods (which reference `std/channel.fn`'s
+    // own `CHANNEL_RC_OK`-shaped constants) to hoist during the compound
+    // pass below, before a later-positioned global pass had run at all.
+    // Constants are simple literals with no compound/enum type
+    // dependency of their own (confirmed across every real one in this
+    // codebase's stdlib), so moving them first has nothing to lose.
+    for n : nodes {
+      fit n.kind {
+        .Variable(v) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
+          let gerr = self.emit_global_variable(n);
+          if gerr.is_some() {
+            ret gerr;
+          }
+        }
+        _ -> {}
+      }
+    }
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -5612,18 +5923,6 @@ impl Codegen {
           let cerr = self.emit_compound(n);
           if cerr.is_some() {
             ret cerr;
-          }
-        }
-        _ -> {}
-      }
-    }
-    for n : nodes {
-      fit n.kind {
-        .Variable(v) -> {
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let gerr = self.emit_global_variable(n);
-          if gerr.is_some() {
-            ret gerr;
           }
         }
         _ -> {}
