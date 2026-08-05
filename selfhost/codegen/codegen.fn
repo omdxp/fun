@@ -565,6 +565,53 @@ pub compound Codegen {
   // by `maybe_instantiate_generic_impl_methods`, the same "only on first
   // concrete use" rule as a generic compound/enum template.
   Vec<Node> generic_impl_templates;
+  // One entry per concrete generic compound/enum instantiation (`Vec
+  // <str>`, e.g.) -- `instantiation_mangled_name.get(i)`'s own template
+  // base name, and the exact substitution context (arg type names/
+  // pointer-ness/full structural dtypes) that was active when it was
+  // instantiated. Recorded by `maybe_instantiate_generic_impl_methods`
+  // (parallel to, but NOT the same as, `emitted_generic_instantiations`
+  // -- that one just dedups the STRUCT/ENUM typedef itself) so `ensure_
+  // generic_impl_method_emitted` can re-establish the SAME substitution
+  // context later, on demand, when a SPECIFIC method first gets called
+  // -- rather than requiring every method to be monomorphized eagerly,
+  // all at once, the moment the type itself is first instantiated (see
+  // that function's own doc comment for why eager blanket monomorphization
+  // is actually wrong, not just wasteful).
+  Vec<str> instantiation_mangled_name;
+  Vec<str> instantiation_base_name;
+  Vec<Vec<str>> instantiation_arg_type_names;
+  Vec<Vec<bin>> instantiation_arg_is_pointer;
+  Vec<Vec<DataType *>> instantiation_arg_dtypes;
+  // Every generic impl method actually EMITTED (or enqueued to be, see
+  // `pending_generic_impl_method_owner`'s doc comment) so far, keyed
+  // `"<mangled_name>::<bare_method_name>"` -- see `ensure_generic_impl_
+  // method_emitted`'s own doc comment.
+  Vec<str> emitted_generic_impl_methods;
+  // A FIFO work queue of (owner mangled name, bare method name) pairs
+  // still needing their actual prototype+body emitted -- see `ensure_
+  // generic_impl_method_emitted`'s own doc comment for why this can't
+  // just emit immediately and recurse: a generic impl method's own body
+  // may call ANOTHER not-yet-emitted method of the same (or a
+  // different) instantiation (`Vec<T>`'s real `sort`/`max_opt` call
+  // `self.swap`/`self.max`), and by the time that inner call is
+  // reached, `self.state` is already swapped to the OUTER method's own
+  // in-progress scratch buffer -- splicing a full function DEFINITION
+  // in there would land it inside the outer method's C braces, which
+  // (unlike a nested TYPE dependency, always legal at block scope) is
+  // not valid C. Queuing instead of recursing lets the OUTERMOST call
+  // (the one where `self.state` still legitimately points at the real
+  // top-level output) drain every entry -- including ones enqueued
+  // WHILE draining -- each with its own clean scratch-swap against that
+  // same real buffer, never nested inside another method's own.
+  Vec<str> pending_generic_impl_method_owner;
+  Vec<str> pending_generic_impl_method_bare;
+  // True for the duration of the OUTERMOST `ensure_generic_impl_method_
+  // emitted` call's drain loop -- a call arriving while this is already
+  // true (triggered from inside another queued method's own body) just
+  // enqueues and returns, trusting the drain loop already running
+  // further up the call stack to reach it.
+  bin draining_generic_impl_methods;
   // The ACTIVE type-param substitution for a generic impl method
   // currently being monomorphized (see
   // `maybe_instantiate_generic_impl_methods`) -- parallel arrays, `
@@ -669,6 +716,15 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.emitted_plain_types.init(0);
   g.all_nodes.init(0);
   g.generic_impl_templates.init(0);
+  g.instantiation_mangled_name.init(0);
+  g.instantiation_base_name.init(0);
+  g.instantiation_arg_type_names.init(0);
+  g.instantiation_arg_is_pointer.init(0);
+  g.instantiation_arg_dtypes.init(0);
+  g.emitted_generic_impl_methods.init(0);
+  g.pending_generic_impl_method_owner.init(0);
+  g.pending_generic_impl_method_bare.init(0);
+  g.draining_generic_impl_methods = false;
   g.type_subst_param_names.init(0);
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
@@ -1521,6 +1577,27 @@ impl Codegen {
     }
   }
 
+  // Records the instantiation's substitution context (for `ensure_
+  // generic_impl_method_emitted` to re-establish later) and each
+  // method's substituted return/param TYPES only (`record_impl_method`,
+  // needed for call-site type inference regardless of whether the
+  // method's own C body ever gets emitted) -- emits NO C at all here.
+  // 
+  // Previously this emitted every method's full prototype+body,
+  // unconditionally, the moment the type itself was first instantiated.
+  // That's not just wasteful, it's WRONG: a template method's body may
+  // only type-check for SOME of the concrete types it could be
+  // instantiated with. `Vec<T>.sum()` does `s = s + self.data[i]`,
+  // valid C only when `T` is itself numeric/decimal (Fun's own
+  // typecheck rejects `+` on anything else) -- `Vec<str>.sum()`'s `+`
+  // on `char*` doesn't compile, even though `Vec<str>` itself is
+  // perfectly valid whenever the program never actually calls `.sum()`
+  // on it. Found via a real stage-2 self-compilation C error (`invalid
+  // operands to binary expression` on `Vec<T>`'s own `sort`/`contains`/
+  // `min`/`max`/`sum`, for instantiations like `Vec<str>`/`Vec<
+  // FitBranch>` that this program's real code never actually calls any
+  // of those methods on). See `ensure_generic_impl_method_emitted`'s
+  // own doc comment for the actual (now lazy, call-triggered) emission.
   maybe_instantiate_generic_impl_methods(
     str base_name,
     str mangled_name,
@@ -1532,6 +1609,12 @@ impl Codegen {
       fit tmpl.kind {
         .Impl(i) -> {
           if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len {
+            self.instantiation_mangled_name.push(mangled_name);
+            self.instantiation_base_name.push(base_name);
+            self.instantiation_arg_type_names.push(arg_type_names);
+            self.instantiation_arg_is_pointer.push(arg_is_pointer);
+            self.instantiation_arg_dtypes.push(arg_dtypes);
+
             let prev_params = self.type_subst_param_names;
             let prev_arg_names = self.type_subst_arg_type_strs;
             let prev_arg_ptrs = self.type_subst_arg_is_pointer;
@@ -1549,38 +1632,6 @@ impl Codegen {
               pfx.append("__");
             }
             str prefix = pfx.build();
-
-            // Forward-declare every method of THIS instantiation before any
-            // of their bodies (see `emit_generic_impl_method_prototype`'s
-            // own doc comment for why) -- one shared scratch buffer, hoisted
-            // as a single block right before the per-method bodies below
-            // (`emit_hoisted` appends each call after the last, so this
-            // block always lands first).
-            CodegenState proto_scratch = codegen_state_new();
-            CodegenState* saved_proto_state = self.state;
-            let saved_proto_hoist_pos = self.hoist_insert_pos;
-            self.state = &proto_scratch;
-            self.hoist_insert_pos = .None;
-            for pm : i.methods {
-              str proto_tmpl_name = "";
-              fit pm.kind {
-                .Function(pfnv) -> { proto_tmpl_name = pfnv.name; }
-                _ -> {}
-              }
-              let proto_bare_name = strip_prefix(proto_tmpl_name, prefix);
-              StringBuilder pnb = string_builder_init(16);
-              pnb.append(mangled_name);
-              pnb.append("__");
-              if i.has_quirk_name {
-                pnb.append(i.quirk_name);
-                pnb.append("__");
-              }
-              pnb.append(proto_bare_name);
-              self.emit_generic_impl_method_prototype(*pm, pnb.build());
-            }
-            self.state = saved_proto_state;
-            self.hoist_insert_pos = saved_proto_hoist_pos;
-            self.emit_hoisted(proto_scratch.out.build());
 
             for m : i.methods {
               str tmpl_name = "";
@@ -1654,56 +1705,6 @@ impl Codegen {
                 recorded_rtype,
                 recorded_param_types
               );
-
-              // `hoist_insert_pos` (if set) is a position measured
-              // against the OUTER, now-swapped-away buffer -- suspending
-              // it for the duration of the swap makes any NESTED
-              // instantiation triggered from inside this method's own
-              // signature/body (e.g. a return type that's ITSELF a
-              // generic enum) append inline to `method_scratch` instead
-              // of splicing at a stale position into the wrong buffer
-              // (which corrupts `substr`'s own length arithmetic and
-              // crashes) -- the whole scratch buffer still ends up
-              // hoisted to the correct outer position via `emit_hoisted`
-              // below regardless.
-              // `emit_function_named` unconditionally resets/overwrites
-              // `local_names`/`local_is_pointer`/`local_type_name`/
-              // `current_fn_rtype_name` for ITS OWN target function, with
-              // no awareness that it might be running NESTED inside
-              // another function's own (still in-progress) emission --
-              // e.g. this monomorphization can be triggered from
-              // resolving an OUTER method's own return type, BEFORE that
-              // outer method's own `self`/params are recorded. Without
-              // saving/restoring these too, the outer method's `self`
-              // would end up SHADOWED by this nested call's own leftover
-              // entries (linear lookup finds the earlier, now-stale one
-              // first), resolving field/method access against the WRONG
-              // type entirely once the outer method's own body runs.
-              CodegenState method_scratch = codegen_state_new();
-              CodegenState* saved_method_state = self.state;
-              let saved_hoist_pos = self.hoist_insert_pos;
-              let saved_local_names = self.local_names;
-              let saved_local_is_pointer = self.local_is_pointer;
-              let saved_local_type_name = self.local_type_name;
-              let saved_local_dtype = self.local_dtype;
-              let saved_fn_rtype_name = self.current_fn_rtype_name;
-              let saved_fn_rtype_dt = self.current_fn_rtype_dt;
-              let saved_defer_stack = self.defer_stack;
-              let saved_defer_scope_starts = self.defer_scope_starts;
-              self.state = &method_scratch;
-              self.hoist_insert_pos = .None;
-              self.emit_function_named(*m, new_name);
-              self.state = saved_method_state;
-              self.hoist_insert_pos = saved_hoist_pos;
-              self.local_names = saved_local_names;
-              self.local_is_pointer = saved_local_is_pointer;
-              self.local_type_name = saved_local_type_name;
-              self.local_dtype = saved_local_dtype;
-              self.current_fn_rtype_name = saved_fn_rtype_name;
-              self.current_fn_rtype_dt = saved_fn_rtype_dt;
-              self.defer_stack = saved_defer_stack;
-              self.defer_scope_starts = saved_defer_scope_starts;
-              self.emit_hoisted(method_scratch.out.build());
             }
 
             self.type_subst_param_names = prev_params;
@@ -1715,6 +1716,205 @@ impl Codegen {
         _ -> {}
       }
     }
+  }
+
+  // Lazily emits ONE concrete monomorphization of a generic impl
+  // method's own prototype+body -- `owner_type` is a generic
+  // instantiation's mangled name (`Vec__str`), `bare_name` the
+  // UNMANGLED method name (`sum`). Called from every generic-impl-
+  // method CALL site (`emit_method_call`/`emit_async_or_fork_call`),
+  // right where the mangled callee name is resolved, so a method is
+  // only ever emitted if the program actually calls it FOR THAT
+  // SPECIFIC instantiation -- see `maybe_instantiate_generic_impl_
+  // methods`'s own doc comment for why blanket eager emission is wrong,
+  // not just wasteful.
+  // 
+  // Enqueues rather than emitting directly and recursing, and drains
+  // the queue only when NOT already draining -- see `Codegen.pending_
+  // generic_impl_method_owner`'s own doc comment for why: a queued
+  // method's body may itself call another not-yet-emitted method, and
+  // by then `self.state` is already the OUTER method's in-progress
+  // scratch buffer, where a nested function DEFINITION can't legally
+  // land. The outermost call (the only one where `self.state` still
+  // points at the real top-level output) processes every entry --
+  // including ones enqueued while it runs -- each against that same
+  // real buffer, never nested inside another method's own.
+  // 
+  // `.None` (success, not an error) when `owner_type` isn't a known
+  // generic instantiation at all -- a PLAIN (non-generic) impl's
+  // method, already emitted unconditionally elsewhere (`register_impl_
+  // methods`'s own methods are concrete C from the start, no
+  // monomorphization-validity concern to defer), or an unrecognized
+  // name. Memoized (`emitted_generic_impl_methods`) since the same
+  // bare method name is reused across every different instantiation.
+  ensure_generic_impl_method_emitted(str owner_type, str bare_name) Option<CodegenErrorKind> {
+    StringBuilder key_sb = string_builder_init(16);
+    key_sb.append(owner_type);
+    key_sb.append("::");
+    key_sb.append(bare_name);
+    str key = key_sb.build();
+    num ei = 0;
+    for ei < self.emitted_generic_impl_methods.len {
+      if equals(self.emitted_generic_impl_methods.get(ei), key) {
+        ret .None;
+      }
+      ei = ei + 1;
+    }
+    // Pushed BEFORE this entry is actually processed (not after) --
+    // same reasoning as `emitted_plain_types`: a self-recursive method
+    // call (this method calling itself) must see "already handled"
+    // rather than re-enqueueing/recursing forever. Its own prototype
+    // (forward-declared as part of processing THIS entry) already
+    // exists in the buffer by the time such a recursive call is
+    // reached, since C only needs the declaration to exist somewhere,
+    // not for the body to be complete yet.
+    self.emitted_generic_impl_methods.push(key);
+    self.pending_generic_impl_method_owner.push(owner_type);
+    self.pending_generic_impl_method_bare.push(bare_name);
+
+    if self.draining_generic_impl_methods {
+      ret .None;
+    }
+    self.draining_generic_impl_methods = true;
+    Option<CodegenErrorKind> first_err = .None;
+    num qi = 0;
+    for qi < self.pending_generic_impl_method_owner.len {
+      let q_owner = self.pending_generic_impl_method_owner.get(qi);
+      let q_bare = self.pending_generic_impl_method_bare.get(qi);
+      let err = self.emit_one_generic_impl_method(q_owner, q_bare);
+      if err.is_some() && first_err.is_none() {
+        first_err = err;
+      }
+      qi = qi + 1;
+    }
+    self.draining_generic_impl_methods = false;
+    ret first_err;
+  }
+
+  // Does the actual prototype+body emission for one queued (owner
+  // mangled name, bare method name) pair -- see `ensure_generic_impl_
+  // method_emitted`'s own doc comment for the queueing/draining
+  // discipline that makes it safe to call this directly against
+  // `self.state`/`self.hoist_insert_pos` exactly as they are.
+  emit_one_generic_impl_method(str owner_type, str bare_name) Option<CodegenErrorKind> {
+    num ii = 0;
+    bin found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), owner_type) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret .None;
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          StringBuilder pfx = string_builder_init(16);
+          pfx.append(i.type_name);
+          pfx.append("__");
+          if i.has_quirk_name {
+            pfx.append(i.quirk_name);
+            pfx.append("__");
+          }
+          str prefix = pfx.build();
+
+          for m : i.methods {
+            str tmpl_name = "";
+            fit m.kind {
+              .Function(fnv) -> { tmpl_name = fnv.name; }
+              _ -> {}
+            }
+            if !equals(strip_prefix(tmpl_name, prefix), bare_name) {
+              continue;
+            }
+
+            let prev_params = self.type_subst_param_names;
+            let prev_arg_names = self.type_subst_arg_type_strs;
+            let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            let prev_arg_dtypes = self.type_subst_arg_dtypes;
+            self.type_subst_param_names = i.type_params;
+            self.type_subst_arg_type_strs = arg_type_names;
+            self.type_subst_arg_dtypes = arg_dtypes;
+            self.type_subst_arg_is_pointer = arg_is_pointer;
+
+            StringBuilder nb = string_builder_init(16);
+            nb.append(owner_type);
+            nb.append("__");
+            if i.has_quirk_name {
+              nb.append(i.quirk_name);
+              nb.append("__");
+            }
+            nb.append(bare_name);
+            str new_name = nb.build();
+
+            // Forward-declare THIS method before its own body (see
+            // `emit_generic_impl_method_prototype`'s own doc comment
+            // for why) -- its own scratch buffer, hoisted right before
+            // the body's own scratch below.
+            CodegenState proto_scratch = codegen_state_new();
+            CodegenState* saved_proto_state = self.state;
+            let saved_proto_hoist_pos = self.hoist_insert_pos;
+            self.state = &proto_scratch;
+            self.hoist_insert_pos = .None;
+            self.emit_generic_impl_method_prototype(*m, new_name);
+            self.state = saved_proto_state;
+            self.hoist_insert_pos = saved_proto_hoist_pos;
+            self.emit_hoisted(proto_scratch.out.build());
+
+            // See the ORIGINAL (pre-lazy) version of this loop's own
+            // identical comment for why `hoist_insert_pos` is suspended
+            // and `local_*`/`current_fn_rtype_*`/`defer_*` saved/
+            // restored around this swap -- unchanged reasoning, just
+            // one method at a time instead of a whole instantiation's
+            // worth in one pass.
+            CodegenState method_scratch = codegen_state_new();
+            CodegenState* saved_method_state = self.state;
+            let saved_hoist_pos = self.hoist_insert_pos;
+            let saved_local_names = self.local_names;
+            let saved_local_is_pointer = self.local_is_pointer;
+            let saved_local_type_name = self.local_type_name;
+            let saved_local_dtype = self.local_dtype;
+            let saved_fn_rtype_name = self.current_fn_rtype_name;
+            let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+            let saved_defer_stack = self.defer_stack;
+            let saved_defer_scope_starts = self.defer_scope_starts;
+            self.state = &method_scratch;
+            self.hoist_insert_pos = .None;
+            let body_err = self.emit_function_named(*m, new_name);
+            self.state = saved_method_state;
+            self.hoist_insert_pos = saved_hoist_pos;
+            self.local_names = saved_local_names;
+            self.local_is_pointer = saved_local_is_pointer;
+            self.local_type_name = saved_local_type_name;
+            self.local_dtype = saved_local_dtype;
+            self.current_fn_rtype_name = saved_fn_rtype_name;
+            self.current_fn_rtype_dt = saved_fn_rtype_dt;
+            self.defer_stack = saved_defer_stack;
+            self.defer_scope_starts = saved_defer_scope_starts;
+            self.emit_hoisted(method_scratch.out.build());
+
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
+            ret body_err;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
   }
 
   // Emits ONE concrete monomorphization of a generic tagged-union enum
@@ -2723,6 +2923,16 @@ impl Codegen {
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
 
+    // A generic impl method (`Vec<str>.sum()`, e.g.) only gets its
+    // actual C prototype+body emitted here, at its first real call site
+    // for THIS instantiation -- see `ensure_generic_impl_method_
+    // emitted`'s own doc comment for why. A no-op (`.None`, nothing
+    // emitted) for a plain (non-generic) type's method, already emitted
+    // unconditionally elsewhere.
+    let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
+    if emit_err.is_some() {
+      ret emit_err;
+    }
     let registered = self.lookup_impl_method(recv_r.type_name, method_name);
     if registered.is_some() {
       self.state.write(registered.unwrap());
@@ -2860,6 +3070,13 @@ impl Codegen {
             fit recv_e.right.kind {
               .Identifier(mname) -> { method_name = mname; }
               _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            }
+            // See `emit_method_call`'s own doc comment: this is a
+            // generic impl method's first real call site for THIS
+            // instantiation.
+            let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
+            if emit_err.is_some() {
+              ret emit_err;
             }
             let registered = self.lookup_impl_method(recv_r.type_name, method_name);
             self.state.write(prefix);
@@ -10302,7 +10519,12 @@ fun _record_box_get_impl(Codegen* g) {
   g.register_impl_methods(impl_node);
 }
 
-test "emit_statement instantiates a generic impl's monomorphized method the first time its compound is used" {
+test "emit_statement declaring a generic Box<num> does not emit its impl's method until it's actually called" {
+  // A generic impl method is now emitted lazily, at its first real CALL
+  // site for a given instantiation (see `ensure_generic_impl_method_
+  // emitted`'s own doc comment) -- merely instantiating `Box<num>` (via
+  // this declaration) records the method's metadata (so a later call
+  // resolves correctly) but emits no C for it at all.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -10312,37 +10534,14 @@ test "emit_statement instantiates a generic impl's monomorphized method the firs
   assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\n"
-  ), "expected the struct, a forward declaration, AND its generic impl's method (self/return type substituted T -> num) emitted once, before the declaration";
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\n"
+  ), "expected only the struct and the declaration -- no method C, since 'get' is never called";
+  assert g.lookup_impl_method("Box__num", "get").is_some(), "expected the method's metadata still registered, even though unemitted";
 }
 
-test "emit_statement does not re-emit a generic impl's monomorphized method on a second use" {
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-  _record_box_template(&g);
-  _record_box_get_impl(&g);
-
-  Node n1 = _box_num_var_decl("b1");
-  Node n2 = _box_num_var_decl("b2");
-  assert g.emit_statement(n1).is_none(), "expected the first Box<num> declaration to emit";
-  assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
-  assert equals(
-    st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b1;\nBox__num b2;\n"
-  ), "expected the struct and the method (plus its forward declaration) emitted only once, even though Box<num> is used twice";
-}
-
-test "emit_expr calls a generic impl's monomorphized method through a value-typed instance" {
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-  _record_box_template(&g);
-  _record_box_get_impl(&g);
-
-  Node decl = _box_num_var_decl("b");
-  assert g.emit_statement(decl).is_none(), "expected the Box<num> declaration to emit";
-
+fun _box_get_call_node(str recv_name) Node {
   Node* recv = malloc(sizeof(Node));
-  *recv = node_new(NodeKind.Identifier("b"));
+  *recv = node_new(NodeKind.Identifier(recv_name));
   Node* method = malloc(sizeof(Node));
   *method = node_new(NodeKind.Identifier("get"));
   ExprNode dot_e;
@@ -10365,26 +10564,69 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
   call_e.right = args;
   call_e.has_right = true;
   call_e.op = "()";
-  Node n = node_new(NodeKind.Expression(call_e));
+  ret node_new(NodeKind.Expression(call_e));
+}
 
+test "emit_statement does not re-emit a generic impl's monomorphized method on a second call" {
+  // See the previous test's own doc comment: the method is now emitted
+  // lazily, at its first real CALL -- this covers the dedup half, a
+  // SECOND call (even through a different instance of the same
+  // instantiation) must not re-emit its prototype/body.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_box_get_impl(&g);
+
+  Node n1 = _box_num_var_decl("b1");
+  Node n2 = _box_num_var_decl("b2");
+  assert g.emit_statement(n1).is_none(), "expected the first Box<num> declaration to emit";
+  assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
+  Node call1 = _box_get_call_node("b1");
+  Node call2 = _box_get_call_node("b2");
+  assert g.emit_expr(call1).is_none(), "expected 'b1.get()' to resolve";
+  assert g.emit_expr(call2).is_none(), "expected 'b2.get()' to resolve";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b1;\nBox__num b2;\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num__get(&b1)Box__num__get(&b2)"
+  ), "expected the struct emitted once (unaffected), and the method (plus its forward declaration) emitted only once despite two calls";
+}
+
+test "emit_expr calls a generic impl's monomorphized method through a value-typed instance" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_box_get_impl(&g);
+
+  Node decl = _box_num_var_decl("b");
+  assert g.emit_statement(decl).is_none(), "expected the Box<num> declaration to emit";
+
+  Node n = _box_get_call_node("b");
   assert g.emit_expr(n).is_none(), "expected 'b.get()' to resolve to the monomorphized method";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
-  ), "expected 'Box__num__get(&b)', resolved via the same lookup_impl_method path a non-generic impl uses";
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num__get(&b)"
+  ), "expected the struct+declaration first, THEN the method (lazily triggered by this call, not the earlier declaration), THEN the call itself";
 }
 
-test "pub transpile monomorphizes a generic impl's methods even when a PLAIN compound's OWN field is the first trigger" {
+test "pub transpile registers a generic impl's method metadata even when a PLAIN compound's OWN field is the first trigger" {
   // Regression test: `compound Lexer { Vec<Token> tokens; }` (the real
   // self-hosted lexer's own shape, found via the self-compile
-  // experiment) never got Vec<T>'s own impl methods monomorphized at
-  // all -- pub transpile's enum/compound pass ran BEFORE its
+  // experiment) never got Vec<T>'s own impl method METADATA registered
+  // at all -- pub transpile's enum/compound pass ran BEFORE its
   // register_impl_methods pass, so `generic_impl_templates` was still
   // EMPTY at the moment Lexer's own field triggered
   // ensure_compound_instantiated for Vec<Token>, and
   // maybe_instantiate_generic_impl_methods silently found no template
-  // to monomorphize (not an error -- a compound needn't have one).
-  // Fixed by moving the impl-registration pass to run FIRST.
+  // to register (not an error -- a compound needn't have one). Fixed by
+  // moving the impl-registration pass to run FIRST.
+  // 
+  // Updated for lazy per-method emission (see `ensure_generic_impl_
+  // method_emitted`'s own doc comment): `last` is never actually CALLED
+  // anywhere in this test, so its C body must NOT appear at all -- the
+  // regression this test guards is specifically that the method's
+  // metadata (`lookup_impl_method`) still resolves correctly, which
+  // requires the SAME ordering fix regardless of whether emission
+  // itself is eager or lazy.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -10486,7 +10728,8 @@ test "pub transpile monomorphizes a generic impl's methods even when a PLAIN com
   nodes.push(lexer_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
-  assert contains(st.out.build(), "int64_t Vec__num__last(Vec__num* self)"), "expected Vec<T>'s own impl method monomorphized from Lexer's field alone, not silently skipped";
+  assert !contains(st.out.build(), "Vec__num__last"), "expected the never-called method to NOT be emitted at all (lazy per-method emission)";
+  assert g.lookup_impl_method("Vec__num", "last").is_some(), "expected Vec<T>'s own impl method metadata registered from Lexer's field alone, not silently skipped";
 }
 
 test "pub transpile hoists a generic compound's monomorphized typedef BEFORE another compound whose OWN field first triggers it" {
@@ -10638,9 +10881,17 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   Node main_decl = _box_num_var_decl("b");
   Node* main_decl_ptr = malloc(sizeof(Node));
   *main_decl_ptr = main_decl;
+  // A CALL, not just a declaration -- lazy per-method emission (see
+  // `ensure_generic_impl_method_emitted`'s own doc comment) only
+  // triggers a method's own C body at its first real call, so this
+  // test's original "declaring Box<num> alone hoists the method too"
+  // premise no longer holds; the call is what needs to be hoisted now.
+  Node* main_call_ptr = malloc(sizeof(Node));
+  *main_call_ptr = _box_get_call_node("b");
   Vec<Node*> main_stmts;
   main_stmts.init(0);
   main_stmts.push(main_decl_ptr);
+  main_stmts.push(main_call_ptr);
   BodyNode main_bn;
   main_bn.statements = main_stmts;
   Node* main_body = malloc(sizeof(Node));
@@ -10668,8 +10919,8 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
-  ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n    Box__num__get(&b);\n}\n"
+  ), "expected the struct typedef AND the monomorphized method (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
