@@ -1990,7 +1990,16 @@ pub const ParseProcess = struct {
     fn parse_for_indirection_unary(self: *Self) ParseError!void {
         const star_token = self.token_peek_next();
         const depth = self.parse_get_pointer_depth();
-        var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
+        // See `parse_for_normal_unary`'s own comment: a unary operand must
+        // stop at a top-level `,` -- comma binds looser than any unary
+        // operator, so `*p.get(), y` must parse as `(*p.get()), y`, never
+        // swallowing `y` into the dereference's own operand. This branch
+        // (indirection unaries, `*`/`&`) never got that same fix, so
+        // `f(*p.get(), y)` silently miscounted its own argument list down
+        // to just one argument (found via a real generic-impl-constraint-
+        // checking `.fn` program hitting `WrongArgCount` on a perfectly
+        // ordinary two-argument call).
+        var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true, .stop_at_comma = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
         const unary_operand_node = self.node_pop() orelse {

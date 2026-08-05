@@ -606,12 +606,41 @@ pub compound Codegen {
   // same real buffer, never nested inside another method's own.
   Vec<str> pending_generic_impl_method_owner;
   Vec<str> pending_generic_impl_method_bare;
+  // How many entries at the FRONT of the two queues above have already
+  // been processed -- `drain_pending_generic_impl_methods` resumes from
+  // here instead of restarting at index 0 every time it's called (which
+  // happens repeatedly over a real program's life, once per brand-new
+  // generic impl method reached at the top level). Without this, a
+  // SECOND, unrelated drain call would silently re-emit every method
+  // from a PREVIOUS drain all over again -- the entries are never
+  // removed from the queue (memoization already prevents them being
+  // enqueued a second time; this cursor is what prevents them being
+  // PROCESSED a second time).
+  num pending_generic_impl_method_cursor;
   // True for the duration of the OUTERMOST `ensure_generic_impl_method_
   // emitted` call's drain loop -- a call arriving while this is already
   // true (triggered from inside another queued method's own body) just
   // enqueues and returns, trusting the drain loop already running
   // further up the call stack to reach it.
   bin draining_generic_impl_methods;
+  // True while `self.state` points at a throwaway TEXT-CAPTURE probe
+  // rather than the real output buffer -- `resolve_field_chain`'s
+  // call-as-receiver case is the one existing example: it swaps `self.
+  // state` to a scratch buffer purely to capture a call expression's
+  // own rendered C text (to embed inline in a field-access chain),
+  // WITHOUT going through `emit_hoisted`'s usual splice-into-the-real-
+  // buffer machinery. A generic impl method reached for the first time
+  // INSIDE such a probe can't be emitted right there (there's no way to
+  // splice a definition into the probe's own tiny buffer and have it
+  // land anywhere sensible) -- setting this suppresses `ensure_generic_
+  // impl_method_emitted`'s own immediate drain, so it just enqueues;
+  // the probe itself drains the queue right after restoring `self.
+  // state` back to the real buffer, using that now-correct context.
+  // Found via a real crash (`emit_hoisted` -> `StringBuilder.append` ->
+  // null deref): the probe's OWN swap never suspended `hoist_insert_
+  // pos` either, so a nested drain spliced at a position measured
+  // against the REAL buffer's length into the probe's much smaller one.
+  bin suppress_generic_impl_method_draining;
   // The ACTIVE type-param substitution for a generic impl method
   // currently being monomorphized (see
   // `maybe_instantiate_generic_impl_methods`) -- parallel arrays, `
@@ -724,7 +753,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.emitted_generic_impl_methods.init(0);
   g.pending_generic_impl_method_owner.init(0);
   g.pending_generic_impl_method_bare.init(0);
+  g.pending_generic_impl_method_cursor = 0;
   g.draining_generic_impl_methods = false;
+  g.suppress_generic_impl_method_draining = false;
   g.type_subst_param_names.init(0);
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
@@ -834,6 +865,80 @@ fun dtype_is_array_as_pointer(DataType dt) bin {
     ret false;
   }
   ret dt.array_depth <= 1;
+}
+
+// True when `dt` matches a constraint NAME from an `impl Vec<T: num |
+// dec>`-style forced-instantiation list (`"num"`, `"dec"`, `"str"`,
+// ...). A builtin scalar matches by its own KIND (`dt.kind`); a named
+// type (`kind == .Unknown`) matches by its bare `type_str`, or by the
+// base name before a mangled `__` separator (so a constraint naming a
+// generic template's own bare name, e.g. `"Vec"`, matches an already-
+// mangled instantiation like `"Vec__num"`). Mirrors the original
+// transpiler's own `checked_type_matches_constraint_name`.
+fun dtype_matches_constraint_name(DataType dt, str expected) bin {
+  fit dt.kind {
+    .Num -> { ret equals(expected, "num"); }
+    .Dec -> { ret equals(expected, "dec"); }
+    .Str -> { ret equals(expected, "str"); }
+    .Chr -> { ret equals(expected, "chr"); }
+    .Bin -> { ret equals(expected, "bin"); }
+    .Raw -> { ret equals(expected, "raw"); }
+    .Void -> { ret equals(expected, "void"); }
+    .Unknown -> {
+      if equals(dt.type_str, expected) {
+        ret true;
+      }
+      num sep = index_of_str(dt.type_str, "__");
+      if sep < 0 {
+        ret false;
+      }
+      ret equals(substr(dt.type_str, 0, sep), expected);
+    }
+  }
+}
+
+// True when `gargs` (a generic impl instantiation's own concrete
+// arguments, positional) is allowed by `forced_insts` -- one of the
+// concrete-type combinations listed in an `impl Vec<T: num | dec>`-
+// style constraint, parsed into `ImplNode.type_param_forced_insts`
+// (`[["num"], ["dec"]]`, one inner list per allowed combination, each
+// inner list positional-matching `gargs`). `has_forced == false` means
+// an UNCONSTRAINED template (`impl Vec<T> { ... }`) -- always allowed,
+// matching every instantiation, same as before this check existed.
+// 
+// Selfhost codegen parses `type_param_forced_insts` (see `ImplNode`'s
+// own doc comment in ast.fn) but never consulted it anywhere -- found
+// via a real stage-2 self-compilation C error: `impl Vec<T: num |
+// dec> { sort, contains, min, max, sum }` (real stdlib shape, plus a
+// separate concrete `impl Vec<str> { ... }` providing str-specific
+// overrides) matched `Vec<str>`/`Vec<FitBranch>`/etc. just as readily
+// as `Vec<num>`, since NOTHING checked the constraint at all --
+// monomorphizing methods (`s = s + self.data[i]`, valid C only for
+// numeric/decimal `T`) that were never supposed to apply to those
+// types in the first place. Mirrors the original transpiler's own
+// `impl_allows_generic_args`.
+fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<DataType*> gargs) bin {
+  if !has_forced {
+    ret true;
+  }
+  for inst : forced_insts {
+    if inst.len != gargs.len {
+      continue;
+    }
+    bin all_match = true;
+    num i = 0;
+    for i < inst.len {
+      if !dtype_matches_constraint_name(*gargs.get(i), inst.get(i)) {
+        all_match = false;
+        break;
+      }
+      i = i + 1;
+    }
+    if all_match {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 impl Codegen {
@@ -1608,7 +1713,11 @@ impl Codegen {
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
-          if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len {
+          if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len && impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes
+          ) {
             self.instantiation_mangled_name.push(mangled_name);
             self.instantiation_base_name.push(base_name);
             self.instantiation_arg_type_names.push(arg_type_names);
@@ -1772,12 +1881,30 @@ impl Codegen {
     self.pending_generic_impl_method_owner.push(owner_type);
     self.pending_generic_impl_method_bare.push(bare_name);
 
-    if self.draining_generic_impl_methods {
+    // Also deferred (just enqueued, not drained) while `self.state`
+    // points at a throwaway TEXT-CAPTURE probe rather than the real
+    // output -- see `Codegen.suppress_generic_impl_method_draining`'s
+    // own doc comment. The probe itself drains this queue once it
+    // restores `self.state` back to the real buffer.
+    if self.draining_generic_impl_methods || self.suppress_generic_impl_method_draining {
       ret .None;
     }
+    ret self.drain_pending_generic_impl_methods();
+  }
+
+  // Actually processes every queued (owner, bare name) pair -- see
+  // `ensure_generic_impl_method_emitted`'s own doc comment for the two
+  // places this gets called from (directly, when nothing else is
+  // draining or suppressing; and by a probe like `resolve_field_chain`'s
+  // call-as-receiver case, right after it restores `self.state`/`self.
+  // hoist_insert_pos` back to the real ones). Safe to call directly
+  // against `self.state`/`self.hoist_insert_pos` exactly as they
+  // currently are, PROVIDED the caller has already ensured those are
+  // the real ones, not some other in-progress scratch buffer.
+  drain_pending_generic_impl_methods() Option<CodegenErrorKind> {
     self.draining_generic_impl_methods = true;
     Option<CodegenErrorKind> first_err = .None;
-    num qi = 0;
+    num qi = self.pending_generic_impl_method_cursor;
     for qi < self.pending_generic_impl_method_owner.len {
       let q_owner = self.pending_generic_impl_method_owner.get(qi);
       let q_bare = self.pending_generic_impl_method_bare.get(qi);
@@ -1786,6 +1913,7 @@ impl Codegen {
         first_err = err;
       }
       qi = qi + 1;
+      self.pending_generic_impl_method_cursor = qi;
     }
     self.draining_generic_impl_methods = false;
     ret first_err;
@@ -1818,6 +1946,13 @@ impl Codegen {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes
+          ) {
             continue;
           }
           StringBuilder pfx = string_builder_init(16);
@@ -3393,11 +3528,40 @@ impl Codegen {
             ret .None;
           }
 
+          // `hoist_insert_pos` (if set) is a position measured against
+          // the OUTER, now-swapped-away buffer -- suspending it for the
+          // duration of this swap, same as every OTHER scratch-buffer
+          // swap in this file, keeps a NESTED hoisted emission
+          // triggered from inside this call (e.g. a generic impl
+          // method reached for the first time right here, as this
+          // call's own receiver) from splicing at a stale position
+          // into THIS tiny scratch buffer instead of the real one --
+          // confirmed via a real crash (`emit_hoisted` -> `StringBuilder.
+          // append` -> null deref) when this swap didn't suspend it.
+          // 
+          // `suppress_generic_impl_method_draining` additionally stops
+          // such a method from being emitted WHILE `self.state` points
+          // here at all -- there's no sensible place to splice a
+          // definition into this throwaway buffer. It's only enqueued;
+          // once `self.state`/`hoist_insert_pos` are restored to the
+          // real ones below, draining is safe again, so this drains
+          // whatever accumulated -- but only when NEITHER an outer
+          // drain nor an outer probe is already in progress (either
+          // one further up the call stack will reach it instead).
           CodegenState call_scratch = codegen_state_new();
           CodegenState* saved_call_state = self.state;
+          let saved_call_hoist_pos = self.hoist_insert_pos;
+          let prev_suppress = self.suppress_generic_impl_method_draining;
           self.state = &call_scratch;
+          self.hoist_insert_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
           let cerr = self.emit_expr(*recv);
           self.state = saved_call_state;
+          self.hoist_insert_pos = saved_call_hoist_pos;
+          self.suppress_generic_impl_method_draining = prev_suppress;
+          if !prev_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
           if cerr.is_some() {
             ret .None;
           }
