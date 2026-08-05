@@ -683,6 +683,45 @@ pub fn format_file_and_imports_in_place(allocator: mem.Allocator, io: std.Io, in
     try format_file_and_imports_recursive(allocator, io, input_file, &visiting, &visited);
 }
 
+/// Re-indents a multi-line raw string's own CONTINUATION lines (every
+/// backtick-prefixed line after the first) to `target_indent` spaces,
+/// discarding whatever leading whitespace each one had verbatim from
+/// source. Safe: the lexer strips a continuation line's leading
+/// whitespace/tabs before its own backtick when RE-reading the string
+/// (see `token_make_raw_string`'s multi-line loop), so that whitespace
+/// was never part of the string's actual value -- only ever a visual
+/// artifact of wherever the line happened to be typed. Leaving it as
+/// verbatim-reproduced (the previous behavior) meant a raw string's
+/// FIRST line -- freshly positioned by whatever wrapping/indent
+/// decision this formatting pass just made for it -- could end up at
+/// a totally different column than its own continuation lines, which
+/// just kept whatever indentation they'd had in the ORIGINAL source.
+/// A single-line (or already-consistently-indented multi-line, e.g.
+/// nothing to change) raw string's `text` is returned unchanged
+/// (dupe'd, so the caller can always `free` the result uniformly).
+fn reindentRawStringContinuations(allocator: mem.Allocator, text: []const u8, target_indent: usize) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '\n') == null) {
+        return allocator.dupe(u8, text);
+    }
+    var out = ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (it.next()) |line| {
+        if (!first) {
+            try out.append('\n');
+            try out.appendNTimes(' ', target_indent);
+            var k: usize = 0;
+            while (k < line.len and (line[k] == ' ' or line[k] == '\t')) k += 1;
+            try out.appendSlice(line[k..]);
+        } else {
+            try out.appendSlice(line);
+        }
+        first = false;
+    }
+    return out.toOwnedSlice();
+}
+
 fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line_starts: []const usize) ![]const u8 {
     return switch (t.type) {
         .Identifier, .Keyword, .Operator => allocator.dupe(u8, t.data.sval.items),
@@ -2660,8 +2699,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             continue;
         }
 
-        const s2 = try token_text(state.allocator, t2, source, line_starts);
-        defer state.allocator.free(s2);
+        const s2_raw = try token_text(state.allocator, t2, source, line_starts);
+        const s2 = if (t2.type == .String and t2.is_raw_string)
+            try reindentRawStringContinuations(state.allocator, s2_raw, state.indent.* * fmt_indent_width)
+        else
+            s2_raw;
+        defer state.allocator.free(s2_raw);
+        defer if (s2.ptr != s2_raw.ptr) state.allocator.free(s2);
         try state.out.appendSlice(s2);
 
         // Track unary prefix ops so we don't insert a space after them.

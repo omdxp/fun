@@ -3808,7 +3808,7 @@ test "fls e2e: for range loop locals support" {
     const comp_p_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-        .{ doc_uri, comp_p_pos.line, comp_p_pos.col + 2 },
+        .{ doc_uri, comp_p_pos.line, comp_p_pos.col + 4 },
     );
     defer allocator.free(comp_p_params);
     const comp_p_id = try lsp.request("textDocument/completion", comp_p_params);
@@ -3820,7 +3820,7 @@ test "fls e2e: for range loop locals support" {
     const hover_p_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-        .{ doc_uri, comp_p_pos.line, comp_p_pos.col + 2 },
+        .{ doc_uri, comp_p_pos.line, comp_p_pos.col + 4 },
     );
     defer allocator.free(hover_p_params);
     const hover_p_id = try lsp.request("textDocument/hover", hover_p_params);

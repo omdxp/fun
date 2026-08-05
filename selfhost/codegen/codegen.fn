@@ -606,6 +606,13 @@ pub compound Codegen {
   // same real buffer, never nested inside another method's own.
   Vec<str> pending_generic_impl_method_owner;
   Vec<str> pending_generic_impl_method_bare;
+  // Parallel to the two queues above: whether THIS entry's own
+  // prototype was already written immediately at discovery time (see
+  // `ensure_generic_impl_method_emitted`'s own doc comment) -- false
+  // only for an entry discovered while `suppress_generic_impl_method_
+  // draining` was set, whose prototype the drain loop still needs to
+  // write itself, once, before processing its body.
+  Vec<bin> pending_generic_impl_method_proto_written;
   // How many entries at the FRONT of the two queues above have already
   // been processed -- `drain_pending_generic_impl_methods` resumes from
   // here instead of restarting at index 0 every time it's called (which
@@ -753,6 +760,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.emitted_generic_impl_methods.init(0);
   g.pending_generic_impl_method_owner.init(0);
   g.pending_generic_impl_method_bare.init(0);
+  g.pending_generic_impl_method_proto_written.init(0);
   g.pending_generic_impl_method_cursor = 0;
   g.draining_generic_impl_methods = false;
   g.suppress_generic_impl_method_draining = false;
@@ -1682,6 +1690,91 @@ impl Codegen {
     }
   }
 
+  // True when `dt` can't safely appear in the EARLY function/method
+  // forward-declare pass (`pub transpile`'s own, right after `register_
+  // impl_methods`) -- either a plain ENUM (any pointer depth or by-
+  // value) or a GENERIC instantiation of either kind. Unlike a plain
+  // COMPOUND (struct) -- whose bare NAME is already forward-declared
+  // by the pass just before this one, and C allows an incomplete
+  // struct type in a mere prototype DECLARATION (confirmed empirically:
+  // only a DEFINITION or an actual CALL needs it complete) -- C has NO
+  // way to forward-declare just an enum's NAME the way `typedef struct
+  // X X;` does for a compound, so the type must be FULLY defined
+  // before ANY mention of it at all, even a bare declaration ("unknown
+  // type name", not merely "incomplete type"). Ditto a generic
+  // instantiation (`Vec__str`, `Opt__num`) -- no separate name-only
+  // forward-declare exists for one of those either, generic or not.
+  // Found via a real stage-2 self-compilation C error for exactly this
+  // shape (`std/error.fn`'s own `error_new_kind(ErrorKind kind, ...)`,
+  // `std/warnings.fn`'s own `WarningId`-typed functions).
+  prototype_type_is_unsafe_early(DataType dt) bin {
+    if dt.generic_args.len > 0 {
+      ret true;
+    }
+    for n : self.all_nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if equals(e.name, dt.type_str) {
+            ret true;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
+  // True when EVERY one of `n`'s (a `Function` node's) own declared
+  // param/return types is safe for the early forward-declare pass --
+  // see `prototype_type_is_unsafe_early`'s own doc comment. A function-
+  // pointer-typed parameter (`v.var_type.has_fn_sig`) is treated as
+  // always safe without inspecting its own nested param/return types --
+  // rare in practice, and always pointer-shaped at the OUTER level
+  // regardless, so not worth the extra recursion until a real failure
+  // shows otherwise.
+  function_prototype_is_safe_early(Node n) bin {
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_rtype && self.prototype_type_is_unsafe_early(*f.rtype) {
+          ret false;
+        }
+        if f.has_args {
+          for arg : f.args {
+            fit arg.kind {
+              .Variable(v) -> {
+                if v.var_type.has_fn_sig {
+                  continue;
+                }
+                if self.prototype_type_is_unsafe_early(*v.var_type) {
+                  ret false;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+        ret true;
+      }
+      _ -> { ret false; }
+    }
+  }
+
+  // Forward-declares a PLAIN (non-generic) top-level function's OR
+  // plain impl method's own C prototype, under its OWN real name --
+  // for a method, that's ALREADY the parser's own pre-mangled `Type__
+  // method` name (see `emit_impl`'s doc comment), so no separate
+  // mangled-name computation is needed the way a GENERIC impl's own
+  // per-instantiation mangling requires. Reuses `emit_generic_impl_
+  // method_prototype`'s identical param-writing logic (that function
+  // takes the callee's own name as an explicit argument rather than
+  // reading it off the node, precisely so this can share it).
+  emit_function_prototype(Node n) Option<CodegenErrorKind> {
+    fit n.kind {
+      .Function(f) -> { ret self.emit_generic_impl_method_prototype(n, f.name); }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   // Records the instantiation's substitution context (for `ensure_
   // generic_impl_method_emitted` to re-establish later) and each
   // method's substituted return/param TYPES only (`record_impl_method`,
@@ -1827,6 +1920,119 @@ impl Codegen {
     }
   }
 
+  // Writes ONE generic impl method's prototype immediately, INLINE,
+  // wherever `self.state` currently is -- no scratch swap, no `hoist_
+  // insert_pos` splice, unlike everything else in this file. Safe
+  // regardless of nesting depth: a bare declaration (unlike a full
+  // DEFINITION) is legal C at block scope, confirmed empirically
+  // (`void foo(int); { ... }` compiles fine nested inside another
+  // function's own body). Best-effort/silent no-op when `owner_type`
+  // isn't a known instantiation or no matching template method is
+  // found -- mirrors `emit_one_generic_impl_method`'s own identical
+  // lookup (duplicated rather than factored out, matching this file's
+  // own established style for near-identical small lookups).
+  // 
+  // Called from `ensure_generic_impl_method_emitted`, BEFORE
+  // enqueueing the method's own BODY for deferred emission -- this is
+  // what lets a method's own body (itself still pending) call ANOTHER
+  // not-yet-bodied method and still compile. Found via a real stage-2
+  // C error ("call to undeclared function" for `Vec__str__grow`,
+  // called from `Vec__str__push`'s own body): with proto+body
+  // deferred TOGETHER as one atomic queue entry, `push`'s own body
+  // (spliced first) ended up calling `grow` (spliced entirely AFTER
+  // push, as the next queue entry) before `grow`'s declaration existed
+  // anywhere -- the queue's FIFO splice order can't retroactively
+  // insert something BEFORE an already-spliced entry, but an inline,
+  // no-hoist prototype write doesn't have that problem at all.
+  // 
+  // Skipped (falls through to normal deferred proto+body handling)
+  // while `self.state` points at a throwaway TEXT-CAPTURE probe (see
+  // `Codegen.suppress_generic_impl_method_draining`'s own doc comment)
+  // -- writing even a bare declaration there would corrupt the pure
+  // EXPRESSION fragment the probe is capturing.
+  emit_generic_impl_method_prototype_now(str owner_type, str bare_name) {
+    num ii = 0;
+    bin found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), owner_type) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret;
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes
+          ) {
+            continue;
+          }
+          StringBuilder pfx = string_builder_init(16);
+          pfx.append(i.type_name);
+          pfx.append("__");
+          if i.has_quirk_name {
+            pfx.append(i.quirk_name);
+            pfx.append("__");
+          }
+          str prefix = pfx.build();
+
+          for m : i.methods {
+            str tmpl_name = "";
+            fit m.kind {
+              .Function(fnv) -> { tmpl_name = fnv.name; }
+              _ -> {}
+            }
+            if !equals(strip_prefix(tmpl_name, prefix), bare_name) {
+              continue;
+            }
+
+            let prev_params = self.type_subst_param_names;
+            let prev_arg_names = self.type_subst_arg_type_strs;
+            let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            let prev_arg_dtypes = self.type_subst_arg_dtypes;
+            self.type_subst_param_names = i.type_params;
+            self.type_subst_arg_type_strs = arg_type_names;
+            self.type_subst_arg_dtypes = arg_dtypes;
+            self.type_subst_arg_is_pointer = arg_is_pointer;
+
+            StringBuilder nb = string_builder_init(16);
+            nb.append(owner_type);
+            nb.append("__");
+            if i.has_quirk_name {
+              nb.append(i.quirk_name);
+              nb.append("__");
+            }
+            nb.append(bare_name);
+            str new_name = nb.build();
+
+            self.emit_generic_impl_method_prototype(*m, new_name);
+
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
   // Lazily emits ONE concrete monomorphization of a generic impl
   // method's own prototype+body -- `owner_type` is a generic
   // instantiation's mangled name (`Vec__str`), `bare_name` the
@@ -1873,13 +2079,18 @@ impl Codegen {
     // same reasoning as `emitted_plain_types`: a self-recursive method
     // call (this method calling itself) must see "already handled"
     // rather than re-enqueueing/recursing forever. Its own prototype
-    // (forward-declared as part of processing THIS entry) already
-    // exists in the buffer by the time such a recursive call is
-    // reached, since C only needs the declaration to exist somewhere,
-    // not for the body to be complete yet.
+    // is written immediately, right below (not deferred like the
+    // body), so it already exists in the buffer by the time such a
+    // recursive call is reached, or by the time ANOTHER not-yet-
+    // bodied method's own call to THIS one is reached.
     self.emitted_generic_impl_methods.push(key);
+    bin proto_written = !self.suppress_generic_impl_method_draining;
+    if proto_written {
+      self.emit_generic_impl_method_prototype_now(owner_type, bare_name);
+    }
     self.pending_generic_impl_method_owner.push(owner_type);
     self.pending_generic_impl_method_bare.push(bare_name);
+    self.pending_generic_impl_method_proto_written.push(proto_written);
 
     // Also deferred (just enqueued, not drained) while `self.state`
     // points at a throwaway TEXT-CAPTURE probe rather than the real
@@ -1908,6 +2119,9 @@ impl Codegen {
     for qi < self.pending_generic_impl_method_owner.len {
       let q_owner = self.pending_generic_impl_method_owner.get(qi);
       let q_bare = self.pending_generic_impl_method_bare.get(qi);
+      if !self.pending_generic_impl_method_proto_written.get(qi) {
+        self.emit_generic_impl_method_prototype_now(q_owner, q_bare);
+      }
       let err = self.emit_one_generic_impl_method(q_owner, q_bare);
       if err.is_some() && first_err.is_none() {
         first_err = err;
@@ -1919,11 +2133,14 @@ impl Codegen {
     ret first_err;
   }
 
-  // Does the actual prototype+body emission for one queued (owner
-  // mangled name, bare method name) pair -- see `ensure_generic_impl_
-  // method_emitted`'s own doc comment for the queueing/draining
-  // discipline that makes it safe to call this directly against
-  // `self.state`/`self.hoist_insert_pos` exactly as they are.
+  // Does the actual BODY emission for one queued (owner mangled name,
+  // bare method name) pair -- the prototype is already written by now
+  // (see `emit_generic_impl_method_prototype_now`'s own doc comment
+  // for why that's handled separately, immediately, not here). See
+  // `ensure_generic_impl_method_emitted`'s own doc comment for the
+  // queueing/draining discipline that makes it safe to call this
+  // directly against `self.state`/`self.hoist_insert_pos` exactly as
+  // they are.
   emit_one_generic_impl_method(str owner_type, str bare_name) Option<CodegenErrorKind> {
     num ii = 0;
     bin found_inst = false;
@@ -1992,20 +2209,6 @@ impl Codegen {
             }
             nb.append(bare_name);
             str new_name = nb.build();
-
-            // Forward-declare THIS method before its own body (see
-            // `emit_generic_impl_method_prototype`'s own doc comment
-            // for why) -- its own scratch buffer, hoisted right before
-            // the body's own scratch below.
-            CodegenState proto_scratch = codegen_state_new();
-            CodegenState* saved_proto_state = self.state;
-            let saved_proto_hoist_pos = self.hoist_insert_pos;
-            self.state = &proto_scratch;
-            self.hoist_insert_pos = .None;
-            self.emit_generic_impl_method_prototype(*m, new_name);
-            self.state = saved_proto_state;
-            self.hoist_insert_pos = saved_proto_hoist_pos;
-            self.emit_hoisted(proto_scratch.out.build());
 
             // See the ORIGINAL (pre-lazy) version of this loop's own
             // identical comment for why `hoist_insert_pos` is suspended
@@ -6862,39 +7065,11 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Top-level `const`/`let` globals are emitted BEFORE enums/compounds
-    // -- not just before impls/functions, as an earlier version of this
-    // ordering had it. Every OTHER pass here can lazily HOIST a
-    // monomorphized generic definition to whatever `self.state.out.len()`
-    // happens to be at the moment it's first triggered (see
-    // `Codegen.hoist_insert_pos`'s doc comment) -- and that first trigger
-    // can fire as early as the ENUM/COMPOUND pass itself (e.g. a plain
-    // compound field whose type is a generic instantiation, `compound
-    // WaitGroup { Channel<num> done_ch; }`-shaped). A global emitted
-    // AFTER that point would land textually LATER than a hoisted method
-    // body that already references it -- a real bug found via `std/task
-    // .fn`'s own real `WaitGroup`, whose generic `Channel<num>` field
-    // triggers `Channel<T>`'s methods (which reference `std/channel.fn`'s
-    // own `CHANNEL_RC_OK`-shaped constants) to hoist during the compound
-    // pass below, before a later-positioned global pass had run at all.
-    // Constants are simple literals with no compound/enum type
-    // dependency of their own (confirmed across every real one in this
-    // codebase's stdlib), so moving them first has nothing to lose.
-    for n : nodes {
-      fit n.kind {
-        .Variable(v) -> {
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let gerr = self.emit_global_variable(n);
-          if gerr.is_some() {
-            ret gerr;
-          }
-        }
-        _ -> {}
-      }
-    }
     // Forward-declares every PLAIN (non-generic) compound's own struct
     // NAME (`typedef struct X X;`, no body) before ANY compound/enum's
-    // FULL body is emitted -- mirroring the original implementation's
+    // FULL body -- OR the function-prototype pass right below, which
+    // needs every type NAME nameable regardless of param/return
+    // position -- is emitted. Mirrors the original implementation's
     // own identical forward-typedef pass exactly. `emit_compound`/
     // `emit_enum` themselves rely purely on SOURCE ORDER (a type
     // referencing another must be declared textually after it), which
@@ -6922,12 +7097,16 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Registers every GENERIC enum/compound TEMPLATE first (pure
-    // bookkeeping, no C text -- see `emit_enum`/`emit_compound`'s own
-    // `has_type_params` branches), before ANY non-generic type's OWN
-    // fields get resolved below -- a plain type's field can itself be
-    // a generic instantiation (`compound Lexer { Vec<Token> tokens;
-    // }`), which needs the template already known.
+    // Registers every GENERIC enum/compound TEMPLATE (pure bookkeeping,
+    // no C text -- see `emit_enum`/`emit_compound`'s own `has_type_
+    // params` branches) before the function-prototype pass just below
+    // -- a plain function/method's OWN signature can reference a
+    // generic instantiation (`fun wrap<T>(T value) Opt<T>`'s `main`
+    // caller returning `Opt<num>` directly, e.g.), which needs the
+    // template already known to resolve at all. Also needed before ANY
+    // non-generic type's OWN fields get resolved further below (a
+    // plain type's field can itself be a generic instantiation,
+    // `compound Lexer { Vec<Token> tokens; }`).
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -6944,6 +7123,102 @@ impl Codegen {
             if cerr.is_some() {
               ret cerr;
             }
+          }
+        }
+        _ -> {}
+      }
+    }
+    // Forward-declares every PLAIN (non-generic) top-level function's
+    // AND every plain impl's own method's C prototype, before ANY of
+    // their bodies -- `emit_function`/`emit_impl` themselves rely
+    // purely on SOURCE order (a function calling another must be
+    // declared textually after it), which breaks down the moment ANY
+    // plain function/method calls another declared LATER in the file.
+    // Mirrors the plain-compound forward-declare pass just above, for the
+    // same reason. Found via a real stage-2 self-compilation C error
+    // ("call to undeclared function") for `std/string.fn`'s own
+    // `_str_len`/`_str_cmp`/`format_num`, called from `impl Vec<str> {
+    // ... }`'s own methods -- a plain impl whose methods only actually
+    // got reached once the type-param-constraint fix (see `impl_allows_
+    // generic_args`'s own doc comment) stopped a WRONG generic template
+    // from shadowing it, so this ordering gap was never hit before.
+    // 
+    // Positioned here, right after `register_impl_methods` -- NOT
+    // further down alongside the plain-compound pass, where this was
+    // tried first -- because a plain impl method can get called from
+    // WAY earlier than its own textual position: a GENERIC method
+    // reached lazily during the enum/compound pass below (`Vec<T>`'s
+    // own `push` calling `self.grow()`) can resolve to a CONCRETE
+    // override (`impl Vec<str> { pub grow() {...} }`, registered by
+    // `register_impl_methods` just above) and get its body emitted
+    // right then -- long before a forward-declare pass positioned
+    // alongside the later compound/impl/function passes would ever
+    // run.
+    // 
+    // Excludes a `std/c/*.fn` binding node (see `is_std_c_signature_
+    // node`'s own doc comment) -- one of those exists purely to
+    // typecheck against an ALREADY-`#include`d system header's own
+    // real declaration (`malloc`/`printf`/...), so forward-declaring
+    // it here too is a competing, conflicting-types redeclaration, not
+    // a harmless duplicate. Also excludes any function/method whose
+    // own signature isn't SAFE this early (see `prototype_type_is_
+    // unsafe_early`'s own doc comment) -- one calling another declared
+    // later in the file, where EITHER end's signature involves a plain
+    // enum or generic instantiation, falls back to depending on
+    // natural source order, same as before this pass existed.
+    for n : nodes {
+      fit n.kind {
+        .Function(f) -> {
+          if !f.has_type_params && !self.is_std_c_signature_node(n) && self.function_prototype_is_safe_early(n) {
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            let ferr = self.emit_function_prototype(n);
+            if ferr.is_some() {
+              ret ferr;
+            }
+          }
+        }
+        .Impl(i) -> {
+          if !i.has_type_params {
+            for m : i.methods {
+              if self.is_std_c_signature_node(*m) || !self.function_prototype_is_safe_early(*m) {
+                continue;
+              }
+              self.hoist_insert_pos = .Some(self.state.out.len());
+              let merr = self.emit_function_prototype(*m);
+              if merr.is_some() {
+                ret merr;
+              }
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    // Top-level `const`/`let` globals are emitted BEFORE enums/compounds
+    // -- not just before impls/functions, as an earlier version of this
+    // ordering had it. Every OTHER pass here can lazily HOIST a
+    // monomorphized generic definition to whatever `self.state.out.len()`
+    // happens to be at the moment it's first triggered (see
+    // `Codegen.hoist_insert_pos`'s doc comment) -- and that first trigger
+    // can fire as early as the ENUM/COMPOUND pass itself (e.g. a plain
+    // compound field whose type is a generic instantiation, `compound
+    // WaitGroup { Channel<num> done_ch; }`-shaped). A global emitted
+    // AFTER that point would land textually LATER than a hoisted method
+    // body that already references it -- a real bug found via `std/task
+    // .fn`'s own real `WaitGroup`, whose generic `Channel<num>` field
+    // triggers `Channel<T>`'s methods (which reference `std/channel.fn`'s
+    // own `CHANNEL_RC_OK`-shaped constants) to hoist during the compound
+    // pass below, before a later-positioned global pass had run at all.
+    // Constants are simple literals with no compound/enum type
+    // dependency of their own (confirmed across every real one in this
+    // codebase's stdlib), so moving them first has nothing to lose.
+    for n : nodes {
+      fit n.kind {
+        .Variable(v) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
+          let gerr = self.emit_global_variable(n);
+          if gerr.is_some() {
+            ret gerr;
           }
         }
         _ -> {}
@@ -7801,7 +8076,10 @@ test "emit_body emits a plain if statement with no elif/else" {
   Node body = node_new(NodeKind.Body(bn));
 
   assert g.emit_body(body).is_none(), "expected the if statement to emit";
-  assert equals(st.out.build(), "if (ok) {\n    return;\n}\n"), "expected a plain if block";
+  assert equals(st.out.build(), `if (ok) {
+  `    return;
+  `}
+  ``), "expected a plain if block";
 }
 
 test "emit_body chains StatementIf/StatementElseIf/StatementElse into one if/else-if/else" {
@@ -7874,7 +8152,14 @@ test "emit_body chains StatementIf/StatementElseIf/StatementElse into one if/els
   let out = st.out.build();
   assert equals(
     out,
-    "if (a) {\n    return 1;\n} else if (b) {\n    return 2;\n} else {\n    return 3;\n}\n"
+    `if (a) {
+    `    return 1;
+    `} else if (b) {
+    `    return 2;
+    `} else {
+    `    return 3;
+    `}
+    ``
   ), "expected a single chained if/else-if/else C construct";
 }
 
@@ -7925,7 +8210,10 @@ test "emit_function emits a plain no-arg function definition with indentation" {
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
-  assert equals(st.out.build(), "int64_t main(void) {\n    return 0;\n}\n"), "expected a complete C function definition";
+  assert equals(st.out.build(), `int64_t main(void) {
+  `    return 0;
+  `}
+  ``), "expected a complete C function definition";
 }
 
 test "emit_function emits a deferred statement at ordinary fall-through, after the rest of the body" {
@@ -7993,7 +8281,14 @@ test "emit_function emits a deferred statement at ordinary fall-through, after t
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
-  assert equals(st.out.build(), "void cleanup(void) {\n    g();\n    free(x);\n}\n"), "expected the deferred 'free(x)' emitted AFTER 'g()', at the block's actual (fall-through) exit, not at its own source position";
+  assert equals(
+    st.out.build(),
+    `void cleanup(void) {
+    `    g();
+    `    free(x);
+    `}
+    ``
+  ), "expected the deferred 'free(x)' emitted AFTER 'g()', at the block's actual (fall-through) exit, not at its own source position";
 }
 
 test "emit_function emits a deferred statement before an early 'ret', snapshotting the return value first" {
@@ -8050,7 +8345,12 @@ test "emit_function emits a deferred statement before an early 'ret', snapshotti
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(
     st.out.build(),
-    "int64_t read_val(void) {\n    __auto_type __fun_defer_ret = 5;\n    free(x);\n    return __fun_defer_ret;\n}\n"
+    `int64_t read_val(void) {
+    `    __auto_type __fun_defer_ret = 5;
+    `    free(x);
+    `    return __fun_defer_ret;
+    `}
+    ``
   ), "expected the return value snapshotted BEFORE the deferred 'free(x)' runs";
 }
 
@@ -8118,7 +8418,11 @@ test "emit_function emits nested-block defers in their own LIFO order, scoped to
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
-  assert equals(st.out.build(), "void two_defers(void) {\n    b();\n    a();\n}\n"), "expected 'b()' (registered second) emitted before 'a()' (registered first) -- LIFO order";
+  assert equals(st.out.build(), `void two_defers(void) {
+  `    b();
+  `    a();
+  `}
+  ``), "expected 'b()' (registered second) emitted before 'a()' (registered first) -- LIFO order";
 }
 
 test "emit_function emits parameters, and a call to it" {
@@ -8189,7 +8493,13 @@ test "emit_function emits parameters, and a call to it" {
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
-  assert equals(st.out.build(), "int64_t add(int64_t a, int64_t b) {\n    return (a + b);\n}\n"), "expected a two-param C function definition";
+  assert equals(
+    st.out.build(),
+    `int64_t add(int64_t a, int64_t b) {
+    `    return (a + b);
+    `}
+    ``
+  ), "expected a two-param C function definition";
 }
 
 test "emit_function_param emits a function-type parameter using C's function-pointer declarator shape" {
@@ -8342,7 +8652,10 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   assert g.emit_function(fn_node).is_none(), "expected 'apply' to emit";
   assert equals(
     st.out.build(),
-    "int64_t apply(int64_t (*cb)(int64_t, int64_t), int64_t a, int64_t b) {\n    return cb(a, b);\n}\n"
+    `int64_t apply(int64_t (*cb)(int64_t, int64_t), int64_t a, int64_t b) {
+    `    return cb(a, b);
+    `}
+    ``
   ), "expected the function-pointer param declarator, and an ordinary (uncast) call through it in the body";
 }
 
@@ -8369,7 +8682,10 @@ test "emit_statement emits a conditional for as a while loop" {
   Node n = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
 
   assert g.emit_statement(n).is_none(), "expected the for-cond to emit";
-  assert equals(st.out.build(), "while (ok) {\n    return;\n}\n"), "expected a while loop";
+  assert equals(st.out.build(), `while (ok) {
+  `    return;
+  `}
+  ``), "expected a while loop";
 }
 
 test "emit_statement emits a bare 'break;'" {
@@ -8424,7 +8740,15 @@ test "emit_statement emits 'break;' inside a for loop's own if branch" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   assert g.emit_statement(n).is_none(), "expected the for-loop-with-a-conditional-break to emit";
-  assert equals(st.out.build(), "while (1) {\n    if (true) {\n        break;\n    }\n}\n"), "expected the C 'break;' nested inside the if inside the while loop";
+  assert equals(
+    st.out.build(),
+    `while (1) {
+    `    if (true) {
+    `        break;
+    `    }
+    `}
+    ``
+  ), "expected the C 'break;' nested inside the if inside the while loop";
 }
 
 test "emit_statement emits an infinite for as while (1)" {
@@ -8448,7 +8772,10 @@ test "emit_statement emits an infinite for as while (1)" {
   Node n = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
 
   assert g.emit_statement(n).is_none(), "expected the infinite for to emit";
-  assert equals(st.out.build(), "while (1) {\n    return;\n}\n"), "expected 'while (1)'";
+  assert equals(st.out.build(), `while (1) {
+  `    return;
+  `}
+  ``), "expected 'while (1)'";
 }
 
 test "emit_statement emits a range for as a counted C for loop" {
@@ -8485,7 +8812,10 @@ test "emit_statement emits a range for as a counted C for loop" {
   Node n = node_new(NodeKind.StatementFor(ForKind.Range(fr)));
 
   assert g.emit_statement(n).is_none(), "expected the for-range to emit";
-  assert equals(st.out.build(), "for (int64_t i = 0; i < n; i++) {\n    return;\n}\n"), "expected a counted C for loop";
+  assert equals(st.out.build(), `for (int64_t i = 0; i < n; i++) {
+  `    return;
+  `}
+  ``), "expected a counted C for loop";
 }
 
 test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" {
@@ -8516,7 +8846,11 @@ test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" 
   assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
   assert equals(
     st.out.build(),
-    "for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {\n    __auto_type item = items.data[__fun_i];\n    return;\n}\n"
+    `for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {
+    `    __auto_type item = items.data[__fun_i];
+    `    return;
+    `}
+    ``
   ), "expected a synthetic index name and the .len/.data fast path";
 }
 
@@ -8543,7 +8877,10 @@ test "emit_statement emits a Vec iterator for with an explicit index name" {
   assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
   assert equals(
     st.out.build(),
-    "for (int64_t idx = 0; idx < items.len; idx++) {\n    __auto_type item = items.data[idx];\n}\n"
+    `for (int64_t idx = 0; idx < items.len; idx++) {
+    `    __auto_type item = items.data[idx];
+    `}
+    ``
   ), "expected the given index name used instead of the synthetic default";
 }
 
@@ -8579,7 +8916,10 @@ test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Ve
   assert g.emit_statement(n).is_none(), "expected the Vec__str iterator for to emit";
   assert equals(
     st.out.build(),
-    "for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {\n    __auto_type item = items.data[__fun_i];\n}\n"
+    `for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {
+    `    __auto_type item = items.data[__fun_i];
+    `}
+    ``
   ), "expected the same .len/.data fast path as the bare 'Vec' stand-in";
 }
 
@@ -8672,7 +9012,13 @@ test "emit_statement records a Vec iterator's own item as a known local, so a NE
   assert g.emit_statement(n).is_none(), "expected the nested Vec iterator for to emit, with 'existing' resolved as a known Vec__str local";
   assert equals(
     st.out.build(),
-    "for (int64_t __fun_i = 0; __fun_i < combos.len; __fun_i++) {\n    __auto_type existing = combos.data[__fun_i];\n    for (int64_t __fun_i = 0; __fun_i < existing.len; __fun_i++) {\n        __auto_type et = existing.data[__fun_i];\n    }\n}\n"
+    `for (int64_t __fun_i = 0; __fun_i < combos.len; __fun_i++) {
+    `    __auto_type existing = combos.data[__fun_i];
+    `    for (int64_t __fun_i = 0; __fun_i < existing.len; __fun_i++) {
+    `        __auto_type et = existing.data[__fun_i];
+    `    }
+    `}
+    ``
   ), "expected the inner loop over 'existing' to emit via the same .len/.data fast path";
 }
 
@@ -8758,7 +9104,12 @@ test "emit_statement emits a fit over a num subject with a comma-chained pattern
   assert g.emit_statement(n).is_none(), "expected the fit statement to emit";
   assert equals(
     st.out.build(),
-    "if (x == 1 || x == 2) {\n    return;\n} else {\n    return 9;\n}\n"
+    `if (x == 1 || x == 2) {
+    `    return;
+    `} else {
+    `    return 9;
+    `}
+    ``
   ), "expected an if/else chain with an OR-ed comma pattern";
 }
 
@@ -8792,7 +9143,10 @@ test "emit_statement emits a fit over a str subject using strcmp" {
 
   Node n = node_new(NodeKind.StatementFit(f));
   assert g.emit_statement(n).is_none(), "expected the fit statement to emit";
-  assert equals(st.out.build(), "if (strcmp(s, \"hi\") == 0) {\n    return;\n}\n"), "expected an strcmp comparison for a str pattern";
+  assert equals(st.out.build(), `if (strcmp(s, "hi") == 0) {
+  `    return;
+  `}
+  ``), "expected an strcmp comparison for a str pattern";
 }
 
 test "emit_statement rejects a fit over a call subject (no temp-var hoisting)" {
@@ -8902,7 +9256,11 @@ test "emit_statement emits a fit destructuring a bare enum-variant shorthand pat
   assert g.emit_statement(n).is_none(), "expected the bare-shorthand destructuring fit to emit";
   assert equals(
     st.out.build(),
-    "if (o.tag == Opt_Some) {\n    __auto_type r = o.payload.Some._0;\n    return;\n}\n"
+    `if (o.tag == Opt_Some) {
+    `    __auto_type r = o.payload.Some._0;
+    `    return;
+    `}
+    ``
   ), "expected a tag check plus a payload-field binding";
 }
 
@@ -8989,7 +9347,12 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
   assert g.emit_statement(n).is_none(), "expected the fit-over-a-method-call to emit";
   assert equals(
     st.out.build(),
-    "__auto_type __fit_subj = Holder__get_opt(&h);\nif (__fit_subj.tag == Opt_Some) {\n    __auto_type r = __fit_subj.payload.Some._0;\n    return;\n}\n"
+    `__auto_type __fit_subj = Holder__get_opt(&h);
+    `if (__fit_subj.tag == Opt_Some) {
+    `    __auto_type r = __fit_subj.payload.Some._0;
+    `    return;
+    `}
+    ``
   ), "expected the call hoisted into a temp var first, then the tag check/binding against IT, not the call re-evaluated per branch";
 }
 
@@ -9110,7 +9473,11 @@ test "emit_statement emits a fit over a method-call subject with a CHAINED field
   assert g.emit_statement(n).is_none(), "expected the fit over a chained-receiver method call to emit";
   assert equals(
     st.out.build(),
-    "__auto_type __fit_subj = ParseState__token_peek_prev_n(self->state, 1);\nif (__fit_subj.tag == Opt_None) {\n    return;\n}\n"
+    `__auto_type __fit_subj = ParseState__token_peek_prev_n(self->state, 1);
+    `if (__fit_subj.tag == Opt_None) {
+    `    return;
+    `}
+    ``
   ), "expected 'self->state' resolved as the call's receiver via resolve_field_chain, hoisted into a temp var";
 }
 
@@ -9202,7 +9569,11 @@ test "emit_statement emits a fit over a '*self'-dereferenced subject using '->'"
   assert g.emit_statement(n).is_none(), "expected the '*self' fit to emit";
   assert equals(
     st.out.build(),
-    "if (self->tag == Opt_Some) {\n    __auto_type r = self->payload.Some._0;\n    return;\n}\n"
+    `if (self->tag == Opt_Some) {
+    `    __auto_type r = self->payload.Some._0;
+    `    return;
+    `}
+    ``
   ), "expected 'self->tag'/'self->payload' (arrow, not dot)";
 }
 
@@ -9277,7 +9648,10 @@ test "emit_statement emits a fit over a chained field-access subject" {
 
   Node n = node_new(NodeKind.StatementFit(f));
   assert g.emit_statement(n).is_none(), "expected the chained-subject fit to emit";
-  assert equals(st.out.build(), "if (t.data.tag == Opt_None) {\n    return;\n}\n"), "expected the chain text 't.data' reused as the fit subject";
+  assert equals(st.out.build(), `if (t.data.tag == Opt_None) {
+  `    return;
+  `}
+  ``), "expected the chain text 't.data' reused as the fit subject";
 }
 
 test "emit_statement emits a fit matching a qualified payload-less variant" {
@@ -9329,7 +9703,10 @@ test "emit_statement emits a fit matching a qualified payload-less variant" {
 
   Node n = node_new(NodeKind.StatementFit(f));
   assert g.emit_statement(n).is_none(), "expected the qualified variant-match fit to emit";
-  assert equals(st.out.build(), "if (o.tag == Opt_None) {\n    return;\n}\n"), "expected a plain tag check, no bindings";
+  assert equals(st.out.build(), `if (o.tag == Opt_None) {
+  `    return;
+  `}
+  ``), "expected a plain tag check, no bindings";
 }
 
 test "emit_statement rejects a fit destructuring pattern for an unrecognized enum" {
@@ -9593,7 +9970,12 @@ test "emit_enum emits a plain enum as a C enum typedef, auto and explicit values
   assert g.emit_enum(n).is_none(), "expected the enum to emit";
   assert equals(
     st.out.build(),
-    "typedef enum Color {\n  Color_Red,\n  Color_Green = 5,\n} Color;\n\n"
+    `typedef enum Color {
+    `  Color_Red,
+    `  Color_Green = 5,
+    `} Color;
+    `
+    ``
   ), "expected a C enum typedef with an auto and an explicit variant value";
 }
 
@@ -9621,7 +10003,18 @@ test "emit_enum emits a tagged-union enum as a discriminant enum plus a tagged s
   assert g.emit_enum(n).is_none(), "expected the tagged-union enum to emit";
   assert equals(
     st.out.build(),
-    "typedef enum Option_tag {\n  Option_Some,\n  Option_None,\n} Option_tag;\ntypedef struct Option {\n  Option_tag tag;\n  union {\n    struct { int64_t _0; } Some;\n  } payload;\n} Option;\n\n"
+    `typedef enum Option_tag {
+    `  Option_Some,
+    `  Option_None,
+    `} Option_tag;
+    `typedef struct Option {
+    `  Option_tag tag;
+    `  union {
+    `    struct { int64_t _0; } Some;
+    `  } payload;
+    `} Option;
+    `
+    ``
   ), "expected a discriminant enum, a tag field, and a union with only the payload variant present";
 }
 
@@ -9989,7 +10382,10 @@ test "emit_statement resolves a bare-shorthand 'ret' against the enclosing funct
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(
     st.out.build(),
-    "Option mk(int64_t x) {\n    return ((Option){ .tag = Option_Some, .payload.Some = { ._0 = (x) } });\n}\n"
+    `Option mk(int64_t x) {
+    `    return ((Option){ .tag = Option_Some, .payload.Some = { ._0 = (x) } });
+    `}
+    ``
   ), "expected the bare 'ret .Some(x);' to resolve against the function's own 'Option' return type";
 }
 
@@ -10018,7 +10414,15 @@ test "emit_compound emits a non-generic compound as a C struct typedef" {
 
   Node n = node_new(NodeKind.Compound(c));
   assert g.emit_compound(n).is_none(), "expected the compound to emit";
-  assert equals(st.out.build(), "typedef struct Point {\n  int64_t x;\n  int64_t y;\n} Point;\n\n"), "expected a C struct typedef with both fields";
+  assert equals(
+    st.out.build(),
+    `typedef struct Point {
+    `  int64_t x;
+    `  int64_t y;
+    `} Point;
+    `
+    ``
+  ), "expected a C struct typedef with both fields";
 }
 
 test "emit_expr emits a method call on a value-typed receiver, taking its address" {
@@ -10250,7 +10654,13 @@ test "emit_impl emits each method as a mangled top-level C function, with self r
 
   Node impl_node = node_new(NodeKind.Impl(impln));
   assert g.emit_impl(impl_node).is_none(), "expected the impl to emit";
-  assert equals(st.out.build(), "int64_t Point__get_x(Point* self) {\n    return self->x;\n}\n"), "expected the method emitted as a plain C function reading 'self->x'";
+  assert equals(
+    st.out.build(),
+    `int64_t Point__get_x(Point* self) {
+    `    return self->x;
+    `}
+    ``
+  ), "expected the method emitted as a plain C function reading 'self->x'";
 }
 
 test "emit_impl emits a quirk-implementing impl's method under its already-double-mangled name" {
@@ -10310,7 +10720,13 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
 
   Node impl_node = node_new(NodeKind.Impl(impln));
   assert g.emit_impl(impl_node).is_none(), "expected the quirk-implementing impl's method to emit";
-  assert equals(st.out.build(), "int64_t Point__To__convert(Point* self) {\n    return 0;\n}\n"), "expected the method emitted under its own already-mangled name, unmodified";
+  assert equals(
+    st.out.build(),
+    `int64_t Point__To__convert(Point* self) {
+    `    return 0;
+    `}
+    ``
+  ), "expected the method emitted under its own already-mangled name, unmodified";
 }
 
 test "register_impl_methods lets emit_method_call resolve a quirk-implementing impl's double-mangled name" {
@@ -10495,7 +10911,12 @@ test "emit_statement instantiates a generic compound's monomorphized struct on f
   assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\n"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b;
+    ``
   ), "expected the monomorphized struct emitted once, then the declaration using its mangled name";
 }
 
@@ -10510,7 +10931,13 @@ test "emit_statement does not re-emit an already-instantiated generic compound" 
   assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b1;\nBox__num b2;\n"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b1;
+    `Box__num b2;
+    ``
   ), "expected the struct typedef only once, even though Box<num> is used twice";
 }
 
@@ -10537,7 +10964,12 @@ test "emit_expr resolves chained field access through a generic-compound-instant
   assert g.emit_expr(access).is_none(), "expected 'b.value' to resolve through the monomorphized Box__num's own registered field";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nb.value"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b;
+    `b.value`
   ), "expected the field access appended after the declaration, resolved via the mangled compound's registry";
 }
 
@@ -10698,7 +11130,12 @@ test "emit_statement declaring a generic Box<num> does not emit its impl's metho
   assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\n"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b;
+    ``
   ), "expected only the struct and the declaration -- no method C, since 'get' is never called";
   assert g.lookup_impl_method("Box__num", "get").is_some(), "expected the method's metadata still registered, even though unemitted";
 }
@@ -10751,7 +11188,17 @@ test "emit_statement does not re-emit a generic impl's monomorphized method on a
   assert g.emit_expr(call2).is_none(), "expected 'b2.get()' to resolve";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b1;\nBox__num b2;\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num__get(&b1)Box__num__get(&b2)"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b1;
+    `Box__num b2;
+    `int64_t Box__num__get(Box__num* self);
+    `int64_t Box__num__get(Box__num* self) {
+    `    return self->value;
+    `}
+    `Box__num__get(&b1)Box__num__get(&b2)`
   ), "expected the struct emitted once (unaffected), and the method (plus its forward declaration) emitted only once despite two calls";
 }
 
@@ -10768,7 +11215,16 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
   assert g.emit_expr(n).is_none(), "expected 'b.get()' to resolve to the monomorphized method";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num__get(&b)"
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `Box__num b;
+    `int64_t Box__num__get(Box__num* self);
+    `int64_t Box__num__get(Box__num* self) {
+    `    return self->value;
+    `}
+    `Box__num__get(&b)`
   ), "expected the struct+declaration first, THEN the method (lazily triggered by this call, not the earlier declaration), THEN the call itself";
 }
 
@@ -10946,7 +11402,76 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Outer Outer;\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+    `#include <stdio.h>
+    `#include <stdbool.h>
+    `#include <stdint.h>
+    `#include <stdarg.h>
+    `#include <stdlib.h>
+    `#include <string.h>
+    `static FILE* stderr_stream(void){ return stderr; }
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `typedef HANDLE __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
+    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `#else
+    `#include <pthread.h>
+    `typedef pthread_t __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+    `static __fun_wd_state __fun_g_wd;
+    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+    `}
+    `static void* __fun_wd_thread(void* unused){ (void)unused;
+    `  long long last_seq=-1; long long stall_ms=0;
+    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+    `  for(;;){
+    `#ifdef _WIN32
+    `    Sleep((DWORD)step);
+    `#else
+    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+    `#endif
+    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+    `    last_seq=seq;
+    `    if(stall_ms>=__fun_g_wd.threshold_ms){
+    `      __fun_wd_warn((long long)blk, 0, stall_ms);
+    `      if(__fun_g_wd.abort_on_fire) abort();
+    `      stall_ms=0;
+    `    }
+    `  }
+    `}
+    `void __fun_wd_enter_wait(void){
+    `  if(!__fun_g_wd.started){
+    `    __fun_g_wd.started=1;
+    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+    `    long long wm=(w && w[0])?atoll(w):0;
+    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
+    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `  }
+    `  if(!__fun_g_wd.armed) return;
+    `  __fun_g_wd.blocked++;
+    `}
+    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    `typedef struct Outer Outer;
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `typedef struct Outer {
+    `  Box__num inner;
+    `} Outer;
+    `
+    ``
   ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
@@ -11083,8 +11608,81 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n    Box__num__get(&b);\n}\n"
-  ), "expected the struct typedef AND the monomorphized method (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces";
+    `#include <stdio.h>
+    `#include <stdbool.h>
+    `#include <stdint.h>
+    `#include <stdarg.h>
+    `#include <stdlib.h>
+    `#include <string.h>
+    `static FILE* stderr_stream(void){ return stderr; }
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `typedef HANDLE __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
+    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `#else
+    `#include <pthread.h>
+    `typedef pthread_t __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+    `static __fun_wd_state __fun_g_wd;
+    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+    `}
+    `static void* __fun_wd_thread(void* unused){ (void)unused;
+    `  long long last_seq=-1; long long stall_ms=0;
+    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+    `  for(;;){
+    `#ifdef _WIN32
+    `    Sleep((DWORD)step);
+    `#else
+    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+    `#endif
+    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+    `    last_seq=seq;
+    `    if(stall_ms>=__fun_g_wd.threshold_ms){
+    `      __fun_wd_warn((long long)blk, 0, stall_ms);
+    `      if(__fun_g_wd.abort_on_fire) abort();
+    `      stall_ms=0;
+    `    }
+    `  }
+    `}
+    `void __fun_wd_enter_wait(void){
+    `  if(!__fun_g_wd.started){
+    `    __fun_g_wd.started=1;
+    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+    `    long long wm=(w && w[0])?atoll(w):0;
+    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
+    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `  }
+    `  if(!__fun_g_wd.armed) return;
+    `  __fun_g_wd.blocked++;
+    `}
+    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    `int64_t main(void);
+    `typedef struct Box__num {
+    `  int64_t value;
+    `} Box__num;
+    `
+    `int64_t Box__num__get(Box__num* self) {
+    `    return self->value;
+    `}
+    `int64_t main(void) {
+    `    Box__num b;
+    `    int64_t Box__num__get(Box__num* self);
+    `Box__num__get(&b);
+    `}
+    ``
+  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces -- its bare PROTOTYPE, unlike the definition, is legal (if unusually placed) right at its own first-use point, since a declaration (not a full definition) is valid C at block scope";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
@@ -11228,7 +11826,12 @@ test "ensure_compound_instantiated mangles a pointer-typed generic argument dist
   assert g.emit_statement(n).is_none(), "expected Box<Node*> to instantiate";
   assert equals(
     st.out.build(),
-    "typedef struct Box__Node_ptr1 {\n  Node* value;\n} Box__Node_ptr1;\n\nBox__Node_ptr1 b;\n"
+    `typedef struct Box__Node_ptr1 {
+    `  Node* value;
+    `} Box__Node_ptr1;
+    `
+    `Box__Node_ptr1 b;
+    ``
   ), "expected the mangled name to include the pointer depth, and the field itself to be a pointer";
 }
 
@@ -11241,7 +11844,19 @@ test "emit_statement instantiates a generic tagged-union enum on first use" {
   assert g.emit_statement(n).is_none(), "expected the Opt<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef enum Opt__num_tag {\n  Opt__num_Some,\n  Opt__num_None,\n} Opt__num_tag;\ntypedef struct Opt__num {\n  Opt__num_tag tag;\n  union {\n    struct { int64_t _0; } Some;\n  } payload;\n} Opt__num;\n\nOpt__num o;\n"
+    `typedef enum Opt__num_tag {
+    `  Opt__num_Some,
+    `  Opt__num_None,
+    `} Opt__num_tag;
+    `typedef struct Opt__num {
+    `  Opt__num_tag tag;
+    `  union {
+    `    struct { int64_t _0; } Some;
+    `  } payload;
+    `} Opt__num;
+    `
+    `Opt__num o;
+    ``
   ), "expected the monomorphized tagged-union emitted once, then the declaration using its mangled name";
 }
 
@@ -12079,7 +12694,74 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
+    `#include <stdio.h>
+    `#include <stdbool.h>
+    `#include <stdint.h>
+    `#include <stdarg.h>
+    `#include <stdlib.h>
+    `#include <string.h>
+    `static FILE* stderr_stream(void){ return stderr; }
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `typedef HANDLE __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
+    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `#else
+    `#include <pthread.h>
+    `typedef pthread_t __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+    `static __fun_wd_state __fun_g_wd;
+    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+    `}
+    `static void* __fun_wd_thread(void* unused){ (void)unused;
+    `  long long last_seq=-1; long long stall_ms=0;
+    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+    `  for(;;){
+    `#ifdef _WIN32
+    `    Sleep((DWORD)step);
+    `#else
+    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+    `#endif
+    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+    `    last_seq=seq;
+    `    if(stall_ms>=__fun_g_wd.threshold_ms){
+    `      __fun_wd_warn((long long)blk, 0, stall_ms);
+    `      if(__fun_g_wd.abort_on_fire) abort();
+    `      stall_ms=0;
+    `    }
+    `  }
+    `}
+    `void __fun_wd_enter_wait(void){
+    `  if(!__fun_g_wd.started){
+    `    __fun_g_wd.started=1;
+    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+    `    long long wm=(w && w[0])?atoll(w):0;
+    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
+    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `  }
+    `  if(!__fun_g_wd.armed) return;
+    `  __fun_g_wd.blocked++;
+    `}
+    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    `int64_t main(void);
+    `int64_t identity__num(int64_t value) {
+    `    return value;
+    `}
+    `int64_t main(void) {
+    `    return identity__num(5);
+    `}
+    ``
   ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
 }
 

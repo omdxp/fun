@@ -1409,6 +1409,30 @@ pub const LexProcess = struct {
             }
         }
 
+        // Whitespace recurses into `read_next_token` for the REAL next
+        // token, which -- via its own copy of the post-switch block
+        // below -- already computes that token's own correct `.pos`
+        // (start_line/start_col captured at ITS OWN dispatch point,
+        // after the whitespace was consumed). Returning directly here,
+        // bypassing this call's OWN post-switch block, is what makes
+        // that stick: falling through to `t = try self.handle_
+        // whitespace()` in the switch below (the previous shape) let
+        // the OUTER call's post-switch code unconditionally over
+        // write the already-correct nested `.pos` with ITS OWN
+        // `start_col`/`start_line` -- captured BEFORE dispatch, i.e.
+        // still pointing at the whitespace itself, not the real
+        // token. Invisible for every other token type (nothing else
+        // reproduces source text by SLICING between two `.pos`
+        // values), but a raw string does exactly that (see
+        // `token_make_raw_string`'s own caller in the formatter) --
+        // found via a real formatter bug: a raw string immediately
+        // preceded by whitespace got double-spaced, since its
+        // "verbatim" reproduction started one column too early, right
+        // at the whitespace, not the opening backtick.
+        if (c.? == ' ' or c.? == '\t' or c.? == '\r') {
+            return self.handle_whitespace();
+        }
+
         switch (c.?) {
             '"' => t = try self.token_make_string(),
             '`' => t = try self.token_make_raw_string(),
@@ -1418,7 +1442,6 @@ pub const LexProcess = struct {
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),
             '\n' => t = try self.token_make_newline(),
-            ' ', '\t', '\r' => t = try self.handle_whitespace(),
             else => {
                 t = try self.read_special_token();
                 if (t == null) {
