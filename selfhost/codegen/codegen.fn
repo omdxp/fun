@@ -693,6 +693,25 @@ fun dtype_is_pointer(DataType dt) bin {
   ret dt.flags.is_pointer;
 }
 
+// True for an UNSIZED array type (`T[]`, no bracket dimension, e.g.
+// `Channel<T>`'s own real `T[] data;` ring-buffer field) -- such a field
+// decays to a plain C pointer (`T*`), same as any unsized C array
+// parameter/field, so it needs the SAME `*`-emission and `field_is_
+// pointer` bookkeeping a real pointer field gets. A SIZED array
+// (`T[3]`, `dt.array_brackets.len > 0`) is intentionally excluded --
+// that's a genuinely fixed-size inline array, not pointer-equivalent,
+// and stays an unsupported/unhandled shape here (see `emit_compound`'s
+// doc comment).
+fun dtype_is_array_as_pointer(DataType dt) bin {
+  if !dt.is_array {
+    ret false;
+  }
+  if dt.array_brackets.len > 0 {
+    ret false;
+  }
+  ret dt.array_depth <= 1;
+}
+
 impl Codegen {
 
   // Writes `type_name`'s bare C spelling (no pointer stars): a sized/
@@ -989,7 +1008,14 @@ impl Codegen {
       for pi < type_params.len {
         if equals(type_params.get(pi), ftype) {
           resolved_type = arg_type_names.get(pi);
-          resolved_ptr = arg_is_pointer.get(pi);
+          // `fptr` (OR'd in here, not replaced) carries the field's OWN
+          // array-decay pointer-ness (`T[] data;` -> at least one `*`,
+          // see `dtype_is_array_as_pointer`'s doc comment) -- that's
+          // independent of whether THIS PARTICULAR argument (`num` in
+          // `Channel<num>`) happens to be pointer-shaped itself. A plain
+          // `T value;` field has `fptr == false`, so this is a no-op for
+          // that (far more common) shape -- unchanged from before.
+          resolved_ptr = arg_is_pointer.get(pi) || fptr;
           break;
         }
         pi = pi + 1;
@@ -2071,6 +2097,28 @@ impl Codegen {
         }
         if !e.has_left || !e.has_right {
           ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        // `_ = expr;` (the "discard this return value on purpose" idiom,
+        // e.g. `_ = runtime_condvar_signal(...)` throughout `std/
+        // channel.fn`) can't lower to a literal C `_ = expr` -- `_` isn't
+        // a declared variable in the emitted C. Lowers to a `(void)(expr)`
+        // cast-to-void instead, matching the original implementation's
+        // own identical special case.
+        if equals(e.op, "=") && e.has_left {
+          fit e.left.kind {
+            .Identifier(lname) -> {
+              if equals(lname, "_") {
+                self.state.write("(void)(");
+                let derr = self.emit_expr(*e.right);
+                if derr.is_some() {
+                  ret derr;
+                }
+                self.state.write(")");
+                ret .None;
+              }
+            }
+            _ -> {}
+          }
         }
         self.state.write("(");
         let lerr = self.emit_expr(*e.left);
@@ -3958,9 +4006,50 @@ impl Codegen {
   // (see `Codegen.current_fn_rtype_name`'s doc comment) -- identical to
   // `f.rtype.type_str` for every non-generic-impl-method call, so this
   // doesn't change behavior anywhere else.
+  // True when `node` was declared in a `std/c/*.fn` binding file (a
+  // signature-only module documenting an existing C header, e.g.
+  // `std/c/time.fn`'s `tm`/`timespec` or `std/c/io.fn`'s `FILE`). Such a
+  // declaration exists purely so Fun call sites/field accesses can be
+  // typechecked against it; the REAL system header (already `#include`d
+  // by `write_std_imports`) is the sole source of truth for the actual
+  // C definition, so codegen must never emit competing C text for one
+  // of these nodes (a struct redefinition, e.g. `tm`/`timespec`/`FILE`
+  // clashing with `<time.h>`/`<stdio.h>`'s own).
+  is_std_c_signature_node(Node node) bin {
+    if !node.has_pos {
+      ret false;
+    }
+    ret contains(node.pos.filename, "/std/c/") || contains(node.pos.filename, "\\std\\c\\");
+  }
+
   emit_function_named(Node node, str emit_name) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
+        // A bodyless function (`;`-only, e.g. every `std.c.*` binding --
+        // `malloc`, `pthread_mutex_init`, ...) is a signature-only
+        // declaration, not something this codegen should emit C text
+        // for at all: the REAL system header (already `#include`d by
+        // `write_std_imports`) is the authoritative declaration, with
+        // its own real parameter/return types -- this codegen's own
+        // param types (`num`/`raw*`-derived) are a Fun-level ABI
+        // convenience, not necessarily identical to the system header's
+        // (e.g. `size_t` vs `int64_t`), so emitting a SECOND, competing
+        // prototype/definition here caused either an outright
+        // redefinition (an earlier version of this fix emitted an
+        // empty-bodied `{ }` DEFINITION, shadowing libc's own `malloc`)
+        // or a "conflicting types" error (a bare prototype with
+        // different parameter types than `<pthread.h>`'s own). Skipping
+        // entirely matches the original implementation's own
+        // `write_function_prototype`/emission guards (`if (fnv.body ==
+        // null) continue/return;`, throughout) exactly. The function's
+        // signature is still fully known to THIS codegen's own
+        // typechecking-adjacent bookkeeping via `register_function_
+        // signatures` (called before any emission pass runs) --
+        // skipping C-text emission here doesn't affect call-site
+        // resolution anywhere.
+        if !f.has_body {
+          ret .None;
+        }
         // Fresh per function -- see `Codegen.local_names`'s doc comment;
         // this is deliberately NOT scoped to nested blocks (an inner `{
         // }` shadowing an outer local of the same name would get this
@@ -4002,13 +4091,26 @@ impl Codegen {
         } else {
           self.state.write("void");
         }
+        // A bodyless function (`;`-only, e.g. every `std.c.*` binding --
+        // `malloc`, `pthread_mutex_init`, ...) is a signature-only
+        // declaration, not a definition: it must emit as a bare
+        // prototype (`TYPE name(params);`), relying on the real C
+        // library's own definition being linked in separately. Emitting
+        // `{ }` here (an empty-bodied DEFINITION) previously shadowed
+        // libc's own `malloc`/`calloc`/`realloc`/`free` with conflicting,
+        // no-op redefinitions -- a real link/compile error the moment
+        // any program actually compiled+ran through this codegen (not
+        // just transpiled to C text), first caught trying to run a
+        // channel-using program end to end.
+        if !f.has_body {
+          self.state.write(");\n");
+          ret .None;
+        }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
-        if f.has_body {
-          let berr = self.emit_body(*f.body);
-          if berr.is_some() {
-            ret berr;
-          }
+        let berr = self.emit_body(*f.body);
+        if berr.is_some() {
+          ret berr;
         }
         self.state.indent_level = self.state.indent_level - 1;
         self.state.write("}\n");
@@ -4202,9 +4304,13 @@ impl Codegen {
   // `ensure_compound_instantiated`/`ensure_enum_instantiated`, extended
   // to cover plain (non-generic) compounds/enums too -- not a bigger
   // hard-coded pass ordering. Left as a known, documented gap rather
-  // than a quick patch; no array-typed fields (`T[3]`/`T[]`) either --
-  // only scalar/pointer field types.
+  // than a quick patch. An UNSIZED array field (`T[]`, e.g. `Channel<T>`
+  // 's own `data` field) IS handled -- see `dtype_is_array_as_pointer`'s
+  // doc comment -- but a SIZED array (`T[3]`) still isn't.
   emit_compound(Node node) Option<CodegenErrorKind> {
+    if self.is_std_c_signature_node(node) {
+      ret .None;
+    }
     fit node.kind {
       .Compound(c) -> {
         Vec<str> field_names;
@@ -4218,7 +4324,7 @@ impl Codegen {
           for f : c.fields {
             field_names.push(f.name);
             field_type_names.push(f.dtype.type_str);
-            field_is_pointer.push(dtype_is_pointer(*f.dtype));
+            field_is_pointer.push(dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype));
           }
           self.generic_compound_names.push(c.name);
           self.generic_compound_type_params.push(c.type_params);
@@ -4239,12 +4345,17 @@ impl Codegen {
           if wt.is_none() {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
+          bin fld_ptr = dtype_is_pointer(*f.dtype);
+          bin fld_arr_ptr = dtype_is_array_as_pointer(*f.dtype);
+          if fld_arr_ptr && !fld_ptr {
+            self.state.write("*");
+          }
           self.state.write(" ");
           self.state.write(f.name);
           self.state.write(";\n");
           field_names.push(f.name);
           field_type_names.push(wt.unwrap());
-          field_is_pointer.push(dtype_is_pointer(*f.dtype));
+          field_is_pointer.push(fld_ptr || fld_arr_ptr);
           field_dtypes.push(self.resolve_type_subst(*f.dtype));
         }
         self.state.write("} ");
@@ -4257,6 +4368,54 @@ impl Codegen {
           field_is_pointer,
           field_dtypes
         );
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Emits a top-level `const`/`let` declaration (e.g. `pub const num
+  // CHANNEL_RC_NULL_ARG = -1;` in `std/channel.fn`) as a C file-scope
+  // global. Deliberately does NOT reuse the local-`Variable` statement
+  // case's indent/`record_local*` bookkeeping -- there's no enclosing
+  // function scope at this point, and no later codegen pass currently
+  // needs a top-level const's inferred type recorded anywhere. `pub
+  // transpile` runs this pass BEFORE impls/functions so a global used
+  // inside any function/method body already has its C declaration
+  // textually earlier in the file (selfhost has no forward-declaration
+  // pass for globals the way the original implementation does).
+  emit_global_variable(Node node) Option<CodegenErrorKind> {
+    if self.is_std_c_signature_node(node) {
+      ret .None;
+    }
+    fit node.kind {
+      .Variable(v) -> {
+        bin is_let = equals(v.var_type.type_str, "__let_infer__");
+        bin const_is_ptr_binding = !is_let && dtype_is_pointer(*v.var_type);
+        if v.is_const && !const_is_ptr_binding {
+          self.state.write("const ");
+        }
+        if is_let {
+          self.state.write("__auto_type");
+        } else {
+          let wt = self.write_type(*v.var_type);
+          if wt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+        }
+        if v.is_const && const_is_ptr_binding {
+          self.state.write(" const");
+        }
+        self.state.write(" ");
+        self.state.write(v.name);
+        if v.has_val {
+          self.state.write(" = ");
+          let verr = self.emit_expr(*v.val);
+          if verr.is_some() {
+            ret verr;
+          }
+        }
+        self.state.write(";\n");
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -4449,6 +4608,30 @@ impl Codegen {
             dt.pointer_depth = 1;
           }
           ret .Some(dt);
+        }
+        // `let m = f[0];` where `f` is a known POINTER-typed local
+        // (`Foo* f`): C's `pointer[0]` is `*pointer`, a VALUE of the
+        // pointee's own type, not another pointer -- e.g. the
+        // read-mutate-writeback pattern this repo's own
+        // `sync_backend_windows_mutex_init` uses (`let m = mutex[0]; ...;
+        // mutex[0] = m;`). Only a bare-identifier receiver is resolved
+        // here (matching `infer_let_expr_type`'s own established
+        // narrowness elsewhere); a chained/computed receiver falls
+        // through to `.None` same as ever.
+        if equals(e.op, "[]") && e.has_left {
+          fit e.left.kind {
+            .Identifier(recv_name) -> {
+              let t = self.lookup_local_type_name(recv_name);
+              let p = self.lookup_local_is_pointer(recv_name);
+              if t.is_some() && p.is_some() && p.unwrap() {
+                DataType dt = dtype_new();
+                dt.type_str = t.unwrap();
+                ret .Some(dt);
+              }
+            }
+            _ -> {}
+          }
+          ret .None;
         }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
@@ -4998,6 +5181,18 @@ impl Codegen {
           let cerr = self.emit_compound(n);
           if cerr.is_some() {
             ret cerr;
+          }
+        }
+        _ -> {}
+      }
+    }
+    for n : nodes {
+      fit n.kind {
+        .Variable(v) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
+          let gerr = self.emit_global_variable(n);
+          if gerr.is_some() {
+            ret gerr;
           }
         }
         _ -> {}
