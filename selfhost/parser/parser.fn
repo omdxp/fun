@@ -2737,7 +2737,18 @@ impl Parser {
 
     if has_value {
       self.state.token_next();
+      // Stop the value expression at a TOP-LEVEL comma so a function
+      // PARAMETER default (`fun f(num b = 2, num c = 3)`) terminates at
+      // the param-separator `,` rather than greedily consuming the next
+      // parameter via the comma operator. Commas nested inside `(...)`/
+      // `[...]` are unaffected (call/array defaults like `= f(a, b)`
+      // still parse fully) -- see `Parser.stop_at_comma`'s doc comment.
+      // Harmless for a plain `let`/typed local: a top-level comma right
+      // after its own initializer is invalid there regardless.
+      let prev_stop_comma = self.stop_at_comma;
+      self.stop_at_comma = true;
       let verr = self.parse_expressionable_root();
+      self.stop_at_comma = prev_stop_comma;
       if verr.is_some() {
         ret verr;
       }
@@ -4782,23 +4793,22 @@ impl Parser {
       }
 
       // User-defined-type bare variable declaration: `Point p;`, `Point p
-      // = ...;`, `Point* p;`, `Vec<num> v;`. Detected the same way the
-      // original does: a `<Identifier> [<generic args>] [* ...]
-      // <Identifier>` lookahead, guarded by "isn't already a known scope
-      // entity" so an ordinary expression statement that happens to
-      // start with an identifier and contain a `*` (`w * h;`) isn't
-      // misparsed as a pointer declaration. The optional `<...>` between
-      // the type name and any pointer stars is skipped via
-      // `skip_generic_args_tokens` -- pure lookahead, a no-op when
-      // there's no `<` there at all -- the same helper
-      // `looks_like_compound_init` uses to look past a possibly-generic
-      // type name.
-      // 
+      // = ...;`, `Point* p;`, `Vec<num> v;`, `T[] xs;` (a generic type
+      // param's own array form, e.g. inside `impl Channel<T>`). Detected
+      // the same way the original does: a `<Identifier> [<generic args>]
+      // [* ...] [[...]] <Identifier>` lookahead, guarded by "isn't already
+      // a known scope entity" so an ordinary expression statement that
+      // happens to start with an identifier and contain a `*` (`w * h;`)
+      // isn't misparsed as a pointer declaration. The optional `<...>`
+      // between the type name and any pointer stars is skipped via
+      // `skip_generic_args_tokens` -- pure lookahead, a no-op when there's
+      // no `<` there at all -- the same helper `looks_like_compound_init`
+      // uses to look past a possibly-generic type name.
+      //
       // Deliberately narrower than the original for this slice: no
-      // module-alias-qualified type segments (`alias.Type name;`), no
-      // array-bracket types (`T[] xs;`) -- each needs its own extra
-      // lookahead and isn't reachable by anything this slice's tests
-      // exercise yet.
+      // module-alias-qualified type segments (`alias.Type name;`) --
+      // needs its own extra lookahead and isn't reachable by anything
+      // this slice's tests exercise yet.
       if self.state.get_scope_entity(name) == nil {
         num off = self.state.skip_generic_args_tokens(1);
         for true {
@@ -4811,6 +4821,39 @@ impl Parser {
             continue;
           }
           break;
+        }
+        // Optional array brackets after the type name: `T[] xs;` or
+        // `T[64] xs;`. Without skipping these, a local declaration of a
+        // user-defined (or generic-param) array type falls through to
+        // the expression path instead, which doesn't parse.
+        for true {
+          let bn = self.state.token_peek_n(off);
+          if bn.is_none() || !token_is_operator(bn.unwrap(), "[") {
+            break;
+          }
+          off = off + 1; // skip '['
+          bin closed = false;
+          for true {
+            let inn = self.state.token_peek_n(off);
+            if inn.is_none() {
+              break;
+            }
+            let innt = inn.unwrap();
+            if token_is_symbol(innt, ']') {
+              off = off + 1; // skip ']'
+              closed = true;
+              break;
+            }
+            // Hitting a statement terminator before ']' means this
+            // isn't a declaration after all.
+            if token_is_symbol(innt, ';') {
+              break;
+            }
+            off = off + 1;
+          }
+          if !closed {
+            break;
+          }
         }
         let t1 = self.state.token_peek_n(off);
         if t1.is_some() && t1.unwrap().type == TokenType.Identifier {
