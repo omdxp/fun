@@ -537,6 +537,24 @@ pub compound Codegen {
   // mangled names are drawn from the same namespace (a compound and an
   // enum can never share a bare name in this language).
   Vec<str> emitted_generic_instantiations;
+  // Every PLAIN (non-generic) compound/enum's name already emitted --
+  // the same "don't emit the same thing twice" bookkeeping `emitted_
+  // generic_instantiations` gives generics, but for plain types (see
+  // `ensure_plain_type_emitted`'s doc comment for why plain types need
+  // this too: a lazily-triggered, dependency-ordered emission, not
+  // `pub transpile`'s old flat "all enums, then all compounds" passes).
+  // Pushed the moment emission STARTS (not after it finishes), so a
+  // genuine cycle in the source (impossible to lay out in C at all --
+  // a compound embedding itself BY VALUE, transitively) is caught as
+  // "already being emitted" rather than recursing forever.
+  Vec<str> emitted_plain_types;
+  // The whole program's flattened top-level node list, stashed ONCE at
+  // the start of `pub transpile` -- lets `ensure_plain_type_emitted`
+  // (and anything triggering it, e.g. `ensure_compound_instantiated`'s
+  // own generic-argument handling) search for a plain type BY NAME
+  // without needing `nodes` threaded as an explicit parameter through
+  // every call in between.
+  Vec<Node> all_nodes;
   // Every GENERIC impl block (`impl Box<T> { ... }` or `impl Box<T> as
   // Quirk { ... }`), recorded whole (not decomposed into parallel arrays
   // like the generic compound/enum registries above -- a whole `Impl`
@@ -648,6 +666,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.generic_enum_type_params.init(0);
   g.generic_enum_variants.init(0);
   g.emitted_generic_instantiations.init(0);
+  g.emitted_plain_types.init(0);
+  g.all_nodes.init(0);
   g.generic_impl_templates.init(0);
   g.type_subst_param_names.init(0);
   g.type_subst_arg_type_strs.init(0);
@@ -1072,6 +1092,28 @@ impl Codegen {
     resolved_field_type_names.init(0);
     Vec<bin> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
+    // The ACTUAL star count for each field's C declaration -- distinct
+    // from `resolved_field_is_pointer`'s boolean (kept as-is; other
+    // consumers like `record_compound` only need "is this field a
+    // pointer AT ALL", one level, for their own downstream decisions).
+    // An array-decayed field (`T[] data;`, `fptr` below) substituting a
+    // POINTER-typed argument (`T` = `Node*`) needs BOTH the array-decay's
+    // own `*` AND the argument's own pointer depth -- e.g. `Vec<Node*>`'s
+    // `data` field must be `Node** data;` (double pointer: one level so
+    // `data` itself is an array, one more because each element IS a
+    // `Node*`), not `Node* data;`. The old single boolean (`arg_is_
+    // pointer.get(pi) || fptr`) collapses that to just "at least one
+    // star", losing the second level -- found via a real stage-2 C error
+    // (`subscript of pointer to incomplete type 'Node'`: with only one
+    // star, `self->data[i]` dereferences straight to a BY-VALUE `Node`,
+    // which needs `Node`'s complete type just to compile the subscript,
+    // instead of yielding a `Node*` -- which never needs `Node` complete
+    // at all). A NON-array-decayed field directly substituting a pointer
+    // param (`T value;` -> `Node* value;`) needs no extra depth -- the
+    // argument's own `pointer_depth` alone already equals the single
+    // star that case needs.
+    Vec<num> resolved_field_ptr_depth;
+    resolved_field_ptr_depth.init(0);
 
     // Pass 1: resolve every field's substituted type NAME/pointer-ness
     // BEFORE `self.state` gets swapped to the scratch buffer below. A
@@ -1100,6 +1142,10 @@ impl Codegen {
       str resolved_type = ftype;
       bin resolved_ptr = fptr;
       bin matched_bare_param = false;
+      num ptr_depth = 0;
+      if fptr {
+        ptr_depth = 1;
+      }
       num pi = 0;
       for pi < type_params.len {
         if equals(type_params.get(pi), ftype) {
@@ -1112,6 +1158,11 @@ impl Codegen {
           // `T value;` field has `fptr == false`, so this is a no-op for
           // that (far more common) shape -- unchanged from before.
           resolved_ptr = arg_is_pointer.get(pi) || fptr;
+          // The argument's OWN full pointer depth (`arg_dtypes.get(pi).
+          // pointer_depth`) stacks ON TOP of the array-decay's own single
+          // level -- see `resolved_field_ptr_depth`'s doc comment above.
+          let matched_arg = arg_dtypes.get(pi);
+          ptr_depth = ptr_depth + matched_arg.pointer_depth;
           matched_bare_param = true;
           break;
         }
@@ -1141,12 +1192,16 @@ impl Codegen {
           if nested_name.is_some() {
             resolved_type = nested_name.unwrap();
             resolved_ptr = dtype_is_pointer(*field_dt) || fptr;
+            if resolved_ptr {
+              ptr_depth = 1;
+            }
           }
         }
       }
       resolved_field_names.push(field_names.get(fi));
       resolved_field_type_names.push(resolved_type);
       resolved_field_is_pointer.push(resolved_ptr);
+      resolved_field_ptr_depth.push(ptr_depth);
       fi = fi + 1;
     }
 
@@ -1163,8 +1218,14 @@ impl Codegen {
     for wi < resolved_field_names.len {
       self.state.write("  ");
       self.write_type_name(resolved_field_type_names.get(wi));
-      if resolved_field_is_pointer.get(wi) {
+      // Writes the field's REAL star count (see `resolved_field_ptr_
+      // depth`'s doc comment) -- NOT `resolved_field_is_pointer`, whose
+      // single boolean would collapse an array-decayed field substituting
+      // a pointer argument (`Vec<Node*>`'s `data`) back down to one star.
+      num pdi = 0;
+      for pdi < resolved_field_ptr_depth.get(wi) {
         self.state.write("*");
+        pdi = pdi + 1;
       }
       self.state.write(" ");
       self.state.write(resolved_field_names.get(wi));
@@ -1431,9 +1492,17 @@ impl Codegen {
                   }
                   self.state.write(")");
                 } else {
+                  // See `emit_function_param`'s own doc comment: an
+                  // unsized array parameter's decay star must be added
+                  // here too, matching the real definition this prototype
+                  // stands in for -- otherwise the two disagree.
+                  bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
                   let wt = self.write_type(*v.var_type);
                   if wt.is_none() {
                     ret .Some(CodegenErrorKind.UnsupportedNode);
+                  }
+                  if arr_as_ptr {
+                    self.state.write("*");
                   }
                   self.state.write(" ");
                   self.state.write(v.name);
@@ -3314,7 +3383,13 @@ impl Codegen {
           let subst_dt = self.resolve_type_subst(*v.var_type);
           resolved_name = wt.unwrap();
           resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
-          if arr_as_ptr && !dtype_is_pointer(subst_dt) {
+          // Unconditional on `arr_as_ptr` alone -- see `emit_function_
+          // param`'s own doc comment for why: the array-decay's own
+          // pointer level is always ADDITIONAL to whatever `write_type`
+          // already wrote for `subst_dt`'s own pointer depth, even when
+          // `subst_dt` is ITSELF already a pointer (a generic `T[]` local
+          // substituting a pointer-typed argument).
+          if arr_as_ptr {
             self.state.write("*");
           }
           resolved_dtype = .Some(subst_dt);
@@ -4470,14 +4545,48 @@ impl Codegen {
           self.record_local(v.name, "", false);
           ret .None;
         }
+        // An UNSIZED array parameter (`T[] src`, e.g. `Vec<T>`'s own
+        // `push_many`/`extend`) decays to a pointer, same as an unsized
+        // array FIELD/local does (see `dtype_is_array_as_pointer`'s doc
+        // comment) -- but `write_type` itself never adds this star (it
+        // only knows about `pointer_depth`/`flags.is_pointer`, neither of
+        // which an array type sets), so it's added here explicitly,
+        // matching the `Variable` local-declaration case just above.
+        // Found via a real stage-2 self-compilation C error
+        // (`subscripted value is not an array, pointer, or vector` on
+        // `Vec<Vec<str>>`'s monomorphized `push_many`'s own `src`
+        // parameter, emitted with zero stars).
+        // 
+        // Added UNCONDITIONALLY when `arr_as_ptr` (not only when `param_
+        // dt` isn't already a pointer) -- `resolve_type_subst` never
+        // folds the array-decay's own level into `pointer_depth` (an
+        // unsized array's `dt.pointer_depth` is always 0 going in,
+        // regardless of what it substitutes to), so this level is always
+        // ADDITIONAL, stacking on top of whatever `write_type` already
+        // wrote for the substituted argument's own pointer depth. Gating
+        // this on `!dtype_is_pointer(param_dt)` (tried first) silently
+        // dropped the array's own level whenever the argument ITSELF was
+        // already a pointer (`Vec<Node*>`'s `push_many(Node* src, ...)`
+        // needs `Node** src`, two levels: one because it's an array, one
+        // because each element is already a `Node*` -- found the same
+        // way, one field further down the very same stage-2 error list).
+        bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
         let wt = self.write_type(*v.var_type);
         if wt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
+        let param_dt = self.resolve_type_subst(*v.var_type);
+        if arr_as_ptr {
+          self.state.write("*");
+        }
         self.state.write(" ");
         self.state.write(v.name);
-        let param_dt = self.resolve_type_subst(*v.var_type);
-        self.record_local_typed(v.name, wt.unwrap(), dtype_is_pointer(param_dt), param_dt);
+        self.record_local_typed(
+          v.name,
+          wt.unwrap(),
+          dtype_is_pointer(param_dt) || arr_as_ptr,
+          param_dt
+        );
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -5017,6 +5126,138 @@ impl Codegen {
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
     }
+  }
+
+  // Ensures a PLAIN (non-generic) compound or enum named `type_name` is
+  // fully emitted, recursively emitting any OTHER plain compound/enum
+  // it embeds BY VALUE first. `pub transpile` previously emitted every
+  // plain enum, then every plain compound, in two flat passes over the
+  // whole program -- correct only when EVERY by-value dependency runs
+  // in that one direction. Real stdlib code has both directions in
+  // different files (found via the stage-2 self-compilation attempt --
+  // codegen succeeding completely, but the resulting C failing with
+  // "field has incomplete type"): `selfhost/ast/ast.fn`'s own tagged-
+  // union `NodeKind` embeds compound payloads like `ExprNode`/
+  // `VariableNode` BY VALUE, needing compounds-before-enums, while
+  // `std/io.fn`'s `Sink` enum holds a `File` compound by value the SAME
+  // way, but `std/error.fn`'s `Error` compound holds an `ErrorKind`
+  // enum by value -- needing the OPPOSITE order in that file. Neither
+  // flat pass order can satisfy both at once; this replaces both passes
+  // with the same lazy, dependency-triggered, memoized emission generic
+  // types already get (`ensure_compound_instantiated`/`ensure_enum_
+  // instantiated`), just keyed by a PLAIN type's own bare name instead
+  // of a mangled one.
+  // 
+  // A BY-POINTER field/payload (`Node* left;`) is exempt -- it only
+  // ever needs the forward-declared struct NAME (already handled,
+  // unconditionally and up front, by `pub transpile`'s own forward-
+  // declare pass), never a complete type, so recursing into it here
+  // would just be extra work for no reason (and could misfire on a
+  // genuinely self-referential type, `Node` containing `Node*`
+  // children, which is completely fine in C but would loop forever if
+  // treated as a by-value dependency).
+  // 
+  // `.None` (success, not an error) when `type_name` isn't a known
+  // plain compound/enum in `nodes` at all -- a builtin scalar, a
+  // generic template's own bare name, or a name this codegen doesn't
+  // otherwise recognize. `nodes` is searched by NAME each call (a
+  // linear scan, matching this file's own established style
+  // elsewhere) rather than threading a separate name->node lookup
+  // table through the recursion.
+  ensure_plain_type_emitted(str type_name) Option<CodegenErrorKind> {
+    num ei = 0;
+    for ei < self.emitted_plain_types.len {
+      if equals(self.emitted_plain_types.get(ei), type_name) {
+        ret .None;
+      }
+      ei = ei + 1;
+    }
+    for n : self.all_nodes {
+      fit n.kind {
+        .Compound(c) -> {
+          if equals(c.name, type_name) && !c.has_type_params {
+            // Pushed BEFORE recursing (not after emission finishes) --
+            // see `Codegen.emitted_plain_types`'s own doc comment for
+            // why: a genuine cycle (impossible to lay out in C) is
+            // caught as "already emitted" instead of recursing forever.
+            self.emitted_plain_types.push(type_name);
+            for f : c.fields {
+              if !dtype_is_pointer(*f.dtype) && !dtype_is_array_as_pointer(*f.dtype) {
+                let fderr = self.ensure_plain_type_emitted(f.dtype.type_str);
+                if fderr.is_some() {
+                  ret fderr;
+                }
+                // A by-value field that's ITSELF a generic instantiation
+                // (`Vec<DataType*> generic_args;` -- `f.dtype.type_str` is
+                // just the bare "Vec", which never matches a plain type
+                // above) hides its own dependency inside `generic_args`:
+                // the instantiation's monomorphized methods may pointer-
+                // subscript a field/param typed as a CONCRETE argument
+                // (`self.data[i]` on `DataType*`), which needs that
+                // argument's COMPLETE type, not just a forward decl. This
+                // must run HERE, before `self.emit_compound(n)` below
+                // starts writing THIS type's own body -- doing it later,
+                // as a side effect of `write_type` resolving this same
+                // field mid-write (tried first, reverted), spliced a
+                // nested type's full definition into the MIDDLE of this
+                // type's still-open struct, since nothing protects
+                // `self.state` from a fresh top-level-style emission
+                // triggered deep inside an already-started one. Skips a
+                // FURTHER-generic argument (`Vec<Vec<T>*>`) -- no known
+                // case needs recursing past one level yet.
+                for garg : f.dtype.generic_args {
+                  if garg.generic_args.len == 0 {
+                    let gerr = self.ensure_plain_type_emitted(garg.type_str);
+                    if gerr.is_some() {
+                      ret gerr;
+                    }
+                  }
+                }
+              }
+            }
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            ret self.emit_compound(n);
+          }
+        }
+        .Enum(e) -> {
+          if equals(e.name, type_name) && !e.has_type_params {
+            self.emitted_plain_types.push(type_name);
+            bin is_tagged_union = false;
+            for v : e.variants {
+              if v.has_payload && v.payload.len > 0 {
+                is_tagged_union = true;
+              }
+            }
+            if is_tagged_union {
+              for v : e.variants {
+                for pt : v.payload {
+                  if !dtype_is_pointer(*pt) {
+                    let pderr = self.ensure_plain_type_emitted(pt.type_str);
+                    if pderr.is_some() {
+                      ret pderr;
+                    }
+                    // See the identical `f.dtype.generic_args` loop in
+                    // the `.Compound` branch above for why this matters.
+                    for garg : pt.generic_args {
+                      if garg.generic_args.len == 0 {
+                        let gerr = self.ensure_plain_type_emitted(garg.type_str);
+                        if gerr.is_some() {
+                          ret gerr;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            ret self.emit_enum(n);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
   }
 
   // Emits a non-generic `enum Name { variants }` declaration -- either a
@@ -6216,6 +6457,7 @@ impl Codegen {
   // plain top-level functions in a fifth, so a plain function calling a
   // method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
+    self.all_nodes = nodes;
     // Computed before the prelude is written -- not read yet (see
     // `uses_fork`'s own doc comment), but the original implementation
     // requires this ordering once the scheduler starts reading it, so
@@ -6269,25 +6511,91 @@ impl Codegen {
         _ -> {}
       }
     }
+    // Forward-declares every PLAIN (non-generic) compound's own struct
+    // NAME (`typedef struct X X;`, no body) before ANY compound/enum's
+    // FULL body is emitted -- mirroring the original implementation's
+    // own identical forward-typedef pass exactly. `emit_compound`/
+    // `emit_enum` themselves rely purely on SOURCE ORDER (a type
+    // referencing another must be declared textually after it), which
+    // breaks down for a set of MUTUALLY self-referential compounds
+    // (`selfhost/ast/ast.fn`'s own real `Node`/`ExprNode`/
+    // `VariableNode`/... -- found via the stage-2 self-compilation
+    // attempt: codegen itself succeeds with zero unsupported-node
+    // errors, but the resulting C fails with "unknown type name" for
+    // exactly these types, since nothing ever forward-declares a NAME
+    // used by POINTER before its own full definition is reached). Only
+    // handles COMPOUNDS -- a tagged-union enum's own cross-references
+    // are far rarer in practice and not what stage-2 hit; left for a
+    // follow-up if it turns out to be needed too.
     for n : nodes {
       fit n.kind {
-        .Enum(e) -> {
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let eerr = self.emit_enum(n);
-          if eerr.is_some() {
-            ret eerr;
+        .Compound(c) -> {
+          if !c.has_type_params && !self.is_std_c_signature_node(n) {
+            self.state.write("typedef struct ");
+            self.state.write(c.name);
+            self.state.write(" ");
+            self.state.write(c.name);
+            self.state.write(";\n");
           }
         }
         _ -> {}
       }
     }
+    // Registers every GENERIC enum/compound TEMPLATE first (pure
+    // bookkeeping, no C text -- see `emit_enum`/`emit_compound`'s own
+    // `has_type_params` branches), before ANY non-generic type's OWN
+    // fields get resolved below -- a plain type's field can itself be
+    // a generic instantiation (`compound Lexer { Vec<Token> tokens;
+    // }`), which needs the template already known.
     for n : nodes {
       fit n.kind {
+        .Enum(e) -> {
+          if e.has_type_params {
+            let eerr = self.emit_enum(n);
+            if eerr.is_some() {
+              ret eerr;
+            }
+          }
+        }
         .Compound(c) -> {
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let cerr = self.emit_compound(n);
-          if cerr.is_some() {
-            ret cerr;
+          if c.has_type_params {
+            let cerr = self.emit_compound(n);
+            if cerr.is_some() {
+              ret cerr;
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    // Every PLAIN (non-generic) enum/compound is emitted lazily, on
+    // first reference, instead of via two flat "all enums, then all
+    // compounds" passes -- see `ensure_plain_type_emitted`'s own doc
+    // comment for why a flat pass order can't satisfy every real
+    // dependency direction (a tagged-union enum embedding a compound
+    // BY VALUE needs that compound emitted first; a compound embedding
+    // a tagged-union enum BY VALUE needs the reverse -- BOTH shapes are
+    // real, in different stdlib files, found via the stage-2 self-
+    // compilation attempt). Iterating `nodes` here just walks every
+    // plain type in SOURCE order and ensures each is emitted -- most
+    // will already be done by the time this reaches them, having been
+    // pulled in as a DEPENDENCY of an earlier one.
+    for n : nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if !e.has_type_params {
+            let eerr2 = self.ensure_plain_type_emitted(e.name);
+            if eerr2.is_some() {
+              ret eerr2;
+            }
+          }
+        }
+        .Compound(c) -> {
+          if !c.has_type_params {
+            let cerr2 = self.ensure_plain_type_emitted(c.name);
+            if cerr2.is_some() {
+              ret cerr2;
+            }
           }
         }
         _ -> {}
@@ -10231,7 +10539,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Outer Outer;\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
   ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
