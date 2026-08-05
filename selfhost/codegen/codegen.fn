@@ -2042,6 +2042,9 @@ impl Codegen {
         ret .None;
       }
       .Unary(u) -> {
+        if equals(u.op, "await") {
+          ret self.emit_await(u.operand);
+        }
         self.state.write("(");
         if u.is_left_operanded_unary {
           // Postfix: `x++`/`x--`.
@@ -2465,6 +2468,105 @@ impl Codegen {
     }
     self.state.write(")");
     ret .None;
+  }
+
+  // Emits `await expr` -- `expr` must be a call (`f(args...)` or
+  // `recv.method(args...)`; see `emit_async_function_support`'s own doc
+  // comment for what these ultimately call). Lowers to a call to that
+  // callee's own "call helper" (`__fun_async_call_<mangled name>`)
+  // instead of the callee's plain mangled name -- everything else
+  // (argument emission, receiver self-arg handling) is IDENTICAL to an
+  // ordinary `emit_call`/`emit_method_call`, just re-derived here rather
+  // than shared, since both of those write their OWN callee name
+  // directly with no seam to intercept.
+  // 
+  // Deliberately narrow for this slice: no generic PLAIN async function
+  // instantiation (`maybe_instantiate_generic_function`) -- only a
+  // generic IMPL METHOD's async method is supported (channel.fn's own
+  // real shape, always `await self.foo(...)`/`await dst.foo(...)`
+  // inside `impl<T> Channel<T>`; `emit_method_call`'s own resolution
+  // already returns the correctly mangled per-instantiation name via
+  // `lookup_impl_method`, so nothing extra is needed for that case to
+  // work). No `fork`/dynamic-quirk-dispatch handling either, matching
+  // `emit_async_function_support`'s own scope.
+  emit_await(Node* operand) Option<CodegenErrorKind> {
+    fit operand.kind {
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left || !e.has_right {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        fit e.left.kind {
+          .Identifier(name) -> {
+            self.state.write("__fun_async_call_");
+            self.state.write(name);
+            self.state.write("(");
+            Vec<Node*> args;
+            args.init(0);
+            defer args.free();
+            self.flatten_call_args(e.right, &args);
+            bin first = true;
+            for arg : args {
+              if !first {
+                self.state.write(", ");
+              }
+              first = false;
+              let aerr = self.emit_expr(*arg);
+              if aerr.is_some() {
+                ret aerr;
+              }
+            }
+            self.state.write(")");
+            ret .None;
+          }
+          .Expression(recv_e) -> {
+            if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            let recv_r_opt = self.resolve_field_chain(recv_e.left);
+            if recv_r_opt.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            let recv_r = recv_r_opt.unwrap();
+            str method_name = "";
+            fit recv_e.right.kind {
+              .Identifier(mname) -> { method_name = mname; }
+              _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            }
+            let registered = self.lookup_impl_method(recv_r.type_name, method_name);
+            self.state.write("__fun_async_call_");
+            if registered.is_some() {
+              self.state.write(registered.unwrap());
+            } else {
+              self.state.write(recv_r.type_name);
+              self.state.write("__");
+              self.state.write(method_name);
+            }
+            self.state.write("(");
+            if recv_r.is_pointer {
+              self.state.write(recv_r.text);
+            } else {
+              self.state.write("&");
+              self.state.write(recv_r.text);
+            }
+            Vec<Node*> margs;
+            margs.init(0);
+            defer margs.free();
+            self.flatten_call_args(e.right, &margs);
+            for marg : margs {
+              self.state.write(", ");
+              let maerr = self.emit_expr(*marg);
+              if maerr.is_some() {
+                ret maerr;
+              }
+            }
+            self.state.write(")");
+            ret .None;
+          }
+          _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+        }
+      }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
   }
 
   // Emits a tagged-union compound literal for `EnumName.Variant(args...)`:
@@ -2907,6 +3009,26 @@ impl Codegen {
         bin resolved_ptr = false;
         Option<DataType> resolved_dtype = .None;
 
+        // An UNSIZED array LOCAL (`T[] new_data = malloc(...);`, e.g.
+        // `Channel<T>`'s own resize -- see `dtype_is_array_as_pointer`'s
+        // doc comment) decays to a pointer, same as an unsized array
+        // FIELD does -- but only when it's NOT initialized with a real
+        // bracket array literal (`num[] xs = [1, 2, 3];`, which stays a
+        // genuine stack array; a malloc-returning/other expression
+        // initializer is the pointer-decay case). `write_type` itself
+        // doesn't know about the initializer, so this is decided here,
+        // not inside `write_type`.
+        bin arr_as_ptr = false;
+        if !is_let {
+          arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+          if arr_as_ptr && v.has_val {
+            fit v.val.kind {
+              .Bracket(_) -> { arr_as_ptr = false; }
+              _ -> {}
+            }
+          }
+        }
+
         // `const` on a POINTER-typed binding must land AFTER the pointer
         // star(s) (`Type* const name`, "the pointer itself can't be
         // reassigned") rather than before the base type (`const Type*
@@ -2917,7 +3039,7 @@ impl Codegen {
         // in emission, so `const` always lands BEFORE -- a reasonable
         // simplification (`const __auto_type x = 5;` is valid GNU C
         // either way).
-        bin const_is_ptr_binding = !is_let && dtype_is_pointer(*v.var_type);
+        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr);
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
@@ -2931,7 +3053,10 @@ impl Codegen {
           }
           let subst_dt = self.resolve_type_subst(*v.var_type);
           resolved_name = wt.unwrap();
-          resolved_ptr = dtype_is_pointer(subst_dt);
+          resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
+          if arr_as_ptr && !dtype_is_pointer(subst_dt) {
+            self.state.write("*");
+          }
           resolved_dtype = .Some(subst_dt);
           have_resolved = true;
         }
@@ -4022,6 +4147,296 @@ impl Codegen {
     ret contains(node.pos.filename, "/std/c/") || contains(node.pos.filename, "\\std\\c\\");
   }
 
+  // Emits the wrapper C functions an `async fun`/`async` method needs
+  // around its own (otherwise perfectly ordinary) body: a per-function
+  // "payload" struct holding its args plus its result, an entry
+  // trampoline that runs on a dedicated OS thread and unpacks/repacks
+  // through that payload, a spawn helper, an await helper (join +
+  // extract result + free), and a call helper -- the thing `await expr`
+  // actually calls (see `emit_expr`'s `"await"` case). Matches the
+  // original implementation's identical mechanism exactly: there is no
+  // state machine or coroutine transform anywhere -- `await` is "spawn a
+  // thread running the whole function body, then immediately join it."
+  // `emit_name` is the function's OWN final emitted C name (its bare
+  // name for a plain function, or the fully mangled name for a generic
+  // impl method instantiation -- see `emit_function_named`'s own
+  // `emit_name` parameter doc comment) so this naturally covers a
+  // monomorphized `async` method (e.g. `Channel<T>`'s `send_timeout_
+  // async`) once per concrete instantiation, with no separate wiring
+  // needed at the generic-impl-instantiation call site.
+  // 
+  // Both the entry trampoline's call AND the call helper's own two
+  // "degrade to a direct synchronous call" fallbacks (on `malloc`
+  // failure or a spawn failure) call `emit_name` directly -- matching
+  // the original's identical fallback, and relying on `emit_name`'s own
+  // ordinary (non-wrapped) definition being emitted right after this
+  // returns (see `emit_function_named`'s own call site).
+  // 
+  // Deliberately narrower than the original for this slice: no `fork`
+  // support (a completely separate mechanism -- the scheduler/worker
+  // pool -- with no interaction with `await` at all) and no rejection
+  // diagnostic for a call to a known-async function that's neither
+  // `await`ed nor `fork`ed (a validation nicety, not load-bearing for
+  // correct codegen); a function-pointer-typed argument
+  // (`v.var_type.has_fn_sig`) is also rejected outright rather than
+  // supported, since nothing this slice needs passes one to an async
+  // function.
+  emit_async_function_support(Node node, str emit_name) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Function(f) -> {
+        if !f.has_rtype {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        bin is_void = equals(f.rtype.type_str, "void");
+
+        Vec<str> arg_names;
+        arg_names.init(0);
+        Vec<DataType*> arg_dtypes;
+        arg_dtypes.init(0);
+        if f.has_args {
+          for arg : f.args {
+            fit arg.kind {
+              .Variable(v) -> {
+                if v.var_type.has_fn_sig {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+                arg_names.push(v.name);
+                arg_dtypes.push(v.var_type);
+              }
+              _ -> {}
+            }
+          }
+        }
+
+        // 0. Forward-declare `emit_name` itself: the entry trampoline
+        // and the call helper's own sync-fallback paths (below) both
+        // call it directly, but its REAL definition is emitted right
+        // AFTER this whole helper set returns (see `emit_function_named`
+        // 's own call site) -- without this, that's a forward reference
+        // to an as-yet-undeclared C function.
+        let fwt = self.write_type(*f.rtype);
+        if fwt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write(" ");
+        self.state.write(emit_name);
+        self.state.write("(");
+        num fi = 0;
+        for fi < arg_dtypes.len {
+          if fi > 0 {
+            self.state.write(", ");
+          }
+          let fpt = self.write_type(*arg_dtypes.get(fi));
+          if fpt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          fi = fi + 1;
+        }
+        if arg_dtypes.len == 0 {
+          self.state.write("void");
+        }
+        self.state.write(");\n");
+
+        StringBuilder pnb = string_builder_init(32);
+        pnb.append("__fun_async_payload_");
+        pnb.append(emit_name);
+        str payload_name = pnb.build();
+
+        // 1. Payload struct: one field per arg, plus `__result` unless
+        // `f`'s own return type is `void`.
+        self.state.write("typedef struct ");
+        self.state.write(payload_name);
+        self.state.write(" {\n");
+        num ai = 0;
+        for ai < arg_names.len {
+          self.state.write("  ");
+          let awt = self.write_type(*arg_dtypes.get(ai));
+          if awt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write(" __arg");
+          self.state.write(format_num(ai));
+          self.state.write(";\n");
+          ai = ai + 1;
+        }
+        if !is_void {
+          self.state.write("  ");
+          let rwt = self.write_type(*f.rtype);
+          if rwt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write(" __result;\n");
+        }
+        self.state.write("} ");
+        self.state.write(payload_name);
+        self.state.write(";\n");
+
+        // 2. Entry trampoline: runs on the spawned thread.
+        self.state.write("static void* __fun_async_entry_");
+        self.state.write(emit_name);
+        self.state.write("(void* __arg) {\n");
+        self.state.write("  ");
+        self.state.write(payload_name);
+        self.state.write("* __payload = (");
+        self.state.write(payload_name);
+        self.state.write("*)__arg;\n");
+        self.state.write("  ");
+        if !is_void {
+          self.state.write("__payload->__result = ");
+        }
+        self.state.write(emit_name);
+        self.state.write("(");
+        ai = 0;
+        for ai < arg_names.len {
+          if ai > 0 {
+            self.state.write(", ");
+          }
+          self.state.write("__payload->__arg");
+          self.state.write(format_num(ai));
+          ai = ai + 1;
+        }
+        self.state.write(");\n");
+        self.state.write("  return NULL;\n");
+        self.state.write("}\n");
+
+        // 3. Spawn helper.
+        self.state.write("static int __fun_async_spawn_");
+        self.state.write(emit_name);
+        self.state.write("(");
+        self.state.write(payload_name);
+        self.state.write("* __payload, __fun_thread_t* __thr) {\n");
+        self.state.write("  return __fun_thread_start(__thr, __fun_async_entry_");
+        self.state.write(emit_name);
+        self.state.write(", __payload);\n");
+        self.state.write("}\n");
+
+        // 4. Await helper: join, extract the result, free the payload.
+        self.state.write("static ");
+        let awt2 = self.write_type(*f.rtype);
+        if awt2.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write(" __fun_async_await_");
+        self.state.write(emit_name);
+        self.state.write("(");
+        self.state.write(payload_name);
+        self.state.write("* __payload, __fun_thread_t __thr) {\n");
+        self.state.write("  (void)__fun_thread_join(__thr);\n");
+        if is_void {
+          self.state.write("  free(__payload);\n");
+        } else {
+          self.state.write("  ");
+          let rwt2 = self.write_type(*f.rtype);
+          if rwt2.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write(" __result = __payload->__result;\n");
+          self.state.write("  free(__payload);\n");
+          self.state.write("  return __result;\n");
+        }
+        self.state.write("}\n");
+
+        // 5. Call helper -- what `await expr` actually lowers to (see
+        // `emit_expr`'s `"await"` case). Degrades to a direct
+        // synchronous call to `emit_name` on `malloc`/spawn failure,
+        // matching the original exactly.
+        self.state.write("static ");
+        let cwt = self.write_type(*f.rtype);
+        if cwt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write(" __fun_async_call_");
+        self.state.write(emit_name);
+        self.state.write("(");
+        ai = 0;
+        for ai < arg_names.len {
+          if ai > 0 {
+            self.state.write(", ");
+          }
+          let pwt = self.write_type(*arg_dtypes.get(ai));
+          if pwt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write(" ");
+          self.state.write(arg_names.get(ai));
+          ai = ai + 1;
+        }
+        if arg_names.len == 0 {
+          self.state.write("void");
+        }
+        self.state.write(") {\n");
+        self.state.write("  ");
+        self.state.write(payload_name);
+        self.state.write("* __payload = malloc(sizeof(");
+        self.state.write(payload_name);
+        self.state.write("));\n");
+        self.state.write("  if (__payload == NULL) { ");
+        if !is_void {
+          self.state.write("return ");
+        }
+        self.state.write(emit_name);
+        self.state.write("(");
+        ai = 0;
+        for ai < arg_names.len {
+          if ai > 0 {
+            self.state.write(", ");
+          }
+          self.state.write(arg_names.get(ai));
+          ai = ai + 1;
+        }
+        self.state.write(");");
+        if is_void {
+          self.state.write(" return;");
+        }
+        self.state.write(" }\n");
+        ai = 0;
+        for ai < arg_names.len {
+          self.state.write("  __payload->__arg");
+          self.state.write(format_num(ai));
+          self.state.write(" = ");
+          self.state.write(arg_names.get(ai));
+          self.state.write(";\n");
+          ai = ai + 1;
+        }
+        self.state.write("  __fun_thread_t __thr;\n");
+        self.state.write("  int __rc = __fun_async_spawn_");
+        self.state.write(emit_name);
+        self.state.write("(__payload, &__thr);\n");
+        self.state.write("  if (__rc != 0) { free(__payload); ");
+        if !is_void {
+          self.state.write("return ");
+        }
+        self.state.write(emit_name);
+        self.state.write("(");
+        ai = 0;
+        for ai < arg_names.len {
+          if ai > 0 {
+            self.state.write(", ");
+          }
+          self.state.write(arg_names.get(ai));
+          ai = ai + 1;
+        }
+        self.state.write(");");
+        if is_void {
+          self.state.write(" return;");
+        }
+        self.state.write(" }\n");
+        if is_void {
+          self.state.write("  __fun_async_await_");
+          self.state.write(emit_name);
+          self.state.write("(__payload, __thr);\n");
+        } else {
+          self.state.write("  return __fun_async_await_");
+          self.state.write(emit_name);
+          self.state.write("(__payload, __thr);\n");
+        }
+        self.state.write("}\n\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   emit_function_named(Node node, str emit_name) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
@@ -4049,6 +4464,22 @@ impl Codegen {
         // resolution anywhere.
         if !f.has_body {
           ret .None;
+        }
+        // An `async fun`/`async` method's OWN body is transpiled as a
+        // completely ordinary C function below -- there's no state
+        // machine/coroutine transform. All the "asyncness" lives in a
+        // small set of WRAPPER functions generated around it (payload
+        // struct + entry trampoline + spawn/await/call helpers, see
+        // `emit_async_function_support`'s own doc comment) -- `await
+        // expr` lowers to a call to the "call helper" (see `emit_expr`'s
+        // `"await"` case), which runs THIS function on a dedicated OS
+        // thread and joins it. `main` is excluded (matches the original
+        // implementation exactly) -- nothing ever `await`s `main`.
+        if f.is_async && !equals(emit_name, "main") {
+          let aserr = self.emit_async_function_support(node, emit_name);
+          if aserr.is_some() {
+            ret aserr;
+          }
         }
         // Fresh per function -- see `Codegen.local_names`'s doc comment;
         // this is deliberately NOT scoped to nested blocks (an inner `{
