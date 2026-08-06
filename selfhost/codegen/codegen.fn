@@ -1812,6 +1812,41 @@ impl Codegen {
     if dt.generic_args.len > 0 {
       ret true;
     }
+    // A CONCRETE impl's own `self` parameter (`impl Vec<str> { ... }`,
+    // as opposed to a generic `impl Vec<T> { ... }`) carries its type as
+    // a bare, already-MANGLED name (`type_str = "Vec__str"`, `generic_
+    // args` EMPTY -- see `_parse_impl_method`'s own doc comment: `self`
+    // only gets `generic_args` attached when the ENCLOSING impl declares
+    // real type PARAMETERS, which a concrete impl doesn't) -- so the
+    // `generic_args.len > 0` check above never catches it, even though
+    // it names a generic instantiation just as unsafe as `Vec<T>`'s own
+    // bare `T` would be: `Vec__str`'s own struct doesn't exist yet
+    // either, the SAME "no separate name-only forward-declare" problem
+    // this whole function exists to catch. Detected by checking whether
+    // the bare name starts with `<some registered generic template
+    // name>__` -- both compound and enum templates are already
+    // registered (via the enum/compound pass right before this one runs)
+    // regardless of whether any concrete instantiation has actually been
+    // triggered yet. Found via a real stage-2 self-compilation C error
+    // (`Vec<str>`'s own concrete-impl methods, `join`/`sort`/..., forward-
+    // declared with a `Vec__str* self` parameter before `Vec__str`'s own
+    // struct existed at all).
+    for tmpl_name : self.generic_compound_names {
+      StringBuilder tmpl_pfx2 = string_builder_init(16);
+      tmpl_pfx2.append(tmpl_name);
+      tmpl_pfx2.append("__");
+      if starts_with(dt.type_str, tmpl_pfx2.build()) {
+        ret true;
+      }
+    }
+    for tmpl_name2 : self.generic_enum_names {
+      StringBuilder tmpl_pfx3 = string_builder_init(16);
+      tmpl_pfx3.append(tmpl_name2);
+      tmpl_pfx3.append("__");
+      if starts_with(dt.type_str, tmpl_pfx3.build()) {
+        ret true;
+      }
+    }
     for n : self.all_nodes {
       fit n.kind {
         .Enum(e) -> {
