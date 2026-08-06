@@ -832,6 +832,33 @@ pub compound Codegen {
   // see that branch's own doc comment for why a CALL receiver needs one
   // at all.
   num call_recv_temp_counter;
+  // How many levels deep `resolve_field_chain`'s own call-as-receiver
+  // scratch-buffer swap is CURRENTLY nested (0 when not nested at all)
+  // -- a MULTI-LEVEL chained call used as a receiver (`logger_init(
+  // .Info).with_timestamps(false).named("app")`, `examples/stdlib/
+  // log_structured.fn`'s own real body) recurses into that swap a
+  // second time while still nested inside the first one's own scratch
+  // buffer. `root_state`/`root_stmt_start_pos` are captured ONLY the
+  // moment this goes from 0 to 1 (the TRUE outermost real buffer/
+  // position, before ANY nesting) -- a deeper 1-to-2 (or beyond)
+  // transition leaves them alone, since they already hold the right
+  // target. `emit_method_call`'s own receiver-temp-hoist reads
+  // `root_stmt_start_pos` (instead of `current_stmt_start_pos` directly,
+  // which only ever reaches the IMMEDIATELY enclosing scratch buffer,
+  // not the true root one) whenever `call_scratch_depth > 0`, and --
+  // mirroring the non-nested case just below, which copies `current_
+  // stmt_start_pos` into `hoist_insert_pos` as the actual splice target
+  // rather than using whatever `hoist_insert_pos` already held (a
+  // function-level position, not a per-statement one) -- uses `root_
+  // stmt_start_pos` as BOTH temporary positions, so the temp-declaration
+  // STATEMENT it splices lands as a real statement in the actual
+  // function body, however deep the receiver chain nests -- rather than
+  // getting embedded inside what's supposed to be a pure EXPRESSION
+  // result (`ChainResolution.text`), which produced genuinely invalid C
+  // (a statement where an expression was expected) before this existed.
+  num call_scratch_depth;
+  CodegenState* root_state;
+  Option<num> root_stmt_start_pos;
   // Unique counter for `emit_fit`'s own call-subject temp-variable
   // names (`__fit_subj1`, `__fit_subj2`, ...), same reasoning as
   // `call_recv_temp_counter` just above -- a FIXED name collided with
@@ -936,6 +963,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.call_recv_temp_counter = 0;
+  g.call_scratch_depth = 0;
+  g.root_state = nil;
+  g.root_stmt_start_pos = .None;
   g.fit_subj_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
@@ -5011,21 +5041,44 @@ impl Codegen {
       recv_tmp_stmt_sb.append(recv_r.text);
       recv_tmp_stmt_sb.append(";\n");
 
-      let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
-      let recv_tmp_splice_pos = self.current_stmt_start_pos;
-      self.hoist_insert_pos = recv_tmp_splice_pos;
-      str recv_tmp_text = recv_tmp_stmt_sb.build();
-      self.emit_hoisted(recv_tmp_text);
-      // See `adjust_pos_after_splice`'s own doc comment for why
-      // `saved_recv_tmp_hoist_pos` needs manual adjustment here too.
-      if recv_tmp_splice_pos.is_some() {
-        saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
-          saved_recv_tmp_hoist_pos,
-          recv_tmp_splice_pos.unwrap(),
-          len(recv_tmp_text)
-        );
+      if self.call_scratch_depth > 0 {
+        // Nested inside `resolve_field_chain`'s own call-as-receiver
+        // scratch buffer (a multi-level chained call receiver, e.g.
+        // `logger_init(.Info).with_timestamps(false).named("app")`) --
+        // `hoist_insert_pos`/`current_stmt_start_pos` only ever reach
+        // THIS immediately-enclosing scratch buffer, which is supposed
+        // to hold a pure EXPRESSION result, not a STATEMENT. Reach
+        // through to the TRUE root buffer/position instead -- see
+        // `Codegen.call_scratch_depth`'s own doc comment.
+        CodegenState* saved_nested_state = self.state;
+        let saved_nested_hoist_pos = self.hoist_insert_pos;
+        let saved_nested_stmt_pos = self.current_stmt_start_pos;
+        self.state = self.root_state;
+        self.hoist_insert_pos = self.root_stmt_start_pos;
+        self.current_stmt_start_pos = self.root_stmt_start_pos;
+        str recv_tmp_text_root = recv_tmp_stmt_sb.build();
+        self.emit_hoisted(recv_tmp_text_root);
+        self.root_stmt_start_pos = self.current_stmt_start_pos;
+        self.state = saved_nested_state;
+        self.hoist_insert_pos = saved_nested_hoist_pos;
+        self.current_stmt_start_pos = saved_nested_stmt_pos;
+      } else {
+        let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
+        let recv_tmp_splice_pos = self.current_stmt_start_pos;
+        self.hoist_insert_pos = recv_tmp_splice_pos;
+        str recv_tmp_text = recv_tmp_stmt_sb.build();
+        self.emit_hoisted(recv_tmp_text);
+        // See `adjust_pos_after_splice`'s own doc comment for why
+        // `saved_recv_tmp_hoist_pos` needs manual adjustment here too.
+        if recv_tmp_splice_pos.is_some() {
+          saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
+            saved_recv_tmp_hoist_pos,
+            recv_tmp_splice_pos.unwrap(),
+            len(recv_tmp_text)
+          );
+        }
+        self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
       }
-      self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
 
       self.state.write("&");
       self.state.write(recv_tmp_name);
@@ -5591,6 +5644,15 @@ impl Codegen {
           // whatever accumulated -- but only when NEITHER an outer
           // drain nor an outer probe is already in progress (either
           // one further up the call stack will reach it instead).
+          // The FIRST time this goes from not-nested to nested (depth
+          // 0 -> 1), capture the TRUE outermost real state/positions --
+          // see `Codegen.call_scratch_depth`'s own doc comment for why
+          // a DEEPER (1 -> 2, ...) transition must leave them alone.
+          if self.call_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.call_scratch_depth = self.call_scratch_depth + 1;
           CodegenState call_scratch = codegen_state_new();
           CodegenState* saved_call_state = self.state;
           let saved_call_hoist_pos = self.hoist_insert_pos;
@@ -5605,6 +5667,24 @@ impl Codegen {
           self.hoist_insert_pos = saved_call_hoist_pos;
           self.current_stmt_start_pos = saved_call_stmt_start_pos;
           self.suppress_generic_impl_method_draining = prev_suppress;
+          self.call_scratch_depth = self.call_scratch_depth - 1;
+          if self.call_scratch_depth == 0 {
+            // Exiting nested receiver-chain territory entirely --
+            // `root_stmt_start_pos` holds the TRUE current position
+            // after any receiver-temp-hoist splices that happened
+            // anywhere during this nested session (see `Codegen.
+            // call_scratch_depth`'s own doc comment), which may be
+            // AHEAD of the `saved_call_stmt_start_pos` snapshot just
+            // restored above (taken before any of those splices
+            // existed). Sync back to it so a FURTHER receiver-temp-
+            // hoist for an enclosing call (now itself back at depth 0)
+            // splices AFTER, not before, everything already spliced
+            // during the nested session -- found via a real stage-2
+            // run against `examples/stdlib/log_structured.fn`'s own
+            // three-level chained receiver, where the outer call's own
+            // temp landed textually ABOVE the inner one it depends on.
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+          }
           if !prev_suppress && !self.draining_generic_impl_methods {
             self.drain_pending_generic_impl_methods();
           }
