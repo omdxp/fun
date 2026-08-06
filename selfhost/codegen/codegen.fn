@@ -629,6 +629,15 @@ pub compound Codegen {
   // `"<mangled_name>::<bare_method_name>"` -- see `ensure_generic_impl_
   // method_emitted`'s own doc comment.
   Vec<str> emitted_generic_impl_methods;
+  // Every combined-substitution monomorphization of a method that
+  // declares its OWN generic type param(s) (on top of the impl's own --
+  // `impl Box<T> { pub wrap<U>(U x) Box<U> { ... } }`) already emitted,
+  // keyed by the FULL combined mangled name (`Box__num__wrap__str`) --
+  // see `maybe_instantiate_generic_impl_method_own_params`'s own doc
+  // comment. A separate dimension from `emitted_generic_impl_methods`
+  // (keyed by owner+bare name alone, with no room for the method's own
+  // additional binding).
+  Vec<str> emitted_method_own_param_insts;
   // Every PLAIN (non-generic) impl method that already got its own
   // inline forward-declared bare prototype from `ensure_plain_impl_
   // method_prototype_emitted`, keyed `"<owner_type>::<bare_name>"` --
@@ -845,6 +854,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.instantiation_arg_is_pointer.init(0);
   g.instantiation_arg_dtypes.init(0);
   g.emitted_generic_impl_methods.init(0);
+  g.emitted_method_own_param_insts.init(0);
   g.emitted_plain_method_protos.init(0);
   g.emitted_plain_function_protos.init(0);
   g.pending_generic_impl_method_owner.init(0);
@@ -2837,6 +2847,268 @@ impl Codegen {
     ret .None;
   }
 
+  // True when `bare_name`, resolved against `owner_type`'s own abstract
+  // impl TEMPLATE (`Codegen.generic_impl_templates`), declares its OWN
+  // generic type parameter(s) on top of the impl's own (`impl Box<T> {
+  // pub wrap<U>(U x) Box<U> { ... } }`) -- the case `maybe_instantiate_
+  // generic_impl_method_own_params` handles. `emit_method_call` checks
+  // this FIRST, before falling into the impl-only-substitution path
+  // (`ensure_generic_impl_method_emitted`), which has no way to bind a
+  // method's own additional param at all.
+  impl_method_has_own_type_params(str owner_type, str bare_name) bin {
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          StringBuilder pfx = string_builder_init(16);
+          pfx.append(i.type_name);
+          pfx.append("__");
+          str tpfx = pfx.build();
+          if !starts_with(owner_type, tpfx) {
+            continue;
+          }
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                if fnv.has_type_params && equals(strip_prefix(fnv.name, tpfx), bare_name) {
+                  ret true;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
+  // Monomorphizes a method that declares its OWN generic type param(s),
+  // combining the impl's own already-known substitution (`owner_type`,
+  // e.g. `Box__num` binding T -> num, looked up the same way `emit_one_
+  // generic_impl_method` does via `Codegen.instantiation_*`) with a
+  // FRESH one for the method's own param(s), inferred from `args` the
+  // same structural way `maybe_instantiate_generic_function` infers a
+  // free function's -- neither substitution alone can resolve a body
+  // that mixes both (`self.value` needs T, `x`/the `Box<U>` return type
+  // need U). Simpler than the QUEUED impl-method path (`ensure_generic_
+  // impl_method_emitted`/`drain_pending_generic_impl_methods`): this is
+  // a ONE-SHOT emission, like `maybe_instantiate_generic_function` --
+  // no separate prototype step, the whole signature+body gets hoisted
+  // to the current statement's own position, correct forward-declaration
+  // for free (self-recursion is still safe: the combined name is pushed
+  // to `emitted_method_own_param_insts` BEFORE recursing into the body).
+  // 
+  // Returns the new combined mangled name (`Box__num__wrap__str`) to
+  // call, or `.None` when inference fails (an own param with no
+  // resolvable argument) or `owner_type` isn't a known instantiation at
+  // all -- the caller falls back to its own (impl-only) path either way.
+  // 
+  // Deliberately narrow for this slice: CHAINING off such a call's own
+  // result (`b.wrap("hello").get()`) doesn't work yet -- confirmed via a
+  // real repro, verified separately that the assign-then-call form
+  // (`Box<str> b2 = b.wrap("hello"); b2.get();`) works correctly.
+  // `resolve_field_chain`'s own "call as receiver" resolution (used to
+  // determine `.get()`'s receiver type here) has no way to reach this
+  // function's OWN combined substitution, so it resolves the chained
+  // call's return type using only the raw, unsubstituted template return
+  // type (`Box<U>` -> the literal, invalid "Box__U") -- fails loudly (a
+  // guaranteed C compile error from the resulting nested/malformed
+  // output) rather than silently miscompiling, so at least it's a safe
+  // failure mode. Fixing this needs `resolve_field_chain`'s call-receiver
+  // case to consult this function too; not done here.
+  maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<str> {
+    num ii = 0;
+    bin found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), owner_type) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret .None;
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let impl_arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let impl_arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+    let impl_arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || i.type_params.len != impl_arg_type_names.len {
+            continue;
+          }
+          StringBuilder pfx = string_builder_init(16);
+          pfx.append(i.type_name);
+          pfx.append("__");
+          str prefix = pfx.build();
+
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                if !fnv.has_type_params || !equals(strip_prefix(fnv.name, prefix), bare_name) {
+                  continue;
+                }
+
+                Vec<str> own_arg_type_names;
+                own_arg_type_names.init(0);
+                Vec<bin> own_arg_is_pointer;
+                own_arg_is_pointer.init(0);
+                for tp : fnv.type_params {
+                  bin found = false;
+                  str found_name = "";
+                  num ai = 0;
+                  num arg_i = 0;
+                  if fnv.has_args {
+                    for parg : fnv.args {
+                      if ai == 0 {
+                        // Skip the implicit `self` param -- `args` (the
+                        // call's own flattened arguments) never includes it.
+                        ai = ai + 1;
+                        continue;
+                      }
+                      fit parg.kind {
+                        .Variable(v) -> {
+                          if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 && arg_i < args.len {
+                            let inferred = self.infer_arg_type_name(args.get(arg_i));
+                            if inferred.is_some() {
+                              found_name = inferred.unwrap();
+                              found = true;
+                            }
+                          }
+                        }
+                        _ -> {}
+                      }
+                      ai = ai + 1;
+                      arg_i = arg_i + 1;
+                    }
+                  }
+                  if !found {
+                    ret .None;
+                  }
+                  own_arg_type_names.push(found_name);
+                  own_arg_is_pointer.push(false);
+                }
+
+                StringBuilder nb = string_builder_init(24);
+                nb.append(owner_type);
+                nb.append("__");
+                nb.append(bare_name);
+                for oan : own_arg_type_names {
+                  nb.append("__");
+                  nb.append(oan);
+                }
+                str new_name = nb.build();
+
+                num ei = 0;
+                bin already_emitted = false;
+                for ei < self.emitted_method_own_param_insts.len {
+                  if equals(self.emitted_method_own_param_insts.get(ei), new_name) {
+                    already_emitted = true;
+                  }
+                  ei = ei + 1;
+                }
+                if already_emitted {
+                  ret .Some(new_name);
+                }
+                self.emitted_method_own_param_insts.push(new_name);
+
+                Vec<str> combined_params;
+                combined_params.init(0);
+                Vec<str> combined_arg_names;
+                combined_arg_names.init(0);
+                Vec<bin> combined_arg_ptrs;
+                combined_arg_ptrs.init(0);
+                for tpn : i.type_params {
+                  combined_params.push(tpn);
+                }
+                for tpn2 : fnv.type_params {
+                  combined_params.push(tpn2);
+                }
+                for an3 : impl_arg_type_names {
+                  combined_arg_names.push(an3);
+                }
+                for an4 : own_arg_type_names {
+                  combined_arg_names.push(an4);
+                }
+                for ap : impl_arg_is_pointer {
+                  combined_arg_ptrs.push(ap);
+                }
+                for ap2 : own_arg_is_pointer {
+                  combined_arg_ptrs.push(ap2);
+                }
+
+                let prev_params = self.type_subst_param_names;
+                let prev_arg_names = self.type_subst_arg_type_strs;
+                let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+                let prev_arg_dtypes = self.type_subst_arg_dtypes;
+                self.type_subst_param_names = combined_params;
+                self.type_subst_arg_type_strs = combined_arg_names;
+                self.type_subst_arg_is_pointer = combined_arg_ptrs;
+                // Left at the IMPL's own (shorter) list on purpose --
+                // `resolve_type_subst` falls back to the flat
+                // strings/pointer-ness above for any index at or beyond
+                // its length, which is exactly every one of the
+                // method's own (freshly-inferred, name-only) params.
+                self.type_subst_arg_dtypes = impl_arg_dtypes;
+
+                // Same scratch-buffer/state-swap discipline as `emit_one_
+                // generic_impl_method`'s own identical swap -- see its
+                // doc comment for why each of these fields specifically.
+                CodegenState method_scratch = codegen_state_new();
+                CodegenState* saved_method_state = self.state;
+                let saved_hoist_pos = self.hoist_insert_pos;
+                let saved_stmt_start_pos = self.current_stmt_start_pos;
+                let saved_local_names = self.local_names;
+                let saved_local_is_pointer = self.local_is_pointer;
+                let saved_local_type_name = self.local_type_name;
+                let saved_local_dtype = self.local_dtype;
+                let saved_fn_rtype_name = self.current_fn_rtype_name;
+                let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+                let saved_defer_stack = self.defer_stack;
+                let saved_defer_scope_starts = self.defer_scope_starts;
+                let prev_suppress = self.suppress_generic_impl_method_draining;
+                self.state = &method_scratch;
+                self.hoist_insert_pos = .None;
+                self.current_stmt_start_pos = .None;
+                self.suppress_generic_impl_method_draining = true;
+                let body_err = self.emit_function_named(*m, new_name);
+                self.state = saved_method_state;
+                self.hoist_insert_pos = saved_hoist_pos;
+                self.current_stmt_start_pos = saved_stmt_start_pos;
+                self.suppress_generic_impl_method_draining = prev_suppress;
+                self.local_names = saved_local_names;
+                self.local_is_pointer = saved_local_is_pointer;
+                self.local_type_name = saved_local_type_name;
+                self.local_dtype = saved_local_dtype;
+                self.current_fn_rtype_name = saved_fn_rtype_name;
+                self.current_fn_rtype_dt = saved_fn_rtype_dt;
+                self.defer_stack = saved_defer_stack;
+                self.defer_scope_starts = saved_defer_scope_starts;
+                self.emit_hoisted(method_scratch.out.build());
+
+                self.type_subst_param_names = prev_params;
+                self.type_subst_arg_type_strs = prev_arg_names;
+                self.type_subst_arg_is_pointer = prev_arg_ptrs;
+                self.type_subst_arg_dtypes = prev_arg_dtypes;
+                if body_err.is_some() {
+                  ret .None;
+                }
+                ret .Some(new_name);
+              }
+              _ -> {}
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   // Emits ONE concrete monomorphization of a generic tagged-union enum
   // template -- same C layout as `emit_tagged_union_enum`, but using
   // `mangled_name` throughout instead of the template's own bare name,
@@ -4177,36 +4449,63 @@ impl Codegen {
       ret self.emit_quirk_dispatch_call(recv_r, method_name, args_node);
     }
 
-    // A generic impl method (`Vec<str>.sum()`, e.g.) only gets its
-    // actual C prototype+body emitted here, at its first real call site
-    // for THIS instantiation -- see `ensure_generic_impl_method_
-    // emitted`'s own doc comment for why. A no-op (`.None`, nothing
-    // emitted) for a plain (non-generic) type's method, already emitted
-    // unconditionally elsewhere.
-    let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
-    if emit_err.is_some() {
-      ret emit_err;
+    Vec<Node*> args;
+    args.init(0);
+    defer args.free();
+    self.flatten_call_args(args_node, &args);
+
+    // A method declaring its OWN generic type param (`impl Box<T> { pub
+    // wrap<U>(U x) Box<U> { ... } }`) needs a COMBINED substitution
+    // (impl's T + this call's own U, inferred from `args`) that neither
+    // `ensure_generic_impl_method_emitted` (impl-only) nor the plain
+    // static-dispatch fallback below knows how to build -- see
+    // `maybe_instantiate_generic_impl_method_own_params`'s own doc
+    // comment. Checked FIRST, before either of those.
+    bin used_own_param_inst = false;
+    if self.impl_method_has_own_type_params(recv_r.type_name, method_name) {
+      let own_inst = self.maybe_instantiate_generic_impl_method_own_params(
+        recv_r.type_name,
+        method_name,
+        args
+      );
+      if own_inst.is_some() {
+        self.state.write(own_inst.unwrap());
+        used_own_param_inst = true;
+      }
     }
-    let registered = self.lookup_impl_method(recv_r.type_name, method_name);
-    if registered.is_some() {
-      // A PLAIN impl method's own signature can be UNSAFE for the early
-      // forward-declare pass (a generic return/param type, e.g. `Lexer.
-      // _next_inner()`'s own `Result<Option<Token>, Error>`) -- such a
-      // method falls back to natural source order there, which breaks
-      // the moment it's called from a method defined EARLIER in the
-      // same file (`Lexer.next()`'s own real body calling `self.
-      // _next_inner()`, itself defined further down in the same `impl
-      // Lexer` block). Ensures an inline bare prototype exists at this
-      // call's own first-use point instead (see `ensure_plain_impl_
-      // method_prototype_emitted`'s own doc comment) -- a no-op once
-      // the early pass already covered it, or once this exact method
-      // already got its own inline prototype from an earlier call site.
-      self.ensure_plain_impl_method_prototype_emitted(recv_r.type_name, method_name);
-      self.state.write(registered.unwrap());
-    } else {
-      self.state.write(recv_r.type_name);
-      self.state.write("__");
-      self.state.write(method_name);
+
+    if !used_own_param_inst {
+      // A generic impl method (`Vec<str>.sum()`, e.g.) only gets its
+      // actual C prototype+body emitted here, at its first real call site
+      // for THIS instantiation -- see `ensure_generic_impl_method_
+      // emitted`'s own doc comment for why. A no-op (`.None`, nothing
+      // emitted) for a plain (non-generic) type's method, already emitted
+      // unconditionally elsewhere.
+      let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
+      if emit_err.is_some() {
+        ret emit_err;
+      }
+      let registered = self.lookup_impl_method(recv_r.type_name, method_name);
+      if registered.is_some() {
+        // A PLAIN impl method's own signature can be UNSAFE for the early
+        // forward-declare pass (a generic return/param type, e.g. `Lexer.
+        // _next_inner()`'s own `Result<Option<Token>, Error>`) -- such a
+        // method falls back to natural source order there, which breaks
+        // the moment it's called from a method defined EARLIER in the
+        // same file (`Lexer.next()`'s own real body calling `self.
+        // _next_inner()`, itself defined further down in the same `impl
+        // Lexer` block). Ensures an inline bare prototype exists at this
+        // call's own first-use point instead (see `ensure_plain_impl_
+        // method_prototype_emitted`'s own doc comment) -- a no-op once
+        // the early pass already covered it, or once this exact method
+        // already got its own inline prototype from an earlier call site.
+        self.ensure_plain_impl_method_prototype_emitted(recv_r.type_name, method_name);
+        self.state.write(registered.unwrap());
+      } else {
+        self.state.write(recv_r.type_name);
+        self.state.write("__");
+        self.state.write(method_name);
+      }
     }
     self.state.write("(");
     if recv_r.is_pointer {
@@ -4265,10 +4564,6 @@ impl Codegen {
       self.state.write(recv_r.text);
     }
 
-    Vec<Node*> args;
-    args.init(0);
-    defer args.free();
-    self.flatten_call_args(args_node, &args);
     num arg_idx = 0;
     for arg : args {
       self.state.write(", ");
