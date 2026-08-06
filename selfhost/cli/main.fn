@@ -40,7 +40,7 @@ fun _codegen_error_kind_name(CodegenErrorKind kind) str {
 
 fun _fail(str msg) num {
   writeln_to(Sink.Stderr, format(`[Error]
-    `{str}`, msg));
+  `{str}`, msg));
   ret 1;
 }
 
@@ -51,10 +51,12 @@ fun compile_file(str in_path, str out_path) num {
   if parsed.is_err() {
     ret _fail(parsed.unwrap_err());
   }
-  let nodes = parsed.unwrap();
+  let merge_result = parsed.unwrap();
+  let nodes = merge_result.nodes;
 
   CodegenState state = codegen_state_new();
   Codegen cg = codegen_new(&state);
+  cg.import_aliases = merge_result.aliases;
   let cg_err = cg.transpile(nodes);
   fit cg_err {
     .Some(kind) -> {

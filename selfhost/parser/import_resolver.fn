@@ -167,7 +167,7 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // the first real failure (file not found, lex, or parse error)
 // short-circuits the whole merge as `.Err`, rather than silently
 // returning a partial program.
-pub fun parse_program_with_imports(str entry_path) Result<Vec<Node>, str> {
+pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   Set<str> preload_visited = set_init("", 8);
@@ -178,12 +178,32 @@ pub fun parse_program_with_imports(str entry_path) Result<Vec<Node>, str> {
 
   Vec<Node> merged;
   merged.init(0);
+  Vec<str> aliases;
+  aliases.init(0);
   Set<str> visited = set_init("", 8);
-  let err = _parse_and_merge(entry_path, &merged, &visited, &global_symbols);
+  let err = _parse_and_merge(entry_path, &merged, &aliases, &visited, &global_symbols);
   if err.is_some() {
     ret .Err(err.unwrap());
   }
-  ret .Ok(merged);
+  ProgramMergeResult r;
+  r.nodes = merged;
+  r.aliases = aliases;
+  ret .Ok(r);
+}
+
+// `parse_program_with_imports`'s own result: the flattened, merged
+// program (`nodes`, unchanged from before) alongside every import
+// ALIAS name (`imp x as y;`'s own `y`) seen anywhere across the whole
+// transitive import graph -- an aliased import's declarations are
+// merged into `nodes` the exact same as an unaliased one (see `_parse_
+// and_merge`'s own doc comment), so codegen needs `aliases` separately
+// to recognize a `y.symbol` qualified reference at a call site as
+// "strip the alias, resolve `symbol` unqualified" (see `Codegen.
+// import_aliases`'s own doc comment) -- the ONLY thing that survives
+// about an alias past this flattening step.
+pub compound ProgramMergeResult {
+  Vec<Node> nodes;
+  Vec<str> aliases;
 }
 
 // Recursively discovers `path`'s (transitive) import graph and collects
@@ -313,6 +333,7 @@ fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, Gl
 fun _parse_and_merge(
   str path,
   Vec<Node>* merged,
+  Vec<str>* aliases,
   Set<str>* visited,
   Map<str,
   GlobalSymbolInfo>* global_symbols
@@ -345,8 +366,11 @@ fun _parse_and_merge(
   for n : state.nodes {
     fit n.kind {
       .Import(imp_node) -> {
+        if imp_node.has_alias {
+          aliases.push(imp_node.alias);
+        }
         str resolved = resolve_import_path(path, imp_node.path);
-        let ierr = _parse_and_merge(resolved, merged, visited, global_symbols);
+        let ierr = _parse_and_merge(resolved, merged, aliases, visited, global_symbols);
         if ierr.is_some() {
           ret ierr;
         }
@@ -390,7 +414,7 @@ test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
   let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/two_file_main.fn");
   assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
-  let nodes = result.unwrap();
+  let nodes = result.unwrap().nodes;
   bin saw_main = false;
   bin saw_helper = false;
   for n : nodes {
@@ -413,7 +437,7 @@ test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
 test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {
   let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/diamond_a.fn");
   assert result.is_ok(), "expected the diamond import graph to resolve cleanly";
-  let nodes = result.unwrap();
+  let nodes = result.unwrap().nodes;
   num shared_count = 0;
   for n : nodes {
     fit n.kind {
@@ -446,7 +470,7 @@ test "parse_program_with_imports resolves a compound-literal expression whose ty
   // before its real parse begins.
   let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/cross_file_compound_main.fn");
   assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
-  let nodes = result.unwrap();
+  let nodes = result.unwrap().nodes;
   bin saw_main = false;
   for n : nodes {
     fit n.kind {

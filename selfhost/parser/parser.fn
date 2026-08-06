@@ -4805,12 +4805,32 @@ impl Parser {
       // no `<` there at all -- the same helper `looks_like_compound_init`
       // uses to look past a possibly-generic type name.
       // 
-      // Deliberately narrower than the original for this slice: no
-      // module-alias-qualified type segments (`alias.Type name;`) --
-      // needs its own extra lookahead and isn't reachable by anything
-      // this slice's tests exercise yet.
       if self.state.get_scope_entity(name) == nil {
-        num off = self.state.skip_generic_args_tokens(1);
+        // Optional qualified type segments after the leading identifier:
+        // `alias.Type name;` (a module-alias-qualified type -- see
+        // `parse_datatype`'s own identical `.`-segment loop, which reads
+        // the SAME shape once this lookahead has already committed to
+        // the declaration path).
+        num off = 1;
+        for true {
+          let dot_tok = self.state.token_peek_n(off);
+          if dot_tok.is_none() {
+            break;
+          }
+          bin is_dot = token_is_operator(dot_tok.unwrap(), ".") || token_is_symbol(
+            dot_tok.unwrap(),
+            '.'
+          );
+          if !is_dot {
+            break;
+          }
+          let seg_tok = self.state.token_peek_n(off + 1);
+          if seg_tok.is_none() || seg_tok.unwrap().type != TokenType.Identifier {
+            break;
+          }
+          off = off + 2;
+        }
+        off = self.state.skip_generic_args_tokens(off);
         for true {
           let tn = self.state.token_peek_n(off);
           if tn.is_none() {

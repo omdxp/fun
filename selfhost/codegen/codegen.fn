@@ -425,6 +425,29 @@ pub compound Codegen {
   // signature to speak of, same reasoning `emit_impl`'s own generic
   // skip already documents.
   Vec<str> quirk_names;
+  // Every import ALIAS name (`imp x as y;`'s own `y`) seen anywhere
+  // across the whole transitive import graph -- see
+  // `import_resolver.ProgramMergeResult`'s own doc comment for why this
+  // is the ONLY thing that survives about an alias past the flattening
+  // merge (its declarations are already merged in, unqualified, same as
+  // an unaliased import's). Set directly by the caller (`selfhost/cli/
+  // main.fn`'s `compile_file`) right after `codegen_new`, before
+  // `transpile` runs -- empty (the default) for every hand-built unit
+  // test below, which never goes through the real merge at all.
+  // 
+  // Consulted wherever a `y.symbol` qualified reference could otherwise
+  // be misread as a real receiver/type: `resolve_type_name` (a
+  // declared type `y.Type`, mangled to `y__Type` by the PARSER already
+  // -- see `parser.parse_datatype`'s own doc comment -- but never
+  // un-mangled by anything downstream until this), `emit_call` (`y.
+  // func(args)`, which otherwise falls through to being misread as a
+  // method call on a receiver named `y`), and `emit_field_access` (`y.
+  // EnumName.Variant` used as a value, not a call). Each site strips a
+  // recognized `<alias>__`/`<alias>.` prefix and re-resolves the
+  // remainder exactly as if the alias segment were never there --
+  // correct precisely because every alias's OWN declarations are
+  // ALREADY merged in under their real, unqualified names.
+  Vec<str> import_aliases;
   // `defer <body>;` support: a FLAT list of every pending deferred
   // statement body currently in scope, across ALL nested blocks of the
   // function being emitted right now (registered in source order by
@@ -876,6 +899,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.expected_compound_type = "";
   g.in_array_initializer = false;
   g.quirk_names.init(0);
+  g.import_aliases.init(0);
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
@@ -1227,6 +1251,30 @@ impl Codegen {
     ret .Some(resolved_name);
   }
 
+  // Un-mangles a declared type name's own leading `<alias>__` segment
+  // (`parser.parse_datatype` mangles `y.Type` to `y__Type` at PARSE
+  // time, for a module alias `imp x as y;` -- see its own doc comment)
+  // back to the bare `Type` -- correct because `y`'s own declarations
+  // are already merged in unqualified (see `Codegen.import_aliases`'s
+  // own doc comment). Only strips when `<alias>` is a REAL, known alias
+  // (never a bare `__`-split guess) -- a genuine generic-instantiation
+  // mangled name (`Vec__num`) has the exact same `X__Y` shape, and
+  // `Vec`/`num` are never import aliases, so this never misfires on one.
+  // A no-op passthrough for anything that doesn't start with a known
+  // alias's own prefix.
+  strip_known_alias_prefix(str type_str) str {
+    for alias : self.import_aliases {
+      StringBuilder pfx = string_builder_init(16);
+      pfx.append(alias);
+      pfx.append("__");
+      str prefix = pfx.build();
+      if starts_with(type_str, prefix) {
+        ret strip_prefix(type_str, prefix);
+      }
+    }
+    ret type_str;
+  }
+
   // The name-resolution half of `write_type`, split out so a caller that
   // only needs `dt`'s resolved NAME (not to emit its C spelling inline
   // right now) can trigger the same monomorphization side effect without
@@ -1235,6 +1283,7 @@ impl Codegen {
   // doc comment), where a temp `__auto_type` variable holds the value
   // and no explicit C type needs to be written at all.
   resolve_type_name(DataType dt) Option<str> {
+    dt.type_str = self.strip_known_alias_prefix(dt.type_str);
     let rdt = self.resolve_type_subst(dt);
     if rdt.generic_args.len == 0 {
       ret .Some(rdt.type_str);
@@ -3971,47 +4020,85 @@ impl Codegen {
       .Identifier(name) -> { callee_name = name; }
       .Expression(recv_e) -> {
         if equals(recv_e.op, ".") {
-          // `EnumName.Variant(args...)` (a tagged-union payload
-          // construction) shares the exact same AST shape as a method
-          // call (`recv.method(...)`) -- disambiguate by checking
-          // whether the left side is a KNOWN ENUM NAME with that
-          // variant first. See `emit_enum_variant_construction`'s doc
-          // comment for the C this constructs.
-          if recv_e.has_left && recv_e.has_right {
-            str enum_name = "";
-            bin have_enum_name = false;
+          // `alias.func(args)` -- a plain function call qualified by an
+          // import alias (see `Codegen.import_aliases`'s own doc
+          // comment). Checked FIRST: without this, the alias identifier
+          // reads as an ordinary receiver value, and this whole call
+          // falls through to `emit_method_call` (which then correctly
+          // rejects it, since an alias is never a known local) instead
+          // of the plain call it actually is.
+          // 
+          // Gated on NOT already a known local: `import_aliases` is a
+          // whole-PROGRAM list, so a coincidentally-same-named LOCAL
+          // parameter/variable in some OTHER function (`std/error.fn`'s
+          // own `error_with_context(Error* e, ...) { e.with_context(...);
+          // }`, found via a real example whose entry file also happens
+          // to declare `imp ... as e;`) must shadow it -- a real local
+          // always wins over a same-named global alias, same as ordinary
+          // scoping.
+          bin left_is_known_alias = false;
+          if recv_e.has_left {
             fit recv_e.left.kind {
-              .Identifier(name) -> {
-                enum_name = name;
-                have_enum_name = true;
-              }
-              // Bare shorthand (`.Some(x)`, no `EnumName.` qualifier) --
-              // see `Codegen.expected_enum_type`'s doc comment. If it
-              // doesn't resolve to a known enum/variant below, this
-              // falls through to `emit_method_call`, which already
-              // rejects a non-identifier receiver on its own.
-              .Blank -> {
-                if !equals(self.expected_enum_type, "") {
-                  enum_name = self.expected_enum_type;
-                  have_enum_name = true;
+              .Identifier(lname) -> {
+                if self.import_aliases.contains(lname) && self.lookup_local_type_name(lname).is_none() {
+                  left_is_known_alias = true;
                 }
               }
               _ -> {}
             }
-            if have_enum_name {
-              fit recv_e.right.kind {
-                .Identifier(variant_name) -> {
-                  if self.enum_has_variant(enum_name, variant_name) {
-                    ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
+          }
+          if left_is_known_alias {
+            if !recv_e.has_right {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            fit recv_e.right.kind {
+              .Identifier(fname) -> { callee_name = fname; }
+              _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            }
+          } else {
+            // `EnumName.Variant(args...)` (a tagged-union payload
+            // construction) shares the exact same AST shape as a method
+            // call (`recv.method(...)`) -- disambiguate by checking
+            // whether the left side is a KNOWN ENUM NAME with that
+            // variant first. See `emit_enum_variant_construction`'s doc
+            // comment for the C this constructs.
+            if recv_e.has_left && recv_e.has_right {
+              str enum_name = "";
+              bin have_enum_name = false;
+              fit recv_e.left.kind {
+                .Identifier(name) -> {
+                  enum_name = name;
+                  have_enum_name = true;
+                }
+                // Bare shorthand (`.Some(x)`, no `EnumName.` qualifier) --
+                // see `Codegen.expected_enum_type`'s doc comment. If it
+                // doesn't resolve to a known enum/variant below, this
+                // falls through to `emit_method_call`, which already
+                // rejects a non-identifier receiver on its own.
+                .Blank -> {
+                  if !equals(self.expected_enum_type, "") {
+                    enum_name = self.expected_enum_type;
+                    have_enum_name = true;
                   }
                 }
                 _ -> {}
               }
+              if have_enum_name {
+                fit recv_e.right.kind {
+                  .Identifier(variant_name) -> {
+                    if self.enum_has_variant(enum_name, variant_name) {
+                      ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
+                    }
+                  }
+                  _ -> {}
+                }
+              }
             }
+            ret self.emit_method_call(recv_e, e.right);
           }
-          ret self.emit_method_call(recv_e, e.right);
+        } else {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
         }
-        ret .Some(CodegenErrorKind.UnsupportedNode);
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
@@ -4850,21 +4937,63 @@ impl Codegen {
     str enum_recv_name = "";
     bin is_bare_shorthand = false;
     bin left_is_single_level = false;
+
+    // `alias.EnumName.Variant` used as a VALUE (not a call, which
+    // `emit_call` handles separately) -- `e.left` here is `alias.
+    // EnumName` (an Expression, not a bare Identifier), so this needs
+    // checking BEFORE the ordinary single-level `fit e.left.kind` below,
+    // which only ever recognizes a bare identifier receiver. See
+    // `Codegen.import_aliases`'s own doc comment.
     fit e.left.kind {
-      .Identifier(name) -> {
-        enum_recv_name = name;
-        left_is_single_level = true;
-      }
-      .Blank -> {
-        // Bare shorthand (`.Variant`, no `EnumName.` qualifier) -- see
-        // `Codegen.expected_enum_type`'s doc comment. Must NOT fall
-        // through to the chained-access path below if this doesn't pan
-        // out (there's no receiver identifier to look up at all).
-        is_bare_shorthand = true;
-        left_is_single_level = true;
-        enum_recv_name = self.expected_enum_type;
+      .Expression(inner_e) -> {
+        if equals(inner_e.op, ".") && inner_e.has_left && inner_e.has_right {
+          // Gated on NOT already a known local -- see `emit_call`'s own
+          // identical gate for why (a real local always shadows a
+          // same-named global alias).
+          bin inner_left_is_alias = false;
+          fit inner_e.left.kind {
+            .Identifier(aname) -> {
+              if self.import_aliases.contains(aname) && self.lookup_local_type_name(aname).is_none() {
+                inner_left_is_alias = true;
+              }
+            }
+            _ -> {}
+          }
+          if inner_left_is_alias {
+            fit inner_e.right.kind {
+              .Identifier(ename) -> {
+                enum_recv_name = ename;
+                left_is_single_level = true;
+              }
+              _ -> {}
+            }
+          }
+        }
       }
       _ -> {}
+    }
+    if left_is_single_level {
+      // Matched the alias case above -- skip the ordinary single-level
+      // check below entirely (it would otherwise see `e.left` as an
+      // unrecognized `.Expression` and leave `left_is_single_level`
+      // untouched anyway, but skipping is clearer than relying on that).
+    } else {
+      fit e.left.kind {
+        .Identifier(name) -> {
+          enum_recv_name = name;
+          left_is_single_level = true;
+        }
+        .Blank -> {
+          // Bare shorthand (`.Variant`, no `EnumName.` qualifier) -- see
+          // `Codegen.expected_enum_type`'s doc comment. Must NOT fall
+          // through to the chained-access path below if this doesn't pan
+          // out (there's no receiver identifier to look up at all).
+          is_bare_shorthand = true;
+          left_is_single_level = true;
+          enum_recv_name = self.expected_enum_type;
+        }
+        _ -> {}
+      }
     }
     if left_is_single_level && !equals(enum_recv_name, "") && self.enum_has_variant(
       enum_recv_name,
