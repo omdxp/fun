@@ -341,7 +341,7 @@ test "if/elif/else transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else if (x == 2)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else {") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "defer inside false if branch does not run" {
@@ -559,7 +559,7 @@ test "array indexing expression transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t arr[] = {1, 2, 3};") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[1]") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "compound assignment transpiles" {
@@ -577,7 +577,7 @@ test "compound assignment transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "x += 2") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "raw pointer maps to void*" {
@@ -593,7 +593,7 @@ test "raw pointer maps to void*" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "void* id(void* p)") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "async and await surface transpiles and runs" {
@@ -1458,7 +1458,7 @@ test "function definitions can be out of order (prototypes emitted)" {
     const main_idx = std.mem.indexOf(u8, out_owned, "int main") orelse return error.TestExpectedMain;
     try std.testing.expect(proto_idx < main_idx);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "declaration-only function emits semicolon prototype" {
@@ -1476,7 +1476,7 @@ test "declaration-only function emits semicolon prototype" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc() ;") == null);
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "aliased import calls transpile to qualified symbols" {
@@ -1747,7 +1747,7 @@ test "defer emits in LIFO order before return" {
     try std.testing.expect(b_pos < a_pos); // LIFO: b (last deferred) runs first
     try std.testing.expect(a_pos < ret_pos); // defers before the actual return
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "defer block emits before function end" {
@@ -1770,7 +1770,7 @@ test "defer block emits before function end" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b();") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "enum types can be referenced before declaration" {
@@ -1801,7 +1801,7 @@ test "enum types can be referenced before declaration" {
     // Ensure the enum variant constant made it through lowering/codegen.
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Color_Blue") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.time import adds time.h include" {
@@ -1817,7 +1817,7 @@ test "std.time import adds time.h include" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <time.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread import emits portable thread include layer" {
@@ -1835,7 +1835,7 @@ test "std.c.thread import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_create(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread symbols are callable after import" {
@@ -1853,7 +1853,7 @@ test "std.c.thread symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread_windows import emits portable thread include layer" {
@@ -1871,7 +1871,7 @@ test "std.c.thread_windows import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_cond_timedwait(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread_windows symbols are callable after import" {
@@ -1889,7 +1889,7 @@ test "std.c.thread_windows symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.thread import emits pthread headers" {
@@ -1905,7 +1905,7 @@ test "transitive std.thread import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread helper lifecycle APIs transpile" {
@@ -1928,7 +1928,7 @@ test "std.thread helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread accepts named function callbacks" {
@@ -1951,7 +1951,7 @@ test "std.thread accepts named function callbacks" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_start(&t, worker, NULL)") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync helper lifecycle APIs transpile" {
@@ -1991,7 +1991,7 @@ test "std.sync helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.sync_runtime import emits pthread headers" {
@@ -2007,7 +2007,7 @@ test "transitive std.sync_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_runtime lifecycle APIs transpile" {
@@ -2049,7 +2049,7 @@ test "std.sync_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_runtime backend selector APIs transpile" {
@@ -2077,7 +2077,7 @@ test "std.sync_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_windows(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.runtime_backend selector APIs transpile" {
@@ -2109,7 +2109,7 @@ test "std.runtime_backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_POSIX_ID") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_WINDOWS_ID") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_backend_windows native APIs transpile" {
@@ -2155,7 +2155,7 @@ test "std.sync_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_mutex_init(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_init(") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_backend_posix lifecycle APIs transpile" {
@@ -2197,7 +2197,7 @@ test "std.sync_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_backend_windows native APIs transpile" {
@@ -2225,7 +2225,7 @@ test "std.thread_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_create(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_start(") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_backend_posix lifecycle APIs transpile" {
@@ -2249,7 +2249,7 @@ test "std.thread_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "runtime backend honors FUN_RUNTIME_BACKEND override" {
@@ -2519,7 +2519,7 @@ test "transitive std.thread_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime lifecycle APIs transpile" {
@@ -2543,7 +2543,7 @@ test "std.thread_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime async task handle APIs transpile" {
@@ -2570,7 +2570,7 @@ test "std.thread_runtime async task handle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime async task handle behavior is stable across backend selectors" {
@@ -2695,7 +2695,7 @@ test "std.thread_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_windows(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel runtime conformance matrix is stable across backend selectors" {
@@ -2998,7 +2998,7 @@ test "transitive std.channel import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.thread_pool import emits pthread headers" {
@@ -3014,7 +3014,7 @@ test "transitive std.thread_pool import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_pool lifecycle APIs transpile" {
@@ -3044,7 +3044,7 @@ test "std.thread_pool lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__is_ready(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel send and recv transpile for num" {
@@ -3066,7 +3066,7 @@ test "std.channel send and recv transpile for num" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel buffered constructor and try_send transpile" {
@@ -3090,7 +3090,7 @@ test "std.channel buffered constructor and try_send transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_new_cap__num") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__try_send(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel timeout send and recv transpile" {
@@ -3116,7 +3116,7 @@ test "std.channel timeout send and recv transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel async wrapper APIs await and run" {
@@ -3273,7 +3273,7 @@ test "std.io APIs usable in async function transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_bytes(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_all(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.net async APIs transpile" {
@@ -3298,7 +3298,7 @@ test "std.net async APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_async") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.net offload async edge return codes are stable across backend selectors" {
@@ -3410,7 +3410,7 @@ test "std.channel cancel-aware send and recv APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel cancel token APIs transpile" {
@@ -3459,7 +3459,7 @@ test "std.channel cancel token APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_token(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select recv2 timeout transpile" {
@@ -3484,7 +3484,7 @@ test "std.channel select recv2 timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select recv3 fair timeout transpile" {
@@ -3511,7 +3511,7 @@ test "std.channel select recv3 fair timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv3_rr_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select default branch APIs transpile" {
@@ -3537,7 +3537,7 @@ test "std.channel select default branch APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_default_with(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_default_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select cancel-aware APIs transpile" {
@@ -3568,7 +3568,7 @@ test "std.channel select cancel-aware APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select wait-slice tuning transpile" {
@@ -3590,7 +3590,7 @@ test "std.channel select wait-slice tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_slice_ms(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_slice_ms(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select explicit wait-slice override transpile" {
@@ -3616,7 +3616,7 @@ test "std.channel select explicit wait-slice override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select explicit wait-slice and backoff override transpile" {
@@ -3642,7 +3642,7 @@ test "std.channel select explicit wait-slice and backoff override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select blocking tuning overrides transpile" {
@@ -3668,7 +3668,7 @@ test "std.channel select blocking tuning overrides transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select adaptive wait backoff transpile" {
@@ -3690,7 +3690,7 @@ test "std.channel select adaptive wait backoff transpile" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_compute_wait_slice_ms(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select backoff-step tuning transpile" {
@@ -3712,7 +3712,7 @@ test "std.channel select backoff-step tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_backoff_steps(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_backoff_steps(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "channel select default returns default branch when empty" {
@@ -4573,7 +4573,7 @@ test "generic function specialization emits concrete names" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__str") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__T") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "generic inference after init transpiles with concrete specializations and runs" {
@@ -4672,7 +4672,7 @@ test "assert emits abort and message" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr, \"Assertion failed at ") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "abort()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "compounds + quirks + impl vtables transpile" {
@@ -4710,7 +4710,7 @@ test "compounds + quirks + impl vtables transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.self") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "pointer field access uses arrow" {
@@ -4730,7 +4730,7 @@ test "pointer field access uses arrow" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pp->x") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 fn extractFirstQuirkBaseName(out: []const u8) ?[]const u8 {
@@ -4779,7 +4779,7 @@ test "structural quirks share canonical C type" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b.vtable->getX") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "asm statement transpiles" {
@@ -4800,7 +4800,7 @@ test "asm statement transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"=r\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"memory\"") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "asm block preserves newlines" {
@@ -4823,7 +4823,7 @@ test "asm block preserves newlines" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x8, 93\\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "svc 0\\n") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.net import emits socket headers" {
@@ -4865,7 +4865,7 @@ test "main num return emits exit status" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "return (int)(7);") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "map compound key specialization symbols emit" {
@@ -4900,7 +4900,7 @@ test "map compound key specialization symbols emit" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__remove") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "stdlib hot path stress transpiles" {
@@ -4938,7 +4938,7 @@ test "stdlib hot path stress transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__remove") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "generic specialization plus net offload async regression stays stable" {
@@ -4982,7 +4982,7 @@ test "generic specialization plus net offload async regression stays stable" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__get") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "nested import generic impl specialization prototypes emit and run" {
