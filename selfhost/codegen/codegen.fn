@@ -3731,10 +3731,37 @@ impl Codegen {
       self.state.write("({ ");
       num va_i = 0;
       for va_i < var_len {
+        Node* va_arg = args.get(fixed_len + va_i);
+        // A bare CHARACTER LITERAL (`'.'`) has type `int` in C, not
+        // `char` -- a real, general C language rule (unlike C++), not a
+        // selfhost-specific quirk. Left uncast, `__auto_type __fun_va_N
+        // = '.';` infers `int`, so `__fun_tag`'s own `_Generic` dispatch
+        // (see `write_prelude`'s own doc comment) matches the `int` case
+        // ('n', "number") instead of `char` ('c') -- the callee's own
+        // vararg-unpacking shim then stringifies the literal's ASCII
+        // CODE (`fmt_num(46)` -> "46") instead of the character itself
+        // (`fmt_chr('.')` -> "."). An explicit `(char)` cast here forces
+        // `__auto_type` to infer the right type instead. A `chr`-typed
+        // VARIABLE (not a literal) doesn't need this -- its own C
+        // declaration is already `char`, so `__auto_type` already
+        // infers correctly from it. Found via a real stage-2-compiled-
+        // by-itself divergence: a repeated run of `.` characters in an
+        // import path (`parser.parse_import`'s own `format("{chr}{str}",
+        // '.', path)`) came out as the literal text "4646" instead of
+        // "..", one generation further into self-hosting than where
+        // this bug was introduced.
+        bin va_is_chr_literal = false;
+        fit va_arg.kind {
+          .Character(_) -> { va_is_chr_literal = true; }
+          _ -> {}
+        }
         self.state.write("__auto_type __fun_va_");
         self.state.write(format_num(va_i));
         self.state.write(" = ");
-        let va_err = self.emit_expr(*args.get(fixed_len + va_i));
+        if va_is_chr_literal {
+          self.state.write("(char)");
+        }
+        let va_err = self.emit_expr(*va_arg);
         if va_err.is_some() {
           ret va_err;
         }
@@ -7408,7 +7435,22 @@ impl Codegen {
             }
             self.function_names.push(f.name);
             self.function_param_types.push(param_types);
-            self.function_is_variadic.push(f.is_variadic);
+            // Only a Fun-DEFINED variadic function (`f.has_body`) gets
+            // the `__fun_vtags`-tag-array call-site treatment (see
+            // `emit_call`'s own doc comment) -- a BODYLESS variadic
+            // binding (`std.c.io`'s own `pub fun snprintf(str dst, num
+            // n, str fmt, ...) num;`, e.g.) is a REAL C variadic
+            // function, expecting ORDINARY C varargs, with no `__fun_
+            // vtags` param and no tag array at all. Marking it variadic
+            // here too made `format_dec`'s own `snprintf(buf, 48, fmt,
+            // d)` call pass a tag-array pointer where `%f` expects a
+            // `double`, silently reading garbage (0.0) instead of the
+            // real value -- found via a real stage-2-compiled-by-itself
+            // divergence (every decimal literal came out as 0.0 one
+            // generation further into self-hosting, even though the
+            // exact same source compiles correctly one generation
+            // earlier).
+            self.function_is_variadic.push(f.is_variadic && f.has_body);
             if f.has_rtype {
               self.function_rtypes.push(f.rtype);
             } else {
