@@ -539,10 +539,16 @@ pub compound Codegen {
   // see `examples/advanced/default_params.fn`), so re-emitting the
   // SAME default expression per call site, rather than caching one
   // shared value, is correct, not wasteful. Populated by `register_
-  // impl_methods` alongside `impl_method_param_types`. Deliberately
-  // narrow: not populated for a GENERIC impl's own monomorphized
-  // methods (`maybe_instantiate_generic_impl_methods`) -- combining
-  // defaults with generics isn't reachable by anything ported so far.
+  // impl_methods` alongside `impl_method_param_types` -- and, for a
+  // GENERIC impl's own monomorphized methods, by `maybe_instantiate_
+  // generic_impl_methods` too (`std/channel.fn`'s own real
+  // `select_recv_timeout_with_tuning_cancel(..., num timeout_ms = -1,
+  // ...)`, a `Channel<T>` method with 4 defaulted trailing params,
+  // found via a real "too few arguments" C error one generation into
+  // self-hosting): a default expression needs no type substitution of
+  // its own (it's evaluated fresh at the CALL SITE, never through this
+  // instantiation's substitution context at all), so the template's
+  // own node is recorded as-is, unlike every OTHER field here.
   Vec<Vec<Node *>> impl_method_default_values;
   // A PLAIN top-level function's own name and its parameters' OWN
   // declared types (positional, parallel Vecs) -- lets `emit_call`
@@ -826,6 +832,14 @@ pub compound Codegen {
   // see that branch's own doc comment for why a CALL receiver needs one
   // at all.
   num call_recv_temp_counter;
+  // Unique counter for `emit_fit`'s own call-subject temp-variable
+  // names (`__fit_subj1`, `__fit_subj2`, ...), same reasoning as
+  // `call_recv_temp_counter` just above -- a FIXED name collided with
+  // a C "redefinition" error the moment a function's body had more
+  // than one `fit <call-expression> { ... }` in the same block scope
+  // (`examples/advanced/channel_recv_result.fn`'s own real `main`,
+  // found via a real "redefinition of '__fit_subj'" C error).
+  num fit_subj_temp_counter;
   // Whether ANY `fork` statement appears anywhere in the program being
   // transpiled -- computed once by `uses_fork_in` at the very start of
   // `pub transpile`, before the prelude is written, mirroring the
@@ -916,6 +930,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.call_recv_temp_counter = 0;
+  g.fit_subj_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
@@ -2101,6 +2116,15 @@ impl Codegen {
               DataType* tmpl_rtype = nil;
               Vec<DataType*> tmpl_param_dtypes;
               tmpl_param_dtypes.init(0);
+              // Each param's own default VALUE expression (`nil` when
+              // it has none) -- see `Codegen.impl_method_default_
+              // values`'s own doc comment. A default expression needs
+              // no type substitution (it's evaluated at the CALL SITE,
+              // outside this instantiation's own substitution context
+              // entirely -- see `emit_default_trailing_args`'s doc
+              // comment), so the template's own node is recorded as-is.
+              Vec<Node*> tmpl_default_values;
+              tmpl_default_values.init(0);
               fit m.kind {
                 .Function(fnv) -> {
                   tmpl_name = fnv.name;
@@ -2115,7 +2139,14 @@ impl Codegen {
                         continue;
                       }
                       fit arg.kind {
-                        .Variable(v) -> { tmpl_param_dtypes.push(v.var_type); }
+                        .Variable(v) -> {
+                          tmpl_param_dtypes.push(v.var_type);
+                          if v.has_val {
+                            tmpl_default_values.push(v.val);
+                          } else {
+                            tmpl_default_values.push(nil);
+                          }
+                        }
                         _ -> {}
                       }
                     }
@@ -2161,18 +2192,13 @@ impl Codegen {
                 *recorded_pdt = substituted_pdt;
                 recorded_param_types.push(recorded_pdt);
               }
-              // Defaults + generics isn't a combination anything ported
-              // so far reaches -- see `Codegen.impl_method_default_
-              // values`'s own doc comment.
-              Vec<Node*> no_default_values;
-              no_default_values.init(0);
               self.record_impl_method(
                 mangled_name,
                 bare_name,
                 new_name,
                 recorded_rtype,
                 recorded_param_types,
-                no_default_values
+                tmpl_default_values
               );
             }
 
@@ -6491,11 +6517,11 @@ impl Codegen {
   // once per branch instead of hoisted into a temp variable, safe only
   // because none of them has a side effect when read twice; a CALL
   // subject can't be re-evaluated (a real side effect, e.g. advancing a
-  // cursor) so it's hoisted into ONE `__auto_type __fit_subj = <call>;`
-  // temp declaration first (mirroring `emit_for_iter`'s own fixed-name,
-  // no-real-hygiene `__fun_i` -- a SECOND `fit`-over-a-call nested
-  // inside this one's own branch body would shadow it, an accepted,
-  // narrow limitation, not a silently wrong one), with its bare-
+  // cursor) so it's hoisted into ONE `__auto_type __fit_subjN = <call>;`
+  // temp declaration first (`next_fit_subj_name`'s own counter keeps
+  // each one unique -- two SIBLING `fit`-over-a-call statements in the
+  // same block scope, not just a nested one, both need a fixed name
+  // "__fit_subj" a real C "redefinition" error), with its bare-
   // shorthand enum type resolved from the CALLEE's own declared return
   // type (`Codegen.impl_method_rtype`, populated by
   // `register_impl_methods` -- see its own doc comment for why this is
@@ -6512,6 +6538,14 @@ impl Codegen {
   // bare shorthand with no resolvable subject type, say) is rejected
   // outright rather than falling through to the literal path, which
   // could never validly compare against it anyway.
+  // Next unique name for `emit_fit`'s own call-subject temp
+  // (`__fit_subj1`, `__fit_subj2`, ...) -- see `Codegen.fit_subj_temp_
+  // counter`'s own doc comment.
+  next_fit_subj_name() str {
+    self.fit_subj_temp_counter = self.fit_subj_temp_counter + 1;
+    ret format("__fit_subj{num}", self.fit_subj_temp_counter);
+  }
+
   emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
     str subj_name = "";
     bin subj_is_pointer = false;
@@ -6573,14 +6607,17 @@ impl Codegen {
           if resolved_await_rtype.is_none() {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
-          self.state.write("__auto_type __fit_subj = ");
+          let fit_subj_name1 = self.next_fit_subj_name();
+          self.state.write("__auto_type ");
+          self.state.write(fit_subj_name1);
+          self.state.write(" = ");
           let awerr = self.emit_await(u.operand);
           if awerr.is_some() {
             ret awerr;
           }
           self.state.write(";\n");
           self.state.write_indent();
-          subj_name = "__fit_subj";
+          subj_name = fit_subj_name1;
           subj_type = resolved_await_rtype;
           subj_is_pointer = false;
         } elif u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
@@ -6628,14 +6665,17 @@ impl Codegen {
             if resolved_rtype.is_none() {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
-            self.state.write("__auto_type __fit_subj = ");
+            let fit_subj_name2 = self.next_fit_subj_name();
+            self.state.write("__auto_type ");
+            self.state.write(fit_subj_name2);
+            self.state.write(" = ");
             let cerr = self.emit_expr(*f.exp);
             if cerr.is_some() {
               ret cerr;
             }
             self.state.write(";\n");
             self.state.write_indent();
-            subj_name = "__fit_subj";
+            subj_name = fit_subj_name2;
             subj_type = resolved_rtype;
             subj_is_pointer = false;
           } else {
@@ -6673,14 +6713,17 @@ impl Codegen {
             if resolved_rtype.is_none() {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
-            self.state.write("__auto_type __fit_subj = ");
+            let fit_subj_name3 = self.next_fit_subj_name();
+            self.state.write("__auto_type ");
+            self.state.write(fit_subj_name3);
+            self.state.write(" = ");
             let merr = self.emit_method_call(recv_e, dot_e.right);
             if merr.is_some() {
               ret merr;
             }
             self.state.write(";\n");
             self.state.write_indent();
-            subj_name = "__fit_subj";
+            subj_name = fit_subj_name3;
             subj_type = resolved_rtype;
             subj_is_pointer = false;
           }
@@ -8498,6 +8541,28 @@ impl Codegen {
       .Character(_) -> { ret .Some("chr"); }
       .Boolean(_) -> { ret .Some("bin"); }
       .Expression(e) -> {
+        // A QUALIFIED enum-variant constant (`Job.Quit`, e.g.
+        // `channel_new_cap<T>(T default_value, num capacity)`'s own
+        // real call site `channel_new_cap(Job.Quit, 8)`) infers `T` as
+        // the enum's own name directly -- checked BEFORE the `()` call
+        // case below, since a qualified access and a call share nothing
+        // structurally except both being `.Expression` nodes.
+        if equals(e.op, ".") && e.has_left && e.has_right {
+          fit e.left.kind {
+            .Identifier(enum_name) -> {
+              fit e.right.kind {
+                .Identifier(variant_name) -> {
+                  if self.enum_has_variant(enum_name, variant_name) {
+                    ret .Some(enum_name);
+                  }
+                }
+                _ -> {}
+              }
+            }
+            _ -> {}
+          }
+          ret .None;
+        }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
         }
@@ -12117,9 +12182,9 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
   assert g.emit_statement(n).is_none(), "expected the fit-over-a-method-call to emit";
   assert equals(
     st.out.build(),
-    `__auto_type __fit_subj = Holder__get_opt(&h);
-    `if (__fit_subj.tag == Opt_Some) {
-    `    __auto_type r = __fit_subj.payload.Some._0;
+    `__auto_type __fit_subj1 = Holder__get_opt(&h);
+    `if (__fit_subj1.tag == Opt_Some) {
+    `    __auto_type r = __fit_subj1.payload.Some._0;
     `    return;
     `}
     ``
@@ -12246,8 +12311,8 @@ test "emit_statement emits a fit over a method-call subject with a CHAINED field
   assert g.emit_statement(n).is_none(), "expected the fit over a chained-receiver method call to emit";
   assert equals(
     st.out.build(),
-    `__auto_type __fit_subj = ParseState__token_peek_prev_n(self->state, 1);
-    `if (__fit_subj.tag == Opt_None) {
+    `__auto_type __fit_subj1 = ParseState__token_peek_prev_n(self->state, 1);
+    `if (__fit_subj1.tag == Opt_None) {
     `    return;
     `}
     ``
