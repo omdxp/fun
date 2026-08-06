@@ -2715,6 +2715,26 @@ impl Codegen {
             // spliced mid-identifier, inside an unrelated function's own
             // signature).
             let saved_stmt_start_pos = self.current_stmt_start_pos;
+            // NOT suppressing `suppress_generic_impl_method_draining`
+            // here (unlike `maybe_instantiate_generic_function`'s own
+            // otherwise-identical swap): this function is ONLY ever
+            // called from inside `drain_pending_generic_impl_methods`'s
+            // own loop, which already has `draining_generic_impl_
+            // methods` set for its ENTIRE duration -- so a NESTED
+            // trigger reached from inside THIS method's own body
+            // (`Vec<T>.init()`'s own `self.grow(cap)` call, e.g.) never
+            // takes the "drain immediately, synchronously, while still
+            // nested inside a scratch buffer" path that suppression
+            // exists to prevent in the first place (`ensure_generic_
+            // impl_method_emitted`'s own `if draining || suppress {
+            // ret .None; }` already short-circuits it via `draining`
+            // alone) -- it just enqueues, and the SAME outer loop picks
+            // it up automatically once back at the real buffer. Its own
+            // PROTOTYPE, unlike a suppressed one, gets written
+            // immediately, inline into `method_scratch` right where the
+            // triggering statement is -- correct and safe (matches
+            // `current_stmt_start_pos`'s own per-statement, scratch-
+            // relative tracking, restored below).
             let saved_local_names = self.local_names;
             let saved_local_is_pointer = self.local_is_pointer;
             let saved_local_type_name = self.local_type_name;
@@ -6026,6 +6046,17 @@ impl Codegen {
     bin last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
+      // Armed fresh for EVERY statement, relative to whatever buffer
+      // `self.state` CURRENTLY is -- when that's an isolated scratch
+      // (`method_scratch`, e.g., mid-swap), this correctly tracks a
+      // position WITHIN that scratch, letting a NESTED trigger from
+      // deeper in this same body (`Vec<T>.init()`'s own `self.grow(cap)`
+      // call, e.g.) splice its own inline prototype right into that
+      // SAME scratch, before whichever statement triggered it -- exactly
+      // matching where `self.state` itself is at the time, so the
+      // splice always lands in the right buffer. Restored to the OUTER
+      // (real-buffer) value by the swap's own code once it's done, same
+      // as `hoist_insert_pos`.
       self.current_stmt_start_pos = .Some(self.state.out.len());
       bin is_if = false;
       fit stmt.kind {
