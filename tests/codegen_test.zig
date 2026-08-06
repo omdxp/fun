@@ -17,6 +17,7 @@ const EnvOverride = struct {
 };
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
@@ -54,6 +55,7 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
 /// are type-checked/emitted and a generated runner `main` replaces any
 /// user-defined `main` -- mirrors the `fun test <path>` CLI subcommand.
 fn runTranspileTestMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
@@ -93,6 +95,7 @@ fn runTranspileTestMode(allocator: std.mem.Allocator, input_path: []const u8, in
 /// emitted as a harness function -- mirrors the `fun fuzz <path> [target]`
 /// CLI subcommand.
 fn runTranspileFuzzMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8, fuzz_target: ?[]const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
@@ -128,12 +131,12 @@ fn runTranspileFuzzMode(allocator: std.mem.Allocator, input_path: []const u8, in
 }
 
 fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
+    // `runTranspile` itself now cleans up `input_path` on every path
+    // (success or error) via its own `defer`.
     const out_owned = runTranspile(allocator, input_path, input) catch {
-        std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
         return;
     };
     defer allocator.free(out_owned);
-    std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     return error.ExpectedFailure;
 }
 

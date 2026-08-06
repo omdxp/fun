@@ -495,6 +495,12 @@ pub compound Codegen {
   // args don't go through this lookup yet).
   Vec<str> function_names;
   Vec<Vec<DataType *>> function_param_types;
+  // Whether each registered plain function is variadic (`fun f(str fmt,
+  // ...)`), parallel to `function_names` -- see `emit_call`'s own doc
+  // comment for why a CALL site needs to know this (extra `__fun_vtags`
+  // type-tag argument, plus the real varargs, instead of a plain
+  // argument list).
+  Vec<bin> function_is_variadic;
   // Each entry's OWN declared return type, parallel to `function_names`
   // -- lets `infer_arg_type_name` bind a generic function's type
   // parameter from a call-site argument that's ITSELF a call to an
@@ -604,6 +610,12 @@ pub compound Codegen {
   // one is about ONE specific already-non-generic method, never a
   // per-instantiation monomorphization).
   Vec<str> emitted_plain_method_protos;
+  // Every PLAIN top-level FUNCTION (not an impl method) that already got
+  // its own inline forward-declared bare prototype from `ensure_plain_
+  // function_prototype_emitted`, keyed by its own bare name -- same
+  // reasoning as `emitted_plain_method_protos`, just for a plain
+  // function instead of a method (no `owner_type`/`self` involved).
+  Vec<str> emitted_plain_function_protos;
   // A FIFO work queue of (owner mangled name, bare method name) pairs
   // still needing their actual prototype+body emitted -- see `ensure_
   // generic_impl_method_emitted`'s own doc comment for why this can't
@@ -784,6 +796,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_param_types.init(0);
   g.function_names.init(0);
   g.function_param_types.init(0);
+  g.function_is_variadic.init(0);
   g.function_rtypes.init(0);
   g.generic_function_templates.init(0);
   g.generic_compound_names.init(0);
@@ -806,6 +819,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.instantiation_arg_dtypes.init(0);
   g.emitted_generic_impl_methods.init(0);
   g.emitted_plain_method_protos.init(0);
+  g.emitted_plain_function_protos.init(0);
   g.pending_generic_impl_method_owner.init(0);
   g.pending_generic_impl_method_bare.init(0);
   g.pending_generic_impl_method_proto_written.init(0);
@@ -896,6 +910,32 @@ fun uses_fork_in(Vec<Node> nodes) bin {
     }
   }
   ret false;
+}
+
+// Adjusts a tracked buffer position (`hoist_insert_pos`/`current_stmt_
+// start_pos`, or a plain LOCAL that captured one of them mid-function)
+// for a splice that just happened at `splice_at`, `splice_len` bytes
+// long: any tracked position AT OR AFTER the splice point shifts right
+// by `splice_len` (everything from `splice_at` onward moved to make
+// room for the inserted text); a position strictly BEFORE it is
+// unaffected. `emit_hoisted` already applies this automatically to
+// `self.current_stmt_start_pos` on every splice -- this same adjustment
+// is also needed, by hand, for any LOCAL variable that captured a
+// position (`saved_proto_hoist_pos`, e.g.) BEFORE a splice happened at
+// an earlier-or-equal position, then gets restored to `self.hoist_
+// insert_pos` AFTER -- a plain captured local has no way to get this
+// automatically. Found via a real stage-2 self-compilation C error (a
+// generic impl method's own FULL BODY spliced mid-statement, inside an
+// unrelated function -- its own captured "restore to" position had
+// gone stale by exactly one earlier splice's length).
+fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Option<num> {
+  if pos.is_none() {
+    ret pos;
+  }
+  if splice_at <= pos.unwrap() {
+    ret .Some(pos.unwrap() + splice_len);
+  }
+  ret pos;
 }
 
 // True when `dt` is a pointer of any depth -- mirrors `write_type`'s own
@@ -1198,19 +1238,14 @@ impl Codegen {
     self.hoist_insert_pos = .Some(pos + len(text));
     // `current_stmt_start_pos` (see its own doc comment) is ANOTHER
     // tracked position against this SAME buffer, measured independently
-    // of `hoist_insert_pos` -- a splice landing at or before it (always
-    // true: a hoisted definition only ever lands BEFORE or AT the
-    // current statement, never after) shifts everything from `pos`
-    // onward by `text`'s own length, same as it does for `hoist_insert_
-    // pos` just above. Left un-advanced, it goes stale the instant a
-    // SECOND splice (a generic method's own prototype, then its full
-    // body, e.g.) happens at an earlier-or-equal position before a
-    // caller reads it -- found via a real stage-2 self-compilation C
-    // error (a receiver-temp declaration spliced mid-identifier, deep
-    // inside an unrelated function's own signature).
-    if self.current_stmt_start_pos.is_some() && pos <= self.current_stmt_start_pos.unwrap() {
-      self.current_stmt_start_pos = .Some(self.current_stmt_start_pos.unwrap() + len(text));
-    }
+    // of `hoist_insert_pos` -- see `adjust_pos_after_splice`'s own doc
+    // comment for why it needs the same shift `hoist_insert_pos` just
+    // got above.
+    self.current_stmt_start_pos = adjust_pos_after_splice(
+      self.current_stmt_start_pos,
+      pos,
+      len(text)
+    );
   }
 
   // Given a DataType with `generic_args` non-empty (`Box<num>`),
@@ -2165,8 +2200,28 @@ impl Codegen {
             self.state.write_indent();
             self.emit_generic_impl_method_prototype(*m, new_name);
             self.state = saved_proto_state;
-            self.hoist_insert_pos = self.current_stmt_start_pos;
-            self.emit_hoisted(proto_scratch.out.build());
+            let proto_splice_pos = self.current_stmt_start_pos;
+            self.hoist_insert_pos = proto_splice_pos;
+            str proto_text = proto_scratch.out.build();
+            self.emit_hoisted(proto_text);
+            // `saved_proto_hoist_pos` is a plain captured LOCAL, not
+            // `self.current_stmt_start_pos` -- `emit_hoisted` only
+            // auto-adjusts the latter. See `adjust_pos_after_splice`'s
+            // own doc comment for why this splice (at `proto_splice_
+            // pos`, NOT at `saved_proto_hoist_pos`'s own position) can
+            // still invalidate it: found via a real stage-2 self-
+            // compilation C error (a generic impl method's own full
+            // body landing mid-statement, inside a DIFFERENT, unrelated
+            // function -- restoring this stale, un-adjusted local put
+            // that later splice too early by exactly this prototype's
+            // own length).
+            if proto_splice_pos.is_some() {
+              saved_proto_hoist_pos = adjust_pos_after_splice(
+                saved_proto_hoist_pos,
+                proto_splice_pos.unwrap(),
+                len(proto_text)
+              );
+            }
             self.hoist_insert_pos = saved_proto_hoist_pos;
 
             self.type_subst_param_names = prev_params;
@@ -2318,9 +2373,135 @@ impl Codegen {
       self.state.write(");\n");
     }
     self.state = saved_pm_state;
-    self.hoist_insert_pos = self.current_stmt_start_pos;
-    self.emit_hoisted(pm_scratch.out.build());
+    // See `adjust_pos_after_splice`'s own doc comment (via `emit_
+    // generic_impl_method_prototype_now`'s identical fix) for why
+    // `saved_pm_hoist_pos` -- a plain captured local, not `self.
+    // current_stmt_start_pos` -- needs manual adjustment for this
+    // splice, not just `emit_hoisted`'s own automatic one.
+    let pm_splice_pos = self.current_stmt_start_pos;
+    self.hoist_insert_pos = pm_splice_pos;
+    str pm_text = pm_scratch.out.build();
+    self.emit_hoisted(pm_text);
+    if pm_splice_pos.is_some() {
+      saved_pm_hoist_pos = adjust_pos_after_splice(
+        saved_pm_hoist_pos,
+        pm_splice_pos.unwrap(),
+        len(pm_text)
+      );
+    }
     self.hoist_insert_pos = saved_pm_hoist_pos;
+  }
+
+  // Ensures a PLAIN top-level FUNCTION (not an impl method) has an
+  // inline bare prototype declared right before its OWN first call
+  // site, when its signature was too UNSAFE for the early forward-
+  // declare pass to cover it (see `prototype_type_is_unsafe_early`'s own
+  // doc comment -- a generic return/param type, e.g. `_dtype_
+  // references_any_param(DataType* dt, Vec<str> params)`'s own `Vec<
+  // str>` parameter) -- such a function falls back to relying on
+  // natural source order, which breaks the moment it's called from
+  // another plain function defined EARLIER in the same file (a self-
+  // recursive helper, e.g., or a forward-referenced sibling). Mirrors
+  // `ensure_plain_impl_method_prototype_emitted` exactly, just sourced
+  // from the plain-function registry (`function_rtypes`/`function_
+  // param_types`) instead of the impl-method one, and with no `self`
+  // param to prepend. See that function's own doc comment for the
+  // shared reasoning (suppress-during-probe guard, splice position,
+  // memoization, the `has_fn_sig` param bail).
+  ensure_plain_function_prototype_emitted(str fn_name) {
+    if self.suppress_generic_impl_method_draining {
+      ret;
+    }
+    num pfi = 0;
+    for pfi < self.emitted_plain_function_protos.len {
+      if equals(self.emitted_plain_function_protos.get(pfi), fn_name) {
+        ret;
+      }
+      pfi = pfi + 1;
+    }
+
+    num fi = 0;
+    bin found_pf = false;
+    for fi < self.function_names.len {
+      if equals(self.function_names.get(fi), fn_name) {
+        found_pf = true;
+        break;
+      }
+      fi = fi + 1;
+    }
+    if !found_pf {
+      ret;
+    }
+    DataType* pf_rtype = self.function_rtypes.get(fi);
+    if pf_rtype == nil {
+      ret;
+    }
+    let pf_param_types = self.function_param_types.get(fi);
+    for pf_pt : pf_param_types {
+      if pf_pt.has_fn_sig {
+        ret;
+      }
+    }
+
+    bin pf_unsafe = self.prototype_type_is_unsafe_early(*pf_rtype);
+    if !pf_unsafe {
+      for pf_pt2 : pf_param_types {
+        if self.prototype_type_is_unsafe_early(*pf_pt2) {
+          pf_unsafe = true;
+        }
+      }
+    }
+    if !pf_unsafe {
+      ret;
+    }
+
+    self.emitted_plain_function_protos.push(fn_name);
+
+    self.resolve_type_name(*pf_rtype);
+    for pf_pt3 : pf_param_types {
+      self.resolve_type_name(*pf_pt3);
+    }
+
+    CodegenState pf_scratch = codegen_state_new();
+    CodegenState* saved_pf_state = self.state;
+    let saved_pf_hoist_pos = self.hoist_insert_pos;
+    pf_scratch.indent_level = saved_pf_state.indent_level;
+    self.state = &pf_scratch;
+    self.hoist_insert_pos = .None;
+    self.state.write_indent();
+    let pf_rt = self.write_type(*pf_rtype);
+    if pf_rt.is_some() {
+      self.state.write(" ");
+      self.state.write(fn_name);
+      self.state.write("(");
+      bin pf_first = true;
+      for pf_pt4 : pf_param_types {
+        if !pf_first {
+          self.state.write(", ");
+        }
+        pf_first = false;
+        self.write_type(*pf_pt4);
+      }
+      if pf_first {
+        self.state.write("void");
+      }
+      self.state.write(");\n");
+    }
+    self.state = saved_pf_state;
+    // See `adjust_pos_after_splice`'s own doc comment for why
+    // `saved_pf_hoist_pos` needs manual adjustment here too.
+    let pf_splice_pos = self.current_stmt_start_pos;
+    self.hoist_insert_pos = pf_splice_pos;
+    str pf_text = pf_scratch.out.build();
+    self.emit_hoisted(pf_text);
+    if pf_splice_pos.is_some() {
+      saved_pf_hoist_pos = adjust_pos_after_splice(
+        saved_pf_hoist_pos,
+        pf_splice_pos.unwrap(),
+        len(pf_text)
+      );
+    }
+    self.hoist_insert_pos = saved_pf_hoist_pos;
   }
 
   // Lazily emits ONE concrete monomorphization of a generic impl
@@ -3445,6 +3626,107 @@ impl Codegen {
     defer args.free();
     self.flatten_call_args(e.right, &args);
 
+    // A call to a known VARIADIC plain function (`format("...", a, b)`,
+    // `fun format(str fmt, ...)`'s own real call sites) needs an EXTRA
+    // trailing argument beyond its own real varargs: a `__fun_vtags`
+    // type-tag string, one character per vararg (built via the `__fun_
+    // tag(x)` `_Generic` macro -- see `write_prelude`'s own doc comment),
+    // that the callee's own body-prefix shim (`emit_function_named`'s
+    // own doc comment) reads back with `va_arg` to stringify each one
+    // into a `Vec<str>` named `vargs`. Each vararg expression is bound
+    // to its own `__auto_type __fun_va_N` temp FIRST (inside a GNU C
+    // statement expression, since this needs to declare locals but is
+    // itself used as a plain expression) -- it's read TWICE below (once
+    // tagged, once passed as the real argument), and a call/side-
+    // effecting expression must not be evaluated twice. Matches the
+    // original transpiler's own identical lowering exactly (minus its
+    // `Display`-trait dispatch for a non-builtin vararg value --
+    // deliberately narrow here, see `emit_function_named`'s own doc
+    // comment for why that's safe to skip for this codegen's real call
+    // graph). Found via a real stage-2 self-compilation C error ("use of
+    // undeclared identifier 'vargs'") for `std/io.fn`'s own real `format`/
+    // `print_fmt`/`println_fmt` bodies.
+    let var_fixed_len = self.lookup_function_variadic_fixed_len(callee_name);
+    if var_fixed_len.is_some() {
+      num fixed_len = var_fixed_len.unwrap();
+      num var_len = 0;
+      if args.len > fixed_len {
+        var_len = args.len - fixed_len;
+      }
+      if var_len == 0 {
+        self.state.write(callee_name);
+        self.state.write("(");
+        num vc_i = 0;
+        for vc_i < fixed_len {
+          if vc_i > 0 {
+            self.state.write(", ");
+          }
+          let vc_err = self.emit_expr(*args.get(vc_i));
+          if vc_err.is_some() {
+            ret vc_err;
+          }
+          vc_i = vc_i + 1;
+        }
+        if fixed_len > 0 {
+          self.state.write(", ");
+        }
+        self.state.write("(const char[]){0})");
+        ret .None;
+      }
+      self.state.write("({ ");
+      num va_i = 0;
+      for va_i < var_len {
+        self.state.write("__auto_type __fun_va_");
+        self.state.write(format_num(va_i));
+        self.state.write(" = ");
+        let va_err = self.emit_expr(*args.get(fixed_len + va_i));
+        if va_err.is_some() {
+          ret va_err;
+        }
+        self.state.write("; ");
+        va_i = va_i + 1;
+      }
+      self.state.write(callee_name);
+      self.state.write("(");
+      num vf_i = 0;
+      for vf_i < fixed_len {
+        if vf_i > 0 {
+          self.state.write(", ");
+        }
+        let vf_err = self.emit_expr(*args.get(vf_i));
+        if vf_err.is_some() {
+          ret vf_err;
+        }
+        vf_i = vf_i + 1;
+      }
+      if fixed_len > 0 {
+        self.state.write(", ");
+      }
+      self.state.write("(const char[]){");
+      num vt_i = 0;
+      for vt_i < var_len {
+        if vt_i > 0 {
+          self.state.write(", ");
+        }
+        self.state.write("__fun_tag(__fun_va_");
+        self.state.write(format_num(vt_i));
+        self.state.write(")");
+        vt_i = vt_i + 1;
+      }
+      if var_len > 0 {
+        self.state.write(", ");
+      }
+      self.state.write("0}");
+      num vp_i = 0;
+      for vp_i < var_len {
+        self.state.write(", __fun_va_");
+        self.state.write(format_num(vp_i));
+        vp_i = vp_i + 1;
+      }
+      self.state.write("); })");
+      ret .None;
+    }
+
     // `__fun_key_eq(a, b)`/`__fun_key_hash(x)` are compiler INTRINSICS
     // (special-cased plain-function-call names, not real functions) used
     // by `std/map.fn`/`std/set.fn`'s own generic `impl Map<K, V>`/`impl
@@ -3593,6 +3875,14 @@ impl Codegen {
     let generic_inst = self.maybe_instantiate_generic_function(callee_name, args);
     if generic_inst.is_some() {
       callee_name = generic_inst.unwrap().mangled_name;
+    } else {
+      // See `ensure_plain_function_prototype_emitted`'s own doc comment:
+      // a NON-generic plain function's signature can still be unsafe for
+      // the early forward-declare pass. Only reached for the already-
+      // non-generic case (`generic_inst.is_none()`) -- a generic
+      // function's own prototype+body is handled entirely by `maybe_
+      // instantiate_generic_function` above instead.
+      self.ensure_plain_function_prototype_emitted(callee_name);
     }
     self.state.write(callee_name);
     self.state.write("(");
@@ -3761,8 +4051,19 @@ impl Codegen {
       recv_tmp_stmt_sb.append(";\n");
 
       let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
-      self.hoist_insert_pos = self.current_stmt_start_pos;
-      self.emit_hoisted(recv_tmp_stmt_sb.build());
+      let recv_tmp_splice_pos = self.current_stmt_start_pos;
+      self.hoist_insert_pos = recv_tmp_splice_pos;
+      str recv_tmp_text = recv_tmp_stmt_sb.build();
+      self.emit_hoisted(recv_tmp_text);
+      // See `adjust_pos_after_splice`'s own doc comment for why
+      // `saved_recv_tmp_hoist_pos` needs manual adjustment here too.
+      if recv_tmp_splice_pos.is_some() {
+        saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
+          saved_recv_tmp_hoist_pos,
+          recv_tmp_splice_pos.unwrap(),
+          len(recv_tmp_text)
+        );
+      }
       self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
 
       self.state.write("&");
@@ -6441,8 +6742,20 @@ impl Codegen {
               ret aerr;
             }
           }
-        } else {
+        } elif !f.is_variadic {
           self.state.write("void");
+        }
+        // A variadic function (`fun f(str fmt, ...)`) gets TWO extra
+        // trailing C params beyond its own named ones: `const char*
+        // __fun_vtags` (a per-call type-tag string, one char per vararg,
+        // NUL-terminated -- built at each CALL site, see `emit_call`'s
+        // own doc comment) then the real `...`. Matches the original
+        // transpiler's own identical signature shape exactly.
+        if f.is_variadic {
+          if f.has_args && f.args.len > 0 {
+            self.state.write(", ");
+          }
+          self.state.write("const char* __fun_vtags, ...");
         }
         // A bodyless function (`;`-only, e.g. every `std.c.*` binding --
         // `malloc`, `pthread_mutex_init`, ...) is a signature-only
@@ -6461,6 +6774,92 @@ impl Codegen {
         }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
+        // A variadic function's own body always starts by unpacking its
+        // real varargs (via `__fun_vtags`/C's own `va_arg`) into a
+        // `Vec<str>` named `vargs` -- `vargs` is a synthetic, scope-
+        // registered-but-never-declared local the PARSER already
+        // recognizes (see `parser.fn`'s own `_parse_impl_method`/
+        // function-parsing doc comment on `is_variadic`), so the body
+        // can read it by name; this is what actually materializes it.
+        // Every vararg gets STRINGIFIED (via `fmt_num`/`fmt_dec`/
+        // `fmt_bin`/`fmt_chr`/`fmt_raw`, matching each `__fun_tag`
+        // character `emit_call`'s own call-site tagging writes) rather
+        // than kept as its own native C type -- `vargs` is always a
+        // `Vec<str>`, matching `format_impl`'s own real body (a
+        // placeholder-substitution loop over `{str}`-shaped tokens, no
+        // per-type dispatch of its own). Mirrors the original
+        // transpiler's own identical shim exactly. No `Display`-trait
+        // dispatch for a non-builtin vararg value (the original's OWN
+        // fuller version has one) -- deliberately narrow for this
+        // slice: every real vararg reaching this codegen's own call
+        // graph is a builtin scalar (`str`/`num`/`chr`), confirmed by
+        // inspection.
+        if f.is_variadic {
+          self.state.write_indent();
+          self.state.write("Vec__str vargs;\n");
+          self.state.write_indent();
+          self.state.write("vargs.len = 0; vargs.cap = 0; vargs.data = NULL;\n");
+          self.state.write_indent();
+          self.state.write("if (__fun_vtags) {\n");
+          self.state.indent_level = self.state.indent_level + 1;
+          self.state.write_indent();
+          self.state.write("size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n");
+          self.state.write_indent();
+          self.state.write("vargs.len = (int64_t)__fun_vc; vargs.cap = (int64_t)__fun_vc;\n");
+          self.state.write_indent();
+          self.state.write("if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n");
+          self.state.write_indent();
+          self.state.write("va_list __fun_ap; va_start(__fun_ap, __fun_vtags);\n");
+          self.state.write_indent();
+          self.state.write("size_t __fun_vi = 0; while (__fun_vi < __fun_vc) {\n");
+          self.state.indent_level = self.state.indent_level + 1;
+          self.state.write_indent();
+          self.state.write("char __fun_tagc = __fun_vtags[__fun_vi];\n");
+          self.state.write_indent();
+          self.state.write("switch (__fun_tagc) {\n");
+          self.state.indent_level = self.state.indent_level + 1;
+          self.state.write_indent();
+          self.state.write("case 's': vargs.data[__fun_vi] = va_arg(__fun_ap, char*); break;\n");
+          self.state.write_indent();
+          self.state.write("case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n");
+          self.state.write_indent();
+          self.state.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
+          self.state.write_indent();
+          self.state.write("case 'b': vargs.data[__fun_vi] = fmt_bin((bool)va_arg(__fun_ap, int)); break;\n");
+          self.state.write_indent();
+          self.state.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
+          self.state.write_indent();
+          self.state.write("case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.write_indent();
+          self.state.write("default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.indent_level = self.state.indent_level - 1;
+          self.state.write_indent();
+          self.state.write("}\n");
+          self.state.write_indent();
+          self.state.write("__fun_vi = __fun_vi + 1;\n");
+          self.state.indent_level = self.state.indent_level - 1;
+          self.state.write_indent();
+          self.state.write("}\n");
+          self.state.write_indent();
+          self.state.write("va_end(__fun_ap);\n");
+          self.state.indent_level = self.state.indent_level - 1;
+          self.state.write_indent();
+          self.state.write("}\n");
+          // Recorded as a known LOCAL so the body's own reads of `vargs`
+          // (`vargs.len`, `vargs.get(i)`, ...) resolve like any other
+          // `Vec<str>` value would -- `resolve_type_name` ensures `Vec__
+          // str` is actually instantiated regardless of program order
+          // (usually already is, `Vec<str>` being ubiquitous, but not
+          // guaranteed).
+          DataType* vargs_str_arg = malloc(sizeof(DataType));
+          *vargs_str_arg = dtype_new();
+          vargs_str_arg.type_str = "str";
+          DataType vargs_dt = dtype_new();
+          vargs_dt.type_str = "Vec";
+          vargs_dt.generic_args.push(vargs_str_arg);
+          self.resolve_type_name(vargs_dt);
+          self.record_local_typed("vargs", "Vec__str", false, vargs_dt);
+        }
         let saved_in_main = self.in_main;
         self.in_main = is_main;
         let berr = self.emit_body(*f.body);
@@ -6943,6 +7342,7 @@ impl Codegen {
             }
             self.function_names.push(f.name);
             self.function_param_types.push(param_types);
+            self.function_is_variadic.push(f.is_variadic);
             if f.has_rtype {
               self.function_rtypes.push(f.rtype);
             } else {
@@ -6953,6 +7353,25 @@ impl Codegen {
         _ -> {}
       }
     }
+  }
+
+  // Looks up `fn_name`'s own FIXED (named, non-`...`) argument count when
+  // it's a known, registered VARIADIC plain function -- see `emit_call`'s
+  // own doc comment for how a call site uses this. `.None` means either
+  // the function isn't registered at all, or it IS but isn't variadic
+  // (an ordinary call, no special handling needed).
+  lookup_function_variadic_fixed_len(str fn_name) Option<num> {
+    num i = 0;
+    for i < self.function_names.len {
+      if equals(self.function_names.get(i), fn_name) {
+        if self.function_is_variadic.get(i) {
+          ret .Some(self.function_param_types.get(i).len);
+        }
+        ret .None;
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 
   // Looks up `fn_name`'s OWN declared return type -- see
@@ -7352,13 +7771,34 @@ impl Codegen {
               // overwriting it with a position measured against THIS
               // scratch buffer.
               let saved_stmt_start_pos = self.current_stmt_start_pos;
+              // Also suspended, same as `resolve_field_chain`'s own
+              // call-as-receiver probe: without this, a generic impl
+              // method reached for the FIRST time from inside THIS
+              // function's own body (`set_init<T>`'s real body calling
+              // `Map<K, V>.init()`, e.g.) gets DRAINED immediately --
+              // its own prototype+FULL BODY splice falls back to "append
+              // at self.state's current tail" (since `hoist_insert_pos`/
+              // `current_stmt_start_pos` are BOTH suspended here already)
+              // -- which, since `self.state` still points at THIS
+              // scratch, lands the drained method's own full definition
+              // NESTED inside this function's own `{ }` -- a hard C
+              // syntax error ("function definition is not allowed
+              // here"). Only ENQUEUED while suppressed; drained
+              // explicitly below, once `self.state`/`hoist_insert_pos`
+              // are back to the real ones. Found via a real stage-2
+              // self-compilation C error for exactly this shape (`set_
+              // init<T>` monomorphized to `str`, calling `Map<str,
+              // bin>.init()` for the first time).
+              let prev_suppress2 = self.suppress_generic_impl_method_draining;
               self.state = &scratch;
               self.hoist_insert_pos = .None;
               self.current_stmt_start_pos = .None;
+              self.suppress_generic_impl_method_draining = true;
               self.emit_function_named(tmpl, mangled_name);
               self.state = saved_state;
               self.hoist_insert_pos = saved_hoist_pos;
               self.current_stmt_start_pos = saved_stmt_start_pos;
+              self.suppress_generic_impl_method_draining = prev_suppress2;
               self.local_names = saved_local_names;
               self.local_is_pointer = saved_local_is_pointer;
               self.local_type_name = saved_local_type_name;
@@ -7368,6 +7808,32 @@ impl Codegen {
               self.defer_stack = saved_defer_stack;
               self.defer_scope_starts = saved_defer_scope_starts;
               self.emit_hoisted(scratch.out.build());
+              if !prev_suppress2 && !self.draining_generic_impl_methods {
+                // A method enqueued from INSIDE the just-spliced `scratch`
+                // text (`tmpl`'s own body, e.g. `set_init<T>` calling
+                // `Map<K, V>.init()` for the first time) needs its own
+                // inline prototype findable from BEFORE `scratch`'s own
+                // text -- not `self.hoist_insert_pos`'s CURRENT value
+                // (`saved_hoist_pos` already advanced past `scratch`'s
+                // own just-spliced length by the `emit_hoisted` call
+                // directly above), which would land the prototype AFTER
+                // `scratch`, too late for the CALL inside its own body to
+                // reach it. `saved_hoist_pos` (captured before that
+                // splice, still `scratch`'s own pre-splice position) is
+                // the right target -- realigned here ONLY for the
+                // duration of this drain, restored to the outer
+                // statement's own position afterward so nothing leaks to
+                // whatever called this function. `emit_one_generic_impl_
+                // method`'s own FULL BODY splice (unlike the prototype)
+                // still correctly uses `self.hoist_insert_pos` directly
+                // (now past `scratch`), landing right AFTER it -- exactly
+                // where a definition (as opposed to a mere forward
+                // declaration) is expected to go.
+                let saved_stmt_start_pos_for_drain = self.current_stmt_start_pos;
+                self.current_stmt_start_pos = saved_hoist_pos;
+                self.drain_pending_generic_impl_methods();
+                self.current_stmt_start_pos = saved_stmt_start_pos_for_drain;
+              }
             }
 
             self.type_subst_param_names = prev_params;
@@ -7588,6 +8054,43 @@ impl Codegen {
     // every other prelude helper here.
     self.state.write("static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }\n");
     self.state.write("static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }\n");
+    // `__fun_tag(x)` maps a single vararg's own C type to the one-
+    // character tag `emit_call`'s own call-site tagging embeds in
+    // `__fun_vtags` (see `emit_function_named`'s own doc comment for the
+    // callee-side unpacking that reads it back) -- matching the original
+    // transpiler's own identical macro exactly.
+    self.state.write("#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n");
+    // Directory iteration/creation/kind-check helpers for `std.c.dirent`
+    // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
+    // libc directory APIs differ enough across platforms (POSIX opendir/
+    // readdir/DIR* vs. Win32 FindFirstFile/FindNextFile) that hand-
+    // written wrappers -- same approach as `stdout_stream` above -- are
+    // the portable option, each signature matched to a Fun type exactly
+    // (`void*` <-> `raw*`, `long long` <-> `num`, `char*`/`const char*`
+    // <-> `str`). Matches the original transpiler's own identical
+    // prelude helpers exactly, both platform branches. Found via a real
+    // stage-2 self-compilation C error ("call to undeclared function
+    // '__fun_dir_open'") for `std/fs.fn`'s own real directory-walking
+    // bodies.
+    self.state.write("#ifdef _WIN32\n");
+    self.state.write("#include <windows.h>\n");
+    self.state.write("#include <direct.h>\n");
+    self.state.write("#include <sys/stat.h>\n");
+    self.state.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
+    self.state.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), \"%s\\\\*\", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }\n");
+    self.state.write("static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }\n");
+    self.state.write("static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }\n");
+    self.state.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }\n");
+    self.state.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }\n");
+    self.state.write("#else\n");
+    self.state.write("#include <dirent.h>\n");
+    self.state.write("#include <sys/stat.h>\n");
+    self.state.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }\n");
+    self.state.write("static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }\n");
+    self.state.write("static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }\n");
+    self.state.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }\n");
+    self.state.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }\n");
+    self.state.write("#endif\n");
     // The compiler's own private thread primitive -- always emitted,
     // regardless of whether this program uses `fork`/`async`/channels.
     // `await`/`fork` support (ported next) build directly on
@@ -7982,7 +8485,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          if !f.has_type_params && !self.is_std_c_signature_node(n) && !equals(f.name, "main") && self.function_prototype_is_safe_early(n) {
+          if !f.has_type_params && !self.is_std_c_signature_node(n) && !equals(f.name, "main") && !f.is_variadic && self.function_prototype_is_safe_early(n) {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function_prototype(n);
             if ferr.is_some() {
@@ -12240,6 +12743,26 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stdin_stream(void){ return stdin; }
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
+    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `#include <direct.h>
+    `#include <sys/stat.h>
+    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
+    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
+    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
+    `#else
+    `#include <dirent.h>
+    `#include <sys/stat.h>
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
+    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
+    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
+    `#endif
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
@@ -12451,6 +12974,26 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static FILE* stdin_stream(void){ return stdin; }
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
+    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `#include <direct.h>
+    `#include <sys/stat.h>
+    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
+    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
+    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
+    `#else
+    `#include <dirent.h>
+    `#include <sys/stat.h>
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
+    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
+    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
+    `#endif
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
@@ -13541,6 +14084,26 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static FILE* stdin_stream(void){ return stdin; }
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
+    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `#ifdef _WIN32
+    `#include <windows.h>
+    `#include <direct.h>
+    `#include <sys/stat.h>
+    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
+    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
+    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
+    `#else
+    `#include <dirent.h>
+    `#include <sys/stat.h>
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
+    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
+    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
+    `#endif
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
