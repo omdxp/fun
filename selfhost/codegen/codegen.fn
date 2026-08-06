@@ -258,6 +258,14 @@ compound ChainResolution {
   str type_name;
   bin is_pointer;
   Option<DataType> dtype;
+  // True only when `text` is a CALL's own rendered text (an RVALUE),
+  // set by `resolve_field_chain`'s call-as-receiver branch -- see its
+  // own doc comment. A caller that needs to take `&text` (`emit_method_
+  // call`'s non-pointer-receiver case) must hoist it into an
+  // addressable temp FIRST; every other resolution path leaves this
+  // false, `text` already a genuine addressable lvalue (a local name,
+  // or a chain of `.field`s off one).
+  bin is_call_result;
 }
 
 // The result of monomorphizing a generic function CALL (see
@@ -588,6 +596,14 @@ pub compound Codegen {
   // `"<mangled_name>::<bare_method_name>"` -- see `ensure_generic_impl_
   // method_emitted`'s own doc comment.
   Vec<str> emitted_generic_impl_methods;
+  // Every PLAIN (non-generic) impl method that already got its own
+  // inline forward-declared bare prototype from `ensure_plain_impl_
+  // method_prototype_emitted`, keyed `"<owner_type>::<bare_name>"` --
+  // see that function's own doc comment. Kept separate from `emitted_
+  // generic_impl_methods` (different key shape, different meaning: this
+  // one is about ONE specific already-non-generic method, never a
+  // per-instantiation monomorphization).
+  Vec<str> emitted_plain_method_protos;
   // A FIFO work queue of (owner mangled name, bare method name) pairs
   // still needing their actual prototype+body emitted -- see `ensure_
   // generic_impl_method_emitted`'s own doc comment for why this can't
@@ -701,6 +717,23 @@ pub compound Codegen {
   // from inside gets spliced in just before that enclosing item instead
   // -- see `emit_hoisted`'s doc comment for the actual splice mechanism.
   Option<num> hoist_insert_pos;
+  // Position right before the CURRENTLY-executing statement's own first
+  // character -- updated by `emit_statements` before dispatching each
+  // statement in a body (including nested bodies, e.g. an `if`/`for`
+  // block's own statements). Lets a lazily-triggered generic-impl-method
+  // PROTOTYPE (`emit_generic_impl_method_prototype_now`) land as its own
+  // separate declaration statement right before the CURRENT one, rather
+  // than at `self.state`'s live tail -- safe when the current statement
+  // hasn't started yet, but wrong the moment ANYTHING'S already been
+  // written for it (`__auto_type line = <here>`), which would otherwise
+  // split one statement into two, invalid C. `.None` outside any
+  // statement list (mirrors `hoist_insert_pos`'s own `.None` meaning).
+  Option<num> current_stmt_start_pos;
+  // Unique counter for `resolve_field_chain`'s own call-as-receiver
+  // temp-variable names (`__fun_recv_tmp0`, `__fun_recv_tmp1`, ...) --
+  // see that branch's own doc comment for why a CALL receiver needs one
+  // at all.
+  num call_recv_temp_counter;
   // Whether ANY `fork` statement appears anywhere in the program being
   // transpiled -- computed once by `uses_fork_in` at the very start of
   // `pub transpile`, before the prelude is written, mirroring the
@@ -709,6 +742,20 @@ pub compound Codegen {
   // is a later slice of this port); `write_prelude` currently always
   // emits the plain, scheduler-less watchdog.
   bin uses_fork;
+  // True while emitting `main`'s own body -- `.StatementReturn`
+  // consults this to decide whether `ret <expr>;` can write the real
+  // expression (only when `main`'s OWN declared return type is a
+  // scalar `num`) or must discard it entirely (any other declared
+  // type, matching `main`'s forced-`int` C signature -- see
+  // `emit_function_named`'s own doc comment: returning a STRUCT/enum
+  // value from a function C itself declares to return `int` is a
+  // real compile error, not just an implicit-narrowing warning).
+  // Saved/restored around any NESTED function-body emission (a
+  // lazily-triggered generic method/plain type dependency reached
+  // from inside `main`'s own body) the same way `current_fn_rtype_
+  // name`/`_dt` already are, so that unrelated inner function's OWN
+  // `ret` statements never inherit `main`'s special handling.
+  bin in_main;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -758,6 +805,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.instantiation_arg_is_pointer.init(0);
   g.instantiation_arg_dtypes.init(0);
   g.emitted_generic_impl_methods.init(0);
+  g.emitted_plain_method_protos.init(0);
   g.pending_generic_impl_method_owner.init(0);
   g.pending_generic_impl_method_bare.init(0);
   g.pending_generic_impl_method_proto_written.init(0);
@@ -769,6 +817,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
   g.hoist_insert_pos = .None;
+  g.current_stmt_start_pos = .None;
+  g.call_recv_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
@@ -776,6 +826,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
+  g.in_main = false;
   ret g;
 }
 
@@ -1145,6 +1196,21 @@ impl Codegen {
     rebuilt.append(tail);
     self.state.out = rebuilt;
     self.hoist_insert_pos = .Some(pos + len(text));
+    // `current_stmt_start_pos` (see its own doc comment) is ANOTHER
+    // tracked position against this SAME buffer, measured independently
+    // of `hoist_insert_pos` -- a splice landing at or before it (always
+    // true: a hoisted definition only ever lands BEFORE or AT the
+    // current statement, never after) shifts everything from `pos`
+    // onward by `text`'s own length, same as it does for `hoist_insert_
+    // pos` just above. Left un-advanced, it goes stale the instant a
+    // SECOND splice (a generic method's own prototype, then its full
+    // body, e.g.) happens at an earlier-or-equal position before a
+    // caller reads it -- found via a real stage-2 self-compilation C
+    // error (a receiver-temp declaration spliced mid-identifier, deep
+    // inside an unrelated function's own signature).
+    if self.current_stmt_start_pos.is_some() && pos <= self.current_stmt_start_pos.unwrap() {
+      self.current_stmt_start_pos = .Some(self.current_stmt_start_pos.unwrap() + len(text));
+    }
   }
 
   // Given a DataType with `generic_args` non-empty (`Box<num>`),
@@ -2019,7 +2085,89 @@ impl Codegen {
             nb.append(bare_name);
             str new_name = nb.build();
 
+            // Pre-resolves the method's OWN return/param types (with
+            // the substitution context above already active) BEFORE
+            // `self.state` swaps to the scratch buffer below -- so a
+            // generic instantiation FIRST triggered by one of them
+            // (`Vec<Token>.last()` returning `Option<Token>`, e.g.)
+            // splices its own typedef via the REAL (not-yet-suspended)
+            // `hoist_insert_pos`, landing at top level, right before the
+            // enclosing top-level function/impl that triggered this
+            // prototype -- the same already-established position every
+            // OTHER lazy type instantiation uses. Done AGAIN, harmlessly,
+            // by `write_type` itself once the scratch build starts right
+            // below (memoized -- a second resolution of the same
+            // instantiation is a no-op) -- this earlier pass exists
+            // PURELY for its splice-position side effect, not to avoid
+            // redoing the resolution. Skipping this would instead let
+            // `write_type` trigger the SAME instantiation later, while
+            // `self.state` already points at the scratch and `hoist_
+            // insert_pos` is suspended to `.None` -- which appends the
+            // typedef INLINE into the scratch instead, so the whole
+            // combined chunk (typedef + prototype) ends up spliced at
+            // `current_stmt_start_pos`, i.e. NESTED inside the CURRENT
+            // statement's own enclosing function body -- a local
+            // typedef, invisible ("unknown type name") to every OTHER
+            // function elsewhere in the file that also needs it. Found
+            // via a real stage-2 self-compilation C error for exactly
+            // this shape (`Option__Token`, first triggered from `Lexer.
+            // _prev_token_is_bare_zero`'s own body).
+            fit m.kind {
+              .Function(proto_fnv) -> {
+                if proto_fnv.has_rtype {
+                  self.resolve_type_name(self.resolve_type_subst(*proto_fnv.rtype));
+                }
+                if proto_fnv.has_args {
+                  for proto_arg : proto_fnv.args {
+                    fit proto_arg.kind {
+                      .Variable(proto_v) -> {
+                        if !proto_v.var_type.has_fn_sig {
+                          self.resolve_type_name(self.resolve_type_subst(*proto_v.var_type));
+                        }
+                      }
+                      _ -> {}
+                    }
+                  }
+                }
+              }
+              _ -> {}
+            }
+
+            // Built into a SCRATCH buffer, then spliced via `emit_
+            // hoisted` at `current_stmt_start_pos` (the position right
+            // before the CURRENTLY-executing statement, tracked by
+            // `emit_statements`) -- NOT written directly at whatever
+            // `self.state`'s CURRENT tail happens to be, which is this
+            // call's OWN caller's assumption but breaks the moment the
+            // triggering call site is a SUB-expression (`let line =
+            // Vec__str__get(&parts, i);`) rather than a bare statement: a
+            // direct write would land mid-statement, splitting "= " from
+            // the call itself, corrupt C. Splicing at the CURRENT
+            // statement's own start instead lands the prototype as its
+            // OWN separate declaration statement, right before whichever
+            // statement first triggered it -- still legal C at block
+            // scope, and exactly where the previous direct-write
+            // behavior happened to land for the (unexamined) common case
+            // of a bare call statement, where nothing had been written
+            // for the statement yet. `hoist_insert_pos` is suspended
+            // (`.None`) during the scratch build so a NESTED
+            // instantiation triggered by `write_type` below (a param/
+            // return type that's itself a generic instantiation) appends
+            // into this SAME scratch instead of splicing into the real
+            // buffer at a stale position -- same scratch-buffer-swap
+            // discipline as every other hoisted definition in this file.
+            CodegenState proto_scratch = codegen_state_new();
+            CodegenState* saved_proto_state = self.state;
+            let saved_proto_hoist_pos = self.hoist_insert_pos;
+            proto_scratch.indent_level = saved_proto_state.indent_level;
+            self.state = &proto_scratch;
+            self.hoist_insert_pos = .None;
+            self.state.write_indent();
             self.emit_generic_impl_method_prototype(*m, new_name);
+            self.state = saved_proto_state;
+            self.hoist_insert_pos = self.current_stmt_start_pos;
+            self.emit_hoisted(proto_scratch.out.build());
+            self.hoist_insert_pos = saved_proto_hoist_pos;
 
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
@@ -2031,6 +2179,148 @@ impl Codegen {
         _ -> {}
       }
     }
+  }
+
+  // Ensures a PLAIN (non-generic) impl method has an inline bare
+  // prototype declared right before its OWN first call site, when its
+  // signature was too UNSAFE for the early forward-declare pass to
+  // cover it (see `prototype_type_is_unsafe_early`'s own doc comment --
+  // a generic return/param type, e.g. `Lexer._next_inner()`'s own
+  // `Result<Option<Token>, Error>`) -- such a method falls back to
+  // relying on natural source order, which breaks the moment it's
+  // called from another method defined EARLIER in the same file
+  // (`Lexer.next()`'s real body calling `self._next_inner()`, itself
+  // defined further down in the same `impl Lexer` block). A no-op when
+  // `owner_type`/`bare_name` isn't a known plain impl method at all, its
+  // signature is ALREADY safe (the early pass already covers it, an
+  // extra prototype here would just be needless clutter), or this exact
+  // method already got its own inline prototype from an earlier call
+  // site (memoized via `emitted_plain_method_protos`). Mirrors `emit_
+  // generic_impl_method_prototype_now`'s own scratch-buffer-then-splice-
+  // at-`current_stmt_start_pos` shape exactly, for the identical
+  // reasoning (legal C at block scope; lands right before whichever
+  // statement first triggered it) -- but sourced from the PLAIN impl-
+  // method registry (`impl_method_rtype`/`impl_method_param_types`)
+  // instead of a generic template's own `Node`, and with no type-
+  // substitution context to apply (a plain method's own param/return
+  // types are already fully concrete).
+  // 
+  // Deliberately narrow for this slice: bails without emitting anything
+  // when any param has a function-pointer type (`v.var_type.has_fn_
+  // sig`) -- that shape needs the SAME wraps-the-name declarator special
+  // case `emit_generic_impl_method_prototype`/`emit_function_param`
+  // already have, not worth duplicating here for a case this rare among
+  // plain (non-generic) impl methods specifically.
+  // 
+  // ALSO a no-op (not even memoized -- a LATER real call site still gets
+  // its own real chance) while `self.suppress_generic_impl_method_
+  // draining` is set: that flag means `self.state` currently points at a
+  // throwaway TEXT-CAPTURE probe (`resolve_field_chain`'s own call-as-
+  // receiver branch, rendering SOME OUTER call's own receiver text into
+  // a tiny scratch buffer -- see its own doc comment), not the real
+  // output. Splicing there anyway -- this function's own EARLIER
+  // behavior -- uses `self.current_stmt_start_pos`'s REAL-buffer-sized
+  // position as a slice bound against that tiny scratch buffer instead,
+  // corrupting `substr`'s own length arithmetic and crashing (found via
+  // a real stage-2 self-compilation lldb backtrace: `emit_hoisted` ->
+  // `StringBuilder.append` -> null deref, several frames below a NESTED
+  // `emit_method_call` reached from inside `resolve_field_chain`'s own
+  // probe). The generic-impl-method path already has this exact
+  // discipline (only enqueues while suppressed, drains once the probe
+  // restores the real buffer) -- this mirrors it.
+  ensure_plain_impl_method_prototype_emitted(str owner_type, str bare_name) {
+    if self.suppress_generic_impl_method_draining {
+      ret;
+    }
+    StringBuilder pm_key_sb = string_builder_init(16);
+    pm_key_sb.append(owner_type);
+    pm_key_sb.append("::");
+    pm_key_sb.append(bare_name);
+    str pm_key = pm_key_sb.build();
+    num pmki = 0;
+    for pmki < self.emitted_plain_method_protos.len {
+      if equals(self.emitted_plain_method_protos.get(pmki), pm_key) {
+        ret;
+      }
+      pmki = pmki + 1;
+    }
+
+    num pmi = 0;
+    bin found_pm = false;
+    for pmi < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(pmi), owner_type) && equals(
+        self.impl_method_bare_name.get(pmi),
+        bare_name
+      ) {
+        found_pm = true;
+        break;
+      }
+      pmi = pmi + 1;
+    }
+    if !found_pm {
+      ret;
+    }
+    DataType* pm_rtype = self.impl_method_rtype.get(pmi);
+    if pm_rtype == nil {
+      ret;
+    }
+    let pm_param_types = self.impl_method_param_types.get(pmi);
+    for pm_pt : pm_param_types {
+      if pm_pt.has_fn_sig {
+        ret;
+      }
+    }
+
+    bin pm_unsafe = self.prototype_type_is_unsafe_early(*pm_rtype);
+    if !pm_unsafe {
+      for pm_pt2 : pm_param_types {
+        if self.prototype_type_is_unsafe_early(*pm_pt2) {
+          pm_unsafe = true;
+        }
+      }
+    }
+    if !pm_unsafe {
+      ret;
+    }
+
+    self.emitted_plain_method_protos.push(pm_key);
+    str pm_mangled = self.impl_method_mangled_name.get(pmi);
+
+    // Pre-resolved BEFORE swapping to the scratch buffer below -- same
+    // reasoning as `emit_generic_impl_method_prototype_now`'s own
+    // identical pre-resolution pass: a generic instantiation first
+    // triggered by one of these types must splice its own typedef via
+    // the REAL (not-yet-suspended) `hoist_insert_pos`, landing at top
+    // level, not appended inline into this throwaway scratch.
+    self.resolve_type_name(*pm_rtype);
+    for pm_pt3 : pm_param_types {
+      self.resolve_type_name(*pm_pt3);
+    }
+
+    CodegenState pm_scratch = codegen_state_new();
+    CodegenState* saved_pm_state = self.state;
+    let saved_pm_hoist_pos = self.hoist_insert_pos;
+    pm_scratch.indent_level = saved_pm_state.indent_level;
+    self.state = &pm_scratch;
+    self.hoist_insert_pos = .None;
+    self.state.write_indent();
+    let pm_rt = self.write_type(*pm_rtype);
+    if pm_rt.is_some() {
+      self.state.write(" ");
+      self.state.write(pm_mangled);
+      self.state.write("(");
+      self.state.write(owner_type);
+      self.state.write("* self");
+      for pm_pt4 : pm_param_types {
+        self.state.write(", ");
+        self.write_type(*pm_pt4);
+      }
+      self.state.write(");\n");
+    }
+    self.state = saved_pm_state;
+    self.hoist_insert_pos = self.current_stmt_start_pos;
+    self.emit_hoisted(pm_scratch.out.build());
+    self.hoist_insert_pos = saved_pm_hoist_pos;
   }
 
   // Lazily emits ONE concrete monomorphization of a generic impl
@@ -2114,6 +2404,17 @@ impl Codegen {
   // the real ones, not some other in-progress scratch buffer.
   drain_pending_generic_impl_methods() Option<CodegenErrorKind> {
     self.draining_generic_impl_methods = true;
+    // NOT saving/restoring `self.current_stmt_start_pos` around this
+    // whole drain (an earlier version of this fix did): `emit_one_
+    // generic_impl_method` (below) suspends it to `.None` around its
+    // OWN scratch-buffer swap already (see that swap's own doc comment)
+    // and `emit_hoisted` itself correctly ADVANCES it for every REAL
+    // splice this loop makes (the prototype, then the full body) --
+    // blanket-restoring it to whatever it was BEFORE this drain started
+    // would undo that legitimate advancement, leaving it stale by
+    // exactly the two splices' own combined length the moment a caller
+    // resuming after this drain returns (`emit_method_call`'s receiver-
+    // temp splice, e.g.) reads it next.
     Option<CodegenErrorKind> first_err = .None;
     num qi = self.pending_generic_impl_method_cursor;
     for qi < self.pending_generic_impl_method_owner.len {
@@ -2219,6 +2520,20 @@ impl Codegen {
             CodegenState method_scratch = codegen_state_new();
             CodegenState* saved_method_state = self.state;
             let saved_hoist_pos = self.hoist_insert_pos;
+            // `emit_function_named` (right below) emits a REAL method
+            // BODY, recursing into `emit_statements` for its own
+            // statements -- which sets `self.current_stmt_start_pos` to
+            // positions measured against THIS scratch buffer, not the
+            // real one. Suspended/restored in lockstep with `hoist_
+            // insert_pos` for the exact same reason: left alone, it
+            // leaks a scratch-relative position out to whatever called
+            // INTO this monomorphization (`emit_method_call`'s own
+            // receiver-temp splice, e.g.), which then splices at that
+            // bogus position in the REAL buffer -- found via a real
+            // stage-2 self-compilation C error (a temp declaration
+            // spliced mid-identifier, inside an unrelated function's own
+            // signature).
+            let saved_stmt_start_pos = self.current_stmt_start_pos;
             let saved_local_names = self.local_names;
             let saved_local_is_pointer = self.local_is_pointer;
             let saved_local_type_name = self.local_type_name;
@@ -2229,9 +2544,11 @@ impl Codegen {
             let saved_defer_scope_starts = self.defer_scope_starts;
             self.state = &method_scratch;
             self.hoist_insert_pos = .None;
+            self.current_stmt_start_pos = .None;
             let body_err = self.emit_function_named(*m, new_name);
             self.state = saved_method_state;
             self.hoist_insert_pos = saved_hoist_pos;
+            self.current_stmt_start_pos = saved_stmt_start_pos;
             self.local_names = saved_local_names;
             self.local_is_pointer = saved_local_is_pointer;
             self.local_type_name = saved_local_type_name;
@@ -3114,9 +3431,23 @@ impl Codegen {
     // previously emitted verbatim as the literal identifier `T`, which
     // doesn't exist in the generated C. Only fires when a substitution
     // context is ACTUALLY active and the argument matches one of its
-    // params; every other `sizeof(...)` (a real, non-generic type name,
-    // the overwhelmingly common case) falls through unchanged below.
-    if equals(callee_name, "sizeof") && self.type_subst_param_names.len > 0 && args.len == 1 {
+    // params.
+    // 
+    // Falls through to a SECOND, unconditional check below (any bare-
+    // identifier `sizeof` argument, substitution context or not) for a
+    // builtin scalar keyword (`sizeof(bin)`, `sizeof(chr)`, ...) --
+    // same underlying problem, just without a generic type param
+    // involved at all: the argument is an ordinary identifier
+    // expression, emitted verbatim with no builtin-name mapping, so
+    // `sizeof(bin)` (a real, non-generic `Vec<bin>`-storage `alloc`
+    // body, e.g.) came out as literal C `sizeof(bin)` -- "bin" isn't a
+    // real C type. `write_type_name` is always safe here even when the
+    // identifier ISN'T a builtin keyword (a real local variable name, or
+    // a user-defined compound/enum name): `map_type_to_c` passes any
+    // unrecognized name through UNCHANGED, matching the previous plain-
+    // identifier emission exactly for every case this fix doesn't apply
+    // to.
+    if equals(callee_name, "sizeof") && args.len == 1 {
       str sizeof_operand = "";
       bin have_sizeof_operand = false;
       fit args.get(0).kind {
@@ -3127,19 +3458,25 @@ impl Codegen {
         _ -> {}
       }
       if have_sizeof_operand {
-        num spi = 0;
-        for spi < self.type_subst_param_names.len {
-          if equals(self.type_subst_param_names.get(spi), sizeof_operand) {
-            self.state.write("sizeof(");
-            self.write_type_name(self.type_subst_arg_type_strs.get(spi));
-            if self.type_subst_arg_is_pointer.get(spi) {
-              self.state.write("*");
+        if self.type_subst_param_names.len > 0 {
+          num spi = 0;
+          for spi < self.type_subst_param_names.len {
+            if equals(self.type_subst_param_names.get(spi), sizeof_operand) {
+              self.state.write("sizeof(");
+              self.write_type_name(self.type_subst_arg_type_strs.get(spi));
+              if self.type_subst_arg_is_pointer.get(spi) {
+                self.state.write("*");
+              }
+              self.state.write(")");
+              ret .None;
             }
-            self.state.write(")");
-            ret .None;
+            spi = spi + 1;
           }
-          spi = spi + 1;
         }
+        self.state.write("sizeof(");
+        self.write_type_name(sizeof_operand);
+        self.state.write(")");
+        ret .None;
       }
     }
 
@@ -3273,6 +3610,19 @@ impl Codegen {
     }
     let registered = self.lookup_impl_method(recv_r.type_name, method_name);
     if registered.is_some() {
+      // A PLAIN impl method's own signature can be UNSAFE for the early
+      // forward-declare pass (a generic return/param type, e.g. `Lexer.
+      // _next_inner()`'s own `Result<Option<Token>, Error>`) -- such a
+      // method falls back to natural source order there, which breaks
+      // the moment it's called from a method defined EARLIER in the
+      // same file (`Lexer.next()`'s own real body calling `self.
+      // _next_inner()`, itself defined further down in the same `impl
+      // Lexer` block). Ensures an inline bare prototype exists at this
+      // call's own first-use point instead (see `ensure_plain_impl_
+      // method_prototype_emitted`'s own doc comment) -- a no-op once
+      // the early pass already covered it, or once this exact method
+      // already got its own inline prototype from an earlier call site.
+      self.ensure_plain_impl_method_prototype_emitted(recv_r.type_name, method_name);
       self.state.write(registered.unwrap());
     } else {
       self.state.write(recv_r.type_name);
@@ -3282,6 +3632,44 @@ impl Codegen {
     self.state.write("(");
     if recv_r.is_pointer {
       self.state.write(recv_r.text);
+    } elif recv_r.is_call_result {
+      // `recv_r.text` is a CALL's own rendered text (an RVALUE, see
+      // `ChainResolution.is_call_result`'s own doc comment) -- `&
+      // <rvalue>` is invalid C ("cannot take the address of an
+      // rvalue"), found via a real stage-2 self-compilation C error for
+      // `is_dynamic_int_datatype`'s own real body, `parse_dynamic_int_
+      // datatype(s).is_some()`. Hoisted into a fresh `__auto_type` temp,
+      // spliced (via the SAME `current_stmt_start_pos` splice `emit_
+      // generic_impl_method_prototype_now` uses, for the identical
+      // "this call site can be arbitrarily deep inside a larger
+      // statement, not just a first-in-body call" reason) as its own
+      // declaration statement right before the CURRENT one, then `&`
+      // the temp instead -- a genuine addressable local.
+      self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
+      StringBuilder recv_tmp_name_sb = string_builder_init(24);
+      recv_tmp_name_sb.append("__fun_recv_tmp");
+      recv_tmp_name_sb.append(format_num(self.call_recv_temp_counter));
+      str recv_tmp_name = recv_tmp_name_sb.build();
+
+      StringBuilder recv_tmp_stmt_sb = string_builder_init(64);
+      num recv_tmp_ii = 0;
+      for recv_tmp_ii < self.state.indent_level {
+        recv_tmp_stmt_sb.append("    ");
+        recv_tmp_ii = recv_tmp_ii + 1;
+      }
+      recv_tmp_stmt_sb.append("__auto_type ");
+      recv_tmp_stmt_sb.append(recv_tmp_name);
+      recv_tmp_stmt_sb.append(" = ");
+      recv_tmp_stmt_sb.append(recv_r.text);
+      recv_tmp_stmt_sb.append(";\n");
+
+      let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
+      self.hoist_insert_pos = self.current_stmt_start_pos;
+      self.emit_hoisted(recv_tmp_stmt_sb.build());
+      self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
+
+      self.state.write("&");
+      self.state.write(recv_tmp_name);
     } else {
       self.state.write("&");
       self.state.write(recv_r.text);
@@ -3670,6 +4058,7 @@ impl Codegen {
         r.type_name = type_found.unwrap();
         r.is_pointer = ptr_found.unwrap();
         r.dtype = self.lookup_local_dtype(name);
+        r.is_call_result = false;
         ret .Some(r);
       }
       .Expression(inner_e) -> {
@@ -3769,11 +4158,26 @@ impl Codegen {
             ret .None;
           }
 
+          // The call's own rendered text is an RVALUE -- fine to embed
+          // directly for a further `.field` read (`tok.unwrap().type`,
+          // this branch's own original/still-common case), but NOT
+          // addressable: a caller needing `&<receiver>` (`emit_method_
+          // call`'s own non-pointer-receiver case, `Type* self` taking
+          // the address of a BY-VALUE result) would otherwise emit
+          // `&some_call(...)`, "address of an rvalue" -- invalid C.
+          // `is_call_result` flags this for such a caller to hoist into
+          // an addressable temp itself, right before taking the address
+          // (see `emit_method_call`'s own doc comment for where/why) --
+          // NOT hoisted unconditionally here, which would needlessly
+          // (and, for this exact test, WRONGLY -- see its own doc
+          // comment) inject an extra statement even for a plain field
+          // READ that never needs addressing at all.
           ChainResolution r;
           r.text = call_scratch.out.build();
           r.type_name = resolved_name_opt.unwrap();
           r.is_pointer = dtype_is_pointer(rdt);
           r.dtype = .Some(rdt);
+          r.is_call_result = true;
           ret .Some(r);
         }
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
@@ -3807,6 +4211,12 @@ impl Codegen {
         r.type_name = field_info.type_name;
         r.is_pointer = field_info.is_pointer;
         r.dtype = field_info.dtype;
+        // Propagated, not reset to `false`: reading a `.field` off a
+        // call-result receiver (`some_call().field`) is STILL not
+        // addressable in C (a by-value struct return has no lvalue at
+        // all, not even one of its own fields) -- the whole chain
+        // inherits the innermost receiver's own rvalue-ness.
+        r.is_call_result = recv_r.is_call_result;
         ret .Some(r);
       }
       _ -> { ret .None; }
@@ -3841,6 +4251,83 @@ impl Codegen {
   pub emit_statement(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .StatementReturn(exp) -> {
+        // `main` always emits as `int main(...)` in C regardless of its
+        // OWN declared Fun-level return type (see `emit_function_
+        // named`'s own doc comment) -- a `ret <expr>;` inside it can
+        // only write the real expression when that declared type is
+        // itself a scalar `num` (implicitly narrows to `int` just
+        // fine); anything else (a struct/enum, `void`, ...) must
+        // discard the expression entirely and just report success,
+        // since returning e.g. a tagged-union VALUE from a function C
+        // itself declares to return `int` is a real compile error, not
+        // merely an implicit-narrowing warning. Pending defers still
+        // run first either way -- only the VALUE is ever skipped, not
+        // the cleanup. Mirrors the original transpiler's own identical
+        // `in_main`/"default-void main ignores expression" rule.
+        bin main_discards_return = false;
+        if self.in_main {
+          main_discards_return = true;
+          if self.current_fn_rtype_dt.is_some() {
+            let main_rt = self.current_fn_rtype_dt.unwrap();
+            if equals(main_rt.type_str, "num") && !main_rt.is_array && main_rt.pointer_depth == 0 {
+              main_discards_return = false;
+            }
+          }
+        }
+        if main_discards_return {
+          // The discarded expression is still EVALUATED (into a
+          // throwaway scratch buffer, then thrown away whole) rather
+          // than skipped outright, purely for its Fun-level SIDE
+          // EFFECTS (a call with side effects as main's own "return"
+          // is unusual but not invalid). `hoist_insert_pos` is
+          // suspended for the swap, same as every other scratch-buffer
+          // swap in this file, so a nested hoisted TYPE dependency
+          // triggered from inside doesn't crash by splicing at a
+          // stale position into this tiny buffer.
+          // 
+          // A generic function/type reached ONLY from here (e.g. some
+          // `wrap<T>()` called ONLY as `main`'s own discarded return
+          // value, never anywhere else) does NOT get hoisted -- this
+          // codegen's lazy triggers all fire as a side effect of
+          // `emit_expr` actually WRITING somewhere real, which this
+          // deliberately never does. Matches the original transpiler's
+          // own simpler behavior here (it doesn't even evaluate the
+          // expression in this case) closely enough: something ONLY
+          // ever reachable through a discarded main-return has no
+          // other real call site needing it monomorphized anyway.
+          if exp != nil {
+            CodegenState main_discard_scratch = codegen_state_new();
+            CodegenState* saved_discard_state = self.state;
+            let saved_discard_hoist_pos = self.hoist_insert_pos;
+            // `current_stmt_start_pos` suspended too, same as `hoist_
+            // insert_pos` just above -- `ensure_plain_impl_method_
+            // prototype_emitted`, reached via an ordinary method call
+            // inside this discarded expression, would otherwise use a
+            // REAL-buffer-sized position as a slice bound against THIS
+            // tiny scratch buffer, corrupting `substr`'s own length
+            // arithmetic and crashing (the exact same failure mode
+            // `hoist_insert_pos`'s own suspension already prevents for
+            // `emit_hoisted`'s other callers).
+            let saved_discard_stmt_start_pos = self.current_stmt_start_pos;
+            self.state = &main_discard_scratch;
+            self.hoist_insert_pos = .None;
+            self.current_stmt_start_pos = .None;
+            let discard_eerr = self.emit_expr(*exp);
+            self.state = saved_discard_state;
+            self.hoist_insert_pos = saved_discard_hoist_pos;
+            self.current_stmt_start_pos = saved_discard_stmt_start_pos;
+            if discard_eerr.is_some() {
+              ret discard_eerr;
+            }
+          }
+          let main_dferr = self.emit_function_scope_defers();
+          if main_dferr.is_some() {
+            ret main_dferr;
+          }
+          self.state.write_indent();
+          self.state.write("return 0;\n");
+          ret .None;
+        }
         // A `ret` unwinds EVERY enclosing block at once, so any
         // currently pending `defer` (this function's own, or an
         // enclosing block's) must run first -- see
@@ -3984,6 +4471,35 @@ impl Codegen {
         }
         self.state.write(" ");
         self.state.write(v.name);
+        // A sized/unsized array declarator (`[24]`, `[]`) lands AFTER the
+        // name in C, unlike every other type modifier above -- mirrors the
+        // original transpiler's own local-variable emission. Skipped for
+        // `let` (no declared type to read `array_brackets` from) and for
+        // `arr_as_ptr` (already decayed to a `*` above, so no brackets).
+        if !is_let && !arr_as_ptr && v.var_type.is_array {
+          if v.var_type.array_brackets.len > 0 {
+            for bnode : v.var_type.array_brackets {
+              self.state.write("[");
+              fit bnode.kind {
+                .Bracket(inner) -> {
+                  let berr = self.emit_expr(*inner);
+                  if berr.is_some() {
+                    ret berr;
+                  }
+                }
+                _ -> {
+                  let berr = self.emit_expr(*bnode);
+                  if berr.is_some() {
+                    ret berr;
+                  }
+                }
+              }
+              self.state.write("]");
+            }
+          } else {
+            self.state.write("[]");
+          }
+        }
         if v.has_val {
           self.state.write(" = ");
           // See `Codegen.expected_enum_type`'s doc comment: a bare
@@ -4460,6 +4976,57 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits one `fit` branch that matches a PLAIN (payload-less) enum's
+  // variant (bare shorthand `.Variant`, or qualified `EnumName.Variant`
+  // -- no destructuring, a plain enum has no payload to bind) as
+  // `subj == EnumName_Variant { ... }` (or `(*subj) == ...` when
+  // `subj_is_pointer`) -- the direct C-enum-value comparison, matching
+  // the original transpiler's own `fit_subject_tagged_union_name`
+  // returning null for a non-data-carrying enum and falling back to a
+  // plain equality chain, NOT `emit_fit_enum_branch`'s `.tag ==` (that
+  // shape only exists on a TAGGED-union struct -- a bare C enum has no
+  // `tag` field at all, "member reference base type ... is not a
+  // structure or union"). Found via a real stage-2 self-compilation C
+  // error on `WarningId as To<str>`'s own `fit *self { .Variant -> ...
+  // }` body -- `WarningId` has only payload-less variants, so `emit_
+  // enum` already compiles it as a bare `typedef enum`, but `emit_fit`
+  // itself had no branch for that shape and always assumed tagged-union.
+  emit_fit_plain_enum_branch(
+    str subj_name,
+    bin subj_is_pointer,
+    str enum_name,
+    str variant_name,
+    FitBranch br,
+    bin wrote_branch
+  ) Option<CodegenErrorKind> {
+    if wrote_branch {
+      self.state.write(" else if (");
+    } else {
+      self.state.write("if (");
+    }
+    if subj_is_pointer {
+      self.state.write("(*");
+      self.state.write(subj_name);
+      self.state.write(")");
+    } else {
+      self.state.write(subj_name);
+    }
+    self.state.write(" == ");
+    self.state.write(enum_name);
+    self.state.write("_");
+    self.state.write(variant_name);
+    self.state.write(") {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    let berr = self.emit_body(*br.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
+    ret .None;
+  }
+
   // Emits `fit subject { patterns -> { body } ... }` as a chain of C
   // `if`/`else if`/`else` blocks. Two pattern kinds are recognized, tried
   // in order for each branch: (1) a tagged-union enum-variant pattern
@@ -4769,16 +5336,38 @@ impl Codegen {
               }
             }
             if have_enum_name && has_variant {
-              let eerr = self.emit_fit_enum_branch(
-                subj_name,
-                subj_is_pointer,
-                effective_enum_name,
-                variant_name,
-                br,
-                wrote_branch
-              );
-              if eerr.is_some() {
-                ret eerr;
+              // A PLAIN (payload-less) enum has no `.tag` field at all --
+              // see `emit_fit_plain_enum_branch`'s own doc comment -- so
+              // it needs a genuinely different comparison than a tagged-
+              // union subject's `.tag == ...`, decided here per the
+              // recorded enum, not assumed tagged unconditionally.
+              if self.enum_is_tagged_union_named(effective_enum_name) {
+                let eerr = self.emit_fit_enum_branch(
+                  subj_name,
+                  subj_is_pointer,
+                  effective_enum_name,
+                  variant_name,
+                  br,
+                  wrote_branch
+                );
+                if eerr.is_some() {
+                  ret eerr;
+                }
+              } else {
+                if br.has_bindings && br.bindings.len > 0 {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+                let peerr = self.emit_fit_plain_enum_branch(
+                  subj_name,
+                  subj_is_pointer,
+                  effective_enum_name,
+                  variant_name,
+                  br,
+                  wrote_branch
+                );
+                if peerr.is_some() {
+                  ret peerr;
+                }
               }
               handled_as_enum = true;
               wrote_branch = true;
@@ -5039,6 +5628,7 @@ impl Codegen {
     bin last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
+      self.current_stmt_start_pos = .Some(self.state.out.len());
       bin is_if = false;
       fit stmt.kind {
         .StatementIf(ifn) -> { is_if = true; }
@@ -5659,16 +6249,90 @@ impl Codegen {
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
+        // `write_type` always writes the return type's OWN naive C
+        // spelling directly to `self.state` as a side effect of
+        // resolving it -- for `main`, that text must never reach the
+        // real output (its own written return type is always the
+        // literal `int`, forced below), so it's captured into a
+        // throwaway scratch buffer instead when this is `main`, and
+        // simply discarded once `rt` (the RESOLVED NAME, still needed
+        // for `current_fn_rtype_name`/`_dt` bookkeeping) is in hand.
+        // `hoist_insert_pos` (if set) is a position measured against
+        // the OUTER, now-swapped-away buffer -- suspending it for the
+        // duration of this swap, same as every OTHER scratch-buffer
+        // swap in this file, keeps a NESTED hoisted emission triggered
+        // from inside `write_type` (e.g. `main`'s declared return type
+        // is itself a generic enum instantiation, first use) from
+        // splicing at a stale position into THIS tiny scratch buffer
+        // instead of the real one -- confirmed via a real crash
+        // (`emit_hoisted` -> `StringBuilder.append` -> null deref) when
+        // this swap didn't suspend it.
+        bin is_main = equals(emit_name, "main");
+        CodegenState rtype_scratch = codegen_state_new();
+        CodegenState* saved_rtype_state = self.state;
+        let saved_rtype_hoist_pos = self.hoist_insert_pos;
+        if is_main {
+          self.state = &rtype_scratch;
+          self.hoist_insert_pos = .None;
+        }
         let rt = self.write_type(*f.rtype);
+        if is_main {
+          self.state = saved_rtype_state;
+          self.hoist_insert_pos = saved_rtype_hoist_pos;
+        }
         if rt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         self.current_fn_rtype_name = rt.unwrap();
         self.current_fn_rtype_dt = .Some(self.resolve_type_subst(*f.rtype));
+        // C's own `main` MUST be `int main(void)`, `int main(int argc,
+        // char** argv)`, or `int main(int argc, char** argv, char**
+        // envp)` -- never anything else, regardless of what THIS
+        // function's own Fun-level signature says (`num`/`str[] args`,
+        // the surface this language exposes). `self.current_fn_rtype_
+        // name`/`_dt` above are still set from the REAL Fun-declared
+        // return type (needed for `ret <shorthand>;`/local-inference
+        // bookkeeping inside the body) -- only the WRITTEN C signature
+        // is overridden here. A bare `int64_t`-returning `return expr;`
+        // inside an `int`-declared function is valid C (implicit
+        // narrowing), so the body itself needs no special handling.
+        // Mirrors the original transpiler's own identical `main` rules
+        // exactly: no params emits the standard `argc`/`argv` pair;
+        // exactly one `str[] name` param keeps that name but still
+        // takes real OS argv (`str[] args` prints as `char* args[]`,
+        // valid for argv); anything else (rare in practice) emits the
+        // user's own params verbatim. Found via a real stage-2 self-
+        // compilation C error ("first parameter of 'main' must be of
+        // type 'int'") -- selfhost never ported this special-casing at
+        // all, so `main`'s own params/return type were written like
+        // any other ordinary function's.
+        bin main_is_single_str_array = false;
+        if is_main && f.has_args && f.args.len == 1 {
+          let main_arg0 = f.args.get(0);
+          fit main_arg0.kind {
+            .Variable(v) -> {
+              if equals(v.var_type.type_str, "str") && v.var_type.is_array {
+                main_is_single_str_array = true;
+              }
+            }
+            _ -> {}
+          }
+        }
+        if is_main {
+          self.state.write("int");
+        }
         self.state.write(" ");
         self.state.write(emit_name);
         self.state.write("(");
-        if f.has_args && f.args.len > 0 {
+        if is_main && ( !f.has_args || f.args.len == 0) {
+          self.state.write("int argc, char** argv");
+        } elif is_main && main_is_single_str_array {
+          self.state.write("int argc, ");
+          let margerr = self.emit_function_param(*f.args.get(0));
+          if margerr.is_some() {
+            ret margerr;
+          }
+        } elif f.has_args && f.args.len > 0 {
           bin first = true;
           for arg : f.args {
             if !first {
@@ -5700,7 +6364,10 @@ impl Codegen {
         }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
+        let saved_in_main = self.in_main;
+        self.in_main = is_main;
         let berr = self.emit_body(*f.body);
+        self.in_main = saved_in_main;
         if berr.is_some() {
           ret berr;
         }
@@ -6580,11 +7247,21 @@ impl Codegen {
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
               let saved_defer_stack = self.defer_stack;
               let saved_defer_scope_starts = self.defer_scope_starts;
+              // See `maybe_instantiate_generic_impl_methods`'s own
+              // identical `method_scratch` swap for why `current_stmt_
+              // start_pos` needs the exact same suspend/restore
+              // treatment as `hoist_insert_pos` here too: `emit_
+              // function_named` recurses into `emit_statements`,
+              // overwriting it with a position measured against THIS
+              // scratch buffer.
+              let saved_stmt_start_pos = self.current_stmt_start_pos;
               self.state = &scratch;
               self.hoist_insert_pos = .None;
+              self.current_stmt_start_pos = .None;
               self.emit_function_named(tmpl, mangled_name);
               self.state = saved_state;
               self.hoist_insert_pos = saved_hoist_pos;
+              self.current_stmt_start_pos = saved_stmt_start_pos;
               self.local_names = saved_local_names;
               self.local_is_pointer = saved_local_is_pointer;
               self.local_type_name = saved_local_type_name;
@@ -6775,7 +7452,17 @@ impl Codegen {
   // unconditionally, so it must always be present regardless of whether
   // this particular program uses `panic(...)` at all (matching the
   // original's own reasoning: cheap, harmless when unused, and avoids
-  // conditionally tracking "does this program need it").
+  // conditionally tracking "does this program need it"). `<ctype.h>` is
+  // ALSO unconditional here for the same reason, rather than gated on an
+  // actual `imp std.c.ctype;` the way the original conditionally includes
+  // it -- import nodes never survive `import_resolver.fn`'s own
+  // flattening (`_parse_and_merge` discards `.Import` after recursing
+  // into it), so this codegen has no way to see WHICH `std.c.*` modules
+  // a program imported at all yet; unconditionally including it is cheap
+  // and harmless when unused, same as every other header here. Found via
+  // a real stage-2 self-compilation C error ("call to undeclared library
+  // function 'isalnum'") for `std/lexer.fn`'s own real char-
+  // classification calls.
   pub write_prelude() {
     self.state.write("#include <stdio.h>\n");
     self.state.write("#include <stdbool.h>\n");
@@ -6783,7 +7470,20 @@ impl Codegen {
     self.state.write("#include <stdarg.h>\n");
     self.state.write("#include <stdlib.h>\n");
     self.state.write("#include <string.h>\n");
+    self.state.write("#include <ctype.h>\n");
+    // `stdout`/`stderr`/`stdin` are macros/globals (not callable), and
+    // differ per libc -- wrapping each in a tiny `static` function lets
+    // `std.c.io`'s own bodyless `stdout_stream()`/`stderr_stream()`/
+    // `stdin_stream()` bindings resolve portably, matching the original
+    // transpiler's own identical prelude helpers exactly. Only `stderr_
+    // stream` was ever added here before (needed unconditionally by
+    // `panic`/`assert`'s own codegen) -- `stdout_stream`/`stdin_stream`
+    // were simply missing, found via a real stage-2 self-compilation C
+    // error ("call to undeclared function 'stdout_stream'") for `std/
+    // io.fn`'s own real `print`/`read_line` bodies.
+    self.state.write("static FILE* stdout_stream(void){ return stdout; }\n");
     self.state.write("static FILE* stderr_stream(void){ return stderr; }\n");
+    self.state.write("static FILE* stdin_stream(void){ return stdin; }\n");
     // The compiler's own private thread primitive -- always emitted,
     // regardless of whether this program uses `fork`/`async`/channels.
     // `await`/`fork` support (ported next) build directly on
@@ -7166,10 +7866,19 @@ impl Codegen {
     // later in the file, where EITHER end's signature involves a plain
     // enum or generic instantiation, falls back to depending on
     // natural source order, same as before this pass existed.
+    // 
+    // Also excludes `main` outright -- `emit_function_prototype`
+    // doesn't know about `main`'s own special C-entry-point signature
+    // handling (see `emit_function_named`'s own doc comment: forced
+    // `int`, forced `argc`/`argv`), so a forward-declared prototype
+    // here would have the WRONG (naive) signature, disagreeing with
+    // the real definition emitted later ("conflicting types"). Not a
+    // real gap: nothing else in the program ever calls `main`
+    // recursively, so it never NEEDED forward-declaring to begin with.
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          if !f.has_type_params && !self.is_std_c_signature_node(n) && self.function_prototype_is_safe_early(n) {
+          if !f.has_type_params && !self.is_std_c_signature_node(n) && !equals(f.name, "main") && self.function_prototype_is_safe_early(n) {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function_prototype(n);
             if ferr.is_some() {
@@ -7294,6 +8003,21 @@ impl Codegen {
         _ -> {}
       }
     }
+    // A single COMBINED pass, walking `nodes` once in true source order,
+    // emits every plain impl's methods AND every plain function's body --
+    // NOT two separate flat "all impls, then all functions" passes (the
+    // previous shape here). Two flat passes unconditionally emit every
+    // impl method BEFORE every plain function, even when a plain
+    // function is textually EARLIER in source and an impl method calls
+    // it -- exactly `std/warnings.fn`'s own `WarningId as From<str>`
+    // (an impl method) calling the plain function `warning_id_from_
+    // string`, declared earlier in the same file: both are excluded from
+    // the early forward-declare pass above (`Option<WarningId>` is a
+    // generic instantiation, see `prototype_type_is_unsafe_early`'s own
+    // doc comment), so ordering falls back to natural source position --
+    // and the flat two-pass shape got that position wrong. Same
+    // "one combined pass, source order" fix already applied to plain
+    // enums/compounds above.
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
@@ -7303,11 +8027,6 @@ impl Codegen {
             ret ierr;
           }
         }
-        _ -> {}
-      }
-    }
-    for n : nodes {
-      fit n.kind {
         .Function(f) -> {
           if !f.has_type_params {
             self.hoist_insert_pos = .Some(self.state.out.len());
@@ -8185,8 +8904,11 @@ test "emit_function emits a plain no-arg function definition with indentation" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
+  // Named "run", not "main" -- this test is about generic function-
+  // emission mechanics, not `main`'s own special C-entry-point
+  // signature handling (which has its own dedicated tests).
   FunctionNode fnv = function_node_new();
-  fnv.name = "main";
+  fnv.name = "run";
   fnv.has_name = true;
   DataType* rtype = malloc(sizeof(DataType));
   *rtype = dtype_new();
@@ -8210,7 +8932,7 @@ test "emit_function emits a plain no-arg function definition with indentation" {
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
-  assert equals(st.out.build(), `int64_t main(void) {
+  assert equals(st.out.build(), `int64_t run(void) {
   `    return 0;
   `}
   ``), "expected a complete C function definition";
@@ -11408,6 +12130,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <stdarg.h>
     `#include <stdlib.h>
     `#include <string.h>
+    `#include <ctype.h>
     `static FILE* stderr_stream(void){ return stderr; }
     `#ifdef _WIN32
     `#include <windows.h>
@@ -11614,6 +12337,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#include <stdarg.h>
     `#include <stdlib.h>
     `#include <string.h>
+    `#include <ctype.h>
     `static FILE* stderr_stream(void){ return stderr; }
     `#ifdef _WIN32
     `#include <windows.h>
@@ -11668,7 +12392,6 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  __fun_g_wd.blocked++;
     `}
     `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-    `int64_t main(void);
     `typedef struct Box__num {
     `  int64_t value;
     `} Box__num;
@@ -11676,13 +12399,13 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `int64_t Box__num__get(Box__num* self) {
     `    return self->value;
     `}
-    `int64_t main(void) {
+    `int main(int argc, char** argv) {
     `    Box__num b;
     `    int64_t Box__num__get(Box__num* self);
-    `Box__num__get(&b);
+    `    Box__num__get(&b);
     `}
     ``
-  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces -- its bare PROTOTYPE, unlike the definition, is legal (if unusually placed) right at its own first-use point, since a declaration (not a full definition) is valid C at block scope";
+  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces -- its bare PROTOTYPE, unlike the definition, is legal (if unusually placed) right at its own first-use point, since a declaration (not a full definition) is valid C at block scope. Also expects `main`'s own C signature forced to the real entry-point shape (`int main(int argc, char** argv)`), not its naive Fun-level `num`-returning, no-arg signature";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
@@ -12700,6 +13423,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#include <stdarg.h>
     `#include <stdlib.h>
     `#include <string.h>
+    `#include <ctype.h>
     `static FILE* stderr_stream(void){ return stderr; }
     `#ifdef _WIN32
     `#include <windows.h>
@@ -12754,15 +13478,14 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `  __fun_g_wd.blocked++;
     `}
     `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-    `int64_t main(void);
     `int64_t identity__num(int64_t value) {
     `    return value;
     `}
-    `int64_t main(void) {
+    `int main(int argc, char** argv) {
     `    return identity__num(5);
     `}
     ``
-  ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
+  ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself -- and 'main' forced to its real C entry-point signature";
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
@@ -12781,6 +13504,17 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   // type_subst_param_names already was) for the duration of
   // maybe_instantiate_generic_function's/
   // maybe_instantiate_generic_impl_methods's own state swap.
+  // 
+  // `main`'s own OWN return type here (`Opt<num>`) exercises a SECOND,
+  // unrelated concern (`main` forces to `int` in C -- see `emit_
+  // function_named`'s own doc comment): its `ret wrap(5);` can't write
+  // the real value (a struct assigned to an `int`-returning function
+  // is a compile error), so it's evaluated ONLY for side effects, into
+  // a throwaway scratch buffer. This means `wrap`/`Opt` -- reachable
+  // ONLY through this discarded return, nowhere else in this test's
+  // own `nodes` -- are correctly never hoisted at all; nothing else
+  // needs them monomorphized. `main` returning something interesting
+  // is exactly what the OTHER "main forces int" tests already cover.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -12917,8 +13651,8 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
-  assert contains(st.out.build(), "typedef struct Opt__num {"), "expected the nested generic enum instantiation to be hoisted correctly";
-  assert contains(st.out.build(), "return wrap__num(5);"), "expected the monomorphized generic function call";
+  assert contains(st.out.build(), "int main(int argc, char** argv) {\n    return 0;\n}"), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
+  assert !contains(st.out.build(), "wrap__num"), "expected 'wrap', reachable ONLY through main's own discarded return, to never be monomorphized at all -- nothing else in this program calls it";
 }
 
 test "pub transpile infers a generic function's type param from the CALLER's expected return type, not the argument itself" {
@@ -13140,8 +13874,11 @@ test "transpile emits the prelude followed by every top-level function" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
+  // Named "run", not "main" -- this test is about generic top-level
+  // function emission, not `main`'s own special C-entry-point
+  // signature handling (which has its own dedicated tests).
   FunctionNode fnv = function_node_new();
-  fnv.name = "main";
+  fnv.name = "run";
   fnv.has_name = true;
   DataType* rtype = malloc(sizeof(DataType));
   *rtype = dtype_new();
@@ -13170,7 +13907,7 @@ test "transpile emits the prelude followed by every top-level function" {
   assert g.transpile(nodes).is_none(), "expected the whole file to transpile";
   let out = st.out.build();
   assert contains(out, "#include <stdint.h>"), "expected the prelude to be present";
-  assert contains(out, "int64_t main(void) {"), "expected the function definition to be present";
+  assert contains(out, "int64_t run(void) {"), "expected the function definition to be present";
 }
 
 test "emit_function resets the locals table's type-name column between functions" {

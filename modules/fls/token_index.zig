@@ -1250,6 +1250,15 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         name: []const u8,
         dtype_base: []const u8,
         dtype_display: []const u8,
+        // The parameter's OWN name token position -- used for its
+        // `decl_range`/`selection_range` instead of the enclosing
+        // function's own body-brace position (see the call site below
+        // that builds `SymbolLite` entries for params). Without this,
+        // hovering a parameter showed the ENCLOSING FUNCTION's own doc
+        // comment: the placeholder range shared the function's own decl
+        // line (most signatures here are single-line), and doc-comment
+        // lookup is purely line-number-driven.
+        pos: token.Pos,
     };
 
     // Track when we're inside any function-ish body so we can index locals.
@@ -3105,7 +3114,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     const sig_owned = allocator_.dupe(u8, sig_buf.items) catch continue;
                     const fpname = tokenString(tokens_[fname_i]);
                     const fpname_owned = allocator_.dupe(u8, fpname) catch fpname;
-                    params.append(.{ .name = fpname_owned, .dtype_base = sig_owned, .dtype_display = sig_owned }) catch {};
+                    params.append(.{ .name = fpname_owned, .dtype_base = sig_owned, .dtype_display = sig_owned, .pos = tokens_[fname_i].pos }) catch {};
                     pi = fname_i + 1;
                     continue;
                 }
@@ -3168,7 +3177,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 else
                     (std.mem.concat(allocator_, u8, &[_][]const u8{ ptype_core, markers.items }) catch ptype_core);
 
-                params.append(.{ .name = pname_owned, .dtype_base = dtype_display, .dtype_display = dtype_display }) catch {};
+                params.append(.{ .name = pname_owned, .dtype_base = dtype_display, .dtype_display = dtype_display, .pos = tokens_[name_i].pos }) catch {};
                 pi = name_i + 1;
             }
         }
@@ -3247,13 +3256,21 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 putType(&locals_type_map, "vargs", "Vec<str>", allocator);
             }
 
-            // Add params as locals within the body.
+            // Add params as locals within the body. Each param's OWN
+            // `decl_range`/`selection_range` -- NOT the enclosing
+            // function's own `br` (its body-opening brace) -- so
+            // hovering a parameter resolves to its own declaration
+            // instead of leaking the enclosing function's doc comment
+            // (line-number-driven doc lookup used to match on `br`'s
+            // line, which is the function's own decl line for a
+            // single-line signature).
             for (pending_params.items) |pinfo| {
+                const pbr = rangeFromTokenPos(pinfo.pos);
                 try out.append(.{
                     .name = try allocator.dupe(u8, pinfo.name),
                     .kind = .variable,
-                    .decl_range = br,
-                    .selection_range = br,
+                    .decl_range = pbr,
+                    .selection_range = pbr,
                     .container_fn_range = body_range.?,
                     .container_type = null,
                     .value_type = try allocator.dupe(u8, pinfo.dtype_display),
@@ -3329,6 +3346,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     .name = pname_owned,
                     .dtype_base = "raw",
                     .dtype_display = "raw*",
+                    .pos = tokens[data_i].pos,
                 }) catch {};
             }
             const comma_i = nextNonTrivialToken(tokens, data_i + 1) orelse continue;
@@ -3341,6 +3359,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     .name = pname_owned,
                     .dtype_base = "num",
                     .dtype_display = "num",
+                    .pos = tokens[len_i].pos,
                 }) catch {};
             }
             continue;

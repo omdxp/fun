@@ -68,6 +68,57 @@ fun _convert_dotted_path(str root, str import_path) str {
   ret sb.build();
 }
 
+// Collapses every `seg/../` pair in `path` (and drops bare `.`/empty
+// segments), e.g. `"selfhost/parser/../ast/ast.fn"` -> `"selfhost/ast/
+// ast.fn"`. `resolve_import_path` itself deliberately does NOT do this
+// (its own tests pin the raw, un-collapsed dotted-path arithmetic) --
+// but the SAME real file reached via two DIFFERENT importing
+// directories (`selfhost/lexer/lexer.fn`'s own `imp ..ast.ast;` vs
+// `selfhost/parser/parser.fn`'s own `imp ..ast.ast;`) resolves to two
+// DIFFERENT, un-normalized path STRINGS for that one file -- and
+// `_preload_and_collect`/`_parse_and_merge`'s own `visited: Set<str>`
+// dedup keys on the raw string, so it never recognizes them as the same
+// file, parsing (and merging) it once per distinct importer directory.
+// Found via a real stage-2 self-compilation C error ("redefinition of
+// 'warning_id_from_string'"/`token_is_operator`/`dtype_new`/... --
+// every one of those lives in a file reachable from more than one
+// importing directory).
+// 
+// Fun ships on Windows too, where a path segment can arrive `\`-
+// separated (`resolve_import_path` itself always builds `/`, but a
+// caller-supplied entry path, or a future platform-specific join, might
+// not) -- every backslash is normalized to `/` FIRST, before splitting,
+// so both separators collapse into the exact same dedup key regardless
+// of which one a given path happens to use.
+fun _normalize_path(str path) str {
+  Vec<str> segs = split(replace_char(path, '\\', '/'), '/');
+  Vec<str> parts;
+  parts.init(8);
+  for seg : segs {
+    if equals(seg, "..") {
+      if parts.len > 0 && !equals(parts.get(parts.len - 1), "..") {
+        parts.pop();
+      } else {
+        parts.push(seg);
+      }
+    } elif equals(seg, ".") || equals(seg, "") {
+      continue;
+    } else {
+      parts.push(seg);
+    }
+  }
+  StringBuilder sb = string_builder_init(64);
+  bin first = true;
+  for p : parts {
+    if !first {
+      sb.append("/");
+    }
+    first = false;
+    sb.append(p);
+  }
+  ret sb.build();
+}
+
 // Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
 // path -- mirroring the CURRENT bootstrap compiler's own two-way split
 // EXACTLY (see `process_import` in `modules/codegen/transpiler.zig`): a
@@ -162,6 +213,7 @@ pub fun parse_program_with_imports(str entry_path) Result<Vec<Node>, str> {
 // matching that can't itself fail on an unresolved identifier, since it
 // never needs to understand expressions at all.
 fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
+  path = _normalize_path(path);
   if visited.has(path) {
     ret .None;
   }
@@ -265,6 +317,7 @@ fun _parse_and_merge(
   Map<str,
   GlobalSymbolInfo>* global_symbols
 ) Option<str> {
+  path = _normalize_path(path);
   if visited.has(path) {
     ret .None;
   }

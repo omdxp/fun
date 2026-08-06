@@ -694,7 +694,16 @@ pub fn findBestDefinitionOpts(symbols: []const SymbolLite, name: []const u8, at:
 
     for (symbols) |s| {
         if (!std.mem.eql(u8, s.name, name)) continue;
-        if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
+        // The receiver-kind exclusion above exists to stop a BARE identifier
+        // from resolving to a field/method/enumMember it can't legitimately
+        // reach without a receiver -- but it wrongly also excludes hovering
+        // the symbol's OWN declaration site (`num count;` inside its
+        // compound, `Red,` inside its enum), which is unambiguously "this
+        // token IS its own declaration," not a shadowing risk. Bypassing
+        // the exclusion there lets that hover resolve normally instead of
+        // falling through to the generic guessed-type fallback, which never
+        // looks up a doc comment.
+        if (exclude_receiver_kinds and types.requiresReceiver(s.kind) and !posInRange(at, s.selection_range)) continue;
 
         if (s.container_fn_range) |cr| {
             if (!posInRange(at, cr)) continue;

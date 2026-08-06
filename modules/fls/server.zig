@@ -1896,7 +1896,20 @@ pub const LspServer = struct {
                 // Only show a bare kind label when no signature was rendered above.
                 try buf.print("_{s}_\n", .{@tagName(d.kind)});
             }
-            _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+            // Skip doc-comment attribution when this symbol's own decl
+            // starts on the SAME line as its enclosing function's own
+            // body-open brace -- a parameter (or a local sharing that
+            // line, however unusual) has no comment of its own there;
+            // whatever sits above that line belongs to the ENCLOSING
+            // function, not this inner symbol. Without this, a
+            // single-line signature (`fun add(num a, num b) num {`,
+            // the common case) put the parameter's OWN `decl_range` on
+            // the exact same line as the function's, so hovering the
+            // parameter leaked the function's own doc comment.
+            const same_line_as_container = if (d.container_fn_range) |cr| d.decl_range.start.line == cr.start.line else false;
+            if (!same_line_as_container) {
+                _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+            }
             try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else if (def_import) |hit| {
             const d = hit.sym;
