@@ -1965,6 +1965,20 @@ impl Codegen {
             ret true;
           }
         }
+        // A quirk name's own C typedef (the vtable/fat-pointer struct)
+        // isn't emitted until its FIRST concrete impl is processed, in
+        // the LATER combined pass (see `emit_quirk_vtable_machinery`'s
+        // own doc comment) -- unsafe here for the exact same reason a
+        // plain enum is: this early pass would forward-declare a
+        // signature naming a type that doesn't exist yet. A GENERIC
+        // quirk has no monomorphic struct to speak of at all, so it's
+        // never actually reachable as a real return/param type here
+        // either way -- excluded for clarity, not correctness.
+        .Quirk(q) -> {
+          if !q.is_generic && equals(q.name, dt.type_str) {
+            ret true;
+          }
+        }
         _ -> {}
       }
     }
@@ -3404,6 +3418,41 @@ impl Codegen {
     ret .None;
   }
 
+  // Resolves a BARE enum-variant shorthand's (`.Red`) own enum by
+  // GLOBAL uniqueness: the one enum name whose registered variants
+  // include `variant_name`, when exactly one such enum exists across
+  // the whole program. Needed for a `let` declaration's own initializer
+  // specifically (`let color = .Red;`) -- unlike an EXPLICITLY typed
+  // `Variable`/a call argument/an equality RHS (`Codegen.expected_enum_
+  // type`'s other sites), a `let` has no declared type of its own to
+  // seed `expected_enum_type` with at all, so a bare shorthand there has
+  // nothing to resolve against UNLESS the variant name itself is
+  // unambiguous program-wide. `.None` when zero or MORE THAN ONE enum
+  // has a variant by that name -- ambiguous, the caller must reject
+  // rather than guess (matches this whole file's own "no real type-
+  // checker, structural inference only" discipline).
+  resolve_unique_enum_for_variant(str variant_name) Option<str> {
+    str found_name = "";
+    num found_count = 0;
+    num i = 0;
+    for i < self.enum_names.len {
+      let variants = self.enum_variant_names.get(i);
+      num j = 0;
+      for j < variants.len {
+        if equals(variants.get(j), variant_name) {
+          found_name = self.enum_names.get(i);
+          found_count = found_count + 1;
+        }
+        j = j + 1;
+      }
+      i = i + 1;
+    }
+    if found_count == 1 {
+      ret .Some(found_name);
+    }
+    ret .None;
+  }
+
   // True if `enum_name` was recorded as a known enum with a variant
   // named `variant_name`. False for an unrecognized enum name OR a
   // recognized enum with no such variant -- either way, the caller must
@@ -4563,6 +4612,77 @@ impl Codegen {
     ret .None;
   }
 
+  // Infers a best-effort C element type for a bare array literal
+  // (`[1, 2, 3]`) from its FIRST element -- needed ONLY for a `let`
+  // declaration's own initializer (`let arr = [1, 2, 3];`): C rejects
+  // `__auto_type x = {1, 2, 3};` outright ("cannot use '__auto_type'
+  // with initializer list"), unlike an EXPLICITLY typed declaration
+  // (`num[] arr = [1, 2, 3];`), which just declares the real array type
+  // on the LHS and needs no C-side inference at all. The bare brace-
+  // list this codegen otherwise emits for an array literal (`Codegen.
+  // in_array_initializer`'s own doc comment) needs a GNU compound-
+  // literal cast (`(int64_t[]){1, 2, 3}`) wrapped around it instead, for
+  // `let` specifically -- this resolves just the `int64_t` part.
+  // Defaults to `int64_t` for anything unrecognized (an empty literal,
+  // or a first element this narrow check doesn't cover) -- a reasonable
+  // fallback, not a guess that could silently miscompile: worst case a
+  // numeric-shaped default on a non-numeric array is a C type error,
+  // not a wrong VALUE.
+  infer_array_literal_elem_c_type(Node* inner) str {
+    Vec<Node*> elems;
+    elems.init(0);
+    defer elems.free();
+    self.flatten_call_args(inner, &elems);
+    if elems.len == 0 {
+      ret "int64_t";
+    }
+    let first = elems.get(0);
+    fit first.kind {
+      .Number(data) -> {
+        fit data {
+          .Dec(_) -> { ret "double"; }
+          _ -> { ret "int64_t"; }
+        }
+      }
+      .String(_) -> { ret "char*"; }
+      .Character(_) -> { ret "char"; }
+      .Boolean(_) -> { ret "bool"; }
+      .Identifier(name) -> {
+        let tn = self.lookup_local_type_name(name);
+        if tn.is_some() {
+          ret map_type_to_c(tn.unwrap());
+        }
+        ret "int64_t";
+      }
+      // `[Point{x = 0, y = 1}, Point{x = 2, y = 3}]` -- an explicit
+      // compound literal carries its own type name directly, same as
+      // `infer_let_expr_type`'s own identical `.CompoundInit` case.
+      .CompoundInit(ci) -> {
+        if ci.has_dtype {
+          ret ci.init_dtype.type_str;
+        }
+        ret "int64_t";
+      }
+      // `[make_point(n, n + 1), make_point(n2, n2 + 1)]` -- a call to a
+      // registered PLAIN function's own declared return type.
+      .Expression(e2) -> {
+        if equals(e2.op, "()") && e2.has_left {
+          fit e2.left.kind {
+            .Identifier(fn_name) -> {
+              let rt = self.lookup_function_rtype(fn_name);
+              if rt.is_some() {
+                ret rt.unwrap().type_str;
+              }
+            }
+            _ -> {}
+          }
+        }
+        ret "int64_t";
+      }
+      _ -> { ret "int64_t"; }
+    }
+  }
+
   // Emits `recv.method(args...)` as C `recv.vtable->method(recv.self,
   // args...)` (`recv->vtable->...`/`recv->self` when `recv` is itself a
   // pointer to the quirk's fat-pointer struct, rather than the struct
@@ -4599,6 +4719,41 @@ impl Codegen {
       }
     }
     self.state.write(")");
+    ret .None;
+  }
+
+  // Resolves the CONCRETE type an expression's own value coerces FROM,
+  // for a quirk-typed destination (a `Variable` declaration's own
+  // initializer, or a `ret` whose enclosing function's declared return
+  // type is a quirk -- see each call site's own doc comment) -- the
+  // `__fun_coerce_<Type>_<Quirk>` helper (`emit_quirk_vtable_
+  // machinery`'s own doc comment) needs `<Type>` by name to call the
+  // right one. Resolved structurally, same "known local, not fully
+  // inferred" style as everywhere else in this file -- two shapes:
+  // - `&identifier` (`Shape s = &rect;`): the concrete type is
+  // `identifier`'s own recorded local type name.
+  // - a bare identifier that's ALREADY a pointer (`ret p;` inside `fun
+  // as_hasx(Point* p) HasX`): same lookup, no `&` to see through first.
+  // `.None` for anything else (a chained receiver, a call result, ...)
+  // -- not yet reachable by anything ported so far.
+  resolve_quirk_coerce_concrete_type(Node* exp) Option<str> {
+    fit exp.kind {
+      .Unary(u) -> {
+        if equals(u.op, "&") && !u.is_left_operanded_unary {
+          fit u.operand.kind {
+            .Identifier(oname) -> { ret self.lookup_local_type_name(oname); }
+            _ -> {}
+          }
+        }
+      }
+      .Identifier(name) -> {
+        let is_ptr = self.lookup_local_is_pointer(name);
+        if is_ptr.is_some() && is_ptr.unwrap() {
+          ret self.lookup_local_type_name(name);
+        }
+      }
+      _ -> {}
+    }
     ret .None;
   }
 
@@ -5478,17 +5633,41 @@ impl Codegen {
         // can't retroactively change what gets returned by mutating a
         // variable the expression already read (matching the original's
         // own `has_pending_function_defers` guard).
+        // A `ret` value coerced to a quirk-typed return (`fun as_hasx(
+        // Point* p) HasX { ret p; }`) needs the same coercion call
+        // wrapped around it as a `Variable` declaration's own
+        // initializer does -- see `resolve_quirk_coerce_concrete_type`'s
+        // own doc comment.
+        bin ret_did_quirk_coerce = false;
+        str ret_quirk_concrete = "";
+        if exp != nil && self.quirk_names.contains(self.current_fn_rtype_name) {
+          let ret_concrete = self.resolve_quirk_coerce_concrete_type(exp);
+          if ret_concrete.is_some() {
+            ret_did_quirk_coerce = true;
+            ret_quirk_concrete = ret_concrete.unwrap();
+          }
+        }
         if self.defer_stack.len == 0 {
           self.state.write_indent();
           self.state.write("return");
           if exp != nil {
             self.state.write(" ");
+            if ret_did_quirk_coerce {
+              self.state.write("__fun_coerce_");
+              self.state.write(ret_quirk_concrete);
+              self.state.write("_");
+              self.state.write(self.current_fn_rtype_name);
+              self.state.write("(");
+            }
             let prev_expected = self.expected_enum_type;
             self.expected_enum_type = self.current_fn_rtype_name;
             let eerr = self.emit_expr(*exp);
             self.expected_enum_type = prev_expected;
             if eerr.is_some() {
               ret eerr;
+            }
+            if ret_did_quirk_coerce {
+              self.state.write(")");
             }
           }
           self.state.write(";\n");
@@ -5497,12 +5676,22 @@ impl Codegen {
         if exp != nil {
           self.state.write_indent();
           self.state.write("__auto_type __fun_defer_ret = ");
+          if ret_did_quirk_coerce {
+            self.state.write("__fun_coerce_");
+            self.state.write(ret_quirk_concrete);
+            self.state.write("_");
+            self.state.write(self.current_fn_rtype_name);
+            self.state.write("(");
+          }
           let prev_expected = self.expected_enum_type;
           self.expected_enum_type = self.current_fn_rtype_name;
           let eerr = self.emit_expr(*exp);
           self.expected_enum_type = prev_expected;
           if eerr.is_some() {
             ret eerr;
+          }
+          if ret_did_quirk_coerce {
+            self.state.write(")");
           }
           self.state.write(";\n");
         }
@@ -5666,39 +5855,73 @@ impl Codegen {
           } else {
             self.expected_enum_type = v.var_type.type_str;
           }
+          // A `let` has no declared type of its own to resolve a bare
+          // enum-variant shorthand initializer against (`let color =
+          // .Red;` -- `expected_enum_type` is just the `__let_infer__`
+          // sentinel set above, never a real enum name) -- fall back to
+          // GLOBAL uniqueness (`resolve_unique_enum_for_variant`'s own
+          // doc comment): if exactly one enum in the whole program has
+          // a variant by that name, that's unambiguously what this
+          // resolves to.
+          if is_let {
+            fit v.val.kind {
+              .Expression(ve) -> {
+                if equals(ve.op, ".") && ve.has_left && ve.has_right {
+                  fit ve.left.kind {
+                    .Blank -> {
+                      fit ve.right.kind {
+                        .Identifier(vname) -> {
+                          let unique = self.resolve_unique_enum_for_variant(vname);
+                          if unique.is_some() {
+                            self.expected_enum_type = unique.unwrap();
+                          }
+                        }
+                        _ -> {}
+                      }
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+              _ -> {}
+            }
+          }
           // See `Codegen.in_array_initializer`'s doc comment: a
           // declaration's own initializer is one of the contexts where a
           // bare `[1, 2, 3]` array literal needs the bare brace-list form.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
           // A quirk-typed declaration's own initializer (`Shape s =
-          // &rect;`) needs a coercion call wrapped around the RHS (see
-          // `emit_quirk_vtable_machinery`'s doc comment for the
-          // `__fun_coerce_<Type>_<Quirk>` helper this calls) -- resolved
-          // structurally, same "known local, not fully inferred" style as
-          // everything else here: only a bare `&identifier` RHS is
-          // recognized, via that identifier's OWN recorded local type
-          // name.
+          // &rect;`) needs a coercion call wrapped around the RHS -- see
+          // `resolve_quirk_coerce_concrete_type`'s own doc comment.
           bin did_quirk_coerce = false;
           if self.quirk_names.contains(v.var_type.type_str) {
+            let concrete = self.resolve_quirk_coerce_concrete_type(v.val);
+            if concrete.is_some() {
+              self.state.write("__fun_coerce_");
+              self.state.write(concrete.unwrap());
+              self.state.write("_");
+              self.state.write(v.var_type.type_str);
+              self.state.write("(");
+              did_quirk_coerce = true;
+            }
+          }
+          // `let arr = [1, 2, 3];` -- C flatly rejects `__auto_type x =
+          // {1, 2, 3};` (no target type to size/type the brace-list
+          // against), unlike an explicitly typed declaration further
+          // above (which just declares the real array type on the LHS
+          // and needs nothing extra here) -- see `infer_array_literal_
+          // elem_c_type`'s own doc comment. Wraps the bare brace-list
+          // `emit_expr` is about to emit in a GNU compound-literal cast
+          // -- `(ElemType[])` is already a complete, self-balanced
+          // parenthesized prefix, so nothing extra needs closing after
+          // `emit_expr` runs (unlike the quirk-coercion case above).
+          if is_let {
             fit v.val.kind {
-              .Unary(u) -> {
-                if equals(u.op, "&") && !u.is_left_operanded_unary {
-                  fit u.operand.kind {
-                    .Identifier(oname) -> {
-                      let concrete = self.lookup_local_type_name(oname);
-                      if concrete.is_some() {
-                        self.state.write("__fun_coerce_");
-                        self.state.write(concrete.unwrap());
-                        self.state.write("_");
-                        self.state.write(v.var_type.type_str);
-                        self.state.write("(");
-                        did_quirk_coerce = true;
-                      }
-                    }
-                    _ -> {}
-                  }
-                }
+              .Bracket(inner) -> {
+                self.state.write("(");
+                self.state.write(self.infer_array_literal_elem_c_type(inner));
+                self.state.write("[])");
               }
               _ -> {}
             }
@@ -8324,6 +8547,21 @@ impl Codegen {
         }
         ret .Some(dt);
       }
+      // `let p = Point{x = 1, y = 2};` -- an EXPLICIT compound literal
+      // (`ci.has_dtype`) carries its own type name directly, no
+      // inference needed. A BARE `.{...}` shorthand initializer has no
+      // `expected_compound_type` to resolve against here either (the
+      // exact same "let has no declared type" gap `resolve_unique_enum_
+      // for_variant`'s own doc comment covers for a bare enum shorthand
+      // -- not attempted here, since a compound literal's own FIELD
+      // NAMES aren't a reliable global-uniqueness key the way an enum
+      // variant's name is).
+      .CompoundInit(ci) -> {
+        if ci.has_dtype {
+          ret .Some(*ci.init_dtype);
+        }
+        ret .None;
+      }
       .Number(data) -> {
         DataType dt = dtype_new();
         fit data {
@@ -8408,10 +8646,57 @@ impl Codegen {
         fit e.left.kind {
           .Identifier(fn_name) -> {
             let rt = self.lookup_function_rtype(fn_name);
-            if rt.is_none() {
-              ret .None;
+            if rt.is_some() {
+              ret .Some(*rt.unwrap());
             }
-            ret .Some(*rt.unwrap());
+            // A call to a GENERIC function template (`let p2 =
+            // pick_first(p1, p2);`, `pick_first<T>(T a, T b) T`) isn't in
+            // the plain registry `lookup_function_rtype` reads -- infer
+            // its ACTUAL, substituted return type via the same
+            // instantiation `emit_call` already triggers for this exact
+            // call (idempotent: `maybe_instantiate_generic_function`
+            // dedups via `emitted_generic_instantiations`, so calling it
+            // again here -- this runs AFTER `emit_expr(v.val)` already
+            // did, in the `Variable`-declaration case -- is a cheap
+            // no-op past the first time). Only the bare-return-type case
+            // (`T`, not `Vec<T>`) is handled, matching every other
+            // narrowness in this function.
+            if e.has_right {
+              for tmpl : self.generic_function_templates {
+                fit tmpl.kind {
+                  .Function(f) -> {
+                    if !equals(f.name, fn_name) || !f.has_rtype || f.rtype.generic_args.len > 0 {
+                      continue;
+                    }
+                    Vec<Node*> gargs;
+                    gargs.init(0);
+                    self.flatten_call_args(e.right, &gargs);
+                    let ginst = self.maybe_instantiate_generic_function(fn_name, gargs);
+                    if ginst.is_none() {
+                      ret .None;
+                    }
+                    let gres = ginst.unwrap();
+                    num pi2 = 0;
+                    if f.has_args {
+                      for parg : f.args {
+                        fit parg.kind {
+                          .Variable(pv) -> {
+                            if equals(pv.var_type.type_str, f.rtype.type_str) && pv.var_type.generic_args.len == 0 && pi2 < gres.param_types.len {
+                              ret .Some(gres.param_types.get(pi2));
+                            }
+                          }
+                          _ -> {}
+                        }
+                        pi2 = pi2 + 1;
+                      }
+                    }
+                    ret .None;
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            ret .None;
           }
           .Expression(recv_e) -> {
             if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
@@ -9171,6 +9456,7 @@ impl Codegen {
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
+    `#include <math.h>
     ``);
     // `stdout`/`stderr`/`stdin` are macros/globals (not callable), and
     // differ per libc -- wrapping each in a tiny `static` function lets
@@ -13897,6 +14183,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
+    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -14129,6 +14416,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
+    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -15240,6 +15528,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
+    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
