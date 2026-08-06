@@ -529,6 +529,21 @@ pub compound Codegen {
   // methods (`maybe_instantiate_generic_impl_methods`, substituted the
   // same way `impl_method_rtype` already is there).
   Vec<Vec<DataType *>> impl_method_param_types;
+  // Each impl method's own trailing DEFAULT parameter VALUES (`pub
+  // add(num x = 10) num { ... }`), parallel to `impl_method_param_types`
+  // -- an entry's own `Vec<Node*>` is parallel to the METHOD's declared
+  // params too (excluding `self`), holding `nil` for a param with no
+  // default. `emit_method_call` reads these to fill in any OMITTED
+  // trailing arguments at a call site (`c.add()` -> `c.add(10)`) --
+  // defaults are evaluated at the CALL SITE (this language's own rule,
+  // see `examples/advanced/default_params.fn`), so re-emitting the
+  // SAME default expression per call site, rather than caching one
+  // shared value, is correct, not wasteful. Populated by `register_
+  // impl_methods` alongside `impl_method_param_types`. Deliberately
+  // narrow: not populated for a GENERIC impl's own monomorphized
+  // methods (`maybe_instantiate_generic_impl_methods`) -- combining
+  // defaults with generics isn't reachable by anything ported so far.
+  Vec<Vec<Node *>> impl_method_default_values;
   // A PLAIN top-level function's own name and its parameters' OWN
   // declared types (positional, parallel Vecs) -- lets `emit_call`
   // resolve a bare enum-variant shorthand (`.Parse`) passed as a CALL
@@ -545,6 +560,12 @@ pub compound Codegen {
   // args don't go through this lookup yet).
   Vec<str> function_names;
   Vec<Vec<DataType *>> function_param_types;
+  // Each plain top-level function's own trailing DEFAULT parameter
+  // VALUES, parallel to `function_param_types`/`function_names` -- see
+  // `Codegen.impl_method_default_values`'s own doc comment for the
+  // exact same mechanism, just for a plain function instead of a
+  // method. Populated by `register_function_signatures`.
+  Vec<Vec<Node *>> function_default_values;
   // Whether each registered plain function is variadic (`fun f(str fmt,
   // ...)`), parallel to `function_names` -- see `emit_call`'s own doc
   // comment for why a CALL site needs to know this (extra `__fun_vtags`
@@ -853,8 +874,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_mangled_name.init(0);
   g.impl_method_rtype.init(0);
   g.impl_method_param_types.init(0);
+  g.impl_method_default_values.init(0);
   g.function_names.init(0);
   g.function_param_types.init(0);
+  g.function_default_values.init(0);
   g.function_is_variadic.init(0);
   g.function_rtypes.init(0);
   g.generic_function_templates.init(0);
@@ -2124,12 +2147,18 @@ impl Codegen {
                 *recorded_pdt = substituted_pdt;
                 recorded_param_types.push(recorded_pdt);
               }
+              // Defaults + generics isn't a combination anything ported
+              // so far reaches -- see `Codegen.impl_method_default_
+              // values`'s own doc comment.
+              Vec<Node*> no_default_values;
+              no_default_values.init(0);
               self.record_impl_method(
                 mangled_name,
                 bare_name,
                 new_name,
                 recorded_rtype,
-                recorded_param_types
+                recorded_param_types,
+                no_default_values
               );
             }
 
@@ -3502,13 +3531,15 @@ impl Codegen {
     str bare_name,
     str mangled_name,
     DataType* rtype,
-    Vec<DataType*> param_types
+    Vec<DataType*> param_types,
+    Vec<Node*> default_values
   ) {
     self.impl_method_owner_type.push(owner_type);
     self.impl_method_bare_name.push(bare_name);
     self.impl_method_mangled_name.push(mangled_name);
     self.impl_method_rtype.push(rtype);
     self.impl_method_param_types.push(param_types);
+    self.impl_method_default_values.push(default_values);
   }
 
   // Looks up `bare_name`'s OWN declared return type on the known
@@ -3551,6 +3582,45 @@ impl Codegen {
           ret .None;
         }
         ret .Some(param_types.get(arg_index));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up `bare_name`'s OWN full param list (excluding `self`) --
+  // NOT just one arg's type, the WHOLE `Vec<DataType*>` -- for
+  // `emit_method_call`'s own default-parameter fill-in (`Codegen.
+  // impl_method_default_values`'s doc comment): it needs the total
+  // declared param COUNT to know how many trailing args a call omitted,
+  // before it can look up which of those have a default at all.
+  // `.None` means the method isn't recognized (an unknown method, or a
+  // generic impl's, never populated here).
+  lookup_impl_method_param_types(str owner_type, str bare_name) Option<Vec<DataType *>> {
+    num i = 0;
+    for i < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
+        self.impl_method_bare_name.get(i),
+        bare_name
+      ) {
+        ret .Some(self.impl_method_param_types.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up `bare_name`'s OWN trailing default-parameter VALUE
+  // expressions -- see `Codegen.impl_method_default_values`'s own doc
+  // comment. `.None` means the method isn't recognized at all.
+  lookup_impl_method_default_values(str owner_type, str bare_name) Option<Vec<Node *>> {
+    num i = 0;
+    for i < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
+        self.impl_method_bare_name.get(i),
+        bare_name
+      ) {
+        ret .Some(self.impl_method_default_values.get(i));
       }
       i = i + 1;
     }
@@ -4445,7 +4515,51 @@ impl Codegen {
       }
       arg_idx = arg_idx + 1;
     }
+    // Any trailing param(s) OMITTED at this call site (`greet("a")`
+    // calling `greet(str name, num times = 2, str sep = "-")`) get
+    // their own declared DEFAULT value expression filled in here --
+    // see `Codegen.function_default_values`'s own doc comment. A
+    // GENERIC call (`generic_inst.is_some()`) never reaches this: a
+    // generic function's own defaults aren't tracked at all (see that
+    // field's own doc comment), so `lookup_function_default_values`
+    // (keyed by the PLAIN registry, `template_callee_name` here would
+    // be the unsubstituted template name anyway) is skipped for it.
+    if generic_inst.is_none() {
+      let defaults = self.lookup_function_default_values(template_callee_name);
+      if defaults.is_some() {
+        let derr = self.emit_default_trailing_args(defaults.unwrap(), args.len);
+        if derr.is_some() {
+          ret derr;
+        }
+      }
+    }
     self.state.write(")");
+    ret .None;
+  }
+
+  // Emits `, <default value expr>` for each trailing parameter position
+  // from `provided_count` onward that HAS a recorded default (a `nil`
+  // entry means no default, and stops filling further positions right
+  // there -- the language's own rule that defaults must be trailing
+  // means a real gap here is a call-arity error the ORIGINAL compiler's
+  // typechecker already catches upstream, not something this codegen
+  // needs to re-diagnose). Shared by `emit_call`/`emit_method_call`, see
+  // `Codegen.function_default_values`'s own doc comment for why
+  // defaults are evaluated FRESH at each call site rather than cached.
+  emit_default_trailing_args(Vec<Node*> defaults, num provided_count) Option<CodegenErrorKind> {
+    num i = provided_count;
+    for i < defaults.len {
+      Node* d = defaults.get(i);
+      if d == nil {
+        ret .None;
+      }
+      self.state.write(", ");
+      let derr = self.emit_expr(*d);
+      if derr.is_some() {
+        ret derr;
+      }
+      i = i + 1;
+    }
     ret .None;
   }
 
@@ -4679,6 +4793,16 @@ impl Codegen {
         ret aerr;
       }
       arg_idx = arg_idx + 1;
+    }
+    // See `emit_call`'s own identical fill-in for a plain function's
+    // trailing defaults -- same mechanism, just keyed by (owner type,
+    // bare method name) instead of a plain function name.
+    let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
+    if method_defaults.is_some() {
+      let mderr = self.emit_default_trailing_args(method_defaults.unwrap(), args.len);
+      if mderr.is_some() {
+        ret mderr;
+      }
     }
     self.state.write(")");
     ret .None;
@@ -8038,16 +8162,29 @@ impl Codegen {
           } else {
             Vec<DataType*> param_types;
             param_types.init(0);
+            // Each param's own default VALUE expression (`nil` when it
+            // has none) -- see `Codegen.function_default_values`'s own
+            // doc comment.
+            Vec<Node*> default_values;
+            default_values.init(0);
             if f.has_args {
               for arg : f.args {
                 fit arg.kind {
-                  .Variable(v) -> { param_types.push(v.var_type); }
+                  .Variable(v) -> {
+                    param_types.push(v.var_type);
+                    if v.has_val {
+                      default_values.push(v.val);
+                    } else {
+                      default_values.push(nil);
+                    }
+                  }
                   _ -> {}
                 }
               }
             }
             self.function_names.push(f.name);
             self.function_param_types.push(param_types);
+            self.function_default_values.push(default_values);
             // Only a Fun-DEFINED variadic function (`f.has_body`) gets
             // the `__fun_vtags`-tag-array call-site treatment (see
             // `emit_call`'s own doc comment) -- a BODYLESS variadic
@@ -8619,6 +8756,21 @@ impl Codegen {
     ret .None;
   }
 
+  // Looks up `fn_name`'s OWN full param COUNT and trailing default-
+  // parameter VALUE expressions -- see `Codegen.function_default_
+  // values`'s own doc comment. `.None` means `fn_name` isn't registered
+  // as a plain (non-generic) function at all.
+  lookup_function_default_values(str fn_name) Option<Vec<Node *>> {
+    num i = 0;
+    for i < self.function_names.len {
+      if equals(self.function_names.get(i), fn_name) {
+        ret .Some(self.function_default_values.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Pre-registers every method of a plain OR quirk-implementing
   // (non-generic) impl block under its own bare name and fully mangled
   // C call-site name (see `Codegen.impl_method_owner_type`'s doc
@@ -8659,6 +8811,11 @@ impl Codegen {
           DataType* rtype = nil;
           Vec<DataType*> param_types;
           param_types.init(0);
+          // Each param's own default VALUE expression (`nil` when it has
+          // none) -- see `Codegen.impl_method_default_values`'s own doc
+          // comment.
+          Vec<Node*> default_values;
+          default_values.init(0);
           fit m.kind {
             .Function(fnv) -> {
               mangled_name = fnv.name;
@@ -8673,7 +8830,14 @@ impl Codegen {
                     continue;
                   }
                   fit arg.kind {
-                    .Variable(v) -> { param_types.push(v.var_type); }
+                    .Variable(v) -> {
+                      param_types.push(v.var_type);
+                      if v.has_val {
+                        default_values.push(v.val);
+                      } else {
+                        default_values.push(nil);
+                      }
+                    }
                     _ -> {}
                   }
                 }
@@ -8682,7 +8846,14 @@ impl Codegen {
             _ -> {}
           }
           let bare_name = strip_prefix(mangled_name, prefix);
-          self.record_impl_method(i.type_name, bare_name, mangled_name, rtype, param_types);
+          self.record_impl_method(
+            i.type_name,
+            bare_name,
+            mangled_name,
+            rtype,
+            param_types,
+            default_values
+          );
         }
       }
       _ -> {}
@@ -11583,7 +11754,16 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
   opt_rtype.type_str = "Opt";
   Vec<DataType*> get_opt_param_types;
   get_opt_param_types.init(0);
-  g.record_impl_method("Holder", "get_opt", "Holder__get_opt", opt_rtype, get_opt_param_types);
+  Vec<Node*> get_opt_default_values;
+  get_opt_default_values.init(0);
+  g.record_impl_method(
+    "Holder",
+    "get_opt",
+    "Holder__get_opt",
+    opt_rtype,
+    get_opt_param_types,
+    get_opt_default_values
+  );
 
   Node* recv = malloc(sizeof(Node));
   *recv = node_new(NodeKind.Identifier("h"));
@@ -11694,12 +11874,15 @@ test "emit_statement emits a fit over a method-call subject with a CHAINED field
   opt_rtype.type_str = "Opt";
   Vec<DataType*> token_peek_prev_n_param_types;
   token_peek_prev_n_param_types.init(0);
+  Vec<Node*> token_peek_prev_n_default_values;
+  token_peek_prev_n_default_values.init(0);
   g.record_impl_method(
     "ParseState",
     "token_peek_prev_n",
     "ParseState__token_peek_prev_n",
     opt_rtype,
-    token_peek_prev_n_param_types
+    token_peek_prev_n_param_types,
+    token_peek_prev_n_default_values
   );
 
   Node* self_ident = malloc(sizeof(Node));
