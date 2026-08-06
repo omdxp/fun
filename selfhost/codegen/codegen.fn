@@ -8135,13 +8135,14 @@ impl Codegen {
   // function 'isalnum'") for `std/lexer.fn`'s own real char-
   // classification calls.
   pub write_prelude() {
-    self.state.write("#include <stdio.h>\n");
-    self.state.write("#include <stdbool.h>\n");
-    self.state.write("#include <stdint.h>\n");
-    self.state.write("#include <stdarg.h>\n");
-    self.state.write("#include <stdlib.h>\n");
-    self.state.write("#include <string.h>\n");
-    self.state.write("#include <ctype.h>\n");
+    self.state.write(`#include <stdio.h>
+    `#include <stdbool.h>
+    `#include <stdint.h>
+    `#include <stdarg.h>
+    `#include <stdlib.h>
+    `#include <string.h>
+    `#include <ctype.h>
+    ``);
     // `stdout`/`stderr`/`stdin` are macros/globals (not callable), and
     // differ per libc -- wrapping each in a tiny `static` function lets
     // `std.c.io`'s own bodyless `stdout_stream()`/`stderr_stream()`/
@@ -8152,16 +8153,18 @@ impl Codegen {
     // were simply missing, found via a real stage-2 self-compilation C
     // error ("call to undeclared function 'stdout_stream'") for `std/
     // io.fn`'s own real `print`/`read_line` bodies.
-    self.state.write("static FILE* stdout_stream(void){ return stdout; }\n");
-    self.state.write("static FILE* stderr_stream(void){ return stderr; }\n");
-    self.state.write("static FILE* stdin_stream(void){ return stdin; }\n");
+    self.state.write(`static FILE* stdout_stream(void){ return stdout; }
+    `static FILE* stderr_stream(void){ return stderr; }
+    `static FILE* stdin_stream(void){ return stdin; }
+    ``);
     // Runtime helpers backing the `__fun_key_hash` intrinsic (see
     // `emit_call`'s own doc comment) -- an FNV-1a-style hash, matching
     // the original transpiler's own identical prelude helpers exactly.
     // Always emitted, same "cheap, harmless when unused" reasoning as
     // every other prelude helper here.
-    self.state.write("static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }\n");
-    self.state.write("static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }\n");
+    self.state.write(`static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
+    ``);
     // `__fun_tag(x)` maps a single vararg's own C type to the one-
     // character tag `emit_call`'s own call-site tagging embeds in
     // `__fun_vtags` (see `emit_function_named`'s own doc comment for the
@@ -8180,25 +8183,26 @@ impl Codegen {
     // stage-2 self-compilation C error ("call to undeclared function
     // '__fun_dir_open'") for `std/fs.fn`'s own real directory-walking
     // bodies.
-    self.state.write("#ifdef _WIN32\n");
-    self.state.write("#include <windows.h>\n");
-    self.state.write("#include <direct.h>\n");
-    self.state.write("#include <sys/stat.h>\n");
-    self.state.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
-    self.state.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), \"%s\\\\*\", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }\n");
-    self.state.write("static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }\n");
-    self.state.write("static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }\n");
-    self.state.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }\n");
-    self.state.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }\n");
-    self.state.write("#else\n");
-    self.state.write("#include <dirent.h>\n");
-    self.state.write("#include <sys/stat.h>\n");
-    self.state.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }\n");
-    self.state.write("static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }\n");
-    self.state.write("static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }\n");
-    self.state.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }\n");
-    self.state.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }\n");
-    self.state.write("#endif\n");
+    self.state.write(`#ifdef _WIN32
+    `#include <windows.h>
+    `#include <direct.h>
+    `#include <sys/stat.h>
+    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
+    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
+    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
+    `#else
+    `#include <dirent.h>
+    `#include <sys/stat.h>
+    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
+    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
+    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
+    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
+    `#endif
+    ``);
     // The compiler's own private thread primitive -- always emitted,
     // regardless of whether this program uses `fork`/`async`/channels.
     // `await`/`fork` support (ported next) build directly on
@@ -8206,21 +8210,22 @@ impl Codegen {
     // (`fork`'s own task queue) builds on top of THIS, not the other way
     // around. Kept as a byte-for-byte copy of the original implementation's
     // own prelude text for this layer.
-    self.state.write("#ifdef _WIN32\n");
-    self.state.write("#include <windows.h>\n");
-    self.state.write("typedef HANDLE __fun_thread_t;\n");
-    self.state.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
-    self.state.write("typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\n");
-    self.state.write("static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\n");
-    self.state.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\n");
-    self.state.write("static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n");
-    self.state.write("#else\n");
-    self.state.write("#include <pthread.h>\n");
-    self.state.write("typedef pthread_t __fun_thread_t;\n");
-    self.state.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
-    self.state.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\n");
-    self.state.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
-    self.state.write("#endif\n");
+    self.state.write(`#ifdef _WIN32
+    `#include <windows.h>
+    `typedef HANDLE __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
+    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `#else
+    `#include <pthread.h>
+    `typedef pthread_t __fun_thread_t;
+    `typedef void* (*__fun_thread_entry_t)(void*);
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    ``);
     // A plain (non-fork) program can still deadlock on a channel wait (e.g.
     // a lone `ch.recv()` with no sender) -- `std/channel.fn` calls
     // `__fun_wd_enter_wait`/`__fun_wd_leave_wait` around every blocking wait
@@ -14994,6 +14999,9 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, with 'y' resolved as its OWN Vec<Vec<str>> dtype, not fn_a's stale Vec<str> entry";
   assert contains(
     st.out.build(),
-    "for (int64_t __fun_i = 0; __fun_i < item.len; __fun_i++) {\n            __auto_type s = item.data[__fun_i];\n        }"
+    `for (int64_t __fun_i = 0; __fun_i < item.len; __fun_i++) {
+    `            __auto_type s = item.data[__fun_i];
+    `        }
+    ``
   ), "expected the NESTED loop over 'item' (Vec<str>) to emit via the .len/.data fast path, proving 'item' resolved its real (not stale) element type";
 }
