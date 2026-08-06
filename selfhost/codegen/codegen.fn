@@ -3350,6 +3350,32 @@ impl Codegen {
     }
   }
 
+  // True when `arg`'s OWN declared type, resolved through the active
+  // generic substitution (see `Codegen.type_subst_param_names`'s doc
+  // comment -- a bare type-param name like `K` may concretely be `str`
+  // in THIS monomorphization), is the builtin string type -- used by
+  // the `__fun_key_eq`/`__fun_key_hash` intrinsics (`emit_call`'s own
+  // doc comment) to choose string-CONTENTS vs raw-BYTES comparison/hash
+  // semantics. Only a bare `.Identifier` argument (a known local/param)
+  // is resolvable at all; anything else conservatively answers `false`
+  // (byte semantics), matching the original's own identical narrowing.
+  _key_arg_is_str(Node* arg) bin {
+    fit arg.kind {
+      .Identifier(name) -> {
+        let dt_opt = self.lookup_local_dtype(name);
+        if dt_opt.is_none() {
+          ret false;
+        }
+        let resolved = self.resolve_type_subst(dt_opt.unwrap());
+        if resolved.pointer_depth != 0 {
+          ret false;
+        }
+        ret equals(resolved.type_str, "str");
+      }
+      _ -> { ret false; }
+    }
+  }
+
   // Emits a call `callee(arg1, arg2, ...)`: a plain-identifier callee (an
   // ordinary free-function call) directly, or delegates to
   // `emit_method_call` when the callee is itself a `.`-Expression
@@ -3418,6 +3444,77 @@ impl Codegen {
     args.init(0);
     defer args.free();
     self.flatten_call_args(e.right, &args);
+
+    // `__fun_key_eq(a, b)`/`__fun_key_hash(x)` are compiler INTRINSICS
+    // (special-cased plain-function-call names, not real functions) used
+    // by `std/map.fn`/`std/set.fn`'s own generic `impl Map<K, V>`/`impl
+    // Set<T>` bodies to compare/hash a key BY CONTENTS when it's a
+    // string, or by RAW BYTES otherwise (matching the original
+    // transpiler's own identical intrinsics -- fixes `Map<str>`/`Set<
+    // str>` keys that would otherwise compare/hash the pointer itself).
+    // `_key_arg_is_str` resolves the argument's OWN declared type
+    // through the active generic substitution (a bare type-param name
+    // like `K` may concretely be `str` in THIS monomorphization) --
+    // mirrors `arg_concrete_type_is_str`'s identical reasoning. Found
+    // via a real stage-2 self-compilation C error ("call to undeclared
+    // function '__fun_key_hash'").
+    if equals(callee_name, "__fun_key_eq") && args.len == 2 {
+      self.state.write("(");
+      if self._key_arg_is_str(args.get(0)) {
+        self.state.write("strcmp((");
+        let keq_a_err = self.emit_expr(*args.get(0));
+        if keq_a_err.is_some() {
+          ret keq_a_err;
+        }
+        self.state.write("), (");
+        let keq_b_err = self.emit_expr(*args.get(1));
+        if keq_b_err.is_some() {
+          ret keq_b_err;
+        }
+        self.state.write(")) == 0)");
+      } else {
+        self.state.write("memcmp(&(");
+        let keq_a_err2 = self.emit_expr(*args.get(0));
+        if keq_a_err2.is_some() {
+          ret keq_a_err2;
+        }
+        self.state.write("), &(");
+        let keq_b_err2 = self.emit_expr(*args.get(1));
+        if keq_b_err2.is_some() {
+          ret keq_b_err2;
+        }
+        self.state.write("), sizeof(");
+        let keq_a_err3 = self.emit_expr(*args.get(0));
+        if keq_a_err3.is_some() {
+          ret keq_a_err3;
+        }
+        self.state.write(")) == 0)");
+      }
+      ret .None;
+    }
+    if equals(callee_name, "__fun_key_hash") && args.len == 1 {
+      if self._key_arg_is_str(args.get(0)) {
+        self.state.write("__fun_str_key_hash((");
+        let kh_err = self.emit_expr(*args.get(0));
+        if kh_err.is_some() {
+          ret kh_err;
+        }
+        self.state.write("))");
+      } else {
+        self.state.write("__fun_bytes_key_hash(&(");
+        let kh_err2 = self.emit_expr(*args.get(0));
+        if kh_err2.is_some() {
+          ret kh_err2;
+        }
+        self.state.write("), sizeof(");
+        let kh_err3 = self.emit_expr(*args.get(0));
+        if kh_err3.is_some() {
+          ret kh_err3;
+        }
+        self.state.write("))");
+      }
+      ret .None;
+    }
 
     // `sizeof(T)` where `T` is the bare type param of the generic impl
     // method currently being monomorphized (`Option<T>.zero()`'s own
@@ -7484,6 +7581,13 @@ impl Codegen {
     self.state.write("static FILE* stdout_stream(void){ return stdout; }\n");
     self.state.write("static FILE* stderr_stream(void){ return stderr; }\n");
     self.state.write("static FILE* stdin_stream(void){ return stdin; }\n");
+    // Runtime helpers backing the `__fun_key_hash` intrinsic (see
+    // `emit_call`'s own doc comment) -- an FNV-1a-style hash, matching
+    // the original transpiler's own identical prelude helpers exactly.
+    // Always emitted, same "cheap, harmless when unused" reasoning as
+    // every other prelude helper here.
+    self.state.write("static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }\n");
+    self.state.write("static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }\n");
     // The compiler's own private thread primitive -- always emitted,
     // regardless of whether this program uses `fork`/`async`/channels.
     // `await`/`fork` support (ported next) build directly on
@@ -12131,7 +12235,11 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
+    `static FILE* stdin_stream(void){ return stdin; }
+    `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
@@ -12338,7 +12446,11 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
+    `static FILE* stdin_stream(void){ return stdin; }
+    `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
@@ -13424,7 +13536,11 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
+    `static FILE* stdin_stream(void){ return stdin; }
+    `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
