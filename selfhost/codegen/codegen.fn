@@ -9606,6 +9606,32 @@ impl Codegen {
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     ``);
+    // `std.c.net`'s own POSIX socket bindings (`socket`/`bind`/`listen`/
+    // `accept`/`recv`/`send`/`close`) resolved to undeclared library
+    // functions -- same "no way to see which std.c.* modules a program
+    // imports" reasoning as every other prelude header here, so always
+    // emitted. Copied verbatim from the original transpiler's own
+    // identical (there, conditionally emitted) block, including its
+    // Windows/POSIX split -- untested on Windows by this port itself,
+    // but matches ALREADY-shipped, already-reviewed behavior exactly
+    // rather than inventing a new one.
+    self.state.write(`#if defined(_WIN32)
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#include <winsock2.h>
+    `#include <ws2tcpip.h>
+    `#pragma comment(lib, "Ws2_32.lib")
+    `#ifndef close
+    `#define close closesocket
+    `#endif
+    `#else
+    `#include <sys/socket.h>
+    `#include <netinet/in.h>
+    `#include <arpa/inet.h>
+    `#include <unistd.h>
+    `#endif
+    ``);
     // A plain (non-fork) program can still deadlock on a channel wait (e.g.
     // a lone `ch.recv()` with no sender) -- `std/channel.fn` calls
     // `__fun_wd_enter_wait`/`__fun_wd_leave_wait` around every blocking wait
@@ -14289,6 +14315,22 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
+    `#if defined(_WIN32)
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#include <winsock2.h>
+    `#include <ws2tcpip.h>
+    `#pragma comment(lib, "Ws2_32.lib")
+    `#ifndef close
+    `#define close closesocket
+    `#endif
+    `#else
+    `#include <sys/socket.h>
+    `#include <netinet/in.h>
+    `#include <arpa/inet.h>
+    `#include <unistd.h>
+    `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;
     `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
@@ -14521,6 +14563,22 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `typedef void* (*__fun_thread_entry_t)(void*);
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `#if defined(_WIN32)
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#include <winsock2.h>
+    `#include <ws2tcpip.h>
+    `#pragma comment(lib, "Ws2_32.lib")
+    `#ifndef close
+    `#define close closesocket
+    `#endif
+    `#else
+    `#include <sys/socket.h>
+    `#include <netinet/in.h>
+    `#include <arpa/inet.h>
+    `#include <unistd.h>
     `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;
@@ -15633,6 +15691,22 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `typedef void* (*__fun_thread_entry_t)(void*);
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `#if defined(_WIN32)
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#include <winsock2.h>
+    `#include <ws2tcpip.h>
+    `#pragma comment(lib, "Ws2_32.lib")
+    `#ifndef close
+    `#define close closesocket
+    `#endif
+    `#else
+    `#include <sys/socket.h>
+    `#include <netinet/in.h>
+    `#include <arpa/inet.h>
+    `#include <unistd.h>
     `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;
