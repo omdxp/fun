@@ -1,0 +1,32 @@
+// An impl method can declare its OWN generic type parameter, independent of
+// (and combinable with) the impl's own -- `impl Box<T> { pub wrap<U>(...)
+// Box<U> { ... } }` mints a DIFFERENT Box<U> instantiation than the
+// receiver's own Box<T>, with `U` inferred from the call's own argument.
+
+imp std.c.io;
+
+compound Box<T> {
+  T value;
+}
+
+impl Box<T> {
+  pub get() T {
+    ret self.value;
+  }
+
+  pub wrap<U>(U x) Box<U> {
+    Box<U> b;
+    b.value = x;
+    ret b;
+  }
+}
+
+fun main() {
+  Box<num> b;
+  b.value = 5;
+  printf("b.get=%lld\n", b.get());
+
+  // `wrap<U>` here mints Box<str>, a different instantiation than `b`'s
+  // own Box<num> -- chained straight into `.get()` on the result.
+  printf("b.wrap(\"hello\").get=%s\n", b.wrap("hello").get());
+}

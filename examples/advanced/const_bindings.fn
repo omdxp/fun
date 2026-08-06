@@ -1,0 +1,22 @@
+// `const` declarations: implicit (`const x = 5;`, type inferred) or explicit
+// (`const num x = 5;`), both top-level and local. A `const` binding rejects
+// any later reassignment (a compile-time diagnostic, not a runtime check).
+
+imp std.c.io;
+
+const num GREETING_REPEAT = 3;
+pub const str GREETING = "hi";
+
+fun main() {
+  const num local_implicit = 10;
+  const str local_explicit_str = "local";
+
+  num total = 0;
+  num i = 0;
+  for i < GREETING_REPEAT {
+    printf("%s (%s) #%d\n", GREETING, local_explicit_str, i);
+    total = total + local_implicit;
+    i = i + 1;
+  }
+  printf("total=%d\n", total);
+}

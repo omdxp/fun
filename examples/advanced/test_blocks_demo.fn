@@ -1,0 +1,23 @@
+// `test "name" { ... }` declarations: skipped entirely by an ordinary
+// compile (this file's own `main()` runs standalone, same as any other
+// example) -- only compiled and run by `fun -in test_blocks_demo.fn -test`
+// (or `fun test test_blocks_demo.fn`), which reports each test's pass/fail
+// and exits non-zero on any failure.
+
+imp std.c.io;
+
+fun add(num a, num b) num {
+  ret a + b;
+}
+
+fun main() {
+  printf("add(2,3)=%lld\n", add(2, 3));
+}
+
+test "add computes the sum of two numbers" {
+  assert add(2, 3) == 5, "expected 5";
+}
+
+test "add handles negative numbers" {
+  assert add(-2, -3) == -5, "expected -5";
+}

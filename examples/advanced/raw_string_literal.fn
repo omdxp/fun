@@ -1,0 +1,22 @@
+// Backtick raw string literals: no escape processing at all (a backslash is
+// just a backslash, a double-quote is just a double-quote) -- useful for
+// text that would otherwise need heavy escaping, like embedded C source or
+// regex-shaped strings. Two forms: inline (closed by another backtick on the
+// same line) and multi-line (each continuation line marks itself with its
+// own leading backtick, joined with real newlines, closed either implicitly
+// by a line with no leading backtick or explicitly by a trailing backtick).
+
+imp std.c.io;
+
+fun main() {
+  str inline_raw = `C:\no\escaping\needed`;
+  printf("%s\n", inline_raw);
+
+  str embedded_quotes = `she said "hello" without any escaping`;
+  printf("%s\n", embedded_quotes);
+
+  str multi_line = `line one
+  `line two
+  `line three`;
+  printf("%s\n", multi_line);
+}
