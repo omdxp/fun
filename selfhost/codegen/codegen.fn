@@ -9170,6 +9170,7 @@ impl Codegen {
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `#include <limits.h>
     ``);
     // `stdout`/`stderr`/`stdin` are macros/globals (not callable), and
     // differ per libc -- wrapping each in a tiny `static` function lets
@@ -13895,6 +13896,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `#include <limits.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -14126,6 +14128,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `#include <limits.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -15236,6 +15239,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#include <stdlib.h>
     `#include <string.h>
     `#include <ctype.h>
+    `#include <limits.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
