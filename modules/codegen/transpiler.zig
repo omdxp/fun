@@ -6470,6 +6470,39 @@ pub const TranspileProcess = struct {
         return self.find_any_impl_method_node_proc(root, type_base, method_name);
     }
 
+    /// Like `find_any_impl_method_node`, but collects EVERY matching impl instead of
+    /// just the first — a type can have several impl blocks defining the same method
+    /// name under different constraints (e.g. stdlib's `impl Vec<T: num | dec>` and
+    /// `impl Vec<str>` both define `contains`), and `check_impl_generic_constraint`
+    /// needs to know about all of them, not just whichever one source order happens
+    /// to register first.
+    fn collect_all_impl_method_nodes_proc(self: *Self, proc: *Self, type_base: []const u8, method_name: []const u8, out: *ArrayList(PlainImplMethodHit)) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            if (!mem.eql(u8, base, type_base)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                const base_name = base_method_name_from_generated(full) orelse continue;
+                if (!mem.eql(u8, base_name, method_name)) continue;
+                out.append(.{ .impl_node = n, .method_node = m }) catch return TranspileError.MemoryAllocationFailed;
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.collect_all_impl_method_nodes_proc(child, type_base, method_name, out);
+        }
+    }
+    fn collect_all_impl_method_nodes(self: *Self, type_base: []const u8, method_name: []const u8, out: *ArrayList(PlainImplMethodHit)) TranspileError!void {
+        const root = self.get_root();
+        try self.collect_all_impl_method_nodes_proc(root, type_base, method_name, out);
+    }
+
     /// When a method call resolves to an impl block that constrains its type
     /// parameters (`impl Box<T: num | dec> { ... }`), verify the concrete receiver
     /// type args satisfy the constraint. Emits a Fun TypeError on violation
@@ -6477,15 +6510,28 @@ pub const TranspileProcess = struct {
     /// old behavior turned into an opaque C linker error `undefined Box__str__get`).
     /// Returns error.TypeMismatch on violation; no-op when unconstrained or the
     /// receiver args aren't statically concrete.
+    ///
+    /// A type can have SEVERAL impl blocks defining the same method name under
+    /// different constraints — e.g. stdlib's `impl Vec<T: num | dec>` and
+    /// `impl Vec<str>` both define `contains`. Checking only the FIRST matching
+    /// impl (by source-registration order) was wrong: `Vec<str>.contains(...)`
+    /// picked up the numeric-constrained impl first and rejected `str` outright,
+    /// even though the str-specific impl right below it plainly accepts it and is
+    /// what actually gets dispatched to. Fixed by checking EVERY matching impl and
+    /// only erroring when ALL of them reject the args (or are otherwise
+    /// constrained against them) — an accepting or unconstrained match anywhere
+    /// in the set is enough.
     fn check_impl_generic_constraint(self: *Self, node: ast.Node, recv_dt: ?*const dtype.DataType, recv_base: []const u8, method_name: []const u8) TranspileError!void {
         const dt = recv_dt orelse return;
         const gargs_vec = dt.generic_args orelse return;
         const gargs = gargs_vec.items();
         if (gargs.len == 0) return;
         const base = if (mem.indexOf(u8, recv_base, "__")) |idx| recv_base[0..idx] else recv_base;
-        const hit = self.find_any_impl_method_node(base, method_name) orelse return;
-        const im = hit.impl_node.node_variant.?.impl;
-        const forced = im.type_param_forced_insts orelse return;
+        var hits = ArrayList(PlainImplMethodHit).init(self.allocator);
+        defer hits.deinit();
+        try self.collect_all_impl_method_nodes(base, method_name, &hits);
+        if (hits.items.len == 0) return;
+        const hit = hits.items[0];
         // Only check when every generic arg is CONCRETE — not a still-symbolic type
         // parameter. A call made inside a generic body (e.g. stdlib `impl Vec<T>`
         // calling a constrained sibling with receiver `Vec__T`) has `T` as the arg;
@@ -6524,11 +6570,14 @@ pub const TranspileProcess = struct {
                 }
             }
         }
-        if (!impl_allows_generic_args(forced, gargs)) {
-            const mangled = self.type_name_mangled(dt) catch dt.type_str.items;
-            self.report_type_error(node, "'{s}' does not satisfy the constraint on 'impl {s}' for method '{s}'", .{ mangled, base, method_name });
-            return TranspileError.TypeMismatch;
+        for (hits.items) |candidate| {
+            const cim = candidate.impl_node.node_variant.?.impl;
+            const cforced = cim.type_param_forced_insts orelse return; // unconstrained match accepts anything
+            if (impl_allows_generic_args(cforced, gargs)) return; // an accepting match is enough
         }
+        const mangled = self.type_name_mangled(dt) catch dt.type_str.items;
+        self.report_type_error(node, "'{s}' does not satisfy the constraint on 'impl {s}' for method '{s}'", .{ mangled, base, method_name });
+        return TranspileError.TypeMismatch;
     }
 
     fn synthesize_generic_plain_method_sig(self: *Self, recv_dt: *const dtype.DataType, recv_name: []const u8, method_name: []const u8) ?FnSig {
