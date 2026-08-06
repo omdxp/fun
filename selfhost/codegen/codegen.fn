@@ -848,6 +848,12 @@ pub compound Codegen {
   // is a later slice of this port); `write_prelude` currently always
   // emits the plain, scheduler-less watchdog.
   bin uses_fork;
+  // Whether the program defines its OWN top-level function under a name
+  // `<math.h>` also declares -- computed once by `program_defines_libm_
+  // colliding_name` at the very start of `pub transpile`, same as
+  // `uses_fork` just above. `write_prelude` skips `#include <math.h>`
+  // when true -- see that function's own doc comment.
+  bin skip_math_h;
   // True while emitting `main`'s own body -- `.StatementReturn`
   // consults this to decide whether `ret <expr>;` can write the real
   // expression (only when `main`'s OWN declared return type is a
@@ -941,6 +947,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
+  g.skip_math_h = false;
   g.in_main = false;
   ret g;
 }
@@ -1008,6 +1015,58 @@ fun uses_fork_in(Vec<Node> nodes) bin {
   for n : nodes {
     if node_contains_fork(&n) {
       ret true;
+    }
+  }
+  ret false;
+}
+
+// True when the program defines its OWN top-level (free-function, never
+// mangled, so the only kind that could collide) function under a name
+// `<math.h>` ALSO declares (`log`, `sin`, `pow`, ...) -- write_prelude
+// includes `<math.h>` unconditionally (same "no way to see which std.c.*
+// modules a program imports" reasoning as every other header there), but
+// a program's OWN same-named function (`std/log.fn`'s own real `pub fun
+// log(LogLevel level, str msg) { ... }`, found via a real "conflicting
+// types for 'log'" C error once BOTH this and the math.h fix landed)
+// then collides with libm's declaration of the same bare name. Checked
+// once, before the prelude is written (mirrors `uses_fork_in`'s own
+// pre-scan), so `write_prelude` can skip the `#include` entirely in that
+// case -- a program defining its own `log`/`pow`/etc. is never ALSO
+// calling libm's version of the same name under the same name, so
+// skipping the include costs nothing real.
+fun program_defines_libm_colliding_name(Vec<Node> nodes) bin {
+  for n : nodes {
+    fit n.kind {
+      .Function(f) -> {
+        // A BODYLESS function (`std.c.math`'s own `pub fun sqrt(dec x)
+        // dec;`, no body -- a real signature binding, not a definition)
+        // is a re-declaration of the SAME libm symbol, not a collision:
+        // it's imported transitively by `std.math` into EVERY one of
+        // these examples, and genuinely NEEDS `<math.h>`'s own
+        // declaration visible to be valid at all. Only a REAL, BODIED
+        // Fun function under one of these names (`std/log.fn`'s own
+        // actual `pub fun log(LogLevel level, str msg) { ... }`) is a
+        // genuine collision.
+        if !f.has_body {
+          continue;
+        }
+        if equals(f.name, "sqrt") || equals(f.name, "sin") || equals(f.name, "cos") || equals(
+          f.name,
+          "tan"
+        ) || equals(f.name, "asin") || equals(f.name, "acos") || equals(f.name, "atan") || equals(
+          f.name,
+          "atan2"
+        ) || equals(f.name, "cbrt") || equals(f.name, "pow") || equals(f.name, "exp") || equals(
+          f.name,
+          "log"
+        ) || equals(f.name, "log10") || equals(f.name, "log2") || equals(f.name, "floor") || equals(
+          f.name,
+          "ceil"
+        ) || equals(f.name, "round") || equals(f.name, "trunc") || equals(f.name, "fmod") {
+          ret true;
+        }
+      }
+      _ -> {}
     }
   }
   ret false;
@@ -4602,7 +4661,8 @@ impl Codegen {
     if generic_inst.is_none() {
       let defaults = self.lookup_function_default_values(template_callee_name);
       if defaults.is_some() {
-        let derr = self.emit_default_trailing_args(defaults.unwrap(), args.len);
+        let dparam_types = self.lookup_function_param_types(template_callee_name);
+        let derr = self.emit_default_trailing_args(defaults.unwrap(), dparam_types, args.len);
         if derr.is_some() {
           ret derr;
         }
@@ -4621,7 +4681,21 @@ impl Codegen {
   // needs to re-diagnose). Shared by `emit_call`/`emit_method_call`, see
   // `Codegen.function_default_values`'s own doc comment for why
   // defaults are evaluated FRESH at each call site rather than cached.
-  emit_default_trailing_args(Vec<Node*> defaults, num provided_count) Option<CodegenErrorKind> {
+  // 
+  // `param_types` (when the caller has it -- `.None` for the rare case
+  // it doesn't) is that SAME position's own declared param type,
+  // resolved into `expected_enum_type`/`expected_compound_type` before
+  // emitting each default -- needed the moment a default value is
+  // ITSELF a bare shorthand (`LogFormat format = .Text;`, `std/log.fn`'s
+  // own real `logger_init` signature, found via a real "unsupported
+  // node" error): without this, a bare `.Text` default has nothing to
+  // resolve against, the exact same gap a caller-PROVIDED bare-shorthand
+  // argument would have without its own equivalent lookup.
+  emit_default_trailing_args(
+    Vec<Node*> defaults,
+    Option<Vec<DataType *>> param_types,
+    num provided_count
+  ) Option<CodegenErrorKind> {
     num i = provided_count;
     for i < defaults.len {
       Node* d = defaults.get(i);
@@ -4629,7 +4703,21 @@ impl Codegen {
         ret .None;
       }
       self.state.write(", ");
+      str prev_expected_e = self.expected_enum_type;
+      str prev_expected_c = self.expected_compound_type;
+      if param_types.is_some() {
+        let ptypes = param_types.unwrap();
+        if i < ptypes.len {
+          let resolved = self.resolve_type_name(*ptypes.get(i));
+          if resolved.is_some() {
+            self.expected_enum_type = resolved.unwrap();
+            self.expected_compound_type = resolved.unwrap();
+          }
+        }
+      }
       let derr = self.emit_expr(*d);
+      self.expected_enum_type = prev_expected_e;
+      self.expected_compound_type = prev_expected_c;
       if derr.is_some() {
         ret derr;
       }
@@ -4980,7 +5068,12 @@ impl Codegen {
     // bare method name) instead of a plain function name.
     let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
     if method_defaults.is_some() {
-      let mderr = self.emit_default_trailing_args(method_defaults.unwrap(), args.len);
+      let mdparam_types = self.lookup_impl_method_param_types(recv_r.type_name, method_name);
+      let mderr = self.emit_default_trailing_args(
+        method_defaults.unwrap(),
+        mdparam_types,
+        args.len
+      );
       if mderr.is_some() {
         ret mderr;
       }
@@ -9154,6 +9247,24 @@ impl Codegen {
     ret .None;
   }
 
+  // Looks up `fn_name`'s OWN full param list (the WHOLE `Vec<DataType*>`,
+  // not just one arg's type) -- needed by `emit_default_trailing_args`
+  // so a default VALUE that's itself a bare enum shorthand (`LogFormat
+  // format = .Text;`, `std/log.fn`'s own real `logger_init` signature)
+  // resolves against that PARAM's own declared type, the same way a
+  // caller-PROVIDED argument already does. `.None` means `fn_name` isn't
+  // registered as a plain (non-generic) function at all.
+  lookup_function_param_types(str fn_name) Option<Vec<DataType *>> {
+    num i = 0;
+    for i < self.function_names.len {
+      if equals(self.function_names.get(i), fn_name) {
+        ret .Some(self.function_param_types.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Pre-registers every method of a plain OR quirk-implementing
   // (non-generic) impl block under its own bare name and fully mangled
   // C call-site name (see `Codegen.impl_method_owner_type`'s doc
@@ -9554,8 +9665,14 @@ impl Codegen {
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    `#include <math.h>
     ``);
+    // See `Codegen.skip_math_h`'s own doc comment: a program defining
+    // its OWN top-level function under a name libm also declares
+    // (`std/log.fn`'s own real `log`) collides with `<math.h>`'s
+    // declaration of the same bare name if this were unconditional.
+    if !self.skip_math_h {
+      self.state.write("#include <math.h>\n");
+    }
     // `stdout`/`stderr`/`stdin` are macros/globals (not callable), and
     // differ per libc -- wrapping each in a tiny `static` function lets
     // `std.c.io`'s own bodyless `stdout_stream()`/`stderr_stream()`/
@@ -9906,6 +10023,7 @@ impl Codegen {
     // requires this ordering once the scheduler starts reading it, so
     // matching it now avoids a reorder later.
     self.uses_fork = uses_fork_in(nodes);
+    self.skip_math_h = program_defines_libm_colliding_name(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
     // Impl methods are pre-registered FIRST, before either the enum or
