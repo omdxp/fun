@@ -5300,6 +5300,29 @@ impl Codegen {
         _ -> {}
       }
     }
+    // `Option<num> b = Option.None;` -- a QUALIFIED variant written
+    // against a GENERIC enum's own bare TEMPLATE name ("Option"),
+    // which is never itself registered in `enum_names` (only a
+    // concrete INSTANTIATION is, once `ensure_enum_instantiated` mangles
+    // it, e.g. "Option__num"). `self.expected_enum_type` already holds
+    // that exact mangled name here (set from the declared type just
+    // above, in the `Variable`-declaration case -- see `resolve_type_
+    // name`'s own generic-arg handling) -- fall back to it when the
+    // bare template name alone doesn't resolve.
+    if left_is_single_level && !is_bare_shorthand && !self.enum_has_variant(
+      enum_recv_name,
+      field_name
+    ) {
+      StringBuilder tmpl_pfx = string_builder_init(16);
+      tmpl_pfx.append(enum_recv_name);
+      tmpl_pfx.append("__");
+      if starts_with(self.expected_enum_type, tmpl_pfx.build()) && self.enum_has_variant(
+        self.expected_enum_type,
+        field_name
+      ) {
+        enum_recv_name = self.expected_enum_type;
+      }
+    }
     if left_is_single_level && !equals(enum_recv_name, "") && self.enum_has_variant(
       enum_recv_name,
       field_name
