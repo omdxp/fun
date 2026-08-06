@@ -398,6 +398,19 @@ pub compound Codegen {
   // `typedefs.fn`'s own body) carries its own type name directly and
   // never consults this at all.
   str expected_compound_type;
+  // True while emitting a context where a bare C brace-list `{...}` is the
+  // correct form for an array literal (`.Bracket(inner)` reached with no
+  // preceding indexee -- see `parser.parse_for_bracket`'s doc comment):
+  // an array variable's own initializer, a 2D array row (a literal nested
+  // inside another), or a compound-init field value. Mirrors the original
+  // transpiler's identically-named field exactly. When false, `emit_expr`
+  // rejects a bare `.Bracket` outright rather than emitting invalid C --
+  // an array literal in a general value position (a call argument, a
+  // binary operand) needs a C compound literal (`(T[]){...}`) instead,
+  // which needs an element type this codegen has no way to infer; not yet
+  // needed by anything ported so far, so deliberately unsupported rather
+  // than silently wrong.
+  bin in_array_initializer;
   // `defer <body>;` support: a FLAT list of every pending deferred
   // statement body currently in scope, across ALL nested blocks of the
   // function being emitted right now (registered in source order by
@@ -837,6 +850,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
   g.expected_compound_type = "";
+  g.in_array_initializer = false;
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
@@ -3390,10 +3404,48 @@ impl Codegen {
             self.state.write(".");
             self.state.write(f.name);
             self.state.write(" = ");
+            // A field value may itself be an array literal (`Row{ cols =
+            // [1, 2, 3] }`, see `parser.parse_for_bracket`'s doc comment)
+            // -- needs the bare-brace-list form, same as a declaration's
+            // own initializer.
+            let prev_arr_init = self.in_array_initializer;
+            self.in_array_initializer = true;
             let ferr = self.emit_expr(*f.value);
+            self.in_array_initializer = prev_arr_init;
             if ferr.is_some() {
               ret ferr;
             }
+          }
+        }
+        self.state.write("}");
+        ret .None;
+      }
+      // A bare `[elem, elem, ...]` array literal (no preceding indexee --
+      // `arr[i]` indexing consumes its own `.Bracket` right side directly
+      // inside `emit_index` and never reaches this general dispatch, see
+      // `emit_index`'s own doc comment). Only valid here in a context
+      // that already establishes `in_array_initializer` (a declaration's
+      // own initializer, a compound-init field, or -- recursively, since
+      // this arm never clears the flag around its own elements -- a 2D
+      // array literal's own row); see `Codegen.in_array_initializer`'s
+      // doc comment for why a general value position isn't supported.
+      .Bracket(inner) -> {
+        if !self.in_array_initializer {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        Vec<Node*> elems;
+        elems.init(0);
+        self.flatten_call_args(inner, &elems);
+        self.state.write("{");
+        bin first = true;
+        for elem : elems {
+          if !first {
+            self.state.write(", ");
+          }
+          first = false;
+          let eerr = self.emit_expr(*elem);
+          if eerr.is_some() {
+            ret eerr;
           }
         }
         self.state.write("}");
@@ -5008,7 +5060,13 @@ impl Codegen {
           } else {
             self.expected_enum_type = v.var_type.type_str;
           }
+          // See `Codegen.in_array_initializer`'s doc comment: a
+          // declaration's own initializer is one of the contexts where a
+          // bare `[1, 2, 3]` array literal needs the bare brace-list form.
+          let prev_arr_init = self.in_array_initializer;
+          self.in_array_initializer = true;
           let verr = self.emit_expr(*v.val);
+          self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
           if verr.is_some() {
             ret verr;
@@ -5321,7 +5379,23 @@ impl Codegen {
         is_vec = true;
       }
     }
-    if !is_vec {
+    // A genuine SIZED array local (`num[] arr`, `is_array` and NOT
+    // decayed to a pointer -- see `dtype_is_array_as_pointer`'s doc
+    // comment) has no `.len`/`.data` at all in C; its length comes from
+    // the classic `sizeof(arr)/sizeof(arr[0])` trick instead, matching
+    // the original transpiler's own identical raw-array fast path
+    // exactly (1D case only -- multi-dimensional arrays are a separate,
+    // not-yet-ported gap).
+    bin is_raw_array = false;
+    str elem_c_type = "int64_t";
+    if !is_vec && arr_dtype.is_some() {
+      let arr_dt = arr_dtype.unwrap();
+      if arr_dt.is_array && arr_dt.pointer_depth == 0 {
+        is_raw_array = true;
+        elem_c_type = map_type_to_c(arr_dt.type_str);
+      }
+    }
+    if !is_vec && !is_raw_array {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
 
@@ -5335,17 +5409,34 @@ impl Codegen {
     self.state.write(" = 0; ");
     self.state.write(idx_name);
     self.state.write(" < ");
-    self.state.write(arr_text);
-    self.state.write(".len; ");
+    if is_vec {
+      self.state.write(arr_text);
+      self.state.write(".len; ");
+    } else {
+      self.state.write("(int64_t)(sizeof(");
+      self.state.write(arr_text);
+      self.state.write(")/sizeof(");
+      self.state.write(arr_text);
+      self.state.write("[0])); ");
+    }
     self.state.write(idx_name);
     self.state.write("++) {\n");
     self.state.indent_level = self.state.indent_level + 1;
     self.state.write_indent();
-    self.state.write("__auto_type ");
+    if is_vec {
+      self.state.write("__auto_type ");
+    } else {
+      self.state.write(elem_c_type);
+      self.state.write(" ");
+    }
     self.state.write(fi.item_name);
     self.state.write(" = ");
     self.state.write(arr_text);
-    self.state.write(".data[");
+    if is_vec {
+      self.state.write(".data[");
+    } else {
+      self.state.write("[");
+    }
     self.state.write(idx_name);
     self.state.write("];\n");
     // `item` is recorded as a known local of the ELEMENT type too, when
@@ -7394,7 +7485,12 @@ impl Codegen {
         self.state.write(v.name);
         if v.has_val {
           self.state.write(" = ");
+          // See `Codegen.in_array_initializer`'s doc comment: a top-level
+          // global's own initializer is a declaration context too.
+          let prev_arr_init = self.in_array_initializer;
+          self.in_array_initializer = true;
           let verr = self.emit_expr(*v.val);
+          self.in_array_initializer = prev_arr_init;
           if verr.is_some() {
             ret verr;
           }
