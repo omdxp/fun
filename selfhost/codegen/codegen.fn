@@ -5566,6 +5566,22 @@ impl Codegen {
           // confirmed via a real crash (`emit_hoisted` -> `StringBuilder.
           // append` -> null deref) when this swap didn't suspend it.
           // 
+          // `current_stmt_start_pos` needs the EXACT same suspension,
+          // for the exact same reason -- missed the first time around
+          // (only `hoist_insert_pos` was fixed then), found via a
+          // SECOND, deeper real crash: a MULTI-LEVEL chained call as a
+          // receiver (`logger_init(.Info).with_timestamps(false).named(
+          // "app")`, `examples/stdlib/log_structured.fn`'s own real
+          // body) recurses into THIS same swap a second time while
+          // still nested inside the first one's own scratch buffer --
+          // `emit_method_call`'s own receiver-temp-hoisting path (for
+          // the INNER call, itself also a call result) then reads
+          // `current_stmt_start_pos` as a splice position, but it still
+          // pointed into the OUTER (real, much larger) buffer, not this
+          // inner scratch one -- out-of-bounds, the same "corrupting
+          // substr's own length arithmetic and crashing" failure mode
+          // `adjust_pos_after_splice`'s own doc comment describes.
+          // 
           // `suppress_generic_impl_method_draining` additionally stops
           // such a method from being emitted WHILE `self.state` points
           // here at all -- there's no sensible place to splice a
@@ -5578,13 +5594,16 @@ impl Codegen {
           CodegenState call_scratch = codegen_state_new();
           CodegenState* saved_call_state = self.state;
           let saved_call_hoist_pos = self.hoist_insert_pos;
+          let saved_call_stmt_start_pos = self.current_stmt_start_pos;
           let prev_suppress = self.suppress_generic_impl_method_draining;
           self.state = &call_scratch;
           self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
           self.suppress_generic_impl_method_draining = true;
           let cerr = self.emit_expr(*recv);
           self.state = saved_call_state;
           self.hoist_insert_pos = saved_call_hoist_pos;
+          self.current_stmt_start_pos = saved_call_stmt_start_pos;
           self.suppress_generic_impl_method_draining = prev_suppress;
           if !prev_suppress && !self.draining_generic_impl_methods {
             self.drain_pending_generic_impl_methods();
