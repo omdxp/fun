@@ -5904,6 +5904,15 @@ impl Codegen {
           } else {
             self.expected_enum_type = v.var_type.type_str;
           }
+          // A bare `.{...}` compound-literal shorthand initializer
+          // (`User u2 = .{name = "Bob"};`) resolves against
+          // `expected_compound_type` the exact same way a bare enum
+          // shorthand resolves against `expected_enum_type` just above
+          // -- but nothing set it for a `Variable` declaration's own
+          // initializer at all until now (only a `.` assignment RHS did
+          // -- see the `Expression`/`"="` case elsewhere in this file).
+          let prev_expected_compound = self.expected_compound_type;
+          self.expected_compound_type = self.expected_enum_type;
           // A `let` has no declared type of its own to resolve a bare
           // enum-variant shorthand initializer against (`let color =
           // .Red;` -- `expected_enum_type` is just the `__let_infer__`
@@ -5981,6 +5990,7 @@ impl Codegen {
           }
           self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
+          self.expected_compound_type = prev_expected_compound;
           if verr.is_some() {
             ret verr;
           }
