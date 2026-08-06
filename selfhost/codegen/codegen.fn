@@ -411,6 +411,20 @@ pub compound Codegen {
   // needed by anything ported so far, so deliberately unsupported rather
   // than silently wrong.
   bin in_array_initializer;
+  // Names of every quirk that has at least one CONCRETE (non-generic)
+  // impl emitted so far -- see `emit_quirk_vtable_machinery`'s doc
+  // comment for the mechanism this backs (a quirk-typed variable's own
+  // dynamic dispatch through a vtable). A name lands here the FIRST time
+  // any impl of it is processed, which is also when its shared vtable
+  // struct/wrapper-typedef get emitted; `emit_method_call`/the
+  // `Variable`-declaration coercion check both consult this to recognize
+  // a receiver/declared-type as a QUIRK (dispatched through a vtable)
+  // rather than a concrete compound (dispatched statically). A GENERIC
+  // quirk impl (`has_type_params`) never adds its name here -- dynamic
+  // dispatch through an unbound type param has no single C vtable
+  // signature to speak of, same reasoning `emit_impl`'s own generic
+  // skip already documents.
+  Vec<str> quirk_names;
   // `defer <body>;` support: a FLAT list of every pending deferred
   // statement body currently in scope, across ALL nested blocks of the
   // function being emitted right now (registered in source order by
@@ -851,6 +865,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.expected_enum_type = "";
   g.expected_compound_type = "";
   g.in_array_initializer = false;
+  g.quirk_names.init(0);
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
@@ -4075,6 +4090,45 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits `recv.method(args...)` as C `recv.vtable->method(recv.self,
+  // args...)` (`recv->vtable->...`/`recv->self` when `recv` is itself a
+  // pointer to the quirk's fat-pointer struct, rather than the struct
+  // value directly) -- the dynamic-dispatch counterpart to
+  // `emit_method_call`'s own static dispatch, called from there once
+  // `recv_r.type_name` is recognized as a quirk name (see
+  // `emit_quirk_vtable_machinery`'s doc comment for the vtable/`self`
+  // field this reads). No temp-hoisting needed even when `recv_r` is a
+  // CALL's own rendered text (an rvalue) -- unlike taking `&recv` (the
+  // static path's own self-arg), C allows plain `.field` access on a
+  // struct rvalue directly.
+  emit_quirk_dispatch_call(ChainResolution recv_r, str method_name, Node* args_node) Option<CodegenErrorKind> {
+    str sep = ".";
+    if recv_r.is_pointer {
+      sep = "->";
+    }
+    self.state.write(recv_r.text);
+    self.state.write(sep);
+    self.state.write("vtable->");
+    self.state.write(method_name);
+    self.state.write("(");
+    self.state.write(recv_r.text);
+    self.state.write(sep);
+    self.state.write("self");
+    Vec<Node*> args;
+    args.init(0);
+    defer args.free();
+    self.flatten_call_args(args_node, &args);
+    for arg : args {
+      self.state.write(", ");
+      let aerr = self.emit_expr(*arg);
+      if aerr.is_some() {
+        ret aerr;
+      }
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
   // Emits a method call `recv.method(arg1, ...)` as C
   // `TypeName__method(<self-arg>, arg1, ...)` -- or `TypeName__Quirk__
   // method(...)` when `method` was defined by a QUIRK-implementing impl
@@ -4098,12 +4152,12 @@ impl Codegen {
   // and the bare-shorthand assignment case already use, rather than a
   // second, narrower bare-identifier-only lookup), and `method` a plain
   // identifier. An unrecognized receiver is REJECTED rather than
-  // guessed, same spirit as `emit_field_access`. TRUE dynamic dispatch
-  // (calling through a receiver declared as the ABSTRACT quirk type
-  // itself, via a vtable) isn't reachable yet -- only a STATIC call
-  // resolved by the receiver's own DECLARED (concrete) type name,
-  // whether that type implements the method via a plain impl or a
-  // quirk-implementing one.
+  // guessed, same spirit as `emit_field_access`. A receiver whose
+  // resolved type name is a known QUIRK (`Codegen.quirk_names`, see
+  // `emit_quirk_vtable_machinery`'s doc comment) dispatches dynamically
+  // through its vtable instead of the STATIC dispatch below (resolved by
+  // the receiver's own DECLARED CONCRETE type name, whether that type
+  // implements the method via a plain impl or a quirk-implementing one).
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
@@ -4117,6 +4171,10 @@ impl Codegen {
     fit recv_e.right.kind {
       .Identifier(name) -> { method_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+
+    if self.quirk_names.contains(recv_r.type_name) {
+      ret self.emit_quirk_dispatch_call(recv_r, method_name, args_node);
     }
 
     // A generic impl method (`Vec<str>.sum()`, e.g.) only gets its
@@ -5065,7 +5123,42 @@ impl Codegen {
           // bare `[1, 2, 3]` array literal needs the bare brace-list form.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
+          // A quirk-typed declaration's own initializer (`Shape s =
+          // &rect;`) needs a coercion call wrapped around the RHS (see
+          // `emit_quirk_vtable_machinery`'s doc comment for the
+          // `__fun_coerce_<Type>_<Quirk>` helper this calls) -- resolved
+          // structurally, same "known local, not fully inferred" style as
+          // everything else here: only a bare `&identifier` RHS is
+          // recognized, via that identifier's OWN recorded local type
+          // name.
+          bin did_quirk_coerce = false;
+          if self.quirk_names.contains(v.var_type.type_str) {
+            fit v.val.kind {
+              .Unary(u) -> {
+                if equals(u.op, "&") && !u.is_left_operanded_unary {
+                  fit u.operand.kind {
+                    .Identifier(oname) -> {
+                      let concrete = self.lookup_local_type_name(oname);
+                      if concrete.is_some() {
+                        self.state.write("__fun_coerce_");
+                        self.state.write(concrete.unwrap());
+                        self.state.write("_");
+                        self.state.write(v.var_type.type_str);
+                        self.state.write("(");
+                        did_quirk_coerce = true;
+                      }
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+              _ -> {}
+            }
+          }
           let verr = self.emit_expr(*v.val);
+          if did_quirk_coerce {
+            self.state.write(")");
+          }
           self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
           if verr.is_some() {
@@ -8184,15 +8277,20 @@ impl Codegen {
   // every impl in the program (see its own doc comment and `transpile`'s
   // pass ordering) -- this function only EMITS, it doesn't register.
   // 
-  // Still deliberately narrow for this slice: TRUE dynamic dispatch
-  // through an abstract quirk-TYPED value (assigning a concrete
-  // quirk-implementor to a variable declared as the quirk itself, then
-  // calling through it via a vtable) isn't reachable yet -- only a
-  // STATIC call through a receiver whose OWN declared type is already
-  // the concrete implementing type works (see `emit_method_call`'s doc
-  // comment), which is by far the common case in this codebase's own
-  // real source. A generic impl (`has_type_params`) is skipped too,
-  // same reasoning as `emit_compound`'s generic-template skip.
+  // TRUE dynamic dispatch through an abstract quirk-TYPED value (assigning
+  // a concrete quirk-implementor to a variable declared as the quirk
+  // itself, then calling through it via a vtable) is handled by
+  // `emit_quirk_vtable_machinery`, called for every quirk-implementing
+  // impl right after this function emits its own concrete method bodies
+  // (see `transpile`'s final combined pass) -- kept as a SEPARATE
+  // function rather than folded in here since it only applies to
+  // `i.has_quirk_name` impls, while this one emits a PLAIN impl's methods
+  // identically either way. A STATIC call through a receiver whose OWN
+  // declared type is already the concrete implementing type (still by
+  // far the common case in this codebase's own real source) is
+  // untouched by any of this, resolved entirely by `emit_method_call`'s
+  // existing lookup. A generic impl (`has_type_params`) is skipped here
+  // too, same reasoning as `emit_compound`'s generic-template skip.
   emit_impl(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Impl(i) -> {
@@ -8205,6 +8303,245 @@ impl Codegen {
             ret merr;
           }
         }
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Emits the C machinery backing dynamic dispatch through an abstract
+  // quirk-typed value (`Shape s = &rect; s.area();`) for one CONCRETE,
+  // non-generic quirk-implementing impl (`impl Rectangle as Shape {
+  // ... }`) -- a no-op for a plain impl (`!i.has_quirk_name`) or a
+  // generic one (skipped by `transpile`'s own caller, same as
+  // `emit_impl`). Simpler than the original transpiler's own identical
+  // mechanism in one deliberate way: this emits ONE vtable struct per
+  // QUIRK NAME directly (`Shape_vtable`), not the original's
+  // per-METHOD-SIGNATURE-HASH canonical struct shared across
+  // differently-named quirks with identical signatures -- that dedup is
+  // a size optimization, not a correctness requirement, and skipping it
+  // keeps this considerably simpler to port.
+  // 
+  // Three pieces, in order:
+  // 1. The FIRST time this quirk name is seen (`Codegen.quirk_names`
+  // doesn't have it yet): the vtable struct itself (one function-pointer
+  // field per quirk method, each taking `void* self` first) and the
+  // "fat pointer" wrapper struct (`typedef struct Shape { void* self;
+  // const Shape_vtable* vtable; } Shape;`) that `Shape` itself resolves
+  // to as a C type -- derived from THIS impl's own method signatures,
+  // which every other impl of the same quirk must structurally match
+  // (the language's own quirk-conformance rule; this codegen has no
+  // typechecker to verify it, so it's simply assumed).
+  // 2. Always: a `void* self`-taking wrapper trampoline per method (casts
+  // back to `Type*` and calls the already-mangled, already-emitted
+  // `Type__Quirk__method`), plus a `static const` vtable instance
+  // (`__fun_impl_Type_Quirk_vtable`) populated with those wrappers.
+  // 3. Always: the coercion helper (`__fun_coerce_Type_Quirk`) that
+  // builds a `Shape` value from a `Type*` -- called from a `Shape s =
+  // &rect;` declaration's own initializer (see the `Variable`
+  // declaration's own coercion check).
+  emit_quirk_vtable_machinery(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Impl(i) -> {
+        // A GENERIC quirk impl (`impl Vec<T> as Sized { ... }`) has no
+        // single monomorphic vtable signature to speak of -- an unbound
+        // `T` in a method's own return/arg type can't be expressed in
+        // one C function-pointer signature. Same skip `emit_impl` itself
+        // already applies for generic impls generally.
+        if !i.has_quirk_name || i.has_type_params {
+          ret .None;
+        }
+        str quirk_name = i.quirk_name;
+        str type_name = i.type_name;
+
+        StringBuilder pfx = string_builder_init(16);
+        pfx.append(type_name);
+        pfx.append("__");
+        pfx.append(quirk_name);
+        pfx.append("__");
+        str prefix = pfx.build();
+
+        if !self.quirk_names.contains(quirk_name) {
+          self.state.write("typedef struct ");
+          self.state.write(quirk_name);
+          self.state.write("_vtable ");
+          self.state.write(quirk_name);
+          self.state.write("_vtable;\n");
+          self.state.write("struct ");
+          self.state.write(quirk_name);
+          self.state.write("_vtable {\n");
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                self.state.write("  ");
+                if fnv.has_rtype {
+                  let wt = self.write_type(*fnv.rtype);
+                  if wt.is_none() {
+                    ret .Some(CodegenErrorKind.UnsupportedNode);
+                  }
+                } else {
+                  self.state.write("void");
+                }
+                let base = strip_prefix(fnv.name, prefix);
+                self.state.write(" (*");
+                self.state.write(base);
+                self.state.write(")(void* self");
+                if fnv.has_args {
+                  bin skipped_self = false;
+                  for arg : fnv.args {
+                    if !skipped_self {
+                      skipped_self = true;
+                      continue;
+                    }
+                    fit arg.kind {
+                      .Variable(v) -> {
+                        self.state.write(", ");
+                        let pwt = self.write_type(*v.var_type);
+                        if pwt.is_none() {
+                          ret .Some(CodegenErrorKind.UnsupportedNode);
+                        }
+                      }
+                      _ -> {}
+                    }
+                  }
+                }
+                self.state.write(");\n");
+              }
+              _ -> {}
+            }
+          }
+          self.state.write("};\n");
+          self.state.write("typedef struct ");
+          self.state.write(quirk_name);
+          self.state.write(" { void* self; const ");
+          self.state.write(quirk_name);
+          self.state.write("_vtable* vtable; } ");
+          self.state.write(quirk_name);
+          self.state.write(";\n\n");
+          self.quirk_names.push(quirk_name);
+        }
+
+        StringBuilder vsb = string_builder_init(24);
+        vsb.append("__fun_impl_");
+        vsb.append(type_name);
+        vsb.append("_");
+        vsb.append(quirk_name);
+        vsb.append("_vtable");
+        str vtbl_instance_name = vsb.build();
+
+        for m : i.methods {
+          fit m.kind {
+            .Function(fnv) -> {
+              let base = strip_prefix(fnv.name, prefix);
+              StringBuilder wsb = string_builder_init(32);
+              wsb.append("__fun_wrap_");
+              wsb.append(type_name);
+              wsb.append("_");
+              wsb.append(quirk_name);
+              wsb.append("_");
+              wsb.append(base);
+              str wrap_name = wsb.build();
+
+              self.state.write("static ");
+              if fnv.has_rtype {
+                let wt2 = self.write_type(*fnv.rtype);
+                if wt2.is_none() {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+              } else {
+                self.state.write("void");
+              }
+              self.state.write(" ");
+              self.state.write(wrap_name);
+              self.state.write("(void* self");
+              Vec<str> arg_names;
+              arg_names.init(0);
+              if fnv.has_args {
+                bin skipped_self2 = false;
+                num arg_i = 0;
+                for arg : fnv.args {
+                  if !skipped_self2 {
+                    skipped_self2 = true;
+                    continue;
+                  }
+                  fit arg.kind {
+                    .Variable(v) -> {
+                      self.state.write(", ");
+                      let pwt2 = self.write_type(*v.var_type);
+                      if pwt2.is_none() {
+                        ret .Some(CodegenErrorKind.UnsupportedNode);
+                      }
+                      StringBuilder an_sb = string_builder_init(8);
+                      an_sb.append(" __fun_a");
+                      an_sb.append(format_num(arg_i));
+                      str an = an_sb.build();
+                      self.state.write(an);
+                      arg_names.push(an);
+                      arg_i = arg_i + 1;
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+              self.state.write(") {\n  ");
+              if fnv.has_rtype {
+                self.state.write("return ");
+              }
+              self.state.write(fnv.name);
+              self.state.write("((");
+              self.state.write(type_name);
+              self.state.write("*)self");
+              for an2 : arg_names {
+                self.state.write(",");
+                self.state.write(an2);
+              }
+              self.state.write(");\n}\n\n");
+            }
+            _ -> {}
+          }
+        }
+
+        self.state.write("static const ");
+        self.state.write(quirk_name);
+        self.state.write("_vtable ");
+        self.state.write(vtbl_instance_name);
+        self.state.write(" = {\n");
+        for m : i.methods {
+          fit m.kind {
+            .Function(fnv) -> {
+              let base2 = strip_prefix(fnv.name, prefix);
+              StringBuilder wsb2 = string_builder_init(32);
+              wsb2.append("__fun_wrap_");
+              wsb2.append(type_name);
+              wsb2.append("_");
+              wsb2.append(quirk_name);
+              wsb2.append("_");
+              wsb2.append(base2);
+              self.state.write("  .");
+              self.state.write(base2);
+              self.state.write(" = ");
+              self.state.write(wsb2.build());
+              self.state.write(",\n");
+            }
+            _ -> {}
+          }
+        }
+        self.state.write("};\n\n");
+
+        self.state.write("static inline ");
+        self.state.write(quirk_name);
+        self.state.write(" __fun_coerce_");
+        self.state.write(type_name);
+        self.state.write("_");
+        self.state.write(quirk_name);
+        self.state.write("(");
+        self.state.write(type_name);
+        self.state.write("* self) { return (");
+        self.state.write(quirk_name);
+        self.state.write("){ .self = self, .vtable = &");
+        self.state.write(vtbl_instance_name);
+        self.state.write(" }; }\n\n");
+
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -8841,6 +9178,10 @@ impl Codegen {
           let ierr = self.emit_impl(n);
           if ierr.is_some() {
             ret ierr;
+          }
+          let qerr = self.emit_quirk_vtable_machinery(n);
+          if qerr.is_some() {
+            ret qerr;
           }
         }
         .Function(f) -> {
