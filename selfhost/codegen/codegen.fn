@@ -1445,7 +1445,32 @@ impl Codegen {
     if compound_inst.is_some() {
       ret compound_inst;
     }
-    ret self.ensure_enum_instantiated(rdt);
+    let enum_inst = self.ensure_enum_instantiated(rdt);
+    if enum_inst.is_some() {
+      ret enum_inst;
+    }
+    // A CONCRETE instantiation of a generic QUIRK used directly as a type
+    // (`To<num>` as a parameter/variable/return type, `examples/stdlib/
+    // generic_to_from.fn`'s own real `to_json_value(To<JsonValue> value)`-
+    // style usage) -- mangled the SAME way the parser's own `_mangled_
+    // dtype_name` does for `ImplNode.quirk_concrete_instantiation`
+    // (`To__num`), checked against `self.quirk_names` (which `emit_quirk_
+    // vtable_machinery` registers a concrete quirk instantiation's own
+    // mangled identity under, not just its bare quirk name -- see its own
+    // doc comment). Neither a compound nor an enum template recognizes
+    // "To" at all, so without this, a concrete-quirk-typed parameter/
+    // variable/return type was rejected as an unresolvable type entirely.
+    StringBuilder quirk_mangled_sb = string_builder_init(16);
+    quirk_mangled_sb.append(rdt.type_str);
+    for qarg : rdt.generic_args {
+      quirk_mangled_sb.append("__");
+      quirk_mangled_sb.append(qarg.type_str);
+    }
+    str quirk_mangled = quirk_mangled_sb.build();
+    if self.quirk_names.contains(quirk_mangled) {
+      ret .Some(quirk_mangled);
+    }
+    ret .None;
   }
 
   // Appends `text` (a fully-rendered struct/enum typedef or generic impl
@@ -5054,16 +5079,40 @@ impl Codegen {
         }
       }
       str prev_expected = self.expected_enum_type;
+      bin arg_did_quirk_coerce = false;
       if ptype.is_some() {
         let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
+          // A concrete-typed argument (`show(&w)`, `w`'s type `Wrapper`)
+          // passed where the callee's OWN declared parameter is a QUIRK
+          // type (`fun show(To<num> t)`, `examples/stdlib/generic_to_
+          // from.fn`'s own real `to_json_value(&c)`) needs the same
+          // coercion wrap a `Variable` declaration's/`ret`'s own
+          // initializer already gets -- see `resolve_quirk_coerce_
+          // concrete_type`'s own doc comment. Without this, the argument
+          // passed its own concrete pointer type directly where C
+          // expects the quirk's fat-pointer struct by value.
+          if self.quirk_names.contains(resolved.unwrap()) {
+            let arg_concrete = self.resolve_quirk_coerce_concrete_type(arg);
+            if arg_concrete.is_some() {
+              self.state.write("__fun_coerce_");
+              self.state.write(arg_concrete.unwrap());
+              self.state.write("_");
+              self.state.write(resolved.unwrap());
+              self.state.write("(");
+              arg_did_quirk_coerce = true;
+            }
+          }
         }
       }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
       if aerr.is_some() {
         ret aerr;
+      }
+      if arg_did_quirk_coerce {
+        self.state.write(")");
       }
       arg_idx = arg_idx + 1;
     }
@@ -6636,13 +6685,30 @@ impl Codegen {
           // &rect;`) needs a coercion call wrapped around the RHS -- see
           // `resolve_quirk_coerce_concrete_type`'s own doc comment.
           bin did_quirk_coerce = false;
-          if self.quirk_names.contains(v.var_type.type_str) {
+          // A CONCRETE quirk instantiation (`To<num> t = ...;`) is
+          // registered under its MANGLED identity (`To__num`), not the
+          // bare `v.var_type.type_str` ("To") -- see `resolve_type_name`'s
+          // own identical fallback/doc comment for why.
+          str var_quirk_type = v.var_type.type_str;
+          if !self.quirk_names.contains(var_quirk_type) && v.var_type.generic_args.len > 0 {
+            StringBuilder vq_sb = string_builder_init(16);
+            vq_sb.append(v.var_type.type_str);
+            for vqarg : v.var_type.generic_args {
+              vq_sb.append("__");
+              vq_sb.append(vqarg.type_str);
+            }
+            let vq_candidate = vq_sb.build();
+            if self.quirk_names.contains(vq_candidate) {
+              var_quirk_type = vq_candidate;
+            }
+          }
+          if self.quirk_names.contains(var_quirk_type) {
             let concrete = self.resolve_quirk_coerce_concrete_type(v.val);
             if concrete.is_some() {
               self.state.write("__fun_coerce_");
               self.state.write(concrete.unwrap());
               self.state.write("_");
-              self.state.write(v.var_type.type_str);
+              self.state.write(var_quirk_type);
               self.state.write("(");
               did_quirk_coerce = true;
             }
@@ -10346,6 +10412,22 @@ impl Codegen {
         }
         str quirk_name = i.quirk_name;
         str type_name = i.type_name;
+        // The VTABLE/fat-pointer TYPE's own identity: a CONCRETE
+        // instantiation of a generic quirk (`impl Config as To<JsonValue>`,
+        // `examples/stdlib/generic_to_from.fn`'s own real body) is a
+        // DISTINCT type from `To<str>` or any other instantiation, and
+        // needs its OWN mangled name (`To__JsonValue`) to avoid colliding
+        // with them -- `i.quirk_concrete_instantiation` already carries
+        // exactly that (mangled the same way `ensure_compound_
+        // instantiated` mangles any other generic instantiation),
+        // populated by the parser but never read by codegen until now.
+        // Method NAME mangling (`prefix`/`strip_prefix` below) stays keyed
+        // on the BARE quirk name regardless -- `fnv.name` is ALREADY pre-
+        // mangled that way by `_parse_impl_method`, independent of this.
+        str quirk_type_identity = quirk_name;
+        if i.has_quirk_concrete_instantiation {
+          quirk_type_identity = i.quirk_concrete_instantiation;
+        }
 
         StringBuilder pfx = string_builder_init(16);
         pfx.append(type_name);
@@ -10354,14 +10436,14 @@ impl Codegen {
         pfx.append("__");
         str prefix = pfx.build();
 
-        if !self.quirk_names.contains(quirk_name) {
+        if !self.quirk_names.contains(quirk_type_identity) {
           self.state.write("typedef struct ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write("_vtable ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write("_vtable;\n");
           self.state.write("struct ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write("_vtable {\n");
           for m : i.methods {
             fit m.kind {
@@ -10405,20 +10487,20 @@ impl Codegen {
           }
           self.state.write("};\n");
           self.state.write("typedef struct ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write(" { void* self; const ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write("_vtable* vtable; } ");
-          self.state.write(quirk_name);
+          self.state.write(quirk_type_identity);
           self.state.write(";\n\n");
-          self.quirk_names.push(quirk_name);
+          self.quirk_names.push(quirk_type_identity);
         }
 
         StringBuilder vsb = string_builder_init(24);
         vsb.append("__fun_impl_");
         vsb.append(type_name);
         vsb.append("_");
-        vsb.append(quirk_name);
+        vsb.append(quirk_type_identity);
         vsb.append("_vtable");
         str vtbl_instance_name = vsb.build();
 
@@ -10430,7 +10512,7 @@ impl Codegen {
               wsb.append("__fun_wrap_");
               wsb.append(type_name);
               wsb.append("_");
-              wsb.append(quirk_name);
+              wsb.append(quirk_type_identity);
               wsb.append("_");
               wsb.append(base);
               str wrap_name = wsb.build();
@@ -10495,7 +10577,7 @@ impl Codegen {
         }
 
         self.state.write("static const ");
-        self.state.write(quirk_name);
+        self.state.write(quirk_type_identity);
         self.state.write("_vtable ");
         self.state.write(vtbl_instance_name);
         self.state.write(" = {\n");
@@ -10507,7 +10589,7 @@ impl Codegen {
               wsb2.append("__fun_wrap_");
               wsb2.append(type_name);
               wsb2.append("_");
-              wsb2.append(quirk_name);
+              wsb2.append(quirk_type_identity);
               wsb2.append("_");
               wsb2.append(base2);
               self.state.write("  .");
@@ -10522,15 +10604,15 @@ impl Codegen {
         self.state.write("};\n\n");
 
         self.state.write("static inline ");
-        self.state.write(quirk_name);
+        self.state.write(quirk_type_identity);
         self.state.write(" __fun_coerce_");
         self.state.write(type_name);
         self.state.write("_");
-        self.state.write(quirk_name);
+        self.state.write(quirk_type_identity);
         self.state.write("(");
         self.state.write(type_name);
         self.state.write("* self) { return (");
-        self.state.write(quirk_name);
+        self.state.write(quirk_type_identity);
         self.state.write("){ .self = self, .vtable = &");
         self.state.write(vtbl_instance_name);
         self.state.write(" }; }\n\n");
