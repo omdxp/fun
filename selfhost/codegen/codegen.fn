@@ -4790,6 +4790,79 @@ impl Codegen {
   // that was judged safe to skip until now), so ported only as far as
   // this real, reported gap actually needs.
   resolve_display_dispatch(Node* expr) Option<DisplayResolution> {
+    // `*ptr` dereferencing a pointer down to a plain Display-implementing
+    // value (`println_fmt("{}", *program)`, `examples/imports/torture_
+    // compiler/main.fn`'s own real body -- an `Expr*` AST node) or `&x`
+    // taking a Display-implementing local's address directly (already a
+    // pointer, so no FURTHER `&` needed when passed to a method expecting
+    // `Self*`) -- resolves the OPERAND local's own declared type directly,
+    // not via `resolve_field_chain` below (which only handles a bare
+    // identifier/field-chain RECEIVER, not a unary-wrapped one). Ported
+    // from the original transpiler's own identical `resolve_display_call_
+    // for_expr` cases (its own doc comment: "previously unhandled ...
+    // printed the raw garbage-looking bytes instead of dispatching to
+    // Display"); checked FIRST, since a `.Unary` node never matches
+    // `eligible` below at all.
+    fit expr.kind {
+      .Unary(u) -> {
+        bin want_ptr = equals(u.op, "*");
+        bin want_addr = equals(u.op, "&");
+        if want_ptr || want_addr {
+          fit u.operand.kind {
+            .Identifier(name) -> {
+              let is_ptr = self.lookup_local_is_pointer(name);
+              let type_name = self.lookup_local_type_name(name);
+              if is_ptr.is_some() && type_name.is_some() {
+                bin shape_ok = false;
+                if want_ptr && is_ptr.unwrap() {
+                  shape_ok = true;
+                }
+                if want_addr && !is_ptr.unwrap() {
+                  shape_ok = true;
+                }
+                if shape_ok {
+                  let fn_name_opt2 = self.lookup_impl_method(type_name.unwrap(), "to_string");
+                  if fn_name_opt2.is_some() {
+                    // Same reasoning as the `.Identifier`/`.` path below's
+                    // own identical call: a Display impl reached ONLY
+                    // through this unary-wrapped `{}` dispatch (never an
+                    // explicit `.to_string()` call) needs its own inline
+                    // prototype forward-declared here too, or a call to it
+                    // from a function defined EARLIER in the same file
+                    // hits "implicit function declaration".
+                    self.ensure_plain_impl_method_prototype_emitted(
+                      type_name.unwrap(),
+                      "to_string"
+                    );
+                    // See the `.Identifier`/`.` path's own identical call
+                    // below for why BOTH ensure calls are needed: a
+                    // GENERIC compound's Display impl (`Trace<T>`,
+                    // `type_name` already the mangled instantiation
+                    // `Trace__dec`) is a no-op for the plain-impl call
+                    // just above; harmless no-op here too when `type_name`
+                    // isn't actually a generic instantiation.
+                    self.ensure_generic_impl_method_emitted(type_name.unwrap(), "to_string");
+                    DisplayResolution res2;
+                    res2.fn_name = fn_name_opt2.unwrap();
+                    // `*p` evaluates to a plain VALUE (the pointee, `Expr`)
+                    // -- calling a pointer-receiver `to_string(Self* self)`
+                    // needs its address taken (`&__fun_va_N`) same as any
+                    // other by-value Display argument. `&x` evaluates to
+                    // an ALREADY-a-pointer value (`Type*`) -- no FURTHER
+                    // address-of needed.
+                    res2.pass_by_ref = want_ptr;
+                    ret .Some(res2);
+                  }
+                }
+              }
+            }
+            _ -> {}
+          }
+        }
+        ret .None;
+      }
+      _ -> {}
+    }
     bin eligible = false;
     fit expr.kind {
       .Identifier(_) -> { eligible = true; }
@@ -4828,7 +4901,22 @@ impl Codegen {
     // declaration" followed by "conflicting types" -- confirmed via a
     // real minimal repro, the exact same failure mode as the identical
     // gap fixed in the original transpiler.
+    // 
+    // `ensure_generic_impl_method_emitted` too, same as `emit_method_
+    // call`'s own combined dispatch -- a GENERIC compound's Display impl
+    // (`impl Trace<T> as Display`, `r.type_name` already the mangled
+    // instantiation `Trace__dec`) is a no-op for `ensure_plain_impl_
+    // method_prototype_emitted` above (see its own doc comment: a
+    // mangled generic instantiation is a completely separate, already-
+    // correct path) but was NEVER ensured here at all, unlike an
+    // ordinary `.to_string()` method call -- "implicit function
+    // declaration" for `Trace__dec__Display__to_string`, confirmed via
+    // `examples/imports/torture_compiler/main.fn`'s own real `println_
+    // fmt("trace = {}", *trace)`. Harmless no-op (via `instantiation_
+    // mangled_name`'s own lookup) when `r.type_name` isn't actually a
+    // generic instantiation.
     self.ensure_plain_impl_method_prototype_emitted(r.type_name, "to_string");
+    self.ensure_generic_impl_method_emitted(r.type_name, "to_string");
     DisplayResolution res;
     res.fn_name = fn_name_opt.unwrap();
     res.pass_by_ref = !r.is_pointer;
