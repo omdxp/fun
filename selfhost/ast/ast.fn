@@ -790,6 +790,15 @@ pub fun node_is_expressionable(Node n) bin {
     // operator (`x != nil && y`), so it counts as expressionable.
     .Nil -> { ret true; }
     .CompoundInit(ci) -> { ret true; }
+    // A bracket literal (`[1, 2, 3]`) as one ELEMENT of an outer array
+    // literal (`[[1, 2, 3], [4, 5, 6]]`, a 2D matrix, e.g.) needs to be
+    // recognized as a valid LEFT operand for the following ',' to
+    // continue chaining the outer literal's remaining elements --
+    // without this, `parse_normal_expression`'s own `node_peek_
+    // expressionable` check found nothing usable right after the first
+    // nested `[1, 2, 3]` popped off the stack, rejecting the ','
+    // outright ("expected left operand for ',' operator").
+    .Bracket(inner) -> { ret true; }
     _ -> { ret false; }
   }
 }
