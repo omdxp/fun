@@ -268,6 +268,15 @@ compound ChainResolution {
   bin is_call_result;
 }
 
+// Result of `resolve_display_dispatch`: which mangled `to_string` C
+// function to call for a variadic `format`/`println_fmt` `{}` argument
+// whose type implements `Display`, and whether the argument itself
+// (already a plain value, not yet addressed) needs an `&` first.
+compound DisplayResolution {
+  str fn_name;
+  bin pass_by_ref;
+}
+
 // The result of monomorphizing a generic function CALL (see
 // `maybe_instantiate_generic_function`'s doc comment): the mangled
 // call-site name, plus each of the template's OWN parameters'
@@ -2721,7 +2730,53 @@ impl Codegen {
       }
     }
 
-    bin pm_unsafe = self.prototype_type_is_unsafe_early(*pm_rtype);
+    // The RECEIVER's own type (`owner_type`, e.g. `Gender` for `Gender.
+    // to_string`) needs the SAME "is this a plain enum, not yet fully
+    // defined this early" check `prototype_type_is_unsafe_early` applies
+    // to any OTHER param -- `impl_method_param_types` deliberately
+    // EXCLUDES the implicit `self` (see `record_impl_method`'s own doc
+    // comment), so without this, a method receiving a PLAIN ENUM as
+    // `self` was invisible to this whole check, silently no-op'ing here
+    // AND never covered by the early forward-declare pass either (which
+    // DOES see `self` via `f.args`, correctly judging it unsafe early,
+    // and so correctly EXCLUDING it there) -- the two disagreed, and
+    // NEITHER ever emitted the real prototype. Found via a real minimal
+    // repro: a quirk impl (`impl User as Display`) calling ANOTHER quirk
+    // impl's method on a plain-enum field (`self.gender.to_string()` /
+    // `format("... {} ...", self.gender)`, `Gender`'s own `as Display`
+    // impl declared LATER in the same file) hit "implicit function
+    // declaration" followed by "conflicting types".
+    // 
+    // Deliberately NARROWER than `prototype_type_is_unsafe_early` itself:
+    // only the plain-enum/quirk-name check, not its OWN generic-args/
+    // mangled-template-prefix checks -- `owner_type` being a MANGLED
+    // generic instantiation (`Box__num`) is already a completely
+    // separate, already-correct code path (`ensure_generic_impl_method_
+    // emitted`/`emit_generic_impl_method_prototype_now`, which already
+    // splices its OWN inline prototype) -- reusing the full check here
+    // duplicated that path's own prototype line (confirmed via the
+    // existing generic-impl-method unit tests, which regressed with the
+    // wider check).
+    bin pm_owner_unsafe = false;
+    for pm_owner_n : self.all_nodes {
+      fit pm_owner_n.kind {
+        .Enum(pm_oe) -> {
+          if equals(pm_oe.name, owner_type) {
+            pm_owner_unsafe = true;
+          }
+        }
+        .Quirk(pm_oq) -> {
+          if !pm_oq.is_generic && equals(pm_oq.name, owner_type) {
+            pm_owner_unsafe = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+    bin pm_unsafe = pm_owner_unsafe;
+    if !pm_unsafe {
+      pm_unsafe = self.prototype_type_is_unsafe_early(*pm_rtype);
+    }
     if !pm_unsafe {
       for pm_pt2 : pm_param_types {
         if self.prototype_type_is_unsafe_early(*pm_pt2) {
@@ -4141,6 +4196,29 @@ impl Codegen {
             self.state.write(".");
             self.state.write(f.name);
             self.state.write(" = ");
+            // A field value may itself be a BARE enum-variant shorthand
+            // (`User{name = "Omar", gender = .Male}`, e.g. -- `gender`'s
+            // OWN declared type is `Gender`) or a NESTED bare `.{...}`
+            // compound shorthand -- both need `expected_enum_type`/
+            // `expected_compound_type` set from the FIELD's own declared
+            // type before recursing, same as every other bare-shorthand
+            // resolution site in this file. Without this, `.Male` had no
+            // type to resolve against at all here and was rejected as an
+            // unsupported node -- confirmed via a real minimal repro, not
+            // previously exercised by the existing test/example corpus
+            // (every prior compound-init example only ever set NON-enum
+            // fields this way).
+            let field_info = self.lookup_compound_field(type_name, f.name);
+            let prev_expected_enum = self.expected_enum_type;
+            let prev_expected_compound = self.expected_compound_type;
+            if field_info.is_some() {
+              let finfo = field_info.unwrap();
+              if self.enum_names.contains(finfo.type_name) {
+                self.expected_enum_type = finfo.type_name;
+              } else {
+                self.expected_compound_type = finfo.type_name;
+              }
+            }
             // A field value may itself be an array literal (`Row{ cols =
             // [1, 2, 3] }`, see `parser.parse_for_bracket`'s doc comment)
             // -- needs the bare-brace-list form, same as a declaration's
@@ -4149,6 +4227,8 @@ impl Codegen {
             self.in_array_initializer = true;
             let ferr = self.emit_expr(*f.value);
             self.in_array_initializer = prev_arr_init;
+            self.expected_enum_type = prev_expected_enum;
+            self.expected_compound_type = prev_expected_compound;
             if ferr.is_some() {
               ret ferr;
             }
@@ -4401,6 +4481,79 @@ impl Codegen {
     }
   }
 
+  // Resolves whether `expr` (a variadic `format`/`println_fmt` `{}`
+  // argument) should be pre-converted through its own type's `Display`
+  // impl instead of passed raw -- a bare local (`println_fmt("{}",
+  // omar)`) or a field access (`self.gender`, a Display impl's own body
+  // formatting one of its fields whose type ALSO implements Display,
+  // `impl User as Display`'s real `format("... {} ...", self.gender)`)
+  // whose resolved type has a registered `to_string` method. Reuses
+  // `resolve_field_chain` for both shapes (it already handles a bare
+  // identifier and a `.field` chain of any depth) rather than re-
+  // deriving a parallel lookup -- restricted to exactly those two
+  // TOP-LEVEL shapes (not a call, `()`) so this never triggers
+  // `resolve_field_chain`'s own call-as-receiver machinery for the
+  // common, simple case; a chain that STILL resolves through a nested
+  // call (`foo().field`) is filtered out via `is_call_result` instead
+  // of being excluded up front, matching how every other `is_call_
+  // result` consumer in this file already treats it.
+  // 
+  // Without this, a variadic argument whose type implements `Display`
+  // printed its raw underlying representation (a struct's own address,
+  // an enum's bare ordinal) instead of dispatching to `Display` --
+  // confirmed via a real minimal repro. Deliberately narrower than the
+  // original transpiler's own equivalent (`resolve_display_call_for_
+  // expr`, which also handles `&identifier`/`*identifier`): not
+  // previously exercised by selfhost's own call graph at all (see
+  // `emit_call`'s own doc comment on the variadic-format path for why
+  // that was judged safe to skip until now), so ported only as far as
+  // this real, reported gap actually needs.
+  resolve_display_dispatch(Node* expr) Option<DisplayResolution> {
+    bin eligible = false;
+    fit expr.kind {
+      .Identifier(_) -> { eligible = true; }
+      .Expression(e) -> {
+        if equals(e.op, ".") {
+          eligible = true;
+        }
+      }
+      _ -> {}
+    }
+    if !eligible {
+      ret .None;
+    }
+    let r_opt = self.resolve_field_chain(expr);
+    if r_opt.is_none() {
+      ret .None;
+    }
+    let r = r_opt.unwrap();
+    if r.is_call_result {
+      ret .None;
+    }
+    let fn_name_opt = self.lookup_impl_method(r.type_name, "to_string");
+    if fn_name_opt.is_none() {
+      ret .None;
+    }
+    // Same reasoning as `emit_method_call`'s own identical call right
+    // before it writes an ordinary method call: a plain impl method's
+    // signature can be unsafe for the early forward-declare pass,
+    // needing an inline prototype at its own first real call site --
+    // this dispatch site is exactly as much a "real call site" as any
+    // other, just reached through `format`/`println_fmt`'s `{}` instead
+    // of an explicit `.to_string()`. Without this, a Display impl
+    // calling ANOTHER Display impl (`impl User as Display`'s own body
+    // formatting `self.gender`, `Gender`'s own `as Display` impl
+    // declared LATER in the same file) hit "implicit function
+    // declaration" followed by "conflicting types" -- confirmed via a
+    // real minimal repro, the exact same failure mode as the identical
+    // gap fixed in the original transpiler.
+    self.ensure_plain_impl_method_prototype_emitted(r.type_name, "to_string");
+    DisplayResolution res;
+    res.fn_name = fn_name_opt.unwrap();
+    res.pass_by_ref = !r.is_pointer;
+    ret .Some(res);
+  }
+
   // Emits a call `callee(arg1, arg2, ...)`: a plain-identifier callee (an
   // ordinary free-function call) directly, or delegates to
   // `emit_method_call` when the callee is itself a `.`-Expression
@@ -4555,6 +4708,32 @@ impl Codegen {
         self.state.write("(const char[]){0})");
         ret .None;
       }
+      // Resolved ONCE per position, up front, and reused across all
+      // three loops below (binding, tag string, pass-through argument)
+      // -- see `resolve_display_dispatch`'s own doc comment for what
+      // this detects and why.
+      Vec<bin> va_is_display;
+      va_is_display.init(var_len);
+      Vec<str> va_disp_fn;
+      va_disp_fn.init(var_len);
+      Vec<bin> va_disp_by_ref;
+      va_disp_by_ref.init(var_len);
+      num vd_i = 0;
+      for vd_i < var_len {
+        let disp = self.resolve_display_dispatch(args.get(fixed_len + vd_i));
+        if disp.is_some() {
+          let d = disp.unwrap();
+          va_is_display.push(true);
+          va_disp_fn.push(d.fn_name);
+          va_disp_by_ref.push(d.pass_by_ref);
+        } else {
+          va_is_display.push(false);
+          va_disp_fn.push("");
+          va_disp_by_ref.push(false);
+        }
+        vd_i = vd_i + 1;
+      }
+
       self.state.write("({ ");
       num va_i = 0;
       for va_i < var_len {
@@ -4593,6 +4772,19 @@ impl Codegen {
           ret va_err;
         }
         self.state.write("; ");
+        if va_is_display.get(va_i) {
+          self.state.write("char* __fun_disp_");
+          self.state.write(format_num(va_i));
+          self.state.write(" = ");
+          self.state.write(va_disp_fn.get(va_i));
+          self.state.write("(");
+          if va_disp_by_ref.get(va_i) {
+            self.state.write("&");
+          }
+          self.state.write("__fun_va_");
+          self.state.write(format_num(va_i));
+          self.state.write("); ");
+        }
         va_i = va_i + 1;
       }
       self.state.write(callee_name);
@@ -4617,9 +4809,13 @@ impl Codegen {
         if vt_i > 0 {
           self.state.write(", ");
         }
-        self.state.write("__fun_tag(__fun_va_");
-        self.state.write(format_num(vt_i));
-        self.state.write(")");
+        if va_is_display.get(vt_i) {
+          self.state.write("'s'");
+        } else {
+          self.state.write("__fun_tag(__fun_va_");
+          self.state.write(format_num(vt_i));
+          self.state.write(")");
+        }
         vt_i = vt_i + 1;
       }
       if var_len > 0 {
@@ -4628,7 +4824,12 @@ impl Codegen {
       self.state.write("0}");
       num vp_i = 0;
       for vp_i < var_len {
-        self.state.write(", __fun_va_");
+        self.state.write(", ");
+        if va_is_display.get(vp_i) {
+          self.state.write("__fun_disp_");
+        } else {
+          self.state.write("__fun_va_");
+        }
         self.state.write(format_num(vp_i));
         vp_i = vp_i + 1;
       }
