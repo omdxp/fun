@@ -434,6 +434,21 @@ pub compound Codegen {
   // signature to speak of, same reasoning `emit_impl`'s own generic
   // skip already documents.
   Vec<str> quirk_names;
+  // Every GENERIC quirk's own DECLARATION (`quirk To<T> { fun to() T; }`),
+  // registered up front (see `transpile`'s own early registration pass)
+  // so `ensure_quirk_instantiated` can derive a CONCRETE instantiation's
+  // own vtable structurally (substituting the quirk's own type param)
+  // even when NO impl of it exists anywhere in the current translation
+  // unit -- `std/json.fn`'s own `to_json_value(To<JsonValue> value)`
+  // wrapper function references `To<JsonValue>` purely as a parameter
+  // TYPE, with the actual concrete `impl ... as To<JsonValue>` living in
+  // a completely different, importing file. A non-generic quirk
+  // (`Display`) never needs this -- its vtable is always derived from
+  // the first concrete impl `emit_quirk_vtable_machinery` happens to
+  // process, matching its own existing, unchanged behavior.
+  Vec<str> quirk_decl_names;
+  Vec<Vec<str>> quirk_decl_type_params;
+  Vec<Vec<QuirkMethodSig>> quirk_decl_methods;
   // Every import ALIAS name (`imp x as y;`'s own `y`) seen anywhere
   // across the whole transitive import graph -- see
   // `import_resolver.ProgramMergeResult`'s own doc comment for why this
@@ -999,6 +1014,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.expected_compound_type = "";
   g.in_array_initializer = false;
   g.quirk_names.init(0);
+  g.quirk_decl_names.init(0);
+  g.quirk_decl_type_params.init(0);
+  g.quirk_decl_methods.init(0);
   g.import_aliases.init(0);
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
@@ -1452,25 +1470,13 @@ impl Codegen {
     // A CONCRETE instantiation of a generic QUIRK used directly as a type
     // (`To<num>` as a parameter/variable/return type, `examples/stdlib/
     // generic_to_from.fn`'s own real `to_json_value(To<JsonValue> value)`-
-    // style usage) -- mangled the SAME way the parser's own `_mangled_
-    // dtype_name` does for `ImplNode.quirk_concrete_instantiation`
-    // (`To__num`), checked against `self.quirk_names` (which `emit_quirk_
-    // vtable_machinery` registers a concrete quirk instantiation's own
-    // mangled identity under, not just its bare quirk name -- see its own
-    // doc comment). Neither a compound nor an enum template recognizes
+    // style usage) -- neither a compound nor an enum template recognizes
     // "To" at all, so without this, a concrete-quirk-typed parameter/
     // variable/return type was rejected as an unresolvable type entirely.
-    StringBuilder quirk_mangled_sb = string_builder_init(16);
-    quirk_mangled_sb.append(rdt.type_str);
-    for qarg : rdt.generic_args {
-      quirk_mangled_sb.append("__");
-      quirk_mangled_sb.append(qarg.type_str);
-    }
-    str quirk_mangled = quirk_mangled_sb.build();
-    if self.quirk_names.contains(quirk_mangled) {
-      ret .Some(quirk_mangled);
-    }
-    ret .None;
+    // See `ensure_quirk_instantiated`'s own doc comment for why this
+    // needs to be able to EMIT the vtable here (not just look one up)
+    // when no concrete impl has been processed anywhere yet.
+    ret self.ensure_quirk_instantiated(rdt);
   }
 
   // Appends `text` (a fully-rendered struct/enum typedef or generic impl
@@ -2025,6 +2031,124 @@ impl Codegen {
       arg_dtypes
     );
     ret .Some(mangled_name);
+  }
+
+  // Given a DataType naming a CONCRETE instantiation of a GENERIC quirk
+  // (`To<JsonValue>`), resolves -- and, the FIRST time this exact
+  // instantiation is seen ANYWHERE (a concrete impl's own processing via
+  // `emit_quirk_vtable_machinery`, OR a bare type reference like this
+  // one, whichever comes first in source order -- both dedup through the
+  // SAME `Codegen.quirk_names` registry) -- EMITS its vtable struct/fat-
+  // pointer type, deriving each method's signature from the quirk's OWN
+  // declaration (registered by `transpile`'s own early pass, see
+  // `Codegen.quirk_decl_names`'s own doc comment) via the SAME type-
+  // substitution mechanism `resolve_type_subst`/`write_type` already use
+  // for a generic compound/enum's own fields. Without this, a type
+  // reference to a concrete quirk instantiation with NO impl anywhere in
+  // the CURRENT translation unit (`std/json.fn`'s own `to_json_value(To<
+  // JsonValue> value)`, whose actual `impl ... as To<JsonValue>` lives in
+  // a completely different, importing file) had no vtable to resolve
+  // against at all. `.None` when `dt.type_str` doesn't name a registered
+  // GENERIC quirk, or the argument count doesn't match -- the caller
+  // (`resolve_type_name`) then correctly falls through to treating this
+  // as an unresolvable type, exactly as before this existed.
+  ensure_quirk_instantiated(DataType dt) Option<str> {
+    num qdi = 0;
+    bin qfound = false;
+    for qdi < self.quirk_decl_names.len {
+      if equals(self.quirk_decl_names.get(qdi), dt.type_str) {
+        qfound = true;
+        break;
+      }
+      qdi = qdi + 1;
+    }
+    if !qfound {
+      ret .None;
+    }
+    let q_type_params = self.quirk_decl_type_params.get(qdi);
+    if q_type_params.len != dt.generic_args.len {
+      ret .None;
+    }
+
+    StringBuilder qname_sb = string_builder_init(16);
+    qname_sb.append(dt.type_str);
+    Vec<str> q_arg_type_names;
+    q_arg_type_names.init(0);
+    Vec<bin> q_arg_is_pointer;
+    q_arg_is_pointer.init(0);
+    for qarg : dt.generic_args {
+      qname_sb.append("__");
+      qname_sb.append(qarg.type_str);
+      q_arg_type_names.push(qarg.type_str);
+      q_arg_is_pointer.push(dtype_is_pointer(*qarg));
+    }
+    str q_mangled = qname_sb.build();
+
+    if self.quirk_names.contains(q_mangled) {
+      ret .Some(q_mangled);
+    }
+
+    let q_methods = self.quirk_decl_methods.get(qdi);
+
+    let prev_params = self.type_subst_param_names;
+    let prev_arg_names = self.type_subst_arg_type_strs;
+    let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+    self.type_subst_param_names = q_type_params;
+    self.type_subst_arg_type_strs = q_arg_type_names;
+    self.type_subst_arg_is_pointer = q_arg_is_pointer;
+
+    CodegenState qvt_scratch = codegen_state_new();
+    CodegenState* saved_qvt_state = self.state;
+    self.state = &qvt_scratch;
+    self.state.write("typedef struct ");
+    self.state.write(q_mangled);
+    self.state.write("_vtable ");
+    self.state.write(q_mangled);
+    self.state.write("_vtable;\n");
+    self.state.write("struct ");
+    self.state.write(q_mangled);
+    self.state.write("_vtable {\n");
+    bin q_write_err = false;
+    for qm : q_methods {
+      self.state.write("  ");
+      if qm.rtype != nil {
+        let qwt = self.write_type(*qm.rtype);
+        if qwt.is_none() {
+          q_write_err = true;
+        }
+      } else {
+        self.state.write("void");
+      }
+      self.state.write(" (*");
+      self.state.write(qm.name);
+      self.state.write(")(void* self");
+      for qarg3 : qm.args {
+        self.state.write(", ");
+        let qpwt = self.write_type(*qarg3.dtype);
+        if qpwt.is_none() {
+          q_write_err = true;
+        }
+      }
+      self.state.write(");\n");
+    }
+    self.state.write("};\n");
+    self.state.write("typedef struct ");
+    self.state.write(q_mangled);
+    self.state.write(" { void* self; const ");
+    self.state.write(q_mangled);
+    self.state.write("_vtable* vtable; } ");
+    self.state.write(q_mangled);
+    self.state.write(";\n\n");
+    self.state = saved_qvt_state;
+    self.type_subst_param_names = prev_params;
+    self.type_subst_arg_type_strs = prev_arg_names;
+    self.type_subst_arg_is_pointer = prev_arg_ptrs;
+    if q_write_err {
+      ret .None;
+    }
+    self.emit_hoisted(qvt_scratch.out.build());
+    self.quirk_names.push(q_mangled);
+    ret .Some(q_mangled);
   }
 
   // Called by `ensure_compound_instantiated`/`ensure_enum_instantiated`
@@ -9805,6 +9929,49 @@ impl Codegen {
               ret .None;
             }
             let recv_r = recv_r_opt.unwrap();
+            // A QUIRK-typed receiver (`let v = value.to();` where `value`
+            // is `To<MyEnum>`, `std/json.fn`'s own real `to_json_string`
+            // body) dispatches through the quirk's OWN declared method
+            // signature, not `lookup_impl_method_rtype` (which only knows
+            // about CONCRETE impls' own registered methods, never a
+            // quirk's abstract contract) -- `recv_r.type_name` is the
+            // quirk's mangled CONCRETE identity (`To__MyEnum`); strip the
+            // matching quirk's own bare-name prefix off it to recover the
+            // concrete argument, then substitute it for the quirk's own
+            // (single) type param in the matching method's declared
+            // return type, mirroring `ensure_quirk_instantiated`'s own
+            // identical substitution.
+            if self.quirk_names.contains(recv_r.type_name) {
+              num qdi2 = 0;
+              for qdi2 < self.quirk_decl_names.len {
+                let qn = self.quirk_decl_names.get(qdi2);
+                StringBuilder qpfx_sb = string_builder_init(16);
+                qpfx_sb.append(qn);
+                qpfx_sb.append("__");
+                str qpfx = qpfx_sb.build();
+                if starts_with(recv_r.type_name, qpfx) {
+                  str qarg_name = strip_prefix(recv_r.type_name, qpfx);
+                  let qmethods = self.quirk_decl_methods.get(qdi2);
+                  for qm2 : qmethods {
+                    if equals(qm2.name, method_name) {
+                      if qm2.rtype == nil {
+                        ret .None;
+                      }
+                      DataType qm_rdt = *qm2.rtype;
+                      let q_type_params2 = self.quirk_decl_type_params.get(qdi2);
+                      if q_type_params2.len == 1 && equals(qm_rdt.type_str, q_type_params2.get(0)) && qm_rdt.generic_args.len == 0 {
+                        DataType subst_dt = dtype_new();
+                        subst_dt.type_str = qarg_name;
+                        ret .Some(subst_dt);
+                      }
+                      ret .Some(qm_rdt);
+                    }
+                  }
+                }
+                qdi2 = qdi2 + 1;
+              }
+              ret .None;
+            }
             let rt = self.lookup_impl_method_rtype(recv_r.type_name, method_name);
             if rt.is_none() {
               ret .None;
@@ -11012,6 +11179,24 @@ impl Codegen {
     self.skip_math_h = program_defines_libm_colliding_name(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
+    // Registers every GENERIC quirk's own declaration -- pure bookkeeping,
+    // no C text -- before anything that could reference a CONCRETE
+    // instantiation of one as a bare type (a function parameter/return
+    // type, e.g.) needs to resolve it. See `Codegen.quirk_decl_names`'s
+    // own doc comment for why this can't just wait for a concrete impl to
+    // be processed first.
+    for n : nodes {
+      fit n.kind {
+        .Quirk(q) -> {
+          if q.has_type_params {
+            self.quirk_decl_names.push(q.name);
+            self.quirk_decl_type_params.push(q.type_params);
+            self.quirk_decl_methods.push(q.methods);
+          }
+        }
+        _ -> {}
+      }
+    }
     // Impl methods are pre-registered FIRST, before either the enum or
     // compound pass -- a generic impl's own template must already be in
     // `generic_impl_templates` by the time `emit_enum`/`emit_compound`
