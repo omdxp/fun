@@ -1752,6 +1752,71 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: dot-shorthand completion for a compound-init field's own value" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Task {\n" ++
+        "  str title;\n" ++
+        "  Priority priority;\n" ++
+        "}\n\n" ++
+        "enum Priority {\n" ++
+        "  Low,\n" ++
+        "  High,\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Task explicit = Task{title = \"Ship\", priority = .High};\n" ++
+        "  Task bare = .{title = \"Ship\", priority = .High};\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-compound-init-field-dot.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // `Task{..., priority = .High}` -- explicit compound-init.
+    const explicit_pos = try findPosition(doc_text, "Task{title = \"Ship\", priority = .", 0);
+    const explicit_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, explicit_pos.line, explicit_pos.col + @as(i64, @intCast("Task{title = \"Ship\", priority = .".len)) },
+    );
+    defer allocator.free(explicit_params);
+    const explicit_id = try lsp.request("textDocument/completion", explicit_params);
+    var explicit_res = try lsp.waitResponse(explicit_id, 15000);
+    defer explicit_res.deinit();
+    const explicit_result = try jsonResultFromResponseObj(explicit_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, explicit_result, "High");
+
+    // `.{..., priority = .High}` -- bare shorthand compound-init, expected type
+    // inferred from the enclosing `Task bare = ...` declaration.
+    const bare_pos = try findPosition(doc_text, ".{title = \"Ship\", priority = .", 0);
+    const bare_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, bare_pos.line, bare_pos.col + @as(i64, @intCast(".{title = \"Ship\", priority = .".len)) },
+    );
+    defer allocator.free(bare_params);
+    const bare_id = try lsp.request("textDocument/completion", bare_params);
+    var bare_res = try lsp.waitResponse(bare_id, 15000);
+    defer bare_res.deinit();
+    const bare_result = try jsonResultFromResponseObj(bare_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, bare_result, "High");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: hover on a dot-shorthand nested inside an enum-constructor call's args" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

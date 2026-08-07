@@ -5497,6 +5497,31 @@ pub const LspServer = struct {
                             if (self.guessVariableType(idx, uri, lt.text, dot_pos)) |vt| {
                                 if (self.isEnumTypeName(uri, vt)) return vt;
                             }
+                            // `lt.text` isn't a plain variable or enum name -- try
+                            // treating it as a COMPOUND-INIT FIELD name instead
+                            // (`User{name = "Omar", gender = .Male}` / `.{name =
+                            // "Omar", gender = .Male}`, `gender`'s own declared
+                            // type is `Gender`). Reuses `detectCompoundInitTypeAtCursor`
+                            // (already solves "what compound type does this `{...}`/
+                            // `.{...}` belong to", including the bare `.{...}` case
+                            // via its own declared-variable inference) rather than
+                            // re-deriving that resolution here. Without this, a
+                            // bare enum-variant shorthand as a compound-init field's
+                            // OWN value never resolved an expected type at all, so
+                            // completion fell back to dumping every enum in scope.
+                            if (self.docs.get(uri)) |doc| {
+                                if (self.detectCompoundInitTypeAtCursor(uri, idx, doc.text, dot_pos)) |container_type| {
+                                    const base = baseTypeNameForLookup(container_type);
+                                    const hit = self.findMemberByContainerFresh(uri, base, lt.text, .field) orelse
+                                        self.findMemberByContainerFresh(uri, base, lt.text, .property);
+                                    if (hit) |h| {
+                                        if (h.sym.value_type) |vt2| {
+                                            const base2 = baseTypeNameForLookup(vt2);
+                                            if (self.isEnumTypeName(uri, base2)) return base2;
+                                        }
+                                    }
+                                }
+                            }
                             break;
                         }
                         if ((lt.kind == .symbol or lt.kind == .operator) and std.mem.eql(u8, lt.text, ";")) break;
@@ -6940,8 +6965,21 @@ pub const LspServer = struct {
             items.deinit();
         }
 
-        // Compound init field completion (e.g. `User{ na| }` / `.{ ag| }`).
-        if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
+        // Compound init field completion (e.g. `User{ na| }` / `.{ ag| }`) --
+        // but NOT when the cursor sits right after a bare `.` (`User{gender =
+        // .|}`), which is a field VALUE'S OWN enum-variant dot-shorthand, not
+        // a field NAME -- a field name is never itself preceded by a bare
+        // `.`. Without this exclusion, this ran (and won, via its own early
+        // `return`) before the dot-shorthand completion logic further below
+        // ever got a chance to see this position at all, always offering
+        // remaining field names instead of the expected enum's own variants.
+        const cursor_b_for_field_check = byteIndexForPosition(doc.text, pos);
+        const prefix_start_for_field_check = cursor_b_for_field_check - prefix.len;
+        const compound_init_field_pos_is_dot_shorthand =
+            prefix_start_for_field_check > 0 and doc.text[prefix_start_for_field_check - 1] == '.';
+        if (!compound_init_field_pos_is_dot_shorthand) {
+            if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
+        }
 
         // Robust text-based member completion for `receiver.` before other fallbacks.
         const recv_info_opt: ?ReceiverGuess = guessReceiverAtCursorWithIndex(doc.text, pos) orelse blk: {
