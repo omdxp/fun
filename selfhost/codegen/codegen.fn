@@ -2368,6 +2368,73 @@ impl Codegen {
     }
   }
 
+  // Forward-declares an ASYNC generic impl method's own `__fun_async_
+  // call_<new_name>` helper -- the symbol `await`/`emit_async_or_fork_
+  // call` actually calls (see `emit_async_function_support`'s own doc
+  // comment for its full definition, emitted later, in place, when
+  // `new_name`'s own real body is). Needed alongside `emit_generic_impl_
+  // method_prototype`'s ordinary method prototype for exactly the same
+  // reason: a SIBLING async method on the same impl, instantiated
+  // EARLIER in the same file/statement stream, calling this one via
+  // `await self.other_method(...)` before this one's own full support
+  // block (which only exists at ITS OWN first-call-site position) has
+  // been emitted anywhere -- "implicit function declaration" followed by
+  // "static declaration ... follows non-static declaration" once the
+  // real (static) definition is spliced in later. Confirmed via
+  // `examples/advanced/channel_async_composed.fn`'s own real body
+  // (`Channel<T>.send_timeout_async`/`recv_timeout_into_async` calling
+  // each other). Only the call helper's own signature needs a forward
+  // declaration -- unlike the full support block, it takes the SAME args
+  // as the method itself, no payload-struct type in its own signature.
+  // Mirrors `emit_generic_impl_method_prototype`'s own reliance on the
+  // ALREADY-ACTIVE substitution context (`self.write_type` applies it
+  // internally) -- deliberately narrower than that function: no function-
+  // pointer-typed param support, matching `emit_async_function_support`'s
+  // own identical restriction for every async method.
+  emit_async_call_helper_prototype(Node m, str new_name) Option<CodegenErrorKind> {
+    fit m.kind {
+      .Function(f) -> {
+        if !f.has_rtype {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        self.state.write("static ");
+        let rt = self.write_type(*f.rtype);
+        if rt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write(" __fun_async_call_");
+        self.state.write(new_name);
+        self.state.write("(");
+        if f.has_args && f.args.len > 0 {
+          bin first = true;
+          for arg : f.args {
+            fit arg.kind {
+              .Variable(v) -> {
+                if v.var_type.has_fn_sig {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+                if !first {
+                  self.state.write(", ");
+                }
+                first = false;
+                let wt = self.write_type(*v.var_type);
+                if wt.is_none() {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+              }
+              _ -> {}
+            }
+          }
+        } else {
+          self.state.write("void");
+        }
+        self.state.write(");\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   // True when `dt` can't safely appear in the EARLY function/method
   // forward-declare pass (`pub transpile`'s own, right after `register_
   // impl_methods`) -- either a plain ENUM (any pointer depth or by-
@@ -2866,6 +2933,30 @@ impl Codegen {
               );
             }
             self.hoist_insert_pos = saved_proto_hoist_pos;
+
+            // An ASYNC method's own `__fun_async_call_<new_name>`
+            // forward declaration is `static` (matching its later real
+            // definition, `emit_async_function_support`'s own step 5) --
+            // C forbids an explicit `static` storage class on a function
+            // DECLARATION at block scope, unlike the ordinary method
+            // prototype just spliced above (which has no storage-class
+            // specifier at all, legal there). Spliced at the REAL,
+            // already-adjusted top-level position (`self.hoist_insert_
+            // pos`, just restored above) instead of `current_stmt_start_
+            // pos`'s block-scope one for exactly that reason.
+            fit m.kind {
+              .Function(proto_async_fnv) -> {
+                if proto_async_fnv.is_async {
+                  CodegenState async_proto_scratch = codegen_state_new();
+                  CodegenState* saved_async_state = self.state;
+                  self.state = &async_proto_scratch;
+                  self.emit_async_call_helper_prototype(*m, new_name);
+                  self.state = saved_async_state;
+                  self.emit_hoisted(async_proto_scratch.out.build());
+                }
+              }
+              _ -> {}
+            }
 
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
