@@ -1,38 +1,18 @@
 // Structured logging.
-// 
-// A `Logger` filters by severity, renders records as human-readable Text or as
-// one JSON object per line, and routes output to any `std.io.Sink` (stdout,
-// stderr, a file, or a rotating file). Records may carry typed key/value fields.
-// 
-// Simple usage (back-compatible):
-// ```
-// Logger l = logger_init(.Info);
-// l.info("hello");                 // [INFO] <ts> hello
-// ```
-// 
-// Structured usage (fluent builder — returns records BY VALUE and is chainable):
-// ```
-// l.info_r("request served")
-//   .str_field("path", "/api")
-//   .num_field("status", 200)
-//   .emit();
-// ```
-// 
-// JSON output to a file:
-// ```
-// let f = open_write("app.log");
-// Logger jl = logger_json(.Debug).to_sink(Sink.File(f));
-// jl.warn("disk low");            // {"level":"WARN","ts":"...","msg":"disk low"}
-// ```
+//
+// A `Logger` filters by severity, renders records as human-readable text or
+// as one JSON object per line, and routes output to any `std.io.Sink`
+// (stdout, stderr, a file, or a rotating file). Records may carry typed
+// key/value fields, either via direct calls (`l.info(...)`) or a chainable
+// builder (`l.info_r(...).str_field(...).emit()`).
 
 imp std.io;
 imp std.string;
 imp std.vec;
 imp std.time;
 
-// Log severity levels, with explicit ordered values so filtering is a stable
-// integer comparison and there is room to insert future levels. `Debug`/`Info`/
-// `Warn`/`Error` keep their historical names; `Trace` and `Fatal` are added.
+// Log severity levels with explicit ordered values, so filtering is a stable
+// integer comparison and there's room to insert levels between the existing ones.
 pub enum LogLevel {
   // Very verbose tracing.
   Trace = 0,
@@ -258,10 +238,10 @@ fun field_val_json_into(StringBuilder* b, FieldVal* v) {
   }
 }
 
-// A pending log record + the builder for attaching structured fields. Returned
-// BY VALUE from the `*_r`/`record` entrypoints and chained by value:
-// `l.info_r("m").num_field("n", 1).emit()`. When `live` is false (below the
-// logger threshold) every builder method and `emit()` are cheap no-ops.
+// A pending log record plus the builder for attaching structured fields.
+// Returned by value from the `*_r`/`record` entrypoints and chained by value:
+// `l.info_r("m").num_field("n", 1).emit()`. When `live` is false the record
+// is below the logger threshold, so every builder method and `emit()` are no-ops.
 pub compound LogRecord {
   // Severity this record was opened at.
   LogLevel level;
@@ -377,14 +357,8 @@ impl LogRecord {
     let sb = string_builder_init(64);
     let n = self.fields.len();
 
-    // RFC3339 UTC (e.g. "2026-07-28T08:50:11Z"): the conventional
-    // timestamp format for structured/machine-readable logs (unambiguous,
-    // sortable, timezone-explicit, one line) -- unlike the C library's
-    // human/ctime format (`now_human_cstr`), which is locale- and local-
-    // timezone-dependent and includes its own trailing newline, silently
-    // splitting the log line in two. Stack-allocated (not malloc'd): a
-    // logger call happens far too often in a long-running process to heap
-    // -allocate its timestamp on every single call.
+    // Stack-allocated buffer for an RFC3339 UTC timestamp (e.g.
+    // "2026-07-28T08:50:11Z"), avoiding a heap allocation on every log call.
     chr[32] ts_buf;
     if self.with_timestamp {
       now().format_utc(ts_buf, 32, "%Y-%m-%dT%H:%M:%SZ");

@@ -1,10 +1,4 @@
 // File and buffer IO utilities.
-// 
-// Usage:
-// ```
-// print("hi");
-// println("bye");
-// ```
 
 imp std.c.io;
 imp std.c.mem;
@@ -162,10 +156,8 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
         continue;
       }
       if i + 4 < n && fmt[i + 4] == '}' {
-        // A `{xyz}` is a typed placeholder ONLY when `xyz` is a recognized type
-        // name (str/num/dec/bin/chr/ptr/raw) — matching the compile-time
-        // `build_printf_format` rule. Any other `{xyz}` (e.g. `{foo}`) is literal
-        // text, so the two format paths agree instead of one silently eating it.
+        // `{xyz}` is a typed placeholder only when `xyz` names a recognized
+        // type (str/num/dec/bin/chr/ptr/raw); any other `{xyz}` is literal text.
         let a = fmt[i + 1];
         let b2 = fmt[i + 2];
         let d = fmt[i + 3];
@@ -582,16 +574,9 @@ impl File {
 
 // --- Sinks: a unified write destination -----------------------------------------------
 
-// A `Sink` names where bytes go: one of the three standard streams, or an open
-// `File`. It gives std.io (and std.log) a single `write` path that works for
-// stdout, stderr, and files alike. Dispatch is a `fit` over the enum (no vtable),
-// so it stays zero-cost.
-// 
-// The set is intentionally limited to byte-stream destinations that map to a
-// `FILE*` today. Pipe/Socket/Unix-socket/SharedMemory/Semaphore sinks are a
-// roadmap item that depends on std.net / std.sync handles and per-OS syscalls;
-// the enum can grow additively (one new variant + one `fit` arm) without
-// changing any caller.
+// A `Sink` names a write destination: a standard stream, an open `File`, or
+// a rotating file sink. Dispatch is a `fit` match over the enum, so it stays
+// zero-cost with no vtable.
 pub enum Sink {
   Stdout,
   Stderr,

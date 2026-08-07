@@ -30,11 +30,9 @@ pub fun fs() Fs {
 }
 
 // Copy a directory-entry name into a Fun-owned buffer. `__fun_dir_read_name`
-// returns a pointer into a buffer the OS reuses/overwrites on the next
-// `__fun_dir_read_name`/`__fun_dir_close` call (POSIX's `struct dirent`
-// living inside the `DIR*`, or Win32's reused `WIN32_FIND_DATAA`) -- names
-// that outlive the current loop iteration (e.g. pushed into a `Vec<str>`)
-// must be duplicated first.
+// returns a pointer into an OS-owned buffer that gets reused on the next
+// call, so a name that needs to outlive the current loop iteration must be
+// duplicated first.
 fun _dup_cstr(str s) str {
   let b = string_builder_init(len(s));
   b.append(s);
