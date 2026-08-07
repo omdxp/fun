@@ -1,10 +1,4 @@
 // Error values for stdlib operations.
-// 
-// Usage:
-// ```
-// Error e = error_new_kind(.Io, 2, "open failed");
-// if error_is_err(&e) { ... }
-// ```
 
 // Broad error categories.
 pub enum ErrorKind {

@@ -1,10 +1,4 @@
 // Simple PRNG.
-// 
-// Usage:
-// ```
-// Rand r = rand_init(123);
-// num v = r.range(1, 10);
-// ```
 
 imp std.vec;
 imp std.result;

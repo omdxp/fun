@@ -1,12 +1,7 @@
 // Thread helpers using pthread-shaped APIs.
 // 
-// Notes:
-// - On POSIX, these map to native pthread APIs.
-// - On Windows, backend compatibility layers provide equivalent behavior.
-// 
-// Usage:
-// Thread t = thread_new();
-// num rc = t.start(entry_ptr, arg_ptr);
+// On POSIX, these map to native pthread APIs. On Windows, backend
+// compatibility layers provide equivalent behavior.
 
 imp std.c.thread;
 imp std.result;

@@ -19,15 +19,10 @@
 // `E` is the error type — most stdlib functions use the shared `Error`
 // compound (kind + code + message + context) and can be built with `ok(v)`,
 // `err(code, message, default)`, `err_kind(kind, message, default)`, or
-// `err_error(e, default)`. A caller that wants its OWN specific error type
-// (an enum of just the failure modes it actually has, e.g. `Result<Node,
-// ParseErrorKind>`) constructs it directly via the bare shorthand
-// (`ret .Err(ParseErrorKind.UnexpectedToken);`), which resolves against the
-// enclosing function's declared return type or a variable's declared type
-// like any other enum-variant shorthand — no stdlib helper needed for that
-// case, since a helper generic over an unconstrained `E` would need a
-// witness value with nothing natural to infer it from (`Err` never carries
-// a `T`-shaped value the way `Ok` does).
+// `err_error(e, default)`. A caller with a specific error enum (e.g.
+// `Result<Node, ParseErrorKind>`) constructs it directly via the bare
+// shorthand (`ret .Err(ParseErrorKind.UnexpectedToken);`) instead, since a
+// generic helper over an unconstrained `E` has nothing to infer it from.
 
 imp std.error;
 imp std.c.string;
@@ -122,27 +117,22 @@ impl Result<T, E> {
   }
 }
 
-// Construct a successful `Ok(value)`. Generic over the error type `E` (the
-// body never touches it) -- unlike `err()`/`err_kind()`/etc., which always
-// construct a concrete `Error` internally and so stay fixed to
-// `Result<T, Error>` (see the module doc comment above). `E` has no argument
-// to infer it from, so a caller either supplies it explicitly
-// (`ok<T, E>(value)`) or, more simply, uses the `.Ok(value)` shorthand
-// directly (which resolves both `T` and `E` from the surrounding declared
-// return/variable type, same as `.Err(...)` already does).
+// Constructs a successful `Ok(value)`, generic over the error type `E`. `E`
+// has no argument to infer it from, so callers either supply it explicitly
+// (`ok<T, E>(value)`) or use the `.Ok(value)` shorthand, which resolves both
+// `T` and `E` from the surrounding declared type.
 pub fun ok<T, E>(T value) Result<T, E> {
   ret .Ok(value);
 }
 
-// Construct an `Err` from a code + message, tagged `ErrorKind.System`. The trailing
-// value is not stored (an Err carries only the Error); it exists purely as a
-// generic-type WITNESS so `T` is inferred from the call site — `err(1, "msg",
-// fallback)` resolves `Result<T, Error>`. The leading underscore marks it
-// intentionally unused.
+// Constructs an `Err` from a code and message, tagged `ErrorKind.System`. The
+// trailing value isn't stored; it's only a generic-type witness so `T` is
+// inferred from the call site, e.g. `err(1, "msg", fallback)` resolves
+// `Result<T, Error>`.
 // 
-// Prefer `err_kind()` when the failure has an unambiguous category (`Io`, `Parse`,
-// `NotFound`, `Invalid`, `OutOfMemory`, `Unexpected`) — callers inspecting
-// `result.unwrap_err().kind` see that category instead of the generic `System`.
+// Prefer `err_kind()` when the failure has an unambiguous category (`Io`,
+// `Parse`, `NotFound`, `Invalid`, `OutOfMemory`, `Unexpected`) so callers
+// inspecting `result.unwrap_err().kind` see that category instead of `System`.
 pub fun err<T>(num code, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new(code, message));
 }

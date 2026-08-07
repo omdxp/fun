@@ -56,9 +56,8 @@ pub quirk Iterator<T> {
   next() Option<T>;
 }
 
-// Convert this value INTO a `T`. Fun has no reflection/derive, so each type
-// hand-implements the conversion — the explicit equivalent of a derived
-// `Into<T>`.
+// Converts this value into a `T`. Fun has no reflection or derive macros, so
+// each type hand-implements the conversion.
 // 
 // ```
 // impl Point as To<JsonValue> {
@@ -82,8 +81,8 @@ pub quirk To<T> {
   to() T;
 }
 
-// Rebuild this value FROM a `T` (e.g. `impl Config as From<JsonValue>`).
-// Reads state from the source value:
+// Rebuilds this value from a `T` (e.g. `impl Config as From<JsonValue>`),
+// reading state from the source value:
 // 
 // ```
 // impl Config as From<JsonValue> {

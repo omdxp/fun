@@ -34,11 +34,9 @@ async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
   out <- o;
 }
 
-// Runs every discovered test CONCURRENTLY, printing a `PASS`/`FAIL` line per
-// test (in COMPLETION order, not declaration order -- tests run in
-// parallel) and a final summary line. Returns 0 when every test passed, 1
-// otherwise, matching the exit-code convention every other Fun program
-// uses.
+// Runs every discovered test concurrently, printing a `PASS`/`FAIL` line per
+// test in completion order (not declaration order) and a final summary
+// line. Returns 0 when every test passed, 1 otherwise.
 // 
 // Params:
 // - count: number of tests discovered (from the compiler's own bridge

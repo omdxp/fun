@@ -53,7 +53,7 @@ pub fun abort();
 // Registers a function to be called at normal process termination.
 // 
 // Params:
-// - func: function pointer (not modeled yet; pass as raw*)
+// - func: function pointer, passed as raw*
 // 
 // Returns:
 // - 0 on success, nonzero on failure (C semantics)
@@ -151,7 +151,7 @@ pub fun rand() num;
 // - seed: seed value
 pub fun srand(num seed);
 
-// Search/sort (function pointers not modeled yet; pass as raw*)
+// Search/sort (comparator function pointers are passed as raw*)
 // Binary searches a sorted array.
 // 
 // Params:

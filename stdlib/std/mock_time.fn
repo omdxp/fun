@@ -1,18 +1,10 @@
 // A `Clock` abstraction for writing deterministic, instant time-dependent
-// tests -- no real sleeping/waiting required.
+// tests, with no real sleeping required.
 // 
-// Any function that needs "the current time" to be testable should accept a
-// `Clock`-typed parameter instead of calling `std.time`'s `now()` directly:
-// 
-// ```
-// fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {
-//   ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;
-// }
-// ```
-// 
-// Production code passes a `SystemClock` (backed by the real clock); a test
-// passes a `MockClock` it fully controls instead -- a concrete value always
-// coerces to a quirk-typed parameter by its ADDRESS:
+// A function that needs the current time to be testable should accept a
+// `Clock` parameter instead of calling `std.time`'s `now()` directly.
+// Production code passes a `SystemClock`; tests pass a `MockClock` they
+// fully control.
 // 
 // ```
 // test "a token expires after its ttl" {
@@ -24,10 +16,8 @@
 // }
 // ```
 // 
-// Deliberately a per-value abstraction, not a global override: each
-// `MockClock` is an ordinary local value a test constructs and owns, so
-// concurrently running tests (see std.testing's concurrent runner) never
-// share or race over fake time -- there is nothing global to race over.
+// Each `MockClock` is an ordinary local value a test owns, so concurrently
+// running tests never share or race over fake time.
 
 imp std.time;
 

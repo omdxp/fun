@@ -41,6 +41,6 @@
 // literal `0`) for parity with C sources (best-effort).
 // 
 // Notes
-// - Function-like macros such as `offsetof(type, member)` cannot be expressed as
-// Fun signatures today because they require passing a C type name, not a
-// runtime value.
+// - Function-like macros such as `offsetof(type, member)` require a C type
+// name rather than a runtime value, so they can't be expressed as Fun
+// signatures.

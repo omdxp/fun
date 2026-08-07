@@ -1,9 +1,4 @@
 // Collection quirks and helpers.
-// 
-// Usage:
-// ```
-// fun takes(Collection c) { if c.is_empty() { ... } }
-// ```
 
 imp std.quirks;
 

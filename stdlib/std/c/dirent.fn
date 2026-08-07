@@ -1,18 +1,10 @@
 // Directory iteration/creation/kind-check helpers.
 // 
-// Notes:
-// - Unlike the rest of `std.c.*`, these are NOT thin bindings to a real libc
-// function name: POSIX (opendir/readdir/DIR*) and Win32
-// (FindFirstFile/FindNextFile) directory APIs differ too much to bind
-// directly, and `struct dirent`'s layout isn't something Fun can safely
-// mirror as a compound across platforms. The compiler instead emits a small
-// hand-written C wrapper for each of these directly into every program's
-// prelude (see `transpile_prelude` in the compiler) -- one POSIX body, one
-// Win32 body, same C name either way -- so these declarations just describe
-// that wrapper's signature to Fun's type checker. Each wrapper's C
-// signature is written to match a Fun type exactly (`void*` <-> `raw*`,
-// `long long` <-> `num`, `char*`/`const char*` <-> `str`), so (unlike a raw
-// libc binding) there's no ABI-width mismatch to worry about here.
+// Unlike the rest of `std.c.*`, these aren't thin bindings to a single libc
+// function: POSIX and Win32 directory APIs differ too much to bind directly.
+// The compiler emits a small hand-written wrapper for each of these into
+// every program's prelude, with a POSIX body and a Win32 body sharing one
+// name; these declarations just describe that wrapper's signature.
 
 // Open a directory for iteration.
 // 

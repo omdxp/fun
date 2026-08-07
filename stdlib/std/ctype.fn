@@ -1,15 +1,7 @@
 // Ergonomic `chr`/`bin` wrappers over `std.c.ctype`'s raw `num`-returning C
 // bindings, so lexer-style code reads naturally (`is_digit(c)` instead of
-// `isdigit(c) != 0`, with `c` passed as a plain `chr` instead of needing to
-// be widened to `num` first).
-// 
-// Usage:
-// ```
-// imp std.ctype;
-//
-// chr c = 'a';
-// if is_alpha(c) { ... }
-// ```
+// `isdigit(c) != 0`), with `c` passed as a plain `chr` instead of needing to
+// be widened to `num` first.
 
 imp std.c.ctype;
 

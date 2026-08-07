@@ -1,21 +1,4 @@
 // Spawn child processes and capture (or inherit) their output.
-// 
-// Usage:
-// ```
-// imp std.process;
-//
-// Vec<str> args;
-// args.init(0);
-// args.push("echo");
-// args.push("hello");
-// let argv = argv_from(&args);
-// let res = run(argv);
-// if res.is_ok() {
-//   let out = res.unwrap();
-//   printf("exit=%lld out=%s\n", out.exit_code, out.stdout_text);
-// }
-// free_argv(argv);
-// ```
 
 imp std.c.process;
 imp std.c.mem;
@@ -45,10 +28,10 @@ fun _empty_process_result() ProcessResult {
   ret r;
 }
 
-// Build a NULL-terminated argument vector (the shape `run`/`spawn_inherited`
-// need) from a plain list of arguments. A Fun array LITERAL can't mix `str`
-// elements with a trailing `nil` sentinel (elements must share one type), so
-// callers build the list via `Vec<str>` and convert it here instead.
+// Builds a NULL-terminated argument vector (the shape `run`/`spawn_inherited`
+// need) from a plain list of arguments. An array literal can't mix `str`
+// elements with a trailing `nil` sentinel, so callers build the list via
+// `Vec<str>` and convert it here instead.
 // 
 // Params:
 // - args: the program name (conventionally repeated as argv[0]) followed by
@@ -94,19 +77,16 @@ fun _open_pipe(num* out_read_fd, num* out_write_fd) num {
   ret 0;
 }
 
-// Decode a POSIX `waitpid` status into a shell-style exit code: the process's
-// own exit code on a normal exit, or 128+signal on termination by a signal.
-// Matches glibc/BSD/Darwin's wait(2) status layout (see std.c.process's
-// module doc comment) -- can't use the WIFEXITED/WEXITSTATUS C macros
-// directly since function-like macros can't be bound as Fun signatures.
+// Decodes a POSIX waitpid status into a shell-style exit code: the exit code
+// on a normal exit, or 128+signal on termination by a signal. Matches
+// glibc/BSD/Darwin's wait(2) layout since the WIFEXITED/WEXITSTATUS macros
+// can't be bound as Fun signatures.
 fun _decode_wait_status(i32 status) num {
-  // 0x7f == 127 (low 7 bits: the terminating-signal number, 0 for a normal
-  // exit); 0xFF == 255 (low 8 bits: the exit code stashed in bits 8-15). No
-  // hex literal syntax in Fun today, hence the decimal spelling.
+  // 127 (low 7 bits) holds the terminating signal number, 0 on a normal
+  // exit; 255 (low 8 bits) holds the exit code in bits 8-15.
   num term_sig = status & 127;
-  // `if (expr) ...` mis-parses when the leading paren is just a
-  // sub-expression (not the whole condition) followed by more operators --
-  // binding the comparison to a name first sidesteps it.
+  // Binding the comparison to a name avoids a parser edge case with a
+  // leading parenthesized sub-expression followed by more operators.
   bin exited_normally = term_sig == 0;
   if exited_normally {
     ret (status >> 8) & 255;
@@ -122,11 +102,10 @@ fun _wait_exit_code(num pid) num {
   ret code;
 }
 
-// Drain a pipe's read end to completion (until EOF), closing it when done,
-// and send the fully joined text back over `out`. Run as its own virtual
-// thread (via `fork`) so stdout and stderr can be drained CONCURRENTLY --
-// reading them one after the other risks a deadlock if the child fills the
-// OTHER pipe's kernel buffer while this side is blocked waiting on the first.
+// Drains a pipe's read end to EOF, closes it, and sends the joined text over
+// `out`. Runs as its own virtual thread via `fork` so stdout and stderr can
+// be drained concurrently; draining them one after the other risks a
+// deadlock if the child fills the other pipe's buffer first.
 async fun _drain_pipe(num fd, Channel<str>* out) {
   let b = string_builder_init(256);
   for true {
