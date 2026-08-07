@@ -57,6 +57,8 @@ fun compile_file(str in_path, str out_path) num {
   CodegenState state = codegen_state_new();
   Codegen cg = codegen_new(&state);
   cg.import_aliases = merge_result.aliases;
+  cg.alias_rename_keys = merge_result.alias_rename_keys;
+  cg.alias_rename_targets = merge_result.alias_rename_targets;
   let cg_err = cg.transpile(nodes);
   fit cg_err {
     .Some(kind) -> {

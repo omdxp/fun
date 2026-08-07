@@ -158,15 +158,25 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // both importing a shared third) or a cyclic one terminates instead of
 // looping or duplicating declarations.
 // 
-// Deliberately narrow for this slice: no cross-file duplicate-symbol
-// detection -- two files each privately declaring the same bare name
-// would silently collide once flattened into one list (the SAME gap
-// `parser.pub parse`'s own doc comment already flags as not wired for a
-// single file's own top-level declarations, just now reachable across
-// files too). Every resolved path is assumed to exist and parse cleanly;
-// the first real failure (file not found, lex, or parse error)
-// short-circuits the whole merge as `.Err`, rather than silently
-// returning a partial program.
+// `current_alias` is the alias (or `""` for the entry file, or an
+// unaliased import) THIS file's own top-level declarations were reached
+// under -- threaded through purely so `_rename_colliding_functions` can
+// disambiguate a PLAIN (non-generic) function name that collides with
+// one already merged from a DIFFERENT aliased import (`imp mod1 as one;
+// imp mod2 as two;` where both `mod1.fn`/`mod2.fn` declare `pub fun
+// pick()`, `examples/imports/alias_collision/main.fn`'s own real body)
+// -- runs in a dedicated pass, AFTER this file's own imports are fully
+// merged (so the collision check sees everything merged so far) but
+// BEFORE this file's own nodes are pushed (so the rename -- and every
+// same-file call site referencing the old name -- is settled before
+// anything else can observe the stale name). See its own doc comment
+// for the exact mechanism and what's still NOT handled (an unaliased
+// collision, a colliding COMPOUND/enum/impl, or a GENERIC function).
+// 
+// Every resolved path is assumed to exist and parse cleanly; the first
+// real failure (file not found, lex, or parse error) short-circuits the
+// whole merge as `.Err`, rather than silently returning a partial
+// program.
 pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
@@ -180,14 +190,29 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
   merged.init(0);
   Vec<str> aliases;
   aliases.init(0);
+  Vec<str> rename_keys;
+  rename_keys.init(0);
+  Vec<str> rename_targets;
+  rename_targets.init(0);
   Set<str> visited = set_init("", 8);
-  let err = _parse_and_merge(entry_path, &merged, &aliases, &visited, &global_symbols);
+  let err = _parse_and_merge(
+    entry_path,
+    &merged,
+    &aliases,
+    &visited,
+    &global_symbols,
+    "",
+    &rename_keys,
+    &rename_targets
+  );
   if err.is_some() {
     ret .Err(err.unwrap());
   }
   ProgramMergeResult r;
   r.nodes = merged;
   r.aliases = aliases;
+  r.alias_rename_keys = rename_keys;
+  r.alias_rename_targets = rename_targets;
   ret .Ok(r);
 }
 
@@ -201,9 +226,20 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
 // "strip the alias, resolve `symbol` unqualified" (see `Codegen.
 // import_aliases`'s own doc comment) -- the ONLY thing that survives
 // about an alias past this flattening step.
+// 
+// `alias_rename_keys`/`alias_rename_targets` (parallel Vecs, `"<alias>::
+// <bare_name>"` -> the real mangled name) carry the ADDITIONAL exception
+// to that "strip the alias, resolve unqualified" rule: see `_rename_
+// colliding_functions`'s own doc comment for when a bare name COLLIDES
+// across two differently-aliased imports and gets renamed instead --
+// codegen's own alias-qualified call sites need to check here FIRST,
+// falling back to the bare name unqualified when nothing matches (the
+// overwhelmingly common, non-colliding case).
 pub compound ProgramMergeResult {
   Vec<Node> nodes;
   Vec<str> aliases;
+  Vec<str> alias_rename_keys;
+  Vec<str> alias_rename_targets;
 }
 
 // Recursively discovers `path`'s (transitive) import graph and collects
@@ -336,7 +372,10 @@ fun _parse_and_merge(
   Vec<str>* aliases,
   Set<str>* visited,
   Map<str,
-  GlobalSymbolInfo>* global_symbols
+  GlobalSymbolInfo>* global_symbols,
+  str current_alias,
+  Vec<str>* rename_keys,
+  Vec<str>* rename_targets
 ) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
@@ -363,22 +402,277 @@ fun _parse_and_merge(
     ret .Some(format("parse error in {str}", path));
   }
 
+  // Pass 1: recurse into THIS file's own imports first -- always
+  // grouped at the top of a file, before any other declaration (this
+  // codebase's own convention) -- so every one of them is fully merged
+  // BEFORE `_rename_colliding_functions` below checks THIS file's own
+  // declarations against `merged`.
   for n : state.nodes {
     fit n.kind {
       .Import(imp_node) -> {
+        str next_alias = "";
         if imp_node.has_alias {
           aliases.push(imp_node.alias);
+          next_alias = imp_node.alias;
         }
         str resolved = resolve_import_path(path, imp_node.path);
-        let ierr = _parse_and_merge(resolved, merged, aliases, visited, global_symbols);
+        let ierr = _parse_and_merge(
+          resolved,
+          merged,
+          aliases,
+          visited,
+          global_symbols,
+          next_alias,
+          rename_keys,
+          rename_targets
+        );
         if ierr.is_some() {
           ret ierr;
         }
       }
+      _ -> {}
+    }
+  }
+
+  // Pass 2: rename any colliding plain function BEFORE pushing anything
+  // -- see `_rename_colliding_functions`'s own doc comment.
+  if !equals(current_alias, "") {
+    _rename_colliding_functions(&state.nodes, merged, current_alias, rename_keys, rename_targets);
+  }
+
+  // Pass 3: push every non-import node, now settled.
+  for n : state.nodes {
+    fit n.kind {
+      .Import(_) -> {}
       _ -> { merged.push(n); }
     }
   }
   ret .None;
+}
+
+// Renames any of `nodes`' own top-level PLAIN (non-generic) functions
+// whose bare name already exists among `merged`'s own functions (a
+// collision across two DIFFERENT aliased imports each privately
+// declaring the same name, `imp mod1 as one; imp mod2 as two;` where
+// both declare `pub fun pick()`) to `<alias>__<name>`, and rewrites
+// every UNQUALIFIED call to the old name anywhere in `nodes` (this
+// file's OWN declarations -- a same-file caller of the renamed
+// function, not just the declaration itself) to the new one. An
+// ALIAS-QUALIFIED cross-file reference (`one.pick()`) is unaffected
+// here -- resolved separately, at emission time, by `codegen.fn`'s own
+// alias-handling call sites, which already fall back to the bare name
+// unqualified in the (overwhelmingly common) non-colliding case.
+// 
+// Deliberately narrow for this slice: only a PLAIN function's own name
+// is considered (`fnv.has_type_params` is skipped entirely -- a generic
+// function's call sites are resolved by MANGLED instantiation name, not
+// its bare template name, a difference this rename doesn't account
+// for), and only when `alias` is non-empty (an UNALIASED import's own
+// collision is a separate, rarer case, still unhandled). A colliding
+// compound/enum/impl isn't handled either -- not needed by any real
+// example yet.
+fun _rename_colliding_functions(
+  Vec<Node>* nodes,
+  Vec<Node>* merged,
+  str alias,
+  Vec<str>* rename_keys,
+  Vec<str>* rename_targets
+) {
+  Vec<str> old_names;
+  old_names.init(0);
+  Vec<str> new_names;
+  new_names.init(0);
+  num ci = 0;
+  for ci < nodes.len {
+    let n = nodes.get(ci);
+    fit n.kind {
+      .Function(fnv) -> {
+        if !fnv.has_type_params && fnv.has_name && _merged_has_function_name(merged, fnv.name) {
+          old_names.push(fnv.name);
+          new_names.push(format("{str}__{str}", alias, fnv.name));
+        }
+      }
+      _ -> {}
+    }
+    ci = ci + 1;
+  }
+  num ri = 0;
+  for ri < old_names.len {
+    let old_name = old_names.get(ri);
+    let new_name = new_names.get(ri);
+    _rewrite_toplevel_calls(nodes, old_name, new_name);
+    // Recorded for codegen's own alias-qualified call sites (`two.pick(
+    // )`) -- see `ProgramMergeResult.alias_rename_keys`'s own doc
+    // comment.
+    rename_keys.push(format("{str}::{str}", alias, old_name));
+    rename_targets.push(new_name);
+    ri = ri + 1;
+  }
+}
+
+// True when `merged` already contains a top-level PLAIN function named
+// `name` -- see `_rename_colliding_functions`'s own doc comment.
+fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
+  num mi = 0;
+  for mi < merged.len {
+    let n = merged.get(mi);
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, name) {
+          ret true;
+        }
+      }
+      _ -> {}
+    }
+    mi = mi + 1;
+  }
+  ret false;
+}
+
+// Applies `_rewrite_calls_in_node` to every TOP-LEVEL node in `nodes` --
+// split out separately because a top-level entry is a plain `Node`
+// (by value), not a `Node*` the way every NESTED child field already
+// is, so it needs its own get/mutate-locally/set roundtrip through the
+// `Vec<Node>` itself rather than a direct through-pointer mutation.
+fun _rewrite_toplevel_calls(Vec<Node>* nodes, str old_name, str new_name) {
+  num idx = 0;
+  for idx < nodes.len {
+    Node cur = nodes.get(idx);
+    _rewrite_calls_in_node(&cur, old_name, new_name);
+    nodes.set(idx, cur);
+    idx = idx + 1;
+  }
+}
+
+// Recursively rewrites every UNQUALIFIED call site (`old_name(...)`) to
+// `new_name(...)` anywhere within `n`, and renames `n` ITSELF when it's
+// the matching function's own declaration -- see `_rename_colliding_
+// functions`'s own doc comment for why this exists (a same-file caller
+// of a just-renamed colliding function must keep compiling). Covers
+// every statement/expression shape that can contain a nested call --
+// deliberately no MORE general than that (a colliding function is never
+// referenced any other way, e.g. taking its address as a first-class
+// value, anywhere in this codebase's own style).
+fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
+  fit n.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left {
+        fit e.left.kind {
+          .Identifier(callee_name) -> {
+            if equals(callee_name, old_name) {
+              *e.left = node_new(NodeKind.Identifier(new_name));
+            }
+          }
+          _ -> { _rewrite_calls_in_node(e.left, old_name, new_name); }
+        }
+      } elif e.has_left {
+        _rewrite_calls_in_node(e.left, old_name, new_name);
+      }
+      if e.has_right {
+        _rewrite_calls_in_node(e.right, old_name, new_name);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .Panic(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .Unary(u) -> { _rewrite_calls_in_node(u.operand, old_name, new_name); }
+    .Tenary(t) -> {
+      _rewrite_calls_in_node(t.cond, old_name, new_name);
+      _rewrite_calls_in_node(t.then_val, old_name, new_name);
+      _rewrite_calls_in_node(t.else_val, old_name, new_name);
+    }
+    .Bracket(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .CompoundInit(ci) -> {
+      for f : ci.fields {
+        _rewrite_calls_in_node(f.value, old_name, new_name);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _rewrite_calls_in_node(v.val, old_name, new_name);
+      }
+    }
+    .Function(fnv) -> {
+      if equals(fnv.name, old_name) {
+        fnv.name = new_name;
+        n.kind = NodeKind.Function(fnv);
+      }
+      if fnv.has_body {
+        _rewrite_calls_in_node(fnv.body, old_name, new_name);
+      }
+    }
+    .Body(b) -> {
+      for s : b.statements {
+        _rewrite_calls_in_node(s, old_name, new_name);
+      }
+    }
+    .StatementReturn(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementDefer(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementFork(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementIf(ifn) -> {
+      _rewrite_calls_in_node(ifn.condition, old_name, new_name);
+      _rewrite_calls_in_node(ifn.body, old_name, new_name);
+    }
+    .StatementElseIf(ifn2) -> {
+      _rewrite_calls_in_node(ifn2.condition, old_name, new_name);
+      _rewrite_calls_in_node(ifn2.body, old_name, new_name);
+    }
+    .StatementElse(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> {
+          if fc.has_condition {
+            _rewrite_calls_in_node(fc.condition, old_name, new_name);
+          }
+          _rewrite_calls_in_node(fc.body, old_name, new_name);
+        }
+        .Range(fr) -> {
+          _rewrite_calls_in_node(fr.range_expr, old_name, new_name);
+          _rewrite_calls_in_node(fr.body, old_name, new_name);
+        }
+        .Iter(fi) -> {
+          _rewrite_calls_in_node(fi.iterable, old_name, new_name);
+          _rewrite_calls_in_node(fi.body, old_name, new_name);
+        }
+      }
+    }
+    .StatementAssert(an) -> {
+      _rewrite_calls_in_node(an.condition, old_name, new_name);
+      if an.has_message {
+        _rewrite_calls_in_node(an.message, old_name, new_name);
+      }
+    }
+    .StatementFit(fs) -> {
+      _rewrite_calls_in_node(fs.exp, old_name, new_name);
+      for br : fs.branches {
+        if br.has_condition {
+          _rewrite_calls_in_node(br.condition, old_name, new_name);
+        }
+        _rewrite_calls_in_node(br.body, old_name, new_name);
+      }
+    }
+    .Impl(i) -> {
+      for m : i.methods {
+        _rewrite_calls_in_node(m, old_name, new_name);
+      }
+    }
+    _ -> {}
+  }
 }
 
 test "resolve_import_path converts a same-directory dotted path" {

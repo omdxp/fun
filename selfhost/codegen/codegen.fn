@@ -544,6 +544,20 @@ pub compound Codegen {
   // correct precisely because every alias's OWN declarations are
   // ALREADY merged in under their real, unqualified names.
   Vec<str> import_aliases;
+  // Exceptions to `import_aliases`'s own "strip the alias, resolve the
+  // remainder unqualified" rule -- `<alias>::<bare_name>` keys (parallel
+  // to `alias_rename_targets`' own real, mangled callee names) for a
+  // PLAIN function whose bare name collided with one from a DIFFERENTLY
+  // aliased import and got renamed at merge time instead (see `import_
+  // resolver._rename_colliding_functions`'s own doc comment). Set
+  // alongside `import_aliases` by the same caller, from `ProgramMerge
+  // Result.alias_rename_keys`/`alias_rename_targets` -- empty (the
+  // default, same as `import_aliases`) for every hand-built unit test.
+  // `lookup_alias_rename` is the ONLY consumer; every alias-qualified
+  // call site should check it FIRST, falling back to the unqualified
+  // bare name when nothing matches (overwhelmingly the common case).
+  Vec<str> alias_rename_keys;
+  Vec<str> alias_rename_targets;
   // `defer <body>;` support: a FLAT list of every pending deferred
   // statement body currently in scope, across ALL nested blocks of the
   // function being emitted right now (registered in source order by
@@ -1094,6 +1108,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.quirk_decl_type_params.init(0);
   g.quirk_decl_methods.init(0);
   g.import_aliases.init(0);
+  g.alias_rename_keys.init(0);
+  g.alias_rename_targets.init(0);
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
@@ -5243,11 +5259,13 @@ impl Codegen {
           // always wins over a same-named global alias, same as ordinary
           // scoping.
           bin left_is_known_alias = false;
+          str known_alias_name = "";
           if recv_e.has_left {
             fit recv_e.left.kind {
               .Identifier(lname) -> {
                 if self.import_aliases.contains(lname) && self.lookup_local_type_name(lname).is_none() {
                   left_is_known_alias = true;
+                  known_alias_name = lname;
                 }
               }
               _ -> {}
@@ -5258,7 +5276,22 @@ impl Codegen {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
             fit recv_e.right.kind {
-              .Identifier(fname) -> { callee_name = fname; }
+              .Identifier(fname) -> {
+                // A collision-renamed function (`two.pick()` where
+                // `pick` collided with a DIFFERENTLY-aliased import's
+                // own same-named one, `examples/imports/alias_collision
+                // /main.fn`'s own real body) resolves to its REAL
+                // mangled name here instead of the bare one -- see
+                // `lookup_alias_rename`'s own doc comment. Falls back
+                // to the bare name unqualified (the overwhelmingly
+                // common case) when nothing matches.
+                let renamed = self.lookup_alias_rename(known_alias_name, fname);
+                if renamed.is_some() {
+                  callee_name = renamed.unwrap();
+                } else {
+                  callee_name = fname;
+                }
+              }
               _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
             }
           } else {
@@ -10527,6 +10560,24 @@ impl Codegen {
           ret .None;
         }
         ret .Some(rt);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up whether `bare_name`, referenced through `alias` (`two.pick(
+  // )` -> `alias = "two"`, `bare_name = "pick"`), was renamed at merge
+  // time due to a collision with a DIFFERENTLY-aliased import's own
+  // same-named function -- see `Codegen.alias_rename_keys`'s own doc
+  // comment. `.None` means no such rename happened (the common case --
+  // callers fall back to the bare name unqualified).
+  lookup_alias_rename(str alias, str bare_name) Option<str> {
+    str key = format("{str}::{str}", alias, bare_name);
+    num i = 0;
+    for i < self.alias_rename_keys.len {
+      if equals(self.alias_rename_keys.get(i), key) {
+        ret .Some(self.alias_rename_targets.get(i));
       }
       i = i + 1;
     }
