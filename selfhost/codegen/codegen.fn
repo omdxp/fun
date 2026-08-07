@@ -5262,9 +5262,39 @@ impl Codegen {
   // inside `impl<T> Channel<T>`; `emit_method_call`'s own resolution
   // already returns the correctly mangled per-instantiation name via
   // `lookup_impl_method`, so nothing extra is needed for that case to
-  // work). No dynamic-quirk-dispatch handling, matching
-  // `emit_async_function_support`'s own scope.
+  // work).
+  // 
+  // A QUIRK-typed receiver (`await passthrough(q).add(1)` where `q`'s
+  // static type is a quirk, `examples/advanced/async_quirk_await_*.fn`'s
+  // own real bodies) is handled SEPARATELY, below -- the CONCRETE
+  // callee behind a quirk dispatch isn't known until runtime, so there's
+  // no single mangled name to build a `__fun_async_call_<name>` fiber
+  // helper around at all. Matches the original transpiler's own
+  // identical fallback (`is_await_dynamic_quirk_dispatch`): `await`
+  // degrades to a plain SYNCHRONOUS call in this case, reusing ordinary
+  // quirk-vtable dispatch (`emit_method_call`'s own `quirk_names.
+  // contains` check, including its already-correct receiver-temp-hoist
+  // for a call-result receiver like `passthrough(q)` here) completely
+  // unchanged.
   emit_await(Node* operand) Option<CodegenErrorKind> {
+    fit operand.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") && e.has_left {
+          fit e.left.kind {
+            .Expression(recv_e) -> {
+              if equals(recv_e.op, ".") && recv_e.has_left && recv_e.has_right {
+                let recv_r_opt = self.resolve_field_chain(recv_e.left);
+                if recv_r_opt.is_some() && self.quirk_names.contains(recv_r_opt.unwrap().type_name) {
+                  ret self.emit_expr(*operand);
+                }
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
     ret self.emit_async_or_fork_call(operand, "__fun_async_call_");
   }
 
@@ -5872,6 +5902,58 @@ impl Codegen {
         // all, not even one of its own fields) -- the whole chain
         // inherits the innermost receiver's own rvalue-ness.
         r.is_call_result = recv_r.is_call_result;
+        ret .Some(r);
+      }
+      // `(expr).field`/`await (expr).method(...)` -- a parenthesized
+      // receiver (`examples/advanced/async_quirk_await_parenthesized_
+      // receiver.fn`'s own real `(pack(q).v).add(1)`) resolves exactly
+      // like its unwrapped inner expression; the parens themselves carry
+      // no separate meaning here (C doesn't need them preserved -- `.`/
+      // `->` already bind tighter than anything that could be inside).
+      .ExpressionParenthesis(inner) -> { ret self.resolve_field_chain(inner); }
+      // `(*ptr_expr).field` -- a single pointer-dereference receiver
+      // (`examples/advanced/async_quirk_await_pointer_receiver.fn`'s own
+      // real `(*pb).v.add(1)`) resolves its OWN operand first, then
+      // flips `is_pointer` (a dereferenced pointer is a plain VALUE,
+      // addressed with `.` for any FURTHER link, not `->`) and drops one
+      // level of `dtype`'s own `pointer_depth` to match. Only a single,
+      // non-left-operanded `*` -- `u.has_indirection`'s own multi-level
+      // form (`**pp`) isn't a shape any real caller here produces.
+      .Unary(u) -> {
+        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
+          ret .None;
+        }
+        let recv_r_opt = self.resolve_field_chain(u.operand);
+        if recv_r_opt.is_none() {
+          ret .None;
+        }
+        let recv_r = recv_r_opt.unwrap();
+        if !recv_r.is_pointer {
+          ret .None;
+        }
+        StringBuilder deref_sb = string_builder_init(8);
+        deref_sb.append("(*");
+        deref_sb.append(recv_r.text);
+        deref_sb.append(")");
+        Option<DataType> deref_dtype = recv_r.dtype;
+        if deref_dtype.is_some() {
+          DataType dd = deref_dtype.unwrap();
+          if dd.pointer_depth > 0 {
+            dd.pointer_depth = dd.pointer_depth - 1;
+          }
+          // `dtype_is_pointer` also honors `flags.is_pointer`
+          // independently of `pointer_depth` (a `T*` PARAMETER's own
+          // flag) -- clearing only `pointer_depth` left it `true`,
+          // wrongly still reading as a pointer after the deref.
+          dd.flags.is_pointer = false;
+          deref_dtype = .Some(dd);
+        }
+        ChainResolution r;
+        r.text = deref_sb.build();
+        r.type_name = recv_r.type_name;
+        r.is_pointer = false;
+        r.dtype = deref_dtype;
+        r.is_call_result = false;
         ret .Some(r);
       }
       _ -> { ret .None; }
@@ -9356,6 +9438,42 @@ impl Codegen {
           }
           _ -> { ret .None; }
         }
+      }
+      // `let boxed = *pb;` -- a single pointer-dereference initializer
+      // (`examples/advanced/async_quirk_await_pointer_receiver.fn`'s own
+      // real body) resolves `pb`'s own chain first (any depth, via
+      // `resolve_field_chain`, same reasoning as the `.Expression` case
+      // above), then drops one level of `pointer_depth` to match -- a
+      // dereferenced pointer local is a plain VALUE. Without this,
+      // `boxed` was never recorded as a known local at all, rejecting
+      // any FURTHER field access off it.
+      .Unary(u) -> {
+        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
+          ret .None;
+        }
+        let recv_r_opt = self.resolve_field_chain(u.operand);
+        if recv_r_opt.is_none() {
+          ret .None;
+        }
+        let recv_r = recv_r_opt.unwrap();
+        if !recv_r.is_pointer {
+          ret .None;
+        }
+        if recv_r.dtype.is_some() {
+          DataType dd = recv_r.dtype.unwrap();
+          if dd.pointer_depth > 0 {
+            dd.pointer_depth = dd.pointer_depth - 1;
+          }
+          // `dtype_is_pointer` also honors `flags.is_pointer`
+          // independently of `pointer_depth` (a `T*` PARAMETER's own
+          // flag) -- clearing only `pointer_depth` left it `true`,
+          // wrongly still reading as a pointer after the deref.
+          dd.flags.is_pointer = false;
+          ret .Some(dd);
+        }
+        DataType dt = dtype_new();
+        dt.type_str = recv_r.type_name;
+        ret .Some(dt);
       }
       _ -> { ret .None; }
     }
