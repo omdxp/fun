@@ -3789,13 +3789,27 @@ impl Codegen {
   // variant-constant or module-alias access, or a not-yet-supported
   // `self`) -- the caller must treat that as "can't handle this", not
   // "assume value type".
+  // Searches BACKWARD (most-recently-`record_local*`'d entry first) --
+  // NOT the order these three lookups originally scanned in. Two DIFFERENT
+  // locals sharing the same name later in the SAME function body (two
+  // sibling `fit` arms each binding a payload as `doc`, e.g. `std/json.fn`'s
+  // own real `Result.Ok(doc)` immediately followed by ANOTHER, unrelated
+  // `Result.Ok(doc)` -- `examples/stdlib/json_toml_try_basic.fn`'s own real
+  // body) both get pushed onto the SAME flat `local_names` list (this
+  // codegen has no block-scope popping at all) -- a forward scan always
+  // found the FIRST (oldest, now out-of-scope) "doc", silently resolving
+  // the SECOND one's own field/method access against the WRONG type the
+  // entire rest of the function, with no error at all (just wrong,
+  // silently-empty-looking output) -- confirmed via a real minimal repro,
+  // not previously exercised by the existing test/example corpus (every
+  // prior sibling-`fit`/shadowing case apparently used distinct names).
   lookup_local_is_pointer(str name) Option<bin> {
-    num i = 0;
-    for i < self.local_names.len {
+    num i = self.local_names.len - 1;
+    for i >= 0 {
       if equals(self.local_names.get(i), name) {
         ret .Some(self.local_is_pointer.get(i));
       }
-      i = i + 1;
+      i = i - 1;
     }
     ret .None;
   }
@@ -3803,14 +3817,14 @@ impl Codegen {
   // Looks up `name`'s declared type name (e.g. "Point"), for building a
   // method call's mangled callee name. See `lookup_local_is_pointer`'s
   // doc comment -- same scope, same "can't handle this" contract on
-  // `.None`.
+  // `.None`, and the SAME backward-scan reasoning for shadowing.
   lookup_local_type_name(str name) Option<str> {
-    num i = 0;
-    for i < self.local_names.len {
+    num i = self.local_names.len - 1;
+    for i >= 0 {
       if equals(self.local_names.get(i), name) {
         ret .Some(self.local_type_name.get(i));
       }
-      i = i + 1;
+      i = i - 1;
     }
     ret .None;
   }
@@ -3820,14 +3834,15 @@ impl Codegen {
   // `.None` covers BOTH "not a known local at all" and "a known local,
   // but only recorded via plain `record_local`" -- the caller can't tell
   // these apart from this result alone (use `lookup_local_type_name`
-  // first to distinguish, if that matters).
+  // first to distinguish, if that matters). Same backward-scan reasoning
+  // as `lookup_local_is_pointer`'s own doc comment.
   lookup_local_dtype(str name) Option<DataType> {
-    num i = 0;
-    for i < self.local_names.len {
+    num i = self.local_names.len - 1;
+    for i >= 0 {
       if equals(self.local_names.get(i), name) {
         ret self.local_dtype.get(i);
       }
-      i = i + 1;
+      i = i - 1;
     }
     ret .None;
   }
@@ -4789,6 +4804,30 @@ impl Codegen {
               if have_enum_name {
                 fit recv_e.right.kind {
                   .Identifier(variant_name) -> {
+                    // `Option<str> x = Option.Some("v");` -- a QUALIFIED
+                    // construction written against a GENERIC enum's own
+                    // bare TEMPLATE name ("Option"), which is never
+                    // itself registered in `enum_names` (only a concrete
+                    // INSTANTIATION is, e.g. "Option__str") -- same gap
+                    // `emit_field_access`'s own identical fallback
+                    // already fixed for a NO-payload variant READ
+                    // (`Option.None`); needed here too for a payload-
+                    // carrying variant CONSTRUCTION CALL. `expected_
+                    // enum_type` already holds the mangled name here
+                    // (set by the enclosing `ret`/`Variable`-declaration/
+                    // call-argument context) whenever it's a concrete
+                    // instantiation of THIS same bare template.
+                    if !self.enum_has_variant(enum_name, variant_name) {
+                      StringBuilder ec_tmpl_pfx = string_builder_init(16);
+                      ec_tmpl_pfx.append(enum_name);
+                      ec_tmpl_pfx.append("__");
+                      if starts_with(self.expected_enum_type, ec_tmpl_pfx.build()) && self.enum_has_variant(
+                        self.expected_enum_type,
+                        variant_name
+                      ) {
+                        enum_name = self.expected_enum_type;
+                      }
+                    }
                     if self.enum_has_variant(enum_name, variant_name) {
                       ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
                     }
