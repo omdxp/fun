@@ -481,6 +481,19 @@ pub compound Codegen {
   // signature to speak of, same reasoning `emit_impl`'s own generic
   // skip already documents.
   Vec<str> quirk_names;
+  // Keys (`<type_name>::<quirk_name>`) of every CONCRETE quirk impl whose
+  // OWN `emit_quirk_vtable_machinery` has already run -- lets `ensure_
+  // plain_type_emitted`'s own field-dependency check trigger it EARLY,
+  // out of the impl node's own normal source-order turn, for a plain
+  // compound with a quirk-typed FIELD (`compound Holder { AsyncCounter
+  // q; }`, `examples/advanced/async_quirk_await_nested_receiver.fn`'s
+  // own real body) whose vtable struct/typedef must already exist by
+  // the time `Holder`'s own body is emitted -- without a guard here,
+  // the LATER normal-pass call for the SAME impl would re-emit its own
+  // wrapper trampolines/vtable instance/coerce helper a second time
+  // ("redefinition"), since (unlike the shared vtable STRUCT itself,
+  // already deduped via `quirk_names`) nothing else gates them.
+  Vec<str> emitted_quirk_impl_vtables;
   // Every GENERIC quirk's own DECLARATION (`quirk To<T> { fun to() T; }`),
   // registered up front (see `transpile`'s own early registration pass)
   // so `ensure_quirk_instantiated` can derive a CONCRETE instantiation's
@@ -1064,6 +1077,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.expected_compound_type = "";
   g.in_array_initializer = false;
   g.quirk_names.init(0);
+  g.emitted_quirk_impl_vtables.init(0);
   g.quirk_decl_names.init(0);
   g.quirk_decl_type_params.init(0);
   g.quirk_decl_methods.init(0);
@@ -9743,6 +9757,42 @@ impl Codegen {
     }
   }
 
+  // Companion to `ensure_plain_type_emitted` (below), for a by-value
+  // field whose type is a QUIRK rather than a plain compound/enum --
+  // `emit_quirk_vtable_machinery` (the only thing that ever emits a
+  // quirk's own vtable struct/fat-pointer typedef) normally only runs
+  // once per CONCRETE impl, in `pub transpile`'s own late, per-impl
+  // pass, in that impl's OWN source position -- too late for a plain
+  // compound embedding the quirk BY VALUE earlier in the file (`compound
+  // Holder { AsyncCounter q; }`, `examples/advanced/async_quirk_await_
+  // nested_receiver.fn`'s own real body), which needs the vtable TYPE
+  // complete by the time `Holder`'s own body is emitted. Finds the
+  // FIRST CONCRETE (non-generic) impl of `type_name` anywhere in the
+  // program and triggers its machinery early instead -- safe to call
+  // regardless of whether that impl's own turn in the later pass has
+  // already happened or not, via `Codegen.emitted_quirk_impl_vtables`'s
+  // own memoization (and the vtable STRUCT itself is identical no
+  // matter WHICH concrete impl of the same quirk builds it, so it
+  // doesn't matter which one is found first when several exist). A
+  // no-op when `type_name` isn't a quirk with any concrete impl at all
+  // -- a builtin scalar, a plain compound/enum (already handled by
+  // `ensure_plain_type_emitted` itself), or a quirk with only GENERIC
+  // impls (no single vtable signature to speak of, same skip `emit_
+  // quirk_vtable_machinery` itself already applies).
+  ensure_quirk_vtable_emitted_early(str type_name) Option<CodegenErrorKind> {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if i.has_quirk_name && equals(i.quirk_name, type_name) && !i.has_type_params {
+            ret self.emit_quirk_vtable_machinery(n);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   // Ensures a PLAIN (non-generic) compound or enum named `type_name` is
   // fully emitted, recursively emitting any OTHER plain compound/enum
   // it embeds BY VALUE first. `pub transpile` previously emitted every
@@ -9801,6 +9851,18 @@ impl Codegen {
                 let fderr = self.ensure_plain_type_emitted(f.dtype.type_str);
                 if fderr.is_some() {
                   ret fderr;
+                }
+                // A by-value field whose type is a QUIRK (`compound
+                // Holder { AsyncCounter q; }`, `examples/advanced/
+                // async_quirk_await_nested_receiver.fn`'s own real
+                // body) needs the SAME early-emission treatment, but
+                // `ensure_plain_type_emitted` just above never finds
+                // anything for it at all (a quirk is neither a
+                // `.Compound` nor an `.Enum` node) -- see `ensure_quirk_
+                // vtable_emitted_early`'s own doc comment.
+                let fqerr = self.ensure_quirk_vtable_emitted_early(f.dtype.type_str);
+                if fqerr.is_some() {
+                  ret fqerr;
                 }
                 // A by-value field that's ITSELF a generic instantiation
                 // (`Vec<DataType*> generic_args;` -- `f.dtype.type_str` is
@@ -10150,7 +10212,41 @@ impl Codegen {
     fit node.kind {
       .Variable(v) -> {
         bin is_let = equals(v.var_type.type_str, "__let_infer__");
-        bin const_is_ptr_binding = !is_let && dtype_is_pointer(*v.var_type);
+        // `pub transpile`'s own top-level pass ordering emits every
+        // GLOBAL before any plain compound/enum's own full body (see its
+        // own doc comment: "constants are simple literals with no
+        // compound/enum type dependency of their own" -- true when this
+        // pass was written, no longer true for a global whose OWN
+        // declared type IS a plain compound/enum, `Counter[] counters =
+        // [Counter{...}, Counter{...}];`, `examples/advanced/async_
+        // quirk_await_indexed_receiver.fn`'s own real body). Ensures
+        // `Counter`'s full body is emitted FIRST (a harmless no-op, via
+        // `Codegen.emitted_plain_types`'s own memoization, for a builtin
+        // scalar/generic template's bare name/anything already emitted)
+        // -- without this, `counters` referenced `Counter` as a COMPLETE
+        // type (an array element, and each `(Counter){...}` compound-
+        // literal cast) before it existed as anything more than a bare
+        // forward-declared name, "incomplete type".
+        let gt_err = self.ensure_plain_type_emitted(v.var_type.type_str);
+        if gt_err.is_some() {
+          ret gt_err;
+        }
+        // An UNSIZED array GLOBAL (`T[] buf = malloc(...);`) decays to a
+        // pointer, same reasoning as `emit_statement`'s identical LOCAL
+        // check -- but only when it's NOT initialized with a real
+        // bracket array literal (which stays a genuine, fixed-size
+        // global array).
+        bin arr_as_ptr = false;
+        if !is_let {
+          arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+          if arr_as_ptr && v.has_val {
+            fit v.val.kind {
+              .Bracket(_) -> { arr_as_ptr = false; }
+              _ -> {}
+            }
+          }
+        }
+        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr);
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
@@ -10161,12 +10257,73 @@ impl Codegen {
           if wt.is_none() {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
+          if arr_as_ptr {
+            self.state.write("*");
+          }
         }
         if v.is_const && const_is_ptr_binding {
           self.state.write(" const");
         }
         self.state.write(" ");
         self.state.write(v.name);
+        // An array declarator (`[24]`, `[]`) lands AFTER the name in C,
+        // same as `emit_statement`'s identical LOCAL handling -- missing
+        // here entirely until now, so a global array (`Counter[]
+        // counters = [Counter{...}, Counter{...}];`, `examples/advanced/
+        // async_quirk_await_indexed_receiver.fn`'s own real body) lost
+        // its array-ness completely, declaring what looked like a single
+        // bare `Counter` holding a brace-list of TWO structs -- invalid
+        // C, and (since the SAME bug meant the struct's own full
+        // typedef also hadn't been forward-declared as an array element
+        // yet at that point) "variable has incomplete type" on top of
+        // it. Deliberately narrower than the local case: no `let`-
+        // inferred bracket-literal special handling (a bare `let arr =
+        // [...]` GLOBAL isn't exercised by any real example yet) --
+        // only an EXPLICITLY array-typed global, which is what's
+        // actually needed here.
+        if !is_let && !arr_as_ptr && v.var_type.is_array {
+          if v.var_type.array_brackets.len > 0 {
+            for bnode : v.var_type.array_brackets {
+              self.state.write("[");
+              fit bnode.kind {
+                .Bracket(inner) -> {
+                  let berr = self.emit_expr(*inner);
+                  if berr.is_some() {
+                    ret berr;
+                  }
+                }
+                _ -> {
+                  let berr = self.emit_expr(*bnode);
+                  if berr.is_some() {
+                    ret berr;
+                  }
+                }
+              }
+              self.state.write("]");
+            }
+          } elif v.var_type.array_depth > 1 {
+            self.state.write("[]");
+            bin wrote_inner_dims = false;
+            if v.has_val {
+              fit v.val.kind {
+                .Bracket(_) -> {
+                  self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
+                  wrote_inner_dims = true;
+                }
+                _ -> {}
+              }
+            }
+            if !wrote_inner_dims {
+              num mdim_d = 1;
+              for mdim_d < v.var_type.array_depth {
+                self.state.write("[]");
+                mdim_d = mdim_d + 1;
+              }
+            }
+          } else {
+            self.state.write("[]");
+          }
+        }
         if v.has_val {
           self.state.write(" = ");
           // See `Codegen.in_array_initializer`'s doc comment: a top-level
@@ -11444,6 +11601,21 @@ impl Codegen {
         }
         str quirk_name = i.quirk_name;
         str type_name = i.type_name;
+        // See `Codegen.emitted_quirk_impl_vtables`'s own doc comment --
+        // a no-op when THIS impl's own machinery already ran (triggered
+        // early by `ensure_plain_type_emitted`'s field-dependency check,
+        // e.g.), so the normal per-impl pass reaching it again later
+        // doesn't re-emit its wrapper trampolines/vtable instance/
+        // coerce helper a second time.
+        StringBuilder eqiv_key_sb = string_builder_init(16);
+        eqiv_key_sb.append(type_name);
+        eqiv_key_sb.append("::");
+        eqiv_key_sb.append(quirk_name);
+        str eqiv_key = eqiv_key_sb.build();
+        if self.emitted_quirk_impl_vtables.contains(eqiv_key) {
+          ret .None;
+        }
+        self.emitted_quirk_impl_vtables.push(eqiv_key);
         // The VTABLE/fat-pointer TYPE's own identity: a CONCRETE
         // instantiation of a generic quirk (`impl Config as To<JsonValue>`,
         // `examples/stdlib/generic_to_from.fn`'s own real body) is a
