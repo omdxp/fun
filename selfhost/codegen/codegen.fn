@@ -6713,7 +6713,37 @@ impl Codegen {
                   .Identifier(n) -> { method_name = n; }
                   _ -> {}
                 }
+                // `alias.func(args)` -- a plain function call qualified
+                // by an import alias (`m.to_async(&c)`, `examples/
+                // imports/async_quirk_alias/main.fn`'s own real body),
+                // sharing this exact `.`-`()`  AST shape with an
+                // ordinary method call. Same alias-vs-method
+                // disambiguation `emit_call`'s own identical check
+                // already uses: `recv_e.left` (here "m") is a KNOWN
+                // ALIAS, not a receiver OBJECT, so `method_name` (here
+                // "to_async") is really the CALLEE's own bare name --
+                // resolved via the ordinary plain-function lookup, not
+                // `lookup_impl_method_rtype`, which would otherwise try
+                // (and fail) to resolve "m" as a typed local. Checked
+                // FIRST, before assuming `recv_e.left` is a real
+                // receiver.
+                bin left_is_known_alias2 = false;
                 if !equals(method_name, "") {
+                  fit recv_e.left.kind {
+                    .Identifier(lname2) -> {
+                      if self.import_aliases.contains(lname2) && self.lookup_local_type_name(lname2).is_none() {
+                        left_is_known_alias2 = true;
+                      }
+                    }
+                    _ -> {}
+                  }
+                }
+                if left_is_known_alias2 {
+                  let alias_rt = self.lookup_function_rtype(method_name);
+                  if alias_rt.is_some() {
+                    call_rtype = .Some(*alias_rt.unwrap());
+                  }
+                } elif !equals(method_name, "") {
                   let recv_r_opt = self.resolve_field_chain(recv_e.left);
                   if recv_r_opt.is_some() {
                     let recv_r2 = recv_r_opt.unwrap();
