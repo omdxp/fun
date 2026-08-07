@@ -439,9 +439,8 @@ impl Vec<T> {
   }
 
   // Sort elements in place using a custom comparator (stable insertion sort).
-  // Unlike the numeric `sort()`/`sort_desc()` (only available on `Vec<num>`/
-  // `Vec<dec>`), this works for ANY element type -- e.g. sorting compiler
-  // diagnostics by line/col, or `Vec<str>` by length instead of lexically.
+  // Works for any element type, unlike the numeric `sort()`/`sort_desc()`
+  // which are only available on `Vec<num>`/`Vec<dec>`.
   // 
   // Params:
   // - cmp: comparator returning negative if `a` sorts before `b`, positive if

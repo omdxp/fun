@@ -828,7 +828,7 @@ pub fun parse_int(str s) num {
   ret value * sign;
 }
 
-// Parse a signed integer, validating the WHOLE string. `Ok(n)` only when `s` is a
+// Parse a signed integer, validating the whole string. `Ok(n)` only when `s` is a
 // non-empty run of digits (with an optional leading `-`); otherwise `Err`. Use this
 // for untrusted input where `parse_int`'s silent 0/partial result is a footgun.
 pub fun try_parse_int(str s) Result<num, Error> {
@@ -997,7 +997,7 @@ pub fun parse_dec(str s) dec {
   ret value * sign;
 }
 
-// Parse a decimal, validating the WHOLE string. `Ok(d)` only when `s` is a non-empty
+// Parse a decimal, validating the whole string. `Ok(d)` only when `s` is a non-empty
 // number — optional leading `-`, digits, at most one `.` — otherwise `Err`. Use this
 // for untrusted input where `parse_dec`'s silent partial result is a footgun.
 pub fun try_parse_dec(str s) Result<dec, Error> {

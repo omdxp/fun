@@ -125,10 +125,9 @@ impl Map<K, V> {
   }
 
   hash_key(K key) num {
-    // Type-aware key hash: string keys hash by CONTENTS, value-typed keys by
-    // their raw bytes. The compiler lowers __fun_key_hash per the concrete key
-    // type (this method is monomorphized). Previously this hashed the raw bytes
-    // of the key, which for `str` keys hashed the POINTER, not the string.
+    // Type-aware key hash: string keys hash by contents, value-typed keys by
+    // their raw bytes. The compiler lowers __fun_key_hash per the concrete
+    // key type, since this method is monomorphized.
     ret __fun_key_hash(key);
   }
 
@@ -416,9 +415,7 @@ impl Map<K, V> {
   // - true when a new entry is inserted
   // - false when the key already exists
   pub put_if_absent(K key, V value) bin {
-    // Only insert when the key is absent; do NOT overwrite an existing value.
-    // (Previously this always called put(), overwriting the existing value, then
-    // reported false — the report was right but the mutation was wrong.)
+    // Inserts only when the key is absent; leaves an existing value untouched.
     if self.find_live_index(key) != -1 {
       ret false;
     }
