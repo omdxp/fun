@@ -241,6 +241,20 @@ pub enum CodegenErrorKind {
 // iterable that's itself a field access, `for a : dt.generic_args { ...
 // }`, needing to know ITS OWN element type to record `a` as a known
 // local too).
+// Result of `lookup_local_multidim` -- see `Codegen.local_multidim_names`'s
+// own doc comment.
+compound MultidimInfo {
+  str root;
+  num depth;
+}
+
+// Result of `infer_array_literal_elem_type_and_depth` -- see its own doc
+// comment.
+compound ArrayLiteralElemInfo {
+  str type_name;
+  num depth;
+}
+
 compound FieldTypeInfo {
   str type_name;
   bin is_pointer;
@@ -341,6 +355,31 @@ pub compound Codegen {
   // (determining a `for item : vec_local` loop's own `item` element
   // type, needed to support a FURTHER nested `for x : item` iteration).
   Vec<Option<DataType>> local_dtype;
+  // Sparse (only pushed for a name that actually needs it) record of a
+  // MULTI-DIMENSIONAL raw array's own iteration-loop variable, mapping it
+  // back to the TRUE root array name and how many `[0]` index levels
+  // already separate it from that root -- see `emit_for_iter`'s own doc
+  // comment for why a nested loop's own length bound can't be computed
+  // from the loop variable's OWN (possibly pointer-decayed) value at all,
+  // only by re-indexing the ORIGINAL declared array. Searched by name,
+  // same backward-scan-for-shadowing convention as `local_names`'s own
+  // lookups, but kept as an entirely separate, parallel-but-different-
+  // length registry rather than extra columns on `local_names` itself --
+  // every one of `record_local`/`record_local_typed`'s ~20 existing call
+  // sites would otherwise need updating for a feature only `emit_for_
+  // iter`'s own multi-dim case ever populates. Reset between top-level
+  // functions (`emit_function_named`, alongside `local_dtype`) to avoid
+  // a same-named local in an unrelated LATER function reading back a
+  // stale entry; deliberately NOT threaded through the generic-function/
+  // impl-method nested-instantiation save/restore blocks `local_dtype`
+  // itself participates in -- no example in today's corpus iterates a
+  // multi-dim array from inside a generic function/impl method body, so
+  // narrowing scope to just the common (cross-FUNCTION leakage) risk
+  // avoids threading three more fields through every one of those sites
+  // for a case nothing currently exercises.
+  Vec<str> local_multidim_names;
+  Vec<str> local_multidim_roots;
+  Vec<num> local_multidim_depths;
   // Whole-program record of every non-generic enum's name, its variants'
   // names, and whether it's a tagged union (any variant has a payload),
   // populated by `transpile`'s own first pass over top-level `Enum`
@@ -951,6 +990,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.local_is_pointer.init(0);
   g.local_type_name.init(0);
   g.local_dtype.init(0);
+  g.local_multidim_names.init(0);
+  g.local_multidim_roots.init(0);
+  g.local_multidim_depths.init(0);
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
@@ -4028,6 +4070,36 @@ impl Codegen {
     ret .None;
   }
 
+  // Registers `name` (a multi-dimensional raw array's own for-loop
+  // ITEM, `row` in `for row : matrix { ... }`) as needing its length
+  // bound computed via `root` (the TRUE declared array, `matrix`) with
+  // `depth` leading `[0]` index levels -- see `Codegen.local_multidim_
+  // names`'s own doc comment.
+  record_local_multidim(str name, str root, num depth) {
+    self.local_multidim_names.push(name);
+    self.local_multidim_roots.push(root);
+    self.local_multidim_depths.push(depth);
+  }
+
+  // Looks up `name`'s own multi-dim root/depth, if it was registered via
+  // `record_local_multidim` -- `.None` for every ordinary local (the
+  // overwhelming common case: not a multi-dim array's own loop item at
+  // all). Same backward-scan-for-shadowing convention as `local_names`'s
+  // own lookups.
+  lookup_local_multidim(str name) Option<MultidimInfo> {
+    num i = self.local_multidim_names.len - 1;
+    for i >= 0 {
+      if equals(self.local_multidim_names.get(i), name) {
+        MultidimInfo m;
+        m.root = self.local_multidim_roots.get(i);
+        m.depth = self.local_multidim_depths.get(i);
+        ret .Some(m);
+      }
+      i = i - 1;
+    }
+    ret .None;
+  }
+
   // Records `name` as a known enum with the given variant names and
   // tagged-union-ness, for later `EnumName.Variant` access recognition.
   // See the `Codegen.enum_names`/`enum_variant_names`/
@@ -4824,6 +4896,88 @@ impl Codegen {
         }
       }
       _ -> { out.push(node); }
+    }
+  }
+
+  // Writes the INNER dimension declarators `[N1][N2]...` for a multi-
+  // dimensional array local's own DECLARATION (`num[][] matrix = [[1, 2,
+  // 3], [4, 5, 6]];` -> `int64_t matrix[][3] = ...;`) -- the LEADING
+  // dimension always stays unsized (`[]`, C infers it from the
+  // initializer's own top-level element count), but C requires every
+  // OTHER dimension explicit (`T[][N]` is legal C, `T[][]` is not).
+  // Derived structurally by counting the FIRST element's own elements at
+  // each nesting level (assumes a rectangular/uniform literal -- mirrors
+  // the original transpiler's own identical `emit_multidim_inner_
+  // declarators`, ported here for the same reason). `outer_lit` is the
+  // `.Bracket` node at the CURRENT nesting level; `remaining` is how many
+  // MORE inner dimensions still need writing. A silent no-op when the
+  // shape doesn't match (`outer_lit` isn't a `.Bracket`, has no elements,
+  // or its own first element isn't ITSELF a `.Bracket`) -- same as the
+  // original's own fallback; a caller reaching a non-rectangular or
+  // under-nested literal this way already has a type mismatch the C
+  // compiler itself will catch.
+  emit_multidim_inner_declarators(Node* outer_lit, num remaining) {
+    if remaining == 0 {
+      ret;
+    }
+    fit outer_lit.kind {
+      .Bracket(outer_inner) -> {
+        Vec<Node*> outer_elems;
+        outer_elems.init(0);
+        self.flatten_call_args(outer_inner, &outer_elems);
+        if outer_elems.len == 0 {
+          ret;
+        }
+        let first_elem = outer_elems.get(0);
+        fit first_elem.kind {
+          .Bracket(first_inner) -> {
+            Vec<Node*> inner_elems;
+            inner_elems.init(0);
+            self.flatten_call_args(first_inner, &inner_elems);
+            self.state.write("[");
+            self.state.write(format_num(inner_elems.len));
+            self.state.write("]");
+            if remaining > 1 {
+              self.emit_multidim_inner_declarators(first_elem, remaining - 1);
+            }
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Purely STRUCTURAL nesting depth of a bare array literal (1 for a
+  // flat `[1, 2, 3]`, one more per level of further uniform nesting --
+  // `[[1, 2], [3, 4]]` -> 2) -- companion to `emit_multidim_inner_
+  // declarators`, needed by a `let`-inferred literal's own GNU compound-
+  // literal cast (`(ElemType[])`, see that call site's own doc comment)
+  // to know how many INNER dimension declarators to append. Unlike
+  // `infer_array_literal_elem_type_and_depth`, doesn't care what the
+  // INNERMOST element's own Fun/C type actually is -- only whether the
+  // FIRST element at each level is itself another `.Bracket` -- so this
+  // always succeeds (never needs an `Option`): a bracket literal's own
+  // nesting depth is well-defined structurally regardless of whether its
+  // element type can be named at all. `lit` not being a `.Bracket` at
+  // all (never a real call site's shape, since every caller already
+  // matched `.Bracket` first) trivially answers 1 rather than crashing.
+  array_literal_nesting_depth(Node* lit) num {
+    fit lit.kind {
+      .Bracket(inner) -> {
+        Vec<Node*> elems;
+        elems.init(0);
+        self.flatten_call_args(inner, &elems);
+        if elems.len == 0 {
+          ret 1;
+        }
+        let first = elems.get(0);
+        fit first.kind {
+          .Bracket(_) -> { ret 1 + self.array_literal_nesting_depth(first); }
+          _ -> { ret 1; }
+        }
+      }
+      _ -> { ret 1; }
     }
   }
 
@@ -7011,7 +7165,39 @@ impl Codegen {
           self.state.write("const ");
         }
 
-        if is_let {
+        // `let arr = [1, 2, 3];` needs a REAL, EXPLICITLY-typed array
+        // declaration (`int64_t arr[] = {1, 2, 3};`), NOT `__auto_type`
+        // -- confirmed empirically: `__auto_type x = (int64_t[]){1, 2,
+        // 3};` DECAYS to a pointer at the point of initialization (GCC/
+        // Clang both agree: `sizeof(x)` there is just the pointer's own
+        // size, 8), unlike a genuinely DECLARED array local, which never
+        // decays. Since this codegen's whole 1D/multi-dim raw-array
+        // iteration fast path (`emit_for_iter`) depends on `sizeof(arr)/
+        // sizeof(arr[0])` giving the REAL element count, `__auto_type`
+        // here silently broke iteration down to a SINGLE element for
+        // ANY `let`-inferred array literal (1D or multi-dim alike) --
+        // found via `examples/advanced/matrix.fn`'s own `let m2 = [[10,
+        // 20], [30, 40]];` printing nothing at all for `m2`'s own rows.
+        // `let_lit_elem_c_type`/`let_lit_depth` are reused below (both
+        // for the array declarator after the name, and to skip the
+        // compound-literal cast the OLD `__auto_type`-based approach
+        // needed but a real typed declaration doesn't).
+        bin let_is_bracket_literal = false;
+        str let_lit_elem_c_type = "int64_t";
+        num let_lit_depth = 1;
+        if is_let && v.has_val {
+          fit v.val.kind {
+            .Bracket(bracket_inner) -> {
+              let_is_bracket_literal = true;
+              let_lit_elem_c_type = self.infer_array_literal_elem_c_type(bracket_inner);
+              let_lit_depth = self.array_literal_nesting_depth(v.val);
+            }
+            _ -> {}
+          }
+        }
+        if let_is_bracket_literal {
+          self.state.write(let_lit_elem_c_type);
+        } elif is_let {
           self.state.write("__auto_type");
         } else {
           let wt = self.write_type(*v.var_type);
@@ -7040,10 +7226,20 @@ impl Codegen {
         self.state.write(v.name);
         // A sized/unsized array declarator (`[24]`, `[]`) lands AFTER the
         // name in C, unlike every other type modifier above -- mirrors the
-        // original transpiler's own local-variable emission. Skipped for
-        // `let` (no declared type to read `array_brackets` from) and for
+        // original transpiler's own local-variable emission. `let_is_
+        // bracket_literal`'s own declarator (leading `[]`, C infers the
+        // outer count from the initializer, same as the explicitly-typed
+        // path below does; inner dims -- if any -- from `emit_multidim_
+        // inner_declarators`) is entirely separate from the ordinary
+        // explicitly-typed one below (no `v.var_type.array_brackets` to
+        // read at all for a `let`). Otherwise skipped for `let` and for
         // `arr_as_ptr` (already decayed to a `*` above, so no brackets).
-        if !is_let && !arr_as_ptr && v.var_type.is_array {
+        if let_is_bracket_literal {
+          self.state.write("[]");
+          if let_lit_depth > 1 {
+            self.emit_multidim_inner_declarators(v.val, let_lit_depth - 1);
+          }
+        } elif !is_let && !arr_as_ptr && v.var_type.is_array {
           if v.var_type.array_brackets.len > 0 {
             for bnode : v.var_type.array_brackets {
               self.state.write("[");
@@ -7062,6 +7258,37 @@ impl Codegen {
                 }
               }
               self.state.write("]");
+            }
+          } elif v.var_type.array_depth > 1 {
+            // A multi-dimensional array with NO explicit bracket sizes
+            // anywhere (`num[][] matrix = [[1, 2, 3], [4, 5, 6]];`) --
+            // the leading dimension stays `[]` (C infers it from the
+            // initializer), but every OTHER dimension needs an EXPLICIT
+            // size (`T[][N]` is legal C, `T[][]` is not) -- derived from
+            // the initializer literal's own shape via `emit_multidim_
+            // inner_declarators`. Falls back to plain `[]`-per-dimension
+            // (matching the ORIGINAL transpiler's own identical
+            // fallback) when there's no bracket-literal initializer to
+            // derive sizes from at all (a plain forward declaration,
+            // e.g.) -- invalid C on its own, but no worse than what this
+            // codegen already emitted before this fix existed.
+            self.state.write("[]");
+            bin wrote_inner_dims = false;
+            if v.has_val {
+              fit v.val.kind {
+                .Bracket(_) -> {
+                  self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
+                  wrote_inner_dims = true;
+                }
+                _ -> {}
+              }
+            }
+            if !wrote_inner_dims {
+              num mdim_d = 1;
+              for mdim_d < v.var_type.array_depth {
+                self.state.write("[]");
+                mdim_d = mdim_d + 1;
+              }
             }
           } else {
             self.state.write("[]");
@@ -7172,26 +7399,12 @@ impl Codegen {
               did_quirk_coerce = true;
             }
           }
-          // `let arr = [1, 2, 3];` -- C flatly rejects `__auto_type x =
-          // {1, 2, 3};` (no target type to size/type the brace-list
-          // against), unlike an explicitly typed declaration further
-          // above (which just declares the real array type on the LHS
-          // and needs nothing extra here) -- see `infer_array_literal_
-          // elem_c_type`'s own doc comment. Wraps the bare brace-list
-          // `emit_expr` is about to emit in a GNU compound-literal cast
-          // -- `(ElemType[])` is already a complete, self-balanced
-          // parenthesized prefix, so nothing extra needs closing after
-          // `emit_expr` runs (unlike the quirk-coercion case above).
-          if is_let {
-            fit v.val.kind {
-              .Bracket(inner) -> {
-                self.state.write("(");
-                self.state.write(self.infer_array_literal_elem_c_type(inner));
-                self.state.write("[])");
-              }
-              _ -> {}
-            }
-          }
+          // `let_is_bracket_literal` already declared a REAL, explicitly-
+          // typed array above (not `__auto_type`) -- `emit_expr`'s own
+          // `.Bracket` case just needs the bare brace-list form here,
+          // same as any other array-typed declaration's own initializer;
+          // no GNU compound-literal cast wrapper needed (that was only
+          // ever `__auto_type`'s own requirement).
           let verr = self.emit_expr(*v.val);
           if did_quirk_coerce {
             self.state.write(")");
@@ -7523,16 +7736,28 @@ impl Codegen {
     // decayed to a pointer -- see `dtype_is_array_as_pointer`'s doc
     // comment) has no `.len`/`.data` at all in C; its length comes from
     // the classic `sizeof(arr)/sizeof(arr[0])` trick instead, matching
-    // the original transpiler's own identical raw-array fast path
-    // exactly (1D case only -- multi-dimensional arrays are a separate,
-    // not-yet-ported gap).
+    // the original transpiler's own identical raw-array fast path --
+    // see this function's own tail (past the `is_vec`/`Set`/`Map`
+    // dispatch below) for how a MULTI-DIMENSIONAL raw array (`arr_dt.
+    // array_depth > 1`) generalizes this, via `Codegen.local_multidim_
+    // names`.
     bin is_raw_array = false;
     str elem_c_type = "int64_t";
+    // Defaults to 1 (an ordinary single-dimension array) when `arr_dt.
+    // array_depth` wasn't populated at all -- mirrors the original
+    // transpiler's own identical default for a hand-built/legacy `DataType`
+    // that predates `array_depth`'s own introduction.
+    num raw_array_depth = 1;
+    Option<DataType> raw_arr_dt = .None;
     if !is_vec && arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       if arr_dt.is_array && arr_dt.pointer_depth == 0 {
         is_raw_array = true;
         elem_c_type = map_type_to_c(arr_dt.type_str);
+        raw_arr_dt = .Some(arr_dt);
+        if arr_dt.array_depth > 0 {
+          raw_array_depth = arr_dt.array_depth;
+        }
       }
     }
     // `Set<T>`/`Map<K, V>` (a bare identifier, structurally known --
@@ -7755,6 +7980,42 @@ impl Codegen {
       self.state.write_indent();
     }
 
+    // A MULTI-DIMENSIONAL raw array's own length bound (for THIS level)
+    // can't be computed from `arr_text` itself once `arr_text` is a
+    // NESTED item (`row` in `for item : row`, itself a PREVIOUS `for row
+    // : matrix` loop's own item) -- `row`'s own runtime value has
+    // already decayed to a pointer by then (`sizeof(row)` would just be
+    // the pointer's own size, not the real row length). `Codegen.local_
+    // multidim_names` tracks exactly this: when `arr_text` was itself
+    // registered as a multi-dim item (below, the FIRST time this ever
+    // recurses), `len_root`/`len_offset` redirect the bound expression
+    // back to the TRUE root array name with the right number of leading
+    // `[0]` index levels instead -- `sizeof(matrix[0])/sizeof(matrix[0][
+    // 0])` for the inner loop, e.g., not `sizeof(row)/sizeof(row[0])`.
+    // Defaults to `arr_text` itself with zero leading `[0]`s -- the
+    // ordinary case, an array that's either 1D or the OUTERMOST loop
+    // over a multi-dim one (`arr_text` still names the real declared
+    // array directly).
+    str len_root = arr_text;
+    num len_offset = 0;
+    if is_raw_array && iterable_is_identifier {
+      let mdim = self.lookup_local_multidim(arr_text);
+      if mdim.is_some() {
+        let m = mdim.unwrap();
+        len_root = m.root;
+        len_offset = m.depth;
+      }
+    }
+    // How many dimensions are left BELOW this one -- 0 for an ordinary
+    // 1D array or the innermost level of a multi-dim one (`item` is a
+    // plain scalar), 1 for a 2D array's own row (`item` decays to a
+    // single-star pointer), 2+ for a 3D+ array's own layer (`item` needs
+    // `__auto_type` to correctly deduce a "pointer to array" type --
+    // see below).
+    num element_depth = 0;
+    if is_raw_array && raw_array_depth > 0 {
+      element_depth = raw_array_depth - 1;
+    }
     self.state.write("for (int64_t ");
     self.state.write(idx_name);
     self.state.write(" = 0; ");
@@ -7765,19 +8026,46 @@ impl Codegen {
       self.state.write(".len; ");
     } else {
       self.state.write("(int64_t)(sizeof(");
-      self.state.write(arr_text);
+      self.state.write(len_root);
+      num lo_i = 0;
+      for lo_i < len_offset {
+        self.state.write("[0]");
+        lo_i = lo_i + 1;
+      }
       self.state.write(")/sizeof(");
-      self.state.write(arr_text);
-      self.state.write("[0])); ");
+      self.state.write(len_root);
+      num lo_j = 0;
+      for lo_j < len_offset + 1 {
+        self.state.write("[0]");
+        lo_j = lo_j + 1;
+      }
+      self.state.write(")); ");
     }
     self.state.write(idx_name);
     self.state.write("++) {\n");
     self.state.indent_level = self.state.indent_level + 1;
     self.state.write_indent();
-    if is_vec {
+    // An element that's ITSELF still an array of 2+ dimensions (a 3D+
+    // array's own layer, `item = tensor[idx]` where `tensor` is `num[][]
+    // []`) needs `__auto_type` so the compiler deduces the correct
+    // "pointer to array" type (`int64_t (*)[4]`, e.g.) -- naive pointer-
+    // star expansion (`elem_c_type **item`) would be a flat double
+    // pointer instead, wrong (loses the inner dimension's own stride).
+    // Confirmed empirically: array-to-pointer decay on assignment always
+    // takes the FIRST-ELEMENT's own type as the pointee, never flattens
+    // further. A 1D array or a 2D array's own row (`element_depth` 0 or
+    // 1) has no such ambiguity -- plain `elem_c_type` plus the right
+    // number of stars matches the original transpiler's own identical
+    // distinction exactly.
+    if is_vec || element_depth >= 2 {
       self.state.write("__auto_type ");
     } else {
       self.state.write(elem_c_type);
+      num star_i = 0;
+      for star_i < element_depth {
+        self.state.write(" *");
+        star_i = star_i + 1;
+      }
       self.state.write(" ");
     }
     self.state.write(fi.item_name);
@@ -7803,6 +8091,26 @@ impl Codegen {
       let elem_name = self.resolve_type_name(edt);
       if elem_name.is_some() {
         self.record_local_typed(fi.item_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
+      }
+    }
+    // A raw array's own item is ALSO recorded as a known local of the
+    // decremented-depth type -- needed for `item` itself to be
+    // recognized as a (possibly STILL multi-dimensional) raw array by a
+    // FURTHER nested `for x : item`, which re-enters this exact function
+    // and needs `arr_dtype`/`is_raw_array` to resolve structurally for
+    // `item`'s own name, not just to track its multidim root/depth
+    // (registered separately, right below, only when `item` is STILL an
+    // array after this level).
+    if is_raw_array && raw_arr_dt.is_some() {
+      DataType item_dt = raw_arr_dt.unwrap();
+      item_dt.array_depth = element_depth;
+      item_dt.is_array = element_depth > 0;
+      let item_name_opt = self.resolve_type_name(item_dt);
+      if item_name_opt.is_some() {
+        self.record_local_typed(fi.item_name, item_name_opt.unwrap(), false, item_dt);
+      }
+      if element_depth > 0 {
+        self.record_local_multidim(fi.item_name, len_root, len_offset + 1);
       }
     }
     let berr = self.emit_body(*fi.body);
@@ -9196,6 +9504,9 @@ impl Codegen {
         self.local_is_pointer.init(0);
         self.local_type_name.init(0);
         self.local_dtype.init(0);
+        self.local_multidim_names.init(0);
+        self.local_multidim_roots.init(0);
+        self.local_multidim_depths.init(0);
         // Fresh per function too -- see `Codegen.defer_stack`'s doc
         // comment; a previous function's leftover pending defers (or
         // frame markers) must never bleed into this one.
@@ -10088,6 +10399,55 @@ impl Codegen {
     }
   }
 
+  // Infers a BARE array literal's own Fun-level element type name and
+  // nesting DEPTH (1 for a flat `[1, 2, 3]`, one more per level of
+  // further nesting, `[[1, 2], [3, 4]]` -> 2) -- needed for `infer_let_
+  // expr_type`'s own `.Bracket` case (`let arr = [1, 2, 3];`), which has
+  // no DECLARED type to read at all. Only the FIRST element at each
+  // level is inspected (assumes a rectangular/uniform literal, same
+  // assumption `emit_multidim_inner_declarators` already makes for the
+  // DECLARATION side of this same feature). `.None` when the first
+  // element's own type can't be determined this way (anything besides a
+  // scalar literal `infer_arg_type_name` itself resolves, or a further-
+  // nested bracket) or the literal has no elements at all.
+  infer_array_literal_elem_type_and_depth(Node* lit) Option<ArrayLiteralElemInfo> {
+    fit lit.kind {
+      .Bracket(inner) -> {
+        Vec<Node*> elems;
+        elems.init(0);
+        self.flatten_call_args(inner, &elems);
+        if elems.len == 0 {
+          ret .None;
+        }
+        let first = elems.get(0);
+        fit first.kind {
+          .Bracket(_) -> {
+            let sub = self.infer_array_literal_elem_type_and_depth(first);
+            if sub.is_none() {
+              ret .None;
+            }
+            let s = sub.unwrap();
+            ArrayLiteralElemInfo r;
+            r.type_name = s.type_name;
+            r.depth = s.depth + 1;
+            ret .Some(r);
+          }
+          _ -> {
+            let tn = self.infer_arg_type_name(first);
+            if tn.is_none() {
+              ret .None;
+            }
+            ArrayLiteralElemInfo r;
+            r.type_name = tn.unwrap();
+            r.depth = 1;
+            ret .Some(r);
+          }
+        }
+      }
+      _ -> { ret .None; }
+    }
+  }
+
   // Companion to `infer_arg_type_name`, for `maybe_instantiate_generic_
   // function`'s NESTED type-param inference (a param declared `Pair<L,
   // R> p`, matching a type param inside the param's own `generic_args`
@@ -10175,6 +10535,29 @@ impl Codegen {
         if p.unwrap() {
           dt.pointer_depth = 1;
         }
+        ret .Some(dt);
+      }
+      // `let arr = [1, 2, 3];` (and its multi-dimensional generalization,
+      // `let m2 = [[10, 20], [30, 40]];`) -- a BARE array literal, no
+      // declared type to read at all. Without this, `arr`/`m2` was never
+      // recorded as a known local afterward (this whole `fit` falls
+      // through to `_ -> { ret .None; }` below), so a later `for x : arr`
+      // rejected it outright as an unrecognized iterable ("codegen
+      // failed: unsupported node") -- confirmed via `examples/advanced/
+      // matrix.fn`'s own real `let m2 = [[10, 20], [30, 40]];` followed
+      // by `for r : m2 { for v : r { ... } }`. See `infer_array_literal_
+      // elem_type_and_depth`'s own doc comment for how the element type/
+      // nesting depth are derived.
+      .Bracket(_) -> {
+        let info = self.infer_array_literal_elem_type_and_depth(val);
+        if info.is_none() {
+          ret .None;
+        }
+        let i = info.unwrap();
+        DataType dt = dtype_new();
+        dt.type_str = i.type_name;
+        dt.is_array = true;
+        dt.array_depth = i.depth;
         ret .Some(dt);
       }
       // `let p = Point{x = 1, y = 2};` -- an EXPLICIT compound literal
