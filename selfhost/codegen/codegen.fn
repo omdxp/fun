@@ -1,214 +1,13 @@
-// The self-hosted Fun compiler's codegen: transpiles an AST into C source.
-// Ported from the previous implementation's `modules/codegen/transpiler.zig`,
-// incrementally, the same way `selfhost/parser` was.
+// Transpiles a Fun AST into C source.
 // 
-// Coverage so far: literal expressions (number/decimal/string/character/
-// boolean/`nil`, the last emitting C `NULL`), identifiers, unary
-// operators (prefix, pointer-indirection depth, postfix `++`/`--`),
-// binary operators (arithmetic/comparison/logical/bitwise/assignment --
-// every one shares an identical C spelling), array indexing (`arr[i]`,
-// as an rvalue or an assignment target -- see `emit_index`'s doc
-// comment), calls with a plain-identifier callee (any argument count,
-// flattening the parser's comma-chained argument-list representation --
-// see `flatten_call_args`), variable declarations -- explicit type, or
-// `let` (emits GNU C's own `__auto_type`, letting the C compiler infer
-// the real type, since this codegen has no type-checker of its own --
-// `infer_let_expr_type` ALSO best-effort infers the declared type for
-// this file's OWN bookkeeping, purely so a later bare-shorthand `fit`/
-// field access/method call on that local still resolves; failing to
-// infer only means the local isn't usable that way afterward, not that
-// the declaration itself is rejected) -- `ret` statements, bare
-// `break;`/`continue;`
-// (an identical C spelling, no translation needed), `if`/`elif`/`else`
-// (chained correctly into one C construct even though they're three
-// independent sibling AST statements -- see `emit_if_chain`'s doc
-// comment), `for` (condition/infinite form as a C `while`, integer-range
-// form as a C counted `for`, and the `Vec` iterator form -- `for item :
-// arr { ... }` / `for i, item :: arr { ... }` -- as the original's own
-// `.len`/`.data` fast-path loop; see `emit_for_cond`/`emit_for_range`/
-// `emit_for_iter`),
-// bare expression statements (an assignment, a call for its side effect,
-// `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
-// they're a plain `.Expression`/`.Unary` node straight in the statement
-// list), a `compound Name { fields }` declaration as a C struct (see
-// `emit_compound`) -- a GENERIC one (`compound Box<T> { ... }`) is
-// recorded as a template and monomorphized on demand the first time a
-// concrete instantiation (`Box<num>`) is actually used, via
-// `ensure_compound_instantiated`. A monomorphized struct/enum typedef or
-// generic impl method is emitted at whatever point first triggers it,
-// which is often INSIDE some function's own body (`Box<num> b;` as a
-// local, say) -- when `pub transpile` is driving emission, that
-// definition is spliced in just before the enclosing top-level
-// function/impl instead of left nested inside its `{ }` (fatal for a
-// method's own C function definition, which can never nest; merely
-// oddly-scoped, not fatal, for a typedef) -- see `Codegen.
-// hoist_insert_pos`/`emit_hoisted`'s doc comments) -- `ident.field`
-// member access -- including a
-// CHAINED access (`a.b.c`) -- deciding `.`/`->` at every link from each
-// receiver's DECLARED type (a deliberately narrow, non-inference-based
-// heuristic -- see `emit_field_access`/`emit_receiver_and_resolve_type`'s
-// doc comments for exactly what it can't handle), a
-// `impl Type { methods }` block, PLAIN or quirk-implementing, generic or
-// not (each method is ALREADY parsed as a pre-mangled, self-first-arg
-// `Function` node -- see `emit_impl`'s doc comment -- so a non-generic
-// one is emitted exactly like any other function; a GENERIC impl's
-// methods instead monomorphize the same way a generic compound/enum
-// does, lazily, the first time a concrete instantiation of the
-// enclosing type is used -- see
-// `maybe_instantiate_generic_impl_methods`'s doc comment), a method call
-// `recv.method(...)` -- `recv` a plain local OR a chained field access
-// (`self.parts.push(s)`) -- resolved statically to `Type__method(<self-
-// arg>, ...)` (or `Type__Quirk__method(...)` when a quirk-implementing
-// impl defined it -- see `register_impl_methods`/`emit_method_call`'s
-// doc comments) from the receiver's own resolved type, `fit subject {
-// patterns -> { body } ... }` over a plain identifier, a `*name`
-// dereference (`fit *self { ... }`), a chained field access (`fit
-// t.data { ... }`), or a `receiver.method()` call (`fit self.next_tok()
-// { ... }`, hoisted into a temp `__auto_type` variable first since,
-// unlike the other three subject shapes, it can't just be re-evaluated
-// per branch -- see `Codegen.impl_method_rtype`'s doc comment) subject
-// -- either a literal-pattern chain, or a
-// tagged-union enum-variant pattern (bare `.Variant`/`.Variant(x)`,
-// resolved against the SUBJECT's own declared/resolved type, or
-// qualified `EnumName.Variant`/`EnumName.Variant(x)`),
-// destructuring any positional bindings out of the payload -- as a C
-// `if`/`else if`/`else` chain (see `emit_fit`/`emit_fit_enum_branch`'s
-// doc comments), an `enum Name { variants }` declaration -- either a
-// plain C enum, or, when any variant carries a payload, the original's
-// own discriminant-enum-plus-tagged-struct/union layout (see
-// `emit_enum`/`emit_tagged_union_enum`'s doc comments); a GENERIC one
-// (`enum Option<T> { ... }`) monomorphizes the same way a generic
-// compound does, lazily, on first concrete use (see
-// `ensure_enum_instantiated`'s doc comment) -- together with
-// a QUALIFIED enum-variant access (`EnumName.Variant` bare, or
-// `EnumName.Variant(args...)` a payload construction, both recognized
-// without a call needed to disambiguate from a method call), OR a BARE
-// enum-variant shorthand (`.Variant`/`.Variant(x)`, no qualifier) in a
-// `ret <shorthand>;` statement or a `Variable` declaration's own
-// initializer -- resolved against the enclosing function's declared
-// return type, or that variable's own declared type, respectively (see
-// `Codegen.expected_enum_type`'s doc comment for this "already fully
-// explicit declared-type, not real inference" mechanism, and
-// `emit_field_access`/`emit_enum_variant_construction`'s doc comments for
-// how it's consumed), and a top-level function declaration with any
-// number of parameters (still no generics/variadics). Verified end to
-// end: the self-hosted lexer -> self-hosted parser -> this codegen, on
-// programs using variables, comparisons, if-elif-else, assignment
-// statements, all three `for` loop forms above, multi-arg function
-// calls, a compound with field reads/writes, a plain impl method called
-// both directly and through `self`, a `fit` over a `num` subject with a
-// comma-chained pattern and a default arm, a plain enum whose variant
-// constants are compared and returned, and a tagged-union enum
-// constructed three ways (qualified, bare-shorthand as a `ret` value,
-// and bare-shorthand as a `Variable` initializer) and destructured back
-// out through a `fit` with a bare-shorthand binding pattern and a bare
-// no-payload variant match, produces C that compiles and runs with the
-// correct exit code.
-// 
-// Deliberately deferred from this slice (documented rather than silently
-// dropped):
-// - Reading a tagged union's own `.payload.Variant._N` fields back out
-// WITHOUT going through a `fit` destructuring pattern, and calls/access
-// through an aliased/imported module -- both share the
-// `Identifier . Identifier` AST shape with plain field access and
-// qualified enum-variant access, and `emit_field_access`/
-// `emit_receiver_and_resolve_type` deliberately refuse to guess at either
-// of them (see their own doc comments). The former needs the tagged-union
-// payload layout threaded into the compound-field-type registry; the
-// latter needs import support, neither of which exists yet.
-// - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
-// value, a `Variable` initializer, an assignment's right-hand side, an
-// equality/inequality comparison's right-hand side (`self.kind ==
-// .None`, `is_ok`/`is_err`-style predicate methods throughout this
-// codebase's own real stdlib -- `Codegen.expected_enum_type` resolves
-// against the LEFT side's own declared/resolved type for `=`/`==`/`!=`
-// alike), or a call argument to a PLAIN function (`err_kind(.Parse,
-// "msg", 0)`, resolved against the CALLEE's own declared parameter type
-// at that position -- see `Codegen.function_names`'s doc comment; a
-// method-call argument doesn't resolve this way yet) -- a compound-
-// literal field initializer, a shorthand on the LEFT of `=`/`==`/`!=`,
-// or a nested sub-expression anywhere deeper still, would all need a
-// real expected-type mechanism threaded through arbitrary expression
-// contexts, which this narrow, site-by-site approach deliberately isn't.
-// - A generic COMPOUND (`compound Box<T> { ... }`), a generic ENUM
-// (`enum Option<T> { ... }`), a generic impl's OWN methods (`impl
-// Box<T> { ... }`), and a generic FUNCTION (`fun err_kind<T>(...) ...`)
-// all monomorphize now -- the first three lazily, the first time a
-// concrete instantiation is actually used (see
-// `ensure_compound_instantiated`/`ensure_enum_instantiated`/
-// `maybe_instantiate_generic_impl_methods`'s doc comments); the last
-// from its own CALL site, inferring each type param's binding from the
-// arguments actually passed (see
-// `maybe_instantiate_generic_function`/`infer_arg_type_name`'s doc
-// comments -- only a known local, a literal, or a call to an already-
-// registered plain function can be inferred FROM; anything else is
-// rejected, not guessed) -- but only for a template whose fields/
-// variant-payloads/method-or-function self-and-param-and-return types
-// are bare `T`-shaped (no array-of-generic field, e.g. the real
-// `Vec<T>`'s own `T[] data;`) and concrete arguments with no generic
-// args of their own -- a NESTED generic argument (`Result<Option<Token>,
-// Error>`, `Box<Box<num>>`) resolves fine now (see `ensure_compound_
-// instantiated`'s doc comment), recursing to arbitrary depth; only an
-// argument whose own template ISN'T registered at all is rejected.
-// A bare enum-variant shorthand nested inside ANOTHER variant's own
-// construction (`.Ok(.Some(t))`) resolves against that position's own
-// recorded payload type too (`Codegen.enum_variant_payload_owner`'s doc
-// comment). TRUE dynamic dispatch through an abstract quirk-typed
-// receiver (see below) still doesn't reach a generic impl's methods
-// either, same as a non-generic one's.
-// - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
-// quirk type itself (a vtable lookup) -- a separate, larger deferred
-// item. A quirk-implementing impl's OWN methods emit fine now (see
-// `emit_impl`), and a STATIC call through a receiver whose declared
-// type is already the CONCRETE implementing type resolves correctly
-// (see `emit_method_call`/`register_impl_methods`'s doc comments) --
-// only the abstract-quirk-typed-variable case is still unreachable.
-// - The iterator form of `for` over anything other than a known-`Vec`
-// local (an array literal, or a general `Iterator`-implementing quirk
-// value dispatched through `.next()`) -- see `emit_for_iter`'s doc
-// comment. `[]` indexing (`arr[i]`, as an rvalue or an assignment
-// target) DOES work now -- see `emit_index`'s doc comment -- needing no
-// type resolution at all, since C's own `[]` composes directly with
-// whatever the receiver already emitted as.
-// - A `fit` subject that isn't a plain identifier, a single `*name`
-// dereference, a chained field access, or a `receiver.method()` call
-// matching `emit_method_call`'s own recognized shape (this last one now
-// works: a temp `__auto_type` variable holds the call's result, and its
-// bare-shorthand enum type resolves from the CALLEE's own declared
-// return type -- see `emit_fit`'s doc comment and `Codegen.
-// impl_method_rtype`) -- a plain-FUNCTION-call subject, or a chained
-// call (`a.b().c()`), is still rejected rather than guessed.
-// - Every declaration kind besides a plain function/compound (generic or
-// not)/enum (generic or not)/impl (generic or not) (a top-level `quirk`
-// declaration itself needs no C emission at all -- it's a structural,
-// compile-time-only interface spec).
-// - Type INFERENCE: a function's return type and every literal's type are
-// already fully explicit at this stage (an omitted `let` type, or a
-// function relying on inferred generics, isn't reachable yet), so no
-// `infer_expr_type`-equivalent exists yet either.
-// - Quirk/vtable dispatch, async/channels -- each is a substantial slice
-// of its own in the original and will get one here too. Multi-file
-// resolution/merging itself now exists (`selfhost/parser/
-// import_resolver.fn`'s `parse_program_with_imports` recursively
-// resolves, parses, and flattens an entire `imp`-connected program into
-// one `Vec<Node>` this codegen's own `transpile` can take unchanged) --
-// but an ALIASED import's `alias.symbol` QUALIFIED access at a call site
-// is still unrecognized (it shares the `Identifier . Identifier` AST
-// shape with plain field access and qualified enum-variant access,
-// same as the tagged-union payload gap above), and cross-file
-// duplicate-symbol detection doesn't exist yet either.
-// - Exotic literal-escaping edge cases the original handles (splitting a
-// string literal around a `\xFF`-then-more-hex-digits run so C doesn't
-// fold extra digits into the escape) -- string content is written back
-// out verbatim otherwise, relying on the lexer already having preserved
-// escape sequences byte-for-byte from source (confirmed: `lexes string
-// literals with escapes preserved verbatim` in the lexer's own test
-// suite), which is valid C escape syntax already.
-// - Decimal literals are emitted in FIXED-point (`format_dec(d, 6)`)
-// rather than the original's scientific-notation (`{e}`) convention --
-// both are valid C floating-point literal syntax representing the same
-// value; the original's choice wasn't semantically required, and fixed-
-// point is simpler to produce with the stdlib helpers already at hand.
+// Generic compounds, enums, impl methods, and functions are monomorphized
+// lazily, the first time a concrete instantiation is actually used. A
+// definition triggered from inside another function's body is spliced in
+// just before the enclosing top-level item rather than left nested inside
+// it (see `Codegen.hoist_insert_pos`/`emit_hoisted`). There is no
+// standalone type-checker: declared types are taken at face value, and a
+// `let` binding without one relies on the C compiler's own `__auto_type`
+// inference.
 
 imp codegen_state;
 imp typedefs;
@@ -241,15 +40,15 @@ pub enum CodegenErrorKind {
 // iterable that's itself a field access, `for a : dt.generic_args { ...
 // }`, needing to know ITS OWN element type to record `a` as a known
 // local too).
-// Result of `lookup_local_multidim` -- see `Codegen.local_multidim_names`'s
-// own doc comment.
+// A multi-dimensional array's root name and index depth; see
+// `lookup_local_multidim`.
 compound MultidimInfo {
   str root;
   num depth;
 }
 
-// Result of `infer_array_literal_elem_type_and_depth` -- see its own doc
-// comment.
+// An array literal's element type and nesting depth; see
+// `infer_array_literal_elem_type_and_depth`.
 compound ArrayLiteralElemInfo {
   str type_name;
   num depth;
@@ -261,78 +60,50 @@ compound FieldTypeInfo {
   Option<DataType> dtype;
 }
 
-// Same facts as `FieldTypeInfo`, plus the RESOLVED C text itself -- the
-// pure counterpart of `emit_receiver_and_resolve_type` (which writes
-// text as it resolves, fine for a receiver emitted exactly once inline).
-// `emit_fit`'s subject needs its text computed once but WRITTEN once per
-// branch, so resolution has to happen without touching the output buffer
-// -- see `resolve_field_chain`'s doc comment.
+// Like `FieldTypeInfo`, plus the resolved C text. Used where a receiver's
+// text needs to be computed once but written multiple times, such as a
+// `fit` subject shared across several branches.
 compound ChainResolution {
   str text;
   str type_name;
   bin is_pointer;
   Option<DataType> dtype;
-  // True only when `text` is a CALL's own rendered text (an RVALUE),
-  // set by `resolve_field_chain`'s call-as-receiver branch -- see its
-  // own doc comment. A caller that needs to take `&text` (`emit_method_
-  // call`'s non-pointer-receiver case) must hoist it into an
-  // addressable temp FIRST; every other resolution path leaves this
-  // false, `text` already a genuine addressable lvalue (a local name,
-  // or a chain of `.field`s off one).
+  // Set when `text` is a call's own rendered result (an rvalue) rather
+  // than an addressable lvalue. A caller that needs `&text` must hoist
+  // it into a temp first.
   bin is_call_result;
 }
 
-// Result of `resolve_display_dispatch`: which mangled `to_string` C
-// function to call for a variadic `format`/`println_fmt` `{}` argument
-// whose type implements `Display`, and whether the argument itself
-// (already a plain value, not yet addressed) needs an `&` first.
+// Which mangled `to_string` function to call for a `Display` argument in
+// a `format`/`println_fmt` `{}` placeholder, and whether it needs `&`
+// first.
 compound DisplayResolution {
   str fn_name;
   bin pass_by_ref;
 }
 
-// The result of monomorphizing a generic function CALL (see
-// `maybe_instantiate_generic_function`'s doc comment): the mangled
-// call-site name, plus each of the template's OWN parameters'
-// declared type ALREADY substituted against this call's concrete
-// bindings (positional, parallel to the template's own `f.args`) --
-// `emit_call` uses these to resolve a bare-shorthand ARGUMENT (`ok(
-// .None)`) against the param's ACTUAL (substituted) type, not the
-// template's raw, unsubstituted one (which could itself be a bare type
-// param like `T`, never a real enum name).
+// A monomorphized generic function call: its mangled name, plus each
+// parameter's declared type already substituted against this call's
+// concrete arguments.
 compound GenericCallResolution {
   str mangled_name;
   Vec<DataType> param_types;
-  // The callee's OWN declared return type, substituted the SAME way
-  // `param_types` is -- unlike `param_types` (always resolvable
-  // structurally from the call's own arguments), a caller needing
-  // `rtype` (`infer_let_expr_type`, for `let b = make_box(5);` where
-  // `make_box<T>(T x) Box<T>` -- the return type ITSELF is generic, not
-  // just a bare type param) has no other way to recover it once this
-  // function's own substitution context is torn down.
+  // The return type, substituted the same way. Kept separately since it
+  // can't be recovered once the substitution context is torn down.
   DataType rtype;
 }
 
-// Result of `maybe_instantiate_generic_impl_method_own_params` -- see
-// its own doc comment. `rtype` mirrors `GenericCallResolution.rtype`'s
-// own reasoning exactly: the caller (`resolve_field_chain`'s own "call
-// as receiver" case, resolving a CHAINED call's receiver type, `b.wrap(
-// "hello").get()`) has no other way to recover the COMBINED (impl's own
-// + the method's own fresh) substitution's result once this function's
-// own substitution context is torn down.
+// Result of `maybe_instantiate_generic_impl_method_own_params`: mangled
+// name plus substituted return type, for the same reason as
+// `GenericCallResolution.rtype`.
 compound OwnParamCallResolution {
   str mangled_name;
   DataType rtype;
 }
 
-// One variant's template shape within a generic enum template (see
-// `Codegen.generic_enum_names`'s doc comment): its bare name, whether it
-// carries a payload, and -- if so -- each payload position's OWN
-// pre-substitution declared type (possibly a bare occurrence of one of
-// the enclosing template's type-param names, e.g. `T` in `Some(T)`),
-// substituted per concrete instantiation the same way a generic
-// compound's own fields are (see `ensure_compound_instantiated`'s doc
-// comment).
+// One variant's shape within a generic enum template: its name, whether
+// it carries a payload, and each payload position's declared type before
+// substitution.
 compound GenericEnumVariantTemplate {
   str name;
   bin has_payload;
@@ -342,397 +113,170 @@ compound GenericEnumVariantTemplate {
 
 pub compound Codegen {
   CodegenState* state;
-  // A best-effort, function-local (reset at the start of every
-  // `emit_function`, see its own doc comment) record of which local names
-  // (parameters and `Variable` declarations seen so far, in source order)
-  // are pointer-typed, and their declared type name -- just enough to
-  // decide `.`/`->` for a plain `ident.field` access, and to build a
-  // method call's mangled callee name, without a real type-inference
-  // engine. See `emit_field_access`/`emit_method_call`'s doc comments for
-  // what this deliberately can't handle yet.
+  // Local names seen so far in the current function (reset per
+  // `emit_function`), with pointer-ness and declared type name -- enough
+  // to decide `.`/`->` for a field access and build a method call's
+  // mangled name without a real type-inference engine.
   Vec<str> local_names;
   Vec<bin> local_is_pointer;
   Vec<str> local_type_name;
-  // The FULL structured type for a local, when the call site recording
-  // it actually had one on hand (a real `Variable` declaration or
-  // function/method parameter's own `DataType`, post-substitution --
-  // see `record_local_typed`) -- `.None` for everything recorded through
-  // plain `record_local` (a name derived/synthesized from something
-  // else, like a `let`-inferred bookkeeping type, a `fit` destructuring
-  // binding, or a hand-built unit test's stand-in local). Lets a site
-  // that needs REAL structure (a generic arg, e.g. `Vec<T>`'s own `T`,
-  // not just the resolved/mangled NAME string `local_type_name` has) read
-  // it directly instead of reverse-engineering it out of a mangled name
-  // -- see `emit_for_iter`'s own doc comment for the motivating case
-  // (determining a `for item : vec_local` loop's own `item` element
-  // type, needed to support a FURTHER nested `for x : item` iteration).
+  // A local's full structured type, when known (`record_local_typed`);
+  // `.None` for a local recorded without one (`record_local`). Lets a
+  // caller read a generic argument's real structure instead of
+  // reverse-engineering it from a mangled name.
   Vec<Option<DataType>> local_dtype;
-  // Sparse (only pushed for a name that actually needs it) record of a
-  // MULTI-DIMENSIONAL raw array's own iteration-loop variable, mapping it
-  // back to the TRUE root array name and how many `[0]` index levels
-  // already separate it from that root -- see `emit_for_iter`'s own doc
-  // comment for why a nested loop's own length bound can't be computed
-  // from the loop variable's OWN (possibly pointer-decayed) value at all,
-  // only by re-indexing the ORIGINAL declared array. Searched by name,
-  // same backward-scan-for-shadowing convention as `local_names`'s own
-  // lookups, but kept as an entirely separate, parallel-but-different-
-  // length registry rather than extra columns on `local_names` itself --
-  // every one of `record_local`/`record_local_typed`'s ~20 existing call
-  // sites would otherwise need updating for a feature only `emit_for_
-  // iter`'s own multi-dim case ever populates. Reset between top-level
-  // functions (`emit_function_named`, alongside `local_dtype`) to avoid
-  // a same-named local in an unrelated LATER function reading back a
-  // stale entry; deliberately NOT threaded through the generic-function/
-  // impl-method nested-instantiation save/restore blocks `local_dtype`
-  // itself participates in -- no example in today's corpus iterates a
-  // multi-dim array from inside a generic function/impl method body, so
-  // narrowing scope to just the common (cross-FUNCTION leakage) risk
-  // avoids threading three more fields through every one of those sites
-  // for a case nothing currently exercises.
+  // Sparse record of a multi-dimensional array's iteration variable,
+  // mapping it back to the root array name and how many `[0]` levels
+  // separate it -- a nested loop's length bound can't be computed from
+  // the (possibly pointer-decayed) loop variable itself, only by
+  // re-indexing the original array. Reset between top-level functions.
   Vec<str> local_multidim_names;
   Vec<str> local_multidim_roots;
   Vec<num> local_multidim_depths;
-  // Whole-program record of every non-generic enum's name, its variants'
-  // names, and whether it's a tagged union (any variant has a payload),
-  // populated by `transpile`'s own first pass over top-level `Enum`
-  // nodes -- lets `emit_expr`/`emit_call` recognize a qualified
-  // enum-variant access (`EnumName.Variant` bare, or `EnumName.Variant(
-  // args...)` a construction call) and emit the right C, without a real
-  // type-inference engine (see `emit_field_access`/`emit_enum`'s doc
-  // comments for what's deliberately not registered here).
+  // Every non-generic enum's name, variant names, and whether it's a
+  // tagged union, so a qualified enum-variant access resolves without a
+  // real type-inference engine.
   Vec<str> enum_names;
   Vec<Vec<str>> enum_variant_names;
   Vec<bin> enum_is_tagged_union;
-  // Whole-program record of a tagged-union enum's OWN per-variant
-  // payload field types (positional, parallel to
-  // `enum_variant_payload_type_names`/`enum_variant_payload_is_pointer`)
-  // -- lets `emit_fit_enum_branch` register each destructuring binding
-  // (`.Some(t) -> { ... }`) as a KNOWN LOCAL via `record_local`, so
-  // FURTHER access on it (`t.data`, another `fit`, a method call) still
-  // resolves, instead of `t` only ever being usable as a bare value.
-  // Populated by `emit_tagged_union_enum`/`emit_tagged_union_enum_
-  // instance` (both the plain and the monomorphized path) right after
-  // computing each payload field's own resolved type, the same "already
-  // fully explicit" bookkeeping this file uses everywhere else.
+  // A tagged-union enum's per-variant payload field types, so a `fit`
+  // destructuring binding is registered as a known local and further
+  // access on it (a field, another `fit`, a method call) resolves.
   Vec<str> enum_variant_payload_owner;
   Vec<str> enum_variant_payload_variant;
   Vec<Vec<str>> enum_variant_payload_type_names;
   Vec<Vec<bin>> enum_variant_payload_is_pointer;
-  // The CURRENT function's declared return type name, refreshed at the
-  // start of every `emit_function` -- feeds `expected_enum_type` for a
-  // `ret <shorthand>;` statement's own expression (see `emit_statement`'s
-  // `StatementReturn` case).
+  // The current function's declared return type name, refreshed at the
+  // start of every `emit_function`; feeds `expected_enum_type` for a
+  // bare-shorthand `ret`.
   str current_fn_rtype_name;
-  // The same CURRENT function's return type, as a full (substituted)
-  // `DataType` rather than just its resolved name -- lets
-  // `maybe_instantiate_generic_function` fall back to CONTEXTUAL
-  // inference when a type param's binding can't be read off the call's
-  // own arguments (`ret ok(.None);` inside `_next_inner`'s real body --
-  // `ok<T>(value) Result<T, Error>` called with a bare shorthand that
-  // carries no type info by itself; `T` instead comes from matching
-  // `ok`'s own declared `Result<T, Error>` return shape POSITIONALLY
-  // against `_next_inner`'s OWN concrete return type, `Result<
-  // Option<Token>, Error>`, the same "bare occurrence only" restriction
-  // as everywhere else). See `infer_generic_function_type_param_from_
-  // context`'s doc comment for the actual matching logic.
+  // The current function's return type as a full substituted `DataType`.
+  // Lets `maybe_instantiate_generic_function` fall back to inferring a
+  // type param from the enclosing function's own return type when it
+  // can't be read off the call's arguments.
   Option<DataType> current_fn_rtype_dt;
-  // The enum name a BARE `.Variant`/`.Variant(x)` shorthand (no
-  // `EnumName.` qualifier -- `e.left`/`recv_e.left` is `.Blank`) should
-  // resolve against, standing in for the "expected type from context"
-  // this codegen doesn't have a real inference engine for. Empty when
-  // nothing in the immediately enclosing statement provides one. Scoped
-  // narrowly by the three sites that set it (`emit_statement`'s
-  // `StatementReturn`/`Variable` cases, and `emit_expr`'s `=` assignment
-  // case, each saving and restoring the previous value around just their
-  // own value/initializer/right-hand expression) rather than left set
-  // for a whole function body, so it can't leak into an unrelated
-  // shorthand elsewhere in the same function -- e.g. a `Variable`
-  // declaration's own initializer must resolve against THAT variable's
-  // declared type, not the enclosing function's return type.
+  // The enum a bare `.Variant`/`.Variant(x)` shorthand should resolve
+  // against, standing in for "the expected type from context." Empty
+  // when nothing in the enclosing statement provides one; scoped to just
+  // the statement's own value/initializer/right-hand side so it can't
+  // leak into an unrelated shorthand elsewhere in the same function.
   str expected_enum_type;
-  // The compound type name a BARE `.{ field = value, ... }` compound-
-  // literal shorthand (no `Type` before the `{` -- `ci.has_dtype ==
-  // false`) should resolve against, standing in for "the expected type
-  // from context" the same way `expected_enum_type` does for a bare
-  // `.Variant`/`.Variant(x)` enum shorthand -- see that field's own doc
-  // comment for the general shape of this pattern (this codegen has no
-  // type-checker of its own, so context has to be threaded through
-  // explicitly like this rather than resolved by an earlier pass, unlike
-  // the original transpiler's `bind_compound_init_expected`). Populated
-  // only at the ONE real site found so far (`emit_expr`'s `=` assignment
-  // case, e.g. `dtype_new`'s own real body in this codebase, `dt.flags =
-  // .{is_pointer = false, ...};`) -- an EXPLICIT `Type{...}` compound
-  // literal (`DynamicIntType{is_signed = true, bits = 8}`, also real,
-  // `typedefs.fn`'s own body) carries its own type name directly and
-  // never consults this at all.
+  // Same idea as `expected_enum_type`, for a bare `.{ field = value }`
+  // compound-literal shorthand.
   str expected_compound_type;
-  // True while emitting a context where a bare C brace-list `{...}` is the
-  // correct form for an array literal (`.Bracket(inner)` reached with no
-  // preceding indexee -- see `parser.parse_for_bracket`'s doc comment):
-  // an array variable's own initializer, a 2D array row (a literal nested
-  // inside another), or a compound-init field value. Mirrors the original
-  // transpiler's identically-named field exactly. When false, `emit_expr`
-  // rejects a bare `.Bracket` outright rather than emitting invalid C --
-  // an array literal in a general value position (a call argument, a
-  // binary operand) needs a C compound literal (`(T[]){...}`) instead,
-  // which needs an element type this codegen has no way to infer; not yet
-  // needed by anything ported so far, so deliberately unsupported rather
-  // than silently wrong.
+  // True while emitting a context where a bare `{...}` brace-list is the
+  // correct form for an array literal: an array variable's initializer, a
+  // nested row, or a compound-init field value. When false, a bare array
+  // literal is rejected outright rather than emitting invalid C.
   bin in_array_initializer;
-  // Names of every quirk that has at least one CONCRETE (non-generic)
-  // impl emitted so far -- see `emit_quirk_vtable_machinery`'s doc
-  // comment for the mechanism this backs (a quirk-typed variable's own
-  // dynamic dispatch through a vtable). A name lands here the FIRST time
-  // any impl of it is processed, which is also when its shared vtable
-  // struct/wrapper-typedef get emitted; `emit_method_call`/the
-  // `Variable`-declaration coercion check both consult this to recognize
-  // a receiver/declared-type as a QUIRK (dispatched through a vtable)
-  // rather than a concrete compound (dispatched statically). A GENERIC
-  // quirk impl (`has_type_params`) never adds its name here -- dynamic
-  // dispatch through an unbound type param has no single C vtable
-  // signature to speak of, same reasoning `emit_impl`'s own generic
-  // skip already documents.
+  // Names of every quirk with at least one concrete (non-generic) impl
+  // emitted so far, used to recognize a receiver/declared type as a
+  // quirk (dispatched through a vtable) rather than a concrete compound.
+  // A generic quirk impl never adds its name here -- dynamic dispatch
+  // through an unbound type param has no single C vtable signature.
   Vec<str> quirk_names;
-  // Keys (`<type_name>::<quirk_name>`) of every CONCRETE quirk impl whose
-  // OWN `emit_quirk_vtable_machinery` has already run -- lets `ensure_
-  // plain_type_emitted`'s own field-dependency check trigger it EARLY,
-  // out of the impl node's own normal source-order turn, for a plain
-  // compound with a quirk-typed FIELD (`compound Holder { AsyncCounter
-  // q; }`, `examples/advanced/async_quirk_await_nested_receiver.fn`'s
-  // own real body) whose vtable struct/typedef must already exist by
-  // the time `Holder`'s own body is emitted -- without a guard here,
-  // the LATER normal-pass call for the SAME impl would re-emit its own
-  // wrapper trampolines/vtable instance/coerce helper a second time
-  // ("redefinition"), since (unlike the shared vtable STRUCT itself,
-  // already deduped via `quirk_names`) nothing else gates them.
+  // Keys (`<type_name>::<quirk_name>`) of every concrete quirk impl
+  // whose vtable machinery has already run, so a plain compound with a
+  // quirk-typed field can trigger it early without the normal pass
+  // re-emitting it later.
   Vec<str> emitted_quirk_impl_vtables;
-  // Every GENERIC quirk's own DECLARATION (`quirk To<T> { fun to() T; }`),
-  // registered up front (see `transpile`'s own early registration pass)
-  // so `ensure_quirk_instantiated` can derive a CONCRETE instantiation's
-  // own vtable structurally (substituting the quirk's own type param)
-  // even when NO impl of it exists anywhere in the current translation
-  // unit -- `std/json.fn`'s own `to_json_value(To<JsonValue> value)`
-  // wrapper function references `To<JsonValue>` purely as a parameter
-  // TYPE, with the actual concrete `impl ... as To<JsonValue>` living in
-  // a completely different, importing file. A non-generic quirk
-  // (`Display`) never needs this -- its vtable is always derived from
-  // the first concrete impl `emit_quirk_vtable_machinery` happens to
-  // process, matching its own existing, unchanged behavior.
+  // Every generic quirk's own declaration, registered up front so a
+  // concrete instantiation's vtable can be derived structurally even
+  // when no impl of it exists in the current translation unit. A
+  // non-generic quirk's vtable is instead derived from its first
+  // concrete impl.
   Vec<str> quirk_decl_names;
   Vec<Vec<str>> quirk_decl_type_params;
   Vec<Vec<QuirkMethodSig>> quirk_decl_methods;
-  // Every import ALIAS name (`imp x as y;`'s own `y`) seen anywhere
-  // across the whole transitive import graph -- see
-  // `import_resolver.ProgramMergeResult`'s own doc comment for why this
-  // is the ONLY thing that survives about an alias past the flattening
-  // merge (its declarations are already merged in, unqualified, same as
-  // an unaliased import's). Set directly by the caller (`selfhost/cli/
-  // main.fn`'s `compile_file`) right after `codegen_new`, before
-  // `transpile` runs -- empty (the default) for every hand-built unit
-  // test below, which never goes through the real merge at all.
+  // Every import alias name (`imp x as y;`'s own `y`) seen across the
+  // transitive import graph. Set by the caller right after `codegen_new`;
+  // empty for a hand-built unit test.
   // 
   // Consulted wherever a `y.symbol` qualified reference could otherwise
-  // be misread as a real receiver/type: `resolve_type_name` (a
-  // declared type `y.Type`, mangled to `y__Type` by the PARSER already
-  // -- see `parser.parse_datatype`'s own doc comment -- but never
-  // un-mangled by anything downstream until this), `emit_call` (`y.
-  // func(args)`, which otherwise falls through to being misread as a
-  // method call on a receiver named `y`), and `emit_field_access` (`y.
-  // EnumName.Variant` used as a value, not a call). Each site strips a
-  // recognized `<alias>__`/`<alias>.` prefix and re-resolves the
-  // remainder exactly as if the alias segment were never there --
-  // correct precisely because every alias's OWN declarations are
-  // ALREADY merged in under their real, unqualified names.
+  // be misread as a receiver or type: `resolve_type_name` (a declared
+  // type `y.Type`, already mangled to `y__Type` by the parser),
+  // `emit_call` (`y.func(args)`), and `emit_field_access` (`y.EnumName.
+  // Variant` used as a value). Each site strips a
+  // recognized `<alias>__`/`<alias>.` prefix and resolves the rest
+  // unqualified, since an alias's own declarations are already merged
+  // in under their real names.
   Vec<str> import_aliases;
-  // Exceptions to `import_aliases`'s own "strip the alias, resolve the
-  // remainder unqualified" rule -- `<alias>::<bare_name>` keys (parallel
-  // to `alias_rename_targets`' own real, mangled callee names) for a
-  // PLAIN function whose bare name collided with one from a DIFFERENTLY
-  // aliased import and got renamed at merge time instead (see `import_
-  // resolver._rename_colliding_functions`'s own doc comment). Set
-  // alongside `import_aliases` by the same caller, from `ProgramMerge
-  // Result.alias_rename_keys`/`alias_rename_targets` -- empty (the
-  // default, same as `import_aliases`) for every hand-built unit test.
-  // `lookup_alias_rename` is the ONLY consumer; every alias-qualified
-  // call site should check it FIRST, falling back to the unqualified
-  // bare name when nothing matches (overwhelmingly the common case).
+  // Exception to the rule above: `<alias>::<bare_name>` -> the real
+  // mangled name, for a function that collided with a differently
+  // aliased import and got renamed at merge time (see `import_resolver.
+  // _rename_colliding_functions`). Checked by `lookup_alias_rename`
+  // before falling back to the plain unqualified name.
   Vec<str> alias_rename_keys;
   Vec<str> alias_rename_targets;
-  // `defer <body>;` support: a FLAT list of every pending deferred
-  // statement body currently in scope, across ALL nested blocks of the
-  // function being emitted right now (registered in source order by
-  // `emit_statement`'s `.StatementDefer` case), plus a stack of frame
-  // markers (each an index into `defer_stack` where that block's OWN
-  // defers begin, pushed/popped by `emit_statements` around its own
-  // statement loop -- see its doc comment). Mirrors the original
-  // transpiler's `defer_stack`/`defer_scope_stack` pair, simplified: this
-  // codegen doesn't yet distinguish a LOOP frame from a plain block frame
-  // (no real `break`/`continue`-past-a-`defer` usage has been found yet
-  // to require it -- see `emit_function_scope_defers`'s doc comment for
-  // the resulting limitation), so there is only ever "the current
-  // block's own frame" and "everything back to function entry".
-  // Deferred bodies are never actually POPPED off `defer_stack` by an
-  // early exit (a `ret` inside a nested block) -- only replicated as
-  // ordinary C statements at that exit point (`emit_defers_from`) -- the
-  // ACTUAL pop happens once, when the owning block finishes being
-  // emitted at all (`emit_statements`' own `pop_defer_scope` call),
-  // regardless of how many early-exit copies were already emitted from
-  // it. This is the standard compile-time "replicate the cleanup at
-  // every exit point" lowering (no runtime unwind table), matching the
-  // original.
+  // `defer` support: every pending deferred statement body in scope for
+  // the function being emitted, in source order, plus a stack of frame
+  // markers (an index into `defer_stack` where each block's own defers
+  // begin). Doesn't yet distinguish a loop frame from a plain block
+  // frame. A deferred body is replicated as ordinary statements at each
+  // early exit; the real pop happens once, when the owning block
+  // finishes.
   Vec<Node*> defer_stack;
   Vec<num> defer_scope_starts;
-  // Whole-program record of every non-generic compound's name and its
-  // fields' declared types, populated by `emit_compound`'s own emission
-  // pass -- lets a CHAINED field access (`a.b.c`) determine `.`/`->` at
-  // each link by looking up the PREVIOUS link's resolved type's field,
-  // instead of just the outermost receiver's (see
-  // `emit_receiver_and_resolve_type`'s doc comment).
+  // Every non-generic compound's name and its fields' declared types, so
+  // a chained field access can determine `.`/`->` at each link.
   Vec<str> compound_names;
   Vec<Vec<str>> compound_field_names;
   Vec<Vec<str>> compound_field_type_names;
   Vec<Vec<bin>> compound_field_is_pointer;
-  // The FULL, un-mangled declared `DataType` for each field, when the
-  // recording call site had one on hand -- see `FieldTypeInfo.dtype`'s
-  // doc comment for why (a field-access iterable's own element type,
-  // `for a : dt.generic_args { ... }`).
+  // Each field's full, un-mangled declared type, when known.
   Vec<Vec<Option<DataType>>> compound_field_dtype;
-  // Whole-program record of every impl method's owning type, its OWN
-  // bare name, and its FULLY MANGLED C call-site name -- populated by
-  // `register_impl_methods`' own dedicated pre-pass (see `transpile`'s
-  // doc comment for why this can't just happen as a side effect of
-  // `emit_impl` itself). A PLAIN impl's method mangles to
-  // `Type__method`; a QUIRK-implementing impl's mangles to
-  // `Type__Quirk__method` instead (`_parse_impl_method`'s own scheme in
-  // the parser -- codegen doesn't invent this, it only has to
-  // reconstruct which one applies at a CALL site). Lets
-  // `emit_method_call` resolve the right one regardless of which kind of
-  // impl actually defined the method being called.
+  // Every impl method's owning type, bare name, and fully mangled
+  // call-site name. A plain impl's method mangles to `Type__method`; a
+  // quirk-implementing impl's mangles to `Type__Quirk__method`.
   Vec<str> impl_method_owner_type;
   Vec<str> impl_method_bare_name;
   Vec<str> impl_method_mangled_name;
-  // Each entry's OWN declared return type, parallel to the three arrays
-  // above -- lets `emit_fit` resolve a bare-shorthand enum pattern
-  // (`.Some(x) -> { ... }`) against a `fit self.method() { ... }`
-  // subject (a CALL, not a plain local) by looking up the CALLEE's own
-  // declared return type instead of a local's, then hoisting a temp
-  // `__auto_type` variable to hold the call's result (see
-  // `emit_fit`'s doc comment for why a call subject specifically needs
-  // one). Populated ONLY for a PLAIN (non-generic) impl's methods, by
-  // `register_impl_methods` -- a generic impl's own monomorphized
-  // methods aren't registered here yet (a separate, smaller follow-up:
-  // `maybe_instantiate_generic_impl_methods` would need to resolve the
-  // SUBSTITUTED return type, not the template's raw `T`).
+  // Each method's declared return type, parallel to the three arrays
+  // above. Populated only for a plain (non-generic) impl's methods.
   Vec<DataType*> impl_method_rtype;
-  // Each entry's OWN declared PARAMETER types (positional, excluding
-  // the implicit `self` receiver), parallel to the arrays above -- lets
-  // `emit_method_call` resolve a bare enum-variant shorthand
-  // (`self.local_dtype.push(.None)`, e.g. `ensure_compound_
-  // instantiated`'s own real body found continuing the stage-2 self-
-  // compilation attempt) passed as a METHOD CALL argument against the
-  // callee's own declared parameter type at that position, the exact
-  // same thing `lookup_function_param_type`/`emit_call` already do for
-  // a PLAIN function call -- `emit_method_call` had no equivalent at
-  // all before this, rejecting every bare shorthand passed to a
-  // method. Populated for both a plain impl's methods
-  // (`register_impl_methods`) and a generic impl's own monomorphized
-  // methods (`maybe_instantiate_generic_impl_methods`, substituted the
-  // same way `impl_method_rtype` already is there).
+  // Each method's declared parameter types, excluding the implicit
+  // `self`, parallel to the arrays above.
   Vec<Vec<DataType *>> impl_method_param_types;
-  // Each impl method's own trailing DEFAULT parameter VALUES (`pub
-  // add(num x = 10) num { ... }`), parallel to `impl_method_param_types`
-  // -- an entry's own `Vec<Node*>` is parallel to the METHOD's declared
-  // params too (excluding `self`), holding `nil` for a param with no
-  // default. `emit_method_call` reads these to fill in any OMITTED
-  // trailing arguments at a call site (`c.add()` -> `c.add(10)`) --
-  // defaults are evaluated at the CALL SITE (this language's own rule,
-  // see `examples/advanced/default_params.fn`), so re-emitting the
-  // SAME default expression per call site, rather than caching one
-  // shared value, is correct, not wasteful. Populated by `register_
-  // impl_methods` alongside `impl_method_param_types` -- and, for a
-  // GENERIC impl's own monomorphized methods, by `maybe_instantiate_
-  // generic_impl_methods` too (`std/channel.fn`'s own real
-  // `select_recv_timeout_with_tuning_cancel(..., num timeout_ms = -1,
-  // ...)`, a `Channel<T>` method with 4 defaulted trailing params,
-  // found via a real "too few arguments" C error one generation into
-  // self-hosting): a default expression needs no type substitution of
-  // its own (it's evaluated fresh at the CALL SITE, never through this
-  // instantiation's substitution context at all), so the template's
-  // own node is recorded as-is, unlike every OTHER field here.
+  // Each impl method's trailing default parameter values, parallel to
+  // `impl_method_param_types`; `nil` for a parameter with no default.
+  // Defaults are evaluated fresh at the call site, so re-emitting the
+  // same expression per call is correct, not wasteful.
   Vec<Vec<Node *>> impl_method_default_values;
-  // A PLAIN top-level function's own name and its parameters' OWN
-  // declared types (positional, parallel Vecs) -- lets `emit_call`
-  // resolve a bare enum-variant shorthand (`.Parse`) passed as a CALL
-  // ARGUMENT (`err_kind(.Parse, "msg", 0)`, e.g. `_read_comment_block`'s
-  // real body in the self-hosted lexer's own source) against the
-  // CALLEE's own declared parameter type at that position, the same
-  // "expected type from the one place that actually declares it, not
-  // real inference" trick as `Codegen.expected_enum_type`'s other three
-  // sites. Populated by `register_function_signatures`, a whole-program
-  // pre-pass over every top-level `Function` node (see `pub transpile`'s
-  // doc comment for why forward references need their own pass, same
-  // reasoning as `register_impl_methods`) -- NOT populated for an impl
-  // method's own params (a separate, narrower case: `emit_method_call`'s
-  // args don't go through this lookup yet).
+  // Every plain top-level function's name and declared parameter types,
+  // so a bare enum-variant shorthand passed as a call argument resolves
+  // against the callee's own declared parameter type.
   Vec<str> function_names;
   Vec<Vec<DataType *>> function_param_types;
-  // Each plain top-level function's own trailing DEFAULT parameter
-  // VALUES, parallel to `function_param_types`/`function_names` -- see
-  // `Codegen.impl_method_default_values`'s own doc comment for the
-  // exact same mechanism, just for a plain function instead of a
-  // method. Populated by `register_function_signatures`.
+  // Each plain top-level function's trailing default parameter values,
+  // parallel to `function_param_types`/`function_names`.
   Vec<Vec<Node *>> function_default_values;
-  // Whether each registered plain function is variadic (`fun f(str fmt,
-  // ...)`), parallel to `function_names` -- see `emit_call`'s own doc
-  // comment for why a CALL site needs to know this (extra `__fun_vtags`
-  // type-tag argument, plus the real varargs, instead of a plain
-  // argument list).
+  // Whether each registered plain function is variadic, parallel to
+  // `function_names`.
   Vec<bin> function_is_variadic;
-  // Each entry's OWN declared return type, parallel to `function_names`
-  // -- lets `infer_arg_type_name` bind a generic function's type
-  // parameter from a call-site argument that's ITSELF a call to an
-  // already-registered plain function (`err_kind(.Parse, "msg",
-  // token_zero())`, binding `T` from `token_zero`'s own `Token` return
-  // type -- see `maybe_instantiate_generic_function`'s doc comment).
+  // Each function's declared return type, parallel to `function_names`.
   Vec<DataType*> function_rtypes;
-  // Every GENERIC top-level function (`fun err_kind<T>(...) ...`),
-  // recorded whole by `register_function_signatures` when it sees
-  // `has_type_params`, instead of registering it into `function_names`
-  // -- see `maybe_instantiate_generic_function`'s doc comment for how
-  // (and when) one gets monomorphized.
+  // Every generic top-level function, recorded whole rather than
+  // registered into `function_names` -- monomorphized lazily from its
+  // own call site.
   Vec<Node> generic_function_templates;
-  // A generic COMPOUND template (`compound Box<T> { ... }`): its name,
-  // type-param names, and each field's OWN pre-substitution declared
-  // type -- recorded by `emit_compound` when it sees `has_type_params`,
-  // WITHOUT emitting any C (a template is never emitted directly, only
-  // a concrete monomorphization of it -- see
-  // `ensure_compound_instantiated`'s doc comment).
+  // A generic compound template: its name, type-param names, and each
+  // field's declared type before substitution. A template is never
+  // emitted directly, only a concrete monomorphization of it.
   Vec<str> generic_compound_names;
   Vec<Vec<str>> generic_compound_type_params;
   Vec<Vec<str>> generic_compound_field_names;
   Vec<Vec<str>> generic_compound_field_type_names;
   Vec<Vec<bin>> generic_compound_field_is_pointer;
-  // Each field's OWN full pre-substitution `DataType*` (the same AST
-  // node `emit_compound` read `field_type_names`'s string from,
-  // KEEPING its own `generic_args` -- unlike `field_type_names`, which
-  // only ever kept the bare `type_str`, silently dropping them). Needed
-  // so `ensure_compound_instantiated` can substitute a field whose OWN
-  // type is ITSELF a nested generic instantiation using one of the
-  // template's own params (`Map<T, bin> map;` inside `compound Set<T>`,
-  // e.g.) via `resolve_type_subst`, not just a BARE occurrence of a
-  // param (`T value;`) -- see `ensure_compound_instantiated`'s own doc
-  // comment for the substitution this enables.
+  // Each field's full pre-substitution type, generic arguments included,
+  // so a field whose own type is itself a nested generic instantiation
+  // can be substituted correctly.
   Vec<Vec<DataType *>> generic_compound_field_dtypes;
-  // A generic ENUM template (`enum Option<T> { ... }`): its name,
-  // type-param names, and each variant's OWN pre-substitution template
-  // shape -- recorded by `emit_enum` when it sees `has_type_params`,
-  // WITHOUT emitting any C, same reasoning as the generic COMPOUND
-  // registry above (see `ensure_enum_instantiated`'s doc comment).
+  // A generic enum template: its name, type-param names, and each
+  // variant's shape before substitution.
   Vec<str> generic_enum_names;
   Vec<Vec<str>> generic_enum_type_params;
   Vec<Vec<GenericEnumVariantTemplate>> generic_enum_variants;
-  // Mangled names already monomorphized (see `ensure_compound_
-  // instantiated`/`ensure_enum_instantiated`), so instantiating the SAME
+  // Mangled names already monomorphized, so instantiating the same
   // concrete type arguments twice doesn't emit a duplicate C typedef --
   // shared across both compound and enum instantiations, since their
   // mangled names are drawn from the same namespace (a compound and an
@@ -800,225 +344,96 @@ pub compound Codegen {
   Vec<str> emitted_method_own_param_insts;
   // Every PLAIN (non-generic) impl method that already got its own
   // inline forward-declared bare prototype from `ensure_plain_impl_
-  // method_prototype_emitted`, keyed `"<owner_type>::<bare_name>"` --
-  // see that function's own doc comment. Kept separate from `emitted_
-  // generic_impl_methods` (different key shape, different meaning: this
-  // one is about ONE specific already-non-generic method, never a
-  // per-instantiation monomorphization).
+  // method_prototype_emitted`, keyed `"<owner_type>::<bare_name>"`. Kept
+  // separate from `emitted_generic_impl_methods`: this is one specific
+  // non-generic method, never a per-instantiation monomorphization.
   Vec<str> emitted_plain_method_protos;
-  // Every PLAIN top-level FUNCTION (not an impl method) that already got
-  // its own inline forward-declared bare prototype from `ensure_plain_
-  // function_prototype_emitted`, keyed by its own bare name -- same
-  // reasoning as `emitted_plain_method_protos`, just for a plain
-  // function instead of a method (no `owner_type`/`self` involved).
+  // Every plain top-level function that already got its own inline
+  // forward-declared prototype, keyed by bare name.
   Vec<str> emitted_plain_function_protos;
-  // A FIFO work queue of (owner mangled name, bare method name) pairs
-  // still needing their actual prototype+body emitted -- see `ensure_
-  // generic_impl_method_emitted`'s own doc comment for why this can't
-  // just emit immediately and recurse: a generic impl method's own body
-  // may call ANOTHER not-yet-emitted method of the same (or a
-  // different) instantiation (`Vec<T>`'s real `sort`/`max_opt` call
-  // `self.swap`/`self.max`), and by the time that inner call is
-  // reached, `self.state` is already swapped to the OUTER method's own
-  // in-progress scratch buffer -- splicing a full function DEFINITION
-  // in there would land it inside the outer method's C braces, which
-  // (unlike a nested TYPE dependency, always legal at block scope) is
-  // not valid C. Queuing instead of recursing lets the OUTERMOST call
-  // (the one where `self.state` still legitimately points at the real
-  // top-level output) drain every entry -- including ones enqueued
-  // WHILE draining -- each with its own clean scratch-swap against that
-  // same real buffer, never nested inside another method's own.
+  // A FIFO queue of (owner mangled name, bare method name) pairs still
+  // needing their prototype and body emitted. A generic impl method's
+  // body may call another not-yet-emitted method of the same
+  // instantiation; queuing instead of emitting immediately lets the
+  // outermost call drain every entry against the real output buffer,
+  // never nested inside another method's own braces.
   Vec<str> pending_generic_impl_method_owner;
   Vec<str> pending_generic_impl_method_bare;
-  // Parallel to the two queues above: whether THIS entry's own
-  // prototype was already written immediately at discovery time (see
-  // `ensure_generic_impl_method_emitted`'s own doc comment) -- false
-  // only for an entry discovered while `suppress_generic_impl_method_
-  // draining` was set, whose prototype the drain loop still needs to
-  // write itself, once, before processing its body.
+  // Parallel to the queue above: whether this entry's prototype was
+  // already written at discovery time. False only for an entry
+  // discovered while draining was suppressed, whose prototype the drain
+  // loop still needs to write itself before the body.
   Vec<bin> pending_generic_impl_method_proto_written;
-  // How many entries at the FRONT of the two queues above have already
-  // been processed -- `drain_pending_generic_impl_methods` resumes from
-  // here instead of restarting at index 0 every time it's called (which
-  // happens repeatedly over a real program's life, once per brand-new
-  // generic impl method reached at the top level). Without this, a
-  // SECOND, unrelated drain call would silently re-emit every method
-  // from a PREVIOUS drain all over again -- the entries are never
-  // removed from the queue (memoization already prevents them being
-  // enqueued a second time; this cursor is what prevents them being
-  // PROCESSED a second time).
+  // How many entries at the front of the queue have already been
+  // processed, so a later, unrelated drain resumes instead of
+  // re-processing everything from the start.
   num pending_generic_impl_method_cursor;
-  // True for the duration of the OUTERMOST `ensure_generic_impl_method_
-  // emitted` call's drain loop -- a call arriving while this is already
-  // true (triggered from inside another queued method's own body) just
-  // enqueues and returns, trusting the drain loop already running
-  // further up the call stack to reach it.
+  // True for the duration of the outermost drain loop. A call arriving
+  // while this is already true just enqueues and returns.
   bin draining_generic_impl_methods;
-  // True while `self.state` points at a throwaway TEXT-CAPTURE probe
-  // rather than the real output buffer -- `resolve_field_chain`'s
-  // call-as-receiver case is the one existing example: it swaps `self.
-  // state` to a scratch buffer purely to capture a call expression's
-  // own rendered C text (to embed inline in a field-access chain),
-  // WITHOUT going through `emit_hoisted`'s usual splice-into-the-real-
-  // buffer machinery. A generic impl method reached for the first time
-  // INSIDE such a probe can't be emitted right there (there's no way to
-  // splice a definition into the probe's own tiny buffer and have it
-  // land anywhere sensible) -- setting this suppresses `ensure_generic_
-  // impl_method_emitted`'s own immediate drain, so it just enqueues;
-  // the probe itself drains the queue right after restoring `self.
-  // state` back to the real buffer, using that now-correct context.
-  // Found via a real crash (`emit_hoisted` -> `StringBuilder.append` ->
-  // null deref): the probe's OWN swap never suspended `hoist_insert_
-  // pos` either, so a nested drain spliced at a position measured
-  // against the REAL buffer's length into the probe's much smaller one.
+  // True while `self.state` points at a throwaway text-capture probe
+  // (`resolve_field_chain`'s call-as-receiver case, capturing a call's
+  // rendered text without going through the usual splice machinery).
+  // A generic impl method reached for the first time inside such a
+  // probe can't be spliced there, so this suppresses immediate draining
+  // in favor of enqueuing; the probe drains the queue itself once it
+  // restores the real buffer.
   bin suppress_generic_impl_method_draining;
-  // The ACTIVE type-param substitution for a generic impl method
-  // currently being monomorphized (see
-  // `maybe_instantiate_generic_impl_methods`) -- parallel arrays, `
-  // type_subst_param_names.get(i)` (one of the impl's OWN type-param
-  // names, e.g. `"T"`) substitutes to `type_subst_arg_type_strs.get(i)`/
-  // `type_subst_arg_is_pointer.get(i)` (this instantiation's concrete
-  // argument). Empty (the default, and restored to empty around any
-  // nested instantiation -- see that function's doc comment) means no
-  // substitution is active, so `resolve_type_subst` is a free no-op for
-  // every ordinary (non-generic-impl-method) emission -- this is NOT a
-  // general type-inference mechanism, just enough to re-resolve a bare
-  // occurrence of the impl's own type param (see `resolve_type_subst`'s
-  // doc comment for exactly what shape it handles).
+  // The active type-param substitution for a generic impl method
+  // currently being monomorphized: parallel arrays mapping each of the
+  // impl's own type-param names to this instantiation's concrete
+  // argument. Empty means no substitution is active.
   Vec<str> type_subst_param_names;
   Vec<str> type_subst_arg_type_strs;
   Vec<bin> type_subst_arg_is_pointer;
-  // Each argument's OWN full, structural `DataType*` (the SAME AST-
-  // owned pointer `type_subst_arg_type_strs`/`type_subst_arg_is_
-  // pointer` were themselves flattened FROM), parallel to those two --
-  // kept SEPARATELY because a bare-param substitution previously always
-  // rebuilt a brand-new `DataType` from just the flat mangled STRING
-  // (`type_subst_arg_type_strs.get(i)`), which is a dead end for a
-  // FURTHER-generic argument (substituting `T` -> `Vec<GenericEnum
-  // VariantTemplate>` inside `Vec<T>.get()`, e.g., a real shape hit
-  // continuing the stage-2 self-compilation attempt): the rebuilt
-  // `DataType` had NO `generic_args` of its own, only the already-
-  // mangled flat name ("Vec__GenericEnumVariantTemplate") as an opaque
-  // `type_str` -- so a LATER consumer needing the substituted type's
-  // OWN structure (`emit_for_iter`'s "what's this Vec's element type"
-  // check, e.g.) had nothing to work with. `resolve_type_subst` now
-  // prefers copying the FULL entry here (when present) over the flat-
-  // string reconstruction, which is kept only as a fallback for call
-  // sites (mostly hand-built unit tests) that populate the OLDER two
-  // arrays directly without this one.
+  // Each argument's full structural type, parallel to the two arrays
+  // above, kept separately so a further-generic argument substitutes
+  // with its own generic arguments intact rather than collapsing to an
+  // opaque mangled name.
   Vec<DataType*> type_subst_arg_dtypes;
-  // Where a lazily-monomorphized struct/enum typedef or generic impl
-  // method definition should land in `self.state.out`, instead of at
-  // whatever position happens to be CURRENT when it's first triggered
-  // (which, for a type first used inside a function's own body -- the
-  // common case, not an edge case -- would nest the definition INSIDE
-  // that function's `{ }`; harmless for a typedef (block-scoped, valid
-  // C), but a hard syntax error for an impl method's own FUNCTION
-  // DEFINITION, which C never allows nested). `.None` (the default, and
-  // what every hand-built unit test below leaves it at, since none of
-  // them call `pub transpile`) means "no enclosing top-level
-  // function/impl is being tracked -- just append at the current tail,"
-  // preserving every existing test's exact expected output. `pub
-  // transpile` sets this to `.Some(<position right before this
-  // top-level item's own emission started>)` around each `emit_impl`/
-  // `emit_function` call in its own passes, so a definition triggered
-  // from inside gets spliced in just before that enclosing item instead
-  // -- see `emit_hoisted`'s doc comment for the actual splice mechanism.
+  // Where a lazily-monomorphized typedef or generic impl method
+  // definition should be spliced, instead of wherever the current
+  // output happens to be when it's first triggered (which, for a type
+  // used inside a function body, would nest a method definition inside
+  // that function's braces -- invalid C). `.None` means append at the
+  // current tail.
   Option<num> hoist_insert_pos;
-  // Position right before the CURRENTLY-executing statement's own first
-  // character -- updated by `emit_statements` before dispatching each
-  // statement in a body (including nested bodies, e.g. an `if`/`for`
-  // block's own statements). Lets a lazily-triggered generic-impl-method
-  // PROTOTYPE (`emit_generic_impl_method_prototype_now`) land as its own
-  // separate declaration statement right before the CURRENT one, rather
-  // than at `self.state`'s live tail -- safe when the current statement
-  // hasn't started yet, but wrong the moment ANYTHING'S already been
-  // written for it (`__auto_type line = <here>`), which would otherwise
-  // split one statement into two, invalid C. `.None` outside any
-  // statement list (mirrors `hoist_insert_pos`'s own `.None` meaning).
+  // Position right before the currently executing statement, updated
+  // before dispatching each statement in a body. Lets a lazily-triggered
+  // prototype land as its own declaration right before the current
+  // statement rather than at the live tail.
   Option<num> current_stmt_start_pos;
-  // Unique counter for `resolve_field_chain`'s own call-as-receiver
-  // temp-variable names (`__fun_recv_tmp0`, `__fun_recv_tmp1`, ...) --
-  // see that branch's own doc comment for why a CALL receiver needs one
-  // at all.
+  // Unique counter for `resolve_field_chain`'s call-as-receiver temp
+  // names.
   num call_recv_temp_counter;
-  // Unique counter for `emit_for_iter`'s own Set/Map Iterator-protocol
-  // temp-variable names (`__fun_iter_it0`/`__fun_iter_opt0`, ...) -- same
-  // reasoning as `call_recv_temp_counter` just above, a fixed name would
-  // collide the moment two sibling `for`-over-a-Set/Map loops land in the
-  // same block (or one nests inside the other).
+  // Unique counter for `emit_for_iter`'s Set/Map iterator temp names.
   num for_iter_temp_counter;
-  // How many levels deep the codegen is CURRENTLY nested inside one of
-  // its own "private" scratch buffers with `hoist_insert_pos`/`current_
-  // stmt_start_pos` suspended to `.None` (0 when not nested at all) --
-  // `resolve_field_chain`'s call-as-receiver swap, `emit_one_generic_
-  // impl_method`/`maybe_instantiate_generic_impl_method_own_params`'s own
-  // method-body swap, and `maybe_instantiate_generic_function`'s own
-  // function-body swap all participate in this SAME counter, because any
-  // of them can trigger one of the OTHERS recursively (a multi-level
-  // chained call used as a receiver, `logger_init(.Info).with_timestamps(
-  // false).named("app")`; or a generic function instantiated for the
-  // FIRST time from inside a generic impl method's OWN first
-  // instantiation, `Person<T>.new`'s body calling `some("none")`,
-  // `examples/stdlib/math_rand_option_aliases.fn`'s own real body) while
-  // still nested inside an OUTER one's own scratch buffer. `root_state`/
-  // `root_hoist_pos`/`root_stmt_start_pos` are captured ONLY the moment
-  // this goes from 0 to 1 (the TRUE outermost real buffer/positions,
-  // before ANY nesting) -- a deeper 1-to-2 (or beyond) transition leaves
-  // them alone, since they already hold the right target.
-  // 
-  // `emit_hoisted` itself reads `root_hoist_pos` (instead of just
-  // appending inline to whatever `self.state` currently is, its usual
-  // `hoist_insert_pos.is_none()` fallback) whenever `hoist_scratch_depth
-  // > 0` -- otherwise a definition hoisted from deep inside a nested
-  // scratch lands INSIDE that scratch's own in-progress text instead of
-  // at a real top-level position, corrupting whatever statement/
-  // expression the scratch was building (observed as a full function
-  // definition spliced mid-expression into an unrelated return
-  // statement). `emit_method_call`'s own receiver-temp-hoist additionally
-  // reads `root_stmt_start_pos` directly (STATEMENT-granularity, not
-  // `root_hoist_pos`'s coarser one) when it specifically needs to land a
-  // temp-declaration STATEMENT right before the current statement rather
-  // than wherever `hoist_insert_pos` already points.
+  // How many levels deep the codegen is nested inside one of its own
+  // scratch buffers with `hoist_insert_pos`/`current_stmt_start_pos`
+  // suspended (0 when not nested). Several scratch-buffer swaps share
+  // this counter since any can trigger another recursively. `root_
+  // state`/`root_hoist_pos`/`root_stmt_start_pos` are captured only on
+  // the 0-to-1 transition, holding the true outermost buffer and
+  // positions; `emit_hoisted` reads them instead of the live (nested)
+  // ones whenever this is above zero.
   num hoist_scratch_depth;
   CodegenState* root_state;
   Option<num> root_hoist_pos;
   Option<num> root_stmt_start_pos;
-  // Unique counter for `emit_fit`'s own call-subject temp-variable
-  // names (`__fit_subj1`, `__fit_subj2`, ...), same reasoning as
-  // `call_recv_temp_counter` just above -- a FIXED name collided with
-  // a C "redefinition" error the moment a function's body had more
-  // than one `fit <call-expression> { ... }` in the same block scope
-  // (`examples/advanced/channel_recv_result.fn`'s own real `main`,
-  // found via a real "redefinition of '__fit_subj'" C error).
+  // Unique counter for `emit_fit`'s call-subject temp names.
   num fit_subj_temp_counter;
-  // Whether ANY `fork` statement appears anywhere in the program being
-  // transpiled -- computed once by `uses_fork_in` at the very start of
-  // `pub transpile`, before the prelude is written, mirroring the
-  // original implementation's own `uses_fork` field/pre-scan. Not yet
-  // read by anything (the M:N scheduler this eventually selects between
-  // is a later slice of this port); `write_prelude` currently always
-  // emits the plain, scheduler-less watchdog.
+  // Whether any `fork` statement appears in the program, computed once
+  // before the prelude is written.
   bin uses_fork;
-  // Whether the program defines its OWN top-level function under a name
-  // `<math.h>` also declares -- computed once by `program_defines_libm_
-  // colliding_name` at the very start of `pub transpile`, same as
-  // `uses_fork` just above. `write_prelude` skips `#include <math.h>`
-  // when true -- see that function's own doc comment.
+  // Whether the program defines its own top-level function under a name
+  // `<math.h>` also declares; `write_prelude` skips `#include <math.h>`
+  // when true.
   bin skip_math_h;
-  // True while emitting `main`'s own body -- `.StatementReturn`
-  // consults this to decide whether `ret <expr>;` can write the real
-  // expression (only when `main`'s OWN declared return type is a
-  // scalar `num`) or must discard it entirely (any other declared
-  // type, matching `main`'s forced-`int` C signature -- see
-  // `emit_function_named`'s own doc comment: returning a STRUCT/enum
-  // value from a function C itself declares to return `int` is a
-  // real compile error, not just an implicit-narrowing warning).
-  // Saved/restored around any NESTED function-body emission (a
-  // lazily-triggered generic method/plain type dependency reached
-  // from inside `main`'s own body) the same way `current_fn_rtype_
-  // name`/`_dt` already are, so that unrelated inner function's OWN
-  // `ret` statements never inherit `main`'s special handling.
+  // True while emitting `main`'s own body. `main`'s forced `int` C
+  // signature means `ret <expr>;` can only emit the real expression when
+  // its declared return type is a scalar `num`; any other type discards
+  // it. Saved and restored around any nested function-body emission so
+  // an inner function's own returns don't inherit this.
   bin in_main;
 }
 
@@ -1192,9 +607,8 @@ fun uses_fork_in(Vec<Node> nodes) bin {
 // includes `<math.h>` unconditionally (same "no way to see which std.c.*
 // modules a program imports" reasoning as every other header there), but
 // a program's OWN same-named function (`std/log.fn`'s own real `pub fun
-// log(LogLevel level, str msg) { ... }`, found via a real "conflicting
-// types for 'log'" C error once BOTH this and the math.h fix landed)
-// then collides with libm's declaration of the same bare name. Checked
+// log(LogLevel level, str msg) { ... }`) then collides with libm's
+// declaration of the same bare name. Checked
 // once, before the prelude is written (mirrors `uses_fork_in`'s own
 // pre-scan), so `write_prelude` can skip the `#include` entirely in that
 // case -- a program defining its own `log`/`pow`/etc. is never ALSO
@@ -1238,22 +652,8 @@ fun program_defines_libm_colliding_name(Vec<Node> nodes) bin {
   ret false;
 }
 
-// Adjusts a tracked buffer position (`hoist_insert_pos`/`current_stmt_
-// start_pos`, or a plain LOCAL that captured one of them mid-function)
-// for a splice that just happened at `splice_at`, `splice_len` bytes
-// long: any tracked position AT OR AFTER the splice point shifts right
-// by `splice_len` (everything from `splice_at` onward moved to make
-// room for the inserted text); a position strictly BEFORE it is
-// unaffected. `emit_hoisted` already applies this automatically to
-// `self.current_stmt_start_pos` on every splice -- this same adjustment
-// is also needed, by hand, for any LOCAL variable that captured a
-// position (`saved_proto_hoist_pos`, e.g.) BEFORE a splice happened at
-// an earlier-or-equal position, then gets restored to `self.hoist_
-// insert_pos` AFTER -- a plain captured local has no way to get this
-// automatically. Found via a real stage-2 self-compilation C error (a
-// generic impl method's own FULL BODY spliced mid-statement, inside an
-// unrelated function -- its own captured "restore to" position had
-// gone stale by exactly one earlier splice's length).
+// Shifts a tracked buffer position right by `splice_len` if it falls at
+// or after `splice_at`, to account for text just spliced in there.
 fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Option<num> {
   if pos.is_none() {
     ret pos;
@@ -1273,15 +673,10 @@ fun dtype_is_pointer(DataType dt) bin {
   ret dt.flags.is_pointer;
 }
 
-// True for an UNSIZED array type (`T[]`, no bracket dimension, e.g.
-// `Channel<T>`'s own real `T[] data;` ring-buffer field) -- such a field
-// decays to a plain C pointer (`T*`), same as any unsized C array
-// parameter/field, so it needs the SAME `*`-emission and `field_is_
-// pointer` bookkeeping a real pointer field gets. A SIZED array
-// (`T[3]`, `dt.array_brackets.len > 0`) is intentionally excluded --
-// that's a genuinely fixed-size inline array, not pointer-equivalent,
-// and stays an unsupported/unhandled shape here (see `emit_compound`'s
-// doc comment).
+// True for an unsized array type (`T[]`, no bracket dimension) -- such a
+// field decays to a plain C pointer, the same as an unsized C array
+// parameter. A sized array (`T[3]`) is excluded; it stays a fixed-size
+// inline array.
 fun dtype_is_array_as_pointer(DataType dt) bin {
   if !dt.is_array {
     ret false;
@@ -1292,14 +687,10 @@ fun dtype_is_array_as_pointer(DataType dt) bin {
   ret dt.array_depth <= 1;
 }
 
-// True when `dt` matches a constraint NAME from an `impl Vec<T: num |
-// dec>`-style forced-instantiation list (`"num"`, `"dec"`, `"str"`,
-// ...). A builtin scalar matches by its own KIND (`dt.kind`); a named
-// type (`kind == .Unknown`) matches by its bare `type_str`, or by the
-// base name before a mangled `__` separator (so a constraint naming a
-// generic template's own bare name, e.g. `"Vec"`, matches an already-
-// mangled instantiation like `"Vec__num"`). Mirrors the original
-// transpiler's own `checked_type_matches_constraint_name`.
+// True when `dt` matches a constraint name from an `impl Vec<T: num |
+// dec>`-style forced-instantiation list. A builtin scalar matches by
+// kind; a named type matches by its bare name, or by the base name
+// before a mangled `__` separator.
 fun dtype_matches_constraint_name(DataType dt, str expected) bin {
   fit dt.kind {
     .Num -> { ret equals(expected, "num"); }
@@ -1322,26 +713,10 @@ fun dtype_matches_constraint_name(DataType dt, str expected) bin {
   }
 }
 
-// True when `gargs` (a generic impl instantiation's own concrete
-// arguments, positional) is allowed by `forced_insts` -- one of the
-// concrete-type combinations listed in an `impl Vec<T: num | dec>`-
-// style constraint, parsed into `ImplNode.type_param_forced_insts`
-// (`[["num"], ["dec"]]`, one inner list per allowed combination, each
-// inner list positional-matching `gargs`). `has_forced == false` means
-// an UNCONSTRAINED template (`impl Vec<T> { ... }`) -- always allowed,
-// matching every instantiation, same as before this check existed.
-// 
-// Selfhost codegen parses `type_param_forced_insts` (see `ImplNode`'s
-// own doc comment in ast.fn) but never consulted it anywhere -- found
-// via a real stage-2 self-compilation C error: `impl Vec<T: num |
-// dec> { sort, contains, min, max, sum }` (real stdlib shape, plus a
-// separate concrete `impl Vec<str> { ... }` providing str-specific
-// overrides) matched `Vec<str>`/`Vec<FitBranch>`/etc. just as readily
-// as `Vec<num>`, since NOTHING checked the constraint at all --
-// monomorphizing methods (`s = s + self.data[i]`, valid C only for
-// numeric/decimal `T`) that were never supposed to apply to those
-// types in the first place. Mirrors the original transpiler's own
-// `impl_allows_generic_args`.
+// True when `gargs` (a generic impl instantiation's concrete arguments)
+// is allowed by `forced_insts`, one of the concrete-type combinations
+// from an `impl Vec<T: num | dec>`-style constraint. An unconstrained
+// template always allows any instantiation.
 fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<DataType*> gargs) bin {
   if !has_forced {
     ret true;
@@ -1368,12 +743,7 @@ fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<Dat
 
 impl Codegen {
 
-  // Writes `type_name`'s bare C spelling (no pointer stars): a sized/
-  // dynamic int (`iN`/`uN`) via `dynamic_int_type_to_c`, else the
-  // builtin mapping via `map_type_to_c` (a user-defined type name passes
-  // through unchanged, matching the original). Split out of `write_type`
-  // so `ensure_compound_instantiated` can apply the exact same rule to
-  // an already-RESOLVED field type name, not just a raw `DataType`.
+  // Writes `type_name`'s bare C spelling, with no pointer stars.
   write_type_name(str type_name) {
     fit parse_dynamic_int_datatype(type_name) {
       .Some(dyn) -> { self.state.write(dynamic_int_type_to_c(dyn)); }
@@ -1381,20 +751,10 @@ impl Codegen {
     }
   }
 
-  // When an active substitution context exists (see `Codegen.
-  // type_subst_param_names`'s doc comment -- set only while emitting a
-  // monomorphized generic impl method, see
-  // `maybe_instantiate_generic_impl_methods`), returns a COPY of `dt`
-  // with every BARE occurrence of one of the active type-param names
-  // substituted for its concrete argument -- either `dt` itself (a
-  // method's own `T` param/return type substitutes directly to `num`),
-  // or one of `dt`'s OWN generic arguments (a `Vec<T>` local inside the
-  // method body substitutes to `Vec<num>`), matching the exact same
-  // "must be a bare occurrence, no nested generic args of its own"
-  // restriction `ensure_compound_instantiated` already applies to a
-  // generic compound template's own fields. Returns `dt` UNCHANGED (not
-  // a copy) when no substitution context is active at all, so every
-  // ordinary (non-generic-impl-method) call site pays zero cost.
+  // Returns a copy of `dt` with every bare occurrence of an active
+  // type-param name substituted for its concrete argument, either `dt`
+  // itself or one of its own generic arguments. Returns `dt` unchanged
+  // when no substitution context is active.
   resolve_type_subst(DataType dt) DataType {
     if self.type_subst_param_names.len == 0 {
       ret dt;
@@ -1402,14 +762,10 @@ impl Codegen {
     if dt.generic_args.len == 0 {
       for i : 0..self.type_subst_param_names.len {
         if equals(self.type_subst_param_names.get(i), dt.type_str) {
-          // Prefer the argument's OWN full, structural `DataType* (see
-          // `Codegen.type_subst_arg_dtypes`'s doc comment for why the
-          // flat-string reconstruction below loses a FURTHER-generic
-          // argument's own structure, e.g. substituting `T` ->
-          // `Vec<GenericEnumVariantTemplate>`). Falls back to the flat
-          // strings for a call site that only ever populated those
-          // (mostly hand-built unit tests, never a further-generic
-          // argument in practice).
+          // Prefer the argument's own full structural type, which keeps
+          // a further-generic argument's own structure intact. Falls
+          // back to the flat strings for a call site that only
+          // populated those.
           if i < self.type_subst_arg_dtypes.len {
             let arg_dt = self.type_subst_arg_dtypes.get(i);
             DataType out2 = *arg_dt;
@@ -1481,19 +837,11 @@ impl Codegen {
   // `resolve_type_subst`, so a bare occurrence of a generic impl
   // method's own type param (`T`) resolves against the active
   // instantiation instead of being (wrongly) looked up as a plain
-  // user-defined type name. Callers that need to register this type for
-  // later lookup (`record_local`, a compound field's own registry
-  // entry) must use the RETURNED name, not `dt.type_str` directly -- for
-  // a generic instantiation those differ, and only the mangled name is
-  // what `record_compound`/`record_enum`
-  // register fields/variants under.
-  // 
-  // `.None` means `dt` is a generic instantiation this codegen can't
-  // resolve (an unrecognized template, wrong argument count, or a
-  // nested generic argument -- see `ensure_compound_instantiated`/
-  // `ensure_enum_instantiated`'s doc comments) -- the caller must reject
-  // rather than emit guessed/wrong C. Deliberately simplified from the
-  // original for this slice: no C-typedef-alias resolution.
+  // Writes `dt`'s C spelling plus pointer stars, returning the resolved
+  // name -- the mangled name for a generic instantiation, `dt.type_str`
+  // otherwise. A caller that needs to register this type for later
+  // lookup must use the returned name, not `dt.type_str` directly.
+  // `.None` when `dt` is a generic instantiation that can't be resolved.
   pub write_type(DataType dt) Option<str> {
     let resolved = self.resolve_type_name(dt);
     if resolved.is_none() {
@@ -1514,17 +862,11 @@ impl Codegen {
     ret .Some(resolved_name);
   }
 
-  // Un-mangles a declared type name's own leading `<alias>__` segment
-  // (`parser.parse_datatype` mangles `y.Type` to `y__Type` at PARSE
-  // time, for a module alias `imp x as y;` -- see its own doc comment)
-  // back to the bare `Type` -- correct because `y`'s own declarations
-  // are already merged in unqualified (see `Codegen.import_aliases`'s
-  // own doc comment). Only strips when `<alias>` is a REAL, known alias
-  // (never a bare `__`-split guess) -- a genuine generic-instantiation
-  // mangled name (`Vec__num`) has the exact same `X__Y` shape, and
-  // `Vec`/`num` are never import aliases, so this never misfires on one.
-  // A no-op passthrough for anything that doesn't start with a known
-  // alias's own prefix.
+  // Strips a declared type name's leading `<alias>__` segment back to
+  // the bare name, since an alias's declarations are merged in
+  // unqualified. Only strips a real, known alias -- a generic
+  // instantiation's mangled name has the same `X__Y` shape but never
+  // matches one.
   strip_known_alias_prefix(str type_str) str {
     for alias : self.import_aliases {
       StringBuilder pfx = string_builder_init(16);
@@ -1538,13 +880,9 @@ impl Codegen {
     ret type_str;
   }
 
-  // The name-resolution half of `write_type`, split out so a caller that
-  // only needs `dt`'s resolved NAME (not to emit its C spelling inline
-  // right now) can trigger the same monomorphization side effect without
-  // writing anything -- `emit_fit` uses this to resolve a `fit self.
-  // method() { ... }` CALL subject's declared return type (see its own
-  // doc comment), where a temp `__auto_type` variable holds the value
-  // and no explicit C type needs to be written at all.
+  // The name-resolution half of `write_type`, for a caller that needs
+  // `dt`'s resolved name (triggering monomorphization) without writing
+  // its C spelling.
   resolve_type_name(DataType dt) Option<str> {
     dt.type_str = self.strip_known_alias_prefix(dt.type_str);
     let rdt = self.resolve_type_subst(dt);
@@ -1559,43 +897,22 @@ impl Codegen {
     if enum_inst.is_some() {
       ret enum_inst;
     }
-    // A CONCRETE instantiation of a generic QUIRK used directly as a type
-    // (`To<num>` as a parameter/variable/return type, `examples/stdlib/
-    // generic_to_from.fn`'s own real `to_json_value(To<JsonValue> value)`-
-    // style usage) -- neither a compound nor an enum template recognizes
-    // "To" at all, so without this, a concrete-quirk-typed parameter/
-    // variable/return type was rejected as an unresolvable type entirely.
-    // See `ensure_quirk_instantiated`'s own doc comment for why this
-    // needs to be able to EMIT the vtable here (not just look one up)
-    // when no concrete impl has been processed anywhere yet.
+    // A concrete instantiation of a generic quirk used directly as a
+    // type -- neither a compound nor an enum template recognizes it.
     ret self.ensure_quirk_instantiated(rdt);
   }
 
-  // Appends `text` (a fully-rendered struct/enum typedef or generic impl
-  // method definition -- see the three call sites, each of which builds
-  // its own text into a SCRATCH `CodegenState` first, by temporarily
-  // pointing `self.state` at it, so their existing `self.state.write`
-  // calls need no changes) either at the current tail of `self.state.out`
-  // (when `hoist_insert_pos` is `.None` -- every hand-built unit test
-  // below, which never calls `pub transpile`) or SPLICED in at the
-  // tracked earlier position (when driven by `pub transpile`, so a
-  // definition triggered from inside some top-level function/impl's own
-  // body lands BEFORE that enclosing item instead of nested inside it --
-  // see `Codegen.hoist_insert_pos`'s doc comment for why that distinction
-  // matters). Advances `hoist_insert_pos` by `text`'s own length after a
-  // splice, so a SECOND hoisted definition lands right after the first,
-  // not before it.
+  // Appends a fully-rendered typedef or method definition either at the
+  // current tail (when `hoist_insert_pos` is `.None`) or spliced at the
+  // tracked earlier position, so a definition triggered from inside a
+  // function body lands before the enclosing item rather than nested
+  // inside it. Advances `hoist_insert_pos` so a second hoisted
+  // definition lands after the first.
   emit_hoisted(str text) {
     if self.hoist_insert_pos.is_none() {
       if self.hoist_scratch_depth > 0 {
-        // Nested inside another private scratch buffer with `hoist_
-        // insert_pos` suspended to `.None` -- appending here would land
-        // INSIDE that scratch's own in-progress text (a full definition
-        // spliced mid-expression into whatever statement the scratch was
-        // building) instead of a real top-level position. See `Codegen.
-        // hoist_scratch_depth`'s own doc comment. Route through the TRUE
-        // root buffer/position instead, mirroring the splice logic below
-        // but against `root_state`/`root_hoist_pos`.
+        // Nested inside another scratch buffer -- route through the
+        // root buffer/position instead of the suspended local one.
         if self.root_hoist_pos.is_none() {
           self.root_state.write(text);
           ret;
@@ -1630,11 +947,8 @@ impl Codegen {
     rebuilt.append(tail);
     self.state.out = rebuilt;
     self.hoist_insert_pos = .Some(pos + len(text));
-    // `current_stmt_start_pos` (see its own doc comment) is ANOTHER
-    // tracked position against this SAME buffer, measured independently
-    // of `hoist_insert_pos` -- see `adjust_pos_after_splice`'s own doc
-    // comment for why it needs the same shift `hoist_insert_pos` just
-    // got above.
+    // Tracked independently of `hoist_insert_pos`, so it needs the same
+    // shift.
     self.current_stmt_start_pos = adjust_pos_after_splice(
       self.current_stmt_start_pos,
       pos,
@@ -1642,27 +956,11 @@ impl Codegen {
     );
   }
 
-  // Given a generic compound template's BARE name (`Box`, from a `Box{
-  // value = 7}` literal written with NO explicit `<T>`) and its own
-  // initializer fields, infers each of the template's type params' own
-  // concrete binding from whichever field's DECLARED type (on the
-  // template itself, `T value;`) is a bare occurrence of that param --
-  // mirrors the original transpiler's own `bind_generic_param`-based
-  // inference for exactly this shape (`validate_compound_init`'s "generic
-  // args omitted, infer them from field values" branch). Without this,
-  // `resolve_type_name` had no way to tell a BARE occurrence of a
-  // generic template's own name (zero generic args, matching an
-  // ORDINARY plain compound just as well) apart from an omitted-but-
-  // inferable one -- it took the early "`generic_args.len == 0` -> the
-  // name unchanged" exit unconditionally, silently emitting the
-  // template's own bare, never-instantiated name (`Box`, not `Box__
-  // num`) as if it were a real, complete C type -- a real, previously-
-  // undiscovered bug found via `examples/advanced/generic_inference_
-  // after_init.fn`'s own `let nbox = Box{value = 7};`. `.None` when
-  // `base_name` isn't a registered generic compound template at all
-  // (the ordinary plain-compound case, left entirely alone), or some
-  // type param's binding can't be inferred from ANY field this way --
-  // the caller must reject rather than guess.
+  // Given a generic compound template's bare name (from a literal with
+  // no explicit type arguments) and its initializer fields, infers each
+  // type param's concrete binding from whichever field's declared type
+  // is a bare occurrence of that param. `.None` when `base_name` isn't a
+  // generic template, or a type param can't be inferred from any field.
   infer_generic_compound_init_args(str base_name, Vec<CompoundInitField> init_fields) Option<Vec<DataType *>> {
     num template_idx = 0;
     bin found_tmpl = false;
@@ -1724,36 +1022,15 @@ impl Codegen {
     ret .Some(resolved_args);
   }
 
-  // Given a DataType with `generic_args` non-empty (`Box<num>`),
-  // resolves -- and, the FIRST time this exact instantiation is seen,
-  // EMITS -- the concrete monomorphized C struct for it, returning the
-  // mangled name (`Box__num`). Mangling matches the original
-  // transpiler's own scheme (`append_mangled_type`): `<base>__<arg1>__
-  // <arg2>...`, each arg's own Fun-level type name (`arg.type_str`),
-  // with a `_ptrN` suffix when that arg itself has pointer depth
-  // (`Vec<Node*>` -> `Vec__Node_ptr1`, distinct from `Vec<Node>` ->
-  // `Vec__Node` -- these need DIFFERENT monomorphizations, a `T` field
-  // substituting to `Node` by value vs. `Node*` by pointer). A repeat
-  // instantiation with the SAME mangled name is recognized via
-  // `emitted_generic_instantiations` and not re-emitted.
-  // 
-  // A NESTED generic argument (`Vec<Vec<num>>`, `Result<Option<Token>,
-  // Error>`) resolves (and, on first use, emits) the inner instantiation
-  // FIRST via `resolve_type_name`, then uses ITS OWN mangled name as
-  // this position's arg name -- this recurses to arbitrary depth, not
-  // just one level.
-  // 
-  // `.None` means: `dt.type_str` isn't a known generic compound
-  // template, the argument COUNT doesn't match the template's own
-  // type-param count, or a nested argument itself couldn't be resolved.
-  // Each template field must be a bare occurrence of one of the
-  // template's OWN type-param names (`T value;`) to be substituted --
-  // an array-of-generic field (`T[] data;`, e.g. the real `Vec<T>`'s own
-  // `data` field) or any other non-matching field type is left
-  // UNCHANGED (not substituted), which is only correct when that field
-  // doesn't actually depend on the type param -- a template with a
-  // genuinely generic array field isn't fully supported by this slice
-  // yet.
+  // Resolves and, the first time this exact instantiation is seen,
+  // emits the concrete monomorphized C struct for a generic compound
+  // (`Box<num>` -> `Box__num`), mangled as `<base>__<arg1>__<arg2>...`
+  // with a `_ptrN` suffix for a pointer argument. A nested generic
+  // argument resolves (and emits) first, recursing to arbitrary depth.
+  // `.None` when `dt.type_str` isn't a known generic compound template,
+  // the argument count doesn't match, or a nested argument can't be
+  // resolved. A field must be a bare occurrence of a type param to be
+  // substituted; anything else is left unchanged.
   ensure_compound_instantiated(DataType dt) Option<str> {
     num template_idx = 0;
     bin found = false;
@@ -1786,13 +1063,9 @@ impl Codegen {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
       if arg.generic_args.len > 0 {
-        // A NESTED generic argument (`Result<Option<Token>, Error>`'s
-        // own first arg, `Option<Token>`) -- resolve (and, on first
-        // use, EMIT) it FIRST via the exact same `resolve_type_name`
-        // dispatch `write_type` itself uses, so it's already hoisted
-        // and dedup-registered before the OUTER type's own mangled name
-        // even gets built. Its OWN resolved (mangled) name becomes THIS
-        // position's arg name, same as any other arg.
+        // A nested generic argument resolves (and, on first use, emits)
+        // first, so it's already hoisted before the outer type's own
+        // mangled name is built.
         let nested_name = self.resolve_type_name(*arg);
         if nested_name.is_none() {
           ret .None;
@@ -1808,12 +1081,8 @@ impl Codegen {
       }
       arg_type_names.push(arg_name);
       arg_is_pointer.push(arg_ptr);
-      // `arg` itself (this position's OWN full, structural `DataType*`,
-      // e.g. `Vec<GenericEnumVariantTemplate>` in full, not just its
-      // already-mangled name above) -- see `Codegen.type_subst_arg_
-      // dtypes`'s own doc comment for why keeping this (not just the
-      // flattened name/pointer-ness) matters for a FURTHER-generic
-      // argument.
+      // Keeps the argument's full structural type, not just its
+      // flattened name, for a further-generic argument.
       arg_dtypes.push(arg);
       ai = ai + 1;
     }
@@ -1826,42 +1095,19 @@ impl Codegen {
       }
       ei = ei + 1;
     }
-    // Pushed BEFORE the struct body is actually resolved/written (not
-    // after, as this used to) -- a SELF-referential field (`Box<T>* next;`
-    // inside `compound Box<T>`, `examples/imports/torture_compiler/
-    // trace.fn`'s own real `Trace<T>* next;`) resolves its OWN type via
-    // `resolve_type_name` in the pass-1 loop below, which recurses right
-    // back into THIS function for the SAME mangled name. Left registered
-    // only at the very end, that recursive call never finds itself
-    // already in progress and starts building the SAME struct all over
-    // again -- infinite recursion, a real stack-overflow SIGSEGV
-    // confirmed via lldb (crashes on function entry, corrupted stack,
-    // single unwindable frame). Safe to mark this early: nothing between
-    // here and the end of the function returns `.None` (a partial,
-    // marked-but-never-emitted entry would otherwise be a real risk).
+    // Registered before the struct body is resolved: a self-referential
+    // field resolves its own type via `resolve_type_name` in pass 1
+    // below, which recurses back into this function for the same
+    // mangled name -- registering only at the end would recurse forever.
     self.emitted_generic_instantiations.push(mangled_name);
     let field_names = self.generic_compound_field_names.get(template_idx);
     let field_type_names = self.generic_compound_field_type_names.get(template_idx);
     let field_is_pointer = self.generic_compound_field_is_pointer.get(template_idx);
     let field_dtypes = self.generic_compound_field_dtypes.get(template_idx);
-    // Forward-declares `mangled_name` itself, IMMEDIATELY, but ONLY when
-    // this template is DIRECTLY self-referential (some field's own bare
-    // template name is THIS SAME template, `Box<T>* next;` inside
-    // `compound Box<T>`, e.g.) -- fixing the infinite-recursion crash
-    // above still leaves a real C-validity gap for exactly that shape:
-    // the recursive `resolve_type_name` call now returns early with just
-    // the NAME, but no typedef for it exists in the output YET, so the
-    // full struct body below (`Box__num* next;`, using the bare alias,
-    // not `struct Box__num*`) references a type name C doesn't recognize
-    // ("must use 'struct' tag to refer to type"). Mirrors the SAME
-    // forward-declare this file's own top-level PLAIN-compound/tagged-
-    // union-enum pass already does up front for non-generic types --
-    // redeclaring the same typedef once the full body follows below is
-    // valid C (that pass already relies on the same redeclaration-is-
-    // fine behavior). Gated (not unconditional) so an ordinary, non-
-    // recursive generic instantiation gets no extra forward-declare line
-    // at all -- several hand-built unit tests assert the exact byte
-    // output for that common case.
+    // Forward-declares the struct name immediately when the template is
+    // directly self-referential, so a field like `Box<T>* next;` inside
+    // `compound Box<T>` has a type name to reference before its own full
+    // body is written below.
     bin is_self_referential = false;
     for fdt : field_dtypes {
       if equals(fdt.type_str, dt.type_str) {
@@ -1884,49 +1130,17 @@ impl Codegen {
     resolved_field_type_names.init(0);
     Vec<bin> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
-    // The ACTUAL star count for each field's C declaration -- distinct
-    // from `resolved_field_is_pointer`'s boolean (kept as-is; other
-    // consumers like `record_compound` only need "is this field a
-    // pointer AT ALL", one level, for their own downstream decisions).
-    // An array-decayed field (`T[] data;`, `fptr` below) substituting a
-    // POINTER-typed argument (`T` = `Node*`) needs BOTH the array-decay's
-    // own `*` AND the argument's own pointer depth -- e.g. `Vec<Node*>`'s
-    // `data` field must be `Node** data;` (double pointer: one level so
-    // `data` itself is an array, one more because each element IS a
-    // `Node*`), not `Node* data;`. The old single boolean (`arg_is_
-    // pointer.get(pi) || fptr`) collapses that to just "at least one
-    // star", losing the second level -- found via a real stage-2 C error
-    // (`subscript of pointer to incomplete type 'Node'`: with only one
-    // star, `self->data[i]` dereferences straight to a BY-VALUE `Node`,
-    // which needs `Node`'s complete type just to compile the subscript,
-    // instead of yielding a `Node*` -- which never needs `Node` complete
-    // at all). A NON-array-decayed field directly substituting a pointer
-    // param (`T value;` -> `Node* value;`) needs no extra depth -- the
-    // argument's own `pointer_depth` alone already equals the single
-    // star that case needs.
+    // The actual star count for each field's C declaration, needed
+    // because an array-decayed field substituting a pointer-typed
+    // argument needs both the array decay's own star and the argument's
+    // pointer depth (e.g. `Vec<Node*>`'s `data` field is `Node** data;`).
     Vec<num> resolved_field_ptr_depth;
     resolved_field_ptr_depth.init(0);
 
-    // Pass 1: resolve every field's substituted type NAME/pointer-ness
-    // BEFORE `self.state` gets swapped to the scratch buffer below. A
-    // field whose OWN type is ITSELF a nested generic instantiation
-    // using one of the template's own params (`Map<T, bin> map;` inside
-    // `compound Set<T>`, e.g. `std/set.fn`'s real shape) needs
-    // `resolve_type_name` -- which, for a genuinely NEW nested
-    // instantiation, recurses right back into `ensure_compound_
-    // instantiated` (or `ensure_enum_instantiated`) for THAT type. If
-    // that recursive call's own `emit_hoisted` ran with `self.state`
-    // already pointed at THIS instantiation's in-progress scratch
-    // buffer (as it would if this resolution happened inline in pass 2
-    // below), it would splice into that scratch buffer using a
-    // `hoist_insert_pos` computed against the REAL output buffer's own
-    // (much larger) length -- an out-of-bounds splice, crashing in
-    // `emit_hoisted`/`StringBuilder.append` (confirmed via a real
-    // backtrace during development). Resolving everything first, with
-    // `self.state` still pointing at whatever it legitimately was
-    // before this call, keeps every recursive `emit_hoisted` call
-    // splicing into the SAME buffer `hoist_insert_pos` was measured
-    // against.
+    // Pass 1: resolve every field's substituted type before `self.state`
+    // is swapped to the scratch buffer below, so a nested instantiation
+    // triggered along the way still splices against the real buffer
+    // rather than the in-progress scratch one.
     num fi = 0;
     for fi < field_names.len {
       str ftype = field_type_names.get(fi);
@@ -1942,17 +1156,12 @@ impl Codegen {
       for pi < type_params.len {
         if equals(type_params.get(pi), ftype) {
           resolved_type = arg_type_names.get(pi);
-          // `fptr` (OR'd in here, not replaced) carries the field's OWN
-          // array-decay pointer-ness (`T[] data;` -> at least one `*`,
-          // see `dtype_is_array_as_pointer`'s doc comment) -- that's
-          // independent of whether THIS PARTICULAR argument (`num` in
-          // `Channel<num>`) happens to be pointer-shaped itself. A plain
-          // `T value;` field has `fptr == false`, so this is a no-op for
-          // that (far more common) shape -- unchanged from before.
+          // `fptr` carries the field's own array-decay pointer-ness,
+          // independent of whether this particular argument is itself
+          // pointer-shaped.
           resolved_ptr = arg_is_pointer.get(pi) || fptr;
-          // The argument's OWN full pointer depth (`arg_dtypes.get(pi).
-          // pointer_depth`) stacks ON TOP of the array-decay's own single
-          // level -- see `resolved_field_ptr_depth`'s doc comment above.
+          // The argument's own pointer depth stacks on top of the array
+          // decay's single level.
           let matched_arg = arg_dtypes.get(pi);
           ptr_depth = ptr_depth + matched_arg.pointer_depth;
           matched_bare_param = true;
@@ -1960,14 +1169,10 @@ impl Codegen {
         }
         pi = pi + 1;
       }
-      // `ftype`/`field_type_names` only ever recorded a field's bare
-      // base name ("Map"), silently dropping its own generic args --
-      // `field_dtypes` (the field's full, un-mangled `DataType*`, kept
-      // alongside the bare name) lets this reuse the EXACT SAME
-      // substitution machinery a generic impl method's own body already
-      // gets (`resolve_type_subst`/`resolve_type_name`, temporarily
-      // pointed at THIS instantiation's own param/arg mapping) instead
-      // of re-deriving a parallel substitution scheme here.
+      // `ftype` only ever records a field's bare base name, dropping its
+      // own generic args -- `field_dtypes` keeps the full type, letting
+      // this reuse the same substitution machinery a generic impl
+      // method's own body gets.
       if !matched_bare_param {
         let field_dt = field_dtypes.get(fi);
         if field_dt.generic_args.len > 0 {
@@ -2010,10 +1215,8 @@ impl Codegen {
     for wi < resolved_field_names.len {
       self.state.write("  ");
       self.write_type_name(resolved_field_type_names.get(wi));
-      // Writes the field's REAL star count (see `resolved_field_ptr_
-      // depth`'s doc comment) -- NOT `resolved_field_is_pointer`, whose
-      // single boolean would collapse an array-decayed field substituting
-      // a pointer argument (`Vec<Node*>`'s `data`) back down to one star.
+      // Uses the field's real star count, not `resolved_field_is_
+      // pointer`'s single boolean.
       num pdi = 0;
       for pdi < resolved_field_ptr_depth.get(wi) {
         self.state.write("*");
@@ -2046,23 +1249,11 @@ impl Codegen {
     ret .Some(mangled_name);
   }
 
-  // Given a DataType with `generic_args` non-empty (`Option<num>`),
-  // resolves -- and, the FIRST time this exact instantiation is seen,
-  // EMITS -- the concrete monomorphized C enum/tagged-union for it,
-  // returning the mangled name (`Option__num`). Mirrors
-  // `ensure_compound_instantiated` almost exactly (same mangling
-  // scheme -- including resolving a NESTED generic argument first, to
-  // arbitrary depth, via `resolve_type_name` -- same `.None` conditions,
-  // same repeat-instantiation dedup via `emitted_generic_instantiations`, shared
-  // with compounds since a compound and an enum can never share a bare
-  // name); the difference is purely in what gets emitted per variant
-  // (see `emit_tagged_union_enum_instance`'s doc comment for the
-  // tagged-union layout, or a plain C enum inline below when no variant
-  // has a payload).
-  // 
-  // Only called from `write_type` AFTER `ensure_compound_instantiated`
-  // already found no matching compound template -- so this only needs
-  // to search the ENUM registry, not re-check compounds.
+  // Resolves and, the first time this exact instantiation is seen,
+  // emits the concrete monomorphized C enum/tagged-union for a generic
+  // enum (`Option<num>` -> `Option__num`). Mirrors `ensure_compound_
+  // instantiated` almost exactly; the difference is only in what gets
+  // emitted per variant.
   ensure_enum_instantiated(DataType dt) Option<str> {
     num template_idx = 0;
     bin found = false;
@@ -2095,9 +1286,8 @@ impl Codegen {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
       if arg.generic_args.len > 0 {
-        // See `ensure_compound_instantiated`'s own doc comment: a nested
-        // generic argument resolves (and, on first use, emits) FIRST via
-        // `resolve_type_name`, recursing to arbitrary depth.
+        // A nested generic argument resolves first, recursing to
+        // arbitrary depth.
         let nested_name = self.resolve_type_name(*arg);
         if nested_name.is_none() {
           ret .None;
@@ -2207,25 +1397,13 @@ impl Codegen {
     ret .Some(mangled_name);
   }
 
-  // Given a DataType naming a CONCRETE instantiation of a GENERIC quirk
-  // (`To<JsonValue>`), resolves -- and, the FIRST time this exact
-  // instantiation is seen ANYWHERE (a concrete impl's own processing via
-  // `emit_quirk_vtable_machinery`, OR a bare type reference like this
-  // one, whichever comes first in source order -- both dedup through the
-  // SAME `Codegen.quirk_names` registry) -- EMITS its vtable struct/fat-
-  // pointer type, deriving each method's signature from the quirk's OWN
-  // declaration (registered by `transpile`'s own early pass, see
-  // `Codegen.quirk_decl_names`'s own doc comment) via the SAME type-
-  // substitution mechanism `resolve_type_subst`/`write_type` already use
-  // for a generic compound/enum's own fields. Without this, a type
-  // reference to a concrete quirk instantiation with NO impl anywhere in
-  // the CURRENT translation unit (`std/json.fn`'s own `to_json_value(To<
-  // JsonValue> value)`, whose actual `impl ... as To<JsonValue>` lives in
-  // a completely different, importing file) had no vtable to resolve
-  // against at all. `.None` when `dt.type_str` doesn't name a registered
-  // GENERIC quirk, or the argument count doesn't match -- the caller
-  // (`resolve_type_name`) then correctly falls through to treating this
-  // as an unresolvable type, exactly as before this existed.
+  // Resolves and, the first time this exact instantiation is seen,
+  // emits a concrete generic-quirk instantiation's vtable struct/fat
+  // pointer type, deriving each method's signature from the quirk's own
+  // declaration. Needed for a type reference to a concrete quirk
+  // instantiation with no impl in the current translation unit. `.None`
+  // when `dt.type_str` doesn't name a registered generic quirk, or the
+  // argument count doesn't match.
   ensure_quirk_instantiated(DataType dt) Option<str> {
     num qdi = 0;
     bin qfound = false;
@@ -2325,60 +1503,12 @@ impl Codegen {
     ret .Some(q_mangled);
   }
 
-  // Called by `ensure_compound_instantiated`/`ensure_enum_instantiated`
-  // right after emitting a NEW concrete monomorphization of a generic
-  // compound/enum template (`base_name` is the template's own bare name,
-  // e.g. `"Box"`; `mangled_name` this instantiation's mangled name, e.g.
-  // `"Box__num"`), monomorphizing and emitting every method of a generic
-  // impl block matching `base_name` (`impl Box<T> { ... }` or `impl
-  // Box<T> as Quirk { ... }`), if one was registered (see
-  // `Codegen.generic_impl_templates`'s doc comment) -- a NO-OP when no
-  // such impl exists (a generic compound/enum needn't have one). Called
-  // only on FIRST instantiation (guarded by the caller's own
-  // `emitted_generic_instantiations` dedup check), so a method is never
-  // emitted twice for the same concrete arguments.
-  // 
-  // Each method's self/param/return/local types resolve against
-  // `arg_type_names`/`arg_is_pointer` (positionally matched to the
-  // impl's own `type_params`) via the `type_subst_*` substitution
-  // context (see `resolve_type_subst`'s doc comment), pushed here and
-  // restored afterward -- a method BODY can itself trigger a NESTED
-  // instantiation (e.g. using some other generic type with the same
-  // type param), which must not clobber the outer, still-in-progress
-  // substitution once that nested call returns. A method's C symbol
-  // mangles to `<mangled_name>__<bare_method_name>` (or `<mangled_name>
-  // __<Quirk>__<bare_method_name>` for a quirk-implementing impl),
-  // registered via `record_impl_method` under `mangled_name` as the
-  // owner type so a call through a receiver of this monomorphized type
-  // (recorded under `mangled_name` by `record_local`, since that's what
-  // `write_type` returns for it) resolves via the ordinary
-  // `emit_method_call` path with no changes needed there.
-  // 
-  // `emit_function_named`'s own `Option<CodegenErrorKind>` result is
-  // deliberately discarded per method (matching the same simplification
-  // `emit_tagged_union_enum`'s own `write_type` call already makes for a
-  // payload field) -- this function is itself called from deep inside
-  // `write_type`'s own `Option<str>`-returning call chain
-  // (`ensure_compound_instantiated`/`ensure_enum_instantiated`), and
-  // propagating a per-method-instantiation failure through THAT chain's
-  // different error type is a separate, larger plumbing change than this
-  // slice's scope; an unsupported generic method body will simply emit
-  // no/partial C for that one method rather than surface a codegen
-  // error, which no existing test exercises.
-  // 
-  // A side-effect-free SIGNATURE-only emission of one generic impl
-  // method's monomorphized C prototype (`<rtype> <new_name>(<params>);`),
-  // used by `maybe_instantiate_generic_impl_methods` to forward-declare
-  // every method of an instantiation BEFORE any of their bodies -- one
-  // method's body can call ANOTHER method of the SAME instantiation
-  // declared LATER in the source (`Option<T>.unwrap()` calling its own
-  // `self.zero()`, `Vec<T>.init()` calling its own `self.grow()`), and
-  // without a forward declaration the C compiler sees an implicit
-  // (wrongly `int`-returning) declaration at the call site, then a
-  // "conflicting types" error at the real definition. Deliberately does
-  // NOT reuse `emit_function_param` (which also REGISTERS each param as a
-  // known local, a side effect only appropriate during real body
-  // emission) -- just resolves and writes each param's type.
+  // Emits a monomorphized generic impl method's C prototype only (no
+  // body), so `maybe_instantiate_generic_impl_methods` can forward-
+  // declare every method of an instantiation before any of their bodies
+  // -- one method's body can call another declared later in the source.
+  // Doesn't reuse `emit_function_param`, which also registers each
+  // param as a known local.
   emit_generic_impl_method_prototype(Node m, str new_name) Option<CodegenErrorKind> {
     fit m.kind {
       .Function(f) -> {
@@ -2452,29 +1582,10 @@ impl Codegen {
     }
   }
 
-  // Forward-declares an ASYNC generic impl method's own `__fun_async_
-  // call_<new_name>` helper -- the symbol `await`/`emit_async_or_fork_
-  // call` actually calls (see `emit_async_function_support`'s own doc
-  // comment for its full definition, emitted later, in place, when
-  // `new_name`'s own real body is). Needed alongside `emit_generic_impl_
-  // method_prototype`'s ordinary method prototype for exactly the same
-  // reason: a SIBLING async method on the same impl, instantiated
-  // EARLIER in the same file/statement stream, calling this one via
-  // `await self.other_method(...)` before this one's own full support
-  // block (which only exists at ITS OWN first-call-site position) has
-  // been emitted anywhere -- "implicit function declaration" followed by
-  // "static declaration ... follows non-static declaration" once the
-  // real (static) definition is spliced in later. Confirmed via
-  // `examples/advanced/channel_async_composed.fn`'s own real body
-  // (`Channel<T>.send_timeout_async`/`recv_timeout_into_async` calling
-  // each other). Only the call helper's own signature needs a forward
-  // declaration -- unlike the full support block, it takes the SAME args
-  // as the method itself, no payload-struct type in its own signature.
-  // Mirrors `emit_generic_impl_method_prototype`'s own reliance on the
-  // ALREADY-ACTIVE substitution context (`self.write_type` applies it
-  // internally) -- deliberately narrower than that function: no function-
-  // pointer-typed param support, matching `emit_async_function_support`'s
-  // own identical restriction for every async method.
+  // Forward-declares an async generic impl method's `__fun_async_call_
+  // <new_name>` helper, needed when a sibling async method on the same
+  // impl calls this one via `await` before its own support block has
+  // been emitted anywhere.
   emit_async_call_helper_prototype(Node m, str new_name) Option<CodegenErrorKind> {
     fit m.kind {
       .Function(f) -> {
@@ -2519,46 +1630,20 @@ impl Codegen {
     }
   }
 
-  // True when `dt` can't safely appear in the EARLY function/method
-  // forward-declare pass (`pub transpile`'s own, right after `register_
-  // impl_methods`) -- either a plain ENUM (any pointer depth or by-
-  // value) or a GENERIC instantiation of either kind. Unlike a plain
-  // COMPOUND (struct) -- whose bare NAME is already forward-declared
-  // by the pass just before this one, and C allows an incomplete
-  // struct type in a mere prototype DECLARATION (confirmed empirically:
-  // only a DEFINITION or an actual CALL needs it complete) -- C has NO
-  // way to forward-declare just an enum's NAME the way `typedef struct
-  // X X;` does for a compound, so the type must be FULLY defined
-  // before ANY mention of it at all, even a bare declaration ("unknown
-  // type name", not merely "incomplete type"). Ditto a generic
-  // instantiation (`Vec__str`, `Opt__num`) -- no separate name-only
-  // forward-declare exists for one of those either, generic or not.
-  // Found via a real stage-2 self-compilation C error for exactly this
-  // shape (`std/error.fn`'s own `error_new_kind(ErrorKind kind, ...)`,
-  // `std/warnings.fn`'s own `WarningId`-typed functions).
+  // True when `dt` can't safely appear in the early function/method
+  // forward-declare pass: a plain enum, or a generic instantiation of
+  // either kind. Unlike a compound, whose bare name is already forward-
+  // declared, C has no way to name an enum without its full definition,
+  // and no separate name-only forward-declare for a generic
+  // instantiation either.
   prototype_type_is_unsafe_early(DataType dt) bin {
     if dt.generic_args.len > 0 {
       ret true;
     }
-    // A CONCRETE impl's own `self` parameter (`impl Vec<str> { ... }`,
-    // as opposed to a generic `impl Vec<T> { ... }`) carries its type as
-    // a bare, already-MANGLED name (`type_str = "Vec__str"`, `generic_
-    // args` EMPTY -- see `_parse_impl_method`'s own doc comment: `self`
-    // only gets `generic_args` attached when the ENCLOSING impl declares
-    // real type PARAMETERS, which a concrete impl doesn't) -- so the
-    // `generic_args.len > 0` check above never catches it, even though
-    // it names a generic instantiation just as unsafe as `Vec<T>`'s own
-    // bare `T` would be: `Vec__str`'s own struct doesn't exist yet
-    // either, the SAME "no separate name-only forward-declare" problem
-    // this whole function exists to catch. Detected by checking whether
-    // the bare name starts with `<some registered generic template
-    // name>__` -- both compound and enum templates are already
-    // registered (via the enum/compound pass right before this one runs)
-    // regardless of whether any concrete instantiation has actually been
-    // triggered yet. Found via a real stage-2 self-compilation C error
-    // (`Vec<str>`'s own concrete-impl methods, `join`/`sort`/..., forward-
-    // declared with a `Vec__str* self` parameter before `Vec__str`'s own
-    // struct existed at all).
+    // A concrete impl's own `self` parameter carries an already-mangled
+    // bare name with no generic_args, so the check above misses it --
+    // detected instead by checking whether the name starts with a
+    // registered generic template's own prefix.
     for tmpl_name : self.generic_compound_names {
       StringBuilder tmpl_pfx2 = string_builder_init(16);
       tmpl_pfx2.append(tmpl_name);
@@ -2653,27 +1738,11 @@ impl Codegen {
     }
   }
 
-  // Records the instantiation's substitution context (for `ensure_
-  // generic_impl_method_emitted` to re-establish later) and each
-  // method's substituted return/param TYPES only (`record_impl_method`,
-  // needed for call-site type inference regardless of whether the
-  // method's own C body ever gets emitted) -- emits NO C at all here.
-  // 
-  // Previously this emitted every method's full prototype+body,
-  // unconditionally, the moment the type itself was first instantiated.
-  // That's not just wasteful, it's WRONG: a template method's body may
-  // only type-check for SOME of the concrete types it could be
-  // instantiated with. `Vec<T>.sum()` does `s = s + self.data[i]`,
-  // valid C only when `T` is itself numeric/decimal (Fun's own
-  // typecheck rejects `+` on anything else) -- `Vec<str>.sum()`'s `+`
-  // on `char*` doesn't compile, even though `Vec<str>` itself is
-  // perfectly valid whenever the program never actually calls `.sum()`
-  // on it. Found via a real stage-2 self-compilation C error (`invalid
-  // operands to binary expression` on `Vec<T>`'s own `sort`/`contains`/
-  // `min`/`max`/`sum`, for instantiations like `Vec<str>`/`Vec<
-  // FitBranch>` that this program's real code never actually calls any
-  // of those methods on). See `ensure_generic_impl_method_emitted`'s
-  // own doc comment for the actual (now lazy, call-triggered) emission.
+  // Records the instantiation's substitution context and each method's
+  // substituted return/param types, without emitting any C -- a
+  // template method's body may only type-check for some of the concrete
+  // types it could be instantiated with, so the body itself is emitted
+  // lazily, on first call, by `ensure_generic_impl_method_emitted`.
   maybe_instantiate_generic_impl_methods(
     str base_name,
     str mangled_name,
@@ -2718,13 +1787,9 @@ impl Codegen {
               DataType* tmpl_rtype = nil;
               Vec<DataType*> tmpl_param_dtypes;
               tmpl_param_dtypes.init(0);
-              // Each param's own default VALUE expression (`nil` when
-              // it has none) -- see `Codegen.impl_method_default_
-              // values`'s own doc comment. A default expression needs
-              // no type substitution (it's evaluated at the CALL SITE,
-              // outside this instantiation's own substitution context
-              // entirely -- see `emit_default_trailing_args`'s doc
-              // comment), so the template's own node is recorded as-is.
+              // Each param's default value expression, `nil` when it has
+              // none. Needs no substitution -- it's evaluated fresh at
+              // the call site.
               Vec<Node*> tmpl_default_values;
               tmpl_default_values.init(0);
               fit m.kind {
@@ -2768,24 +1833,17 @@ impl Codegen {
               nb.append(bare_name);
               str new_name = nb.build();
 
-              // The TEMPLATE's own declared return type (often a bare
-              // `T`) substituted against THIS instantiation's concrete
-              // binding, so `infer_let_expr_type` can resolve `let out =
-              // res.unwrap();`-style locals against a monomorphized
-              // generic impl method's return type too -- previously
-              // always recorded as `nil` (untracked), so a `let` local
-              // holding such a call's result was never a known local
-              // afterward.
+              // The template's declared return type, substituted against
+              // this instantiation's concrete binding, so a `let`
+              // binding can resolve against a monomorphized method's
+              // return type too.
               DataType* recorded_rtype = nil;
               if tmpl_rtype != nil {
                 DataType substituted_rtype = self.resolve_type_subst(*tmpl_rtype);
                 recorded_rtype = malloc(sizeof(DataType));
                 *recorded_rtype = substituted_rtype;
               }
-              // Each param's OWN substituted type too (`Vec<T>.push(T
-              // value)`'s bare `T` -> the concrete instantiation's own
-              // arg, e.g.) -- see `Codegen.impl_method_param_types`'s
-              // doc comment.
+              // Each param's substituted type too.
               Vec<DataType*> recorded_param_types;
               recorded_param_types.init(0);
               for pdt : tmpl_param_dtypes {
@@ -2815,36 +1873,13 @@ impl Codegen {
     }
   }
 
-  // Writes ONE generic impl method's prototype immediately, INLINE,
-  // wherever `self.state` currently is -- no scratch swap, no `hoist_
-  // insert_pos` splice, unlike everything else in this file. Safe
-  // regardless of nesting depth: a bare declaration (unlike a full
-  // DEFINITION) is legal C at block scope, confirmed empirically
-  // (`void foo(int); { ... }` compiles fine nested inside another
-  // function's own body). Best-effort/silent no-op when `owner_type`
-  // isn't a known instantiation or no matching template method is
-  // found -- mirrors `emit_one_generic_impl_method`'s own identical
-  // lookup (duplicated rather than factored out, matching this file's
-  // own established style for near-identical small lookups).
-  // 
-  // Called from `ensure_generic_impl_method_emitted`, BEFORE
-  // enqueueing the method's own BODY for deferred emission -- this is
-  // what lets a method's own body (itself still pending) call ANOTHER
-  // not-yet-bodied method and still compile. Found via a real stage-2
-  // C error ("call to undeclared function" for `Vec__str__grow`,
-  // called from `Vec__str__push`'s own body): with proto+body
-  // deferred TOGETHER as one atomic queue entry, `push`'s own body
-  // (spliced first) ended up calling `grow` (spliced entirely AFTER
-  // push, as the next queue entry) before `grow`'s declaration existed
-  // anywhere -- the queue's FIFO splice order can't retroactively
-  // insert something BEFORE an already-spliced entry, but an inline,
-  // no-hoist prototype write doesn't have that problem at all.
-  // 
-  // Skipped (falls through to normal deferred proto+body handling)
-  // while `self.state` points at a throwaway TEXT-CAPTURE probe (see
-  // `Codegen.suppress_generic_impl_method_draining`'s own doc comment)
-  // -- writing even a bare declaration there would corrupt the pure
-  // EXPRESSION fragment the probe is capturing.
+  // Writes one generic impl method's prototype immediately, wherever
+  // `self.state` currently is -- a bare declaration is legal C at block
+  // scope regardless of nesting depth. Called before the method's body
+  // is queued for deferred emission, so its own body can call another
+  // not-yet-bodied method of the same instantiation and still compile.
+  // A silent no-op when `owner_type` isn't a known instantiation, or
+  // while `self.state` points at a throwaway text-capture probe.
   emit_generic_impl_method_prototype_now(str owner_type, str bare_name) {
     num ii = 0;
     bin found_inst = false;
@@ -2914,33 +1949,10 @@ impl Codegen {
             nb.append(bare_name);
             str new_name = nb.build();
 
-            // Pre-resolves the method's OWN return/param types (with
-            // the substitution context above already active) BEFORE
-            // `self.state` swaps to the scratch buffer below -- so a
-            // generic instantiation FIRST triggered by one of them
-            // (`Vec<Token>.last()` returning `Option<Token>`, e.g.)
-            // splices its own typedef via the REAL (not-yet-suspended)
-            // `hoist_insert_pos`, landing at top level, right before the
-            // enclosing top-level function/impl that triggered this
-            // prototype -- the same already-established position every
-            // OTHER lazy type instantiation uses. Done AGAIN, harmlessly,
-            // by `write_type` itself once the scratch build starts right
-            // below (memoized -- a second resolution of the same
-            // instantiation is a no-op) -- this earlier pass exists
-            // PURELY for its splice-position side effect, not to avoid
-            // redoing the resolution. Skipping this would instead let
-            // `write_type` trigger the SAME instantiation later, while
-            // `self.state` already points at the scratch and `hoist_
-            // insert_pos` is suspended to `.None` -- which appends the
-            // typedef INLINE into the scratch instead, so the whole
-            // combined chunk (typedef + prototype) ends up spliced at
-            // `current_stmt_start_pos`, i.e. NESTED inside the CURRENT
-            // statement's own enclosing function body -- a local
-            // typedef, invisible ("unknown type name") to every OTHER
-            // function elsewhere in the file that also needs it. Found
-            // via a real stage-2 self-compilation C error for exactly
-            // this shape (`Option__Token`, first triggered from `Lexer.
-            // _prev_token_is_bare_zero`'s own body).
+            // Pre-resolves the method's return/param types before
+            // `self.state` swaps to the scratch buffer below, so a
+            // generic instantiation triggered by one of them splices its
+            // typedef at top level rather than nested inside the scratch.
             fit m.kind {
               .Function(proto_fnv) -> {
                 if proto_fnv.has_rtype {
@@ -2962,29 +1974,10 @@ impl Codegen {
               _ -> {}
             }
 
-            // Built into a SCRATCH buffer, then spliced via `emit_
-            // hoisted` at `current_stmt_start_pos` (the position right
-            // before the CURRENTLY-executing statement, tracked by
-            // `emit_statements`) -- NOT written directly at whatever
-            // `self.state`'s CURRENT tail happens to be, which is this
-            // call's OWN caller's assumption but breaks the moment the
-            // triggering call site is a SUB-expression (`let line =
-            // Vec__str__get(&parts, i);`) rather than a bare statement: a
-            // direct write would land mid-statement, splitting "= " from
-            // the call itself, corrupt C. Splicing at the CURRENT
-            // statement's own start instead lands the prototype as its
-            // OWN separate declaration statement, right before whichever
-            // statement first triggered it -- still legal C at block
-            // scope, and exactly where the previous direct-write
-            // behavior happened to land for the (unexamined) common case
-            // of a bare call statement, where nothing had been written
-            // for the statement yet. `hoist_insert_pos` is suspended
-            // (`.None`) during the scratch build so a NESTED
-            // instantiation triggered by `write_type` below (a param/
-            // return type that's itself a generic instantiation) appends
-            // into this SAME scratch instead of splicing into the real
-            // buffer at a stale position -- same scratch-buffer-swap
-            // discipline as every other hoisted definition in this file.
+            // Built into a scratch buffer, then spliced at the current
+            // statement's own start -- writing directly at the live tail
+            // would land mid-statement if the triggering call is a
+            // sub-expression rather than a bare statement.
             CodegenState proto_scratch = codegen_state_new();
             CodegenState* saved_proto_state = self.state;
             let saved_proto_hoist_pos = self.hoist_insert_pos;
@@ -2998,17 +1991,9 @@ impl Codegen {
             self.hoist_insert_pos = proto_splice_pos;
             str proto_text = proto_scratch.out.build();
             self.emit_hoisted(proto_text);
-            // `saved_proto_hoist_pos` is a plain captured LOCAL, not
-            // `self.current_stmt_start_pos` -- `emit_hoisted` only
-            // auto-adjusts the latter. See `adjust_pos_after_splice`'s
-            // own doc comment for why this splice (at `proto_splice_
-            // pos`, NOT at `saved_proto_hoist_pos`'s own position) can
-            // still invalidate it: found via a real stage-2 self-
-            // compilation C error (a generic impl method's own full
-            // body landing mid-statement, inside a DIFFERENT, unrelated
-            // function -- restoring this stale, un-adjusted local put
-            // that later splice too early by exactly this prototype's
-            // own length).
+            // `saved_proto_hoist_pos` is a plain captured local, so it
+            // needs the same shift `emit_hoisted` only applies
+            // automatically to `current_stmt_start_pos`.
             if proto_splice_pos.is_some() {
               saved_proto_hoist_pos = adjust_pos_after_splice(
                 saved_proto_hoist_pos,
@@ -3018,16 +2003,9 @@ impl Codegen {
             }
             self.hoist_insert_pos = saved_proto_hoist_pos;
 
-            // An ASYNC method's own `__fun_async_call_<new_name>`
-            // forward declaration is `static` (matching its later real
-            // definition, `emit_async_function_support`'s own step 5) --
-            // C forbids an explicit `static` storage class on a function
-            // DECLARATION at block scope, unlike the ordinary method
-            // prototype just spliced above (which has no storage-class
-            // specifier at all, legal there). Spliced at the REAL,
-            // already-adjusted top-level position (`self.hoist_insert_
-            // pos`, just restored above) instead of `current_stmt_start_
-            // pos`'s block-scope one for exactly that reason.
+            // An async method's own call-helper forward declaration is
+            // `static`, which C forbids at block scope -- spliced at the
+            // real top-level position instead.
             fit m.kind {
               .Function(proto_async_fnv) -> {
                 if proto_async_fnv.is_async {
@@ -3054,53 +2032,12 @@ impl Codegen {
     }
   }
 
-  // Ensures a PLAIN (non-generic) impl method has an inline bare
-  // prototype declared right before its OWN first call site, when its
-  // signature was too UNSAFE for the early forward-declare pass to
-  // cover it (see `prototype_type_is_unsafe_early`'s own doc comment --
-  // a generic return/param type, e.g. `Lexer._next_inner()`'s own
-  // `Result<Option<Token>, Error>`) -- such a method falls back to
-  // relying on natural source order, which breaks the moment it's
-  // called from another method defined EARLIER in the same file
-  // (`Lexer.next()`'s real body calling `self._next_inner()`, itself
-  // defined further down in the same `impl Lexer` block). A no-op when
-  // `owner_type`/`bare_name` isn't a known plain impl method at all, its
-  // signature is ALREADY safe (the early pass already covers it, an
-  // extra prototype here would just be needless clutter), or this exact
-  // method already got its own inline prototype from an earlier call
-  // site (memoized via `emitted_plain_method_protos`). Mirrors `emit_
-  // generic_impl_method_prototype_now`'s own scratch-buffer-then-splice-
-  // at-`current_stmt_start_pos` shape exactly, for the identical
-  // reasoning (legal C at block scope; lands right before whichever
-  // statement first triggered it) -- but sourced from the PLAIN impl-
-  // method registry (`impl_method_rtype`/`impl_method_param_types`)
-  // instead of a generic template's own `Node`, and with no type-
-  // substitution context to apply (a plain method's own param/return
-  // types are already fully concrete).
-  // 
-  // Deliberately narrow for this slice: bails without emitting anything
-  // when any param has a function-pointer type (`v.var_type.has_fn_
-  // sig`) -- that shape needs the SAME wraps-the-name declarator special
-  // case `emit_generic_impl_method_prototype`/`emit_function_param`
-  // already have, not worth duplicating here for a case this rare among
-  // plain (non-generic) impl methods specifically.
-  // 
-  // ALSO a no-op (not even memoized -- a LATER real call site still gets
-  // its own real chance) while `self.suppress_generic_impl_method_
-  // draining` is set: that flag means `self.state` currently points at a
-  // throwaway TEXT-CAPTURE probe (`resolve_field_chain`'s own call-as-
-  // receiver branch, rendering SOME OUTER call's own receiver text into
-  // a tiny scratch buffer -- see its own doc comment), not the real
-  // output. Splicing there anyway -- this function's own EARLIER
-  // behavior -- uses `self.current_stmt_start_pos`'s REAL-buffer-sized
-  // position as a slice bound against that tiny scratch buffer instead,
-  // corrupting `substr`'s own length arithmetic and crashing (found via
-  // a real stage-2 self-compilation lldb backtrace: `emit_hoisted` ->
-  // `StringBuilder.append` -> null deref, several frames below a NESTED
-  // `emit_method_call` reached from inside `resolve_field_chain`'s own
-  // probe). The generic-impl-method path already has this exact
-  // discipline (only enqueues while suppressed, drains once the probe
-  // restores the real buffer) -- this mirrors it.
+  // Ensures a plain (non-generic) impl method has an inline prototype
+  // declared right before its own first call site, when its signature
+  // was too unsafe for the early forward-declare pass. A no-op when the
+  // method is unknown, its signature is already safe, it already got
+  // its own prototype, or `self.state` currently points at a throwaway
+  // text-capture probe rather than the real output.
   ensure_plain_impl_method_prototype_emitted(str owner_type, str bare_name) {
     if self.suppress_generic_impl_method_draining {
       ret;
@@ -3144,33 +2081,12 @@ impl Codegen {
       }
     }
 
-    // The RECEIVER's own type (`owner_type`, e.g. `Gender` for `Gender.
-    // to_string`) needs the SAME "is this a plain enum, not yet fully
-    // defined this early" check `prototype_type_is_unsafe_early` applies
-    // to any OTHER param -- `impl_method_param_types` deliberately
-    // EXCLUDES the implicit `self` (see `record_impl_method`'s own doc
-    // comment), so without this, a method receiving a PLAIN ENUM as
-    // `self` was invisible to this whole check, silently no-op'ing here
-    // AND never covered by the early forward-declare pass either (which
-    // DOES see `self` via `f.args`, correctly judging it unsafe early,
-    // and so correctly EXCLUDING it there) -- the two disagreed, and
-    // NEITHER ever emitted the real prototype. Found via a real minimal
-    // repro: a quirk impl (`impl User as Display`) calling ANOTHER quirk
-    // impl's method on a plain-enum field (`self.gender.to_string()` /
-    // `format("... {} ...", self.gender)`, `Gender`'s own `as Display`
-    // impl declared LATER in the same file) hit "implicit function
-    // declaration" followed by "conflicting types".
-    // 
-    // Deliberately NARROWER than `prototype_type_is_unsafe_early` itself:
-    // only the plain-enum/quirk-name check, not its OWN generic-args/
-    // mangled-template-prefix checks -- `owner_type` being a MANGLED
-    // generic instantiation (`Box__num`) is already a completely
-    // separate, already-correct code path (`ensure_generic_impl_method_
-    // emitted`/`emit_generic_impl_method_prototype_now`, which already
-    // splices its OWN inline prototype) -- reusing the full check here
-    // duplicated that path's own prototype line (confirmed via the
-    // existing generic-impl-method unit tests, which regressed with the
-    // wider check).
+    // The receiver's own type needs the same "plain enum, not yet
+    // defined this early" check as any other param -- `impl_method_
+    // param_types` excludes the implicit `self`. Narrower than
+    // `prototype_type_is_unsafe_early` itself: only the plain-enum/
+    // quirk-name check, since a mangled generic instantiation is
+    // already handled by a separate, correct path.
     bin pm_owner_unsafe = false;
     for pm_owner_n : self.all_nodes {
       fit pm_owner_n.kind {
@@ -3205,12 +2121,9 @@ impl Codegen {
     self.emitted_plain_method_protos.push(pm_key);
     str pm_mangled = self.impl_method_mangled_name.get(pmi);
 
-    // Pre-resolved BEFORE swapping to the scratch buffer below -- same
-    // reasoning as `emit_generic_impl_method_prototype_now`'s own
-    // identical pre-resolution pass: a generic instantiation first
-    // triggered by one of these types must splice its own typedef via
-    // the REAL (not-yet-suspended) `hoist_insert_pos`, landing at top
-    // level, not appended inline into this throwaway scratch.
+    // Pre-resolved before swapping to the scratch buffer below, so a
+    // generic instantiation triggered by one of these types splices at
+    // top level rather than into this throwaway scratch.
     self.resolve_type_name(*pm_rtype);
     for pm_pt3 : pm_param_types {
       self.resolve_type_name(*pm_pt3);
@@ -3237,11 +2150,8 @@ impl Codegen {
       self.state.write(");\n");
     }
     self.state = saved_pm_state;
-    // See `adjust_pos_after_splice`'s own doc comment (via `emit_
-    // generic_impl_method_prototype_now`'s identical fix) for why
-    // `saved_pm_hoist_pos` -- a plain captured local, not `self.
-    // current_stmt_start_pos` -- needs manual adjustment for this
-    // splice, not just `emit_hoisted`'s own automatic one.
+    // `saved_pm_hoist_pos` is a plain captured local, so it needs manual
+    // adjustment for this splice.
     let pm_splice_pos = self.current_stmt_start_pos;
     self.hoist_insert_pos = pm_splice_pos;
     str pm_text = pm_scratch.out.build();
