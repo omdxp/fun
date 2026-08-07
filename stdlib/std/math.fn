@@ -380,11 +380,10 @@ pub fun sign_of<T: num | dec>(T x) Sign {
 // - smaller value
 // 
 // Notes:
-// - Kept as separate `_num`/`_dec` overloads rather than a constrained
-// generic `min<T>`: `Vec<T: num | dec>` already declares its own instance
-// method named `min()` (a reduction over the vector), and a same-named
-// free function collides with that method's resolution when both
-// `std.vec` and `std.math` are imported together.
+// - Kept as separate `_num`/`_dec` overloads rather than a generic `min<T>`.
+// `Vec<T: num | dec>` already has an instance method named `min()`, and a
+// same-named free function would collide with it when both `std.vec` and
+// `std.math` are imported together.
 pub fun min_num(num a, num b) num {
   if a < b {
     ret a;
@@ -495,7 +494,7 @@ pub fun rad_to_deg(dec radians) dec {
 // 
 // Params:
 // - base: base value
-// - exp: exponent (a NEGATIVE exponent yields 1, since integer powers can't
+// - exp: exponent (a negative exponent yields 1, since integer powers can't
 // represent fractions; use `try_pow_int` to reject negative exponents)
 // 
 // Returns:

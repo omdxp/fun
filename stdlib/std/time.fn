@@ -229,10 +229,9 @@ pub fun format_human(num epoch, str buf, num buf_len) num {
 // - epoch: seconds since epoch
 // 
 // Returns:
-// - pointer to a SHARED static buffer (or null). Do NOT free it, and do NOT
-// hold it across another time call (now/format_*): the next ctime/localtime
-// overwrites it. Copy it (e.g. into your own buffer) if you need to keep it.
-// For a caller-owned, copy-safe result, use `format_human(epoch, buf, len)`.
+// - pointer to a shared static buffer (or null). Don't free it or hold it
+// across another time call, since the next ctime/localtime overwrites it.
+// Use `format_human(epoch, buf, len)` for a caller-owned, copy-safe result.
 pub fun format_human_cstr(num epoch) str {
   raw* tbuf = _time_buf_from_epoch(epoch);
   if tbuf == nil {
@@ -311,10 +310,9 @@ pub fun now_human(str buf, num buf_len) num {
 // Return a human-readable string for the current time (ctime).
 // 
 // Returns:
-// - pointer to a SHARED static buffer (or null). Do NOT free it, and do NOT
-// hold it across another time call: the next ctime/localtime overwrites it.
-// Copy it if you need to keep it, or use `now_human(buf, len)` for a
-// caller-owned result.
+// - pointer to a shared static buffer (or null). Don't free it or hold it
+// across another time call, since the next ctime/localtime overwrites it.
+// Use `now_human(buf, len)` for a caller-owned result.
 pub fun now_human_cstr() str {
   let t = now();
   ret format_human_cstr(t.epoch);
