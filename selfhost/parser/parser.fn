@@ -1103,6 +1103,23 @@ impl ParseState {
     ret token_is_symbol(next_opt.unwrap(), '{');
   }
 
+  // Same lookahead as `looks_like_compound_init`, but for a bare TYPE
+  // reference used as `sizeof(...)`'s sole argument (`sizeof(Trace<
+  // dec>)`, `examples/imports/torture_compiler/{main,trace}.fn`'s own
+  // real bodies) -- the closing token is `)`, not `{`, since there's no
+  // literal body at all here.
+  pub looks_like_sizeof_generic_type() bin {
+    num off = self.skip_generic_args_tokens(1);
+    if off == 1 {
+      ret false;
+    }
+    let next_opt = self.token_peek_n(off);
+    if next_opt.is_none() {
+      ret false;
+    }
+    ret token_is_symbol(next_opt.unwrap(), ')');
+  }
+
   // True if the identifier at the cursor is a known symbol resolving to
   // a `Compound` declaration -- one of the conditions gating whether
   // `Name{...}`/`Name<T>{...}` should be parsed as a compound-literal
@@ -1797,6 +1814,53 @@ impl Parser {
               ret dterr;
             }
             ret self.parse_compound_init(dt, true, t.pos, true);
+          }
+          // `sizeof(Generic<T>)` -- an identifier immediately preceded by
+          // `sizeof(` that looks like the START of a generic type
+          // reference (`<` follows, and skipping past the generic args
+          // lands on the closing `)`) parses as a bare TYPE reference
+          // instead of falling through to `parse_single_token_to_node`,
+          // which would try (and fail) to read `Trace < dec >` as a
+          // comparison-chain EXPRESSION -- `examples/imports/torture_
+          // compiler/{main,trace}.fn`'s own real `sizeof(Trace<dec>)`.
+          // Reuses the `.CompoundInit` node shape with ZERO fields as a
+          // plain "type reference, no literal body" carrier (no new AST
+          // node needed) -- `emit_call`'s own `sizeof` special case
+          // reads it back structurally.
+          bin in_sizeof_ctx = false;
+          fit self.state.token_peek_prev_stream_n(0) {
+            .Some(p) -> {
+              if token_is_operator(p, "(") {
+                fit self.state.token_peek_prev_stream_n(1) {
+                  .Some(p2) -> {
+                    if p2.type == TokenType.Identifier {
+                      fit p2.data {
+                        .Sval(s2) -> { in_sizeof_ctx = equals(s2, "sizeof"); }
+                        _ -> {}
+                      }
+                    }
+                  }
+                  .None -> {}
+                }
+              }
+            }
+            .None -> {}
+          }
+          if !after_member_access && in_sizeof_ctx && self.state.looks_like_sizeof_generic_type() {
+            DataType* sdt = malloc(sizeof(DataType));
+            *sdt = dtype_new();
+            let sderr = self.state.parse_datatype(sdt);
+            if sderr.is_some() {
+              ret sderr;
+            }
+            CompoundInitNode ci = compound_init_node_new();
+            ci.init_dtype = sdt;
+            ci.has_dtype = true;
+            Node ci_node = node_new(NodeKind.CompoundInit(ci));
+            ci_node.pos = t.pos;
+            ci_node.has_pos = true;
+            self.create_node(&ci_node);
+            ret .None;
           }
           ret self.parse_single_token_to_node();
         }

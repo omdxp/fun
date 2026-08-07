@@ -1612,11 +1612,57 @@ impl Codegen {
       }
       ei = ei + 1;
     }
-
+    // Pushed BEFORE the struct body is actually resolved/written (not
+    // after, as this used to) -- a SELF-referential field (`Box<T>* next;`
+    // inside `compound Box<T>`, `examples/imports/torture_compiler/
+    // trace.fn`'s own real `Trace<T>* next;`) resolves its OWN type via
+    // `resolve_type_name` in the pass-1 loop below, which recurses right
+    // back into THIS function for the SAME mangled name. Left registered
+    // only at the very end, that recursive call never finds itself
+    // already in progress and starts building the SAME struct all over
+    // again -- infinite recursion, a real stack-overflow SIGSEGV
+    // confirmed via lldb (crashes on function entry, corrupted stack,
+    // single unwindable frame). Safe to mark this early: nothing between
+    // here and the end of the function returns `.None` (a partial,
+    // marked-but-never-emitted entry would otherwise be a real risk).
+    self.emitted_generic_instantiations.push(mangled_name);
     let field_names = self.generic_compound_field_names.get(template_idx);
     let field_type_names = self.generic_compound_field_type_names.get(template_idx);
     let field_is_pointer = self.generic_compound_field_is_pointer.get(template_idx);
     let field_dtypes = self.generic_compound_field_dtypes.get(template_idx);
+    // Forward-declares `mangled_name` itself, IMMEDIATELY, but ONLY when
+    // this template is DIRECTLY self-referential (some field's own bare
+    // template name is THIS SAME template, `Box<T>* next;` inside
+    // `compound Box<T>`, e.g.) -- fixing the infinite-recursion crash
+    // above still leaves a real C-validity gap for exactly that shape:
+    // the recursive `resolve_type_name` call now returns early with just
+    // the NAME, but no typedef for it exists in the output YET, so the
+    // full struct body below (`Box__num* next;`, using the bare alias,
+    // not `struct Box__num*`) references a type name C doesn't recognize
+    // ("must use 'struct' tag to refer to type"). Mirrors the SAME
+    // forward-declare this file's own top-level PLAIN-compound/tagged-
+    // union-enum pass already does up front for non-generic types --
+    // redeclaring the same typedef once the full body follows below is
+    // valid C (that pass already relies on the same redeclaration-is-
+    // fine behavior). Gated (not unconditional) so an ordinary, non-
+    // recursive generic instantiation gets no extra forward-declare line
+    // at all -- several hand-built unit tests assert the exact byte
+    // output for that common case.
+    bin is_self_referential = false;
+    for fdt : field_dtypes {
+      if equals(fdt.type_str, dt.type_str) {
+        is_self_referential = true;
+      }
+    }
+    if is_self_referential {
+      StringBuilder fwd_sb = string_builder_init(32);
+      fwd_sb.append("typedef struct ");
+      fwd_sb.append(mangled_name);
+      fwd_sb.append(" ");
+      fwd_sb.append(mangled_name);
+      fwd_sb.append(";\n");
+      self.emit_hoisted(fwd_sb.build());
+    }
 
     Vec<str> resolved_field_names;
     resolved_field_names.init(0);
@@ -1776,7 +1822,6 @@ impl Codegen {
       resolved_field_type_names,
       resolved_field_is_pointer
     );
-    self.emitted_generic_instantiations.push(mangled_name);
     self.maybe_instantiate_generic_impl_methods(
       dt.type_str,
       mangled_name,
@@ -1869,8 +1914,31 @@ impl Codegen {
       }
       ei = ei + 1;
     }
-
+    // Pushed BEFORE the enum body is actually resolved/written, AND
+    // forward-declared immediately WHEN self-referential -- see
+    // `ensure_compound_instantiated`'s own identical fix/doc comment for
+    // why and for the exact same gating (avoids an extra forward-declare
+    // line for the ordinary, non-recursive case, which several hand-
+    // built unit tests assert the exact byte output for).
+    self.emitted_generic_instantiations.push(mangled_name);
     let variant_templates = self.generic_enum_variants.get(template_idx);
+    bin enum_is_self_referential = false;
+    for vt : variant_templates {
+      for pt : vt.payload_type_strs {
+        if equals(pt, dt.type_str) {
+          enum_is_self_referential = true;
+        }
+      }
+    }
+    if enum_is_self_referential {
+      StringBuilder efwd_sb = string_builder_init(32);
+      efwd_sb.append("typedef struct ");
+      efwd_sb.append(mangled_name);
+      efwd_sb.append(" ");
+      efwd_sb.append(mangled_name);
+      efwd_sb.append(";\n");
+      self.emit_hoisted(efwd_sb.build());
+    }
 
     bin is_tagged_union = false;
     for vt : variant_templates {
@@ -1915,7 +1983,6 @@ impl Codegen {
     self.emit_hoisted(enum_scratch.out.build());
 
     self.record_enum(mangled_name, variant_names, is_tagged_union);
-    self.emitted_generic_instantiations.push(mangled_name);
     self.maybe_instantiate_generic_impl_methods(
       dt.type_str,
       mangled_name,
@@ -4669,6 +4736,26 @@ impl Codegen {
     // identifier emission exactly for every case this fix doesn't apply
     // to.
     if equals(callee_name, "sizeof") && args.len == 1 {
+      // `sizeof(Generic<T>)` -- parser.fn's own `.CompoundInit` node with
+      // ZERO fields, used as a plain "type reference, no literal body"
+      // carrier for exactly this shape (see `parse_expressionable_
+      // single`'s own doc comment for why no new AST node was needed).
+      // Resolved (and, on first use, monomorphized) the SAME way any
+      // other generic-type reference is, via `resolve_type_name`.
+      fit args.get(0).kind {
+        .CompoundInit(ci) -> {
+          if ci.has_dtype {
+            let resolved = self.resolve_type_name(*ci.init_dtype);
+            if resolved.is_some() {
+              self.state.write("sizeof(");
+              self.write_type_name(resolved.unwrap());
+              self.state.write(")");
+              ret .None;
+            }
+          }
+        }
+        _ -> {}
+      }
       str sizeof_operand = "";
       bin have_sizeof_operand = false;
       fit args.get(0).kind {
@@ -9234,6 +9321,27 @@ impl Codegen {
     }
   }
 
+  // Companion to `infer_arg_type_name`, for the ONE shape that matters
+  // to its own caller (`maybe_instantiate_generic_function`'s own type-
+  // param inference, which needs to know whether the generated
+  // function's param should be `T` or `T*`) -- a known local's OWN
+  // recorded pointer-ness. `false` for every other shape `infer_arg_
+  // type_name` itself resolves (a literal is never a pointer; a call's
+  // return type isn't tracked structurally enough here to say either
+  // way, matching that function's own scope).
+  infer_arg_is_pointer(Node* arg) bin {
+    fit arg.kind {
+      .Identifier(name) -> {
+        let p = self.lookup_local_is_pointer(name);
+        if p.is_some() {
+          ret p.unwrap();
+        }
+        ret false;
+      }
+      _ -> { ret false; }
+    }
+  }
+
   // Infers a `let NAME = <expr>;` declaration's own type, for THIS
   // codegen's OWN bookkeeping (`record_local`, so a later bare-shorthand
   // `fit`/chained field access/method call on `NAME` still resolves) --
@@ -9551,14 +9659,29 @@ impl Codegen {
             for tp : f.type_params {
               bin found = false;
               str found_name = "";
+              bin found_is_pointer = false;
               num ai = 0;
               for parg : f.args {
                 fit parg.kind {
                   .Variable(v) -> {
                     if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 && ai < args.len {
-                      let inferred = self.infer_arg_type_name(args.get(ai));
+                      let arg_node = args.get(ai);
+                      let inferred = self.infer_arg_type_name(arg_node);
                       if inferred.is_some() {
                         found_name = inferred.unwrap();
+                        // A POINTER argument (`err(1, "...", result)`
+                        // where `result` is `Expr*`, `examples/imports/
+                        // torture_compiler/parser.fn`'s own real body)
+                        // needs the generated function's own param to
+                        // ALSO be a pointer -- `infer_arg_type_name`
+                        // only ever returns the bare type NAME, dropping
+                        // pointer-ness entirely, which this hardcoded
+                        // `false` below used to just accept. Captured
+                        // HERE, at the exact matching arg position --
+                        // `ai` itself is stale by the time this loop
+                        // ends (incremented past every param, not just
+                        // the matching one).
+                        found_is_pointer = self.infer_arg_is_pointer(arg_node);
                         found = true;
                       }
                     }
@@ -9578,7 +9701,7 @@ impl Codegen {
                 ret .None;
               }
               arg_type_names.push(found_name);
-              arg_is_pointer.push(false);
+              arg_is_pointer.push(found_is_pointer);
             }
 
             StringBuilder nb = string_builder_init(16);
@@ -10637,9 +10760,13 @@ impl Codegen {
     // errors, but the resulting C fails with "unknown type name" for
     // exactly these types, since nothing ever forward-declares a NAME
     // used by POINTER before its own full definition is reached). Only
-    // handles COMPOUNDS -- a tagged-union enum's own cross-references
-    // are far rarer in practice and not what stage-2 hit; left for a
-    // follow-up if it turns out to be needed too.
+    // handles COMPOUNDS directly below -- a PLAIN (non-generic) tagged-
+    // union enum needs the exact same treatment for a SELF-referential
+    // (or mutually-referential) pointer payload (`enum Expr { Neg(Expr*),
+    // ... }`, `examples/imports/torture_compiler/ast.fn`'s own real
+    // body) -- confirmed via the original transpiler's own identical
+    // blanket forward-declare pass, which covers every struct-backed
+    // type (compounds AND tagged-union enums alike), not just compounds.
     for n : nodes {
       fit n.kind {
         .Compound(c) -> {
@@ -10649,6 +10776,23 @@ impl Codegen {
             self.state.write(" ");
             self.state.write(c.name);
             self.state.write(";\n");
+          }
+        }
+        .Enum(e) -> {
+          if !e.has_type_params {
+            bin en_is_tagged_union = false;
+            for v : e.variants {
+              if v.has_payload && v.payload.len > 0 {
+                en_is_tagged_union = true;
+              }
+            }
+            if en_is_tagged_union {
+              self.state.write("typedef struct ");
+              self.state.write(e.name);
+              self.state.write(" ");
+              self.state.write(e.name);
+              self.state.write(";\n");
+            }
           }
         }
         _ -> {}
