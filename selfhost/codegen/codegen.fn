@@ -289,6 +289,14 @@ compound DisplayResolution {
 compound GenericCallResolution {
   str mangled_name;
   Vec<DataType> param_types;
+  // The callee's OWN declared return type, substituted the SAME way
+  // `param_types` is -- unlike `param_types` (always resolvable
+  // structurally from the call's own arguments), a caller needing
+  // `rtype` (`infer_let_expr_type`, for `let b = make_box(5);` where
+  // `make_box<T>(T x) Box<T>` -- the return type ITSELF is generic, not
+  // just a bare type param) has no other way to recover it once this
+  // function's own substitution context is torn down.
+  DataType rtype;
 }
 
 // One variant's template shape within a generic enum template (see
@@ -1548,6 +1556,88 @@ impl Codegen {
       pos,
       len(text)
     );
+  }
+
+  // Given a generic compound template's BARE name (`Box`, from a `Box{
+  // value = 7}` literal written with NO explicit `<T>`) and its own
+  // initializer fields, infers each of the template's type params' own
+  // concrete binding from whichever field's DECLARED type (on the
+  // template itself, `T value;`) is a bare occurrence of that param --
+  // mirrors the original transpiler's own `bind_generic_param`-based
+  // inference for exactly this shape (`validate_compound_init`'s "generic
+  // args omitted, infer them from field values" branch). Without this,
+  // `resolve_type_name` had no way to tell a BARE occurrence of a
+  // generic template's own name (zero generic args, matching an
+  // ORDINARY plain compound just as well) apart from an omitted-but-
+  // inferable one -- it took the early "`generic_args.len == 0` -> the
+  // name unchanged" exit unconditionally, silently emitting the
+  // template's own bare, never-instantiated name (`Box`, not `Box__
+  // num`) as if it were a real, complete C type -- a real, previously-
+  // undiscovered bug found via `examples/advanced/generic_inference_
+  // after_init.fn`'s own `let nbox = Box{value = 7};`. `.None` when
+  // `base_name` isn't a registered generic compound template at all
+  // (the ordinary plain-compound case, left entirely alone), or some
+  // type param's binding can't be inferred from ANY field this way --
+  // the caller must reject rather than guess.
+  infer_generic_compound_init_args(str base_name, Vec<CompoundInitField> init_fields) Option<Vec<DataType *>> {
+    num template_idx = 0;
+    bin found_tmpl = false;
+    for template_idx < self.generic_compound_names.len {
+      if equals(self.generic_compound_names.get(template_idx), base_name) {
+        found_tmpl = true;
+        break;
+      }
+      template_idx = template_idx + 1;
+    }
+    if !found_tmpl {
+      ret .None;
+    }
+    let type_params = self.generic_compound_type_params.get(template_idx);
+    let tmpl_field_names = self.generic_compound_field_names.get(template_idx);
+    let tmpl_field_dtypes = self.generic_compound_field_dtypes.get(template_idx);
+
+    Vec<DataType*> resolved_args;
+    resolved_args.init(0);
+    for tp : type_params {
+      bin tp_found = false;
+      str tp_name = "";
+      bin tp_is_pointer = false;
+      num fi = 0;
+      for fi < tmpl_field_names.len {
+        if tp_found {
+          break;
+        }
+        let tfdt = tmpl_field_dtypes.get(fi);
+        if equals(tfdt.type_str, tp) && tfdt.generic_args.len == 0 {
+          let fname = tmpl_field_names.get(fi);
+          num ii = 0;
+          for ii < init_fields.len {
+            let ifield = init_fields.get(ii);
+            if equals(ifield.name, fname) {
+              let inferred_name = self.infer_arg_type_name(ifield.value);
+              if inferred_name.is_some() {
+                tp_name = inferred_name.unwrap();
+                tp_is_pointer = self.infer_arg_is_pointer(ifield.value);
+                tp_found = true;
+              }
+            }
+            ii = ii + 1;
+          }
+        }
+        fi = fi + 1;
+      }
+      if !tp_found {
+        ret .None;
+      }
+      DataType* tp_dt = malloc(sizeof(DataType));
+      *tp_dt = dtype_new();
+      tp_dt.type_str = tp_name;
+      if tp_is_pointer {
+        tp_dt.pointer_depth = 1;
+      }
+      resolved_args.push(tp_dt);
+    }
+    ret .Some(resolved_args);
   }
 
   // Given a DataType with `generic_args` non-empty (`Box<num>`),
@@ -4317,28 +4407,55 @@ impl Codegen {
         // value, ... }`, or `(Type){0}` for an empty initializer.
         str type_name = "";
         if ci.has_dtype {
-          let resolved = self.resolve_type_name(*ci.init_dtype);
-          if resolved.is_none() {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
-          }
-          type_name = resolved.unwrap();
+          bin have_type_name = false;
           // A bare `Type{...}` (no explicit generic args written) inside
           // a generic impl method's OWN body, naming exactly that
           // method's own return type's bare template (`Person{...}`
           // inside `Person<T>.new(...) Person<T> { ret Person{...}; }`,
           // `examples/stdlib/math_rand_option_aliases.fn`'s own real
-          // body) resolves to the UNCHANGED bare name above --
-          // `resolve_type_subst` only substitutes an EXACT type-param
-          // name (`T` -> `str`), never a compound's OWN template name
-          // against the active instantiation. `current_fn_rtype_name`
-          // already holds the correctly-mangled name (`Person__str`)
-          // for exactly this shape, since it's resolved the same way
-          // when the enclosing function's OWN signature was emitted.
+          // body) resolves against `current_fn_rtype_name` -- already
+          // the correctly-mangled name (`Person__str`) for exactly this
+          // shape, since it's resolved the same way when the enclosing
+          // function's OWN signature was emitted. Checked BEFORE the
+          // field-based inference below, since a generic method body's
+          // OWN fields are typically set from the method's still-
+          // abstract type-param-typed locals/params, not concrete
+          // values a field-value-based inference could bind correctly.
           if ci.init_dtype.generic_args.len == 0 && self.current_fn_rtype_dt.is_some() {
             let crt = self.current_fn_rtype_dt.unwrap();
             if crt.generic_args.len > 0 && equals(crt.type_str, ci.init_dtype.type_str) {
               type_name = self.current_fn_rtype_name;
+              have_type_name = true;
             }
+          }
+          // A bare `Box{value = 7}` (no explicit `<T>`, and NOT the
+          // generic-impl-method-body shape just above) -- infer `T`'s
+          // own concrete binding from the initializer's own field
+          // values (see `infer_generic_compound_init_args`'s own doc
+          // comment for why `resolve_type_name`'s own early "zero
+          // generic args -> bare name unchanged" exit can't do this
+          // itself).
+          if !have_type_name && ci.init_dtype.generic_args.len == 0 {
+            let inferred_gargs = self.infer_generic_compound_init_args(
+              ci.init_dtype.type_str,
+              ci.fields
+            );
+            if inferred_gargs.is_some() {
+              DataType effective_dtype = *ci.init_dtype;
+              effective_dtype.generic_args = inferred_gargs.unwrap();
+              let resolved2 = self.resolve_type_name(effective_dtype);
+              if resolved2.is_some() {
+                type_name = resolved2.unwrap();
+                have_type_name = true;
+              }
+            }
+          }
+          if !have_type_name {
+            let resolved = self.resolve_type_name(*ci.init_dtype);
+            if resolved.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            type_name = resolved.unwrap();
           }
         } elif !equals(self.expected_compound_type, "") {
           type_name = self.expected_compound_type;
@@ -9693,10 +9810,12 @@ impl Codegen {
   // inference" spirit as everywhere else in this file: a known LOCAL
   // (its own recorded type), a call to an already-registered PLAIN
   // function (its own declared return type -- `err_kind`'s real call
-  // site infers `T` from `token_zero()` this way), or a literal
-  // (num/dec/str/chr/bin, from the literal's own kind). Anything else
-  // (a field access, a method call, a nested generic call, ...) is
-  // unresolvable, rejected rather than guessed.
+  // site infers `T` from `token_zero()` this way), a literal (num/dec/
+  // str/chr/bin, from the literal's own kind), or a plain field chain
+  // (`nbox.value`, via `resolve_field_chain` -- `make_pair(nbox.value,
+  // sbox.value)`'s own real call site in `examples/advanced/generic_
+  // inference_after_init.fn`). Anything else (a method call, a nested
+  // generic call, ...) is unresolvable, rejected rather than guessed.
   infer_arg_type_name(Node* arg) Option<str> {
     fit arg.kind {
       .Identifier(name) -> { ret self.lookup_local_type_name(name); }
@@ -9730,6 +9849,15 @@ impl Codegen {
               }
             }
             _ -> {}
+          }
+          // Not a qualified enum-variant constant -- a PLAIN field
+          // chain (`nbox.value`, `make_pair(nbox.value, sbox.value)`'s
+          // own real call site in `examples/advanced/generic_inference_
+          // after_init.fn`) resolves via the same `resolve_field_chain`
+          // a method call's own receiver resolution already uses.
+          let chain = self.resolve_field_chain(arg);
+          if chain.is_some() {
+            ret .Some(chain.unwrap().type_name);
           }
           ret .None;
         }
@@ -9768,7 +9896,74 @@ impl Codegen {
         }
         ret false;
       }
+      .Expression(e) -> {
+        if equals(e.op, ".") && e.has_left && e.has_right {
+          let chain = self.resolve_field_chain(arg);
+          if chain.is_some() {
+            ret chain.unwrap().is_pointer;
+          }
+        }
+        ret false;
+      }
       _ -> { ret false; }
+    }
+  }
+
+  // Companion to `infer_arg_type_name`, for `maybe_instantiate_generic_
+  // function`'s NESTED type-param inference (a param declared `Pair<L,
+  // R> p`, matching a type param inside the param's own `generic_args`
+  // rather than the param's bare type itself -- see that function's own
+  // doc comment). Needs the argument's FULL structural `DataType`
+  // (including ITS OWN `generic_args`, e.g. `pair`'s recorded `Pair<num,
+  // str>`), not just the bare name `infer_arg_type_name` returns.
+  // Covers a known local (via `lookup_local_dtype`, when it was recorded
+  // with one; a bare name-only local has no generic args to offer, so
+  // this yields `.None` for it same as an unknown name) and a literal
+  // (a bare `DataType` with no generic args, matching `infer_arg_type_
+  // name`'s own literal cases). Anything else is unresolvable here.
+  infer_arg_dtype(Node* arg) Option<DataType> {
+    fit arg.kind {
+      .Identifier(name) -> { ret self.lookup_local_dtype(name); }
+      .Number(data) -> {
+        fit data {
+          .Num(_) -> {
+            DataType dt = dtype_new();
+            dt.type_str = "num";
+            ret .Some(dt);
+          }
+          .Dec(_) -> {
+            DataType dt = dtype_new();
+            dt.type_str = "dec";
+            ret .Some(dt);
+          }
+          _ -> { ret .None; }
+        }
+      }
+      .String(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "str";
+        ret .Some(dt);
+      }
+      .Character(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "chr";
+        ret .Some(dt);
+      }
+      .Boolean(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "bin";
+        ret .Some(dt);
+      }
+      .Expression(e) -> {
+        if equals(e.op, ".") && e.has_left && e.has_right {
+          let chain = self.resolve_field_chain(arg);
+          if chain.is_some() {
+            ret chain.unwrap().dtype;
+          }
+        }
+        ret .None;
+      }
+      _ -> { ret .None; }
     }
   }
 
@@ -9814,7 +10009,25 @@ impl Codegen {
       // variant's name is).
       .CompoundInit(ci) -> {
         if ci.has_dtype {
-          ret .Some(*ci.init_dtype);
+          // A bare `Box{value = 7}` (no explicit `<T>`) needs the SAME
+          // field-value-based generic-arg inference `emit_expr`'s own
+          // `.CompoundInit` case uses -- see `infer_generic_compound_
+          // init_args`'s own doc comment. Without this, `nbox`'s own
+          // recorded local type stayed the template's bare, ungeneric
+          // name (`Box`, `generic_args` empty), so a LATER `nbox.value`
+          // field read (or passing it as a generic function's own
+          // argument) couldn't resolve `value`'s real type at all.
+          DataType effective_dtype = *ci.init_dtype;
+          if effective_dtype.generic_args.len == 0 {
+            let inferred_gargs = self.infer_generic_compound_init_args(
+              effective_dtype.type_str,
+              ci.fields
+            );
+            if inferred_gargs.is_some() {
+              effective_dtype.generic_args = inferred_gargs.unwrap();
+            }
+          }
+          ret .Some(effective_dtype);
         }
         ret .None;
       }
@@ -9906,22 +10119,27 @@ impl Codegen {
               ret .Some(*rt.unwrap());
             }
             // A call to a GENERIC function template (`let p2 =
-            // pick_first(p1, p2);`, `pick_first<T>(T a, T b) T`) isn't in
-            // the plain registry `lookup_function_rtype` reads -- infer
-            // its ACTUAL, substituted return type via the same
-            // instantiation `emit_call` already triggers for this exact
-            // call (idempotent: `maybe_instantiate_generic_function`
+            // pick_first(p1, p2);`, `pick_first<T>(T a, T b) T`, or `let
+            // b = make_box(5);`, `make_box<T>(T x) Box<T>` -- the return
+            // type ITSELF a generic instantiation, not just a bare type
+            // param) isn't in the plain registry `lookup_function_rtype`
+            // reads -- infer its ACTUAL, substituted return type via the
+            // same instantiation `emit_call` already triggers for this
+            // exact call (idempotent: `maybe_instantiate_generic_function`
             // dedups via `emitted_generic_instantiations`, so calling it
             // again here -- this runs AFTER `emit_expr(v.val)` already
             // did, in the `Variable`-declaration case -- is a cheap
-            // no-op past the first time). Only the bare-return-type case
-            // (`T`, not `Vec<T>`) is handled, matching every other
-            // narrowness in this function.
+            // no-op past the first time). `GenericCallResolution.rtype`
+            // already carries the substituted return type directly (see
+            // its own doc comment) -- no need to separately hunt for a
+            // same-named parameter as a proxy for it, this function's OWN
+            // previous, narrower approach (which only worked for a BARE
+            // `T` return, not `Box<T>`).
             if e.has_right {
               for tmpl : self.generic_function_templates {
                 fit tmpl.kind {
                   .Function(f) -> {
-                    if !equals(f.name, fn_name) || !f.has_rtype || f.rtype.generic_args.len > 0 {
+                    if !equals(f.name, fn_name) || !f.has_rtype {
                       continue;
                     }
                     Vec<Node*> gargs;
@@ -9931,22 +10149,7 @@ impl Codegen {
                     if ginst.is_none() {
                       ret .None;
                     }
-                    let gres = ginst.unwrap();
-                    num pi2 = 0;
-                    if f.has_args {
-                      for parg : f.args {
-                        fit parg.kind {
-                          .Variable(pv) -> {
-                            if equals(pv.var_type.type_str, f.rtype.type_str) && pv.var_type.generic_args.len == 0 && pi2 < gres.param_types.len {
-                              ret .Some(gres.param_types.get(pi2));
-                            }
-                          }
-                          _ -> {}
-                        }
-                        pi2 = pi2 + 1;
-                      }
-                    }
-                    ret .None;
+                    ret .Some(ginst.unwrap().rtype);
                   }
                   _ -> {}
                 }
@@ -10163,6 +10366,54 @@ impl Codegen {
                 }
                 ai = ai + 1;
               }
+              // Falls back to a NESTED match when no param is a bare
+              // occurrence of `tp` itself: a param declared `Pair<L, R>
+              // p` (`swap_pair<L, R>(Pair<L, R> p) Pair<R, L>`, e.g.)
+              // never matches the bare-occurrence loop above (`v.
+              // var_type.generic_args.len == 0` fails, since `Pair<L,
+              // R>` has two), but `tp` still appears -- as a bare
+              // occurrence ONE LEVEL DOWN, inside the param's own
+              // `generic_args`. Resolved by finding `tp`'s POSITION
+              // there, then reading that same position out of the
+              // ACTUAL argument's own structural `DataType` (`pair`'s
+              // recorded `Pair<num, str>`, via `infer_arg_dtype`) --
+              // e.g. position 0 -> `num` for `L`, position 1 -> `str`
+              // for `R`. Only one level of nesting is matched (matching
+              // `infer_arg_dtype`'s own scope); a param whose actual
+              // argument itself lacks recorded generic args (a plain
+              // `record_local` local, not `record_local_typed`) can't
+              // be resolved this way either.
+              if !found {
+                num ai3 = 0;
+                for parg3 : f.args {
+                  fit parg3.kind {
+                    .Variable(v3) -> {
+                      if v3.var_type.generic_args.len > 0 && ai3 < args.len {
+                        num gi = 0;
+                        for garg : v3.var_type.generic_args {
+                          if !found && equals(garg.type_str, tp) && garg.generic_args.len == 0 {
+                            let arg_dt3 = self.infer_arg_dtype(args.get(ai3));
+                            if arg_dt3.is_some() {
+                              let adt3 = arg_dt3.unwrap();
+                              if gi < adt3.generic_args.len {
+                                let nested = adt3.generic_args.get(gi);
+                                let nested_name = self.resolve_type_name(*nested);
+                                if nested_name.is_some() {
+                                  found_name = nested_name.unwrap();
+                                  found = true;
+                                }
+                              }
+                            }
+                          }
+                          gi = gi + 1;
+                        }
+                      }
+                    }
+                    _ -> {}
+                  }
+                  ai3 = ai3 + 1;
+                }
+              }
               if !found {
                 let ctx_inferred = self.infer_generic_function_type_param_from_context(f, tp);
                 if ctx_inferred.is_some() {
@@ -10346,6 +10597,18 @@ impl Codegen {
               }
             }
 
+            // Computed BEFORE the substitution context below gets torn
+            // down -- see `GenericCallResolution.rtype`'s own doc
+            // comment for why this can't just be derived by the caller
+            // afterward. `f.rtype` is optional (`void`-returning generic
+            // function); left as an unsubstituted, harmless placeholder
+            // when absent -- no caller reads `rtype` without checking
+            // `f.has_rtype` (or the equivalent) itself first.
+            DataType resolved_rtype = dtype_new();
+            if f.has_rtype {
+              resolved_rtype = self.resolve_type_subst(*f.rtype);
+            }
+
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
             self.type_subst_arg_is_pointer = prev_arg_ptrs;
@@ -10353,6 +10616,7 @@ impl Codegen {
             GenericCallResolution res;
             res.mangled_name = mangled_name;
             res.param_types = param_types;
+            res.rtype = resolved_rtype;
             ret .Some(res);
           }
         }
