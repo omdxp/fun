@@ -313,6 +313,18 @@ compound GenericCallResolution {
   DataType rtype;
 }
 
+// Result of `maybe_instantiate_generic_impl_method_own_params` -- see
+// its own doc comment. `rtype` mirrors `GenericCallResolution.rtype`'s
+// own reasoning exactly: the caller (`resolve_field_chain`'s own "call
+// as receiver" case, resolving a CHAINED call's receiver type, `b.wrap(
+// "hello").get()`) has no other way to recover the COMBINED (impl's own
+// + the method's own fresh) substitution's result once this function's
+// own substitution context is torn down.
+compound OwnParamCallResolution {
+  str mangled_name;
+  DataType rtype;
+}
+
 // One variant's template shape within a generic enum template (see
 // `Codegen.generic_enum_names`'s doc comment): its bare name, whether it
 // carries a payload, and -- if so -- each payload position's OWN
@@ -3684,24 +3696,15 @@ impl Codegen {
   // to `emitted_method_own_param_insts` BEFORE recursing into the body).
   // 
   // Returns the new combined mangled name (`Box__num__wrap__str`) to
-  // call, or `.None` when inference fails (an own param with no
-  // resolvable argument) or `owner_type` isn't a known instantiation at
-  // all -- the caller falls back to its own (impl-only) path either way.
-  // 
-  // Deliberately narrow for this slice: CHAINING off such a call's own
-  // result (`b.wrap("hello").get()`) doesn't work yet -- confirmed via a
-  // real repro, verified separately that the assign-then-call form
-  // (`Box<str> b2 = b.wrap("hello"); b2.get();`) works correctly.
-  // `resolve_field_chain`'s own "call as receiver" resolution (used to
-  // determine `.get()`'s receiver type here) has no way to reach this
-  // function's OWN combined substitution, so it resolves the chained
-  // call's return type using only the raw, unsubstituted template return
-  // type (`Box<U>` -> the literal, invalid "Box__U") -- fails loudly (a
-  // guaranteed C compile error from the resulting nested/malformed
-  // output) rather than silently miscompiling, so at least it's a safe
-  // failure mode. Fixing this needs `resolve_field_chain`'s call-receiver
-  // case to consult this function too; not done here.
-  maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<str> {
+  // call, PLUS the method's own return type resolved through the SAME
+  // combined substitution (see `OwnParamCallResolution.rtype`'s own doc
+  // comment for why the caller can't recover this otherwise -- needed
+  // by `resolve_field_chain`'s own "call as receiver" case to support
+  // CHAINING off such a call's own result, `b.wrap("hello").get()`) --
+  // or `.None` when inference fails (an own param with no resolvable
+  // argument) or `owner_type` isn't a known instantiation at all -- the
+  // caller falls back to its own (impl-only) path either way.
+  maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
     num ii = 0;
     bin found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -3787,19 +3790,6 @@ impl Codegen {
                 }
                 str new_name = nb.build();
 
-                num ei = 0;
-                bin already_emitted = false;
-                for ei < self.emitted_method_own_param_insts.len {
-                  if equals(self.emitted_method_own_param_insts.get(ei), new_name) {
-                    already_emitted = true;
-                  }
-                  ei = ei + 1;
-                }
-                if already_emitted {
-                  ret .Some(new_name);
-                }
-                self.emitted_method_own_param_insts.push(new_name);
-
                 Vec<str> combined_params;
                 combined_params.init(0);
                 Vec<str> combined_arg_names;
@@ -3825,6 +3815,12 @@ impl Codegen {
                   combined_arg_ptrs.push(ap2);
                 }
 
+                // The COMBINED substitution is set up BEFORE the dedup
+                // check below (moved earlier than this used to be) --
+                // see `OwnParamCallResolution.rtype`'s own doc comment:
+                // a REPEAT call still needs the method's own resolved
+                // return type computed fresh for THIS call site, even
+                // though its body isn't re-emitted.
                 let prev_params = self.type_subst_param_names;
                 let prev_arg_names = self.type_subst_arg_type_strs;
                 let prev_arg_ptrs = self.type_subst_arg_is_pointer;
@@ -3838,6 +3834,31 @@ impl Codegen {
                 // its length, which is exactly every one of the
                 // method's own (freshly-inferred, name-only) params.
                 self.type_subst_arg_dtypes = impl_arg_dtypes;
+
+                DataType resolved_rtype = dtype_new();
+                if fnv.has_rtype {
+                  resolved_rtype = self.resolve_type_subst(*fnv.rtype);
+                }
+
+                num ei = 0;
+                bin already_emitted = false;
+                for ei < self.emitted_method_own_param_insts.len {
+                  if equals(self.emitted_method_own_param_insts.get(ei), new_name) {
+                    already_emitted = true;
+                  }
+                  ei = ei + 1;
+                }
+                if already_emitted {
+                  self.type_subst_param_names = prev_params;
+                  self.type_subst_arg_type_strs = prev_arg_names;
+                  self.type_subst_arg_is_pointer = prev_arg_ptrs;
+                  self.type_subst_arg_dtypes = prev_arg_dtypes;
+                  OwnParamCallResolution res0;
+                  res0.mangled_name = new_name;
+                  res0.rtype = resolved_rtype;
+                  ret .Some(res0);
+                }
+                self.emitted_method_own_param_insts.push(new_name);
 
                 // Same scratch-buffer/state-swap discipline as `emit_one_
                 // generic_impl_method`'s own identical swap -- see its
@@ -3894,7 +3915,10 @@ impl Codegen {
                 if body_err.is_some() {
                   ret .None;
                 }
-                ret .Some(new_name);
+                OwnParamCallResolution res;
+                res.mangled_name = new_name;
+                res.rtype = resolved_rtype;
+                ret .Some(res);
               }
               _ -> {}
             }
@@ -6033,7 +6057,7 @@ impl Codegen {
         args
       );
       if own_inst.is_some() {
-        self.state.write(own_inst.unwrap());
+        self.state.write(own_inst.unwrap().mangled_name);
         used_own_param_inst = true;
       }
     }
@@ -6692,12 +6716,41 @@ impl Codegen {
                 if !equals(method_name, "") {
                   let recv_r_opt = self.resolve_field_chain(recv_e.left);
                   if recv_r_opt.is_some() {
-                    let rt = self.lookup_impl_method_rtype(
-                      recv_r_opt.unwrap().type_name,
+                    let recv_r2 = recv_r_opt.unwrap();
+                    // A method declaring its OWN generic type param
+                    // (`impl Box<T> { pub wrap<U>(...) Box<U> { ... }
+                    // }`) needs the COMBINED (impl's + this call's own)
+                    // substitution `maybe_instantiate_generic_impl_
+                    // method_own_params` builds -- `lookup_impl_method_
+                    // rtype` below only ever knows the impl's OWN
+                    // static registration, which for such a method is
+                    // the raw, unsubstituted template return type
+                    // (`Box<U>` -> the literal, invalid "Box__U").
+                    // Checked FIRST, letting CHAINING off such a call's
+                    // own result (`b.wrap("hello").get()`, `examples/
+                    // advanced/method_own_type_param.fn`'s own real
+                    // body) resolve correctly.
+                    if inner_e.has_right && self.impl_method_has_own_type_params(
+                      recv_r2.type_name,
                       method_name
-                    );
-                    if rt.is_some() {
-                      call_rtype = .Some(*rt.unwrap());
+                    ) {
+                      Vec<Node*> own_args;
+                      own_args.init(0);
+                      self.flatten_call_args(inner_e.right, &own_args);
+                      let own_res = self.maybe_instantiate_generic_impl_method_own_params(
+                        recv_r2.type_name,
+                        method_name,
+                        own_args
+                      );
+                      if own_res.is_some() {
+                        call_rtype = .Some(own_res.unwrap().rtype);
+                      }
+                    }
+                    if call_rtype.is_none() {
+                      let rt = self.lookup_impl_method_rtype(recv_r2.type_name, method_name);
+                      if rt.is_some() {
+                        call_rtype = .Some(*rt.unwrap());
+                      }
                     }
                   }
                 }
