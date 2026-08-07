@@ -7269,6 +7269,60 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // A plain field access (`self.gender`, e.g. a Display impl's own
+        // body formatting one of its fields whose OWN type also implements
+        // Display, `format("... {} ...", self.gender)` inside `impl User as
+        // Display`) — resolves the receiver's OWN declared type, then that
+        // type's compound field registry, to find the field's declared
+        // type. Previously unhandled, so a field of a Display-implementing
+        // type printed its raw underlying representation (an enum's bare
+        // ordinal, e.g.) instead of dispatching to Display — confirmed via
+        // a real minimal repro, not previously exercised by the existing
+        // test/example corpus. Narrower than the general case: only a
+        // bare-identifier receiver (`self`, `recv`), matching this
+        // function's own existing scope for every other case above.
+        if (expr.type == .Expression and expr.node_variant != null and mem.eql(u8, expr.node_variant.?.exp.op, ".")) {
+            const dot = expr.node_variant.?.exp;
+            const left = dot.left orelse return null;
+            const right = dot.right orelse return null;
+            if (left.*.type != .Identifier or left.*.data == null) return null;
+            if (right.*.type != .Identifier or right.*.data == null) return null;
+            const recv_name = left.*.data.?.sval.items;
+            const field_name = right.*.data.?.sval.items;
+
+            const recv_dt = self.identifier_declared_dtype(recv_name) orelse return null;
+            if (recv_dt.type != .Unknown) return null;
+
+            var recv_type_name: []const u8 = recv_dt.type_str.items;
+            var recv_type_owned = false;
+            if (recv_dt.generic_args != null) {
+                recv_type_name = self.type_name_mangled_for_emit(recv_dt) catch return null;
+                recv_type_owned = true;
+            }
+            defer if (recv_type_owned) self.allocator.free(@constCast(recv_type_name));
+            const recv_type_canon = self.canonical_compound_name(recv_type_name);
+
+            const field_dt = self.lookup_compound_field(recv_type_canon, field_name) orelse return null;
+
+            var field_type_name: []const u8 = field_dt.type_str.items;
+            var field_type_owned = false;
+            if (field_dt.generic_args != null) {
+                field_type_name = self.type_name_mangled_for_emit(field_dt) catch return null;
+                field_type_owned = true;
+            }
+            defer if (field_type_owned) self.allocator.free(@constCast(field_type_name));
+            const field_type_canon = self.canonical_compound_name(field_type_name);
+
+            const res = self.resolve_quirk_impl_method_for_concrete(ref_node, field_type_canon, "to_string");
+            if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
+            if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
+
+            return .{
+                .fn_name = res.fn_name.?,
+                .pass_by_ref = field_dt.pointer_depth == 0,
+            };
+        }
+
         return null;
     }
 
@@ -16821,7 +16875,26 @@ pub const TranspileProcess = struct {
     fn emit_plain_impl_method_prototypes_from_node(self: *Self, n: *ast.Node, emitted: *std.StringHashMap(bool)) TranspileError!void {
         if (n.type != .Impl or n.node_variant == null) return;
         const im = n.node_variant.?.impl;
-        if (im.quirk_name != null) return;
+        // A GENERIC quirk impl (`impl Box<T> as Iterator<T>`) still skips this
+        // pass entirely -- the branch below (gated on `self.impl_type_params`)
+        // mangles each instantiation as `mangled__base`, with no quirk-name
+        // segment at all, which would be WRONG for a quirk impl (the real
+        // symbol is `mangled__QuirkName__base`, see `emit_quirk_impl_instance`'s
+        // own identical naming a few hundred lines up). A NON-generic quirk
+        // impl (`impl Gender as Display`, e.g.) falls through instead: its
+        // own `fnv.name` is ALREADY the fully-mangled `Type__Quirk__method`
+        // string (see the near-identical forward-declare loop just above this
+        // function, which only re-mangles when `type_name` differs from
+        // `im.type_name` -- the common case already matches), so the plain
+        // per-method loop below emits a correct prototype unchanged. Without
+        // this, a quirk impl's own method body calling ANOTHER quirk impl's
+        // method declared LATER in the same file/module (`impl User as
+        // Display`'s `to_string()` calling `self.gender.to_string()`, where
+        // `Gender`'s own `as Display` impl comes after `User`'s in source
+        // order) hit "implicit function declaration" followed by "conflicting
+        // types" -- confirmed via a real minimal repro, not previously
+        // exercised by the existing test/example corpus.
+        if (im.quirk_name != null and self.impl_type_params(n) != null) return;
         if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) return;
 
         if (self.impl_type_params(n)) |params| {
@@ -17010,7 +17083,16 @@ pub const TranspileProcess = struct {
             self.in_function_params = false;
             try self.write(");\n");
 
-            if (fnv.is_async) {
+            // An ASYNC quirk method's own payload-struct/helper prototypes
+            // are already emitted by a separate, quirk-specific mechanism
+            // (see `emit_quirk_impl_instance`) -- this whole loop only
+            // started reaching quirk impls at all for the plain prototype
+            // LINE just above (see this function's own doc comment on
+            // exactly this branch), and duplicating the async support
+            // prototypes here too produced a real "redefinition of
+            // __fun_async_payload_..." C error, confirmed via the existing
+            // test suite.
+            if (fnv.is_async and im.quirk_name == null) {
                 const prev_override = self.override_fn_name;
                 self.override_fn_name = fname;
                 defer self.override_fn_name = prev_override;
