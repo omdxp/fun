@@ -832,6 +832,12 @@ pub compound Codegen {
   // see that branch's own doc comment for why a CALL receiver needs one
   // at all.
   num call_recv_temp_counter;
+  // Unique counter for `emit_for_iter`'s own Set/Map Iterator-protocol
+  // temp-variable names (`__fun_iter_it0`/`__fun_iter_opt0`, ...) -- same
+  // reasoning as `call_recv_temp_counter` just above, a fixed name would
+  // collide the moment two sibling `for`-over-a-Set/Map loops land in the
+  // same block (or one nests inside the other).
+  num for_iter_temp_counter;
   // How many levels deep the codegen is CURRENTLY nested inside one of
   // its own "private" scratch buffers with `hoist_insert_pos`/`current_
   // stmt_start_pos` suspended to `.None` (0 when not nested at all) --
@@ -972,6 +978,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.call_recv_temp_counter = 0;
+  g.for_iter_temp_counter = 0;
   g.hoist_scratch_depth = 0;
   g.root_state = nil;
   g.root_hoist_pos = .None;
@@ -6544,14 +6551,23 @@ impl Codegen {
     str arr_text = "";
     Option<DataType> arr_dtype = .None;
     Option<str> arr_type_name = .None;
+    bin iterable_is_identifier = false;
     fit fi.iterable.kind {
       .Identifier(name) -> {
         arr_text = name;
         arr_dtype = self.lookup_local_dtype(name);
         arr_type_name = self.lookup_local_type_name(name);
+        iterable_is_identifier = true;
       }
       .Expression(e) -> {
-        if !equals(e.op, ".") {
+        // `.` (a chained field access) or `()` (a call, `for k : squares.
+        // keys() { ... }` -- the Vec returned by a method call used
+        // directly as the iterable, `examples/stdlib/collections_iter.fn`'s
+        // own real body) -- `resolve_field_chain` already handles a call
+        // node passed directly to it (its own "call as receiver" case
+        // works for ANY call, not just one nested as someone else's
+        // receiver).
+        if !equals(e.op, ".") && !equals(e.op, "()") {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         let resolved = self.resolve_field_chain(fi.iterable);
@@ -6624,6 +6640,186 @@ impl Codegen {
         elem_c_type = map_type_to_c(arr_dt.type_str);
       }
     }
+    // `Set<T>`/`Map<K, V>` (a bare identifier, structurally known --
+    // narrower than the original transpiler's own fully general Iterator-
+    // quirk resolution, which works for ANY type implementing `Iterator`,
+    // not just these two built-ins; scoped to what `examples/stdlib/
+    // collections_iter.fn` and the stdlib itself actually need) drive
+    // `for item : set`/`for key : map`/`for key, value :: map` through
+    // the `iter()`/`next()`/`Option` protocol instead of a direct index --
+    // see `emit_iter_protocol_for` in the original transpiler for the
+    // reference shape this mirrors. Requires the collection's own
+    // STRUCTURAL generic args (the mangled-name-only case, `arr_dtype`
+    // with empty `generic_args`, can't recover the element type needed to
+    // instantiate `SetIter<T>`/`MapIter<K, V>`/`Option<T>` here) and a
+    // bare identifier receiver (an expression receiver, e.g. `map.keys()`
+    // -- itself a `Vec`, handled by the ordinary Vec path above -- would
+    // be an RVALUE, and `&<rvalue>` to call `.iter()` on it is invalid C;
+    // not needed by any real caller today).
+    if !is_vec && !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
+      let coll_dt = arr_dtype.unwrap();
+      bin is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
+      bin is_map = equals(coll_dt.type_str, "Map") && coll_dt.generic_args.len == 2;
+      if is_set || is_map {
+        DataType elem_key_dt = *coll_dt.generic_args.get(0);
+        DataType* elem_key_ptr = malloc(sizeof(DataType));
+        *elem_key_ptr = elem_key_dt;
+
+        DataType iter_dt = dtype_new();
+        Vec<DataType*> iter_args;
+        iter_args.init(2);
+        iter_args.push(elem_key_ptr);
+        if is_map {
+          iter_dt.type_str = "MapIter";
+          DataType val_dt = *coll_dt.generic_args.get(1);
+          DataType* val_ptr = malloc(sizeof(DataType));
+          *val_ptr = val_dt;
+          iter_args.push(val_ptr);
+        } else {
+          iter_dt.type_str = "SetIter";
+        }
+        iter_dt.generic_args = iter_args;
+
+        DataType opt_dt = dtype_new();
+        opt_dt.type_str = "Option";
+        Vec<DataType*> opt_args;
+        opt_args.init(1);
+        DataType* opt_elem_ptr = malloc(sizeof(DataType));
+        *opt_elem_ptr = elem_key_dt;
+        opt_args.push(opt_elem_ptr);
+        opt_dt.generic_args = opt_args;
+
+        let coll_name_opt = self.resolve_type_name(coll_dt);
+        let iter_name_opt = self.resolve_type_name(iter_dt);
+        let opt_name_opt = self.resolve_type_name(opt_dt);
+        if coll_name_opt.is_none() || iter_name_opt.is_none() || opt_name_opt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        str coll_name = coll_name_opt.unwrap();
+        str iter_name = iter_name_opt.unwrap();
+        str opt_name = opt_name_opt.unwrap();
+
+        self.ensure_generic_impl_method_emitted(coll_name, "iter");
+        self.ensure_generic_impl_method_emitted(iter_name, "next");
+        if is_map && fi.has_index_name {
+          self.ensure_generic_impl_method_emitted(coll_name, "get");
+        }
+
+        self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+        StringBuilder it_tmp_sb = string_builder_init(24);
+        it_tmp_sb.append("__fun_iter_it");
+        it_tmp_sb.append(format_num(self.for_iter_temp_counter));
+        str it_tmp = it_tmp_sb.build();
+        StringBuilder opt_tmp_sb = string_builder_init(24);
+        opt_tmp_sb.append("__fun_iter_opt");
+        opt_tmp_sb.append(format_num(self.for_iter_temp_counter));
+        str opt_tmp = opt_tmp_sb.build();
+
+        self.state.write("{\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        self.state.write_indent();
+        self.state.write(iter_name);
+        self.state.write(" ");
+        self.state.write(it_tmp);
+        self.state.write(" = ");
+        self.state.write(coll_name);
+        self.state.write("__iter(&");
+        self.state.write(arr_text);
+        self.state.write(");\n");
+        self.state.write_indent();
+        self.state.write("for (;;) {\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        self.state.write_indent();
+        self.state.write(opt_name);
+        self.state.write(" ");
+        self.state.write(opt_tmp);
+        self.state.write(" = ");
+        self.state.write(iter_name);
+        // `SetIter<T>`/`MapIter<K, V>` both declare `next` under `impl ...
+        // as Iterator<...>` (a QUIRKED impl block, unlike `iter`/`get`'s
+        // own plain ones just above) -- a quirked impl's own mangled
+        // method name embeds the quirk name (`owner__QuirkName__method`,
+        // see `emit_one_generic_impl_method`'s own naming), so the plain
+        // `owner__method` this function otherwise uses everywhere else
+        // doesn't resolve here. Hardcoding "Iterator" matches both
+        // stdlib types' own actual declarations exactly -- acceptable
+        // given this whole branch is already scoped to Set/Map
+        // specifically, not a general Iterator-quirk dispatch.
+        self.state.write("__Iterator__next(&");
+        self.state.write(it_tmp);
+        self.state.write(");\n");
+        self.state.write_indent();
+        self.state.write("if (");
+        self.state.write(opt_tmp);
+        self.state.write(".tag == ");
+        self.state.write(opt_name);
+        self.state.write("_None) break;\n");
+        self.state.write_indent();
+        if is_map && fi.has_index_name {
+          self.state.write("__auto_type ");
+          self.state.write(fi.index_name);
+          self.state.write(" = ");
+          self.state.write(opt_tmp);
+          self.state.write(".payload.Some._0;\n");
+          self.state.write_indent();
+          self.state.write("__auto_type ");
+          self.state.write(fi.item_name);
+          self.state.write(" = ");
+          self.state.write(coll_name);
+          self.state.write("__get(&");
+          self.state.write(arr_text);
+          self.state.write(", ");
+          self.state.write(fi.index_name);
+          self.state.write(");\n");
+          let key_name = self.resolve_type_name(elem_key_dt);
+          if key_name.is_some() {
+            self.record_local_typed(
+              fi.index_name,
+              key_name.unwrap(),
+              dtype_is_pointer(elem_key_dt),
+              elem_key_dt
+            );
+          }
+          let val_dt2 = *coll_dt.generic_args.get(1);
+          let val_name = self.resolve_type_name(val_dt2);
+          if val_name.is_some() {
+            self.record_local_typed(
+              fi.item_name,
+              val_name.unwrap(),
+              dtype_is_pointer(val_dt2),
+              val_dt2
+            );
+          }
+        } else {
+          self.state.write("__auto_type ");
+          self.state.write(fi.item_name);
+          self.state.write(" = ");
+          self.state.write(opt_tmp);
+          self.state.write(".payload.Some._0;\n");
+          let elem_name = self.resolve_type_name(elem_key_dt);
+          if elem_name.is_some() {
+            self.record_local_typed(
+              fi.item_name,
+              elem_name.unwrap(),
+              dtype_is_pointer(elem_key_dt),
+              elem_key_dt
+            );
+          }
+        }
+        let berr = self.emit_body(*fi.body);
+        if berr.is_some() {
+          ret berr;
+        }
+        self.state.indent_level = self.state.indent_level - 1;
+        self.state.write_indent();
+        self.state.write("}\n");
+        self.state.indent_level = self.state.indent_level - 1;
+        self.state.write_indent();
+        self.state.write("}\n");
+        ret .None;
+      }
+    }
+
     if !is_vec && !is_raw_array {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
@@ -6633,13 +6829,44 @@ impl Codegen {
       idx_name = fi.index_name;
     }
 
+    // A Vec-typed iterable that ISN'T a bare identifier (`squares.keys()`,
+    // `examples/stdlib/collections_iter.fn`'s own real body) is an RVALUE
+    // -- `arr_text` is its own rendered CALL text, re-embedding it in both
+    // the loop condition (`arr_text.len`) and the body (`arr_text.data[
+    // idx]`) would re-evaluate the call once per condition check AND once
+    // per iteration, re-allocating a brand new Vec every single time
+    // (wasteful, and leaks every one of those but the last). Materialized
+    // into a temp ONCE up front instead, matching the original
+    // transpiler's own identical reasoning for this exact shape. Raw
+    // arrays never reach here as a non-identifier (the earlier `is_array`
+    // check already requires a real local), so this only ever applies to
+    // the Vec case.
+    bin needs_vec_src_temp = is_vec && !iterable_is_identifier;
+    str vec_src_text = arr_text;
+    if needs_vec_src_temp {
+      self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+      StringBuilder vsrc_sb = string_builder_init(24);
+      vsrc_sb.append("__fun_iter_src");
+      vsrc_sb.append(format_num(self.for_iter_temp_counter));
+      vec_src_text = vsrc_sb.build();
+      self.state.write("{\n");
+      self.state.indent_level = self.state.indent_level + 1;
+      self.state.write_indent();
+      self.state.write("__auto_type ");
+      self.state.write(vec_src_text);
+      self.state.write(" = ");
+      self.state.write(arr_text);
+      self.state.write(";\n");
+      self.state.write_indent();
+    }
+
     self.state.write("for (int64_t ");
     self.state.write(idx_name);
     self.state.write(" = 0; ");
     self.state.write(idx_name);
     self.state.write(" < ");
     if is_vec {
-      self.state.write(arr_text);
+      self.state.write(vec_src_text);
       self.state.write(".len; ");
     } else {
       self.state.write("(int64_t)(sizeof(");
@@ -6660,7 +6887,7 @@ impl Codegen {
     }
     self.state.write(fi.item_name);
     self.state.write(" = ");
-    self.state.write(arr_text);
+    self.state.write(vec_src_text);
     if is_vec {
       self.state.write(".data[");
     } else {
@@ -6690,6 +6917,11 @@ impl Codegen {
     self.state.indent_level = self.state.indent_level - 1;
     self.state.write_indent();
     self.state.write("}\n");
+    if needs_vec_src_temp {
+      self.state.indent_level = self.state.indent_level - 1;
+      self.state.write_indent();
+      self.state.write("}\n");
+    }
     ret .None;
   }
 
