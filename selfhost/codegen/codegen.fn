@@ -4029,6 +4029,24 @@ impl Codegen {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
           type_name = resolved.unwrap();
+          // A bare `Type{...}` (no explicit generic args written) inside
+          // a generic impl method's OWN body, naming exactly that
+          // method's own return type's bare template (`Person{...}`
+          // inside `Person<T>.new(...) Person<T> { ret Person{...}; }`,
+          // `examples/stdlib/math_rand_option_aliases.fn`'s own real
+          // body) resolves to the UNCHANGED bare name above --
+          // `resolve_type_subst` only substitutes an EXACT type-param
+          // name (`T` -> `str`), never a compound's OWN template name
+          // against the active instantiation. `current_fn_rtype_name`
+          // already holds the correctly-mangled name (`Person__str`)
+          // for exactly this shape, since it's resolved the same way
+          // when the enclosing function's OWN signature was emitted.
+          if ci.init_dtype.generic_args.len == 0 && self.current_fn_rtype_dt.is_some() {
+            let crt = self.current_fn_rtype_dt.unwrap();
+            if crt.generic_args.len > 0 && equals(crt.type_str, ci.init_dtype.type_str) {
+              type_name = self.current_fn_rtype_name;
+            }
+          }
         } elif !equals(self.expected_compound_type, "") {
           type_name = self.expected_compound_type;
         } else {
