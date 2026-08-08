@@ -22,10 +22,7 @@ pub compound Url {
 }
 
 impl Url {
-  // Build a simple HTTP/1.1 GET request string.
-  // 
-  // Returns:
-  // - heap-allocated request string
+  // Builds a simple HTTP/1.1 GET request string.
   pub build_http_get() str {
     Vec<str> parts;
     parts.init(4);
@@ -40,13 +37,7 @@ impl Url {
   }
 }
 
-// Parse a URL into components (scheme/host/port/path).
-// 
-// Params:
-// - s: URL string
-// 
-// Returns:
-// - parsed Url
+// Parses a URL into scheme/host/port/path components.
 pub fun parse_url(str s) Url {
   Url u;
   u.scheme = "http";
@@ -96,29 +87,17 @@ pub fun try_parse_url(str s) Result<Url, Error> {
   ret .Ok(u);
 }
 
-// Build a simple HTTP GET request from a Url.
-// 
-// Params:
-// - url: URL instance to build a request for
-// 
-// Returns:
-// - request string
+// Builds a simple HTTP GET request string from a parsed Url.
 pub fun build_http_get(Url* url) str {
   ret url.build_http_get();
 }
 
-// POSIX socket constants (best-effort defaults).
-// 
-// Returns:
-// - AF_INET constant
+// Returns the POSIX AF_INET constant (best-effort default).
 pub fun af_inet() num {
   ret 2;
 }
 
-// Return SOCK_STREAM constant value (best-effort default).
-// 
-// Returns:
-// - SOCK_STREAM constant
+// Returns the POSIX SOCK_STREAM constant (best-effort default).
 pub fun sock_stream() num {
   ret 1;
 }
@@ -154,10 +133,7 @@ fun _pack_sockaddr_in_bsd(num port) SockAddrInPacked {
   ret a;
 }
 
-// Create a TCP listening socket on the given port.
-// 
-// Returns:
-// - server fd on success, or -1
+// Creates a TCP listening socket on `port`; returns the server fd, or -1 on failure.
 pub fun tcp_listen(num port) num {
   let fd = socket(af_inet(), sock_stream(), 0);
   if fd < 0 {
@@ -183,14 +159,7 @@ pub fun tcp_listen(num port) num {
   ret fd;
 }
 
-// Create a TCP listening socket and report failures as a Result.
-// 
-// Params:
-// - port: TCP port to bind
-// 
-// Returns:
-// - `Ok(fd)` on success
-// - `Err` when socket setup fails
+// Creates a TCP listening socket on `port`, with Result.
 pub fun try_tcp_listen(num port) Result<num, Error> {
   let fd = tcp_listen(port);
   if fd < 0 {
@@ -199,22 +168,12 @@ pub fun try_tcp_listen(num port) Result<num, Error> {
   ret .Ok(fd);
 }
 
-// Accept a client connection.
-// 
-// Returns:
-// - client fd, or -1
+// Accepts a client connection; returns the client fd, or -1 on failure.
 pub fun tcp_accept(num server_fd) num {
   ret accept(server_fd, nil, nil);
 }
 
-// Accept a client connection and report failures as a Result.
-// 
-// Params:
-// - server_fd: listening socket descriptor
-// 
-// Returns:
-// - `Ok(fd)` on success
-// - `Err` when accept fails
+// Accepts a client connection, with Result.
 pub fun try_tcp_accept(num server_fd) Result<num, Error> {
   let fd = tcp_accept(server_fd);
   if fd < 0 {
@@ -223,29 +182,12 @@ pub fun try_tcp_accept(num server_fd) Result<num, Error> {
   ret .Ok(fd);
 }
 
-// Read from a socket.
-// 
-// Params:
-// - fd: socket fd
-// - buf: destination buffer
-// - len: bytes to read
-// 
-// Returns:
-// - bytes read or negative on error
+// Reads up to `len` bytes from a socket into `buf`; returns bytes read, or negative on error.
 pub fun tcp_read(num fd, str buf, num len) num {
   ret recv(fd, buf, len, 0);
 }
 
-// Read from a socket and report failures as a Result.
-// 
-// Params:
-// - fd: socket fd
-// - buf: destination buffer
-// - len: bytes to read
-// 
-// Returns:
-// - `Ok(bytes_read)` on success
-// - `Err` when the read fails
+// Reads from a socket, with Result.
 pub fun try_tcp_read(num fd, str buf, num len) Result<num, Error> {
   let n = tcp_read(fd, buf, len);
   if n < 0 {
@@ -254,29 +196,12 @@ pub fun try_tcp_read(num fd, str buf, num len) Result<num, Error> {
   ret .Ok(n);
 }
 
-// Write to a socket.
-// 
-// Params:
-// - fd: socket fd
-// - buf: source buffer
-// - len: bytes to write
-// 
-// Returns:
-// - bytes written or negative on error
+// Writes `len` bytes from `buf` to a socket; returns bytes written, or negative on error.
 pub fun tcp_write(num fd, str buf, num len) num {
   ret send(fd, buf, len, 0);
 }
 
-// Write to a socket and report failures as a Result.
-// 
-// Params:
-// - fd: socket fd
-// - buf: source buffer
-// - len: bytes to write
-// 
-// Returns:
-// - `Ok(bytes_written)` on success
-// - `Err` when the write fails
+// Writes to a socket, with Result.
 pub fun try_tcp_write(num fd, str buf, num len) Result<num, Error> {
   let n = tcp_write(fd, buf, len);
   if n < 0 {
@@ -285,10 +210,7 @@ pub fun try_tcp_write(num fd, str buf, num len) Result<num, Error> {
   ret .Ok(n);
 }
 
-// Close a socket.
-// 
-// Params:
-// - fd: socket fd
+// Closes a socket.
 pub fun tcp_close(num fd) {
   close(fd);
 }
@@ -355,19 +277,9 @@ fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
   ret nil;
 }
 
-// Perform a best-effort request/response exchange on an existing socket.
-// 
-// Params:
-// - fd: connected socket descriptor
-// - send_buf: optional payload to send first (null/empty skips write)
-// - recv_buf: destination buffer for response bytes
-// - recv_len: max bytes to read into recv_buf
-// - cancel_token: optional cancellation token
-// 
-// Returns:
-// - >= 0 bytes read
-// - -1 on invalid args or socket write/read failure
-// - -3 when cancelled
+// Sends `send_buf` (if any) then reads a response into `recv_buf` on an
+// already-connected socket. Returns bytes read on success, -1 on invalid
+// args or a write/read failure, and -3 if cancelled.
 pub async fun tcp_roundtrip_async(
   num fd,
   str send_buf,
@@ -378,15 +290,9 @@ pub async fun tcp_roundtrip_async(
   ret _tcp_roundtrip_core(fd, send_buf, recv_buf, recv_len, cancel_token);
 }
 
-// Offload a roundtrip operation to a runtime thread and await its result.
-// 
-// Notes:
-// - Uses runtime_async_spawn so the socket call runs off the caller thread.
-// - Cancellation is checked before/after join. Join still waits for worker completion.
-// 
-// Returns:
-// - same codes as tcp_roundtrip_async
-// - backend thread start/join error code when spawn/join fails
+// Same as `tcp_roundtrip_async`, but offloads the socket call to a runtime
+// thread so it doesn't block the caller. Returns the same codes, or a thread
+// start/join error code when spawn/join fails.
 pub async fun tcp_roundtrip_offload_async(
   num fd,
   str send_buf,
@@ -425,17 +331,10 @@ pub async fun tcp_roundtrip_offload_async(
   ret job.result_rc;
 }
 
-// Parse a URL, build an HTTP GET request, and publish it to a channel.
-// 
-// Ownership:
-// - The emitted request string is heap-allocated; the receiver should free it.
-// 
-// Returns:
-// - 0 on success
-// - 1 when output channel is closed
-// - -1 on invalid args or malformed url
-// - -2 when request allocation fails
-// - -3 when cancelled
+// Parses `raw_url`, builds an HTTP GET request, and sends it (heap-allocated;
+// the receiver must free it) to `out_requests`. Returns 0 on success, 1 if
+// the channel is closed, -1 on invalid args or a malformed URL, -2 if
+// request allocation fails, and -3 if cancelled.
 pub async fun build_http_get_to_channel_async(
   str raw_url,
   Channel<str>* out_requests,
@@ -477,15 +376,8 @@ pub async fun build_http_get_to_channel_async(
   ret -1;
 }
 
-// Serve a single HTTP request with a fixed response.
-// 
-// Params:
-// - port: TCP port to bind
-// - body: response body to send
-// 
-// Returns:
-// - `0` on success
-// - `-1` on socket setup or request handling failure
+// Serves a single HTTP request on `port` with a fixed `body` response;
+// returns 0 on success, -1 on socket setup or request-handling failure.
 pub fun http_serve_once(num port, str body) num {
   let server = tcp_listen(port);
   if server < 0 {
@@ -511,15 +403,7 @@ pub fun http_serve_once(num port, str body) num {
   ret 0;
 }
 
-// Serve a single HTTP request and report failures as a Result.
-// 
-// Params:
-// - port: TCP port to bind
-// - body: response body to send
-// 
-// Returns:
-// - `Ok(0)` on success
-// - `Err` when serving fails
+// Serves a single HTTP request, with Result.
 pub fun try_http_serve_once(num port, str body) Result<num, Error> {
   let rc = http_serve_once(port, body);
   if rc != 0 {
@@ -528,15 +412,9 @@ pub fun try_http_serve_once(num port, str body) Result<num, Error> {
   ret .Ok(rc);
 }
 
-// Serve HTTP requests forever in a blocking loop.
-// 
-// Params:
-// - port: TCP port to bind
-// - body: response body to send
-// 
-// Returns:
-// - `0` if the loop exits normally
-// - `-1` on socket setup or request handling failure
+// Serves HTTP requests forever in a blocking loop, always responding with
+// `body`. Returns 0 if the loop exits normally, -1 on socket setup or
+// request-handling failure.
 pub fun http_serve_forever(num port, str body) num {
   let server = tcp_listen(port);
   if server < 0 {
@@ -564,15 +442,7 @@ pub fun http_serve_forever(num port, str body) num {
   ret 0;
 }
 
-// Serve HTTP requests forever and report failures as a Result.
-// 
-// Params:
-// - port: TCP port to bind
-// - body: response body to send
-// 
-// Returns:
-// - `Ok(0)` if the loop exits normally
-// - `Err` when serving fails
+// Serves HTTP requests forever, with Result.
 pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
   let rc = http_serve_forever(port, body);
   if rc != 0 {

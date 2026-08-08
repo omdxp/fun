@@ -8,41 +8,26 @@ imp std.result;
 imp std.error;
 
 // Print a string to stdout (no newline).
-// 
-// Params:
-// - s: string to print
 pub fun print(str s) {
   printf("%s", s);
 }
 
 // Print a string to stdout with newline.
-// 
-// Params:
-// - s: string to print
 pub fun println(str s) {
   puts(s);
 }
 
 // Print a number to stdout (no newline).
-// 
-// Params:
-// - n: number to print
 pub fun print_num(num n) {
   printf("%lld", n);
 }
 
 // Print a decimal to stdout (no newline).
-// 
-// Params:
-// - d: decimal to print
 pub fun print_dec(dec d) {
   printf("%f", d);
 }
 
 // Print a boolean to stdout (no newline).
-// 
-// Params:
-// - b: boolean to print
 pub fun print_bin(bin b) {
   if b {
     printf("true");
@@ -121,14 +106,7 @@ pub fun fmt_raw(raw* p) str {
   ret buf;
 }
 
-// Format using a pre-built Vec<str>.
-// 
-// Params:
-// - fmt: format string
-// - args: string arguments
-// 
-// Returns:
-// - formatted string
+// Formats `fmt` using a pre-built Vec<str> of arguments; used by format() and its variants.
 pub fun format_impl(str fmt, Vec<str>* args) str {
   let b = string_builder_init(8);
   num i = 0;
@@ -189,17 +167,8 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
   b.free();
   ret out;
 }
-// Format a string using "{}" placeholders.
-// 
-// Placeholder forms:
-// - {} or {str} : string
-// - {num}       : number
-// - {dec}       : decimal
-// - {bin}       : boolean
-// - {chr}       : character
-// - {ptr}       : raw pointer
-// 
-// Use "{{" and "}}" to emit literal braces.
+// Format a string using "{}" placeholders: {} or {str} for a string, {num},
+// {dec}, {bin}, {chr}, {ptr} for other types. Use "{{" and "}}" for literal braces.
 pub fun format(str fmt, ...) str {
   ret format_impl(fmt, &vargs);
 }
@@ -230,13 +199,7 @@ pub compound File {
   FILE* handle;
 }
 
-// Open file for reading (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for reading (binary); returned File has a null handle on failure.
 pub fun open_read(str path) File {
   File f;
   f.handle = fopen(path, "rb");
@@ -252,13 +215,7 @@ pub fun try_open_read(str path) Result<File, Error> {
   ret .Ok(f);
 }
 
-// Open file for writing (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for writing (binary); returned File has a null handle on failure.
 pub fun open_write(str path) File {
   File f;
   f.handle = fopen(path, "wb");
@@ -274,13 +231,7 @@ pub fun try_open_write(str path) Result<File, Error> {
   ret .Ok(f);
 }
 
-// Open file for appending (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for appending (binary); returned File has a null handle on failure.
 pub fun open_append(str path) File {
   File f;
   f.handle = fopen(path, "ab");
@@ -742,13 +693,7 @@ impl RotatingSink {
   }
 }
 
-// Read a file into a string.
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - file contents or null
+// Reads a file into a new string, or null on failure.
 pub fun read_all(str path) str {
   let f = open_read(path);
   if f.handle == nil {
@@ -759,14 +704,7 @@ pub fun read_all(str path) str {
   ret out;
 }
 
-// Write a string to a file.
-// 
-// Params:
-// - path: file path
-// - data: contents
-// 
-// Returns:
-// - true on success
+// Writes `data` to a file, returning true on success.
 pub fun write_all(str path, str data) bin {
   let f = open_write(path);
   if f.handle == nil {

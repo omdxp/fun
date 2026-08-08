@@ -117,11 +117,9 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the array elements, or None when this is not an Array.
-  // 
-  // Notes:
-  // - The returned Vec copies only the header; the elements are still shared.
-  // - Treat the returned Vec as read-only.
+  // Return the array elements, or None when this is not an Array. The
+  // returned Vec shares its elements with the original and should be
+  // treated as read-only.
   pub as_array() Option<Vec<JsonValue>> {
     fit *self {
       .Array(a) -> { ret .Some(a); }
@@ -130,12 +128,9 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the object as a Map, or None when this is not an Object.
-  // 
-  // Notes:
-  // - The returned Map copies only the header; the entries are still shared.
-  // - Treat the returned Map as read-only.
-  // - Use `m.values().data` to iterate every value, or `m.keys()` for the keys.
+  // Return the object as a Map, or None when this is not an Object. The
+  // returned Map shares its entries with the original and should be treated
+  // as read-only; use `m.values().data` to iterate values or `m.keys()` for keys.
   pub as_object() Option<Map<str, JsonValue>> {
     fit *self {
       .Object(o) -> { ret .Some(o); }
@@ -144,14 +139,7 @@ impl JsonValue {
     ret .None;
   }
 
-  // Look up a key on an object value.
-  // 
-  // Params:
-  // - key: object key to read
-  // 
-  // Returns:
-  // - `Some(value)` when this is an object and the key exists
-  // - `None` when the key is missing or this value is not an object
+  // Look up `key` on an object value; `None` if missing or not an object.
   pub get(str key) Option<JsonValue> {
     fit *self {
       .Object(o) -> { ret o.at(key); }
@@ -160,14 +148,7 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the element at an array index.
-  // 
-  // Params:
-  // - i: array index
-  // 
-  // Returns:
-  // - `Some(value)` when this is an array and `i` is in range
-  // - `None` when `i` is out of range or this value is not an array
+  // Return the element at array index `i`; `None` if out of range or not an array.
   pub index(num i) Option<JsonValue> {
     fit *self {
       .Array(a) -> { ret a.at(i); }
@@ -176,12 +157,8 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the logical length of the value.
-  // 
-  // Returns:
-  // - object entry count for `Object`
-  // - element count for `Array`
-  // - `0` for scalar values
+  // Return the logical length: entry count for Object, element count for
+  // Array, or 0 for scalar values.
   pub len() num {
     fit *self {
       .Array(a) -> { ret a.len(); }
@@ -209,20 +186,14 @@ pub fun json_bool(bin b) JsonValue {
   ret JsonValue.Bool(b);
 }
 
-// Create an empty JSON object map.
-// 
-// Returns:
-// - empty map ready to wrap as `JsonValue.Object`
+// Create an empty JSON object map, ready to wrap as `JsonValue.Object`.
 pub fun json_object() Map<str, JsonValue> {
   Map<str, JsonValue> m;
   m.init(8);
   ret m;
 }
 
-// Create an empty JSON array vector.
-// 
-// Returns:
-// - empty vector ready to wrap as `JsonValue.Array`
+// Create an empty JSON array vector, ready to wrap as `JsonValue.Array`.
 pub fun json_array() Vec<JsonValue> {
   Vec<JsonValue> v;
   v.init(8);
