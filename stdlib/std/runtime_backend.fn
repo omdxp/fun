@@ -1,11 +1,6 @@
-// Runtime backend selector helpers.
-// 
-// Notes:
-// - Selector order:
-// 1) FUN_RUNTIME_BACKEND override
-// 2) FUN_RUNTIME_OS override
-// 3) host environment hints (OS / OSTYPE)
-// 4) fallback to POSIX
+// Runtime backend selector helpers. Selection order: FUN_RUNTIME_BACKEND
+// override, then FUN_RUNTIME_OS override, then host environment hints
+// (OS / OSTYPE), then fallback to POSIX.
 
 imp std.sys;
 imp std.c.string;
@@ -78,11 +73,9 @@ fun runtime_backend_detect_windows_hint() bin {
   ret false;
 }
 
-// Return the selected runtime backend id.
-// 
-// Environment overrides:
-// - FUN_RUNTIME_BACKEND: posix/windows (or 1/2)
-// - FUN_RUNTIME_OS: posix/unix/windows
+// Selected runtime backend id. Honors the FUN_RUNTIME_BACKEND
+// (posix/windows or 1/2) and FUN_RUNTIME_OS (posix/unix/windows)
+// environment overrides.
 pub fun runtime_backend_id() num {
   let override_backend = runtime_backend_id_from_name(env("FUN_RUNTIME_BACKEND"));
   if override_backend != 0 {

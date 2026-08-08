@@ -1,20 +1,13 @@
-// Sync runtime shim contract.
-// 
-// Notes:
-// - This module is the backend-facing contract for synchronization operations.
-// - Backend selection is sourced from std.runtime_backend.
-// - Return codes come from the selected backend implementation.
+// Sync runtime shim contract: the backend-facing contract for
+// synchronization operations. Backend selection comes from
+// std.runtime_backend; return codes come from the selected backend.
 
 imp std.runtime_backend;
 imp std.sync;
 imp std.sync_backend_posix;
 imp std.sync_backend_windows;
 
-// Return the active sync runtime backend id.
-// 
-// Backend ids:
-// - 1: POSIX
-// - 2: Windows
+// Active sync runtime backend id (1: POSIX, 2: Windows).
 pub fun sync_runtime_backend_id() num {
   ret runtime_backend_id();
 }

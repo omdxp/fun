@@ -1,208 +1,68 @@
-// C math library bindings (math.h)
-// 
-// Notes:
-// - Trigonometric functions use radians (C semantics).
-// - Domain/range errors follow the platform C library behavior.
+// C math library bindings (math.h). Trigonometric functions use radians;
+// domain/range errors follow the platform C library behavior (C semantics).
 
-// Computes sine.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - sine of x (C semantics)
+// Sine of `x` (radians).
 pub fun sin(dec x) dec;
 
-// Computes cosine.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - cosine of x (C semantics)
+// Cosine of `x` (radians).
 pub fun cos(dec x) dec;
 
-// Computes tangent.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - tangent of x (C semantics)
+// Tangent of `x` (radians).
 pub fun tan(dec x) dec;
 
-// Computes arcsine.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arcsine of x (C semantics)
+// Arcsine of `x`.
 pub fun asin(dec x) dec;
 
-// Computes arccosine.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arccosine of x (C semantics)
+// Arccosine of `x`.
 pub fun acos(dec x) dec;
 
-// Computes arctangent.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arctangent of x (C semantics)
+// Arctangent of `x`.
 pub fun atan(dec x) dec;
 
-// Computes arctangent of y/x handling quadrants.
-// 
-// Params:
-// - y: y coordinate
-// - x: x coordinate
-// 
-// Returns:
-// - arctangent of y/x in the correct quadrant (C semantics)
+// Arctangent of `y / x`, using the sign of both to pick the right quadrant.
 pub fun atan2(dec y, dec x) dec;
 
-// Computes square root.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - square root of x (C semantics)
+// Square root of `x`.
 pub fun sqrt(dec x) dec;
 
-// Computes cube root.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - cube root of x (C semantics)
+// Cube root of `x`.
 pub fun cbrt(dec x) dec;
 
-// Computes x raised to the power y.
-// 
-// Params:
-// - x: base
-// - y: exponent
-// 
-// Returns:
-// - x raised to the power y (C semantics)
+// `x` raised to the power `y`.
 pub fun pow(dec x, dec y) dec;
 
-// Computes e^x.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - e raised to x (C semantics)
+// `e` raised to `x`.
 pub fun exp(dec x) dec;
 
-// Computes natural logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - natural log of x (C semantics)
+// Natural logarithm of `x`.
 pub fun log(dec x) dec;
 
-// Computes base-10 logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - log10 of x (C semantics)
+// Base-10 logarithm of `x`.
 pub fun log10(dec x) dec;
 
-// Computes base-2 logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - log2 of x (C semantics)
+// Base-2 logarithm of `x`.
 pub fun log2(dec x) dec;
 
-// Rounds down to the nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - largest integer value not greater than x (C semantics)
+// Largest integer value not greater than `x`.
 pub fun floor(dec x) dec;
 
-// Rounds up to the nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - smallest integer value not less than x (C semantics)
+// Smallest integer value not less than `x`.
 pub fun ceil(dec x) dec;
 
-// Rounds to nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - nearest integer value (C semantics)
+// `x` rounded to the nearest integer value.
 pub fun round(dec x) dec;
 
-// Truncates toward zero.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - truncated value (C semantics)
+// `x` truncated toward zero.
 pub fun trunc(dec x) dec;
 
-// Computes absolute value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - absolute value of x (C semantics)
+// Absolute value of `x`.
 pub fun fabs(dec x) dec;
 
-// Floating-point remainder of x/y.
-// 
-// Params:
-// - x: value
-// - y: divisor
-// 
-// Returns:
-// - remainder (C semantics)
+// Floating-point remainder of `x / y`.
 pub fun fmod(dec x, dec y) dec;
 
-// Hypotenuse sqrt(x*x + y*y).
-// 
-// Params:
-// - x: x component
-// - y: y component
-// 
-// Returns:
-// - hypotenuse length (C semantics)
+// Hypotenuse length `sqrt(x*x + y*y)`.
 pub fun hypot(dec x, dec y) dec;
 
-// Returns x with the sign of y.
-// 
-// Params:
-// - x: magnitude source
-// - y: sign source
-// 
-// Returns:
-// - value with magnitude of x and sign of y (C semantics)
+// `x` with the sign of `y`.
 pub fun copysign(dec x, dec y) dec;

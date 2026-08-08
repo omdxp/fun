@@ -1,105 +1,69 @@
-// POSIX synchronization backend implementation.
-// 
-// Notes:
-// - This module defines the POSIX backend contract used by std.sync_runtime.
-// - Functions are thin forwards to std.sync helpers.
+// POSIX synchronization backend implementation, used by std.sync_runtime.
+// Functions are thin forwards to std.sync helpers.
 
 imp std.sync;
 
-// Create a new POSIX backend mutex.
+// Creates a new POSIX backend mutex.
 pub fun sync_backend_posix_mutex_new() Mutex {
   ret mutex_new();
 }
 
-// Create a new POSIX backend condition variable.
+// Creates a new POSIX backend condition variable.
 pub fun sync_backend_posix_condvar_new() CondVar {
   ret condvar_new();
 }
 
-// Initialize a POSIX backend mutex.
-// 
-// Returns:
-// - same return codes as mutex_init
+// Forwards to `mutex_init`.
 pub fun sync_backend_posix_mutex_init(Mutex* mutex) num {
   ret mutex_init(mutex);
 }
 
-// Lock a POSIX backend mutex.
-// 
-// Returns:
-// - same return codes as mutex_lock
+// Forwards to `mutex_lock`.
 pub fun sync_backend_posix_mutex_lock(Mutex* mutex) num {
   ret mutex_lock(mutex);
 }
 
-// Try lock a POSIX backend mutex.
-// 
-// Returns:
-// - same return codes as mutex_try_lock
+// Forwards to `mutex_try_lock`.
 pub fun sync_backend_posix_mutex_try_lock(Mutex* mutex) num {
   ret mutex_try_lock(mutex);
 }
 
-// Unlock a POSIX backend mutex.
-// 
-// Returns:
-// - same return codes as mutex_unlock
+// Forwards to `mutex_unlock`.
 pub fun sync_backend_posix_mutex_unlock(Mutex* mutex) num {
   ret mutex_unlock(mutex);
 }
 
-// Destroy a POSIX backend mutex.
-// 
-// Returns:
-// - same return codes as mutex_destroy
+// Forwards to `mutex_destroy`.
 pub fun sync_backend_posix_mutex_destroy(Mutex* mutex) num {
   ret mutex_destroy(mutex);
 }
 
-// Initialize a POSIX backend condition variable.
-// 
-// Returns:
-// - same return codes as condvar_init
+// Forwards to `condvar_init`.
 pub fun sync_backend_posix_condvar_init(CondVar* cond) num {
   ret condvar_init(cond);
 }
 
-// Wait on a POSIX backend condition variable.
-// 
-// Returns:
-// - same return codes as condvar_wait
+// Forwards to `condvar_wait`.
 pub fun sync_backend_posix_condvar_wait(CondVar* cond, Mutex* mutex) num {
   ret condvar_wait(cond, mutex);
 }
 
-// Timed wait on a POSIX backend condition variable.
-// 
-// Returns:
-// - same return codes as condvar_timed_wait
+// Forwards to `condvar_timed_wait`.
 pub fun sync_backend_posix_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   ret condvar_timed_wait(cond, mutex, abs_time);
 }
 
-// Signal one POSIX backend condition variable waiter.
-// 
-// Returns:
-// - same return codes as condvar_signal
+// Forwards to `condvar_signal`.
 pub fun sync_backend_posix_condvar_signal(CondVar* cond) num {
   ret condvar_signal(cond);
 }
 
-// Broadcast to all POSIX backend condition variable waiters.
-// 
-// Returns:
-// - same return codes as condvar_broadcast
+// Forwards to `condvar_broadcast`.
 pub fun sync_backend_posix_condvar_broadcast(CondVar* cond) num {
   ret condvar_broadcast(cond);
 }
 
-// Destroy a POSIX backend condition variable.
-// 
-// Returns:
-// - same return codes as condvar_destroy
+// Forwards to `condvar_destroy`.
 pub fun sync_backend_posix_condvar_destroy(CondVar* cond) num {
   ret condvar_destroy(cond);
 }
