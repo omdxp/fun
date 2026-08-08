@@ -24,10 +24,7 @@ imp std.time;
 // Uniform "what time is it" access, implemented by both `SystemClock` (the
 // real clock) and `MockClock` (a fully controllable fake one for tests).
 pub quirk Clock {
-  // Return the clock's current time.
-  // 
-  // Returns:
-  // - the clock's current Timestamp
+  // Returns the clock's current time.
   now() Timestamp;
 }
 
@@ -36,10 +33,7 @@ pub quirk Clock {
 pub compound SystemClock {
 }
 
-// Construct a `SystemClock`.
-// 
-// Returns:
-// - a Clock backed by the real system time
+// Constructs a `SystemClock`, a Clock backed by the real system time.
 pub fun system_clock() SystemClock {
   SystemClock c;
   ret c;
@@ -58,28 +52,16 @@ pub compound MockClock {
   Timestamp current;
 }
 
-// Construct a mock clock starting at `start`.
-// 
-// Params:
-// - start: the initial fake time
-// 
-// Returns:
-// - a MockClock fixed at `start` until advanced/set
+// Constructs a mock clock fixed at `start` until advanced/set.
 pub fun mock_clock_new(Timestamp start) MockClock {
   MockClock c;
   c.current = start;
   ret c;
 }
 
-// Construct a mock clock starting at `epoch_seconds` (Unix epoch seconds) --
+// Constructs a mock clock fixed at `epoch_seconds` (Unix epoch seconds) --
 // a convenience over `mock_clock_new` for the common case of not caring
 // about a real calendar date, just a fixed reference point.
-// 
-// Params:
-// - epoch_seconds: the initial fake time, as epoch seconds
-// 
-// Returns:
-// - a MockClock fixed at that epoch until advanced/set
 pub fun mock_clock_at(num epoch_seconds) MockClock {
   Timestamp t;
   t.epoch = epoch_seconds;
@@ -93,19 +75,13 @@ impl MockClock as Clock {
 }
 
 impl MockClock {
-  // Move the fake clock forward by `seconds` (or backward, given a negative
-  // value) -- instant, no real waiting.
-  // 
-  // Params:
-  // - seconds: how far to advance the fake time
+  // Moves the fake clock forward by `seconds` (or backward, given a
+  // negative value) -- instant, no real waiting.
   pub advance(num seconds) {
     self.current.epoch = add_seconds(self.current.epoch, seconds);
   }
 
-  // Jump the fake clock directly to `t`, ignoring its previous value.
-  // 
-  // Params:
-  // - t: the new fake time
+  // Jumps the fake clock directly to `t`, ignoring its previous value.
   pub set(Timestamp t) {
     self.current = t;
   }

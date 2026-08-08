@@ -7,92 +7,47 @@
 // (see `pipe`/`waitpid` below) since function-like C macros like
 // `WIFEXITED`/`WEXITSTATUS` can't be bound as Fun signatures.
 
-// Duplicate a file descriptor onto a specific fd number, closing the target
-// first if it was already open.
-// 
-// Params:
-// - oldfd: existing open file descriptor
-// - newfd: target file descriptor number
-// 
-// Returns:
-// - newfd on success, -1 on failure (C semantics)
+// Duplicates `oldfd` onto `newfd`, closing the target first if it was
+// already open. Returns newfd on success, -1 on failure (C semantics).
 pub fun dup2(num oldfd, num newfd) num;
 
-// Close a file descriptor.
-// 
-// Params:
-// - fd: file descriptor to close
-// 
-// Returns:
-// - 0 on success, -1 on failure (C semantics)
+// Closes a file descriptor. Returns 0 on success, -1 on failure (C semantics).
 pub fun close(num fd) num;
 
-// Read up to `count` bytes from a file descriptor into `buf`.
-// 
-// Params:
-// - fd: file descriptor to read from
-// - buf: destination buffer
-// - count: maximum bytes to read
-// 
-// Returns:
-// - number of bytes read (0 at end-of-file), or -1 on failure (C semantics)
+// Reads up to `count` bytes from `fd` into `buf`. Returns the number of
+// bytes read (0 at end-of-file), or -1 on failure (C semantics).
 pub fun read(num fd, raw* buf, num count) num;
 
-// Write up to `count` bytes from `buf` to a file descriptor.
-// 
-// Params:
-// - fd: file descriptor to write to
-// - buf: source buffer
-// - count: bytes to write
-// 
-// Returns:
-// - number of bytes written, or -1 on failure (C semantics)
+// Writes up to `count` bytes from `buf` to `fd`. Returns the number of bytes
+// written, or -1 on failure (C semantics).
 pub fun write(num fd, raw* buf, num count) num;
 
-// Create a unidirectional data channel (a pipe).
-// 
-// Params:
-// - fds: pointer to a 2-element i32 buffer (real C `int[2]`, not a 64-bit
-// `num`, since libc only writes the low 4 bytes); fds[0] becomes the read
-// end, fds[1] the write end
-// 
-// Returns:
-// - 0 on success, -1 on failure (C semantics)
+// Creates a unidirectional pipe. `fds` is a 2-element i32 buffer (real C
+// `int[2]`, not a 64-bit `num`, since libc only writes the low 4 bytes);
+// fds[0] becomes the read end, fds[1] the write end. Returns 0 on success,
+// -1 on failure (C semantics).
 pub fun pipe(i32* fds) num;
 
 // Forks the calling process. Prefer `posix_spawnp` for actually spawning a
 // program; this is exposed for callers that need the classic fork/exec
 // split directly. Legal to call under its libc name since the `fork`
-// keyword is contextual, reserved only in statement position.
-// 
-// Returns:
-// - 0 in the child process
-// - the child's process id in the parent process
-// - -1 on failure (C semantics)
+// keyword is contextual, reserved only in statement position. Returns 0 in
+// the child, the child's pid in the parent, or -1 on failure (C semantics).
 pub fun fork() num;
 
-// Replace the current process image, searching PATH for `file`, passing
-// `argv` as the new program's argument vector. For use after a manual
-// `fork()` in the child, as an alternative to `posix_spawnp`.
-// 
-// Params:
-// - file: program name (searched via PATH if it contains no '/')
-// - argv: NULL-terminated argument vector (argv[0] conventionally repeats
-// the program name); must remain valid until exec succeeds or fails
-// 
-// Returns:
-// - does not return on success; -1 on failure (C semantics)
+// Replaces the current process image, searching PATH for `file` (unless it
+// contains a '/'), passing `argv` (NULL-terminated, argv[0] conventionally
+// repeating the program name; must stay valid until exec succeeds or
+// fails). For use after a manual `fork()` in the child, as an alternative
+// to `posix_spawnp`. Does not return on success; -1 on failure (C semantics).
 pub fun execvp(str file, str[] argv) num;
 
-// Terminate the calling process immediately, without running atexit
+// Terminates the calling process immediately, without running atexit
 // handlers or flushing stdio buffers. Use in a forked child after `execvp`
 // fails, so a failed exec can't fall through into the parent's own code path.
-// 
-// Params:
-// - code: exit status
 pub fun _exit(num code);
 
-// Return the current process's environment (`char** environ`), for passing
+// Returns the current process's environment (`char** environ`), for passing
 // straight through to `posix_spawn` so the child inherits it.
 pub fun environ_ptr() str[];
 
@@ -107,22 +62,13 @@ pub fun posix_spawn_file_actions_adddup2(
 ) num;
 pub fun posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* actions, num fildes) num;
 
-// Spawn a new process running `path`, searching PATH (posix_spawnp
-// variant), applying `file_actions` in the child before exec.
-// 
-// Params:
-// - pid: output pointer for the new child's process id (real C `pid_t*`,
-// a 32-bit int on Darwin/glibc, not a 64-bit `num*`)
-// - file: program name (searched via PATH, like execvp)
-// - file_actions: dup2/close actions to apply in the child (may be null)
-// - argv: NULL-terminated argument vector (argv[0] conventionally repeats
-// the program name)
-// - envp: NULL-terminated environment vector (pass `environ_ptr()` to
-// inherit the parent's environment)
-// 
-// Returns:
-// - 0 on success (the child was spawned; `pid` is set)
-// - nonzero errno-style error code on failure (C semantics; `pid` untouched)
+// Spawns a new process running `file`, searching PATH (posix_spawnp
+// variant), applying `file_actions` (may be null) in the child before exec,
+// with `argv`/`envp` NULL-terminated (pass `environ_ptr()` for envp to
+// inherit the parent's environment). On success writes the child's pid to
+// `pid` (real C `pid_t*`, a 32-bit int on Darwin/glibc, not a 64-bit
+// `num*`) and returns 0; on failure returns a nonzero errno-style code and
+// leaves `pid` untouched (C semantics).
 pub fun posix_spawnp(
   pid_t* pid,
   str file,
@@ -132,15 +78,9 @@ pub fun posix_spawnp(
   str[] envp
 ) num;
 
-// Wait for a specific child process to change state (here: to exit).
-// 
-// Params:
-// - pid: child process id to wait for
-// - status: output pointer for the raw wait status (real C `int*`, see the
-// `pipe` note above on why this is `i32*` and not `num*`) -- decode with
-// the bit ops described in this module's header comment
-// - options: wait flags (0 for a normal blocking wait)
-// 
-// Returns:
-// - the pid of the child whose state changed, or -1 on failure (C semantics)
+// Waits for child `pid` to exit, writing the raw wait status to `status`
+// (real C `int*`, see the `pipe` note above on why this is `i32*` and not
+// `num*` -- decode with the bit ops described in this module's header
+// comment). `options` is 0 for a normal blocking wait. Returns the pid of
+// the child whose state changed, or -1 on failure (C semantics).
 pub fun waitpid(num pid, i32* status, num options) num;

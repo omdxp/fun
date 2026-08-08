@@ -1,9 +1,8 @@
 // Thread runtime shim contract.
 // 
-// Notes:
-// - This module is the backend-facing contract for thread lifecycle operations.
-// - Backend selection is sourced from std.runtime_backend.
-// - Return codes come from the selected backend implementation.
+// The backend-facing contract for thread lifecycle operations. Backend
+// selection is sourced from std.runtime_backend; return codes come from the
+// selected backend implementation.
 
 imp std.runtime_backend;
 imp std.thread;
@@ -118,14 +117,9 @@ pub fun runtime_async_task_new() RuntimeAsyncTask {
   ret task;
 }
 
-// Spawn a runtime thread and return a join handle.
-// 
-// Params:
-// - entry: pthread-style entry pointer (`raw* (*)(raw*)`)
-// - arg: user argument passed to entry
-// 
-// Returns:
-// - RuntimeAsyncTask with start_rc set to the thread start result
+// Spawns a runtime thread running `entry(arg)` (pthread-style entry
+// pointer, `raw* (*)(raw*)`), returning a RuntimeAsyncTask join handle with
+// start_rc set to the thread start result.
 pub fun runtime_async_spawn(raw* entry, raw* arg) RuntimeAsyncTask {
   let task = runtime_async_task_new();
   task.start_rc = runtime_thread_start(&task.thread, entry, arg);
@@ -139,20 +133,14 @@ impl RuntimeAsyncTask {
     ret self.active;
   }
 
-  // Return the most recent start result.
+  // Returns the most recent start result.
   pub last_start_rc() num {
     ret self.start_rc;
   }
 
-  // Join the spawned runtime thread.
-  // 
-  // Params:
-  // - out_ret: optional output pointer for entry return value
-  // 
-  // Returns:
-  // - 0 on success
-  // - start_rc when task never started successfully
-  // - backend join error code
+  // Joins the spawned runtime thread, optionally writing its entry
+  // function's return value to `out_ret`. Returns 0 on success, `start_rc`
+  // when the task never started successfully, or a backend join error code.
   pub join(raw* out_ret) num {
     if self.active == false {
       if self.start_rc != 0 {
@@ -173,12 +161,8 @@ impl RuntimeAsyncTask {
     ret self.join(out_ret);
   }
 
-  // Detach the spawned runtime thread.
-  // 
-  // Returns:
-  // - 0 on success
-  // - start_rc when task never started successfully
-  // - backend detach error code
+  // Detaches the spawned runtime thread. Returns 0 on success, `start_rc`
+  // when the task never started successfully, or a backend detach error code.
   pub detach() num {
     if self.active == false {
       if self.start_rc != 0 {

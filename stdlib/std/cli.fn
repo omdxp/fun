@@ -14,13 +14,7 @@ pub compound CliArgs {
   Vec<str> positionals;
 }
 
-// Parse argv into options and positionals.
-// 
-// Params:
-// - args: argv-style array (args[0] is program name)
-// 
-// Returns:
-// - parsed CliArgs with options and positionals
+// Parses argv-style `args` (args[0] is program name) into options and positionals.
 pub fun cli_parse(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);
@@ -183,25 +177,11 @@ impl CliArgs {
 }
 
 // C-style wrapper for option existence.
-// 
-// Params:
-// - args: parsed args
-// - key: option name
-// 
-// Returns:
-// - true if present
 pub fun cli_has(CliArgs* args, str key) bin {
   ret args.has(key);
 }
 
-// C-style wrapper for option value.
-// 
-// Params:
-// - args: parsed args
-// - key: option name
-// 
-// Returns:
-// - value string or null
+// C-style wrapper for option value (null when absent).
 pub fun cli_get(CliArgs* args, str key) str {
   ret args.get(key);
 }

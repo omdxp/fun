@@ -10,13 +10,7 @@ pub compound Rand {
   num state;
 }
 
-// Initialize a PRNG with a seed.
-// 
-// Params:
-// - seed: initial seed
-// 
-// Returns:
-// - initialized generator
+// Initializes a PRNG with the given seed.
 pub fun rand_init(num seed) Rand {
   Rand r;
   r.state = seed;
@@ -24,10 +18,7 @@ pub fun rand_init(num seed) Rand {
 }
 
 impl Rand {
-  // Return the next pseudo-random integer.
-  // 
-  // Returns:
-  // - next pseudo-random integer value
+  // Returns the next pseudo-random integer.
   pub next() num {
     let s = self.state % 32768;
     s = (s * 1103 + 12345) % 32768;
@@ -35,17 +26,8 @@ impl Rand {
     ret s;
   }
 
-  // Return a random integer in `[min, max]`.
-  // 
-  // Params:
-  // - min: inclusive lower bound
-  // - max: inclusive upper bound
-  // 
-  // Notes:
-  // - When `max - min + 1 <= 0`, this returns `min`.
-  // 
-  // Returns:
-  // - pseudo-random integer in the requested range
+  // Returns a random integer in `[min, max]`. Returns `min` when
+  // `max - min + 1 <= 0`.
   pub range(num min, num max) num {
     let v = self.next();
     let span = max - min + 1;
@@ -55,15 +37,7 @@ impl Rand {
     ret min + (v % span);
   }
 
-  // Return a random integer in `[min, max]` with validation.
-  // 
-  // Params:
-  // - min: inclusive lower bound
-  // - max: inclusive upper bound
-  // 
-  // Returns:
-  // - `Ok(value)` when `min <= max`
-  // - `Err` when the bounds are invalid
+  // Returns a random integer in `[min, max]`, or `Err` when `min > max`.
   pub try_range(num min, num max) Result<num, Error> {
     if min > max {
       ret err_kind(.Invalid, "range: min > max", min);
@@ -71,37 +45,19 @@ impl Rand {
     ret .Ok(self.range(min, max));
   }
 
-  // Return the next pseudo-random decimal in `[0, 1)`.
-  // 
-  // Returns:
-  // - next pseudo-random decimal value
+  // Returns the next pseudo-random decimal in `[0, 1)`.
   pub next_dec() dec {
     dec v = self.next();
     ret v / 32768;
   }
 
-  // Return a random decimal in `[min, max)`.
-  // 
-  // Params:
-  // - min: inclusive lower bound
-  // - max: exclusive upper bound
-  // 
-  // Returns:
-  // - pseudo-random decimal in the requested range
+  // Returns a random decimal in `[min, max)`.
   pub range_dec(dec min, dec max) dec {
     let v = self.next_dec();
     ret min + (max - min) * v;
   }
 
-  // Return a random decimal in `[min, max)` with validation.
-  // 
-  // Params:
-  // - min: inclusive lower bound
-  // - max: exclusive upper bound
-  // 
-  // Returns:
-  // - `Ok(value)` when `min <= max`
-  // - `Err` when the bounds are invalid
+  // Returns a random decimal in `[min, max)`, or `Err` when `min > max`.
   pub try_range_dec(dec min, dec max) Result<dec, Error> {
     if min > max {
       ret err_kind(.Invalid, "range_dec: min > max", min);
@@ -109,13 +65,7 @@ impl Rand {
     ret .Ok(self.range_dec(min, max));
   }
 
-  // Return true with probability `p`.
-  // 
-  // Params:
-  // - p: probability in the range `[0, 1]`
-  // 
-  // Returns:
-  // - true with probability `p`
+  // Returns true with probability `p` (clamped to `[0, 1]`).
   pub chance(dec p) bin {
     if p <= 0 {
       ret false;
@@ -128,70 +78,31 @@ impl Rand {
 }
 
 // C-style wrapper for next().
-// 
-// Params:
-// - r: generator
-// 
-// Returns:
-// - next number
 pub fun rand_next(Rand* r) num {
   ret r.next();
 }
 
 // C-style wrapper for range().
-// 
-// Params:
-// - r: generator
-// - min: lower bound
-// - max: upper bound
-// 
-// Returns:
-// - random value in range
 pub fun rand_range(Rand* r, num min, num max) num {
   ret r.range(min, max);
 }
 
 // C-style wrapper for next_dec().
-// 
-// Params:
-// - r: generator
-// 
-// Returns:
-// - random value in [0, 1)
 pub fun rand_dec(Rand* r) dec {
   ret r.next_dec();
 }
 
 // C-style wrapper for range_dec().
-// 
-// Params:
-// - r: generator
-// - min: lower bound
-// - max: upper bound
-// 
-// Returns:
-// - random value in range
 pub fun rand_range_dec(Rand* r, dec min, dec max) dec {
   ret r.range_dec(min, max);
 }
 
 // C-style wrapper for chance().
-// 
-// Params:
-// - r: generator
-// - p: probability (0..1)
-// 
-// Returns:
-// - true with probability p
 pub fun rand_chance(Rand* r, dec p) bin {
   ret r.chance(p);
 }
 
-// Shuffle a Vec<T> in-place (Fisher-Yates).
-// 
-// Params:
-// - r: generator
-// - v: vector
+// Shuffles a Vec<T> in-place (Fisher-Yates).
 pub fun rand_shuffle<T>(Rand* r, Vec<T>* v) {
   if v.len() <= 1 {
     ret;

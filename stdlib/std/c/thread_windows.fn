@@ -1,13 +1,10 @@
 // Windows-oriented pthread compatibility signature module.
 // 
-// Notes:
-// - This module re-exports pthread-shaped signatures for Windows-facing backends.
-// - Codegen maps these symbols to:
-// - Win32-backed compatibility functions on Windows
-// - pthread.h declarations on non-Windows hosts
+// Re-exports pthread-shaped signatures for Windows-facing backends. Codegen
+// maps these symbols to Win32-backed compatibility functions on Windows, or
+// plain pthread.h declarations on non-Windows hosts.
 
-// This module exists to re-export `std.c.thread`'s pthread-shaped signatures for
-// Windows-facing backends; the import has codegen side effects (the compat layer) even
-// though no symbol is referenced here, so the unused-import warning is a false positive.
+// The import has codegen side effects (the compat layer) even though no
+// symbol is referenced here, so the unused-import warning is a false positive.
 allow unused_import, "re-export module: pulls in the pthread compatibility layer";
 imp std.c.thread;

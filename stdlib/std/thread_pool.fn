@@ -1,8 +1,7 @@
 // Thread pool helpers built on std.thread.
 // 
-// Notes:
-// - This module manages groups of worker thread handles.
-// - Worker entrypoints use pthread-style function pointers (`raw*`).
+// Manages groups of worker thread handles. Worker entrypoints use
+// pthread-style function pointers (`raw*`).
 
 imp std.thread;
 imp std.thread_runtime;
@@ -21,13 +20,8 @@ pub compound ThreadPool {
   bin has_storage;
 }
 
-// Create a thread pool with `size` worker handles.
-// 
-// Params:
-// - size: requested worker count (negative values become 0)
-// 
-// Returns:
-// - initialized pool; `has_storage == false` when allocation fails
+// Creates a thread pool with `size` worker handles (negative values become
+// 0). `has_storage` is false on the returned pool when allocation fails.
 pub fun thread_pool_new(num size) ThreadPool {
   ThreadPool pool;
   raw* workers_ptr = nil;
@@ -82,16 +76,9 @@ impl ThreadPool {
     ret self.size;
   }
 
-  // Start all workers with a shared entrypoint.
-  // 
-  // Params:
-  // - entry: pthread-style entry function pointer
-  // - args: optional per-worker argument array (`args[i]` for worker i)
-  // 
-  // Returns:
-  // - 0 on success
-  // - -2 when pool allocation failed
-  // - first nonzero thread start error code
+  // Starts all workers running `entry`, with an optional per-worker
+  // argument array (`args[i]` for worker i). Returns 0 on success, -2 when
+  // pool allocation failed, or the first nonzero thread start error code.
   pub start_all(raw* entry, raw** args) num {
     if self.has_storage == false {
       ret -2;
@@ -128,15 +115,9 @@ impl ThreadPool {
     ret .Ok(self.size);
   }
 
-  // Join all started workers.
-  // 
-  // Params:
-  // - out_rets: optional per-worker return-pointer array (`out_rets[i]`)
-  // 
-  // Returns:
-  // - 0 on success
-  // - -2 when pool allocation failed
-  // - first nonzero thread join error code
+  // Joins all started workers, with an optional per-worker return-pointer
+  // array (`out_rets[i]`). Returns 0 on success, -2 when pool allocation
+  // failed, or the first nonzero thread join error code.
   pub join_all(raw** out_rets) num {
     if self.has_storage == false {
       ret -2;
@@ -171,12 +152,8 @@ impl ThreadPool {
     ret .Ok(self.size);
   }
 
-  // Detach all started workers.
-  // 
-  // Returns:
-  // - 0 on success
-  // - -2 when pool allocation failed
-  // - first nonzero thread detach error code
+  // Detaches all started workers. Returns 0 on success, -2 when pool
+  // allocation failed, or the first nonzero thread detach error code.
   pub detach_all() num {
     if self.has_storage == false {
       ret -2;
@@ -206,10 +183,8 @@ impl ThreadPool {
     ret .Ok(self.size);
   }
 
-  // Free worker storage and reset the pool to an empty ready state.
-  // 
-  // Returns:
-  // - 0 always
+  // Frees worker storage and resets the pool to an empty ready state.
+  // Always returns 0.
   pub destroy() num {
     if self.has_storage == true && self.size > 0 {
       free(self.workers);

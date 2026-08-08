@@ -36,14 +36,11 @@ async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
 
 // Runs every discovered test concurrently, printing a `PASS`/`FAIL` line per
 // test in completion order (not declaration order) and a final summary
-// line. Returns 0 when every test passed, 1 otherwise.
-// 
-// Params:
-// - count: number of tests discovered (from the compiler's own bridge
-// function)
-// - name_of: maps a test's index to its declared name
-// - run_at: runs test `i`; returns true on pass, false on a failed
-// assertion recovered without aborting the process
+// line. `count` is the number of tests discovered (from the compiler's own
+// bridge function), `name_of` maps a test's index to its declared name, and
+// `run_at` runs test `i`, returning true on pass or false on a failed
+// assertion recovered without aborting the process. Returns 0 when every
+// test passed, 1 otherwise.
 pub fun run_discovered_tests(num count, fun(num) str name_of, fun(num) bin run_at) num {
   if count == 0 {
     println("no tests found");

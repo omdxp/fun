@@ -2,53 +2,27 @@
 // 
 // Unlike the rest of `std.c.*`, these aren't thin bindings to a single libc
 // function: POSIX and Win32 directory APIs differ too much to bind directly.
-// The compiler emits a small hand-written wrapper for each of these into
-// every program's prelude, with a POSIX body and a Win32 body sharing one
-// name; these declarations just describe that wrapper's signature.
+// The compiler emits a small wrapper for each of these into every program's
+// prelude, with a POSIX body and a Win32 body sharing one name; these
+// declarations just describe that wrapper's signature.
 
-// Open a directory for iteration.
-// 
-// Params:
-// - path: directory path
-// 
-// Returns:
-// - an opaque directory handle, or `nil` on failure
+// Opens a directory for iteration, returning an opaque handle or `nil` on failure.
 pub fun __fun_dir_open(str path) raw*;
 
-// Read the next entry's name from a directory handle. Includes `.`/`..` and
-// the platform's usual ordering guarantees (i.e. none) -- callers that want
-// a filtered/sorted listing do that themselves.
-// 
-// Params:
-// - dirp: handle from `__fun_dir_open`
-// 
-// Returns:
-// - the next entry's name, or `nil` once entries are exhausted
+// Reads the next entry's name from a directory handle, or `nil` once entries
+// are exhausted. Includes `.`/`..` and the platform's usual ordering
+// guarantees (i.e. none) -- callers that want a filtered/sorted listing do
+// that themselves.
 pub fun __fun_dir_read_name(raw* dirp) str;
 
-// Close a directory handle opened by `__fun_dir_open`.
-// 
-// Params:
-// - dirp: handle from `__fun_dir_open`
-// 
-// Returns:
-// - 0 on success, -1 on failure or a null handle
+// Closes a directory handle opened by `__fun_dir_open`. Returns 0 on success,
+// -1 on failure or a null handle.
 pub fun __fun_dir_close(raw* dirp) num;
 
-// Check whether `path` names a directory.
-// 
-// Params:
-// - path: path to check
-// 
-// Returns:
-// - 1 if `path` is a directory, 0 otherwise (including on a null/missing path)
+// Checks whether `path` names a directory. Returns 1 if so, 0 otherwise
+// (including on a null/missing path).
 pub fun __fun_path_is_dir(str path) num;
 
-// Create a single directory (not recursive -- the parent must already exist).
-// 
-// Params:
-// - path: directory path to create
-// 
-// Returns:
-// - 0 on success, -1 on failure (including if it already exists)
+// Creates a single directory (not recursive -- the parent must already
+// exist). Returns 0 on success, -1 on failure (including if it already exists).
 pub fun __fun_make_dir(str path) num;

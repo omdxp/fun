@@ -1,8 +1,7 @@
 // Time and date bindings (time.h)
 // 
-// Notes:
-// - Values follow C `time.h` semantics and platform libc behavior.
-// - Some functions return pointers to static storage (C semantics).
+// Values follow C `time.h` semantics and platform libc behavior. Some
+// functions return pointers to static storage (C semantics).
 
 // Broken-down local or UTC time components.
 pub compound tm {
@@ -34,94 +33,37 @@ pub compound timespec {
   num tv_nsec;
 }
 
-// Returns the current calendar time.
-// 
-// Params:
-// - tloc: optional output pointer (may be null)
-// 
-// Returns:
-// - time value (C semantics)
+// Returns the current calendar time, optionally also writing it to `tloc`
+// (may be null).
 pub fun time(num* tloc) num;
 
-// Returns processor time consumed by the program.
-// 
-// Returns:
-// - processor time value, or -1 if not available (C semantics)
+// Returns processor time consumed by the program, or -1 if not available (C semantics).
 pub fun clock() num;
 
-// Reads the current time for a clock id.
-// 
-// Params:
-// - clk_id: POSIX clock id (`CLOCK_REALTIME` is typically 0)
-// - tp: destination timespec pointer
-// 
-// Returns:
-// - 0 on success, nonzero on failure (C semantics)
+// Reads the current time for POSIX clock `clk_id` (`CLOCK_REALTIME` is
+// typically 0) into `tp`. Returns 0 on success, nonzero on failure (C semantics).
 pub fun clock_gettime(num clk_id, raw* tp) num;
 
-// Computes the difference between two time values.
-// 
-// Params:
-// - time1: first time
-// - time0: second time
-// 
-// Returns:
-// - difference in seconds as dec (C semantics)
+// Returns the difference time1 - time0 in seconds as dec (C semantics).
 pub fun difftime(num time1, num time0) dec;
 
-// Converts broken-down local time to calendar time.
-// 
-// Params:
-// - t: broken-down time
-// 
-// Returns:
-// - calendar time value, or -1 on failure (C semantics)
+// Converts broken-down local time to calendar time, or -1 on failure (C semantics).
 pub fun mktime(raw* t) num;
 
-// Converts broken-down time to a textual representation.
-// 
-// Params:
-// - t: broken-down time
-// 
-// Returns:
-// - pointer to static string (C semantics)
+// Converts broken-down time to a textual representation (pointer to static
+// string, C semantics).
 pub fun asctime(raw* t) str;
 
-// Converts calendar time to a textual representation.
-// 
-// Params:
-// - timep: pointer to calendar time
-// 
-// Returns:
-// - pointer to static string (C semantics)
+// Converts calendar time to a textual representation (pointer to static
+// string, C semantics).
 pub fun ctime(num* timep) str;
 
-// Converts calendar time to UTC broken-down time.
-// 
-// Params:
-// - timep: pointer to calendar time
-// 
-// Returns:
-// - pointer to static tm (C semantics)
+// Converts calendar time to UTC broken-down time (pointer to static tm, C semantics).
 pub fun gmtime(num* timep) raw*;
 
-// Converts calendar time to local broken-down time.
-// 
-// Params:
-// - timep: pointer to calendar time
-// 
-// Returns:
-// - pointer to static tm (C semantics)
+// Converts calendar time to local broken-down time (pointer to static tm, C semantics).
 pub fun localtime(num* timep) raw*;
 
-// Formats a broken-down time according to a format string.
-// 
-// Params:
-// - s: destination buffer
-// - max: buffer capacity
-// - format: format string
-// - t: broken-down time
-// 
-// Returns:
-// - number of bytes written (C semantics)
+// Formats broken-down time `t` into `s` (capacity `max`) according to
+// `format`, returning the number of bytes written (C semantics).
 pub fun strftime(str s, num max, str format, raw* t) num;

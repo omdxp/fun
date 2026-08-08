@@ -24,17 +24,11 @@ pub compound WaitGroup {
   num expected;
 }
 
-// Create a WaitGroup expecting `n` tasks to complete.
-// 
-// The signalling channel is buffered to `n` so `done()` never blocks before
-// `wait()` starts draining. Starting at `wait_group_new(0)` and growing via
-// `add()` later is also safe, since `add()` grows the buffer to match.
-// 
-// Params:
-// - n: number of virtual tasks that will each call `done()` once
-// 
-// Returns:
-// - a WaitGroup whose `wait()` blocks until `n` completions arrive
+// Creates a WaitGroup expecting `n` tasks to each call `done()` once;
+// `wait()` blocks until all `n` completions arrive. The signalling channel
+// is buffered to `n` so `done()` never blocks before `wait()` starts
+// draining. Starting at `wait_group_new(0)` and growing via `add()` later
+// is also safe, since `add()` grows the buffer to match.
 pub fun wait_group_new(num n) WaitGroup {
   WaitGroup wg;
   wg.expected = n;

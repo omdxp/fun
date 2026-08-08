@@ -4,44 +4,23 @@ imp std.quirks;
 
 // Collection quirk for basic size introspection.
 pub quirk Collection {
-  // Return the number of elements.
-  // 
-  // Returns:
-  // - element count
+  // Returns the number of elements.
   len() num;
-  // Return true when the collection is empty.
-  // 
-  // Returns:
-  // - true when the collection holds no elements
+  // Returns true when the collection is empty.
   is_empty() bin;
 }
 
-// Helper functions for common quirks.
-// 
-// Params:
-// - s: sized value
-// 
-// Returns:
-// - number of elements
+// Returns the element count of a Sized value.
 pub fun len_of(Sized s) num {
   ret s.len();
 }
 
-// Check whether a Sized value is empty.
-// 
-// Params:
-// - s: sized value
-// 
-// Returns:
-// - true if size is zero
+// Checks whether a Sized value is empty.
 pub fun is_empty_of(Sized s) bin {
   ret s.is_empty();
 }
 
-// Clear a collection-like value via the Clearable quirk.
-// 
-// Params:
-// - c: clearable value
+// Clears a collection-like value via the Clearable quirk.
 pub fun clear_of(Clearable c) {
   c.clear();
 }

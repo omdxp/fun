@@ -1,119 +1,38 @@
 // POSIX sockets (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h)
 // 
-// Notes:
-// - These are declarations only; implementations come from system libc.
-// - This module targets POSIX-style sockets.
+// These are declarations only; implementations come from system libc.
+// This module targets POSIX-style sockets.
 
 // Socket API
-// Create a socket descriptor.
-// 
-// Params:
-// - domain: address family
-// - type: socket type
-// - protocol: protocol
-// 
-// Returns:
-// - socket fd or -1 (C semantics)
+// Creates a socket descriptor, returning the fd or -1 (C semantics).
 pub fun socket(num domain, num type, num protocol) num;
-// Bind a socket to a local address.
-// 
-// Params:
-// - sockfd: socket fd
-// - addr: address struct
-// - addrlen: length of addr
-// 
-// Returns:
-// - 0 on success, -1 on error (C semantics)
+// Binds a socket to a local address. Returns 0 on success, -1 on error (C semantics).
 pub fun bind(num sockfd, raw* addr, num addrlen) num;
-// Mark a socket as listening.
-// 
-// Params:
-// - sockfd: socket fd
-// - backlog: listen backlog
-// 
-// Returns:
-// - 0 on success, -1 on error (C semantics)
+// Marks a socket as listening with the given backlog. Returns 0 on success,
+// -1 on error (C semantics).
 pub fun listen(num sockfd, num backlog) num;
-// Accept a connection from a listening socket.
-// 
-// Params:
-// - sockfd: socket fd
-// - addr: output address (may be null)
-// - addrlen: output addr length (may be null)
-// 
-// Returns:
-// - client fd or -1 (C semantics)
+// Accepts a connection from a listening socket (`addr`/`addrlen` may be
+// null). Returns the client fd or -1 (C semantics).
 pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
-// Receive bytes from a socket.
-// 
-// Params:
-// - sockfd: socket fd
-// - buf: destination buffer
-// - len: bytes to read
-// - flags: recv flags
-// 
-// Returns:
-// - bytes read or -1 (C semantics)
+// Receives up to `len` bytes from a socket into `buf`. Returns bytes read or
+// -1 (C semantics).
 pub fun recv(num sockfd, raw* buf, num len, num flags) num;
-// Send bytes to a socket.
-// 
-// Params:
-// - sockfd: socket fd
-// - buf: source buffer
-// - len: bytes to write
-// - flags: send flags
-// 
-// Returns:
-// - bytes sent or -1 (C semantics)
+// Sends up to `len` bytes from `buf` to a socket. Returns bytes sent or -1
+// (C semantics).
 pub fun send(num sockfd, raw* buf, num len, num flags) num;
-// Close a file/socket descriptor.
-// 
-// Params:
-// - fd: descriptor
-// 
-// Returns:
-// - 0 on success, -1 on error (C semantics)
+// Closes a file/socket descriptor. Returns 0 on success, -1 on error (C semantics).
 pub fun close(num fd) num;
 
 // Byte order helpers
-// Host-to-network short.
-// 
-// Params:
-// - hostshort: host value
-// 
-// Returns:
-// - network byte order value
+// Converts a short from host to network byte order.
 pub fun htons(num hostshort) num;
-// Host-to-network long.
-// 
-// Params:
-// - hostlong: host value
-// 
-// Returns:
-// - network byte order value
+// Converts a long from host to network byte order.
 pub fun htonl(num hostlong) num;
-// Network-to-host short.
-// 
-// Params:
-// - netshort: network value
-// 
-// Returns:
-// - host byte order value
+// Converts a short from network to host byte order.
 pub fun ntohs(num netshort) num;
-// Network-to-host long.
-// 
-// Params:
-// - netlong: network value
-// 
-// Returns:
-// - host byte order value
+// Converts a long from network to host byte order.
 pub fun ntohl(num netlong) num;
 
 // Address parsing
-// 
-// Params:
-// - cp: address string
-// 
-// Returns:
-// - IPv4 address in network order (C semantics)
+// Parses an IPv4 address string, returning it in network byte order (C semantics).
 pub fun inet_addr(str cp) num;

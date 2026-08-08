@@ -8,27 +8,16 @@
 // Import:
 // - `imp std.c.def;`
 // 
-// Common typedef names
-// - `size_t`
-// - Unsigned integer type used for sizes/lengths.
-// - In Fun, this is treated as numeric-compatible.
-// 
-// - `ptrdiff_t`
-// - Signed integer type used for pointer differences.
-// - In Fun, this is treated as numeric-compatible.
-// 
-// - `wchar_t`
-// - Wide character integer type.
-// - In Fun, this is treated as numeric-compatible.
-// 
-// - `max_align_t`
-// - An alignment type (usually a struct) available on C11+.
-// - In Fun, this is treated as an opaque named type (not numeric).
+// Common typedef names (all treated as numeric-compatible in Fun, except
+// `max_align_t` which is an opaque named type)
+// - `size_t`: unsigned integer type used for sizes/lengths.
+// - `ptrdiff_t`: signed integer type used for pointer differences.
+// - `wchar_t`: wide character integer type.
+// - `max_align_t`: an alignment type (usually a struct) available on C11+.
 // 
 // Optional / platform-specific typedefs
-// - `rsize_t`
-// - Bounds-checked library size type (Annex K), if provided by the platform.
-// - In Fun, this is treated as numeric-compatible.
+// - `rsize_t`: bounds-checked library size type (Annex K), numeric-compatible
+// if provided by the platform.
 // 
 // Variadic arguments
 // - `va_list`

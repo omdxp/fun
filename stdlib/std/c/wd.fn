@@ -11,10 +11,8 @@ pub fun __fun_wd_enter_wait();
 // Mark the current thread as leaving a blocking channel wait (records progress).
 pub fun __fun_wd_leave_wait();
 
-// Print a "possible deadlock" diagnostic to stderr.
-// 
-// Params:
-// - blocked_or_count: blocked task count (scheduler) or channel occupancy
-// - pending_or_cap: pending tasks (scheduler) or channel capacity
-// - stall_ms: how long no progress has been observed
+// Prints a "possible deadlock" diagnostic to stderr: `blocked_or_count` is
+// the blocked task count (scheduler) or channel occupancy,
+// `pending_or_cap` is pending tasks (scheduler) or channel capacity, and
+// `stall_ms` is how long no progress has been observed.
 pub fun __fun_wd_warn(num blocked_or_count, num pending_or_cap, num stall_ms);

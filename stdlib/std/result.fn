@@ -61,12 +61,9 @@ impl Result<T, E> {
     ret fallback;
   }
 
-  // Return the Ok value.
-  // 
-  // Notes:
-  // - Prefer `unwrap_or()` when you need a fallback.
-  // - On Err this returns a zero value; there is no panic mechanism.
-  // - Use it only after checking `is_ok()` or matching the variant.
+  // Return the Ok value. Prefer `unwrap_or()` when you need a fallback: on
+  // Err this returns a zero value (there is no panic mechanism), so only
+  // use it after checking `is_ok()` or matching the variant.
   pub unwrap() T {
     fit *self {
       .Ok(v) -> { ret v; }
@@ -140,25 +137,14 @@ pub fun err<T>(num code, str message, T _default_value) Result<T, Error> {
 // Construct an `Err` tagged with a specific error category, code `0`. Use this in
 // place of `err()` whenever the failure obviously belongs to one of the
 // `ErrorKind` categories, so callers can branch on `kind` instead of parsing
-// `message`.
-// 
-// Params:
-// - kind: broad error category
-// - message: human-readable error message
-// - _default_value: generic-type witness only, not stored (see `err()`)
+// `message`. `_default_value` is a generic-type witness only, not stored (see `err()`).
 pub fun err_kind<T>(ErrorKind kind, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new_simple(kind, message));
 }
 
 // Construct a category-tagged `Err` that also carries a real numeric code (e.g. an
 // OS/pthread return code). Use `err_kind()` instead when there is no meaningful
-// code to report.
-// 
-// Params:
-// - kind: broad error category
-// - code: numeric error code
-// - message: human-readable error message
-// - _default_value: generic-type witness only, not stored (see `err()`)
+// code to report. `_default_value` is a generic-type witness only, not stored (see `err()`).
 pub fun err_kind_code<T>(ErrorKind kind, num code, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new_kind(kind, code, message));
 }

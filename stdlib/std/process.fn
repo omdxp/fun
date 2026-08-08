@@ -29,18 +29,12 @@ fun _empty_process_result() ProcessResult {
 }
 
 // Builds a NULL-terminated argument vector (the shape `run`/`spawn_inherited`
-// need) from a plain list of arguments. An array literal can't mix `str`
+// need) from `args` (the program name, conventionally repeated as argv[0],
+// followed by its arguments, in order). An array literal can't mix `str`
 // elements with a trailing `nil` sentinel, so callers build the list via
-// `Vec<str>` and convert it here instead.
-// 
-// Params:
-// - args: the program name (conventionally repeated as argv[0]) followed by
-// its arguments, in order
-// 
-// Returns:
-// - a NULL-terminated argument vector suitable for `run`/`spawn_inherited`;
-// free with `free_argv` once done (the individual strings are borrowed
-// from `args`, not copied, so only the array itself needs freeing)
+// `Vec<str>` and convert it here instead. Free the result with `free_argv`
+// once done (the individual strings are borrowed from `args`, not copied,
+// so only the array itself needs freeing).
 pub fun argv_from(Vec<str>* args) str[] {
   str[] out = malloc(sizeof(str) * (args.len + 1));
   num i = 0;
@@ -57,11 +51,8 @@ pub fun free_argv(str[] argv) {
   free(argv);
 }
 
-// Open a pipe, returning its (read_fd, write_fd) pair via out params.
-// 
-// Returns:
-// - 0 on success
-// - -1 on failure (out params untouched)
+// Opens a pipe, writing its (read_fd, write_fd) pair to the out params.
+// Returns 0 on success, -1 on failure (out params left untouched).
 fun _open_pipe(num* out_read_fd, num* out_write_fd) num {
   i32* fds = malloc(sizeof(i32) * 2);
   if fds == nil {
@@ -127,16 +118,12 @@ async fun _drain_pipe(num fd, Channel<str>* out) {
   b.free();
 }
 
-// Spawn `argv[0]` (searched via PATH) with the given argument vector,
-// capturing its stdout and stderr separately and waiting for it to exit.
-// 
-// Params:
-// - argv: NULL-terminated argument vector (argv[0] is both the program to
-// run and, conventionally, the first element of its own argv)
-// 
-// Returns:
-// - `Ok(ProcessResult)` once the child has exited, with its captured output
-// - `Err` if the process could not be spawned at all (e.g. not found)
+// Spawns `argv[0]` (searched via PATH) with the given NULL-terminated
+// argument vector (argv[0] is both the program to run and, conventionally,
+// the first element of its own argv), capturing its stdout and stderr
+// separately and waiting for it to exit. Returns `Ok(ProcessResult)` once
+// the child has exited, with its captured output, or `Err` if the process
+// could not be spawned at all (e.g. not found).
 pub fun run(str[] argv) Result<ProcessResult, Error> {
   num out_read = 0;
   num out_write = 0;
@@ -193,18 +180,13 @@ pub fun run(str[] argv) Result<ProcessResult, Error> {
   ret .Ok(result);
 }
 
-// Spawn `argv[0]` (searched via PATH) with inherited stdio (stdin/stdout/
-// stderr all pass straight through to the caller's own, unlike `run`), wait
-// for it to exit, and return its exit code. Used for running a compiled
-// program interactively rather than capturing a tool's diagnostic output.
-// 
-// Params:
-// - argv: NULL-terminated argument vector
-// 
-// Returns:
-// - the child's exit code on success (shell-style: 128+signal on a fatal
-// signal)
-// - -1 if the process could not be spawned at all
+// Spawns `argv[0]` (searched via PATH) with the given NULL-terminated
+// argument vector and inherited stdio (stdin/stdout/stderr all pass
+// straight through to the caller's own, unlike `run`), waits for it to
+// exit, and returns its exit code (shell-style: 128+signal on a fatal
+// signal), or -1 if the process could not be spawned at all. Used for
+// running a compiled program interactively rather than capturing a tool's
+// diagnostic output.
 pub fun spawn_inherited(str[] argv) num {
   pid_t pid = 0;
   let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, environ_ptr());

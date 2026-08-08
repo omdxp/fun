@@ -1,131 +1,46 @@
 // Character classification and conversion (ctype.h)
 // 
-// Notes:
-// - C functions take an `int` (typically an unsigned char promoted); modeled as num.
-// - Returns are C-style: nonzero means true, 0 means false.
+// C functions take an `int` (typically an unsigned char promoted); modeled as num.
+// Returns are C-style: nonzero means true, 0 means false.
 
 // Checks if the character is alphanumeric.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isalnum(num c) num;
 
 // Checks if the character is alphabetic.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isalpha(num c) num;
 
 // Checks if the character is blank (space or tab).
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isblank(num c) num;
 
 // Checks if the character is a control character.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun iscntrl(num c) num;
 
 // Checks if the character is a decimal digit.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isdigit(num c) num;
 
 // Checks if the character has a graphical representation.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isgraph(num c) num;
 
 // Checks if the character is lowercase.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun islower(num c) num;
 
 // Checks if the character is printable.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isprint(num c) num;
 
 // Checks if the character is punctuation.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun ispunct(num c) num;
 
 // Checks if the character is whitespace.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isspace(num c) num;
 
 // Checks if the character is uppercase.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isupper(num c) num;
 
 // Checks if the character is a hexadecimal digit.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - nonzero if true, 0 if false (C semantics)
 pub fun isxdigit(num c) num;
 
-// Converts a character code to lowercase if possible.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - lowercased character code, or c if no conversion applies (C semantics)
+// Converts a character code to lowercase, or returns c unchanged if no conversion applies.
 pub fun tolower(num c) num;
 
-// Converts a character code to uppercase if possible.
-// 
-// Params:
-// - c: character code
-// 
-// Returns:
-// - uppercased character code, or c if no conversion applies (C semantics)
+// Converts a character code to uppercase, or returns c unchanged if no conversion applies.
 pub fun toupper(num c) num;
