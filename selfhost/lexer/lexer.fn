@@ -1,27 +1,10 @@
 // The self-hosted Fun compiler's lexer: turns Fun source text into a
-// Vec<Token>. Ported from the previous implementation's lexer module.
+// Vec<Token>.
 // 
-// Design differences from the original (each confirmed necessary/safe by
-// reading the original source and grepping for downstream consumers before
-// diverging):
-// - Reads the WHOLE source into a `str` up front (via `std.fs`, already
-// built in Phase 0) and lexes with an index cursor, instead of the
-// original's per-character positional file reads. Fun string indexing
-// (`s[i]`) makes this the natural, idiomatic shape here (see the
-// `examples/imports/torture_compiler` mini-lexer precedent) and avoids a
-// syscall per character.
-// - Drops `curr_exp_count`/`parenthesis_buf`/`arg_str_buf`/
-// `start_expression`/`finish_expression`: written to throughout the
-// original but never actually READ anywhere in the whole codebase (grepped
-// to confirm) -- vestigial bookkeeping for a removed feature.
-// - Drops the `asm` raw-body lexing mode (scanning `asm { ... }` as an
-// opaque text blob). Inline assembly is a niche feature the self-hosted
-// compiler's OWN source has no need for; deferred rather than ported
-// speculatively. `asm` still lexes fine as an ordinary keyword/statement
-// otherwise -- only the raw-body-capture special case is missing.
-// - Uses `panic("...")` for the one "should never happen" internal
-// invariant the original treats as a logged-but-recoverable lexer error
-// (pushing back a newline, which the lexer's own code never does).
+// Reads the whole source into a `str` up front (via `std.fs`) and lexes
+// with an index cursor. `asm { ... }` bodies lex as ordinary
+// keywords/statements; the raw-body-capture special case for inline
+// assembly is not implemented.
 
 imp std.string;
 imp std.vec;
@@ -44,9 +27,7 @@ pub compound Lexer {
   str filename;
   // Every token emitted so far. Kept on the lexer itself (rather than only
   // handed back up to a driver loop) because the hex/binary special-number
-  // check below needs to inspect -- and pop -- the PRECEDING emitted token,
-  // matching the original's `token_make_special_number` (which pops the
-  // preceding literal `0` off the shared `transpile_proc.tokens` list).
+  // check below needs to inspect -- and pop -- the preceding emitted token.
   Vec<Token> tokens;
 }
 
@@ -127,12 +108,12 @@ fun _not_newline(chr c) bin {
 // The result of scanning one line's worth of a raw (backtick) string --
 // see `Lexer._scan_raw_string_line`.
 enum RawLineResult {
-  // Hit a closing backtick: the whole raw string ends HERE, even if more
+  // Hit a closing backtick: the whole raw string ends here, even if more
   // text follows on the same line (`` `line two`; ``).
   Closed,
   // Hit the line's newline with no closing backtick: either the start of
   // a multi-line block, or (on a later line) another contributed line --
-  // the caller decides which, based on whether the FOLLOWING line also
+  // the caller decides which, based on whether the following line also
   // starts with a backtick.
   Continues,
   // Hit end-of-file with no closing backtick.
@@ -140,7 +121,7 @@ enum RawLineResult {
 }
 
 impl Lexer {
-  // Snapshot the CURRENT line/col as a `Pos` (used for a token's START
+  // Snapshot the current line/col as a `Pos` (used for a token's start
   // position; `_finish_pos` fills in the end/span once the token is read).
   _start_pos() Pos {
     Pos p;
@@ -153,8 +134,8 @@ impl Lexer {
     ret p;
   }
 
-  // Fills in the END of a token's span (the START was already captured by
-  // `_start_pos`) using the lexer's CURRENT position, once the token's text
+  // Fills in the end of a token's span (the start was already captured by
+  // `_start_pos`) using the lexer's current position, once the token's text
   // has been fully consumed.
   _finish_pos(Pos* p) {
     p.end_line = self.line;
@@ -163,7 +144,7 @@ impl Lexer {
 
   // Peek the current/next character without advancing. Returns NUL at EOF
   // (an internal sentinel; Option<Token>/Result<Token, Error> is used at the
-  // PUBLIC token-stream boundary instead of threading EOF through every
+  // public token-stream boundary instead of threading EOF through every
   // single-character read).
   _peek() chr {
     if self.pos >= self.len {
@@ -172,7 +153,7 @@ impl Lexer {
     ret self.src[self.pos];
   }
 
-  // Peek ONE character past the current position (for two-character
+  // Peek one character past the current position (for two-character
   // lookahead, e.g. distinguishing `//` from a single `/`). Returns NUL at
   // or past EOF.
   _peek2() chr {
@@ -197,7 +178,7 @@ impl Lexer {
   }
 
   // Un-consume the most recently advanced-over character `c`. The lexer
-  // never pushes back a newline (same restriction as the original).
+  // never pushes back a newline.
   _push_back(chr c) {
     if c == '\n' {
       panic("internal lexer error: attempted to push back newline");
@@ -289,7 +270,7 @@ impl Lexer {
   }
 
   // Reads a run of digits (and `_` digit separators, stripped here so every
-  // downstream consumer sees a clean digit string), WITHOUT consuming a
+  // downstream consumer sees a clean digit string), without consuming a
   // trailing non-digit.
   _read_digits() str {
     let b = string_builder_init(16);
@@ -383,9 +364,8 @@ impl Lexer {
     }
     num v = iv.unwrap();
 
-    // Support (and discard) suffixes like `10L`/`10f` -- accepted for
-    // source compatibility with the current lexer, but (like the original)
-    // not otherwise tracked: nothing downstream reads the distinction.
+    // Support (and discard) suffixes like `10L`/`10f`: accepted but not
+    // otherwise tracked, since nothing downstream reads the distinction.
     fit self._peek() {
       'L' -> {
         self._advance();
@@ -424,7 +404,7 @@ impl Lexer {
         // identifier-start or another dot: a decimal literal "1.0". A
         // following letter/underscore (`1.foo`) stays integer + '.'
         // (member access); a following dot (`0..3`) is the range operator,
-        // so its first dot must NOT be swallowed into a float.
+        // so its first dot must not be swallowed into a float.
         self._advance(); // '.'
         b.append(".0");
       }
@@ -483,9 +463,8 @@ impl Lexer {
     ret t;
   }
 
-  // A single escape character (the byte AFTER the backslash) to its decoded
-  // value, or an error for an unrecognized escape. Matches the escape
-  // sequences the original implementation's `get_escape_char` supports.
+  // Decodes a single escape character (the byte after the backslash) to
+  // its actual value, or returns an error for an unrecognized escape.
   _decode_escape_char(chr c) Result<chr, Error> {
     fit c {
       'n' -> { ret .Ok('\n'); }
@@ -499,7 +478,7 @@ impl Lexer {
     }
   }
 
-  // Reads a `"..."` string literal. Escapes are passed through VERBATIM
+  // Reads a `"..."` string literal. Escapes are passed through verbatim
   // into the buffer (kept as a literal `\` + the escape char) -- codegen
   // emits the text straight into a C string literal, which interprets `\n`
   // /`\t`/etc. itself. This also means an escaped quote `\"` does not
@@ -539,10 +518,10 @@ impl Lexer {
 
   // Scans one line's worth of raw-string content (from right after an
   // opening backtick) into `b`, stopping at whichever comes first: a
-  // closing backtick (consumed, `.Closed`), the line's own newline (NOT
+  // closing backtick (consumed, `.Closed`), the line's own newline (not
   // consumed, `.Continues`), or EOF (`.Eof`). Shared by `_read_raw_string`
   // for the first line and every continuation line, since both need the
-  // exact same "close, or hand off to the caller at the newline" behavior.
+  // same "close, or hand off to the caller at the newline" behavior.
   _scan_raw_string_line(StringBuilder* b) RawLineResult {
     for {
       if self.pos >= self.len {
@@ -565,26 +544,24 @@ impl Lexer {
   // 
   // Two forms, both starting with a backtick:
   // - Inline (or explicitly-closed-multi-line): closed by another
-  // backtick, e.g. `` `content` ``, or on the LAST line of a multi-line
+  // backtick, e.g. `` `content` ``, or on the last line of a multi-line
   // block (`` `line two`; ``) when trailing code needs to sit on that
   // same line. Content is taken completely literally: no escape
   // processing at all (a backslash is just a backslash, a double-quote
   // is just a double-quote).
   // - Multi-line, implicitly closed: a backtick left unclosed before the
-  // line's newline starts a block. Each SUBSEQUENT line that begins
+  // line's newline starts a block. Each subsequent line that begins
   // (after leading spaces/tabs) with its own backtick contributes its
   // own content, joined to the previous lines with a real newline byte.
-  // The block ends at the first line that doesn't start with a
-  // backtick, WITHOUT consuming that line -- exactly like Zig's `\\`
-  // multi-line strings (any trailing code, like the statement's `;`,
-  // goes on its own following line), just per-line-marked with backtick.
+  // The block ends at the first line that doesn't start with a backtick,
+  // without consuming that line (any trailing code, like the statement's
+  // `;`, goes on its own following line).
   // 
-  // The buffer holds the LITERAL bytes (unlike `_read_string`, whose
+  // The buffer holds the literal bytes (unlike `_read_string`, whose
   // buffer keeps escape sequences verbatim for direct re-embedding in C)
   // -- `t.is_raw_string = true` tells codegen to escape this content when
   // emitting the C string literal, and tells the formatter to reproduce
-  // the original backtick spelling verbatim rather than requoting the
-  // buffer.
+  // the backtick spelling verbatim rather than requoting the buffer.
   _read_raw_string() Result<Token, Error> {
     let start = self._start_pos();
     self._advance(); // opening '`'
@@ -626,7 +603,7 @@ impl Lexer {
     ret .Ok(t);
   }
 
-  // Reads a `'c'` character literal. Unlike string escapes, these ARE
+  // Reads a `'c'` character literal. Unlike string escapes, these are
   // decoded to their actual byte value here (the token carries a real
   // `chr`, not source text for a C compiler to reinterpret).
   _read_character() Result<Token, Error> {
@@ -925,8 +902,7 @@ impl Lexer {
   }
 }
 
-// Tokenizes `src` (a whole file's contents) into a flat Vec<Token>. Mirrors
-// `LexProcess.lex()`.
+// Tokenizes `src` (a whole file's contents) into a flat Vec<Token>.
 pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
   Lexer lex = lexer_new(src, filename);
 
@@ -1055,7 +1031,7 @@ test "lexes number suffixes without tracking their distinction" {
 
 test "lexes string literals with escapes preserved verbatim" {
   // Source text (6 chars): "hi\n" -- a quoted string containing a literal
-  // backslash-n, NOT a real newline.
+  // backslash-n, not a real newline.
   let toks = _lex("\"hi\\n\"");
   assert toks.len == 1, "expected 1 token";
   assert toks.get(0).type == .String, "expected String token";
@@ -1073,7 +1049,7 @@ test "lexes an inline raw string with no escape processing" {
   assert toks.get(0).type == .String, "expected String token";
   assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
   fit toks.get(0).data {
-    // The backslashes are LITERAL bytes (one each), not escape-sequence pairs.
+    // The backslashes are literal bytes (one each), not escape-sequence pairs.
     .Sval(s) -> { assert equals(s, "C:\\Users\\name"), "expected literal backslashes"; }
     _ -> { panic("expected Sval"); }
   }
@@ -1150,19 +1126,14 @@ test "lexes symbols and newlines" {
   assert toks.get(2).type == .NewLine, "expected NewLine token";
 }
 
-// A lexer's whole job is to survive input it never validated in advance --
-// malformed UTF-8, truncated escapes/comments/strings, byte sequences no
-// human would type. `tokenize` already returns a Result for the EXPECTED
-// failure case (an unterminated string/comment, an unknown character) --
-// this fuzz target isn't hunting for that, it's hunting for the crash a
-// hand-rolled cursor-based scanner is prone to on truncated/edge-case input
-// (an off-the-end read, an infinite loop that never advances the cursor).
+// Fuzzes the lexer against malformed UTF-8, truncated escapes/comments/
+// strings, and other byte sequences no human would type. This targets
+// crashes (an off-the-end read, an infinite loop), not the expected
+// `Result` error case that `tokenize` already returns for bad input.
 // 
-// `data`/`len` are a raw byte buffer with no guarantee of NUL-termination
-// (fuzzing engines don't null-terminate their generated inputs), but
-// `tokenize` takes a `str` -- so this copies into a freshly NUL-terminated
-// buffer first, same as any other C boundary crossing a length-prefixed
-// buffer into a NUL-terminated string.
+// `data`/`len` are a raw byte buffer with no guaranteed NUL-termination,
+// so this copies into a freshly NUL-terminated buffer before calling
+// `tokenize`, which takes a `str`.
 fuzz "tokenize never crashes on arbitrary input" (raw* data, num len) {
   str src = malloc(len + 1);
   if src == nil {

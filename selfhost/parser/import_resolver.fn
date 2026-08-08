@@ -1,12 +1,8 @@
 // Resolves and merges a whole `imp`-connected program into one flat
 // `Vec<Node>`, so `codegen.transpile` (which only ever sees a single
-// file's worth of top-level declarations today) can be handed a
+// file's worth of top-level declarations at a time) can be handed a
 // multi-file program's declarations all at once, in one pass, with no
-// changes to codegen itself -- `imp`-qualified access (`alias.symbol`)
-// and cross-file duplicate-symbol detection are each a separate,
-// not-yet-supported gap (see `parse_program_with_imports`'s own doc
-// comment); this file only makes every reachable declaration visible in
-// one place.
+// changes to codegen itself.
 
 imp parse_state;
 imp parser;
@@ -22,17 +18,14 @@ imp std.map;
 imp std.option;
 imp std.result;
 
-// Converts one `imp`-statement's dotted `path` (already parsed into an
-// `ImportNode.path` string, preserving leading/interior dot RUNS exactly
-// as written -- see `parser.parse_import`'s own doc comment) into an
-// actual `.fn` file path under `root`, joining path segments with `/`
-// and converting a run of N consecutive `.` characters into `N / 2`
-// `../` parent-traversal segments, plus one EXTRA `/` path-separator
-// when N is odd -- a plain single `.` between two path segments
-// (`lexer.token`) is exactly that odd-run-of-1 case, and a leading
-// `..`/`....`/... run (always an EVEN count, enforced by `parse_import`
-// itself) is exactly the even case, needing no extra separator since
-// `../` already ends in one. Shared by `resolve_import_path` for BOTH a
+// Converts one `imp`-statement's dotted `path` into an actual `.fn` file
+// path under `root`, joining path segments with `/` and converting a run
+// of N consecutive `.` characters into `N / 2` `../` parent-traversal
+// segments, plus one extra `/` path-separator when N is odd. A plain
+// single `.` between two path segments (`lexer.token`) is the odd-run-of-1
+// case; a leading `..`/`....`/... run (always even, enforced by
+// `parse_import`) is the even case, needing no extra separator since
+// `../` already ends in one. Shared by `resolve_import_path` for both a
 // local (relative-to-importing-file) and a `std.*` (relative-to-
 // stdlib-root) import -- only `root` differs between the two.
 fun _convert_dotted_path(str root, str import_path) str {
@@ -70,26 +63,17 @@ fun _convert_dotted_path(str root, str import_path) str {
 
 // Collapses every `seg/../` pair in `path` (and drops bare `.`/empty
 // segments), e.g. `"selfhost/parser/../ast/ast.fn"` -> `"selfhost/ast/
-// ast.fn"`. `resolve_import_path` itself deliberately does NOT do this
-// (its own tests pin the raw, un-collapsed dotted-path arithmetic) --
-// but the SAME real file reached via two DIFFERENT importing
-// directories (`selfhost/lexer/lexer.fn`'s own `imp ..ast.ast;` vs
-// `selfhost/parser/parser.fn`'s own `imp ..ast.ast;`) resolves to two
-// DIFFERENT, un-normalized path STRINGS for that one file -- and
-// `_preload_and_collect`/`_parse_and_merge`'s own `visited: Set<str>`
-// dedup keys on the raw string, so it never recognizes them as the same
-// file, parsing (and merging) it once per distinct importer directory.
-// Found via a real stage-2 self-compilation C error ("redefinition of
-// 'warning_id_from_string'"/`token_is_operator`/`dtype_new`/... --
-// every one of those lives in a file reachable from more than one
-// importing directory).
+// ast.fn"`. The same real file reached via two different importing
+// directories (`selfhost/lexer/lexer.fn`'s `imp ..ast.ast;` vs
+// `selfhost/parser/parser.fn`'s `imp ..ast.ast;`) would otherwise resolve
+// to two different, un-normalized path strings, and the dedup sets in
+// `_preload_and_collect`/`_parse_and_merge` key on the raw string --
+// without normalizing, the same file gets parsed and merged once per
+// distinct importer directory.
 // 
-// Fun ships on Windows too, where a path segment can arrive `\`-
-// separated (`resolve_import_path` itself always builds `/`, but a
-// caller-supplied entry path, or a future platform-specific join, might
-// not) -- every backslash is normalized to `/` FIRST, before splitting,
-// so both separators collapse into the exact same dedup key regardless
-// of which one a given path happens to use.
+// A path segment can arrive `\`-separated on Windows, so every backslash
+// is normalized to `/` first, before splitting, so both separators
+// collapse into the same dedup key.
 fun _normalize_path(str path) str {
   Vec<str> segs = split(replace_char(path, '\\', '/'), '/');
   Vec<str> parts;
@@ -120,22 +104,14 @@ fun _normalize_path(str path) str {
 }
 
 // Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
-// path -- mirroring the CURRENT bootstrap compiler's own two-way split
-// EXACTLY (see `process_import` in `modules/codegen/transpiler.zig`): a
-// path starting with `std.` (the stdlib convention every real `.fn` file
-// already uses, e.g. `imp std.string;`) resolves against the STDLIB
-// ROOT, not relative to the importing file -- otherwise every stdlib
-// import would need re-resolving from EACH importing file's own
-// directory, which is wrong the moment two files in different
-// directories both `imp std.string;`. Everything else resolves relative
-// to `input_file_path`'s own directory (see `_convert_dotted_path`'s doc
-// comment for the actual dot-to-path conversion, shared by both).
-// 
-// Deliberately narrow for this slice: the stdlib root is a fixed
-// `"stdlib"` (matching the CURRENT bootstrap compiler's own dev-tree
-// fallback when run from the repo root, which is how every caller of
-// this function runs today) -- no `FUN_STDLIB_DIR` environment-variable
-// override, since this stdlib has no `getenv`-equivalent binding yet.
+// path. A path starting with `std.` (e.g. `imp std.string;`) resolves
+// against a fixed stdlib root (`"stdlib"`), not relative to the importing
+// file -- otherwise every stdlib import would need re-resolving from
+// each importing file's own directory, which breaks the moment two files
+// in different directories both `imp std.string;`. Everything else
+// resolves relative to `input_file_path`'s own directory (see
+// `_convert_dotted_path`'s doc comment for the dot-to-path conversion,
+// shared by both).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
     ret _convert_dotted_path("stdlib", import_path);
@@ -148,30 +124,21 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 }
 
 // Recursively resolves, parses, and merges `entry_path` and every file it
-// (transitively) `imp`s into one `Vec<Node>` -- an ALIASED import (`imp x
-// as y;`) is traversed the exact same as an unaliased one (its
-// declarations still need to be reachable), but a `y.symbol` QUALIFIED
-// reference at a call site is a separate gap this doesn't resolve (see
-// `codegen.fn`'s own top-of-file doc comment, "calls/access through an
-// aliased/imported module"). Each file is parsed at MOST once (tracked
-// by its resolved path in a `Set<str>`), so a diamond import (two files
-// both importing a shared third) or a cyclic one terminates instead of
-// looping or duplicating declarations.
+// (transitively) `imp`s into one `Vec<Node>`. An aliased import (`imp x
+// as y;`) is traversed the same as an unaliased one, since its
+// declarations still need to be reachable. Each file is parsed at most
+// once (tracked by its resolved path in a `Set<str>`), so a diamond
+// import (two files both importing a shared third) or a cyclic one
+// terminates instead of looping or duplicating declarations.
 // 
 // `current_alias` is the alias (or `""` for the entry file, or an
-// unaliased import) THIS file's own top-level declarations were reached
-// under -- threaded through purely so `_rename_colliding_functions` can
-// disambiguate a PLAIN (non-generic) function name that collides with
-// one already merged from a DIFFERENT aliased import (`imp mod1 as one;
-// imp mod2 as two;` where both `mod1.fn`/`mod2.fn` declare `pub fun
-// pick()`, `examples/imports/alias_collision/main.fn`'s own real body)
-// -- runs in a dedicated pass, AFTER this file's own imports are fully
-// merged (so the collision check sees everything merged so far) but
-// BEFORE this file's own nodes are pushed (so the rename -- and every
-// same-file call site referencing the old name -- is settled before
-// anything else can observe the stale name). See its own doc comment
-// for the exact mechanism and what's still NOT handled (an unaliased
-// collision, a colliding COMPOUND/enum/impl, or a GENERIC function).
+// unaliased import) this file's own top-level declarations were reached
+// under -- threaded through so `_rename_colliding_functions` can
+// disambiguate a plain (non-generic) function name that collides with
+// one already merged from a differently-aliased import. That rename
+// pass runs after this file's own imports are fully merged but before
+// this file's own nodes are pushed, so a same-file call site never
+// observes the stale name.
 // 
 // Every resolved path is assumed to exist and parse cleanly; the first
 // real failure (file not found, lex, or parse error) short-circuits the
@@ -216,25 +183,20 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
   ret .Ok(r);
 }
 
-// `parse_program_with_imports`'s own result: the flattened, merged
-// program (`nodes`, unchanged from before) alongside every import
-// ALIAS name (`imp x as y;`'s own `y`) seen anywhere across the whole
-// transitive import graph -- an aliased import's declarations are
-// merged into `nodes` the exact same as an unaliased one (see `_parse_
-// and_merge`'s own doc comment), so codegen needs `aliases` separately
-// to recognize a `y.symbol` qualified reference at a call site as
-// "strip the alias, resolve `symbol` unqualified" (see `Codegen.
-// import_aliases`'s own doc comment) -- the ONLY thing that survives
-// about an alias past this flattening step.
+// `parse_program_with_imports`'s result: the flattened, merged program
+// (`nodes`) alongside every import alias name (`imp x as y;`'s `y`) seen
+// across the whole transitive import graph. An aliased import's
+// declarations are merged into `nodes` the same as an unaliased one, so
+// codegen needs `aliases` separately to recognize a `y.symbol` qualified
+// reference at a call site as "strip the alias, resolve `symbol`
+// unqualified".
 // 
 // `alias_rename_keys`/`alias_rename_targets` (parallel Vecs, `"<alias>::
-// <bare_name>"` -> the real mangled name) carry the ADDITIONAL exception
-// to that "strip the alias, resolve unqualified" rule: see `_rename_
-// colliding_functions`'s own doc comment for when a bare name COLLIDES
-// across two differently-aliased imports and gets renamed instead --
-// codegen's own alias-qualified call sites need to check here FIRST,
-// falling back to the bare name unqualified when nothing matches (the
-// overwhelmingly common, non-colliding case).
+// <bare_name>"` -> the real mangled name) hold the exception to that
+// rule: when a bare name collides across two differently-aliased imports
+// and gets renamed instead (see `_rename_colliding_functions`), codegen's
+// alias-qualified call sites check here first, falling back to the bare
+// name unqualified when nothing matches.
 pub compound ProgramMergeResult {
   Vec<Node> nodes;
   Vec<str> aliases;
@@ -243,31 +205,23 @@ pub compound ProgramMergeResult {
 }
 
 // Recursively discovers `path`'s (transitive) import graph and collects
-// just the NAME of each public top-level `compound` declared anywhere in
+// just the name of each public top-level `compound` declared anywhere in
 // it (into `out`, keyed by name) -- a lightweight first pass so
 // `is_known_compound_symbol` can recognize a compound declared in
-// ANOTHER file before that file's own REAL parse ever starts
-// (`parse_program_with_imports` runs this FIRST, then threads the
+// another file before that file's own real parse starts
+// (`parse_program_with_imports` runs this first, then threads the
 // resulting map into every file's own `ParseState.global_symbols` via
 // `_parse_and_merge`).
 // 
-// Deliberately does NOT reuse `Parser.pub parse()` (a full parse) the
-// way `_parse_and_merge` does: a full parse of THIS file would need
-// `is_known_compound_symbol` to already know about compounds from files
-// it hasn't been visited yet either (`codegen/typedefs.fn`'s own real
-// `DynamicIntType{...}` test body, found via the self-compile
-// experiment, is exactly this -- a compound-literal expression whose
-// type is declared in a DIFFERENT file). Sidesteps the circularity two
-// ways instead: `imp` statements (always grouped at the top of a file,
-// before any other declaration, matching this whole codebase's own
-// convention) are parsed via the real `Parser.parse_import` in a loop
-// (reusing its already-correct dotted-path/`../`-run reconstruction
-// logic exactly, rather than duplicating it here) so the import graph
-// itself is discovered accurately; a top-level `pub compound NAME`
-// declaration is instead found via a raw TOKEN scan over the remaining
-// tokens (tracking `{`/`}` depth to stay at top level) -- simple pattern
-// matching that can't itself fail on an unresolved identifier, since it
-// never needs to understand expressions at all.
+// Doesn't reuse `Parser.pub parse()` (a full parse), since that would
+// need `is_known_compound_symbol` to already know about compounds from
+// files not yet visited -- the same circularity this pass exists to
+// avoid. Instead: `imp` statements (always grouped at the top of a file)
+// are parsed via the real `Parser.parse_import` in a loop, so the import
+// graph itself is discovered accurately; a top-level `pub compound name`
+// declaration is found via a raw token scan over the remaining tokens
+// (tracking `{`/`}` depth to stay at top level), simple pattern matching
+// that never needs to understand expressions.
 fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
@@ -314,13 +268,10 @@ fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* vi
   ret .None;
 }
 
-// Raw token scan (see `_preload_and_collect`'s own doc comment for why
-// this doesn't just reuse the real parser) for every top-level `pub
-// compound NAME` sequence from `start_idx` to the end of `tokens`,
-// recording each into `out`. Tracks `{`/`}` depth so a NESTED compound-
-// like sequence (there isn't one in practice, but a field named
-// `compound` inside some OTHER top-level construct isn't reachable here
-// regardless) never matches -- only depth 0 counts.
+// Raw token scan (see `_preload_and_collect` for why this doesn't reuse
+// the real parser) for every top-level `pub compound name` sequence from
+// `start_idx` to the end of `tokens`, recording each into `out`. Tracks
+// `{`/`}` depth so only a depth-0 (top-level) sequence ever matches.
 fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, GlobalSymbolInfo>* out) {
   num i = start_idx;
   num depth = 0;
@@ -402,11 +353,10 @@ fun _parse_and_merge(
     ret .Some(format("parse error in {str}", path));
   }
 
-  // Pass 1: recurse into THIS file's own imports first -- always
-  // grouped at the top of a file, before any other declaration (this
-  // codebase's own convention) -- so every one of them is fully merged
-  // BEFORE `_rename_colliding_functions` below checks THIS file's own
-  // declarations against `merged`.
+  // Pass 1: recurse into this file's own imports first (always grouped
+  // at the top of a file, before any other declaration), so every one of
+  // them is fully merged before `_rename_colliding_functions` below
+  // checks this file's own declarations against `merged`.
   for n : state.nodes {
     fit n.kind {
       .Import(imp_node) -> {
@@ -434,8 +384,8 @@ fun _parse_and_merge(
     }
   }
 
-  // Pass 2: rename any colliding plain function BEFORE pushing anything
-  // -- see `_rename_colliding_functions`'s own doc comment.
+  // Pass 2: rename any colliding plain function before pushing anything
+  // -- see `_rename_colliding_functions`.
   if !equals(current_alias, "") {
     _rename_colliding_functions(&state.nodes, merged, current_alias, rename_keys, rename_targets);
   }
@@ -450,27 +400,20 @@ fun _parse_and_merge(
   ret .None;
 }
 
-// Renames any of `nodes`' own top-level PLAIN (non-generic) functions
+// Renames any of `nodes`' own top-level plain (non-generic) functions
 // whose bare name already exists among `merged`'s own functions (a
-// collision across two DIFFERENT aliased imports each privately
-// declaring the same name, `imp mod1 as one; imp mod2 as two;` where
-// both declare `pub fun pick()`) to `<alias>__<name>`, and rewrites
-// every UNQUALIFIED call to the old name anywhere in `nodes` (this
-// file's OWN declarations -- a same-file caller of the renamed
-// function, not just the declaration itself) to the new one. An
-// ALIAS-QUALIFIED cross-file reference (`one.pick()`) is unaffected
-// here -- resolved separately, at emission time, by `codegen.fn`'s own
-// alias-handling call sites, which already fall back to the bare name
-// unqualified in the (overwhelmingly common) non-colliding case.
+// collision across two differently-aliased imports each privately
+// declaring the same name) to `<alias>__<name>`, and rewrites every
+// unqualified call to the old name anywhere in `nodes` (this file's own
+// declarations, including a same-file caller of the renamed function) to
+// the new one. An alias-qualified cross-file reference (`one.pick()`) is
+// unaffected here -- resolved separately, at emission time, by
+// `codegen.fn`'s alias-handling call sites, which fall back to the bare
+// name unqualified in the non-colliding case.
 // 
-// Deliberately narrow for this slice: only a PLAIN function's own name
-// is considered (`fnv.has_type_params` is skipped entirely -- a generic
-// function's call sites are resolved by MANGLED instantiation name, not
-// its bare template name, a difference this rename doesn't account
-// for), and only when `alias` is non-empty (an UNALIASED import's own
-// collision is a separate, rarer case, still unhandled). A colliding
-// compound/enum/impl isn't handled either -- not needed by any real
-// example yet.
+// Only considers a plain function's own name (a generic function's call
+// sites are resolved by mangled instantiation name, not its bare
+// template name), and only when `alias` is non-empty.
 fun _rename_colliding_functions(
   Vec<Node>* nodes,
   Vec<Node>* merged,
@@ -501,17 +444,16 @@ fun _rename_colliding_functions(
     let old_name = old_names.get(ri);
     let new_name = new_names.get(ri);
     _rewrite_toplevel_calls(nodes, old_name, new_name);
-    // Recorded for codegen's own alias-qualified call sites (`two.pick(
-    // )`) -- see `ProgramMergeResult.alias_rename_keys`'s own doc
-    // comment.
+    // Recorded for codegen's alias-qualified call sites (`two.pick()`) --
+    // see `ProgramMergeResult.alias_rename_keys`.
     rename_keys.push(format("{str}::{str}", alias, old_name));
     rename_targets.push(new_name);
     ri = ri + 1;
   }
 }
 
-// True when `merged` already contains a top-level PLAIN function named
-// `name` -- see `_rename_colliding_functions`'s own doc comment.
+// True when `merged` already contains a top-level plain function named
+// `name` -- see `_rename_colliding_functions`.
 fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
   num mi = 0;
   for mi < merged.len {
@@ -529,11 +471,11 @@ fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
   ret false;
 }
 
-// Applies `_rewrite_calls_in_node` to every TOP-LEVEL node in `nodes` --
-// split out separately because a top-level entry is a plain `Node`
-// (by value), not a `Node*` the way every NESTED child field already
-// is, so it needs its own get/mutate-locally/set roundtrip through the
-// `Vec<Node>` itself rather than a direct through-pointer mutation.
+// Applies `_rewrite_calls_in_node` to every top-level node in `nodes` --
+// split out separately because a top-level entry is a plain `Node` (by
+// value), not a `Node*` the way every nested child field already is, so
+// it needs its own get/mutate-locally/set roundtrip through the
+// `Vec<Node>` rather than a direct through-pointer mutation.
 fun _rewrite_toplevel_calls(Vec<Node>* nodes, str old_name, str new_name) {
   num idx = 0;
   for idx < nodes.len {
@@ -544,15 +486,12 @@ fun _rewrite_toplevel_calls(Vec<Node>* nodes, str old_name, str new_name) {
   }
 }
 
-// Recursively rewrites every UNQUALIFIED call site (`old_name(...)`) to
-// `new_name(...)` anywhere within `n`, and renames `n` ITSELF when it's
-// the matching function's own declaration -- see `_rename_colliding_
-// functions`'s own doc comment for why this exists (a same-file caller
-// of a just-renamed colliding function must keep compiling). Covers
-// every statement/expression shape that can contain a nested call --
-// deliberately no MORE general than that (a colliding function is never
-// referenced any other way, e.g. taking its address as a first-class
-// value, anywhere in this codebase's own style).
+// Recursively rewrites every unqualified call site (`old_name(...)`) to
+// `new_name(...)` anywhere within `n`, and renames `n` itself when it's
+// the matching function's own declaration (see `_rename_colliding_
+// functions`: a same-file caller of a just-renamed colliding function
+// must keep compiling). Covers every statement/expression shape that can
+// contain a nested call.
 fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
   fit n.kind {
     .Expression(e) -> {
@@ -751,17 +690,11 @@ test "parse_program_with_imports reports an error for a missing import rather th
   assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
 }
 
-test "parse_program_with_imports resolves a compound-literal expression whose type is declared in ANOTHER file" {
-  // Regression test: `codegen/typedefs.fn`'s own real test body
-  // (`DynamicIntType{is_signed = true, bits = 8}`, `DynamicIntType`
-  // declared in the separate `parser/datatype_defs.fn`) -- found via the
-  // self-compile experiment -- failed to parse at all ("unknown
-  // identifier 'DynamicIntType'"): `is_known_compound_symbol` only ever
-  // checked THIS file's own symbol table, never a compound declared in
-  // an imported file. Fixed via `preload_global_symbols`/
-  // `_preload_and_collect`, a lightweight first pass over the whole
-  // import graph that seeds every file's own `ParseState.global_symbols`
-  // before its real parse begins.
+test "parse_program_with_imports resolves a compound-literal expression whose type is declared in another file" {
+  // `_preload_and_collect` seeds every file's `ParseState.global_symbols`
+  // before its real parse begins, so `is_known_compound_symbol` can
+  // recognize a compound-literal's type even when it's declared in an
+  // imported file rather than the current one.
   let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/cross_file_compound_main.fn");
   assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;

@@ -1,19 +1,11 @@
 // Token types for the self-hosted Fun compiler's lexer.
 // 
-// Ported from the previous lexer's token module, with two deliberate
-// simplifications (confirmed by grepping the whole codebase before dropping
-// either):
-// - `NumberType` (the Normal/Long/Float/Double distinction on a numeric
-// literal) is dropped entirely -- nothing in the transpiler's codegen
-// ever reads it; a Number token already distinguishes integer vs decimal
-// by which `TokenData` variant it carries (`Num` vs `Dec`).
-// - `between_brackets`/`between_args` are dropped -- always set to `null`
-// and never read anywhere in the current implementation.
+// A `Number` token distinguishes integer vs decimal by which `TokenData`
+// variant it carries (`Num` vs `Dec`).
 
 imp std.string;
 
-// The kind of lexical token. Mirrors the previous implementation's
-// `TokenType` exactly.
+// The kind of lexical token.
 pub enum TokenType {
   Identifier,
   Keyword,
@@ -62,10 +54,10 @@ pub compound Token {
   // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
   // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences
   // verbatim, ready for direct re-embedding in C), a raw string's data
-  // holds the LITERAL bytes with no escape processing at all -- codegen
+  // holds the literal bytes with no escape processing at all -- codegen
   // must escape this content when emitting the C string literal, and the
-  // formatter must reproduce the original backtick spelling verbatim
-  // rather than requoting the buffer.
+  // formatter must reproduce the backtick spelling verbatim rather than
+  // requoting the buffer.
   bin is_raw_string;
 }
 

@@ -1,11 +1,4 @@
 // Math helpers beyond C bindings.
-// 
-// Usage:
-// ```
-// Vec2 a; a.x = 0; a.y = 0;
-// Vec2 b; b.x = 3; b.y = 4;
-// dec d = a.distance(b);
-// ```
 
 imp std.c.math as cmath;
 imp std.result;

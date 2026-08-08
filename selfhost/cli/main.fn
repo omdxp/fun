@@ -1,23 +1,9 @@
-// The self-hosted Fun compiler's own entry point: the first place all of
-// `selfhost/`'s previously-independent, individually-tested pieces (lexer,
-// import-aware parser, codegen) are actually wired together into one
-// program that turns a real `.fn` file into C output.
+// Entry point for the self-hosted Fun compiler: wires the lexer,
+// import-aware parser, and codegen together to turn a `.fn` file into C
+// output.
 // 
-// Deliberately narrow for this first end-to-end slice, matching every
-// other "deliberately narrow for now" precedent throughout `selfhost/`:
-// - Only compiles to a `.c` file -- unlike the bootstrap `fun` binary's
-// own CLI, this does NOT shell a C compiler or run the result. Process
-// spawning with captured output is real, separate work (`std.process`
-// has no such binding yet) rather than something to improvise here.
-// - Positional arguments only (`<input.fn> [<output.c>]`), not the
-// bootstrap CLI's `-in`/`-out` flag syntax -- matching that exactly is
-// a later compatibility concern, not a blocker for proving the pipeline
-// itself works.
-// - Codegen error reporting is as coarse as `codegen.fn`'s own
-// `CodegenErrorKind` today (a bare `UnsupportedNode`/`InvalidNode` tag,
-// no location or message) -- richer codegen diagnostics are a separate
-// improvement to `codegen.fn` itself, not something this driver can add
-// from the outside.
+// Takes positional arguments (`<input.fn> [<output.c>]`) and only writes
+// a `.c` file; it doesn't invoke a C compiler or run the result.
 
 imp ..parser.import_resolver;
 imp ..codegen.codegen;
@@ -27,10 +13,9 @@ imp std.fs;
 imp std.io;
 imp std.c.mem;
 
-// Renders a `CodegenErrorKind` as a human-readable word -- `codegen.fn`
-// itself carries no message/location for these (see this file's own
-// header comment), so this is the coarsest possible diagnostic: which of
-// the two failure shapes it was, nothing more.
+// Renders a `CodegenErrorKind` as a human-readable word. This is the
+// coarsest possible diagnostic: which of the two failure shapes it was,
+// nothing more.
 fun _codegen_error_kind_name(CodegenErrorKind kind) str {
   fit kind {
     .UnsupportedNode -> { ret "unsupported node"; }

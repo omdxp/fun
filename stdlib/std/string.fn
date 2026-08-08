@@ -1,11 +1,4 @@
 // String helpers implemented in Fun.
-// 
-// Usage:
-// ```
-// StringBuilder b = string_builder_init(4);
-// b.append("hello");
-// b.append("world");
-// ```
 
 imp std.c.mem;
 imp std.c.io;

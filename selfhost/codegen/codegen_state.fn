@@ -1,9 +1,5 @@
-// Minimal state for the self-hosted Fun compiler's codegen (C emission):
-// just the growing output buffer and current indentation depth. Mirrors
-// `parse_state.fn`'s "own minimal state container" precedent -- a small,
-// self-contained slice of the original's giant `TranspileProcess`, grown
-// only as later codegen slices actually need more (a type registry,
-// generics-instantiation tracking, scope for type-driven warnings, ...).
+// State for codegen (C emission): the growing output buffer and current
+// indentation depth.
 
 imp std.string;
 
@@ -25,8 +21,7 @@ impl CodegenState {
     self.out.append(s);
   }
 
-  // Emits the current indentation (4 spaces per level), matching the
-  // original's fixed 4-space convention.
+  // Emits the current indentation, 4 spaces per level.
   pub write_indent() {
     num i = 0;
     for i < self.indent_level {

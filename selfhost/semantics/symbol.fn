@@ -1,12 +1,8 @@
 // Symbol table entries for the self-hosted Fun compiler.
 // 
-// Ported from the original semantics module's symbol tracking. The
-// original's `Symbol.data` is an UNTAGGED union, externally discriminated by
-// a separate `Symbol.type: SymbolType` field (a hand-rolled tagged union,
-// since Zig has no direct equivalent of Fun's data-carrying enums). Folded
-// here into a single `SymbolKind` data-carrying enum instead -- eliminates
-// the possibility of `type`/`data` disagreeing (e.g. `type = .Node` but
-// `data` unset), which the original's shape allowed structurally.
+// A symbol's kind and payload are combined into a single `SymbolKind`
+// data-carrying enum, so there's no separate tag field that could disagree
+// with the payload.
 
 imp ..ast.ast;
 imp std.vec;

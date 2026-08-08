@@ -1,12 +1,4 @@
 // Helper utilities for fixed arrays.
-// 
-// Usage:
-// ```
-// Array<num> a;
-// a.data = [1, 2, 3];
-// a.len = 3;
-// num v = a.get(1);
-// ```
 
 imp std.option;
 imp std.quirks;

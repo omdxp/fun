@@ -1,10 +1,4 @@
 // File system helpers built on std.io.
-// 
-// Usage:
-// ```
-// Fs f = fs();
-// if f.exists("file.txt") { ... }
-// ```
 
 imp std.io;
 imp std.channel;

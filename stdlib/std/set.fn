@@ -1,10 +1,4 @@
 // Generic set built on Map<T, bin>.
-// 
-// Usage:
-// ```
-// Set<str> s = set_init("", 8);
-// s.add("a");
-// ```
 
 imp std.map;
 imp std.vec;
@@ -202,23 +196,7 @@ impl Set<T> {
     ret true;
   }
 
-  // Return a forward iterator over the set elements.
-  // 
-  // Notes:
-  // - Iteration order is unspecified.
-  // 
-  // Usage:
-  // 
-  // ```
-  // let it = s.iter();
-  // for true {
-  //   fit it.next() {
-  //     Option.Some(x) -> { use(x); }
-  //     Option.None -> { break; }
-  //   }
-  // }
-  // ```
-  // 
+  // Returns a forward iterator over the set elements, in unspecified order.
   // Returns:
   // - iterator yielding each element once
   pub iter() SetIter<T> {

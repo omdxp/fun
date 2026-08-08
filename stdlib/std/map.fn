@@ -1,11 +1,4 @@
 // Generic map with typed keys and values.
-// 
-// Usage:
-// ```
-// Map<num, str> m;
-// m.init(8);
-// m.put(1, "a");
-// ```
 
 imp std.c.mem;
 imp std.c.string;
@@ -496,23 +489,8 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Return a forward iterator over the live keys.
-  // 
-  // Notes:
-  // - Iteration order is unspecified.
-  // - Pair the yielded keys with `get()` or `at()` to visit values.
-  // 
-  // Usage:
-  // 
-  // ```
-  // let it = m.iter_keys();
-  // for true {
-  //   fit it.next() {
-  //     Option.Some(k) -> { use(k, m.get(k)); }
-  //     Option.None -> { break; }
-  //   }
-  // }
-  // ```
+  // Returns a forward iterator over the live keys, in unspecified order.
+  // Pair the yielded keys with `get()` or `at()` to visit values.
   pub iter_keys() MapIter<K, V> {
     MapIter<K, V> it;
     it.src = self;

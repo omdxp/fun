@@ -1,10 +1,4 @@
 // Path helpers.
-// 
-// Usage:
-// ```
-// Path p = path("/tmp");
-// str joined = p.join("file.txt");
-// ```
 
 imp std.c.mem;
 imp std.string;

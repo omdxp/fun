@@ -1,10 +1,4 @@
 // Basic URL parsing and HTTP request building.
-// 
-// Usage:
-// ```
-// Url u = url_parse("http://example.com/");
-// str req = u.build_http_get();
-// ```
 
 imp std.string;
 imp std.vec;

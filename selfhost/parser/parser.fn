@@ -1,60 +1,16 @@
-// The self-hosted Fun compiler's parser: turns a token stream into an AST.
-// Ported from the previous implementation's parser module, incrementally
-// across many sessions; see `parse_state.fn` for why the parser gets its
-// own minimal state container instead of reusing the full original
-// `TranspileProcess`.
+// The parser: turns a token stream into an AST.
 // 
-// Coverage as of this writing: the full expression grammar (precedence/
-// associativity, unary/postfix operators, calls, array indexing/literals,
-// enum-variant shorthand, compound-literal initializers -- named and the
-// `.{...}` type-inferred form, channel receive/send, `nil`/`panic`/`await`
-// as operands), every statement form (`let`, `ret`, `assert`, `if`/`elif`/
-// `else`, all three `for` shapes, `fit` including data-carrying-enum
-// destructuring patterns, `defer`/`break`/`continue`/`fork`, `allow`/
-// `expect` warning control), every top-level declaration form (`imp`,
-// `test`, `compound`, `enum`, `quirk`, `impl`, `fun`), and a top-level
-// `parse()` loop tying them into a whole parseable file.
+// Covers the full expression grammar, every statement form (`let`, `ret`,
+// `assert`, `if`/`elif`/`else`, all three `for` shapes, `fit` with
+// data-carrying-enum destructuring, `defer`/`break`/`continue`/`fork`,
+// `allow`/`expect`), every top-level declaration form (`imp`, `test`,
+// `compound`, `enum`, `quirk`, `impl`, `fun`), and a top-level `parse()`
+// loop that ties them into a whole parseable file. `asm`/inline-assembly
+// is not parsed; the lexer defers raw asm-body lexing to match.
 // 
-// Deliberately still deferred (documented rather than silently dropped):
-// - `asm`/inline-assembly -- a prior, separate architectural decision
-// (see `selfhost/ast/ast.fn`'s own file-level note): the self-hosted
-// compiler's own source has no need for inline assembly, and the lexer
-// already defers raw asm-body lexing to match.
-// - Cross-file `imp` resolution (`preload_import_global_symbols`) --
-// `parse_import` parses the syntax into an AST node but doesn't resolve
-// it; that's real filesystem/module-resolution work, a separate
-// subsystem (see `parse_import`'s own doc comment).
-// - The `forward_type_names` pre-scan and cross-file lookup a compound-
-// literal's `Type{...}` detection would otherwise need for a type
-// declared LATER in the file or imported from elsewhere -- narrower
-// coverage than the original for now (see `is_known_compound_symbol`'s
-// doc comment); a same-file, already-declared-above compound works.
-// - Array-typed generic arguments (`Vec<num[]>`) -- structurally out of
-// reach from `parse_generic_type_args` specifically, which lives on
-// `ParseState` (no expression-parsing capability), while array brackets
-// need the `Parser`-layer `parse_array_brackets` (see
-// `parse_generic_type_args`'s own doc comment for the confirmed
-// typecheck error and what closing it would actually require).
-// - The O(1) significant-token lookahead cache (`sig_indices`/
-// `phys_to_rank` in the original) -- `token_peek_n` here always does the
-// linear scan the original falls back to when the cache is stale. Safe:
-// the original's own comment confirms the linear path is always correct,
-// just slower; revisit only if parse time on large files becomes a
-// problem.
-// - `deinit_node`/`deinit_root_scope` (manual arena cleanup) -- the
-// original frees an arena once per whole compile; a self-hosted `fun`
-// invocation is a short-lived process, so nothing here frees per-node
-// memory either, matching the same "let the OS reclaim on exit" choice
-// already made throughout `stdlib`'s own C bindings usage.
-// 
-// Known compiler gap worked around throughout this file (and worth fixing
-// upstream separately): chaining a further `.field` access directly onto a
-// `Vec<T*>.get(...)` call (`vec.get(i).field`) can emit `.` instead of `->`
-// for the outer access and fail to compile, because the codegen path that
-// picks `.`/`->` doesn't fully resolve a generic method call's monomorphized
-// return type through the receiver's type args in every shape. Binding the
-// call result to a `let` first (`let x = vec.get(i); x.field`) always works
-// and reads at least as clearly, so that's the convention used here.
+// Chaining `.field` directly onto a `Vec<T*>.get(...)` call can emit `.`
+// instead of `->` and fail to compile; bind the call result to a `let`
+// first (`let x = vec.get(i); x.field`) to avoid it.
 
 imp parse_state;
 imp datatype_defs;
@@ -71,9 +27,7 @@ imp std.io;
 imp std.c.io;
 imp std.c.mem;
 
-// Errors the parser can report. Mirrors the original's `ParseError` set
-// (its `TranspileError`/`LexError` members are not included here since
-// those belong to modules not yet ported).
+// Errors the parser can report.
 pub enum ParseErrorKind {
   InvalidSymbol,
   InvalidKeyword,
@@ -83,12 +37,6 @@ pub enum ParseErrorKind {
   InvalidOperand,
   InvalidStatement,
   InvalidString,
-  // Note: in the original this specific member actually comes from
-  // `LexError`, not `ParseError` (its `ParseError || TranspileError ||
-  // LexError` union just makes it usable from parser code too) -- folded
-  // into this single enum along with everything else regardless of which
-  // original error set it came from, since this port doesn't replicate
-  // that three-way split.
   InvalidExpression,
 }
 
@@ -303,9 +251,8 @@ impl ParseState {
 
   // Splits a lexed `>>` token in place into two adjacent `>` tokens, if the
   // next significant token is one. Needed so nested generics (`Vec<Vec<num>>`)
-  // parse correctly: the lexer has no way to know `>>` here is two closing
-  // angle brackets rather than the right-shift operator, since that
-  // depends on the surrounding PARSE context, not just the characters.
+  // parse correctly, since the lexer can't tell `>>` apart from a
+  // right-shift operator without parse context.
   pub split_angle_closer_token_if_needed() {
     fit self.tokens_peek_no_increment() {
       .Some(t) -> {
@@ -580,20 +527,18 @@ impl ParseState {
     }
   }
 
-  // Parses `<T>` or `<T: a | b, U: c>` generic type PARAMETERS in a
-  // function/impl header (as opposed to `parse_generic_type_args`, which
-  // parses generic ARGUMENTS at a type-reference site). A no-op (not an
-  // error) when there's no `<...>` at all -- generics are optional.
+  // Parses `<T>` or `<T: a | b, U: c>` generic type parameters in a
+  // function/impl header, as opposed to `parse_generic_type_args`, which
+  // parses generic arguments at a type-reference site. A no-op when
+  // there's no `<...>` at all, since generics are optional.
   // 
   // Fills `out_params` with the parameter names. When any parameter
   // carries a `: constraint` bound, also fills `out_forced_insts` with the
   // Cartesian product of every parameter's constraint set: one combo per
-  // product term, each a `Vec<str>` of one concrete type per parameter (in
-  // parameter order) -- e.g. `<T: num | dec>` produces `[["num"],
-  // ["dec"]]`; `<T: num | dec, U: a | b>` produces all four `[T, U]`
-  // pairings. Used elsewhere to type-check that a generic call's inferred
-  // type arguments satisfy the constraints; parsing doesn't interpret the
-  // constraint names itself; they're just captured as strings.
+  // product term, each a `Vec<str>` of one concrete type per parameter in
+  // parameter order (e.g. `<T: num | dec>` produces `[["num"], ["dec"]]`;
+  // `<T: num | dec, U: a | b>` produces all four `[T, U]` pairings).
+  // Constraint names are captured as plain strings, not interpreted here.
   pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>>* out_forced_insts) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
@@ -702,24 +647,14 @@ impl ParseState {
   }
 
   // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
-  // if the next significant token opens one. A no-op (not an error) when it
-  // doesn't, since a type name may simply not be generic.
+  // if the next significant token opens one. A no-op when it doesn't, since
+  // a type name may simply not be generic.
   // 
-  // Deferred from this slice: an array-typed argument (`Vec<num[]>`) --
-  // needs `parse_array_brackets`, which needs the expression parser.
-  // Structurally out of reach from HERE specifically: this function lives
-  // on `ParseState` (pure token/datatype machinery, no expression
-  // parsing), while `parse_array_brackets` is a `Parser` method (it calls
-  // `parse_expressionable_root` for array-size expressions) -- confirmed
-  // directly (`self.parse_array_brackets(adt)` from here fails to
-  // typecheck: "type 'ParseState' has no method 'parse_array_brackets'").
-  // Closing this would mean moving `parse_datatype`/`parse_generic_type_args`
-  // to the `Parser` layer (touching every one of their many call sites
-  // across this file), not just adding one function -- correctly out of
-  // scope for the array-bracket slice that closed every OTHER site. A
-  // generic arg that starts with `[` currently falls through to
-  // `parse_datatype` reporting `InvalidDataType`, the same clean-error
-  // outcome as any other not-yet-supported syntax in this port.
+  // Array-typed arguments (`Vec<num[]>`) aren't supported: this method lives
+  // on `ParseState`, which has no expression-parsing capability, while
+  // array brackets need `Parser.parse_array_brackets`. A generic arg
+  // starting with `[` falls through to `parse_datatype`, which reports
+  // `InvalidDataType`.
   pub parse_generic_type_args(DataType* dt) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
@@ -762,29 +697,17 @@ impl ParseState {
     ret .None;
   }
 
-  // Parses a function-TYPE parameter's datatype: `fun(T1, T2, ...) R`.
+  // Parses a function-type parameter's datatype: `fun(T1, T2, ...) R`.
   // Called from `parse_datatype` when the leading token is the `fun`
-  // keyword, matching the original's own `parse_fn_type_datatype` split
-  // (see there for why the parameter itself needs no further special
-  // handling at a CALL site: its own C type ends up a real function
-  // pointer, so `cb(a, b)` is ordinary C). `dt` ends up with
-  // `has_fn_sig = true` and `fn_sig` populated (params + return type,
-  // recursing back into `parse_datatype` for each -- so a function-type
-  // parameter's OWN param/return types can themselves be builtins, user
-  // types, or even ANOTHER function type); `type_str` holds a fixed
-  // placeholder (`"fun(...)"`, matching the original's own diagnostic
-  // text) rather than a real C type name, since codegen reads `fn_sig`
-  // directly instead (see `Codegen.write_type`'s doc comment once that
-  // side lands). An omitted return type defaults to `void`, matching
-  // every other omitted-return-type site in this codebase -- but ONLY
-  // detected when truly nothing follows the closing `)` (matching the
-  // original's own heuristic exactly): an identifier immediately after
-  // is ALWAYS consumed as the return type, even when it was actually
-  // meant as the enclosing parameter's own name (`fun(chr) pred` with no
-  // return type parses `pred` itself as the return type, then fails
-  // wherever the ACTUAL parameter name is expected next) -- real source
-  // avoids this by never omitting the return type when a bare
-  // identifier would follow directly.
+  // keyword. Fills `dt.fn_sig` with the parsed params and return type
+  // (each recursively parsed, so they can themselves be builtins, user
+  // types, or another function type) and sets `type_str` to the fixed
+  // placeholder `"fun(...)"`, since codegen reads `fn_sig` directly. An
+  // omitted return type defaults to `void`, but only when nothing follows
+  // the closing `)`: a bare identifier immediately after is always
+  // consumed as the return type, even if it was meant as the enclosing
+  // parameter's own name, so `fun(chr) pred` with no return type
+  // misparses `pred` as the return type.
   pub parse_fn_type_datatype(DataType* dt) Option<ParseErrorKind> {
     self.token_next(); // consume 'fun'
     let operr = self.expect_op("(");
@@ -861,14 +784,11 @@ impl ParseState {
   // user-defined/identifier-based name (optionally alias-qualified,
   // `mod.Type`), its generic arguments if any, then a trailing run of `*`
   // pointer-depth markers. Trailing array-bracket suffixes (`num[5]`,
-  // `str[]`) are a separate function, `parse_array_brackets` -- matching
-  // the original's own `parse_datatype`/`parse_array_brackets` split --
-  // called explicitly by each site that allows one (`parse_variable`,
-  // compound fields, enum payloads, quirk/function/impl-method
-  // arg/return types), not from within this function itself. A leading
-  // `fun` keyword delegates to `parse_fn_type_datatype` instead (the
-  // function-TYPE parameter form) rather than falling through to the
-  // ordinary keyword/identifier handling below.
+  // `str[]`) are handled separately by `parse_array_brackets`, called
+  // explicitly by each site that allows one (`parse_variable`, compound
+  // fields, enum payloads, quirk/function/impl-method arg/return types).
+  // A leading `fun` keyword delegates to `parse_fn_type_datatype` instead
+  // of the ordinary keyword/identifier handling below.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
@@ -954,16 +874,14 @@ impl ParseState {
     ret .None;
   }
 
-  // True if the `<...>` starting at the cursor looks like a type
-  // PARAMETER list (`<T>`, `<T, U>`, `<T: a | b>`) rather than concrete
-  // generic ARGUMENTS (`<num>`, `<Vec<str>>`) -- pure lookahead, consumes
-  // nothing. Used by `parse_impl` to distinguish `impl Vec<T> { ... }`
-  // (T is a NEW type param the impl introduces) from `impl Vec<num> {
-  // ... }` (a concrete monomorphizing impl for an already-generic type).
-  // Every segment must be a bare identifier (optionally with `: constraint
-  // | constraint` bounds) all the way to the closing `>`/`>>` -- anything
-  // else (a datatype keyword, a nested `<`, ...) means it's argument
-  // syntax instead.
+  // True if the `<...>` starting at the cursor looks like a type parameter
+  // list (`<T>`, `<T, U>`, `<T: a | b>`) rather than concrete generic
+  // arguments (`<num>`, `<Vec<str>>`). Pure lookahead; consumes nothing.
+  // Used by `parse_impl` to distinguish `impl Vec<T> { ... }` (T is a new
+  // type param the impl introduces) from `impl Vec<num> { ... }` (a
+  // concrete monomorphizing impl). Every segment must be a bare identifier,
+  // optionally with `: constraint | constraint` bounds, all the way to the
+  // closing `>`/`>>`; anything else means it's argument syntax instead.
   pub impl_generic_args_are_params() bin {
     num off = 0;
     let first_opt = self.token_peek_n(off);
@@ -1103,11 +1021,9 @@ impl ParseState {
     ret token_is_symbol(next_opt.unwrap(), '{');
   }
 
-  // Same lookahead as `looks_like_compound_init`, but for a bare TYPE
-  // reference used as `sizeof(...)`'s sole argument (`sizeof(Trace<
-  // dec>)`, `examples/imports/torture_compiler/{main,trace}.fn`'s own
-  // real bodies) -- the closing token is `)`, not `{`, since there's no
-  // literal body at all here.
+  // Same lookahead as `looks_like_compound_init`, but for a bare type
+  // reference used as `sizeof(...)`'s sole argument (`sizeof(Trace<dec>)`).
+  // The closing token is `)`, not `{`, since there's no literal body here.
   pub looks_like_sizeof_generic_type() bin {
     num off = self.skip_generic_args_tokens(1);
     if off == 1 {
@@ -1125,19 +1041,12 @@ impl ParseState {
   // `Name{...}`/`Name<T>{...}` should be parsed as a compound-literal
   // initializer rather than left as a plain identifier reference.
   // 
-  // Checks symbols already registered in THIS file up to the current
-  // parse position (via `get_symbol`) FIRST -- not a compound declared
-  // LATER in the same file (the original's `is_forward_declared_type`
-  // pre-scan, deferred along with `forward_type_names` per this file's
-  // own top-level doc comment). Falls back to `global_symbols` (a public
-  // compound declared in ANOTHER file, e.g. `DynamicIntType{...}` used
-  // in `codegen/typedefs.fn` while declared in `parser/datatype_defs.fn`
-  // -- found via the self-compile experiment) -- populated across the
-  // whole transitive import graph by `import_resolver.fn`'s
-  // `preload_global_symbols`, BEFORE any file's own real parse begins.
-  // A forward reference within the SAME file still falls through to
-  // being read as a plain identifier, the same clean-but-incomplete
-  // outcome as any other not-yet-supported shape in this port.
+  // Checks symbols already registered in this file up to the current
+  // parse position first, then falls back to `global_symbols`, populated
+  // across the whole transitive import graph by `import_resolver.fn`'s
+  // `preload_global_symbols` before any file's own parse begins. A type
+  // declared later in the same file isn't found this way and is read as a
+  // plain identifier instead.
   pub is_known_compound_symbol(str name) bin {
     let maybe_sym = self.get_symbol(name);
     if maybe_sym.is_some() {
@@ -1156,12 +1065,10 @@ impl ParseState {
   }
 }
 
-// The parser's OWN state, layered on top of the shared `ParseState`: a
-// pointer back to that shared state plus the handful of fields that are
-// genuinely parser-local (current body/function context for `binded`
-// stamping, expression-recursion depth, `fit`-condition tracking). Mirrors
-// the original's `ParseProcess` holding a `*TranspileProcess` plus its own
-// small field set.
+// The parser's state, layered on top of the shared `ParseState`: a pointer
+// back to that shared state plus the fields that are genuinely
+// parser-local (current body/function context for `binded` stamping,
+// expression-recursion depth, `fit`-condition tracking).
 pub compound Parser {
   ParseState* state;
 
@@ -1177,45 +1084,36 @@ pub compound Parser {
   bin has_current_function;
 
   // Current native-recursion depth of the recursive-descent expression
-  // parser. See the original's `max_parse_expr_depth` note: guards against
-  // stack-overflow crashes on pathological input.
+  // parser. Guards against stack-overflow crashes on pathological input.
   num expr_depth;
 
-  // True while parsing a `fit` arm CONDITION, where pattern bindings like
+  // True while parsing a `fit` arm condition, where pattern bindings like
   // `Enum.Variant(x, y)` introduce new identifiers not yet in scope.
   bin in_fit_condition;
 
-  // True for the ENTIRE duration of parsing a `fit` statement (its subject
-  // expression, every arm's condition, and every arm's body) -- stops the
-  // general expression loop from swallowing a following `->` as a (bogus)
-  // binary operator, since `->` is only ever the fit-arm delimiter, never
-  // a real expression operator. Without this, `fit x { 1 -> { a; } ...`
-  // over-consumes: after parsing `1`, `parse_expressionable`'s loop sees
-  // `->` next and, with nothing telling it otherwise, treats it as a
-  // binary-operator continuation and keeps parsing rightward through the
-  // arm's whole body.
+  // True for the entire duration of parsing a `fit` statement (subject
+  // expression, every arm's condition, and every arm's body). Stops the
+  // general expression loop from swallowing a following `->` as a binary
+  // operator, since `->` is only ever the fit-arm delimiter. Without this,
+  // `fit x { 1 -> { a; } ...` over-consumes: after parsing `1`, the loop
+  // would see `->` and keep parsing rightward through the arm's body.
   bin in_fit_statement;
 
   // True while parsing a bounded operand (`await expr`, `fork call`, a
-  // channel receive `<-ch`) that must stop at the first BINARY operator
+  // channel receive `<-ch`) that must stop at the first binary operator
   // rather than continuing to consume rightward: `await f(x) + 1` is
   // `(await f(x)) + 1`, not `await (f(x) + 1)`. Postfix continuations
-  // (`(`, `[`, `.`) still continue the primary -- only checked once a
-  // primary already exists on the stack (see `parse_expressionable_single`),
-  // so the FIRST token of the bounded operand is never itself mistaken
-  // for "stop here".
+  // (`(`, `[`, `.`) still continue the primary; only checked once a
+  // primary already exists on the stack.
   bin stop_at_binary_op;
 
-  // True while parsing a value expression that must stop at a TOP-LEVEL
-  // comma rather than treating it as the (very low precedence) comma
-  // operator: a compound-literal field's value (`Point{ x = 1, y = 2 }`
-  // -- without this, `x`'s value expression greedily consumes `1, y = 2`
-  // as one big comma-Expression). Unlike `stop_at_binary_op`, this stops
-  // at a comma unconditionally, not only once a primary already exists --
-  // a bare leading comma is never valid here regardless. Commas nested
-  // inside a further `(...)`/`[...]` are NOT affected (parenthesis/bracket
-  // parsing doesn't propagate this flag into its own inner expressions),
-  // so `x = f(a, b)` still parses its call args fully.
+  // True while parsing a value expression that must stop at a top-level
+  // comma rather than treating it as the comma operator, e.g. a
+  // compound-literal field's value (`Point{ x = 1, y = 2 }`) -- without
+  // this, `x`'s value expression would greedily consume `1, y = 2`.
+  // Unlike `stop_at_binary_op`, this stops at a comma unconditionally.
+  // Commas nested inside a further `(...)`/`[...]` aren't affected, so
+  // `x = f(a, b)` still parses its call args fully.
   bin stop_at_comma;
 }
 
@@ -1285,9 +1183,8 @@ impl Parser {
 
   // Consumes the next token and turns it into a single leaf AST node: a
   // number/character literal, an identifier, a string literal, or a
-  // boolean literal. Anything else (an operator, a grouping symbol, a
-  // keyword, ...) is an error -- this handles exactly the PRIMARY tokens
-  // of an expression, not operators or grouping, which belong to the
+  // boolean literal. Anything else is an error. Handles only the primary
+  // tokens of an expression; operators and grouping belong to the
   // expression parser built on top of this.
   pub parse_single_token_to_node() Option<ParseErrorKind> {
     let tok = self.state.token_next();
@@ -1427,12 +1324,8 @@ impl Parser {
   // Builds a binary `Expression` node (`left_node op right_node`) and
   // pushes it via `create_node`. Copies both operands onto the heap so the
   // new node owns stable pointers to them, matching every other
-  // node-construction site in this file.
-  // 
-  // Simplified from the original: takes a required `op_pos` rather than
-  // the original's three-way `op_pos orelse left.pos orelse right.pos`
-  // fallback, since nothing ported so far ever calls this without a real
-  // operator token position. Revisit if a future caller needs the fallback.
+  // node-construction site in this file. `op_pos` is required; every
+  // caller has a real operator token position to give it.
   pub make_expression_node(Node* left_node, Node* right_node, str op, Pos op_pos) {
     Node* left = malloc(sizeof(Node));
     *left = *left_node;
@@ -1455,9 +1348,8 @@ impl Parser {
   // Desugars a channel operation into a method call and pushes it via
   // `create_node`: `<-ch` -> `ch.recv()` (`has_arg = false`, the call
   // argument becomes a `Blank`), `ch <- v` -> `ch.send(v)` (`has_arg =
-  // true`). Builds `(recv.method)(arg)` the same way `.Variant(payload)`
-  // shorthand does (a `.` dot-expression wrapped in a `()` call), since
-  // that's exactly the AST shape a method call already is.
+  // true`). Builds `(recv.method)(arg)`, a `.` dot-expression wrapped in a
+  // `()` call, the same AST shape a method call already has.
   _push_channel_method_call(Node* recv, str method_name, Node* arg, bin has_arg, Pos op_pos) {
     Node method_ident = node_new(NodeKind.Identifier(method_name));
     method_ident.pos = op_pos;
@@ -1515,7 +1407,7 @@ impl Parser {
         ret eqerr;
       }
 
-      // Stop the value expression at a TOP-LEVEL comma so it terminates
+      // Stop the value expression at a top-level comma so it terminates
       // at this field's own separator rather than greedily consuming the
       // next field (`x = 1, y = 2` must not become `x = (1, y = 2)` via
       // the comma operator). See `Parser.stop_at_comma`'s doc comment.
@@ -1580,15 +1472,12 @@ impl Parser {
   // left tree rotation used by `parse_reorder_expression` to fix precedence
   // when `op1` should bind tighter than (or equal to) `op2`, but the
   // parser's naive left-to-right build produced the right-heavy shape
-  // instead. A no-op when the right child isn't itself an `Expression`
-  // (nothing to rotate) or either side is missing.
+  // instead. A no-op when the right child isn't itself an `Expression` or
+  // either side is missing.
   // 
-  // Structurally identical to `parse_node_move_right_left_to_left` below --
-  // the original has the two as separate functions (one additionally frees
-  // the detached old right-node shell, which this port doesn't need since
-  // nothing here manually frees memory; see the file-level note), called
-  // from `parse_reorder_expression`'s two different trigger conditions.
-  // Kept as two functions to mirror the original's structure/call sites.
+  // Structurally identical to `parse_node_move_right_left_to_left` below;
+  // kept as two separate functions, each called from a different trigger
+  // condition in `parse_reorder_expression`.
   pub parse_node_shift_children_left(Node* node) {
     fit node.kind {
       .Expression(exp) -> {
@@ -1626,9 +1515,8 @@ impl Parser {
 
   // The same `(a op1 (b op2 c))` -> `((a op1 b) op2 c)` rotation as
   // `parse_node_shift_children_left`, used by `parse_reorder_expression`'s
-  // OTHER trigger condition (an array-index/call/index left operand paired
-  // with an assignment/comma right operand). See that function's doc
-  // comment for why this is a separate function despite the identical body.
+  // other trigger condition: an array-index/call/index left operand
+  // paired with an assignment/comma right operand.
   pub parse_node_move_right_left_to_left(Node* node) {
     fit node.kind {
       .Expression(exp) -> {
@@ -1668,13 +1556,13 @@ impl Parser {
   // precedence, after the naive left-to-right expression build. Two
   // independent fixups:
   // 
-  // 1. If the right child is itself an `Expression` and the OUTER operator
+  // 1. If the right child is itself an `Expression` and the outer operator
   // has priority over the right child's operator (binds tighter, or equal
   // with left-to-right associativity), rotate left via
   // `parse_node_shift_children_left` and recurse into both new children --
   // a single rotation may not be enough for a longer chain (`a + b * c * d`
   // needs two).
-  // 2. Independently (not exclusive with the above): if the left operand
+  // 2. Independently: if the left operand
   // looks like an array index paired with an assignment on the right
   // (`arr[i] = v` shaped oddly by the naive build), or a call/index operand
   // paired with a comma-expression on the right (multi-arg call/index
@@ -1737,7 +1625,7 @@ impl Parser {
   // just-finished statement). `.None` when the list is empty or the last
   // node isn't operand-shaped. Used to tell "an operator here continues a
   // left operand already on the stack" (a binary operator) from "an
-  // operator here STARTS a new operand" (a prefix/unary position).
+  // operator here starts a new operand" (a prefix/unary position).
   pub node_peek_expressionable() Option<Node> {
     fit self.state.node_peek_last() {
       .Some(n) -> {
@@ -1758,43 +1646,32 @@ impl Parser {
   // (more) to parse at this position, signaled by leaving the output list
   // unchanged (see `parse_expressionable`, which loops on exactly that).
   // 
-  // `sizeof(Type)` needs no special handling here at all: 'sizeof' isn't
-  // a keyword in this language (confirmed absent from the lexer's
-  // keyword list) -- it's just an ordinary call whose callee happens to
-  // be named 'sizeof', already handled by the plain Identifier path
-  // below (the only wrinkle, letting the type-name argument through the
-  // unknown-identifier check, is handled in `parse_single_token_to_node`
-  // via `is_sizeof_type_operand`). (Prefix/postfix unary operators,
-  // enum-variant shorthand, channel receive/send (`<-`), and the `nil`/
-  // `panic(...)`/`await` keyword operands ARE supported -- routed
-  // through `parse_expression`/`parse_normal_expression` below, or
-  // handled directly here for the keyword operands, matching the
-  // original's own rationale: handling them here rather than only in
-  // statement position lets a following binary operator bind to them as
-  // an operand, e.g. `x != nil && y`.)
+  // `sizeof` isn't a keyword in this language, so `sizeof(Type)` is just an
+  // ordinary call whose callee happens to be named `sizeof`, handled by the
+  // plain Identifier path below (`parse_single_token_to_node`'s
+  // `is_sizeof_type_operand` lets the type-name argument through the
+  // unknown-identifier check). Prefix/postfix unary operators, enum-variant
+  // shorthand, channel receive/send (`<-`), and the `nil`/`panic(...)`/
+  // `await` keyword operands are handled here or in `parse_expression`/
+  // `parse_normal_expression`, so a following binary operator can bind to
+  // them as an operand, e.g. `x != nil && y`.
   pub parse_expressionable_single() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
         // A `fit` arm's comma-separated multi-pattern list only supports
-        // string-literal patterns today, not bare enum-variant shorthand
-        // (confirmed directly: `.A, .B -> {}` fails to parse where `"a",
-        // "b" -> {}` works fine) -- a real language gap, but an unrelated
-        // one (lives in the fit-statement grammar, not ported/touched by
-        // this slice), so this uses an if/elif chain instead rather than
-        // detouring to fix it now.
+        // string-literal patterns, not bare enum-variant shorthand
+        // (`.A, .B -> {}` fails to parse where `"a", "b" -> {}` works).
         if t.type == TokenType.Number || t.type == TokenType.Boolean || t.type == TokenType.String {
           ret self.parse_single_token_to_node();
         }
         if t.type == TokenType.Identifier {
           // Named compound-literal initializer: `Point{...}`/`Box<num>{...}`.
           // Gated on the identifier already resolving to a known
-          // `Compound` symbol (see `is_known_compound_symbol`'s own doc
-          // comment for what that narrower-than-the-original check does
-          // and doesn't cover) and NOT being a plain value already in
-          // scope (a local variable named the same as a compound would
-          // otherwise be misread) or immediately following `.` (a
-          // qualified reference like `TokenType.Symbol` is never a
-          // compound-init target).
+          // `Compound` symbol (see `is_known_compound_symbol`) and not
+          // being a plain value already in scope (a local variable named
+          // the same as a compound would otherwise be misread) or
+          // immediately following `.` (a qualified reference like
+          // `TokenType.Symbol` is never a compound-init target).
           str name = "";
           fit t.data {
             .Sval(s) -> { name = s; }
@@ -1816,17 +1693,14 @@ impl Parser {
             ret self.parse_compound_init(dt, true, t.pos, true);
           }
           // `sizeof(Generic<T>)` -- an identifier immediately preceded by
-          // `sizeof(` that looks like the START of a generic type
+          // `sizeof(` that looks like the start of a generic type
           // reference (`<` follows, and skipping past the generic args
-          // lands on the closing `)`) parses as a bare TYPE reference
+          // lands on the closing `)`) parses as a bare type reference
           // instead of falling through to `parse_single_token_to_node`,
           // which would try (and fail) to read `Trace < dec >` as a
-          // comparison-chain EXPRESSION -- `examples/imports/torture_
-          // compiler/{main,trace}.fn`'s own real `sizeof(Trace<dec>)`.
-          // Reuses the `.CompoundInit` node shape with ZERO fields as a
-          // plain "type reference, no literal body" carrier (no new AST
-          // node needed) -- `emit_call`'s own `sizeof` special case
-          // reads it back structurally.
+          // comparison-chain expression. Reuses the `.CompoundInit` node
+          // shape with zero fields as a plain type-reference carrier;
+          // `emit_call`'s `sizeof` special case reads it back structurally.
           bin in_sizeof_ctx = false;
           fit self.state.token_peek_prev_stream_n(0) {
             .Some(p) -> {
@@ -1879,10 +1753,10 @@ impl Parser {
             ret .None;
           }
           // For a bounded operand (`await`/`fork`/channel receive): once
-          // a primary has been parsed, a following BINARY operator ends
+          // a primary has been parsed, a following binary operator ends
           // it, so `await f(x) + 1` parses as `(await f(x)) + 1`. Postfix
-          // continuations (`(`, `[`, `.`) and the `<-` receive prefix are
-          // NOT binary-only, so they still continue the primary. See
+          // continuations (`(`, `[`, `.`) and the `<-` receive prefix
+          // aren't binary-only, so they still continue the primary. See
           // `Parser.stop_at_binary_op`'s doc comment.
           if self.stop_at_binary_op && is_binary_only_operator(t) && self.node_peek_expressionable().is_some() {
             ret .None;
@@ -1895,8 +1769,8 @@ impl Parser {
             .Sval(s) -> { kw = s; }
             _ -> {}
           }
-          // `nil`/`panic(...)`/`await` as PRIMARY expression operands --
-          // so they compose with surrounding operators/contexts (e.g.
+          // `nil`/`panic(...)`/`await` as primary expression operands, so
+          // they compose with surrounding operators/contexts (e.g.
           // `x != nil && y`, `let y = panic("msg");`, `let z = await
           // f();`), not just as their own bare statement.
           if equals(kw, "nil") {
@@ -1929,12 +1803,10 @@ impl Parser {
           // whose own preceding token is the identifier `sizeof`.
           if keyword_is_datatype(kw) {
             bin in_sizeof = false;
-            // `t` hasn't been consumed yet here (unlike the `.Identifier`
-            // case in `parse_single_token_to_node`, which peeks backward
-            // from the JUST-consumed token) -- `token_peek_prev_stream_n`
-            // (relative to the next token still to be consumed), not
-            // `token_peek_prev`/`token_peek_prev_n` (relative to the most
-            // recently consumed one), is the correct lookup here.
+            // `t` hasn't been consumed yet, so `token_peek_prev_stream_n`
+            // (relative to the next token still to be consumed) is the
+            // correct lookup here, not `token_peek_prev`/`token_peek_prev_n`
+            // (relative to the most recently consumed token).
             fit self.state.token_peek_prev_stream_n(0) {
               .Some(p) -> {
                 if token_is_operator(p, "(") {
@@ -1985,7 +1857,7 @@ impl Parser {
   }
 
   // Like `parse_expressionable`, but requires at least one node to have
-  // been produced -- the entry point for a position that MUST be an
+  // been produced -- the entry point for a position that must be an
   // expression (an initializer, a condition, ...), as opposed to a
   // position where an expression is merely optional.
   pub parse_expressionable_root() Option<ParseErrorKind> {
@@ -2047,7 +1919,7 @@ impl Parser {
     Node exp_node = node_new(NodeKind.Blank);
     if !self.state.next_token_is_symbol(')') {
       // A parenthesized sub-expression is a fresh context: an inner
-      // binary operator or comma is never bounded by an ENCLOSING
+      // binary operator or comma is never bounded by an enclosing
       // `await <call>` operand or compound-init field value -- clear
       // both flags so e.g. `await (a + b)` and `f(a, b)` (a call
       // argument list, itself built from real comma-Expression nodes)
@@ -2102,9 +1974,9 @@ impl Parser {
     ret self.parse_additional_expression();
   }
 
-  // Parses `[...]`: array INDEXING when a valid expressionable left
+  // Parses `[...]`: array indexing when a valid expressionable left
   // operand already exists (`arr[i]` -> `Expression{ left = arr, right =
-  // Bracket(i), op = "[]" }`), or an array LITERAL otherwise (just the
+  // Bracket(i), op = "[]" }`), or an array literal otherwise (just the
   // bare `Bracket` node, e.g. `[1, 2, 3]`).
   pub parse_for_bracket() Option<ParseErrorKind> {
     Node left_node = node_new(NodeKind.Blank);
@@ -2124,7 +1996,7 @@ impl Parser {
       ret lberr;
     }
 
-    // Inside `[...]`, a comma separates array ELEMENTS -- not the
+    // Inside `[...]`, a comma separates array elements -- not the
     // enclosing context's terminator, and an inner binary operator isn't
     // bounded by an enclosing `await`/`fork` operand either. Clear both
     // (e.g. a compound-init field value `Row{ cols = [1, 2, 3] }`) so a
@@ -2175,7 +2047,7 @@ impl Parser {
   // Parses a pointer-indirection unary (`*p`, `**pp`): a run of `*`s
   // (the pointer depth being dereferenced) followed by the operand
   // expression. Kept separate from `parse_for_normal_unary` because a
-  // following run of `*`s is a POINTER-DEPTH COUNT, not a chain of
+  // following run of `*`s is a pointer-depth count, not a chain of
   // separately-nested unary `Expression`/`Unary` operators.
   pub parse_for_indirection_unary() Option<ParseErrorKind> {
     let star_tok = self.state.token_peek_next();
@@ -2238,13 +2110,10 @@ impl Parser {
       _ -> {}
     }
 
-    // Bound the operand the same way `parse_for_indirection_unary` does
-    // (see its own doc comment): `-x = 10` (nonsensical, but structurally
-    // the same shape as `!r.is_err(), "msg"`) must not swallow a
-    // following binary operator OR a top-level comma into the operand --
-    // `is_binary_only_operator` covers both, so a single
-    // `stop_at_binary_op` bound handles it without a separate
-    // `stop_at_comma` toggle.
+    // Bound the operand the same way `parse_for_indirection_unary` does:
+    // `-x = 10` must not swallow a following binary operator or a
+    // top-level comma into the operand. `is_binary_only_operator` covers
+    // both, so a single `stop_at_binary_op` bound handles it.
     let prev_stop_binary = self.stop_at_binary_op;
     self.stop_at_binary_op = true;
     let err = self.parse_expressionable();
@@ -2306,7 +2175,7 @@ impl Parser {
     ret self.parse_additional_expression();
   }
 
-  // Wraps an already-parsed LEFT operand in a postfix `Unary` node
+  // Wraps an already-parsed left operand in a postfix `Unary` node
   // (`x++`/`x--`) instead of treating the operator as a binary continuation.
   pub parse_for_left_operanded_unary(Node* node_left, str unary_op, Pos op_pos) Option<ParseErrorKind> {
     UnaryNode u;
@@ -2321,15 +2190,12 @@ impl Parser {
     unode.has_pos = true;
     self.create_node(&unode);
 
-    // `node_left` was already popped by the caller before dispatching
-    // here, so this call's own net effect on the node stack is "pop one,
-    // push one" -- zero net growth. Without explicitly continuing via
-    // `parse_additional_expression`, the OUTER `parse_expressionable`
-    // loop (which gates continued looping on net stack growth) would
-    // wrongly conclude nothing happened and stop, silently dropping a
-    // following operator (`x++ + 1` would never see the `+ 1`). Mirrors
-    // the identical fix already needed by `parse_for_parenthesis`/
-    // `parse_for_bracket` for the same reason.
+    // `node_left` was already popped by the caller, so this call's net
+    // effect on the node stack is "pop one, push one" -- zero net growth.
+    // Without explicitly continuing via `parse_additional_expression`, the
+    // outer `parse_expressionable` loop (which gates looping on net stack
+    // growth) would wrongly conclude nothing happened and stop, silently
+    // dropping a following operator (`x++ + 1` would never see the `+ 1`).
     ret self.parse_additional_expression();
   }
 
@@ -2370,9 +2236,9 @@ impl Parser {
   // output list into an `Expression` node via `make_expression_node`, then
   // fixes precedence via `parse_reorder_expression`.
   // 
-  // Deliberately simplified from the original for this slice: a binary
-  // RHS must be a parenthesized group or another `parse_expressionable`
-  // continuation (no unary RHS, e.g. `a + -b` isn't supported yet).
+  // A binary RHS must be a parenthesized group or another
+  // `parse_expressionable` continuation; a unary RHS like `a + -b` is not
+  // supported.
   pub parse_normal_expression() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -2404,7 +2270,7 @@ impl Parser {
         ret self.parse_compound_init(no_dt, false, op_pos, true);
       }
       // Enum-variant shorthand (`.Variant`, `.Variant(payload)`): parsed as
-      // a `.` dot-expression with a BLANK left side, so later passes can
+      // a `.` dot-expression with a blank left side, so later passes can
       // resolve it using the expected enum type from context. A following
       // `(...)` (a payload) is picked up afterward by the general postfix
       // continuation, same as any other primary.
@@ -2611,14 +2477,9 @@ impl Parser {
   // body node, tracks it as `current_body` (so nested node construction
   // stamps `binded.owner` correctly) while parsing each statement in a
   // loop until the closing `}`, then restores the previous `current_body`.
-  // 
-  // Deliberately simplified from the original for this slice: no
-  // `if`/`elif`/`else` chaining validation (nothing produces those node
-  // kinds yet) and no "function declared as a statement" rejection
-  // (`parse_statement` doesn't dispatch to `parse_function` yet either).
   // On a parse error mid-body, `current_body` is left as whatever it was
-  // at the point of failure rather than unwound -- acceptable since a
-  // parse error aborts the whole parse anyway.
+  // at the point of failure rather than unwound, since a parse error
+  // aborts the whole parse anyway.
   pub parse_body_multiple_statements() Option<ParseErrorKind> {
     Vec<Node*> stmts;
     stmts.init(0);
@@ -3049,23 +2910,20 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses an `if`/`elif` CONDITION and leaves it on top of the node
+  // Parses an `if`/`elif` condition and leaves it on top of the node
   // stack: a leading `(...)` is stripped explicitly (rather than left to
-  // the general expression parser -- `parse_for_parenthesis` unconditionally
-  // tells its caller "there may be more to parse", which is wrong for a
-  // bare parenthesized condition immediately followed by an unrelated
-  // single-statement body), then any further binary-operator continuation
-  // is picked up via the general expression loop.
+  // the general expression parser, since `parse_for_parenthesis`
+  // unconditionally tells its caller "there may be more to parse", which
+  // is wrong for a bare parenthesized condition immediately followed by an
+  // unrelated single-statement body), then any further binary-operator
+  // continuation is picked up via the general expression loop.
   // 
-  // This exact logic has a documented history: an earlier version of it
-  // (in the Zig source this is ported from) dropped the re-wrap step
-  // below, silently miscompiling `(a || b) && c` as `a || b && c` --
-  // codegen never auto-parenthesizes sub-expressions, and C parses the
-  // un-grouped form as `a || (b && c)`, a different result. Ported here
-  // with extra care given that history: when the condition DID start with
-  // an explicit `(` and a binary operator follows, the parsed condition is
-  // re-wrapped in an `ExpressionParenthesis` before continuing, so the
-  // grouping survives into codegen.
+  // When the condition started with an explicit `(` and a binary operator
+  // follows, the parsed condition is re-wrapped in an `ExpressionParenthesis`
+  // before continuing, so the grouping survives into codegen: without it,
+  // `(a || b) && c` would miscompile as `a || b && c`, since codegen never
+  // auto-parenthesizes sub-expressions and C parses the un-grouped form as
+  // `a || (b && c)`.
   _parse_if_or_elif_condition() Option<ParseErrorKind> {
     bin had_leading_paren = false;
     Node cond = node_new(NodeKind.Blank);
@@ -3209,15 +3067,10 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `elif <condition> <body>`. A no-op (not an error) if the next
-  // token isn't `elif` -- callers probe with this the same way the
-  // original does.
-  // 
-  // Deliberately simplified from the original for this slice: no
-  // if/elif/else CHAINING validation (`parse_body_multiple_statements`
-  // doesn't check that an elif/else actually follows an if/elif in this
-  // port), so a stray `elif` with no preceding `if` is accepted rather
-  // than rejected. Revisit once that validation is ported.
+  // Parses `elif <condition> <body>`. A no-op if the next token isn't
+  // `elif`. `parse_body_multiple_statements` doesn't check that an
+  // elif/else actually follows an if/elif, so a stray `elif` with no
+  // preceding `if` is accepted rather than rejected.
   pub parse_elif_statement() Option<ParseErrorKind> {
     if !self.state.next_token_is_keyword("elif") {
       ret .None;
@@ -3269,9 +3122,8 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `else <body>`. A no-op (not an error) if the next token isn't
-  // `else`, matching `parse_elif_statement`. Same chaining-validation
-  // simplification as above.
+  // Parses `else <body>`. A no-op if the next token isn't `else`. Like
+  // `parse_elif_statement`, doesn't validate that it follows an if/elif.
   pub parse_else_statement() Option<ParseErrorKind> {
     if !self.state.next_token_is_keyword("else") {
       ret .None;
@@ -3358,12 +3210,10 @@ impl Parser {
   // argument list and body, and tracks itself as `current_function` while
   // parsing so nested node construction stamps `binded.function` correctly.
   // 
-  // NOT wired into `parse_statement`'s dispatch: a function declaration is
-  // only ever valid at the TOP LEVEL (the original enforces this via a
-  // check in `parse_body_multiple_statements` rejecting a `.Function`
-  // statement result, not ported in this slice's simplified body parser --
-  // see its doc comment). Called from `parse_top_level_declaration`
-  // instead, which IS wired into the top-level `parse()` loop.
+  // Not wired into `parse_statement`'s dispatch: a function declaration is
+  // only ever valid at the top level. Called from
+  // `parse_top_level_declaration`, which is wired into the top-level
+  // `parse()` loop.
   pub parse_function(bin is_public, bin is_async) Option<ParseErrorKind> {
     self.state.new_scope();
 
@@ -3400,20 +3250,15 @@ impl Parser {
     self.current_function = fn_node_ptr;
     self.has_current_function = true;
 
-    // Registers the function's OWN name as a symbol as soon as it's known
-    // (before its args/body are parsed) -- same mechanism `parse_compound`/
-    // `parse_enum`/`parse_quirk` already use for their own names, so a bare
-    // reference to an already-declared function used as a VALUE (`self.
-    // _read_while(_not_newline)`, passing a function by name into a
-    // `fun(T) R`-typed parameter -- see `parse_fn_type_datatype`'s doc
-    // comment) is recognized by the identifier-validity check in
-    // `parse_single_token_to_node` instead of rejected as unknown; an
-    // out-of-order CALL (`foo(...)`) was already tolerated separately via
-    // that check's own "next token is '('" bypass, so this only closes the
-    // "referenced but not called" gap. The stored Symbol's own Node is a
-    // snapshot from THIS point (name only, args/body not parsed yet) --
-    // harmless, since nothing reads a function symbol's node content back;
-    // only `get_symbol(name).is_none()` (existence) is ever checked for it.
+    // Registers the function's own name as a symbol as soon as it's known,
+    // before its args/body are parsed, the same mechanism `parse_compound`/
+    // `parse_enum`/`parse_quirk` use for their own names. This lets a bare
+    // reference to an already-declared function used as a value (passing a
+    // function by name into a `fun(T) R`-typed parameter) be recognized by
+    // the identifier-validity check in `parse_single_token_to_node` instead
+    // of rejected as unknown. The stored symbol's node is a snapshot from
+    // this point (name only, args/body not parsed yet); harmless, since
+    // only `get_symbol(name).is_none()` is ever checked for it.
     Symbol fn_sym = symbol_new(fname);
     fn_sym.kind = SymbolKind.NodeSym(*fn_node_ptr);
     self.state.push_symbol(fn_sym);
@@ -3467,10 +3312,9 @@ impl Parser {
     }
 
     // A variadic function's `...` args are collected into a synthetic
-    // `vargs: Vec` binding, registered in scope (but NOT emitted as a
-    // declaration node -- it's synthesized by codegen, matching the
-    // for-loop range/iterator variables' same on-stack-entity treatment)
-    // so the body can reference `vargs` by name.
+    // `vargs: Vec` binding, registered in scope but not emitted as a
+    // declaration node (it's synthesized by codegen, like for-loop
+    // range/iterator variables), so the body can reference `vargs` by name.
     if is_variadic {
       DataType* vdt = malloc(sizeof(DataType));
       *vdt = dtype_new();
@@ -3724,12 +3568,11 @@ impl Parser {
   // ... }`, `for i : start..end { ... }` (range), or `for item : arr {
   // ... }` / `for i, item :: arr { ... }` (iterator).
   // 
-  // The legacy range/iterator forms are distinguished from a condition
-  // loop that happens to start with an identifier (`for x != 0 { ... }`)
-  // by a 1-token lookahead: only `for IDENT :` or `for IDENT ,` are the
-  // legacy forms (a bare condition never starts with `,`, and `:` isn't a
-  // valid expression-continuation operator either), matching the
-  // original's identical disambiguation.
+  // The range/iterator forms are distinguished from a condition loop that
+  // happens to start with an identifier (`for x != 0 { ... }`) by a
+  // 1-token lookahead: only `for IDENT :` or `for IDENT ,` are those
+  // forms, since a bare condition never starts with `,` and `:` isn't a
+  // valid expression-continuation operator.
   pub parse_for_statement() Option<ParseErrorKind> {
     let for_tok = self.state.token_peek_next();
     let kwerr = self.state.expect_keyword("for");
@@ -3830,16 +3673,16 @@ impl Parser {
     ret .None;
   }
 
-  // Tries to parse a data-carrying-enum DESTRUCTURING fit pattern at the
+  // Tries to parse a data-carrying-enum destructuring fit pattern at the
   // cursor: `Enum.Variant(a, b)` or shorthand `.Variant(a, b)`. On a
   // match, consumes those tokens, sets `*out_condition` to the variant-
   // path `.` expression (`Enum.Variant`, or `<blank>.Variant` for
   // shorthand), fills `*out_bindings` with the positional binding
   // identifiers, and sets `*out_matched` true. On no match, consumes
-  // NOTHING and leaves `*out_matched` false -- the caller parses
+  // nothing and leaves `*out_matched` false so the caller parses
   // normally. Detection requires the trailing `(` so a plain
-  // `Enum.Variant`/`.Variant` arm (no payload binding) still goes
-  // through the ordinary (non-destructuring) path.
+  // `Enum.Variant`/`.Variant` arm with no payload binding still goes
+  // through the ordinary path.
   _try_parse_fit_destructure(bin* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
     *out_matched = false;
     let p0_opt = self.state.token_peek_n(0);
@@ -3961,18 +3804,15 @@ impl Parser {
 
   // Parses one `pattern -> { body }` fit arm, pushing the finished branch
   // onto `out_branches`. `_` (the wildcard default) has no condition and
-  // must be the last arm -- signaled back to the caller via
+  // must be the last arm, signaled back to the caller via
   // `out_has_default` so its loop stops.
   // 
   // Three pattern shapes, tried in order: (1) a data-carrying-enum
-  // DESTRUCTURING pattern (`Shape.Circle(r)` / `.Circle(r)`) via
-  // `_try_parse_fit_destructure` -- its positional binding names are
-  // registered in a scope opened just for the arm body (closed after),
-  // so the body can reference them; (2) a bare `.Variant` shorthand
-  // (no payload) via the same direct-construction bypass
-  // `parse_normal_expression`'s own `.` handling uses, needed because a
-  // bare `.Variant` isn't itself a complete expression the general
-  // parser recognizes outside of this direct construction; (3) an
+  // destructuring pattern (`Shape.Circle(r)` / `.Circle(r)`) via
+  // `_try_parse_fit_destructure`, whose positional binding names are
+  // registered in a scope opened just for the arm body; (2) a bare
+  // `.Variant` shorthand with no payload, since it isn't itself a
+  // complete expression the general parser recognizes on its own; (3) an
   // ordinary expression pattern (literals, identifiers, ...) via
   // `parse_expressionable_root`.
   _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
@@ -4271,10 +4111,9 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses a `panic("msg")` EXPRESSION (leaves a `Panic` node on the node
-  // stack; does NOT consume a trailing `;` -- callers in statement
-  // position do that themselves, matching how other expression-
-  // statements work).
+  // Parses a `panic("msg")` expression, leaving a `Panic` node on the node
+  // stack. Doesn't consume a trailing `;`; callers in statement position
+  // do that themselves.
   pub parse_panic_expr() Option<ParseErrorKind> {
     let panic_tok = self.state.token_next(); // consume 'panic'
     let lperr = self.state.expect_op("(");
@@ -4309,10 +4148,10 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `await <expr>` as a bounded expression OPERAND, lowered as a
-  // `Unary` node with `op = "await"` (leaves it on the node stack; does
-  // NOT consume a trailing `;` -- statement-position callers do that
-  // themselves). The operand parse is bounded via `stop_at_binary_op` so
+  // Parses `await <expr>` as a bounded expression operand, lowered as a
+  // `Unary` node with `op = "await"` and left on the node stack. Doesn't
+  // consume a trailing `;`; statement-position callers do that themselves.
+  // The operand parse is bounded via `stop_at_binary_op` so
   // `await f(x) + 1` parses as `(await f(x)) + 1`.
   pub parse_await_operand() Option<ParseErrorKind> {
     let await_tok = self.state.token_next(); // consume 'await'
@@ -4571,10 +4410,10 @@ impl Parser {
   // Parses `fuzz "name" (raw* data, num len) { ... }`. Top-level only, the
   // same way `parse_test_declaration` enforces it (never wired into
   // `parse_statement`'s dispatch). Parameters are written out explicitly,
-  // like an ordinary function's, and parsed via `_parse_function_args` --
-  // but their TYPES are still fixed by the fuzzing calling convention, so
-  // `_check_fuzz_param_shape` validates the parsed shape against that fixed
-  // contract rather than leaving it open to arbitrary types.
+  // like an ordinary function's, and parsed via `_parse_function_args`,
+  // but their types are still fixed by the fuzzing calling convention, so
+  // `_check_fuzz_param_shape` validates the parsed shape against that
+  // fixed contract.
   pub parse_fuzz_declaration() Option<ParseErrorKind> {
     let fuzz_tok = self.state.token_next(); // consume 'fuzz'
 
@@ -4750,30 +4589,24 @@ impl Parser {
   }
 
   // Parses one statement: a `{ ... }` nested body, a bare-datatype-keyword
-  // variable declaration (`num x = 5;`, no leading `let`), a bare USER-
-  // TYPE variable declaration (`Point p;`, `Point* p = ...;` -- detected
-  // by a `<Identifier> [* ...] <Identifier>` lookahead guarded by "isn't
-  // already a known scope entity", so `w * h;` an ordinary expression
-  // statement isn't misparsed as a pointer declaration; see the
-  // `TokenType.Identifier` branch below for exactly what's still
-  // deliberately narrower than the original here) or a `let` declaration,
-  // a `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
-  // `continue`/`allow`/`expect` statement, `fork <call>;` (a CONTEXTUAL
-  // keyword -- reserved only when NOT immediately followed by `(`, since
+  // variable declaration (`num x = 5;`, no leading `let`), a bare
+  // user-type variable declaration (`Point p;`, `Point* p = ...;`,
+  // detected by a `<Identifier> [* ...] <Identifier>` lookahead guarded by
+  // "isn't already a known scope entity", so `w * h;` isn't misparsed as a
+  // pointer declaration) or a `let` declaration, a
+  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
+  // `continue`/`allow`/`expect` statement, `fork <call>;` (a contextual
+  // keyword, reserved only when not immediately followed by `(`, since
   // `fork` can also be an ordinary identifier, e.g. a `std.c.process`
   // binding for the POSIX `fork()` syscall), `nil`/`panic(...)`/`await`
   // as expression-statements, or a bare expression statement terminated
   // by `;`.
   // 
   // `compound`/`enum`/`quirk`/`impl`/`imp`/`test`/`fun` are intentionally
-  // NOT dispatched here -- those are top-level-only declarations in this
-  // language (matching the original), handled by
-  // `parse_top_level_declaration` instead, not a gap in this function.
-  // 
-  // Deliberately simplified from the original for this slice: `asm` is a
-  // separate, deliberate architectural deferral (see this file's own
-  // top-level doc comment); an unsupported keyword reports a clean "not
-  // yet supported" error rather than silently misparsing.
+  // not dispatched here; those are top-level-only declarations, handled by
+  // `parse_top_level_declaration` instead. `asm` and any other unsupported
+  // keyword report a clean "not yet supported" error rather than silently
+  // misparsing.
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -4863,22 +4696,19 @@ impl Parser {
       // User-defined-type bare variable declaration: `Point p;`, `Point p
       // = ...;`, `Point* p;`, `Vec<num> v;`, `T[] xs;` (a generic type
       // param's own array form, e.g. inside `impl Channel<T>`). Detected
-      // the same way the original does: a `<Identifier> [<generic args>]
-      // [* ...] [[...]] <Identifier>` lookahead, guarded by "isn't already
-      // a known scope entity" so an ordinary expression statement that
-      // happens to start with an identifier and contain a `*` (`w * h;`)
-      // isn't misparsed as a pointer declaration. The optional `<...>`
-      // between the type name and any pointer stars is skipped via
-      // `skip_generic_args_tokens` -- pure lookahead, a no-op when there's
-      // no `<` there at all -- the same helper `looks_like_compound_init`
-      // uses to look past a possibly-generic type name.
-      // 
+      // by a `<Identifier> [<generic args>] [* ...] [[...]] <Identifier>`
+      // lookahead, guarded by "isn't already a known scope entity" so an
+      // ordinary expression statement that happens to start with an
+      // identifier and contain a `*` (`w * h;`) isn't misparsed as a
+      // pointer declaration. The optional `<...>` between the type name
+      // and any pointer stars is skipped via `skip_generic_args_tokens`,
+      // the same helper `looks_like_compound_init` uses to look past a
+      // possibly-generic type name.
       if self.state.get_scope_entity(name) == nil {
         // Optional qualified type segments after the leading identifier:
-        // `alias.Type name;` (a module-alias-qualified type -- see
-        // `parse_datatype`'s own identical `.`-segment loop, which reads
-        // the SAME shape once this lookahead has already committed to
-        // the declaration path).
+        // `alias.Type name;` (a module-alias-qualified type). Reads the
+        // same shape as `parse_datatype`'s `.`-segment loop, once this
+        // lookahead has already committed to the declaration path.
         num off = 1;
         for true {
           let dot_tok = self.state.token_peek_n(off);
@@ -4962,24 +4792,17 @@ impl Parser {
   }
 
   // Parses `imp path;` or `imp path as alias;`, including parent-
-  // traversal path segments (`imp ..defs.user;`, `imp ...deep.thing;` --
-  // each PAIR of leading dots means "go up one directory"; `leading_dots`
+  // traversal path segments (`imp ..defs.user;`, `imp ...deep.thing;`).
+  // Each pair of leading dots means "go up one directory"; `leading_dots`
   // sums the length of every leading all-dot operator token, so this
-  // still works whether the lexer handed back `..` as one token or `.`
-  // `.` as two).
+  // works whether the lexer handed back `..` as one token or `.` `.` as
+  // two.
   // 
-  // Deliberately simplified from the original for this slice: the parsed
-  // path/alias is recorded on the `Import` node, but nothing is done to
-  // actually RESOLVE it -- the original's `preload_import_global_symbols`
-  // / `preload_std_import_global_symbols` read the imported file (or a
-  // hardcoded stdlib symbol table) off disk to preload its exported names
-  // for identifier validation, which is real filesystem work tied to a
-  // whole module-resolution subsystem, not something the parser alone
-  // can or should do. Until that's ported, a plain (non-call) reference
-  // to an imported name relies on the same "unknown identifier" bypasses
-  // `parse_single_token_to_node` already documents (out-of-order calls,
-  // `fit` conditions, ALL_CAPS macro-style constants) rather than genuine
-  // resolution.
+  // Records the parsed path/alias on the `Import` node but doesn't
+  // resolve it; that's real filesystem/module-resolution work handled
+  // elsewhere (`import_resolver.fn`'s `preload_global_symbols`). A plain
+  // (non-call) reference to an imported name relies on the same
+  // "unknown identifier" bypasses `parse_single_token_to_node` documents.
   pub parse_import() Option<ParseErrorKind> {
     let imp_tok = self.state.token_next(); // consume 'imp'
 
@@ -5092,12 +4915,11 @@ impl Parser {
 
   // Parses `compound Name { field decls }` (optionally generic, `compound
   // Name<T> { ... }`): a struct-like user-defined type. Fields share a
-  // datatype across a comma-separated name list (`dec x, y;`), though
-  // only the FIRST field in such a list may be an array type -- deep-
-  // cloning the size-expression AST per extra name isn't supported,
-  // matching the original. Registers the compound's name as a symbol via
-  // `push_symbol` so it can be used as a datatype identifier elsewhere
-  // (e.g. `Name x;`, or `Name{ ... }` compound-init once THAT'S ported).
+  // datatype across a comma-separated name list (`dec x, y;`), though only
+  // the first field in such a list may be an array type, since cloning the
+  // size-expression AST per extra name isn't supported. Registers the
+  // compound's name as a symbol via `push_symbol` so it can be used as a
+  // datatype identifier elsewhere (e.g. `Name x;`, `Name{ ... }`).
   pub parse_compound(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("compound");
     if kwerr.is_some() {
@@ -5163,8 +4985,8 @@ impl Parser {
         }
 
         // Only the first field in a combined multi-name list may be an
-        // array type -- deep-cloning the size-expression AST per extra
-        // name isn't supported, matching the original.
+        // array type, since cloning the size-expression AST per extra
+        // name isn't supported.
         if field_count > 0 && dt.is_array {
           self.state.err("array fields cannot be declared in a combined list; declare them separately");
           ret .Some(ParseErrorKind.InvalidDataType);
@@ -5224,15 +5046,9 @@ impl Parser {
   // allowed. Registers the enum's name as a symbol via `push_symbol`,
   // same as `parse_compound`.
   // 
-  // Deliberately simplified from the original for this slice: reuses the
-  // constraint-AWARE `parse_type_params_with_constraints` for `enum`'s
-  // type parameters
-  // rather than porting a separate constraint-less
-  // `parse_generic_type_params` -- the original's enum path doesn't
-  // support `T: a | b` constraints at all, so this is slightly more
-  // permissive than the original (an enum written with constraint syntax
-  // parses here where the original would error); not worth a whole
-  // near-duplicate function just to preserve that rejection.
+  // Reuses `parse_type_params_with_constraints` for the type parameters,
+  // so an enum written with `T: a | b` constraint syntax parses too, even
+  // though constraints aren't semantically meaningful for enums.
   pub parse_enum(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("enum");
     if kwerr.is_some() {
@@ -5575,31 +5391,23 @@ impl Parser {
 
   // Parses `impl Type { methods }` (plain) or `impl Type as Quirk {
   // methods }` (quirk-implementing), including the generic forms `impl
-  // Type<T> { ... }` (T is a NEW type param the impl introduces,
-  // disambiguated from a CONCRETE monomorphizing impl like `impl
+  // Type<T> { ... }` (T is a new type param the impl introduces,
+  // disambiguated from a concrete monomorphizing impl like `impl
   // Type<num> { ... }` via `impl_generic_args_are_params`'s lookahead)
-  // and `impl Type<T> as Quirk<T> { ... }` (a SYMBOLIC quirk binding --
-  // the quirk's arg is the impl's own type param -- vs. `as Quirk<num>`,
-  // a CONCRETE, distinctly-mangled quirk identity).
+  // and `impl Type<T> as Quirk<T> { ... }` (a symbolic quirk binding,
+  // where the quirk's arg is the impl's own type param, vs. `as
+  // Quirk<num>`, a concrete, distinctly-mangled quirk identity).
   // 
   // Each method compiles to a regular top-level function with a
   // generated, mangled name (`<Type>__<method>`, or
   // `<Type>__<Quirk>__<method>` for a quirk impl) and an implicit `<Type>*
-  // self` first argument, reusing the exact same statement/body-parsing
+  // self` first argument, reusing the same statement/body-parsing
   // infrastructure as `parse_function` (a real `current_function`/scope
   // context, so `if`/`for`/`ret`/`defer`/etc. all work in a method body).
-  // A method may also declare its OWN generic type parameter(s) in
+  // A method may also declare its own generic type parameter(s) in
   // addition to the impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`).
-  // 
-  // Deliberately simplified from the original for this slice: unlike
-  // the original, an impl method's arg list is parsed via the shared
-  // `_parse_function_args` (which also accepts a trailing `...`
-  // variadic marker) rather than a near-duplicate variadic-less loop;
-  // the original doesn't look for `...` in an impl method's arg list at
-  // all, so this is a minor, documented widening (a `...` there is
-  // silently accepted and dropped here, where the original would report
-  // a clean datatype-parse error) not worth a whole separate function
-  // to avoid.
+  // An impl method's arg list accepts a trailing `...` variadic marker,
+  // like an ordinary function's.
   pub parse_impl(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("impl");
     if kwerr.is_some() {
@@ -5679,10 +5487,10 @@ impl Parser {
       quirk_name = qname;
       has_quirk_name = true;
 
-      // A generic quirk binding is either SYMBOLIC (the arg IS the
-      // enclosing impl's own type param -- resolved later by the impl's
+      // A generic quirk binding is either symbolic (the arg is the
+      // enclosing impl's own type param, resolved later by the impl's
       // own generic-instantiation machinery, method mangling keys off
-      // just the base quirk name) or CONCRETE (a fixed instantiation
+      // just the base quirk name) or concrete (a fixed instantiation
       // that's effectively a distinct quirk identity, mangled the same
       // way a generic compound/enum instantiation is).
       if self.state.next_token_is_angle_open() {
@@ -5858,7 +5666,7 @@ impl Parser {
     }
 
     // Implicit `<Type>* self` first arg. When the impl itself is
-    // generic, `self`'s type carries the SAME type params as generic
+    // generic, `self`'s type carries the same type params as generic
     // arguments (`Box<T>* self`), so references to `self`'s fields
     // inside the method resolve against the impl's own params.
     DataType* self_dt = malloc(sizeof(DataType));
@@ -6004,24 +5812,11 @@ impl Parser {
   // `allow`/`expect`, `nil`/`panic(...)`/`await`, a `{ ... }` block, or a
   // bare expression statement) -- delegates there directly.
   // 
-  // Deliberately simplified from the original for this slice: no `asm`
-  // declaration (a prior, separate architectural decision -- see this
-  // file's own top-level doc comment) -- a clean "not yet supported"
-  // error is reported instead of a misparse. Also no bare
-  // `Identifier name;` top-level declaration (public OR private) --
-  // needs the same forward-lookahead machinery the original uses to
-  // disambiguate a type name from an expression, already documented as
-  // deferred in `parse_body_multiple_statements`'s doc comment; `pub`
-  // followed by a plain identifier reports the same clean error as any
-  // other not-yet-supported `pub` target rather than being silently
-  // misparsed as an expression.
-  // 
-  // Also unlike the original: a bare top-level expression (no leading
-  // keyword) DOES require a trailing `;` here, via delegating to
-  // `parse_statement` -- more consistent with every other statement
-  // position than replicating the original's asymmetry (its top-level
-  // `next()` skips the `;` requirement for a bare expression but nothing
-  // else does).
+  // No `asm` declaration and no bare `Identifier name;` top-level
+  // declaration (public or private); both report a clean "not yet
+  // supported" error rather than a misparse. A bare top-level expression
+  // (no leading keyword) requires a trailing `;` here, via delegating to
+  // `parse_statement`.
   pub parse_top_level_declaration() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -6149,8 +5944,7 @@ impl Parser {
   // `<datatype> name [= val];` -- an explicit-type variable declaration
   // with no leading `let`. Shared by `parse_statement` (inside a function
   // body, always private) and `parse_top_level_declaration` (`pub`/bare
-  // at file scope), matching the original's single `parse_keyword`
-  // checking `keyword_is_datatype` first at BOTH scopes.
+  // at file scope).
   _parse_bare_type_variable_declaration(bin is_public) Option<ParseErrorKind> {
     DataType* dt = malloc(sizeof(DataType));
     *dt = dtype_new();
@@ -6167,24 +5961,18 @@ impl Parser {
 
   // Repeatedly parses top-level items until the token stream is
   // exhausted or a parse error occurs. Opens the file's root scope
-  // first (closed by nothing -- matching `parse_body_multiple_statements`'s
-  // established convention of not unwinding parser state on error, and a
-  // successful parse has no reason to close the root scope since nothing
-  // outlives it).
+  // first; nothing closes it, since a successful parse has no reason to
+  // and a failed one aborts the whole parse anyway.
   // 
-  // Deliberately simplified from the original for this slice: no forward
-  // type-name pre-scan (`prescan_forward_type_names`) -- it exists to let
-  // a `Name{...}` compound initializer forward-reference a `compound`/
-  // `enum`/`quirk` declared later in the file, and compound-init parsing
-  // itself isn't ported yet either. No cross-file `global_symbols`
-  // registration (`register_global_node_symbol`,
-  // `preload_import_global_symbols`) -- `parse_import` parses `imp`
-  // syntax into an `Import` node but doesn't resolve it (see its own doc
-  // comment); within a single file, top-level `let`/variable declarations
-  // already resolve via the same scope-entity mechanism as any other declaration,
-  // and forward/out-of-order function calls are already tolerated by
-  // `parse_single_token_to_node`'s identifier check (see its own doc
-  // comment).
+  // Does no forward type-name pre-scan, so a `Name{...}` compound
+  // initializer can't forward-reference a `compound`/`enum`/`quirk`
+  // declared later in the file (see `is_known_compound_symbol`). Does no
+  // cross-file `global_symbols` registration either; that's handled by
+  // `import_resolver.fn` before parsing begins. Within a single file,
+  // top-level `let`/variable declarations resolve via the same
+  // scope-entity mechanism as any other declaration, and forward/
+  // out-of-order function calls are tolerated by
+  // `parse_single_token_to_node`'s identifier check.
   pub parse() Option<ParseErrorKind> {
     self.state.init_root_scope();
     for true {
@@ -6458,12 +6246,10 @@ test "parse_datatype reads a zero-arg function-type parameter" {
 }
 
 test "parse_datatype defaults an omitted function-type return type to void" {
-  // Nothing at all follows the closing ')' here (matching the ORIGINAL
-  // bootstrap compiler's own `parse_fn_type_datatype`, which treats ANY
-  // identifier immediately after ')' as the return type -- ambiguous
-  // with an omitted return type followed by the enclosing parameter's
-  // own name, ONLY resolved in real source by that name never being
-  // omitted in practice; end-of-input is the unambiguous case).
+  // Nothing follows the closing ')' here: `parse_fn_type_datatype` treats
+  // any identifier immediately after ')' as the return type, ambiguous
+  // with an omitted return type followed by the enclosing parameter's own
+  // name; end-of-input is the unambiguous case.
   ParseState st = _state_from("fun(chr)");
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected 'fun(chr)' with nothing after it to parse";
@@ -6545,7 +6331,7 @@ test "token_peek_prev_stream_n looks backward from the not-yet-consumed token" {
   ParseState st = _state_from("a b c");
   st.token_next();
   // Cursor now sits on 'b' (not yet consumed): prev_stream_n(0) should
-  // still see 'a', matching what `token_peek_prev` would see AFTER
+  // still see 'a', matching what `token_peek_prev` would see after
   // consuming 'b', without actually consuming it.
   fit st.token_peek_prev_stream_n(0).unwrap().data {
     .Sval(s) -> { assert equals(s, "a"), "prev_stream_n(0) should see 'a'"; }
@@ -6730,7 +6516,7 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
 
 test "parse_reorder_expression leaves an already-correct right-heavy shape untouched" {
   // Simulates the naive parse of `a + b * c`: `(a + (b * c))`, which is
-  // ALREADY the precedence-correct shape ('*' binds tighter than '+'), so
+  // already the precedence-correct shape ('*' binds tighter than '+'), so
   // no rotation should happen.
   Node a = node_new(NodeKind.Identifier("a"));
   Node b = node_new(NodeKind.Identifier("b"));
@@ -6771,16 +6557,12 @@ test "parse_reorder_expression leaves an already-correct right-heavy shape untou
 }
 
 test "parse_reorder_expression rotates a chain needing two rotations" {
-  // Mirrors how the real parser actually builds `a * b * c * d`: the RHS of
-  // each operator is parsed (and reordered) FIRST, recursively, so by the
+  // Mirrors how the parser actually builds `a * b * c * d`: the RHS of
+  // each operator is parsed and reordered first, recursively, so by the
   // time an outer node is built its right child is already a fully
-  // reordered sub-expression -- `parse_reorder_expression` is called
+  // reordered sub-expression. `parse_reorder_expression` is called
   // incrementally, bottom-up, once per level, never on a raw multi-level
-  // right-recursive chain built in one shot. (An earlier version of this
-  // test built the whole `(a * (b * (c * d)))` chain upfront and called
-  // `parse_reorder_expression` on it exactly once, which under-rotates --
-  // that single-shot shape can't actually arise from the real incremental
-  // algorithm, so it isn't a real bug, just an unrealistic test input.)
+  // right-recursive chain built in one shot.
   Node a = node_new(NodeKind.Identifier("a"));
   Node b = node_new(NodeKind.Identifier("b"));
   Node c = node_new(NodeKind.Identifier("c"));
@@ -6971,12 +6753,10 @@ test "parse_expressionable_root parses a simple binary expression" {
 }
 
 test "parse_expressionable_root parses a negative-literal right-hand side after a comparison operator" {
-  // Regression test: `x != -1` (found via the self-compile experiment in
-  // stdlib/std/string.fn's own real `contains` function) used to fail
-  // "expected expressionable for '!=' operator" -- the binary-RHS
-  // continuation only recognized '(', '[', '.', and '<-' as valid
-  // operator-token starts for the right-hand operand, not a prefix
-  // unary operator like '-'.
+  // Regression test: `x != -1` used to fail "expected expressionable for
+  // '!=' operator", since the binary-RHS continuation only recognized
+  // '(', '[', '.', and '<-' as valid operator-token starts for the
+  // right-hand operand, not a prefix unary operator like '-'.
   Vec<str> names;
   names.init(0);
   names.push("x");
@@ -7173,14 +6953,11 @@ test "parse_expressionable_root parses 'sizeof(Type)' as an ordinary call" {
 }
 
 test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword operand" {
-  // Regression test: `std.map`'s own real `alloc()` body (`cap *
-  // sizeof(bin)`) -- found via the self-compile experiment -- failed to
-  // parse entirely ("expected expression"). Unlike a custom type name
-  // (`sizeof(Point)`, an ordinary `.Identifier` token, handled by
-  // `is_sizeof_type_operand` above), a BUILTIN scalar type name
-  // (`bin`/`num`/`str`/...) lexes as a `.Keyword` token, which
-  // `parse_expressionable_single` didn't have ANY primary-expression
-  // case for at all outside of `nil`/`panic`/`await`.
+  // Unlike a custom type name (`sizeof(Point)`, an ordinary `.Identifier`
+  // token, handled by `is_sizeof_type_operand`), a builtin scalar type
+  // name (`bin`/`num`/`str`/...) lexes as a `.Keyword` token, which
+  // `parse_expressionable_single` handles as a primary-expression case
+  // alongside `nil`/`panic`/`await`.
   ParseState st = _state_from("sizeof(bin)");
   Parser p = parser_new(&st);
   assert p.parse_expressionable_root().is_none(), "expected 'sizeof(bin)' to parse";
@@ -7468,16 +7245,14 @@ test "parse_expressionable_root parses a postfix unary followed by a binary cont
 
 test "parse_expressionable_root parses a unary operand followed by a binary continuation" {
   // `parse_for_normal_unary`/`parse_for_indirection_unary` bound their
-  // operand parse with `stop_at_binary_op` (matching the original's
-  // `expression_is_unary`/`is_unary_operand_compatible` restriction to
-  // postfix-only continuations), so prefix unary is TIGHT-binding: `-a +
-  // b` is `(-a) + b`, not `-(a + b)`. This matters beyond precedence
-  // aesthetics -- without this bound, `*buf = 10` parsed as `*(buf =
-  // 10)` (assigning INTO `buf` itself, then dereferencing the result)
-  // instead of `(*buf) = 10` (assigning through the pointer), silently
-  // changing what gets written. A postfix continuation (`.`/`(`/`[`)
-  // still continues the SAME operand rather than ending it, so
-  // `!r.is_err()` still correctly parses as `!(r.is_err())`.
+  // operand parse with `stop_at_binary_op`, restricting a prefix unary to
+  // postfix-only continuations, so it binds tightly: `-a + b` is
+  // `(-a) + b`, not `-(a + b)`. This matters beyond precedence aesthetics:
+  // without the bound, `*buf = 10` would parse as `*(buf = 10)` (assigning
+  // into `buf` itself, then dereferencing the result) instead of
+  // `(*buf) = 10` (assigning through the pointer). A postfix continuation
+  // (`.`/`(`/`[`) still continues the same operand rather than ending it,
+  // so `!r.is_err()` still correctly parses as `!(r.is_err())`.
   Vec<str> names;
   names.init(0);
   names.push("a");

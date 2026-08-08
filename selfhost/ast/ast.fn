@@ -1,53 +1,22 @@
 // AST node types for the self-hosted Fun compiler.
 // 
-// Design decisions (each a deliberate divergence from a straightforward
-// line-for-line port, documented per the project's self-hosting
-// conventions -- see selfhost/lexer/ for the earlier precedents this
-// follows):
+// `DataType` and its supporting types live in this file rather than a
+// separate module: a DataType's array-size-expression field needs `Node`,
+// and `Node`'s variable/function/field declarations need `DataType`, and
+// imports can't be circular.
 // 
-// - `DataType` (and its supporting types) live in THIS file rather than a
-// separate module. The original has a genuine mutual dependency: a
-// DataType's array-size-expression field needs `Node`, and `Node`'s
-// variable/function/field declarations need `DataType`. The language
-// disallows circular imports between files (confirmed directly), so the
-// two must be co-located -- not a workaround, just where the natural
-// boundary actually falls here.
-// - A single FLAT `NodeKind` enum replaces the original's two-level
-// `NodeType` (a plain discriminant) + nested `node_variant` union (whose
-// OWN inner `statement` union groups several node kinds together purely
-// for source organization). The outer variant tag already fully
-// discriminates every node shape, so the extra nesting carries no extra
-// information here; a flat data-carrying enum is more idiomatic and
-// equally expressive.
-// - Each node kind's data lives in its own dedicated `compound` (e.g.
-// `FunctionNode`, `IfStmtNode`) rather than long positional payload
-// lists -- a data-carrying enum variant can hold any number of
-// positional fields, but seven-plus positional fields of mixed types is
-// unreadable and error-prone at every construction site.
-// - Optional child nodes are plain `Node*` fields compared against `nil`
-// (confirmed working, matching the established stdlib/lexer idiom), not
-// `Option<Node*>` -- `Option<T>` is reserved for genuine value-semantic
-// optionality elsewhere in this codebase; pointer nullability already
-// has `nil` for exactly this.
-// - Optional VECTOR fields (e.g. a function's generic type params, present
-// only for `fun f<T>`) use a `bin has_X` flag alongside an always-`.init(0)`-ed
-// `Vec<T>` value field, rather than a heap-allocated `Vec<T>*` -- confirmed
-// that a freshly-declared compound's `Vec<T>` field reads GARBAGE length
-// (not zero) until `.init()` runs, so every node-payload constructor
-// below explicitly initializes every Vec field to keep this safe; callers
-// MUST go through these constructors rather than declaring bare node
-// payload compounds.
-// - `VariableList`, `StatementCase`, `StatementDefault` (present in the
-// original's NodeType enum) are dropped entirely -- confirmed via
-// grepping the whole codebase that nothing ever constructs them.
-// - `StatementAsm`/inline-assembly nodes are deferred, matching the
-// lexer's own already-documented deferral of `asm` raw-body lexing: the
-// self-hosted compiler's own source has no need for inline assembly.
-// - `data: ?token.TokenData` (the original's separate slot used only for
-// literal nodes -- Number/Identifier/String/Character/Boolean) is
-// dropped in favor of each of those NodeKind variants carrying its
-// literal value directly, reusing `token.TokenData` for Number (which
-// already distinguishes integer vs decimal via its Num/Dec variants).
+// `NodeKind` is a single flat data-carrying enum. Each node kind's data
+// lives in its own dedicated `compound` (e.g. `FunctionNode`,
+// `IfStmtNode`) rather than long positional payload lists.
+// 
+// Optional child nodes are plain `Node*` fields compared against `nil`,
+// not `Option<Node*>`. Optional vector fields (e.g. a function's generic
+// type params) pair a `bin has_X` flag with an always-`.init(0)`-ed
+// `Vec<T>` value field, since a freshly-declared compound's `Vec<T>`
+// field otherwise reads garbage length until `.init()` runs -- every
+// node-payload constructor below initializes every Vec field, and
+// callers should go through these constructors rather than declaring
+// bare node payload compounds.
 
 imp ..lexer.token;
 imp std.vec;
@@ -78,7 +47,7 @@ pub enum DataTypeType {
 }
 
 // A function-type signature attached to a DataType's `fn_sig` (for a
-// function-type PARAMETER, `fun(T1, T2) R name` -- see DataType.fn_sig).
+// function-type parameter, `fun(T1, T2) R name` -- see DataType.fn_sig).
 pub compound FnTypeSig {
   Vec<DataType*> params;
   DataType* rtype;
@@ -183,15 +152,15 @@ pub enum WarningId {
 }
 
 // Which way a `WarningCtrlNode` controls its target warning: `allow` silences
-// it, `expect` requires it to actually fire (else THAT is itself an error).
+// it, `expect` requires it to actually fire (else that is itself an error).
 pub enum WarningControlAction {
   Allow,
   Expect,
 }
 
-// Kept as a free function (rather than ONLY the `From<str>` quirk impl
+// Kept as a free function (rather than only the `From<str>` quirk impl
 // below) because callers that validate a warning-control directive from
-// SOURCE (`allow unknown_id;`) need to detect and report an invalid id as a
+// source (`allow unknown_id;`) need to detect and report an invalid id as a
 // real compile error -- `From<T>`'s `from(T value)` is void/best-effort by
 // contract (see std.quirks), which can't express that failure.
 pub fun warning_id_from_string(str name) Option<WarningId> {
@@ -256,7 +225,7 @@ impl WarningId as To<str> {
 // Each compound below is the payload of exactly one `NodeKind` variant
 // (named identically, minus the `Node`/`Kind` suffix noise). Every one
 // that owns a `Vec<T>` field gets a paired `_new()` constructor; callers
-// MUST use it instead of a bare declaration (see the file-level note).
+// should use it instead of a bare declaration (see the file-level note).
 
 // A binary (or, with `right` absent, unary-ish) operator expression, e.g.
 // `a + b`, `a = b`, member access `a.b`, or a call `callee(args)` (`op` is
@@ -316,7 +285,7 @@ pub compound VariableNode {
   str name;
   Node* val;
   bin has_val;
-  // `const NAME = value;` / `const TYPE NAME = value;` -- always requires
+  // `const name = value;` / `const Type name = value;` -- always requires
   // an initializer (no notion of a later one-time-only assignment to
   // enforce instead). False for every other variable-shaped construction
   // (a plain `let`/typed local, a function parameter, a method's own
@@ -529,7 +498,7 @@ pub compound QuirkNode {
   Vec<QuirkMethodSig> methods;
   // True for a generic quirk (`quirk Iterator<T> { ... }`): static dispatch
   // only, no monomorphic vtable/quirk-object struct (an unbound type param
-  // can't be represented in a single C signature) unless a CONCRETE
+  // can't be represented in a single C signature) unless a concrete
   // instantiation is used as a type annotation.
   bin is_generic;
   Vec<str> type_params;
@@ -556,7 +525,7 @@ pub compound EnumVariant {
   bin has_value;
   // Positional payload types for a data-carrying variant (`Circle(num)` ->
   // [num]); absent for a plain C-style enumerator. An enum is a tagged
-  // union iff ANY of its variants has a payload.
+  // union if any of its variants has a payload.
   Vec<DataType*> payload;
   bin has_payload;
 }
@@ -604,28 +573,19 @@ pub compound ImplNode {
   // block (`impl Type { ... }`).
   str quirk_name;
   bin has_quirk_name;
-  // Set when the `as` clause names a CONCRETE instantiation of a generic
+  // Set when the `as` clause names a concrete instantiation of a generic
   // quirk whose argument is not the enclosing impl's own type param (`as
   // To<num>`) -- the mangled name (`To__num`) of that distinct quirk
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
   bin has_quirk_concrete_instantiation;
-  // Set when this impl targets a CONCRETE instantiation of an already-
-  // generic type (`impl Vec<num> { ... }`, `type_name` above already
-  // mangled to `Vec__num` for that case) -- the full, un-mangled
-  // DataType (`Vec<num>`, base name + real generic args) this was
-  // mangled FROM, so codegen can force `Vec__num`'s own struct/enum
-  // definition (and field records) to exist before this impl's own
-  // method bodies are emitted, even when nothing ELSE in the program
-  // happens to have already triggered that instantiation first (a
-  // method referencing `self.<field>` needs the field records to
-  // exist; `self`'s own dtype is already a bare, non-generic
-  // `Vec__num*` by this point -- see `_parse_impl_method`'s own `self`-
-  // injection -- so it never goes through the ordinary "generic_args
-  // triggers lazy instantiation" path at all). Absent for a plain impl
-  // on an already-non-generic type (`impl Foo { ... }`) or a genuinely
-  // generic template impl (`impl Vec<T> { ... }`, `has_type_params`
-  // true instead).
+  // Set when this impl targets a concrete instantiation of an already-
+  // generic type (`impl Vec<num> { ... }`, `type_name` mangled to
+  // `Vec__num`): the full, un-mangled DataType this was mangled from, so
+  // codegen can force `Vec__num`'s struct/enum definition to exist before
+  // this impl's methods are emitted. Absent for a plain impl on a
+  // non-generic type or a generic template impl (`has_type_params` true
+  // instead).
   DataType* concrete_dtype;
   bin has_concrete_dtype;
   Vec<Node*> methods;
@@ -668,9 +628,6 @@ pub compound FuzzDeclNode {
 }
 
 // ===== The node kind itself =====
-// 
-// A single flat data-carrying enum -- see the file-level design note for
-// why this replaces the original's two-level NodeType+node_variant shape.
 pub enum NodeKind {
   Expression(ExprNode),
   ExpressionParenthesis(Node*),
@@ -683,7 +640,7 @@ pub enum NodeKind {
   Boolean(bin),
   // The `nil` literal (a null pointer/string sentinel; emits C NULL).
   Nil,
-  // A `panic(msg)` expression: unifies with WHATEVER type is expected at
+  // A `panic(msg)` expression: unifies with whatever type is expected at
   // its use site (like `nil` does for pointers). Never actually produces a
   // value: prints the message and aborts.
   Panic(Node*),
@@ -728,8 +685,7 @@ pub enum NodeKind {
 }
 
 // A single AST node: the tagged payload (`kind`) plus source position and
-// bookkeeping shared by every node shape (see the file-level design note on
-// why this envelope+payload split replaces the original's flatter struct).
+// bookkeeping shared by every node shape.
 pub compound Node {
   NodeKind kind;
   Pos pos;
@@ -750,7 +706,6 @@ pub fun node_new(NodeKind kind) Node {
 }
 
 // ===== Predicates =====
-// Ported directly from the original's node_is_* helpers.
 
 pub fun node_is_expression_or_parenthesis(Node n) bin {
   fit n.kind {
@@ -790,14 +745,9 @@ pub fun node_is_expressionable(Node n) bin {
     // operator (`x != nil && y`), so it counts as expressionable.
     .Nil -> { ret true; }
     .CompoundInit(ci) -> { ret true; }
-    // A bracket literal (`[1, 2, 3]`) as one ELEMENT of an outer array
-    // literal (`[[1, 2, 3], [4, 5, 6]]`, a 2D matrix, e.g.) needs to be
-    // recognized as a valid LEFT operand for the following ',' to
-    // continue chaining the outer literal's remaining elements --
-    // without this, `parse_normal_expression`'s own `node_peek_
-    // expressionable` check found nothing usable right after the first
-    // nested `[1, 2, 3]` popped off the stack, rejecting the ','
-    // outright ("expected left operand for ',' operator").
+    // A bracket literal as one element of an outer array literal (a 2D
+    // matrix, e.g.) needs to be a valid left operand for the following
+    // ',' to continue chaining the outer literal's remaining elements.
     .Bracket(inner) -> { ret true; }
     _ -> { ret false; }
   }
@@ -832,10 +782,8 @@ pub fun node_is_expression(Node n, str op) bin {
   }
 }
 
-// A minimal array-operator check (`[]`), matching the original's
-// `utils.is_array_operator`. That helper checks more operator SHAPES in
-// the original (used by the parser/lexer for tokenizing); only the `[]`
-// index-expression form is relevant to AST-level array-ness here.
+// True for the `[]` index-expression operator, the only shape relevant to
+// AST-level array-ness here.
 fun is_array_operator(str op) bin {
   ret equals(op, "[]");
 }

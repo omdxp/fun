@@ -1,9 +1,4 @@
 // Lexical scope tracking for the self-hosted Fun compiler.
-// 
-// Ported from the original semantics module's scope tracking. `iterate_back`/
-// `start_iteration` (a "peek pointer" backward-iteration mechanism on the
-// original's entity vector) are dropped -- confirmed via grepping the whole
-// codebase that nothing calls them anywhere outside their own definitions.
 
 imp ..ast.ast;
 imp std.vec;
@@ -55,7 +50,7 @@ pub fun scope_new() Scope {
 }
 
 impl Scope {
-  // The most recently declared entity directly in THIS scope (not its
+  // The most recently declared entity directly in this scope (not its
   // parents), or nil if none.
   pub last_entity_at_scope() ScopeEntity* {
     if self.entities.len == 0 {
@@ -80,7 +75,7 @@ impl Scope {
     ret nil;
   }
 
-  // Looks up an entity declared directly in THIS scope (not its parents) by
+  // Looks up an entity declared directly in this scope (not its parents) by
   // name, or nil if not found.
   pub get_entity_by_name(str name) ScopeEntity* {
     num i = 0;
