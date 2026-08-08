@@ -1,22 +1,14 @@
 // AST node types for the self-hosted Fun compiler.
 // 
-// `DataType` and its supporting types live in this file rather than a
-// separate module: a DataType's array-size-expression field needs `Node`,
-// and `Node`'s variable/function/field declarations need `DataType`, and
-// imports can't be circular.
-// 
-// `NodeKind` is a single flat data-carrying enum. Each node kind's data
-// lives in its own dedicated `compound` (e.g. `FunctionNode`,
-// `IfStmtNode`) rather than long positional payload lists.
-// 
-// Optional child nodes are plain `Node*` fields compared against `nil`,
-// not `Option<Node*>`. Optional vector fields (e.g. a function's generic
-// type params) pair a `bin has_X` flag with an always-`.init(0)`-ed
-// `Vec<T>` value field, since a freshly-declared compound's `Vec<T>`
-// field otherwise reads garbage length until `.init()` runs -- every
-// node-payload constructor below initializes every Vec field, and
-// callers should go through these constructors rather than declaring
-// bare node payload compounds.
+// `DataType` and `Node` share this file because they're mutually
+// recursive (array-size expressions need `Node`, declarations need
+// `DataType`) and imports can't be circular. `NodeKind` is a flat
+// data-carrying enum with each variant's payload in its own dedicated
+// `compound`. Optional child nodes are plain `Node*` fields compared
+// against `nil`; optional `Vec<T>` fields pair a `bin has_X` flag with
+// an always-`.init(0)`-ed value, since an uninitialized `Vec<T>` reads
+// garbage length -- always build node payloads through the `_new()`
+// constructors below, never a bare declaration.
 
 imp ..lexer.token;
 imp std.vec;
@@ -221,11 +213,10 @@ impl WarningId as To<str> {
 }
 
 // ===== Per-node-kind payload types =====
-// 
 // Each compound below is the payload of exactly one `NodeKind` variant
-// (named identically, minus the `Node`/`Kind` suffix noise). Every one
-// that owns a `Vec<T>` field gets a paired `_new()` constructor; callers
-// should use it instead of a bare declaration (see the file-level note).
+// (named identically, minus the `Node`/`Kind` suffix). One with a
+// `Vec<T>` field gets a paired `_new()` constructor -- use it instead of
+// a bare declaration (see the file-level note above).
 
 // A binary (or, with `right` absent, unary-ish) operator expression, e.g.
 // `a + b`, `a = b`, member access `a.b`, or a call `callee(args)` (`op` is
@@ -285,11 +276,9 @@ pub compound VariableNode {
   str name;
   Node* val;
   bin has_val;
-  // `const name = value;` / `const Type name = value;` -- always requires
-  // an initializer (no notion of a later one-time-only assignment to
-  // enforce instead). False for every other variable-shaped construction
-  // (a plain `let`/typed local, a function parameter, a method's own
-  // `self` binding).
+  // True for `const name = value;` (always requires an initializer).
+  // False for every other variable-shaped construction: a plain
+  // `let`/typed local, a function parameter, or a method's `self`.
   bin is_const;
 }
 
@@ -498,7 +487,7 @@ pub compound QuirkNode {
   Vec<QuirkMethodSig> methods;
   // True for a generic quirk (`quirk Iterator<T> { ... }`): static dispatch
   // only, no monomorphic vtable/quirk-object struct (an unbound type param
-  // can't be represented in a single C signature) unless a concrete
+  // can't be represented in a single emitted signature) unless a concrete
   // instantiation is used as a type annotation.
   bin is_generic;
   Vec<str> type_params;
@@ -520,12 +509,12 @@ pub fun quirk_node_new() QuirkNode {
 pub compound EnumVariant {
   str name;
   // Explicit integer value (`Variant = 3;`); auto-increments from 0
-  // following C enum rules when absent.
+  // when absent.
   num value;
   bin has_value;
   // Positional payload types for a data-carrying variant (`Circle(num)` ->
-  // [num]); absent for a plain C-style enumerator. An enum is a tagged
-  // union if any of its variants has a payload.
+  // [num]); absent for a plain enumerator. An enum is a tagged union if
+  // any of its variants has a payload.
   Vec<DataType*> payload;
   bin has_payload;
 }
@@ -579,13 +568,12 @@ pub compound ImplNode {
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
   bin has_quirk_concrete_instantiation;
-  // Set when this impl targets a concrete instantiation of an already-
-  // generic type (`impl Vec<num> { ... }`, `type_name` mangled to
-  // `Vec__num`): the full, un-mangled DataType this was mangled from, so
-  // codegen can force `Vec__num`'s struct/enum definition to exist before
-  // this impl's methods are emitted. Absent for a plain impl on a
-  // non-generic type or a generic template impl (`has_type_params` true
-  // instead).
+  // Set when this impl targets a concrete instantiation of an
+  // already-generic type (`impl Vec<num> { ... }`, `type_name` mangled
+  // to `Vec__num`): the full, un-mangled DataType, so codegen can force
+  // that type's definition to exist before these methods are emitted.
+  // Absent for a plain impl or a generic template impl (`has_type_params`
+  // true instead).
   DataType* concrete_dtype;
   bin has_concrete_dtype;
   Vec<Node*> methods;
@@ -615,11 +603,10 @@ pub compound TestDeclNode {
 }
 
 // A `fuzz "name" (raw* data, num len) { body }` declaration (see
-// NodeKind.Fuzz). `data_param`/`len_param` are `Variable` nodes for the two
-// user-chosen parameter names; their types are parsed explicitly like
-// ordinary function parameters, but must match the fuzzing calling
-// convention's fixed shape (`raw*`/`num` -- the byte buffer + length a
-// fuzzing engine feeds in), enforced by `parser._check_fuzz_param_shape`.
+// NodeKind.Fuzz). `data_param`/`len_param` are `Variable` nodes for the
+// two user-chosen names; their types parse like ordinary parameters but
+// must match the fixed `raw*`/`num` fuzzing shape, enforced by
+// `parser._check_fuzz_param_shape`.
 pub compound FuzzDeclNode {
   str name;
   Node* data_param;
@@ -638,7 +625,7 @@ pub enum NodeKind {
   String(str),
   Character(chr),
   Boolean(bin),
-  // The `nil` literal (a null pointer/string sentinel; emits C NULL).
+  // The `nil` literal (a null pointer/string sentinel).
   Nil,
   // A `panic(msg)` expression: unifies with whatever type is expected at
   // its use site (like `nil` does for pointers). Never actually produces a
