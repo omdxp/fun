@@ -1,19 +1,10 @@
 // Operator precedence/associativity table the expression parser depends
-// on. Ported from the previous implementation's `modules/ast/expressionable.zig`
-// -- a pure, self-contained lookup table (not parser STATE), so it lives in
-// its own module rather than inside parser.fn, mirroring lexdefs.fn's split
-// from lexer.fn and datatype_defs.fn's split for type-keyword lookups.
+// on: a pure, self-contained lookup table, kept in its own module rather
+// than inside parser.fn.
 // 
-// The original represents each precedence level as a fixed-size array of
-// operator strings (padded with nulls) searched linearly. Ported here as a
-// single `fit`-dispatched lookup instead -- the same idiom already used
-// throughout lexdefs.fn/datatype_defs.fn, and it sidesteps the fixed-array-
-// with-null-padding shape that has no natural Fun equivalent.
-// 
-// Precedence RANK: lower binds tighter (0 = postfix/call/member access,
-// the tightest; 13 = comma, the loosest). This is the opposite convention
-// from "higher number = higher precedence" -- kept to match the original's
-// group INDEX exactly, since that index is what `left_has_priority` compares.
+// Precedence rank: lower binds tighter (0 = postfix/call/member access,
+// the tightest; 13 = comma, the loosest). Each group's index is what
+// `left_has_priority` compares.
 
 imp std.string;
 imp ..lexer.token;
@@ -121,10 +112,10 @@ pub fun op_precedence_for(str op) OpPrecedence {
   }
 }
 
-// True when `op_left` (the OUTER/already-built operator) should keep its
-// operand rather than ceding it to `op_right` (the operator just found to
-// its right) -- i.e. whether `(a op_left b) op_right c` is already the
-// correct grouping, as opposed to needing `a op_left (b op_right c)`.
+// True when `op_left`, the already-built outer operator, should keep its
+// operand rather than ceding it to `op_right`, the operator just found
+// to its right -- i.e. whether `(a op_left b) op_right c` is already the
+// correct grouping, rather than `a op_left (b op_right c)`.
 // Same-operator chains group by the operator's own associativity;
 // otherwise a right-associative left operator never yields, and
 // same-or-tighter binding (numerically <=, since lower rank binds
@@ -141,7 +132,7 @@ pub fun left_has_priority(str op_left, str op_right) bin {
   ret left.rank <= right.rank;
 }
 
-// True if `op` is one of the supported PREFIX unary operators: negation,
+// True if `op` is one of the supported prefix unary operators: negation,
 // unary plus, logical/bitwise not, pointer indirection, address-of, or
 // pre-increment/decrement.
 pub fun is_unary_operator(str op) bin {
@@ -153,18 +144,18 @@ pub fun is_unary_operator(str op) bin {
 
 // True if `op` is the pointer-indirection operator (`*p`). A narrower
 // check than `is_unary_operator` -- indirection needs its own parsing
-// path (`parse_for_indirection_unary`) since a following run of `*`s is a
-// POINTER-DEPTH count, not a chain of separate unary operators.
+// path since a following run of `*`s is a pointer-depth count, not a
+// chain of separate unary operators.
 pub fun is_indirection_operator(str op) bin {
   ret equals(op, "*");
 }
 
-// True if `op` is a LEFT-operanded (postfix) unary operator: `x++`/`x--`.
+// True if `op` is a left-operanded (postfix) unary operator: `x++`/`x--`.
 pub fun is_left_operanded_unary_operator(str op) bin {
   ret equals(op, "++") || equals(op, "--");
 }
 
-// True if `t` is an `Operator` token that, appearing AFTER a complete
+// True if `t` is an `Operator` token that, appearing after a complete
 // primary expression, is a binary/infix operator -- i.e. it would combine
 // the primary with a following operand rather than continue it. Postfix-
 // continuation operators (`.`, `[`, `(`) return false (they extend the
@@ -207,9 +198,8 @@ test "op_precedence_for reports not-found for an unrecognized string" {
 }
 
 test "left_has_priority favors the tighter-binding operator" {
-  // '*' binds tighter than '+': in `a + b * c`, the '+' (already built as
-  // the outer operator when '*' is found to the right) must NOT keep its
-  // operand -- '*' needs it instead.
+  // '*' binds tighter than '+': in `a + b * c`, the already-built '+'
+  // does not keep its operand -- '*' needs it instead.
   assert !left_has_priority("+", "*"), "'+' should yield to a tighter '*' on its right";
   // The reverse: '*' already built, '+' found to the right -- '*' keeps it.
   assert left_has_priority("*", "+"), "'*' should keep its operand against a looser '+'";
@@ -229,8 +219,7 @@ test "left_has_priority chains equal-precedence right-associative operators righ
 
 test "left_has_priority never yields for a right-associative left operator" {
   // A right-associative operator (assignment) never keeps grouping
-  // leftward against a DIFFERENT operator either, regardless of the
-  // other operator's own rank.
+  // leftward against a different operator either, regardless of rank.
   assert !left_has_priority("=", "+"), "right-associative left operator should never keep priority";
 }
 

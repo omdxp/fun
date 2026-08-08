@@ -1,16 +1,7 @@
-// Parser-relevant compile state for the self-hosted Fun compiler.
-// 
-// The original implementation threads parsing, typecheck, and codegen
-// through ONE shared `TranspileProcess` struct (see
-// modules/codegen/transpiler.zig) for lifetime/arena-reuse convenience, even
-// though the parser itself only reads/writes a modest slice of it: the token
-// stream and cursor, output node storage, scope/symbol tracking, the
-// cross-module duplicate-symbol registry, and the current diagnostic
-// position. Fun has no manual-arena concept exposed to user code, so there's
-// no reason to replicate the whole struct up front -- `ParseState` holds
-// exactly what parsing itself needs. Typecheck/codegen-only concerns
-// (generic instantiation tracking, emission guards, indent level, ...) get
-// their own state container once codegen is ported.
+// Parser-relevant compile state for the self-hosted Fun compiler:
+// the token stream and cursor, output node storage, scope/symbol
+// tracking, the cross-module duplicate-symbol registry, and the current
+// diagnostic position.
 
 imp ..ast.ast;
 imp ..lexer.token;
@@ -22,14 +13,10 @@ imp std.string;
 imp std.c.mem;
 
 // Tracks a public symbol's declaring file, to detect cross-module name
-// collisions. Only public symbols are ever recorded (see
-// `parse_state_register_symbol` in parser.fn). `is_compound` additionally
-// lets `is_known_compound_symbol` recognize a CROSS-FILE compound (`pub
-// compound Foo { ... }` in an imported file), not just one already
-// declared earlier in THIS file's own symbol table -- see
-// `import_resolver.fn`'s `preload_global_symbols`, which populates
-// `ParseState.global_symbols` across the whole transitive import graph
-// before any file's own real parse begins.
+// collisions. Only public symbols are recorded. `is_compound`
+// additionally lets `is_known_compound_symbol` recognize a compound
+// declared in an imported file, not just one already declared earlier
+// in the same file.
 pub compound GlobalSymbolInfo {
   str symbol_name;
   str file_path;

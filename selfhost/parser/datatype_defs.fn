@@ -1,10 +1,6 @@
 // Keyword/identifier-to-DataType lookup tables the parser depends on when
-// reading a type annotation. Ported from the previous implementation's
-// `keyword_is_datatype`/`get_datatype_type`/`get_c_typedef_alias_datatype_type`/
-// `is_dynamic_int_datatype`/`parse_dynamic_int_datatype` -- pure,
-// self-contained lookup tables (not parser STATE), so they live in their
-// own module rather than inside parser.fn, mirroring lexdefs.fn's split
-// from lexer.fn.
+// reading a type annotation. Pure, self-contained lookup tables kept in
+// their own module rather than inside parser.fn.
 
 imp ..ast.ast;
 imp std.string;

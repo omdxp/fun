@@ -1,7 +1,5 @@
 // Fun-to-C builtin type name mapping and other pure, stateless codegen
-// lookup tables. Split out from codegen.fn the same way datatype_defs.fn
-// splits parser.fn's keyword/type tables -- a pure, self-contained
-// lookup, not codegen STATE.
+// lookup tables.
 
 imp std.string;
 imp std.io;
@@ -9,11 +7,9 @@ imp ..parser.datatype_defs;
 
 // Maps a builtin Fun scalar type name to its C spelling. Sized/dynamic
 // ints (`iN`/`uN`) are handled separately by the caller via
-// `dynamic_int_type_to_c` (checked first -- see `write_type`'s own doc
-// comment) before falling back here. Anything not recognized here
-// (`void`, a user-defined type name, ...) is returned UNCHANGED --
-// matching the original exactly: `void`'s `type_str` is already the
-// literal string "void" and a user type's name is its own valid C name.
+// `dynamic_int_type_to_c` before falling back here. Anything not
+// recognized (`void`, a user-defined type name, ...) is returned
+// unchanged, since it's already a valid C name.
 pub fun map_type_to_c(str type_str) str {
   fit type_str {
     "num" -> { ret "int64_t"; }
