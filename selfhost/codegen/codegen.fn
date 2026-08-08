@@ -10341,7 +10341,7 @@ test "emit_statement emits a bare panic(...) as a statement" {
 }
 
 test "emit_statement emits 'assert cond, msg;' as an if/abort with the message printed" {
-  // Regression test: `assert !r.is_err(), "tokenize() returned an
+  // `assert !r.is_err(), "tokenize() returned an
   // error";` needs an `emit_statement` case for `.StatementAssert`,
   // rejected as `CodegenErrorKind.UnsupportedNode` without one.
   CodegenState st = codegen_state_new();
@@ -10634,7 +10634,7 @@ test "emit_statement emits a 'let' declaration as '__auto_type', inferring its t
 }
 
 test "emit_statement infers a 'let' declaration's type from a plain field-access initializer, so a chained field read off of it still resolves" {
-  // Regression test: a `let ct = self.current_token; ... ct.pos.line
+  // a `let ct = self.current_token; ... ct.pos.line
   // ...` initializer needs `infer_let_expr_type` to resolve the whole
   // chain via `resolve_field_chain`, the same resolution a later read
   // off of it needs; otherwise the later `ct.pos.line` read is rejected
@@ -10694,11 +10694,11 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
 }
 
 test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was inferred from a method call" {
-  // Regression test: `let last = self.tokens.last(); fit last { .Some(t)
+  // `let last = self.tokens.last(); fit last { .Some(t)
   // -> {...} .None -> {...} }` needs `last`'s type resolved, not left
   // as the un-inferred "__let_infer__" sentinel, or `fit`'s
-  // bare-shorthand pattern match against it is rejected. Fixed via
-  // `infer_let_expr_type`, resolving a method-call initializer's type
+  // bare-shorthand pattern match against it is rejected.
+  // `infer_let_expr_type` resolves a method-call initializer's type
   // through the same `resolve_field_chain`/`lookup_impl_method_rtype`
   // lookups `emit_fit`'s call-subject handling uses.
   CodegenState st = codegen_state_new();
@@ -11126,7 +11126,7 @@ test "emit_function emits a plain no-arg function definition with indentation" {
 }
 
 test "emit_function emits a deferred statement at ordinary fall-through, after the rest of the body" {
-  // Regression test: `.StatementDefer` (e.g. `defer free(loc);`) needs
+  // `.StatementDefer` (e.g. `defer free(loc);`) needs
   // an `emit_statement` case. A `defer` doesn't emit anything at its
   // source position; it's replicated at the block's actual exit point
   // instead, here just ordinary fall-through off the end of the
@@ -11200,7 +11200,7 @@ test "emit_function emits a deferred statement at ordinary fall-through, after t
 }
 
 test "emit_function emits a deferred statement before an early 'ret', snapshotting the return value first" {
-  // Regression test: `ret <expr>;` must evaluate `<expr>` before any
+  // `ret <expr>;` must evaluate `<expr>` before any
   // pending defer runs, since a defer might mutate a variable the
   // expression already read, so a `ret` with pending defers snapshots
   // into `__auto_type __fun_defer_ret` first.
@@ -11793,7 +11793,7 @@ test "emit_statement emits a Vec iterator for with an explicit index name" {
 }
 
 test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Vec instantiation, not just the bare 'Vec' stand-in" {
-  // Regression test: a real `Vec<str> local;` declaration records its
+  // a real `Vec<str> local;` declaration records its
   // local under `write_type`'s resolved (mangled) name, "Vec__str",
   // never the bare "Vec" every other test in this file hand-records via
   // `record_local` directly. `emit_for_iter`'s "is this a Vec?" check
@@ -11829,10 +11829,10 @@ test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Ve
 }
 
 test "emit_statement records a Vec iterator's own item as a known local, so a NESTED iterator over it resolves" {
-  // Regression test: `for existing : combos { for et : existing { ... }
+  // `for existing : combos { for et : existing { ... }
   // }` with `combos: Vec<Vec<str>>` needs the outer loop's item
   // (`existing`) recorded as a known local, or the inner loop over it
-  // is rejected outright. Fixed via `Codegen.local_dtype`: `combos`'s
+  // is rejected outright. `Codegen.local_dtype` holds `combos`'s
   // full `DataType` (`Vec<Vec<str>>`, recorded via `record_local_typed`
   // the same way a real `Variable` declaration/parameter does) lets
   // `emit_for_iter` read the element type (`Vec<str>`) directly off
@@ -12268,11 +12268,11 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
 }
 
 test "emit_statement emits a fit over a method-call subject with a CHAINED field-access receiver" {
-  // Regression test: `fit self.state.token_peek_prev_n(1) { ... }` needs
+  // `fit self.state.token_peek_prev_n(1) { ... }` needs
   // the method-call-subject branch to accept a receiver
   // (`self.state`) that's itself a chained field access, not just a
-  // bare local matching a plain `.Identifier`. Fixed by resolving the
-  // receiver via `resolve_field_chain` instead, the same lookup
+  // bare local matching a plain `.Identifier`. The receiver resolves
+  // via `resolve_field_chain`, the same lookup
   // `emit_method_call`/`infer_let_expr_type` use.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -13078,15 +13078,12 @@ test "emit_expr emits a bare-shorthand payload construction resolved against exp
 }
 
 test "emit_expr resolves a bare-shorthand construction NESTED inside another variant's own construction" {
-  // Regression test: `.Ok(.Some(t))` (check's real body once
-  // `Result<Option<Token>, Error>` monomorphizes, a nested generic
-  // instantiation -- see `ensure_compound_instantiated`'s own doc
-  // comment) used to fail -- the inner bare shorthand had no
-  // expected-type context, since emit_enum_variant_construction never
-  // set expected_enum_type per argument position the way emit_call's
-  // free-function argument loop already did. Fixed by resolving each
-  // position's own payload type via lookup_enum_variant_payload_type,
-  // the same registry emit_fit_enum_branch's binding registration uses.
+  // `.Ok(.Some(t))`, a bare-shorthand construction nested inside
+  // another variant's construction, needs its inner shorthand's
+  // expected type resolved too: `emit_enum_variant_construction` sets
+  // `expected_enum_type` per argument position via
+  // `lookup_enum_variant_payload_type`, the same registry
+  // `emit_fit_enum_branch`'s binding registration uses.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13373,12 +13370,11 @@ test "emit_expr emits a method call on a value-typed receiver, taking its addres
 }
 
 test "emit_expr emits a method call through a CHAINED field-access receiver (self.parts.push(s))" {
-  // Regression test: `self.parts.push(s)` needs `emit_method_call` to
+  // `self.parts.push(s)` needs `emit_method_call` to
   // accept a chained field access, not just a bare identifier receiver.
-  // Fixed by resolving the receiver through the same
-  // `resolve_field_chain` machinery `emit_fit`'s subject and the
-  // bare-shorthand assignment case use, rather than a second, narrower
-  // lookup.
+  // The receiver resolves through the same `resolve_field_chain`
+  // machinery `emit_fit`'s subject and the bare-shorthand assignment
+  // case use, rather than a second, narrower lookup.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("self", "StringBuilder", true);
@@ -13885,10 +13881,9 @@ test "emit_expr resolves chained field access through a generic-compound-instant
 }
 
 test "emit_expr resolves a chained field access through a CALL receiver, with no intermediate 'let'" {
-  // Regression test: `tok.unwrap().type`, a field access whose receiver
+  // `tok.unwrap().type`, a field access whose receiver
   // is itself a call (a plain function or a method call), not a known
-  // local. `resolve_field_chain` needs a case for a call receiver,
-  // beyond a plain identifier or a nested `.`-Expression. Fixed by
+  // local. `resolve_field_chain` handles a call receiver by
   // resolving the call's declared return type (the same
   // `lookup_function_rtype`/`lookup_impl_method_rtype` lookups
   // `infer_let_expr_type`'s "()" case uses), then rendering the call's
@@ -14137,22 +14132,17 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
 }
 
 test "pub transpile registers a generic impl's method metadata even when a PLAIN compound's OWN field is the first trigger" {
-  // Regression test: `compound Lexer { Vec<Token> tokens; }` needs
+  // `compound Lexer { Vec<Token> tokens; }` needs
   // `Vec<T>`'s impl method metadata registered. `pub transpile`'s
-  // enum/compound pass must not run before its `register_impl_methods`
-  // pass, or `generic_impl_templates` is still empty at the moment
-  // Lexer's field triggers `ensure_compound_instantiated` for
-  // `Vec<Token>`, and `maybe_instantiate_generic_impl_methods` silently
-  // finds no template to register. Fixed by running the
-  // impl-registration pass first.
+  // enum/compound pass runs after its `register_impl_methods` pass, so
+  // `generic_impl_templates` is already populated by the time Lexer's
+  // field triggers `ensure_compound_instantiated` for `Vec<Token>`,
+  // and `maybe_instantiate_generic_impl_methods` can find its template.
   // 
-  // Updated for lazy per-method emission (see
-  // `ensure_generic_impl_method_emitted`): `last` is never called
-  // anywhere in this test, so its C body must not appear at all; the
-  // regression this test guards is specifically that the method's
-  // metadata (`lookup_impl_method`) still resolves correctly, which
-  // requires the same ordering fix regardless of whether emission
-  // itself is eager or lazy.
+  // `last` is never called anywhere in this test, so its C body must
+  // not appear at all; the method's metadata (`lookup_impl_method`)
+  // still resolves correctly regardless of whether emission itself is
+  // eager or lazy (see `ensure_generic_impl_method_emitted`).
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -14259,7 +14249,7 @@ test "pub transpile registers a generic impl's method metadata even when a PLAIN
 }
 
 test "pub transpile hoists a generic compound's monomorphized typedef BEFORE another compound whose OWN field first triggers it" {
-  // Regression test: `StringBuilder { Vec<str> parts; ... }` must not
+  // `StringBuilder { Vec<str> parts; ... }` must not
   // emit `Vec__str`'s struct typedef nested inside StringBuilder's own
   // `typedef struct StringBuilder { ... }` field list, which is illegal
   // C: a typedef can't be declared in the middle of another struct's
@@ -14421,7 +14411,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
 }
 
 test "pub transpile hoists a generic impl method's monomorphized definition BEFORE the function that first triggers it, not nested inside it" {
-  // Regression test: `Box<num>` used for the first time inside `main`'s
+  // `Box<num>` used for the first time inside `main`'s
   // body, the common case, must not emit `Box__num`'s struct typedef and
   // `Box__num__get`'s C function definition nested inside `main`'s
   // `{ }`. A nested typedef is valid (if oddly-scoped) C, but a nested
@@ -14749,12 +14739,11 @@ test "ensure_compound_instantiated rejects a nested generic argument whose OWN t
 }
 
 test "ensure_compound_instantiated instantiates a nested generic argument (Box<Box<num>>)" {
-  // Regression test: `Result<Option<Token>, Error>` is a nested generic
-  // instantiation, a generic argument that's itself a generic
-  // instantiation. Fixed by resolving (and, on first use, emitting) the
-  // nested argument first via `resolve_type_name`, using its mangled
-  // name as the outer instantiation's arg name; recurses to arbitrary
-  // depth, not just one level.
+  // `Result<Option<Token>, Error>` is a nested generic instantiation, a
+  // generic argument that's itself a generic instantiation. The nested
+  // argument is resolved (and, on first use, emitted) first via
+  // `resolve_type_name`, using its mangled name as the outer
+  // instantiation's arg name; this recurses to arbitrary depth.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -15087,7 +15076,7 @@ test "emit_expr emits array indexing as C '[]'" {
 }
 
 test "emit_expr emits an explicit 'Type{ field = value, ... }' compound literal" {
-  // Regression test: `DynamicIntType{is_signed = ..., bits = ...}` needs
+  // `DynamicIntType{is_signed = ..., bits = ...}` needs
   // an `emit_expr` case for `.CompoundInit`, rejected as
   // `CodegenErrorKind.UnsupportedNode` without one.
   CodegenState st = codegen_state_new();
@@ -15137,9 +15126,8 @@ test "emit_expr emits an empty explicit compound literal as '(Type){0}'" {
 }
 
 test "emit_expr resolves a bare '.{ field = value, ... }' compound literal against expected_compound_type" {
-  // Regression test: `dtype_new`'s own real body (`dt.flags = .{
-  // is_pointer = false, ... };`) -- found via the self-compile
-  // experiment -- likewise rejected outright: the bare (no explicit
+  // `dtype_new`'s own real body (`dt.flags = .{
+  // is_pointer = false, ... };`) is likewise rejected outright: the bare (no explicit
   // `Type`) form has no dtype of its own, and needs
   // `Codegen.expected_compound_type` (set by `emit_expr`'s own `=`
   // assignment case from the left-hand side's resolved field type,
@@ -15387,7 +15375,7 @@ test "emit_statement resolves a bare-shorthand assignment right-hand side agains
 }
 
 test "emit_expr resolves a bare-shorthand equality comparison's right-hand side against the field's declared type" {
-  // Regression test: `self.kind == .None` needs a bare shorthand as a
+  // `self.kind == .None` needs a bare shorthand as a
   // nested sub-expression, the right operand of `==`, not directly a
   // `ret` value/`Variable` initializer/assignment RHS, to have an
   // expected-type context to resolve against.
@@ -15451,13 +15439,10 @@ test "emit_expr resolves a bare-shorthand equality comparison's right-hand side 
 }
 
 test "pub transpile resolves a bare-shorthand call argument against the callee's own declared parameter type" {
-  // Regression test: `err_kind(.Parse, "msg", 0)` needs a bare shorthand
-  // passed as a call argument to have an expected-type context to
-  // resolve against, unlike a `ret` value/`Variable` initializer/
-  // assignment or comparison RHS, which already worked. Fixed via a
-  // whole-program pre-pass, `register_function_signatures`, recording
-  // each plain function's parameter types so `emit_call` can resolve a
-  // bare shorthand argument against the position it's passed to.
+  // A bare shorthand passed as a call argument resolves against the
+  // callee's declared parameter type at that position, via a
+  // whole-program pre-pass (`register_function_signatures`) that
+  // records each plain function's parameter types.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15565,12 +15550,9 @@ test "pub transpile resolves a bare-shorthand call argument against the callee's
 }
 
 test "pub transpile monomorphizes a generic function from its own call site, inferring T from a literal argument" {
-  // Regression test: `err_kind<T>(...) Result<T, Error>` is a generic
-  // function, as opposed to a generic impl's methods/a generic compound/
-  // a generic enum, all of which already worked, so this codegen must
-  // not silently emit its bare, unsubstituted `T` as a literal, invalid
-  // C type instead of monomorphizing it. Fixed by
-  // `maybe_instantiate_generic_function`: infers each type param's
+  // `err_kind<T>(...) Result<T, Error>` is a generic function, so its
+  // bare, unsubstituted `T` must not be emitted as a literal, invalid
+  // C type. `maybe_instantiate_generic_function` infers each type param's
   // concrete binding from the call site's arguments (here, a plain
   // number literal infers "num"), monomorphizes under a mangled name
   // reusing the same `type_subst_*`/`emit_hoisted` machinery built for
@@ -15779,7 +15761,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
-  // Regression test: `err_kind<T>(...) Result<T, Error>` is a generic
+  // `err_kind<T>(...) Result<T, Error>` is a generic
   // function whose return type (`Result<T, Error>`) is itself a generic
   // enum instantiation, so monomorphizing `err_kind` (which swaps
   // `self.state` to a scratch buffer) triggers a nested
@@ -15788,9 +15770,9 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   // measured against the outer, now-swapped-away buffer. The nested
   // `emit_hoisted` must not splice at that stale position into the
   // wrong, much shorter scratch buffer, corrupting `substr`'s length
-  // arithmetic and crashing outright. Fixed by suspending
-  // `hoist_insert_pos`, like `type_subst_param_names` already was, for
-  // the duration of `maybe_instantiate_generic_function`'s/
+  // arithmetic and crashing outright. `hoist_insert_pos` is suspended,
+  // like `type_subst_param_names`, for the duration of
+  // `maybe_instantiate_generic_function`'s/
   // `maybe_instantiate_generic_impl_methods`'s state swap.
   // 
   // `main`'s return type here (`Opt<num>`) exercises a second, unrelated
@@ -15943,13 +15925,13 @@ test "pub transpile does not crash when a generic function's OWN return type is 
 }
 
 test "pub transpile infers a generic function's type param from the CALLER's expected return type, not the argument itself" {
-  // Regression test: `ret ok(.None);` needs `ok<T>(value) Result<T,
+  // `ret ok(.None);` needs `ok<T>(value) Result<T,
   // Error>`'s type param resolved even though it can't be read off
   // `.None` alone, since a bare shorthand carries no type info by
   // itself. It's inferred from the enclosing function's declared return
   // type (`Result<Opt<num>, Error>` here), matched structurally against
-  // `ok`'s `Result<T, Error>` shape at the same generic-arg position.
-  // Fixed via `infer_generic_function_type_param_from_context`
+  // `ok`'s `Result<T, Error>` shape at the same generic-arg position,
+  // via `infer_generic_function_type_param_from_context`
   // (`Codegen.current_fn_rtype_dt`) plus threading the resulting
   // already-substituted param types back through
   // `GenericCallResolution` so the bare `.None` argument itself also
@@ -16195,7 +16177,7 @@ test "transpile emits the prelude followed by every top-level function" {
 }
 
 test "emit_function resets the locals table's type-name column between functions" {
-  // Regression test: `emit_function` must reset `local_type_name`
+  // `emit_function` must reset `local_type_name`
   // between functions along with `local_names`/`local_is_pointer`, or
   // it keeps accumulating across every function `transpile` emits while
   // the other two columns empty out, and the next function's params
@@ -16331,7 +16313,7 @@ test "emit_function resets the locals table's type-name column between functions
 }
 
 test "emit_function resets local_dtype (not just local_names/local_type_name) between functions" {
-  // Regression test: `Codegen.local_dtype`, added for `emit_for_iter`'s
+  // `Codegen.local_dtype`, added for `emit_for_iter`'s
   // structural element-type lookup, must be reset in
   // `emit_function_named` like its three sibling columns, or a later
   // function's local reads back an earlier function's stale dtype at
