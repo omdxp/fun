@@ -8470,14 +8470,11 @@ impl Codegen {
                       let inferred = self.infer_arg_type_name(arg_node);
                       if inferred.is_some() {
                         found_name = inferred.unwrap();
-                        // A pointer argument needs the generated
-                        // function's param to also be a pointer, but
-                        // `infer_arg_type_name` only returns the bare
-                        // type name, dropping pointer-ness. Captured
-                        // here, at the exact matching arg position,
-                        // since `ai` is stale by the time this loop
-                        // ends, incremented past every param, not just
-                        // the matching one.
+                        // A pointer argument needs the generated param
+                        // to be a pointer too, but `infer_arg_type_name`
+                        // returns only the bare name. Captured here at
+                        // the matching position, since `ai` is stale once
+                        // the loop ends, having passed every param.
                         found_is_pointer = self.infer_arg_is_pointer(arg_node);
                         found = true;
                       }
@@ -8488,17 +8485,12 @@ impl Codegen {
                 ai = ai + 1;
               }
               // Falls back to a nested match when no param is a bare
-              // occurrence of `tp` itself: a param declared `Pair<L, R>
-              // p` never matches the bare-occurrence loop above, since
-              // `v.var_type.generic_args.len == 0` fails, but `tp` still
-              // appears as a bare occurrence one level down, inside the
-              // param's `generic_args`. Resolved by finding `tp`'s
-              // position there, then reading that same position out of
-              // the actual argument's structural `DataType` (via
-              // `infer_arg_dtype`). Only one level of nesting is
-              // matched, matching `infer_arg_dtype`'s scope; a param
-              // whose actual argument lacks recorded generic args can't
-              // be resolved this way either.
+              // occurrence of `tp`: a param declared `Pair<L, R> p` never
+              // matches the loop above, but `tp` appears bare one level
+              // down inside the param's `generic_args`. Its position
+              // there is read out of the argument's structural
+              // `DataType`. Only one level of nesting is matched, and an
+              // argument with no recorded generic args can't resolve.
               if !found {
                 num ai3 = 0;
                 for parg3 : f.args {
@@ -8552,14 +8544,11 @@ impl Codegen {
             }
             str mangled_name = nb.build();
 
-            // The substitution context is set up front, before the
-            // dedup check below, so substituted param types can be
-            // computed and returned via
-            // `GenericCallResolution.param_types` for bare-shorthand
-            // argument resolution on either path: a repeat call resolves
-            // to the already-monomorphized instance without re-emitting
-            // anything, but its params still need resolving fresh for
-            // this call site.
+            // The substitution context is set up before the dedup check
+            // below, so substituted param types are computed on either
+            // path: a repeat call re-uses the already-monomorphized
+            // instance without re-emitting, but still needs its params
+            // resolved fresh for this call site.
             let prev_params = self.type_subst_param_names;
             let prev_arg_names = self.type_subst_arg_type_strs;
             let prev_arg_ptrs = self.type_subst_arg_is_pointer;
@@ -8590,19 +8579,13 @@ impl Codegen {
             if !already_emitted {
               self.emitted_generic_instantiations.push(mangled_name);
 
-              // `hoist_insert_pos` is suspended for the duration of the
-              // swap, so a nested instantiation triggered from inside
-              // this function's signature/body appends inline to
-              // `scratch` instead of splicing at a stale position into
-              // the wrong buffer; the scratch buffer still ends up
-              // hoisted to the correct outer position via `emit_hoisted`
-              // below. Same reasoning as
-              // `maybe_instantiate_generic_impl_methods`'s local-state
-              // save/restore: since this can run nested inside another
-              // function's still-in-progress emission,
-              // `local_names`/`local_is_pointer`/`local_type_name`/
-              // `current_fn_rtype_name`/`current_fn_rtype_dt` must be
-              // saved and restored too, not just `hoist_insert_pos`.
+              // `hoist_insert_pos` is suspended for the swap, so a nested
+              // instantiation appends inline to `scratch` instead of
+              // splicing at a stale position into the wrong buffer;
+              // `emit_hoisted` below still lands `scratch` at the right
+              // outer position. This can run nested inside another
+              // function's in-progress emission, so the local-name and
+              // return-type state is saved and restored too.
               CodegenState scratch = codegen_state_new();
               CodegenState* saved_state = self.state;
               let saved_hoist_pos = self.hoist_insert_pos;
@@ -8614,29 +8597,23 @@ impl Codegen {
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
               let saved_defer_stack = self.defer_stack;
               let saved_defer_scope_starts = self.defer_scope_starts;
-              // `current_stmt_start_pos` needs the same suspend/restore
-              // treatment as `hoist_insert_pos`, since `emit_function_
-              // named` recurses into `emit_statements`, overwriting it
-              // with a position measured against this scratch buffer;
-              // see `maybe_instantiate_generic_impl_methods`'s identical
-              // `method_scratch` swap.
+              // `current_stmt_start_pos` needs the same suspend and
+              // restore as `hoist_insert_pos`, since `emit_function_named`
+              // recurses into `emit_statements` and overwrites it with a
+              // position measured against this scratch buffer.
               let saved_stmt_start_pos = self.current_stmt_start_pos;
-              // Also suspended, same as `resolve_field_chain`'s
-              // call-as-receiver probe: without this, a generic impl
-              // method reached for the first time from inside this
-              // function's body would be drained immediately, and since
-              // `hoist_insert_pos`/`current_stmt_start_pos` are both
-              // suspended here, its splice would fall back to appending
+              // Also suspended: otherwise a generic impl method first
+              // reached from inside this body would drain immediately,
+              // and with both positions suspended its splice would append
               // at `self.state`'s tail, nesting a full method definition
-              // inside this function's `{ }`, a hard C syntax error.
-              // Only enqueued while suppressed; drained explicitly
-              // below, once `self.state`/`hoist_insert_pos` are back to
-              // the real ones.
+              // inside this function's braces. Entries are only enqueued
+              // while suppressed, and drained explicitly below once the
+              // real buffer and position are restored.
               let prev_suppress2 = self.suppress_generic_impl_method_draining;
-              // Participates in `hoist_scratch_depth` the same way
-              // `emit_one_generic_impl_method` does, since this
-              // function's body can be reached from inside another
-              // generic impl method's first instantiation.
+              // Shares `hoist_scratch_depth` with
+              // `emit_one_generic_impl_method`, since this body can be
+              // reached from inside another generic impl method's first
+              // instantiation.
               if self.hoist_scratch_depth == 0 {
                 self.root_state = self.state;
                 self.root_hoist_pos = self.hoist_insert_pos;
@@ -8668,17 +8645,13 @@ impl Codegen {
               self.emit_hoisted(scratch.out.build());
               if !prev_suppress2 && !self.draining_generic_impl_methods {
                 // A method enqueued from inside the just-spliced
-                // `scratch` text needs its inline prototype findable
-                // from before `scratch`'s text, not at
-                // `self.hoist_insert_pos`'s current value, which has
-                // already advanced past `scratch`'s spliced length and
-                // would land the prototype too late for a call inside
-                // `scratch` to reach it. `saved_hoist_pos`, captured
-                // before that splice, is the right target, realigned
-                // only for the duration of this drain. The full body
-                // splice still uses `self.hoist_insert_pos` directly,
-                // landing right after `scratch`, where a definition
-                // belongs.
+                // `scratch` needs its inline prototype before that text,
+                // not at `self.hoist_insert_pos`, which has advanced past
+                // `scratch` and would land the prototype too late for a
+                // call inside it. `saved_hoist_pos`, captured before the
+                // splice, is the right target for this drain only; the
+                // body splice still uses `self.hoist_insert_pos`, landing
+                // after `scratch` where a definition belongs.
                 let saved_stmt_start_pos_for_drain = self.current_stmt_start_pos;
                 self.current_stmt_start_pos = saved_hoist_pos;
                 self.drain_pending_generic_impl_methods();
@@ -8686,11 +8659,10 @@ impl Codegen {
               }
             }
 
-            // Computed before the substitution context below is torn
-            // down; see `GenericCallResolution.rtype`. `f.rtype` is
-            // optional for a `void`-returning generic function, left as
-            // a harmless placeholder when absent, since no caller reads
-            // `rtype` without checking `f.has_rtype` first.
+            // Computed before the substitution context is torn down
+            // below. `f.rtype` is optional for a `void`-returning generic
+            // function and stays a placeholder when absent, no caller
+            // reading `rtype` without checking `f.has_rtype` first.
             DataType resolved_rtype = dtype_new();
             if f.has_rtype {
               resolved_rtype = self.resolve_type_subst(*f.rtype);
@@ -8713,13 +8685,11 @@ impl Codegen {
     ret .None;
   }
 
-  // Looks up the declared type of `fn_name`'s parameter at `arg_index`
-  // (0-based); see `Codegen.function_names`. Falls back to a generic
-  // function template's declared parameter type at that position when
-  // `fn_name` isn't in the plain registry, since a non-generic-position
-  // param type is already fully concrete, needing no substitution for
-  // bare-shorthand purposes. `.None` means `fn_name` isn't registered
-  // anywhere, or `arg_index` is out of range.
+  // Looks up the declared type of `fn_name`'s parameter at `arg_index`.
+  // Falls back to a generic template's declared param type at that
+  // position when `fn_name` isn't in the plain registry, a
+  // non-generic-position param type already being concrete. `.None` means
+  // `fn_name` isn't registered, or `arg_index` is out of range.
   lookup_function_param_type(str fn_name, num arg_index) Option<DataType*> {
     num i = 0;
     for i < self.function_names.len {
@@ -8752,8 +8722,7 @@ impl Codegen {
     ret .None;
   }
 
-  // Looks up `fn_name`'s full param count and trailing default-
-  // parameter value expressions; see `Codegen.function_default_values`.
+  // Looks up `fn_name`'s trailing default-parameter value expressions.
   // `.None` means `fn_name` isn't registered as a plain function.
   lookup_function_default_values(str fn_name) Option<Vec<Node *>> {
     num i = 0;
@@ -8766,11 +8735,10 @@ impl Codegen {
     ret .None;
   }
 
-  // Looks up `fn_name`'s full param list, needed by
-  // `emit_default_trailing_args` so a default value that's itself a
-  // bare enum shorthand resolves against that param's declared type,
-  // the same way a caller-provided argument does. `.None` means
-  // `fn_name` isn't registered as a plain function.
+  // Looks up `fn_name`'s full param list, so
+  // `emit_default_trailing_args` can resolve a default value that is
+  // itself a bare enum shorthand against that param's declared type.
+  // `.None` means `fn_name` isn't registered as a plain function.
   lookup_function_param_types(str fn_name) Option<Vec<DataType *>> {
     num i = 0;
     for i < self.function_names.len {
@@ -8783,18 +8751,13 @@ impl Codegen {
   }
 
   // Pre-registers every method of a plain or quirk-implementing
-  // (non-generic) impl block under its bare name and mangled C
-  // call-site name (see `Codegen.impl_method_owner_type`), without
-  // emitting any C. A whole-program pass run before any impl method
-  // body is generated, so a method calling another type's method
-  // already has that type's row recorded regardless of source order.
-  // The bare name is recovered by stripping the known prefix (`Type__`
-  // for a plain impl, `Type__Quirk__` for a quirk-implementing one) off
-  // each method's already pre-mangled `Function` node name, the scheme
-  // `_parse_impl_method` uses in the parser. A generic impl is instead
-  // only recorded whole; see `Codegen.generic_impl_templates`.
-  // Monomorphization happens lazily, on first concrete use (see
-  // `maybe_instantiate_generic_impl_methods`).
+  // (non-generic) impl block under its bare and mangled call-site names,
+  // emitting no C. A whole-program pass run before any impl method body,
+  // so a method calling another type's method already has that type's row
+  // recorded regardless of source order. The bare name comes from
+  // stripping the known prefix (`Type__`, or `Type__Quirk__`) off each
+  // method's pre-mangled `Function` node name. A generic impl is instead
+  // recorded whole and monomorphized lazily on first concrete use.
   register_impl_methods(Node node) {
     fit node.kind {
       .Impl(i) -> {
@@ -8815,8 +8778,8 @@ impl Codegen {
           DataType* rtype = nil;
           Vec<DataType*> param_types;
           param_types.init(0);
-          // Each param's default value expression (`nil` when it has
-          // none); see `Codegen.impl_method_default_values`.
+          // Each param's default value expression, `nil` when it has
+          // none.
           Vec<Node*> default_values;
           default_values.init(0);
           fit m.kind {
@@ -8867,20 +8830,13 @@ impl Codegen {
   // `impl Type { methods }` block as an ordinary top-level C function.
   // Each method is already parsed as a `Function` node pre-mangled to
   // `Type__method` (or `Type__Quirk__method`) with `<Type>* self` as its
-  // real first arg (see `_parse_impl_method` in the parser), so a
-  // method emits exactly like any other function via `emit_function`,
-  // with no separate self-injection or name-mangling logic needed here.
-  // Assumes `register_impl_methods` already ran for every impl in the
-  // program; this function only emits, it doesn't register.
-  // 
-  // Dynamic dispatch through an abstract quirk-typed value is handled
-  // separately by `emit_quirk_vtable_machinery`, called for every
-  // quirk-implementing impl right after this function emits its
-  // concrete method bodies. A static call through a receiver whose
-  // declared type is already the concrete implementing type is
-  // resolved entirely by `emit_method_call`'s existing lookup. A
-  // generic impl is skipped here, same as `emit_compound`'s
-  // generic-template skip.
+  // first arg, so it emits like any other function, with no
+  // self-injection or mangling here. Assumes `register_impl_methods`
+  // already ran for every impl. Dynamic dispatch through an abstract
+  // quirk-typed value is handled by `emit_quirk_vtable_machinery`, called
+  // right after these concrete bodies; a static call through a concrete
+  // receiver resolves entirely in `emit_method_call`. A generic impl is
+  // skipped, as in `emit_compound`.
   emit_impl(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Impl(i) -> {
@@ -8901,50 +8857,36 @@ impl Codegen {
 
   // Emits the C machinery backing dynamic dispatch through an abstract
   // quirk-typed value (`Shape s = &rect; s.area();`) for one concrete,
-  // non-generic quirk-implementing impl (`impl Rectangle as Shape {
-  // ... }`). A no-op for a plain impl or a generic one, skipped by
-  // `transpile`'s caller same as `emit_impl`. Emits one vtable struct
-  // per quirk name directly (`Shape_vtable`), rather than a
-  // signature-hash struct shared across differently-named quirks with
-  // identical signatures; that sharing would be a size optimization,
-  // not a correctness requirement.
+  // non-generic quirk-implementing impl. A no-op for a plain or generic
+  // impl. One vtable struct is emitted per quirk name (`Shape_vtable`)
+  // rather than a signature-hash struct shared across identically-shaped
+  // quirks, which would be a size optimization only.
   // 
   // Three pieces, in order:
-  // 1. The first time this quirk name is seen (`Codegen.quirk_names`
-  // doesn't have it yet): the vtable struct itself (one function-pointer
-  // field per quirk method, each taking `void* self` first) and the
-  // "fat pointer" wrapper struct (`typedef struct Shape { void* self;
-  // const Shape_vtable* vtable; } Shape;`) that `Shape` itself resolves
-  // to as a C type, derived from this impl's method signatures, which
-  // every other impl of the same quirk must structurally match (the
-  // language's quirk-conformance rule; this codegen has no typechecker
-  // to verify it, so it's simply assumed).
-  // 2. Always: a `void* self`-taking wrapper trampoline per method (casts
-  // back to `Type*` and calls the already-mangled, already-emitted
-  // `Type__Quirk__method`), plus a `static const` vtable instance
-  // (`__fun_impl_Type_Quirk_vtable`) populated with those wrappers.
-  // 3. Always: the coercion helper (`__fun_coerce_Type_Quirk`) that
-  // builds a `Shape` value from a `Type*`, called from a `Shape s =
-  // &rect;` declaration's initializer; see the `Variable` declaration's
-  // coercion check.
+  // 1. The first time this quirk name is seen: the vtable struct, one
+  // function-pointer field per method each taking `void* self` first, and
+  // the fat-pointer wrapper struct `Shape` resolves to as a C type,
+  // derived from this impl's signatures. Every other impl of the quirk
+  // must structurally match; there is no typechecker to verify it.
+  // 2. Always: a `void* self`-taking wrapper trampoline per method,
+  // casting back to `Type*` and calling `Type__Quirk__method`, plus a
+  // `static const` vtable instance populated with those wrappers.
+  // 3. Always: the `__fun_coerce_Type_Quirk` helper building a `Shape`
+  // value from a `Type*`, called from a `Shape s = &rect;` initializer.
   emit_quirk_vtable_machinery(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Impl(i) -> {
         // A generic quirk impl (`impl Vec<T> as Sized { ... }`) has no
-        // single monomorphic vtable signature: an unbound `T` in a
-        // method's return/arg type can't be expressed in one C
-        // function-pointer signature. Same skip `emit_impl` applies for
-        // generic impls generally.
+        // single monomorphic vtable signature: an unbound `T` in a method
+        // signature can't be expressed as one C function pointer.
         if !i.has_quirk_name || i.has_type_params {
           ret .None;
         }
         str quirk_name = i.quirk_name;
         str type_name = i.type_name;
-        // A no-op when this impl's machinery already ran, e.g.
-        // triggered early by `ensure_plain_type_emitted`'s
-        // field-dependency check, so the normal per-impl pass reaching
-        // it again later doesn't re-emit; see
-        // `Codegen.emitted_quirk_impl_vtables`.
+        // A no-op when this impl's machinery already ran, such as when
+        // `ensure_plain_type_emitted`'s field-dependency check triggered
+        // it early, so the later per-impl pass doesn't re-emit.
         StringBuilder eqiv_key_sb = string_builder_init(16);
         eqiv_key_sb.append(type_name);
         eqiv_key_sb.append("::");
@@ -8954,17 +8896,12 @@ impl Codegen {
           ret .None;
         }
         self.emitted_quirk_impl_vtables.push(eqiv_key);
-        // The vtable/fat-pointer type's identity: a concrete
+        // The vtable and fat-pointer type's identity. A concrete
         // instantiation of a generic quirk (`impl Config as
-        // To<JsonValue>`) is a distinct type from `To<str>` or any other
-        // instantiation, and needs its own mangled name (`To__JsonValue`)
-        // to avoid colliding with them. `i.quirk_concrete_instantiation`
-        // already carries that, mangled the same way
-        // `ensure_compound_instantiated` mangles any other generic
-        // instantiation. Method name mangling (`prefix`/`strip_prefix`
-        // below) stays keyed on the bare quirk name regardless, since
-        // `fnv.name` is already pre-mangled that way by
-        // `_parse_impl_method`.
+        // To<JsonValue>`) is distinct from `To<str>` and needs its own
+        // mangled name, which `i.quirk_concrete_instantiation` carries.
+        // Method-name mangling below stays keyed on the bare quirk name,
+        // `fnv.name` already being pre-mangled that way by the parser.
         str quirk_type_identity = quirk_name;
         if i.has_quirk_concrete_instantiation {
           quirk_type_identity = i.quirk_concrete_instantiation;
@@ -9164,15 +9101,11 @@ impl Codegen {
     }
   }
 
-  // Writes the fixed set of C headers this codegen always includes,
-  // plus the `stderr_stream()` helper `emit_expr`'s `.Panic` case calls
-  // unconditionally, so it must always be present regardless of whether
-  // the program uses `panic(...)`. `<ctype.h>` is unconditional here too,
-  // rather than gated on an actual `imp std.c.ctype;`, since import
-  // nodes never survive `import_resolver.fn`'s flattening, so this
-  // codegen has no way to see which `std.c.*` modules a program
-  // imported; including it unconditionally is cheap and harmless when
-  // unused, same as every other header here.
+  // Writes the fixed set of C headers this codegen always includes, plus
+  // the `stderr_stream()` helper `emit_expr`'s `.Panic` case calls. Every
+  // header is unconditional rather than gated on an actual import: import
+  // nodes never survive flattening, so there is no way to see which
+  // `std.c.*` modules a program used, and an unused header is harmless.
   pub write_prelude() {
     self.state.write(`#include <stdio.h>
     `#include <stdbool.h>
@@ -9184,33 +9117,27 @@ impl Codegen {
     `#include <limits.h>
     ``);
     self.state.write("#include <math.h>\n");
-    // `stdout`/`stderr`/`stdin` are macros/globals, not callable, and
-    // differ per libc, so wrapping each in a tiny `static` function lets
-    // `std.c.io`'s bodyless `stdout_stream()`/`stderr_stream()`/
-    // `stdin_stream()` bindings resolve portably.
+    // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
+    // differ per libc, so a `static` wrapper each lets `std.c.io`'s
+    // bodyless stream bindings resolve portably.
     self.state.write(`static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     ``);
-    // Runtime helpers backing the `__fun_key_hash` intrinsic (see
-    // `emit_call`): an FNV-1a-style hash. Always emitted, cheap and
-    // harmless when unused, same as every other prelude helper here.
+    // FNV-1a-style hashes backing the `__fun_key_hash` intrinsic. Always
+    // emitted, harmless when unused.
     self.state.write(`static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     ``);
-    // `__fun_tag(x)` maps a single vararg's C type to the
-    // one-character tag `emit_call`'s call-site tagging embeds in
-    // `__fun_vtags`; see `emit_function_named` for the callee-side
-    // unpacking that reads it back.
+    // `__fun_tag(x)` maps a vararg's C type to the one-character tag
+    // `emit_call` embeds in `__fun_vtags`, which the callee-side
+    // unpacking in `emit_function_named` reads back.
     self.state.write("#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n");
-    // Directory iteration/creation/kind-check helpers for `std.c.dirent`
-    // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
-    // libc directory APIs differ enough across platforms (POSIX
-    // opendir/readdir/DIR* vs. Win32 FindFirstFile/FindNextFile) that
-    // hand-written wrappers, same approach as `stdout_stream` above, are
-    // the portable option, each signature matched to a Fun type exactly
-    // (`void*` <-> `raw*`, `long long` <-> `num`, `char*`/`const char*`
-    // <-> `str`).
+    // Directory helpers for `std.c.dirent`, backing `std.fs`'s
+    // `list_dir`/`walk_dir`/`is_dir`/`make_dir`. Platform directory APIs
+    // differ too much (POSIX `opendir`/`readdir` versus Win32
+    // `FindFirstFile`) for direct bindings, so each wrapper's signature
+    // is matched exactly to its Fun type.
     self.state.write(`#ifdef _WIN32
     `#include <windows.h>
     `#include <direct.h>
@@ -9231,12 +9158,10 @@ impl Codegen {
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
     ``);
-    // The compiler's private thread primitive, always emitted
-    // regardless of whether the program uses `fork`/`async`/channels.
-    // `await`/`fork` support builds directly on
-    // `__fun_thread_start`/`__fun_thread_join`; the M:N scheduler
-    // (`fork`'s task queue) builds on top of this, not the other way
-    // around.
+    // The private thread primitive, always emitted regardless of whether
+    // the program uses `fork`, `async`, or channels. `await` and `fork`
+    // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
+    // M:N scheduler builds on top of those.
     self.state.write(`#ifdef _WIN32
     `#include <windows.h>
     `typedef HANDLE __fun_thread_t;
@@ -9253,11 +9178,9 @@ impl Codegen {
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     ``);
-    // `std.c.net`'s POSIX socket bindings (`socket`/`bind`/`listen`/
-    // `accept`/`recv`/`send`/`close`) need these headers, so always
-    // emitted, same "no way to see which std.c.* modules a program
-    // imports" reasoning as every other prelude header here. Includes
-    // both the Windows and POSIX split.
+    // `std.c.net`'s socket bindings need these headers, in both their
+    // Windows and POSIX forms, and are emitted unconditionally like every
+    // other prelude header.
     self.state.write(`#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
@@ -9275,16 +9198,13 @@ impl Codegen {
     `#include <unistd.h>
     `#endif
     ``);
-    // A plain (non-fork) program can still deadlock on a channel wait
-    // (e.g. a lone `ch.recv()` with no sender): `std/channel.fn` calls
-    // `__fun_wd_enter_wait`/`__fun_wd_leave_wait` around every blocking
-    // wait unconditionally, so these three symbols must always exist
-    // regardless of whether `fork` is used. When `fork` isn't used
-    // anywhere, this minimal, self-contained watchdog (no task queue to
-    // track, since nothing is scheduled) is emitted; when `fork` is
-    // used, `emit_scheduler_runtime` below emits its own alternative
-    // watchdog, integrated with the scheduler's task queue, instead, and
-    // defines the same three symbols there. Dormant unless
+    // A non-fork program can still deadlock on a channel wait, and
+    // `std/channel.fn` calls `__fun_wd_enter_wait`/`__fun_wd_leave_wait`
+    // around every blocking wait, so these three symbols must always
+    // exist. Without `fork` this minimal self-contained watchdog is
+    // emitted, with no task queue to track; with `fork`,
+    // `emit_scheduler_runtime` defines the same symbols against the
+    // scheduler's queue instead. Dormant unless
     // FUN_DEADLOCK_WATCHDOG_MS is set.
     if self.uses_fork {
       self.emit_scheduler_runtime();
@@ -9331,22 +9251,17 @@ impl Codegen {
     }
   }
 
-  // Emits the M:N cooperative task scheduler runtime used by `fork`: a
-  // fixed pool of OS worker threads, sized to the CPU count, drains a
-  // shared FIFO task queue; each `fork f(args)` enqueues one task (a
-  // function pointer plus a heap-allocated argument payload; see
-  // `emit_async_function_support`'s fork-helper section), which a
-  // worker pops and runs to completion. Genuine M:N scheduling, many
-  // cheap `fork` tasks onto a few OS threads, not one-thread-per-fork
-  // the way `await` is. The pool starts lazily on the first fork;
-  // `__fun_sched_wait_idle()` blocks until every queued task has run.
-  // Not wired up to run automatically at every `main` exit point, so an
-  // orphaned `fork` with no other synchronization isn't guaranteed to
-  // finish before `main` returns; every real use in this stdlib already
-  // synchronizes via a `WaitGroup`/channel. Cooperative, not preemptive:
-  // a task that blocks (e.g. on a channel op) holds its worker, since
-  // the yield points are the blocking primitives. Reuses the prelude's
-  // `__fun_thread_start`/`__fun_thread_t`.
+  // Emits the M:N cooperative task scheduler runtime `fork` uses: a fixed
+  // pool of OS worker threads, sized to the CPU count, draining a shared
+  // FIFO task queue. Each `fork f(args)` enqueues a function pointer plus
+  // a heap-allocated payload, which a worker pops and runs to completion,
+  // so many cheap tasks share a few threads rather than one thread per
+  // fork as with `await`. The pool starts lazily on the first fork, and
+  // `__fun_sched_wait_idle()` blocks until the queue drains. It isn't run
+  // automatically at `main`'s exit points, so an orphaned `fork` with no
+  // synchronization may not finish first; stdlib uses synchronize through
+  // a `WaitGroup` or channel. Cooperative, not preemptive: a blocked task
+  // holds its worker, the blocking primitives being the yield points.
   emit_scheduler_runtime() {
     self.state.write(` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
     `typedef void (*__fun_task_fn)(void*);
