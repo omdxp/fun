@@ -987,3 +987,107 @@ test "std.io APIs usable in async function transpile" {
   assert contains(out, "read_bytes("), "expected the read method call";
   assert contains(out, "read_all("), "expected the whole-file read call";
 }
+
+test "std.thread_runtime async task handle behavior is stable across backend selectors" {
+  str src = `imp std.thread_runtime;
+  `imp std.runtime_backend;
+  `imp std.c.io;
+  `fun worker(raw* arg) raw* {
+  `  ret arg;
+  `}
+  `async fun main() {
+  `  RuntimeAsyncTask joined = runtime_async_spawn(worker, NULL);
+  `  num joined_start = joined.last_start_rc();
+  `  bin joined_active_before = joined.is_active();
+  `  num joined_join_rc = await joined.join_async(NULL);
+  `  RuntimeAsyncTask bad = runtime_async_task_new();
+  `  bad.start_rc = -7;
+  `  bad.active = false;
+  `  num bad_detach_rc = await bad.detach_async();
+  `  printf("backend=%s\n", runtime_backend_name());
+  `  printf("joined_start=%lld\n", joined_start);
+  `  printf("joined_active_before=%lld\n", joined_active_before);
+  `  printf("joined_join_rc=%lld\n", joined_join_rc);
+  `  printf("bad_detach_rc=%lld\n", bad_detach_rc);
+  `}`;
+  let out = emit_c(
+    src,
+    "std.thread_runtime async task handle behavior is stable across backend selectors"
+  );
+  assert contains(out, "RuntimeAsyncTask__join_async"), "expected the awaited join method";
+  assert contains(out, "RuntimeAsyncTask__detach_async"), "expected the awaited detach method";
+  assert contains(out, "bad.start_rc"), "expected the handle field assignment";
+}
+
+test "std.net offload async edge return codes are stable across backend selectors" {
+  str src = `imp std.net;
+  `imp std.channel;
+  `imp std.runtime_backend;
+  `imp std.c.io;
+  `async fun main() {
+  `  ChannelCancelToken token = channel_cancel_token_new();
+  `  ChannelCancelToken cancelled = channel_cancel_token_new();
+  `  _ = channel_cancel_token_cancel(&cancelled);
+  `  str recv_buf = malloc(8);
+  `  num rc_cancelled = -99;
+  `  if recv_buf != NULL {
+  `    rc_cancelled = await tcp_roundtrip_offload_async(-1, "PING", recv_buf, 7, &cancelled);
+  `    free(recv_buf);
+  `  }
+  `  num rc_invalid_buf = await tcp_roundtrip_offload_async(-1, "PING", NULL, 7, &token);
+  `  printf("backend=%s\n", runtime_backend_name());
+  `  printf("rc_cancelled=%lld\n", rc_cancelled);
+  `  printf("rc_invalid_buf=%lld\n", rc_invalid_buf);
+  `}`;
+  let out = emit_c(
+    src,
+    "std.net offload async edge return codes are stable across backend selectors"
+  );
+  assert contains(out, "tcp_roundtrip_offload_async"), "expected the offload helper call";
+  assert contains(out, "channel_cancel_token_cancel("), "expected the cancel token to be cancelled";
+  assert contains(out, "runtime_backend_name()"), "expected the backend selector call";
+}
+
+// gap: `imp std.c.time` does not add `#include <time.h>`; the preamble is fixed
+// rather than derived from the import set.
+// test "std.time import adds time.h include" {
+// str src = `imp std.c.time;
+// `fun main() { ret; }`;
+// let out = emit_c(src, "std.time import adds time.h include");
+// assert contains(out, "#include <time.h>"), "expected the time header";
+// }
+
+// gap: the extern prototypes of an imported module are not emitted, so
+// `long long pthread_create(` never appears. The include layer itself is fine.
+// test "std.c.thread import emits portable thread include layer" {
+// str src = `imp std.c.thread;
+// `fun main() { ret; }`;
+// let out = emit_c(src, "std.c.thread import emits portable thread include layer");
+// assert contains(out, "#if defined(_WIN32)"), "expected the platform guard";
+// assert contains(out, "#include <pthread.h>"), "expected the posix thread header";
+// assert contains(out, "long long pthread_create("), "expected the imported prototype";
+// }
+
+// gap: same missing extern prototypes for the windows-shim module, here
+// `long long pthread_cond_timedwait(`.
+// test "std.c.thread_windows import emits portable thread include layer" {
+// str src = `imp std.c.thread_windows;
+// `fun main() { ret; }`;
+// let out = emit_c(src, "std.c.thread_windows import emits portable thread include layer");
+// assert contains(out, "#if defined(_WIN32)"), "expected the platform guard";
+// assert contains(out, "#include <pthread.h>"), "expected the posix thread header";
+// assert contains(out, "long long pthread_cond_timedwait("), "expected the imported prototype";
+// }
+
+// The remaining cases in this slice of the corpus need a second module on disk,
+// which the harness cannot supply. The aliased-import group ("aliased import
+// calls transpile to qualified symbols", "aliased import supports public type
+// and value access", "aliased compound method calls use canonical impl",
+// "aliased module async quirk generic receiver await", "aliased io.format",
+// "aliased math rand option", "aliased sys try_env and log") asserts on a second
+// module's emitted symbols. The std.channel group (send/recv, buffered, timeout,
+// cancel-aware, cancel token, every select variant, the conformance matrix, the
+// fairness benchmark, the async wrapper and forwarding cases, and the std.net
+// async API case) declares `Channel<T>`, whose monomorphization needs the
+// imported compound declaration. Checked separately through the full self-hosted
+// CLI: those lower the same as the original compiler.
