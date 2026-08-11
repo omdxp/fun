@@ -1,0 +1,225 @@
+// Compiler test corpus, batch B. Ported from the `tests/` suite so the same
+// expectations run against this compiler.
+// 
+// The harness compiles a source string on its own without resolving imports,
+// so corpus tests whose fixtures call into stdlib modules (std.channel,
+// std.map, std.net helpers, std.mock_time) have no counterpart here. The
+// tests that only need an import to select C headers are ported as-is.
+
+imp harness;
+imp std.string;
+
+test "generic function specialization emits concrete names" {
+  str src = `fun id<T>(T x) T { ret x; }
+  `fun main() {
+  `  num a = id(1);
+  `  str b = id("hi");
+  `}`;
+  let out = emit_c(src, "generic function specialization emits concrete names");
+  assert contains(out, "id__num"), "expected the num specialization";
+  assert contains(out, "id__str"), "expected the str specialization";
+  assert !contains(out, "id__T"), "expected no unsubstituted type param";
+}
+
+test "generic inference after init transpiles with concrete specializations" {
+  str src = `compound Box<T> {
+  `  T value;
+  `}
+  `compound Pair<L, R> {
+  `  L left;
+  `  R right;
+  `}
+  `fun make_box<T>(T x) Box<T> {
+  `  ret Box<T>{value = x};
+  `}
+  `fun make_pair<L, R>(L left, R right) Pair<L, R> {
+  `  ret Pair<L, R>{left = left, right = right};
+  `}
+  `fun pick_left<L, R>(Pair<L, R> p) L {
+  `  ret p.left;
+  `}
+  `fun swap_pair<L, R>(Pair<L, R> p) Pair<R, L> {
+  `  ret Pair<R, L>{left = p.right, right = p.left};
+  `}
+  `fun main() {
+  `  let nbox = Box{value = 7};
+  `  nbox.value += 1;
+  `  let sbox = make_box("hi");
+  `  let pair = make_pair(nbox.value, sbox.value);
+  `  let swapped = swap_pair(pair);
+  `  let left_num = pick_left(pair);
+  `  let left_str = pick_left(swapped);
+  `}`;
+  let out = emit_c(src, "generic inference after init transpiles with concrete specializations");
+  assert contains(out, "make_pair__num__str"), "expected the inferred pair constructor";
+  assert contains(out, "swap_pair__num__str"), "expected the inferred swap";
+  assert contains(out, "Pair__num__str"), "expected the forward instantiation";
+  assert contains(out, "Pair__str__num"), "expected the swapped instantiation";
+  assert !contains(out, "make_pair__L__R"), "expected no unsubstituted function";
+  assert !contains(out, "Pair__L__R"), "expected no unsubstituted compound";
+}
+
+test "assert emits abort and message" {
+  str src = `fun main() {
+  `  assert true, "ok";
+  `}`;
+  let out = emit_c(src, "assert emits abort and message");
+  assert contains(out, "Assertion failed"), "expected the failure message";
+  assert contains(out, "abort()"), "expected the abort call";
+}
+
+test "compounds + quirks + impl vtables transpile" {
+  str src = `compound Point { num x; num y; }
+  `quirk HasX { getX() num; }
+  `impl Point as HasX {
+  `  getX() num { ret self.x; }
+  `}
+  `fun main() {
+  `  Point p;
+  `  p.x = 1;
+  `  HasX h = &p;
+  `  num v = h.getX();
+  `}`;
+  let out = emit_c(src, "compounds + quirks + impl vtables transpile");
+  assert contains(out, "typedef struct Point"), "expected the struct typedef";
+  assert contains(out, "int64_t x;"), "expected the lowered field";
+  assert contains(out, "_vtable"), "expected a vtable type";
+  assert contains(out, "__fun_coerce_Point_"), "expected a coercion helper";
+  assert contains(out, "HasX h = __fun_coerce_Point_"), "expected the init to coerce";
+  assert contains(out, "h.vtable->getX"), "expected vtable dispatch";
+  assert contains(out, "h.self"), "expected the receiver to be passed";
+}
+
+test "pointer field access uses arrow" {
+  str src = `compound Point { num x; }
+  `fun main() {
+  `  Point p;
+  `  Point* pp = &p;
+  `  pp.x = 1;
+  `}`;
+  let out = emit_c(src, "pointer field access uses arrow");
+  assert contains(out, "pp->x"), "expected an arrow field access";
+}
+
+// gap: two structurally identical quirks do not share a canonical C type, so
+// the second quirk emits no typedef and its dispatch names an undefined type.
+// test "structural quirks share canonical C type" { }
+
+// gap: the asm statement form is not parsed.
+// test "asm statement transpiles" { }
+
+// gap: the asm block form is not parsed.
+// test "asm block preserves newlines" { }
+
+test "transitive std.net import emits socket headers" {
+  str src = `imp std.net;
+  `fun main() {
+  `  ret;
+  `}`;
+  let out = emit_c(src, "transitive std.net import emits socket headers");
+  assert contains(out, "#if defined(_WIN32)"), "expected a platform guard";
+  assert contains(out, "#include <winsock2.h>"), "expected the Windows socket header";
+  assert contains(out, "#include <ws2tcpip.h>"), "expected the Windows address header";
+  assert contains(out, "#include <sys/socket.h>"), "expected the POSIX socket header";
+  assert contains(out, "#include <netinet/in.h>"), "expected the POSIX address header";
+  assert contains(out, "#include <arpa/inet.h>"), "expected the POSIX conversion header";
+  assert contains(out, "#include <unistd.h>"), "expected the POSIX process header";
+}
+
+test "main num return emits exit status" {
+  str src = `fun main() num {
+  `  ret 7;
+  `}`;
+  let out = emit_c(src, "main num return emits exit status");
+  assert contains(out, "int main"), "expected main to be declared int";
+  assert contains(out, "return 7"), "expected the exit status to be returned";
+}
+
+test "hexadecimal literals with a-f and A-F digits compile" {
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  num a = 0xdead;
+  `  num b = 0xBEEF;
+  `  num c = 0xFF;
+  `  num d = 0x1f;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "hexadecimal literals with a-f and A-F digits compile");
+  assert contains(out, "57005"), "expected 0xdead to decode";
+  assert contains(out, "48879"), "expected 0xBEEF to decode";
+  assert contains(out, "255"), "expected 0xFF to decode";
+  assert contains(out, "31"), "expected 0x1f to decode";
+}
+
+test "long type name with quirk impl does not overflow mangled C identifiers" {
+  str src = `quirk Greeter {
+  `  greet() str;
+  `}
+  `compound AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {
+  `  num x;
+  `}
+  `impl AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA as Greeter {
+  `  greet() str { ret "hi"; }
+  `}
+  `fun main() num {
+  `  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA g;
+  `  g.x = 1;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "long type name with quirk impl does not overflow mangled C identifiers");
+  assert contains(out, "AAAAAAAAAA__Greeter__greet"), "expected the mangled impl method";
+}
+
+// gap: a compound-initializer expression that names a type declared later in
+// the file is rejected with a parse error.
+// test "forward-referenced compound struct-initializer expression compiles" { }
+
+test "compound-initializer with a genuinely unknown type is still rejected" {
+  str src = `fun main() num {
+  `  let z = Nonexistent{q = 1};
+  `  ret 0;
+  `}`;
+  let r = transpile_source(src);
+  assert r.is_err(), "expected an undeclared initializer type to be rejected";
+}
+
+test "compound-assignment operators %= &= |= ^= transpile" {
+  str src = `fun main() num {
+  `  num a = 100; a %= 7;
+  `  num b = 100; b &= 7;
+  `  num c = 100; c |= 7;
+  `  num d = 100; d ^= 7;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "compound-assignment operators %= &= |= ^= transpile");
+  assert contains(out, "a %= 7"), "expected the remainder assignment";
+  assert contains(out, "b &= 7"), "expected the bitwise-and assignment";
+  assert contains(out, "c |= 7"), "expected the bitwise-or assignment";
+  assert contains(out, "d ^= 7"), "expected the bitwise-xor assignment";
+}
+
+test "escaped double-quote inside a string literal compiles" {
+  str src = `fun main() num {
+  `  str s = "she said \"hi\" ok";
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "escaped double-quote inside a string literal compiles");
+  assert contains(out, `she said \"hi\" ok`), "expected the escape to survive into C";
+}
+
+test "raw string literal: backslashes and quotes need no escaping" {
+  // Stated as an escaped string because the fixture itself contains the raw
+  // string delimiter.
+  str src = "fun main() num {\n  str path = `C:\\Users\\name\\file.txt`;\n  str msg = `she said \"hi\" and left`;\n  ret 0;\n}\n";
+  let out = emit_c(src, "raw string literal: backslashes and quotes need no escaping");
+  assert contains(out, `C:\\Users\\name\\file.txt`), "expected backslashes to be escaped for C";
+  assert contains(out, `she said \"hi\" and left`), "expected quotes to be escaped for C";
+}
+
+test "raw string literal: multi-line block joins lines with a real newline" {
+  // Stated as an escaped string because the fixture itself contains the raw
+  // string delimiter.
+  str src = "fun main() num {\n  let block =\n    `line one\n    `line two\n  ;\n  ret 0;\n}\n";
+  let out = emit_c(src, "raw string literal: multi-line block joins lines with a real newline");
+  assert contains(out, `line one\nline two`), "expected the lines joined by a newline escape";
+}
