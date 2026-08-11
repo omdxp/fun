@@ -12465,12 +12465,10 @@ test "emit_expr emits a bare-shorthand payload construction resolved against exp
 }
 
 test "emit_expr resolves a bare-shorthand construction NESTED inside another variant's own construction" {
-  // `.Ok(.Some(t))`, a bare-shorthand construction nested inside
-  // another variant's construction, needs its inner shorthand's
-  // expected type resolved too: `emit_enum_variant_construction` sets
-  // `expected_enum_type` per argument position via
-  // `lookup_enum_variant_payload_type`, the same registry
-  // `emit_fit_enum_branch`'s binding registration uses.
+  // `.Ok(.Some(t))` nests a bare shorthand inside another variant's
+  // construction, so the inner shorthand needs an expected type too:
+  // `emit_enum_variant_construction` sets `expected_enum_type` per
+  // argument position from the payload-type registry.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -12757,11 +12755,9 @@ test "emit_expr emits a method call on a value-typed receiver, taking its addres
 }
 
 test "emit_expr emits a method call through a CHAINED field-access receiver (self.parts.push(s))" {
-  // `self.parts.push(s)` needs `emit_method_call` to
-  // accept a chained field access, not just a bare identifier receiver.
-  // The receiver resolves through the same `resolve_field_chain`
-  // machinery `emit_fit`'s subject and the bare-shorthand assignment
-  // case use, rather than a second, narrower lookup.
+  // `self.parts.push(s)` needs `emit_method_call` to accept a chained
+  // field access, not just a bare identifier receiver, resolved through
+  // the same `resolve_field_chain` machinery everything else uses.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("self", "StringBuilder", true);
@@ -13268,14 +13264,11 @@ test "emit_expr resolves chained field access through a generic-compound-instant
 }
 
 test "emit_expr resolves a chained field access through a CALL receiver, with no intermediate 'let'" {
-  // `tok.unwrap().type`, a field access whose receiver
-  // is itself a call (a plain function or a method call), not a known
-  // local. `resolve_field_chain` handles a call receiver by
-  // resolving the call's declared return type (the same
-  // `lookup_function_rtype`/`lookup_impl_method_rtype` lookups
-  // `infer_let_expr_type`'s "()" case uses), then rendering the call's
-  // text into a throwaway scratch buffer, since a field-chain link
-  // otherwise has no emission logic of its own.
+  // `tok.unwrap().type` is a field access whose receiver is a call
+  // rather than a known local. `resolve_field_chain` handles that by
+  // resolving the call's declared return type, then rendering the call's
+  // text into a throwaway scratch buffer, a field-chain link having no
+  // emission logic of its own.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13334,10 +13327,9 @@ test "emit_expr resolves a chained field access through a CALL receiver, with no
   assert equals(st.out.build(), "mk().type"), "expected the call rendered inline, then '.type' appended";
 }
 
-// Registers a generic impl equivalent to `impl Box<T> { pub get() T { ret
-// self.value; } }` (matching `_record_box_template`'s own `Box<T> { T value;
-// }` compound) as a template, via `register_impl_methods` -- no C emitted
-// yet, same as the compound/enum template-recording helpers above.
+// Registers `impl Box<T> { pub get() T { ret self.value; } }` as a
+// template, matching `_record_box_template`'s `Box<T>` compound. Emits no
+// C, like the other template-recording helpers above.
 fun _record_box_get_impl(Codegen* g) {
   DataType* t_arg = malloc(sizeof(DataType));
   *t_arg = dtype_new();
@@ -13407,10 +13399,8 @@ fun _record_box_get_impl(Codegen* g) {
 
 test "emit_statement declaring a generic Box<num> does not emit its impl's method until it's actually called" {
   // A generic impl method is emitted lazily, at its first call site for
-  // a given instantiation; see `ensure_generic_impl_method_emitted`.
-  // Merely instantiating `Box<num>` via this declaration records the
-  // method's metadata, so a later call resolves correctly, but emits no
-  // C for it.
+  // a given instantiation. Instantiating `Box<num>` through this
+  // declaration records the method's metadata but emits no C.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -13459,10 +13449,9 @@ fun _box_get_call_node(str recv_name) Node {
 }
 
 test "emit_statement does not re-emit a generic impl's monomorphized method on a second call" {
-  // See the previous test: the method is emitted lazily, at its first
-  // call. This covers the dedup half: a second call, even through a
-  // different instance of the same instantiation, must not re-emit its
-  // prototype/body.
+  // The dedup half of the previous test: a second call, even through a
+  // different instance of the same instantiation, must not re-emit the
+  // prototype or body.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -13519,17 +13508,12 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
 }
 
 test "pub transpile registers a generic impl's method metadata even when a PLAIN compound's OWN field is the first trigger" {
-  // `compound Lexer { Vec<Token> tokens; }` needs
-  // `Vec<T>`'s impl method metadata registered. `pub transpile`'s
-  // enum/compound pass runs after its `register_impl_methods` pass, so
-  // `generic_impl_templates` is already populated by the time Lexer's
-  // field triggers `ensure_compound_instantiated` for `Vec<Token>`,
-  // and `maybe_instantiate_generic_impl_methods` can find its template.
-  // 
-  // `last` is never called anywhere in this test, so its C body must
-  // not appear at all; the method's metadata (`lookup_impl_method`)
-  // still resolves correctly regardless of whether emission itself is
-  // eager or lazy (see `ensure_generic_impl_method_emitted`).
+  // `compound Lexer { Vec<Token> tokens; }` needs `Vec<T>`'s impl method
+  // metadata registered. `pub transpile` runs `register_impl_methods`
+  // before the type pass, so `generic_impl_templates` is populated by the
+  // time Lexer's field instantiates `Vec<Token>`. `last` is never called
+  // here, so its C body must not appear at all, while its metadata still
+  // resolves.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13636,12 +13620,10 @@ test "pub transpile registers a generic impl's method metadata even when a PLAIN
 }
 
 test "pub transpile hoists a generic compound's monomorphized typedef BEFORE another compound whose OWN field first triggers it" {
-  // `StringBuilder { Vec<str> parts; ... }` must not
-  // emit `Vec__str`'s struct typedef nested inside StringBuilder's own
-  // `typedef struct StringBuilder { ... }` field list, which is illegal
-  // C: a typedef can't be declared in the middle of another struct's
-  // member list. `pub transpile`'s enum/compound passes need to set
-  // `hoist_insert_pos` too, not just the impl/function passes.
+  // `StringBuilder { Vec<str> parts; ... }` must not emit `Vec__str`'s
+  // typedef inside StringBuilder's own field list, which is illegal C.
+  // The type passes therefore set `hoist_insert_pos` too, not just the
+  // impl and function passes.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13798,15 +13780,12 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
 }
 
 test "pub transpile hoists a generic impl method's monomorphized definition BEFORE the function that first triggers it, not nested inside it" {
-  // `Box<num>` used for the first time inside `main`'s
-  // body, the common case, must not emit `Box__num`'s struct typedef and
-  // `Box__num__get`'s C function definition nested inside `main`'s
-  // `{ }`. A nested typedef is valid (if oddly-scoped) C, but a nested
-  // function definition is a hard C syntax error clang rejects
-  // ("function definition is not allowed here"). See
-  // `Codegen.hoist_insert_pos`/`emit_hoisted`: `pub transpile` tracks
-  // where `main` started, and anything hoisted from inside it is
-  // spliced in right before that point instead.
+  // `Box<num>` first used inside `main`'s body must not emit
+  // `Box__num`'s typedef and `Box__num__get`'s definition nested inside
+  // `main`'s braces. A nested typedef is valid if oddly scoped, but a
+  // nested function definition is a hard C syntax error. `pub transpile`
+  // tracks where `main` started, and anything hoisted from inside it is
+  // spliced right before that point.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13889,10 +13868,8 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   Node main_decl = _box_num_var_decl("b");
   Node* main_decl_ptr = malloc(sizeof(Node));
   *main_decl_ptr = main_decl;
-  // A call, not just a declaration: lazy per-method emission (see
-  // `ensure_generic_impl_method_emitted`) only triggers a method's C
-  // body at its first call, so it's the call that needs to be hoisted
-  // here, not the declaration alone.
+  // A call, not just a declaration: lazy per-method emission triggers a
+  // body only at its first call, so it's the call that needs hoisting.
   Node* main_call_ptr = malloc(sizeof(Node));
   *main_call_ptr = _box_get_call_node("b");
   Vec<Node*> main_stmts;
@@ -14094,12 +14071,9 @@ test "ensure_compound_instantiated rejects a wrong generic argument count" {
 }
 
 test "ensure_compound_instantiated rejects a nested generic argument whose OWN template isn't registered" {
-  // Nested generic arguments themselves resolve (see the "instantiates
-  // a nested generic argument" test below); this one covers the
-  // argument still being rejected when the nested type itself is
-  // unresolvable, here "Vec" was never registered as a template, same
-  // "reject rather than guess" reasoning as an unrecognized template
-  // name anywhere else.
+  // Nested generic arguments do resolve, as the test below covers; this
+  // one checks that the argument is still rejected when the nested type
+  // is unresolvable, `Vec` never having been registered as a template.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -14126,10 +14100,9 @@ test "ensure_compound_instantiated rejects a nested generic argument whose OWN t
 }
 
 test "ensure_compound_instantiated instantiates a nested generic argument (Box<Box<num>>)" {
-  // `Result<Option<Token>, Error>` is a nested generic instantiation, a
-  // generic argument that's itself a generic instantiation. The nested
-  // argument is resolved (and, on first use, emitted) first via
-  // `resolve_type_name`, using its mangled name as the outer
+  // `Result<Option<Token>, Error>` has a generic argument that is itself
+  // a generic instantiation. The nested argument resolves (and, on first
+  // use, emits) first, its mangled name becoming the outer
   // instantiation's arg name; this recurses to arbitrary depth.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -14331,10 +14304,9 @@ test "ensure_enum_instantiated rejects a wrong generic argument count" {
 }
 
 test "ensure_enum_instantiated rejects a nested generic argument whose OWN template isn't registered" {
-  // Nested generic arguments themselves resolve (see the "instantiates
-  // a nested generic argument" test below); this one covers the
-  // argument still being rejected when the nested type itself is
-  // unresolvable, here "Vec" was never registered as a template.
+  // Nested generic arguments do resolve, as the test below covers; this
+  // one checks that the argument is still rejected when the nested type
+  // is unresolvable, `Vec` never having been registered as a template.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_opt_template(&g);
@@ -14513,12 +14485,10 @@ test "emit_expr emits an empty explicit compound literal as '(Type){0}'" {
 }
 
 test "emit_expr resolves a bare '.{ field = value, ... }' compound literal against expected_compound_type" {
-  // `dtype_new`'s own real body (`dt.flags = .{
-  // is_pointer = false, ... };`) is likewise rejected outright: the bare (no explicit
-  // `Type`) form has no dtype of its own, and needs
-  // `Codegen.expected_compound_type` (set by `emit_expr`'s own `=`
-  // assignment case from the left-hand side's resolved field type,
-  // mirroring `expected_enum_type`) to know which struct to emit.
+  // A bare `.{ is_pointer = false, ... }` form carries no dtype of its
+  // own, so it needs `expected_compound_type`, set by `emit_expr`'s `=`
+  // case from the left-hand side's resolved field type, to know which
+  // struct to emit.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.expected_compound_type = "DataTypeFlags";
@@ -14551,10 +14521,9 @@ test "emit_expr rejects a bare '.{...}' compound literal with no expected_compou
 }
 
 test "emit_statement resolves a bare '.{...}' compound-literal assignment right-hand side against the field's declared type" {
-  // The full shape: `dt.flags = .{is_pointer = false, ...};` as an
-  // assignment statement, exercising the actual `resolve_field_chain`
-  // wiring in `emit_expr`'s `=` case, not just a pre-set
-  // `expected_compound_type`.
+  // The full shape, `dt.flags = .{is_pointer = false, ...};` as an
+  // assignment statement, exercising the `resolve_field_chain` wiring in
+  // `emit_expr`'s `=` case rather than a pre-set expected type.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("dt", "DataType", false);
@@ -14762,10 +14731,9 @@ test "emit_statement resolves a bare-shorthand assignment right-hand side agains
 }
 
 test "emit_expr resolves a bare-shorthand equality comparison's right-hand side against the field's declared type" {
-  // `self.kind == .None` needs a bare shorthand as a
-  // nested sub-expression, the right operand of `==`, not directly a
-  // `ret` value/`Variable` initializer/assignment RHS, to have an
-  // expected-type context to resolve against.
+  // `self.kind == .None` puts a bare shorthand in a nested
+  // sub-expression, the right operand of `==`, rather than directly in a
+  // `ret` value or initializer, and it still needs an expected type.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("self", "Error", true);
@@ -14827,9 +14795,8 @@ test "emit_expr resolves a bare-shorthand equality comparison's right-hand side 
 
 test "pub transpile resolves a bare-shorthand call argument against the callee's own declared parameter type" {
   // A bare shorthand passed as a call argument resolves against the
-  // callee's declared parameter type at that position, via a
-  // whole-program pre-pass (`register_function_signatures`) that
-  // records each plain function's parameter types.
+  // callee's declared parameter type at that position, recorded by
+  // `register_function_signatures`'s whole-program pre-pass.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -14937,13 +14904,11 @@ test "pub transpile resolves a bare-shorthand call argument against the callee's
 }
 
 test "pub transpile monomorphizes a generic function from its own call site, inferring T from a literal argument" {
-  // `err_kind<T>(...) Result<T, Error>` is a generic function, so its
-  // bare, unsubstituted `T` must not be emitted as a literal, invalid
-  // C type. `maybe_instantiate_generic_function` infers each type param's
-  // concrete binding from the call site's arguments (here, a plain
-  // number literal infers "num"), monomorphizes under a mangled name
-  // reusing the same `type_subst_*`/`emit_hoisted` machinery built for
-  // generic impl methods, and rewrites the call to use it.
+  // `err_kind<T>(...) Result<T, Error>` is generic, so its bare `T` must
+  // never reach the output as a literal C type.
+  // `maybe_instantiate_generic_function` infers each type param from the
+  // call's arguments, monomorphizes under a mangled name, and rewrites
+  // the call to use it.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15148,29 +15113,20 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
-  // `err_kind<T>(...) Result<T, Error>` is a generic
-  // function whose return type (`Result<T, Error>`) is itself a generic
-  // enum instantiation, so monomorphizing `err_kind` (which swaps
-  // `self.state` to a scratch buffer) triggers a nested
-  // `ensure_enum_instantiated` call (for `Result__num__Error`) that also
-  // swaps `self.state`, while `hoist_insert_pos` still holds a position
-  // measured against the outer, now-swapped-away buffer. The nested
-  // `emit_hoisted` must not splice at that stale position into the
-  // wrong, much shorter scratch buffer, corrupting `substr`'s length
-  // arithmetic and crashing outright. `hoist_insert_pos` is suspended,
-  // like `type_subst_param_names`, for the duration of
-  // `maybe_instantiate_generic_function`'s/
-  // `maybe_instantiate_generic_impl_methods`'s state swap.
+  // `err_kind<T>(...) Result<T, Error>` returns a generic enum
+  // instantiation, so monomorphizing it, which swaps `self.state` to a
+  // scratch buffer, triggers a nested `ensure_enum_instantiated` that
+  // swaps again while `hoist_insert_pos` still points into the outer
+  // buffer. The nested `emit_hoisted` must not splice at that stale
+  // position into the much shorter scratch buffer, which would corrupt
+  // the length arithmetic and crash. `hoist_insert_pos` is therefore
+  // suspended across the state swap, like `type_subst_param_names`.
   // 
-  // `main`'s return type here (`Opt<num>`) exercises a second, unrelated
-  // concern: `main` forces to `int` in C (see `emit_function_named`), so
-  // its `ret wrap(5);` can't write the real value, a struct assigned to
-  // an `int`-returning function is a compile error, and is evaluated
-  // only for side effects into a throwaway scratch buffer. This means
-  // `wrap`/`Opt`, reachable only through this discarded return, are
-  // correctly never hoisted; nothing else needs them monomorphized.
-  // `main` returning something interesting is what the other "main
-  // forces int" tests already cover.
+  // `main`'s `Opt<num>` return type exercises a second concern: `main`
+  // is forced to `int`, so `ret wrap(5);` can't write the real value and
+  // is evaluated only for side effects into a throwaway buffer. `wrap`
+  // and `Opt`, reachable only through that discarded return, are
+  // correctly never hoisted.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15312,17 +15268,13 @@ test "pub transpile does not crash when a generic function's OWN return type is 
 }
 
 test "pub transpile infers a generic function's type param from the CALLER's expected return type, not the argument itself" {
-  // `ret ok(.None);` needs `ok<T>(value) Result<T,
-  // Error>`'s type param resolved even though it can't be read off
-  // `.None` alone, since a bare shorthand carries no type info by
-  // itself. It's inferred from the enclosing function's declared return
-  // type (`Result<Opt<num>, Error>` here), matched structurally against
-  // `ok`'s `Result<T, Error>` shape at the same generic-arg position,
-  // via `infer_generic_function_type_param_from_context`
-  // (`Codegen.current_fn_rtype_dt`) plus threading the resulting
-  // already-substituted param types back through
-  // `GenericCallResolution` so the bare `.None` argument itself also
-  // resolves, not just the instantiation's mangled name.
+  // `ret ok(.None);` needs `ok<T>(value) Result<T, Error>`'s type param
+  // resolved even though a bare shorthand carries no type info. It comes
+  // from the enclosing function's declared return type, matched
+  // structurally against `ok`'s `Result<T, Error>` shape at the same
+  // generic-arg position, with the substituted param types threaded back
+  // through `GenericCallResolution` so the `.None` argument resolves
+  // too, not just the instantiation's mangled name.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15564,15 +15516,12 @@ test "transpile emits the prelude followed by every top-level function" {
 }
 
 test "emit_function resets the locals table's type-name column between functions" {
-  // `emit_function` must reset `local_type_name`
-  // between functions along with `local_names`/`local_is_pointer`, or
-  // it keeps accumulating across every function `transpile` emits while
-  // the other two columns empty out, and the next function's params
-  // read back a stale type name at their now-misaligned index instead
-  // of their real one. Silent for `lookup_local_is_pointer`-only
-  // callers (`emit_field_access`), but wrong for anything reading the
-  // type name, exactly what a bare-shorthand `fit` pattern needs to
-  // resolve which enum it's matching.
+  // `emit_function` must reset `local_type_name` between functions
+  // alongside `local_names`/`local_is_pointer`, or it accumulates while
+  // the other columns empty out and the next function's params read a
+  // stale type name at a misaligned index. Harmless for pointer-only
+  // callers, but wrong for anything reading the type name, which is
+  // exactly what a bare-shorthand `fit` pattern needs.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15700,13 +15649,10 @@ test "emit_function resets the locals table's type-name column between functions
 }
 
 test "emit_function resets local_dtype (not just local_names/local_type_name) between functions" {
-  // `Codegen.local_dtype`, added for `emit_for_iter`'s
-  // structural element-type lookup, must be reset in
-  // `emit_function_named` like its three sibling columns, or a later
-  // function's local reads back an earlier function's stale dtype at
-  // the same, now-misaligned, index; same class of bug the sibling
-  // "resets the locals table's type-name column" test above covers for
-  // `local_type_name`.
+  // `local_dtype`, which backs `emit_for_iter`'s structural element-type
+  // lookup, must be reset in `emit_function_named` like its three
+  // sibling columns, or a later function's local reads back an earlier
+  // one's stale dtype at a misaligned index.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -15771,10 +15717,10 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
 
   assert g.emit_function(fa_node).is_none(), "expected fn_a to emit";
 
-  // fn_b: one param, `Vec<Vec<str>> y`, its own index-0 local. If
-  // local_dtype wasn't reset, looking it up would instead read back
-  // fn_a's stale Vec<str> entry, also at index 0, giving 'item' the
-  // wrong, too-shallow element type and rejecting the nested iteration.
+  // `fn_b`'s one param, `Vec<Vec<str>> y`, is its own index-0 local.
+  // Without the reset, the lookup reads back `fn_a`'s stale `Vec<str>`
+  // entry at that index, giving `item` a too-shallow element type and
+  // rejecting the nested iteration.
   DataType* str_arg_b = malloc(sizeof(DataType));
   *str_arg_b = dtype_new();
   str_arg_b.type_str = "str";
