@@ -11498,7 +11498,7 @@ test "emit_statement emits a fit destructuring a bare enum-variant shorthand pat
   Node* subj = malloc(sizeof(Node));
   *subj = node_new(NodeKind.Identifier("o"));
 
-  // `.Some(r) -> { ret r; }` -- bare shorthand: left is Blank, resolved
+  // `.Some(r) -> { ret r; }`, a bare shorthand: left is Blank, resolved
   // against the subject's own recorded local type ("Opt").
   Node* blank = malloc(sizeof(Node));
   *blank = node_new(NodeKind.Blank);
@@ -11818,7 +11818,7 @@ test "emit_statement emits a fit over a '*self'-dereferenced subject using '->'"
   Node* subj = malloc(sizeof(Node));
   *subj = node_new(NodeKind.Unary(u));
 
-  // `.Some(r) -> { ret r; }` -- bare shorthand resolved against "self"'s
+  // `.Some(r) -> { ret r; }`, a bare shorthand resolved against "self"'s
   // recorded local type ("Opt"), same as a plain-identifier subject.
   Node* blank = malloc(sizeof(Node));
   *blank = node_new(NodeKind.Blank);
@@ -11957,7 +11957,7 @@ test "emit_statement emits a fit matching a qualified payload-less variant" {
   Node* subj = malloc(sizeof(Node));
   *subj = node_new(NodeKind.Identifier("o"));
 
-  // `Opt.None -> { ret; }` -- qualified, no bindings.
+  // `Opt.None -> { ret; }`: qualified, no bindings.
   Node* enum_ident = malloc(sizeof(Node));
   *enum_ident = node_new(NodeKind.Identifier("Opt"));
   Node* variant_ident = malloc(sizeof(Node));
@@ -13049,7 +13049,7 @@ test "register_impl_methods lets emit_method_call resolve a quirk-implementing i
   impln.methods.push(method_node);
   Node impl_node = node_new(NodeKind.Impl(impln));
 
-  // Registration only (no emission) -- mirrors `transpile`'s own
+  // Registration only, no emission; matches `transpile`'s own
   // dedicated pre-pass, run before any method body/call is emitted.
   g.register_impl_methods(impl_node);
 
