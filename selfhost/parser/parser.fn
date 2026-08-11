@@ -3151,15 +3151,12 @@ impl Parser {
     self.current_function = fn_node_ptr;
     self.has_current_function = true;
 
-    // Registers the function's own name as a symbol as soon as it's known,
-    // before its args/body are parsed, the same mechanism `parse_compound`/
-    // `parse_enum`/`parse_quirk` use for their own names. This lets a bare
-    // reference to an already-declared function used as a value (passing a
-    // function by name into a `fun(T) R`-typed parameter) be recognized by
-    // the identifier-validity check in `parse_single_token_to_node` instead
-    // of rejected as unknown. The stored symbol's node is a snapshot from
-    // this point (name only, args/body not parsed yet); harmless, since
-    // only `get_symbol(name).is_none()` is ever checked for it.
+    // Registers the function's name as a symbol before its args and body
+    // are parsed, so passing an already-declared function by name into a
+    // `fun(T) R`-typed parameter passes the identifier-validity check in
+    // `parse_single_token_to_node`. The stored symbol's node is a name-only
+    // snapshot, which is fine since only `get_symbol(name).is_none()` is
+    // ever checked for it.
     Symbol fn_sym = symbol_new(fname);
     fn_sym.kind = SymbolKind.NodeSym(*fn_node_ptr);
     self.state.push_symbol(fn_sym);
@@ -3460,13 +3457,11 @@ impl Parser {
 
   // Parses a `for` loop: `for { ... }` (infinite), `for <condition> {
   // ... }`, `for i : start..end { ... }` (range), or `for item : arr {
-  // ... }` / `for i, item :: arr { ... }` (iterator).
-  // 
-  // The range/iterator forms are distinguished from a condition loop that
-  // happens to start with an identifier (`for x != 0 { ... }`) by a
-  // 1-token lookahead: only `for <ident> :` or `for <ident> ,` are those
-  // forms, since a bare condition never starts with `,` and `:` isn't a
-  // valid expression-continuation operator.
+  // ... }` / `for i, item :: arr { ... }` (iterator). A 1-token lookahead
+  // separates the range/iterator forms from a condition loop starting with
+  // an identifier (`for x != 0 { ... }`): only `for <ident> :` or
+  // `for <ident> ,` are those forms, since a bare condition never starts
+  // with `,` and `:` isn't an expression-continuation operator.
   pub parse_for_statement() Option<ParseErrorKind> {
     let for_tok = self.state.token_peek_next();
     let kwerr = self.state.expect_keyword("for");
@@ -3573,10 +3568,9 @@ impl Parser {
   // path `.` expression (`Enum.Variant`, or `<blank>.Variant` for
   // shorthand), fills `*out_bindings` with the positional binding
   // identifiers, and sets `*out_matched` true. On no match, consumes
-  // nothing and leaves `*out_matched` false so the caller parses
-  // normally. Detection requires the trailing `(` so a plain
-  // `Enum.Variant`/`.Variant` arm with no payload binding still goes
-  // through the ordinary path.
+  // nothing and leaves `*out_matched` false. Detection requires the
+  // trailing `(`, so a payload-less `Enum.Variant`/`.Variant` arm still
+  // goes through the ordinary path.
   _try_parse_fit_destructure(bin* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
     *out_matched = false;
     let p0_opt = self.state.token_peek_n(0);
@@ -3698,17 +3692,13 @@ impl Parser {
 
   // Parses one `pattern -> { body }` fit arm, pushing the finished branch
   // onto `out_branches`. `_` (the wildcard default) has no condition and
-  // must be the last arm, signaled back to the caller via
-  // `out_has_default` so its loop stops.
-  // 
-  // Three pattern shapes, tried in order: (1) a data-carrying-enum
-  // destructuring pattern (`Shape.Circle(r)` / `.Circle(r)`) via
-  // `_try_parse_fit_destructure`, whose positional binding names are
-  // registered in a scope opened just for the arm body; (2) a bare
-  // `.Variant` shorthand with no payload, since it isn't itself a
-  // complete expression the general parser recognizes on its own; (3) an
-  // ordinary expression pattern (literals, identifiers, ...) via
-  // `parse_expressionable_root`.
+  // must be the last arm, signaled back through `out_has_default` so the
+  // caller's loop stops. Three pattern shapes are tried in order: a
+  // data-carrying destructuring pattern via `_try_parse_fit_destructure`,
+  // whose binding names are registered in a scope opened for the arm body;
+  // a payload-less `.Variant` shorthand, which the general parser doesn't
+  // recognize as a complete expression on its own; and an ordinary
+  // expression pattern via `parse_expressionable_root`.
   _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
     Node arm_condition = node_new(NodeKind.Blank);
     Vec<str> bindings;
@@ -3926,13 +3916,11 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `fit <condition> { arm , ... }`.
-  // 
-  // `in_fit_statement` is set true before parsing the subject expression
-  // too, not just the arms below, so a subject like `fit x -> ...` (a
-  // stray `->` right after the subject) stops there rather than
-  // swallowing into the arm list. Left set on an early-error return,
-  // since a parse error aborts the whole parse anyway.
+  // Parses `fit <condition> { arm , ... }`. `in_fit_statement` covers the
+  // subject expression as well as the arms, so a stray `->` right after
+  // the subject stops there instead of swallowing into the arm list. It's
+  // left set on an early-error return, since a parse error aborts the
+  // whole parse anyway.
   pub parse_fit_statement() Option<ParseErrorKind> {
     let fit_tok = self.state.token_peek_next();
     let kwerr = self.state.expect_keyword("fit");
@@ -4211,13 +4199,11 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `test "name" { ... }`. Top-level only, enforced by never wiring
-  // `test` into `parse_statement`'s own dispatch (only
-  // `parse_top_level_declaration` calls this). Reuses ordinary statement
-  // parsing for the body via a synthetic (nameless, argument-less)
-  // function context, so `if`/`for`/`ret`/`defer`/etc. (which check
-  // `has_current_function`) work the same inside a test body as inside a
-  // real one.
+  // Parses `test "name" { ... }`, top-level only since `test` is never
+  // wired into `parse_statement`'s dispatch. The body reuses ordinary
+  // statement parsing under a synthetic nameless function context, so
+  // statements that check `has_current_function` behave the same inside a
+  // test body as in a real function.
   pub parse_test_declaration() Option<ParseErrorKind> {
     let test_tok = self.state.token_next(); // consume 'test'
 
@@ -4291,13 +4277,11 @@ impl Parser {
     }
   }
 
-  // Parses `fuzz "name" (raw* data, num len) { ... }`. Top-level only, the
-  // same way `parse_test_declaration` enforces it (never wired into
-  // `parse_statement`'s dispatch). Parameters are written out explicitly,
-  // like an ordinary function's, and parsed via `_parse_function_args`,
-  // but their types are still fixed by the fuzzing calling convention, so
-  // `_check_fuzz_param_shape` validates the parsed shape against that
-  // fixed contract.
+  // Parses `fuzz "name" (raw* data, num len) { ... }`, top-level only like
+  // `parse_test_declaration`. Parameters are written out explicitly and
+  // parsed via `_parse_function_args`, but the fuzzing calling convention
+  // fixes their types, so `_check_fuzz_param_shape` validates the parsed
+  // shape against that contract.
   pub parse_fuzz_declaration() Option<ParseErrorKind> {
     let fuzz_tok = self.state.token_next(); // consume 'fuzz'
 
@@ -4471,25 +4455,19 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses one statement: a `{ ... }` nested body, a bare-datatype-keyword
-  // variable declaration (`num x = 5;`, no leading `let`), a bare
-  // user-type variable declaration (`Point p;`, `Point* p = ...;`,
-  // detected by a `<Identifier> [* ...] <Identifier>` lookahead guarded by
-  // "isn't already a known scope entity", so `w * h;` isn't misparsed as a
-  // pointer declaration) or a `let` declaration, a
-  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
-  // `continue`/`allow`/`expect` statement, `fork <call>;` (a contextual
-  // keyword, reserved only when not immediately followed by `(`, since
-  // `fork` can also be an ordinary identifier, e.g. a `std.c.process`
-  // binding for the POSIX `fork()` syscall), `nil`/`panic(...)`/`await`
-  // as expression-statements, or a bare expression statement terminated
-  // by `;`.
-  // 
-  // `compound`/`enum`/`quirk`/`impl`/`imp`/`test`/`fun` are intentionally
-  // not dispatched here; those are top-level-only declarations, handled by
-  // `parse_top_level_declaration` instead. `asm` and any other unsupported
-  // keyword report a clean "not yet supported" error rather than silently
-  // misparsing.
+  // Parses one statement: a nested `{ ... }` body, a variable declaration
+  // (`let`, `num x = 5;`, or a bare user type like `Point* p = ...;`), any
+  // of the `ret`/`assert`/`if`/`for`/`fit`/`defer`/`break`/`continue`/
+  // `allow`/`expect` statements, `fork <call>;`, `nil`/`panic(...)`/`await`
+  // as expression statements, or a bare expression terminated by `;`. A
+  // bare user-type declaration is found by a `<Identifier> [* ...]
+  // <Identifier>` lookahead guarded on the name not already being a scope
+  // entity, so `w * h;` isn't misread as a pointer declaration, and `fork`
+  // is contextual: it's only a keyword when not followed by `(`, since it
+  // is also an ordinary identifier for the POSIX `fork()` binding.
+  // Top-level-only declarations are not dispatched here; `asm` and other
+  // unsupported keywords report a clean "not yet supported" error instead
+  // of misparsing.
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -4576,17 +4554,13 @@ impl Parser {
         }
       }
 
-      // User-defined-type bare variable declaration: `Point p;`, `Point p
-      // = ...;`, `Point* p;`, `Vec<num> v;`, `T[] xs;` (a generic type
-      // param's own array form, e.g. inside `impl Channel<T>`). Detected
-      // by a `<Identifier> [<generic args>] [* ...] [[...]] <Identifier>`
-      // lookahead, guarded by "isn't already a known scope entity" so an
-      // ordinary expression statement that happens to start with an
-      // identifier and contain a `*` (`w * h;`) isn't misparsed as a
-      // pointer declaration. The optional `<...>` between the type name
-      // and any pointer stars is skipped via `skip_generic_args_tokens`,
-      // the same helper `looks_like_compound_init` uses to look past a
-      // possibly-generic type name.
+      // User-defined-type bare variable declaration: `Point p;`,
+      // `Point* p;`, `Vec<num> v;`, `T[] xs;`. Detected by a
+      // `<Identifier> [<generic args>] [* ...] [[...]] <Identifier>`
+      // lookahead, guarded on the name not already being a scope entity so
+      // an expression statement like `w * h;` isn't misread as a pointer
+      // declaration. `skip_generic_args_tokens` skips the optional `<...>`
+      // between the type name and any pointer stars.
       if self.state.get_scope_entity(name) == nil {
         // Optional qualified type segments after the leading identifier:
         // `alias.Type name;` (a module-alias-qualified type). Reads the
@@ -4679,13 +4653,8 @@ impl Parser {
   // Each pair of leading dots means "go up one directory"; `leading_dots`
   // sums the length of every leading all-dot operator token, so this
   // works whether the lexer handed back `..` as one token or `.` `.` as
-  // two.
-  // 
-  // Records the parsed path/alias on the `Import` node but doesn't
-  // resolve it; that's real filesystem/module-resolution work handled
-  // elsewhere (`import_resolver.fn`'s `preload_global_symbols`). A plain
-  // (non-call) reference to an imported name relies on the same
-  // "unknown identifier" bypasses `parse_single_token_to_node` documents.
+  // two. The path and alias are recorded on the `Import` node but not
+  // resolved; `import_resolver.fn` does that.
   pub parse_import() Option<ParseErrorKind> {
     let imp_tok = self.state.token_next(); // consume 'imp'
 
@@ -4801,8 +4770,8 @@ impl Parser {
   // datatype across a comma-separated name list (`dec x, y;`), though only
   // the first field in such a list may be an array type, since cloning the
   // size-expression AST per extra name isn't supported. Registers the
-  // compound's name as a symbol via `push_symbol` so it can be used as a
-  // datatype identifier elsewhere (e.g. `Name x;`, `Name{ ... }`).
+  // compound's name as a symbol so it can be used as a datatype identifier
+  // elsewhere.
   pub parse_compound(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("compound");
     if kwerr.is_some() {
@@ -4925,13 +4894,10 @@ impl Parser {
   // Parses `enum Name { variants }` (optionally generic, `enum Name<T> {
   // ... }`): a plain C-style enum, or a tagged union if any variant has a
   // data-carrying payload (`Circle(num)`). Variants are separated by `,`
-  // (preferred) or `;` (legacy); a trailing separator before `}` is
-  // allowed. Registers the enum's name as a symbol via `push_symbol`,
-  // same as `parse_compound`.
-  // 
-  // Reuses `parse_type_params_with_constraints` for the type parameters,
-  // so an enum written with `T: a | b` constraint syntax parses too, even
-  // though constraints aren't semantically meaningful for enums.
+  // or `;`, and a trailing separator before `}` is allowed. Registers the
+  // enum's name as a symbol, and reuses
+  // `parse_type_params_with_constraints` so `T: a | b` constraint syntax
+  // parses here too, though constraints carry no meaning for an enum.
   pub parse_enum(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("enum");
     if kwerr.is_some() {
