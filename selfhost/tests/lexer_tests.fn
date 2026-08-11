@@ -1,0 +1,122 @@
+// Lexer corpus, ported from the `lexer` suite. These run against the
+// tokenizer directly rather than through the emitted C.
+
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+
+// Tokenizes `src`, aborting the test if the lexer itself rejects it.
+fun lex_ok(str src) Vec<Token> {
+  let r = tokenize(src, "test.fn");
+  assert !r.is_err(), "tokenize() returned an error";
+  ret r.unwrap();
+}
+
+// Returns the text a Comment, String, Identifier, Keyword or Operator token
+// carries, aborting the test for any other payload.
+fun tok_text(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> { panic("expected a text-carrying token"); }
+  }
+  ret "";
+}
+
+// skipped: LexProcess initialization asserts on the fields of the original
+// implementation's lexing process object, which has no counterpart here.
+
+// skipped: LexProcess next_char, peek_char and push_char all drive the
+// character cursor, an internal of the original implementation. This
+// tokenizer exposes only whole-token lexing.
+
+test "lexes a line comment" {
+  let toks = lex_ok("// This is a comment\n");
+  assert toks.len >= 1, "expected at least the comment token";
+  assert toks.get(0).type == .Comment, "expected a Comment token";
+  assert equals(tok_text(toks.get(0)), " This is a comment"), "expected the comment body without the slashes";
+}
+
+test "lexes a string literal" {
+  let toks = lex_ok("\"Hello, World!\"");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert equals(tok_text(toks.get(0)), "Hello, World!"), "expected the body without the quotes";
+}
+
+test "lexes an inline raw string with no escape processing" {
+  let toks = lex_ok("`C:\\Users\\name\\file.txt`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "C:\\Users\\name\\file.txt"), "expected literal backslashes, not escape pairs";
+}
+
+test "lexes a raw string with an embedded double-quote" {
+  let toks = lex_ok("`she said \"hi\" and left`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "she said \"hi\" and left"), "expected the quotes preserved literally";
+}
+
+test "lexes a multi-line raw string block, implicitly closed" {
+  let toks = lex_ok("`line one\n  `line two\n  `line three\n;");
+  assert toks.len == 2, "expected the string then the trailing ';'";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "line one\nline two\nline three"), "expected lines joined with real newlines";
+  assert toks.get(1).type == .Symbol, "expected the ';' to stay a separate token";
+}
+
+test "lexes a multi-line raw string block, explicitly closed on the last line" {
+  let toks = lex_ok("`line A\n  `line B`;");
+  assert toks.len == 2, "expected the string then the trailing ';'";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "line A\nline B"), "expected lines joined with a real newline";
+  assert toks.get(1).type == .Symbol, "expected the ';' to stay a separate token";
+}
+
+test "lexes an integer literal" {
+  let toks = lex_ok("12345");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .Number, "expected a Number token";
+  fit toks.get(0).data {
+    .Num(n) -> { assert n == 12345, "expected the parsed value"; }
+    _ -> { panic("expected an integer payload"); }
+  }
+}
+
+test "lexes a mixed stream of numbers, operator, comment and string" {
+  let toks = lex_ok("123 + 456 // comment\n\"string\"");
+  assert toks.len == 6, "expected 6 tokens";
+  assert toks.get(0).type == .Number, "expected a Number token";
+  assert toks.get(1).type == .Operator, "expected an Operator token";
+  assert toks.get(2).type == .Number, "expected a Number token";
+  assert toks.get(3).type == .Comment, "expected a Comment token";
+  assert toks.get(4).type == .NewLine, "expected a NewLine token";
+  assert toks.get(5).type == .String, "expected a String token";
+}
+
+test "lexes multi-character operators via maximal munch" {
+  let toks = lex_ok("1==2!=3<=4>=5&&6||7..8...9->10");
+  Vec<str> ops;
+  ops.init(0);
+  defer ops.free();
+  for t : toks {
+    if t.type == TokenType.Operator {
+      ops.push(tok_text(t));
+    }
+  }
+  assert ops.len == 9, "expected 9 operator tokens";
+  assert equals(ops.get(0), "=="), "expected '=='";
+  assert equals(ops.get(1), "!="), "expected '!='";
+  assert equals(ops.get(2), "<="), "expected '<='";
+  assert equals(ops.get(3), ">="), "expected '>='";
+  assert equals(ops.get(4), "&&"), "expected '&&'";
+  assert equals(ops.get(5), "||"), "expected '||'";
+  assert equals(ops.get(6), ".."), "expected '..'";
+  assert equals(ops.get(7), "..."), "expected '...'";
+  assert equals(ops.get(8), "->"), "expected '->'";
+}
