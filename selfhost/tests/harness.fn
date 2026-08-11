@@ -1,0 +1,61 @@
+// Source-to-C helpers for the ported compiler test corpus. Each helper
+// runs the whole pipeline (lex, parse, transpile) over an in-memory
+// source string, so a test states its input as source text rather than
+// hand-built AST nodes.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp std.string;
+imp std.result;
+imp std.error;
+
+// Transpiles `src` and returns the emitted C, or an error describing the
+// stage that rejected it. Imports are not resolved: `src` is compiled on
+// its own, so a test may name `imp` targets it never calls into.
+pub fun transpile_source(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(cst.out.build());
+}
+
+// Transpiles `src`, aborting with `label` when any stage rejects it.
+pub fun emit_c(str src, str label) str {
+  let r = transpile_source(src);
+  if r.is_err() {
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
+// Asserts the emitted C for `src` contains `needle`.
+pub fun assert_emits(str src, str needle, str label) {
+  let out = emit_c(src, label);
+  assert contains(out, needle), format("{str}: expected C to contain `{str}`", label, needle);
+}
+
+// Asserts the emitted C for `src` does not contain `needle`.
+pub fun assert_not_emits(str src, str needle, str label) {
+  let out = emit_c(src, label);
+  assert !contains(out, needle), format("{str}: expected C not to contain `{str}`", label, needle);
+}
