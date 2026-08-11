@@ -223,3 +223,279 @@ test "raw string literal: multi-line block joins lines with a real newline" {
   let out = emit_c(src, "raw string literal: multi-line block joins lines with a real newline");
   assert contains(out, `line one\nline two`), "expected the lines joined by a newline escape";
 }
+
+test "single-letter quirk name emits impl method bodies" {
+  str src = `imp std.c.io;
+  `quirk Q { getX() num; }
+  `compound Foo { num x; }
+  `impl Foo as Q { getX() num { ret self.x; } }
+  `compound G<T> { T x; }
+  `fun main() num {
+  `  Foo f = Foo{x = 5};
+  `  Q q = &f;
+  `  G<num> g; g.x = 9;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "single-letter quirk name emits impl method bodies");
+  assert contains(out, "Foo__Q__getX(Foo* self) {"), "expected the impl method body, not just a prototype";
+  assert contains(out, "G__num"), "expected the generic instantiation";
+}
+
+test "stacked unary operator does not crash the parser" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  num a = 5;
+  `  num b = ~~a;
+  `}`;
+  let out = emit_c(src, "stacked unary operator does not crash the parser");
+  assert contains(out, "~(~a)"), "expected both bitwise-not applications";
+}
+
+test "member-access multiplied by an identifier parses as multiplication" {
+  str src = `imp std.c.io;
+  `compound O { num v; }
+  `compound W { O inner; }
+  `compound S { num id; }
+  `impl S { pub m(num x) num { ret self.id * x; } }
+  `fun nested(W o, num x) num { ret o.inner.v * x; }
+  `fun main() num {
+  `  S s; s.id = 3;
+  `  W w; w.inner.v = 5;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "member-access multiplied by an identifier parses as multiplication");
+  assert contains(out, "self->id * x"), "expected self field times parameter";
+  assert contains(out, "o.inner.v * x"), "expected nested field times parameter";
+}
+
+test "double pointer dereference emits two stars" {
+  str src = `imp std.c.io;
+  `fun set_via(num** pp, num val) { **pp = val; }
+  `fun main() num {
+  `  num x = 5;
+  `  num* p = &x;
+  `  num** pp = &p;
+  `  set_via(pp, 42);
+  `  num v = **pp;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "double pointer dereference emits two stars");
+  assert contains(out, "int64_t** pp"), "expected a double pointer type";
+  assert contains(out, "**pp"), "expected a double dereference";
+}
+
+// gap: an array-of-pointers parameter type (`Item*[] arr`) is rejected by
+// codegen with "unsupported node"; the original accepts it and emits
+// `arr[0]->id`.
+// test "field access on element of array-of-pointers emits arrow" { }
+
+test "fit on a string value lowers to strcmp chain" {
+  str src = `imp std.c.io;
+  `fun classify(str s) {
+  `  fit s {
+  `    "go" -> { printf("going\n"); },
+  `    "stop" -> { printf("stopped\n"); },
+  `    _ -> { printf("idle\n"); }
+  `  }
+  `}
+  `fun main() num {
+  `  classify("go");
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fit on a string value lowers to strcmp chain");
+  assert contains(out, "strcmp(s, \"go\") == 0"), "expected the first label compared by value";
+  assert contains(out, "strcmp(s, \"stop\") == 0"), "expected the second label compared by value";
+  assert contains(out, "else if"), "expected the labels chained";
+}
+
+test "local array of compound stays in the function body" {
+  str src = `imp std.c.io;
+  `compound P { num x; }
+  `fun main() num {
+  `  P[] pts = [P{x = 1}, P{x = 2}, P{x = 3}];
+  `  num sum = 0;
+  `  for p : pts { sum = sum + p.x; }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "local array of compound stays in the function body");
+  assert contains(out, "P pts[] = {"), "expected the array to keep its local initializer";
+  assert contains(out, "sizeof(pts)/sizeof(pts[0])"), "expected the for-each to size the local array";
+}
+
+test "local T[] initialized from a pointer emits a C pointer, not an array" {
+  str src = `imp std.c.io;
+  `imp std.c.mem;
+  `fun main() num {
+  `  raw* mem = malloc(24);
+  `  num[] a = mem;
+  `  a[0] = 42;
+  `  a[1] = 7;
+  `  free(mem);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "local T[] initialized from a pointer emits a C pointer, not an array");
+  assert contains(out, "int64_t* a = "), "expected a pointer declaration";
+}
+
+test "compound initializer field after an address-of-valued field parses correctly" {
+  str src = `imp std.c.io;
+  `compound Engine { num power; }
+  `compound Car { Engine* motor; num wheels; }
+  `fun main() num {
+  `  Engine e; e.power = 50;
+  `  Car c = Car{motor = &e, wheels = 4};
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "compound initializer field after an address-of-valued field parses correctly"
+  );
+  assert contains(out, ".motor = (&e)"), "expected the address-of field";
+  assert contains(out, ".wheels = 4"), "expected the field that follows it";
+}
+
+// gap: a generic compound with `impl Box<T> as Lenable` never emits a coercion
+// helper, so `Lenable la = &bn;` assigns the raw pointer and dispatch names an
+// undeclared `Lenable__size`.
+// test "generic compound coerces to a quirk (mangled coercion helper name)" { }
+
+test "sizeof works with generic types, generic instances, and locals" {
+  str src = `imp std.c.io;
+  `compound Box<T> { T v; }
+  `compound Pair<A, B> { A a; B b; }
+  `fun main() num {
+  `  Box<num> b;
+  `  num a = sizeof(Box<num>);
+  `  num c = sizeof(b);
+  `  num d = sizeof(Pair<num, num>);
+  `  num e = sizeof(Box<Box<num>>);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "sizeof works with generic types, generic instances, and locals");
+  assert contains(out, "sizeof(Box__num)"), "expected a mangled generic operand";
+  assert contains(out, "sizeof(b)"), "expected a value operand";
+  assert contains(out, "sizeof(Pair__num__num)"), "expected a two-param generic operand";
+  assert contains(out, "sizeof(Box__Box__num)"), "expected a nested generic operand";
+}
+
+// gap: `sizeof(Nope)` on an undeclared type is accepted and passed through to C.
+// test "sizeof on an undeclared type is still rejected" { }
+
+// gap: a constant-zero divisor (`10 / 0`, `7 % 0`, `8 / (2 - 2)`) is accepted
+// and passed through to C.
+// test "P5: constant division by zero is rejected at compile time" { }
+
+test "P5: non-zero and runtime divisors still compile" {
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  num x = 2;
+  `  num a = 10 / 2;
+  `  num b = 9 % x;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P5: non-zero and runtime divisors still compile");
+  assert contains(out, "10 / 2"), "expected the constant division to survive";
+  assert contains(out, "9 % x"), "expected the runtime remainder to survive";
+}
+
+test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  num[2][3] m;
+  `  m[0][0] = 5;
+  `  m[1][2] = 9;
+  `  num[2][2] init = [[1, 2], [3, 4]];
+  `  num[2][2][2] t;
+  `  t[1][1][1] = 7;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P4: multi-dimensional array indexing (2D/3D) type-checks");
+  assert contains(out, "m[2][3]"), "expected a real C 2D array, not a flattened pointer";
+  assert contains(out, "init[2][2] = {{1, 2}, {3, 4}}"), "expected the nested initializer";
+  assert contains(out, "t[2][2][2]"), "expected a 3D declaration";
+}
+
+// gap: a single index of `num[2][3]` yields an array, but assigning it to a
+// `num` is accepted instead of rejected.
+// test "P4: partial index of a 2D array yields an array, not a num" { }
+
+// gap: scientific-notation float literals (1e1, 1.5e-1, 2E+1) fail to lex.
+// Leading-dot and trailing-dot literals do lex.
+// test "P3: float literals and the range operator coexist" { }
+
+test "P3: comparison operators do not maximal-munch a following minus" {
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  num a = 5;
+  `  bin ge = a >=-1;
+  `  bin le = a <=-1;
+  `  bin eq = a ==-5;
+  `  bin ne = a !=-5;
+  `  num sh = 4; sh >>= 1;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: comparison operators do not maximal-munch a following minus");
+  assert contains(out, "a >= (-1)"), "expected >= to keep its negative operand";
+  assert contains(out, "a <= (-1)"), "expected <= to keep its negative operand";
+  assert contains(out, "a == (-5)"), "expected == to keep its negative operand";
+  assert contains(out, "a != (-5)"), "expected != to keep its negative operand";
+  assert contains(out, "sh >>= 1"), "expected the shift-assign operator to stay intact";
+}
+
+test "P3: enum variants accept explicit negative values" {
+  str src = `imp std.c.io;
+  `enum E { A = -1, B = 0, C = 5 }
+  `fun main() num {
+  `  E a = E.A;
+  `  E c = E.C;
+  `  num na = a;
+  `  num nc = c;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: enum variants accept explicit negative values");
+  assert contains(out, "E_A = -1"), "expected the negative variant value";
+  assert contains(out, "E_C = 5"), "expected the positive variant value";
+}
+
+test "P3: uninstantiated generic compound does not trip false cyclic-dependency" {
+  str src = `imp std.c.io;
+  `pub compound Box<T> { T v; }
+  `pub compound Node<T> { T val; Node<T>* next; }
+  `fun main() num {
+  `  Node<num> a = Node<num>{val = 7, next = NULL};
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "P3: uninstantiated generic compound does not trip false cyclic-dependency"
+  );
+  assert contains(out, "Node__num"), "expected the one instantiated template";
+  assert !contains(out, "Box__"), "expected the unused template to be dropped";
+}
+
+// gap: a genuine by-value compound cycle (A holds B by value, B holds A by
+// value) is accepted instead of rejected.
+// test "P3: a genuine by-value compound cycle is still rejected" { }
+
+test "private field (leading underscore): same-module read/write/self access works" {
+  str src = `imp std.c.io;
+  `compound User { num id; num _password; }
+  `impl User {
+  `  pub set_pw(num p) { self._password = p; }
+  `  pub check(num p) bin { ret self._password == p; }
+  `}
+  `fun main() num {
+  `  User u = User{id = 1, _password = 42};
+  `  num a = u._password;
+  `  u._password = 99;
+  `  u.set_pw(7);
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "private field (leading underscore): same-module read/write/self access works"
+  );
+  assert contains(out, "int64_t _password;"), "expected the field name emitted verbatim";
+  assert contains(out, "self->_password"), "expected self access inside a method";
+  assert contains(out, "u._password = 99"), "expected same-module write access";
+}
