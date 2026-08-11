@@ -1575,9 +1575,8 @@ impl Parser {
   // The last node on the output list, if it's still a valid expression
   // operand (a literal/identifier/unary/nested-expression rather than, say,
   // a just-finished statement). `.None` when the list is empty or the last
-  // node isn't operand-shaped. Used to tell "an operator here continues a
-  // left operand already on the stack" (a binary operator) from "an
-  // operator here starts a new operand" (a prefix/unary position).
+  // node isn't operand-shaped. Used to tell a binary operator, continuing a
+  // left operand already on the stack, from a prefix/unary position.
   pub node_peek_expressionable() Option<Node> {
     fit self.state.node_peek_last() {
       .Some(n) -> {
@@ -1823,11 +1822,9 @@ impl Parser {
   // the output list right before the `(` (e.g. an already-parsed callee
   // identifier), it's popped and combined with the parenthesized contents
   // into a `()`-op call `Expression` node, which is how function and method
-  // calls are represented: `Expression{ left = callee, right =
-  // ExpressionParenthesis{ ... }, op = "()" }`. Otherwise the parenthesized
-  // contents are pushed as a plain `ExpressionParenthesis` grouping node.
-  // Either way, finishes by picking up any further operator continuation
-  // via `parse_additional_expression`.
+  // calls are represented. Otherwise the parenthesized contents become a
+  // plain `ExpressionParenthesis` grouping node. Either way, finishes by
+  // picking up any further operator continuation.
   pub parse_for_parenthesis() Option<ParseErrorKind> {
     let lparen_err = self.state.expect_op("(");
     if lparen_err.is_some() {
@@ -5233,25 +5230,17 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `impl Type { methods }` (plain) or `impl Type as Quirk {
-  // methods }` (quirk-implementing), including the generic forms `impl
-  // Type<T> { ... }` (T is a new type param the impl introduces,
-  // disambiguated from a concrete monomorphizing impl like `impl
-  // Type<num> { ... }` via `impl_generic_args_are_params`'s lookahead)
-  // and `impl Type<T> as Quirk<T> { ... }` (a symbolic quirk binding,
-  // where the quirk's arg is the impl's own type param, vs. `as
-  // Quirk<num>`, a concrete, distinctly-mangled quirk identity).
-  // 
-  // Each method compiles to a regular top-level function with a
-  // generated, mangled name (`<Type>__<method>`, or
-  // `<Type>__<Quirk>__<method>` for a quirk impl) and an implicit `<Type>*
-  // self` first argument, reusing the same statement/body-parsing
-  // infrastructure as `parse_function` (a real `current_function`/scope
-  // context, so `if`/`for`/`ret`/`defer`/etc. all work in a method body).
-  // A method may also declare its own generic type parameter(s) in
-  // addition to the impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`).
-  // An impl method's arg list accepts a trailing `...` variadic marker,
-  // like an ordinary function's.
+  // Parses `impl Type { methods }` or `impl Type as Quirk { methods }`,
+  // including the generic forms. In `impl Type<T> { ... }` the arg is a
+  // new type param the impl introduces, told apart from a concrete
+  // monomorphizing `impl Type<num> { ... }` by
+  // `impl_generic_args_are_params`; likewise `as Quirk<T>` is a symbolic
+  // binding to the impl's own param while `as Quirk<num>` is a distinctly
+  // mangled quirk identity. Each method becomes a top-level function named
+  // `<Type>__<method>` (or `<Type>__<Quirk>__<method>`) with an implicit
+  // `<Type>* self` first argument, parsed through the same
+  // scope/`current_function` machinery as `parse_function`, and may carry
+  // its own generic params plus a trailing `...` variadic marker.
   pub parse_impl(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("impl");
     if kwerr.is_some() {
@@ -5331,12 +5320,10 @@ impl Parser {
       quirk_name = qname;
       has_quirk_name = true;
 
-      // A generic quirk binding is either symbolic (the arg is the
-      // enclosing impl's own type param, resolved later by the impl's
-      // own generic-instantiation machinery, method mangling keys off
-      // just the base quirk name) or concrete (a fixed instantiation
-      // that's effectively a distinct quirk identity, mangled the same
-      // way a generic compound/enum instantiation is).
+      // A generic quirk binding is either symbolic, where the arg is the
+      // enclosing impl's own type param and mangling keys off the base
+      // quirk name alone, or concrete, a fixed instantiation that is a
+      // distinct quirk identity mangled like any generic instantiation.
       if self.state.next_token_is_angle_open() {
         DataType* quirk_dt = malloc(sizeof(DataType));
         *quirk_dt = dtype_new();
@@ -5796,20 +5783,13 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Repeatedly parses top-level items until the token stream is
-  // exhausted or a parse error occurs. Opens the file's root scope
-  // first; nothing closes it, since a successful parse has no reason to
-  // and a failed one aborts the whole parse anyway.
-  // 
-  // Does no forward type-name pre-scan, so a `Name{...}` compound
-  // initializer can't forward-reference a `compound`/`enum`/`quirk`
-  // declared later in the file (see `is_known_compound_symbol`). Does no
-  // cross-file `global_symbols` registration either; that's handled by
-  // `import_resolver.fn` before parsing begins. Within a single file,
-  // top-level `let`/variable declarations resolve via the same
-  // scope-entity mechanism as any other declaration, and forward/
-  // out-of-order function calls are tolerated by
-  // `parse_single_token_to_node`'s identifier check.
+  // Repeatedly parses top-level items until the token stream is exhausted
+  // or a parse error occurs, opening the file's root scope first and never
+  // closing it. There is no forward type-name pre-scan, so a `Name{...}`
+  // initializer can't forward-reference a type declared later in the file,
+  // and no cross-file `global_symbols` registration, which
+  // `import_resolver.fn` does beforehand. Forward and out-of-order function
+  // calls are tolerated by `parse_single_token_to_node`'s identifier check.
   pub parse() Option<ParseErrorKind> {
     self.state.init_root_scope();
     for true {
@@ -6394,12 +6374,10 @@ test "parse_reorder_expression leaves an already-correct right-heavy shape untou
 }
 
 test "parse_reorder_expression rotates a chain needing two rotations" {
-  // Mirrors how the parser actually builds `a * b * c * d`: the RHS of
-  // each operator is parsed and reordered first, recursively, so by the
-  // time an outer node is built its right child is already a fully
-  // reordered sub-expression. `parse_reorder_expression` is called
-  // incrementally, bottom-up, once per level, never on a raw multi-level
-  // right-recursive chain built in one shot.
+  // Matches how the parser builds `a * b * c * d`: each operator's RHS is
+  // parsed and reordered first, so an outer node's right child is already
+  // a fully reordered sub-expression. `parse_reorder_expression` runs
+  // bottom-up, once per level, never on a raw multi-level chain.
   Node a = node_new(NodeKind.Identifier("a"));
   Node b = node_new(NodeKind.Identifier("b"));
   Node c = node_new(NodeKind.Identifier("c"));
@@ -6764,12 +6742,10 @@ test "parse_expressionable_root parses a one-arg call" {
 }
 
 test "parse_expressionable_root parses 'sizeof(Type)' as an ordinary call" {
-  // 'sizeof' isn't a keyword in this language, so 'sizeof(Point)' is just
-  // an ordinary call whose callee happens to be named 'sizeof'. The only
-  // special handling needed is letting 'Point' (an undeclared,
-  // forward-referenced, or purely-a-type name) through the
-  // unknown-identifier check as the call argument, via
-  // `is_sizeof_type_operand` in `parse_single_token_to_node`.
+  // 'sizeof' isn't a keyword, so 'sizeof(Point)' is an ordinary call whose
+  // callee happens to be named 'sizeof'. The only special handling is
+  // letting the type-name argument through the unknown-identifier check,
+  // via `is_sizeof_type_operand` in `parse_single_token_to_node`.
   ParseState st = _state_from("sizeof(Point)");
   Parser p = parser_new(&st);
   assert p.parse_expressionable_root().is_none(), "expected 'sizeof(Point)' to parse even though 'Point' is never declared";
@@ -7075,14 +7051,11 @@ test "parse_expressionable_root parses a postfix unary followed by a binary cont
 
 test "parse_expressionable_root parses a unary operand followed by a binary continuation" {
   // `parse_for_normal_unary`/`parse_for_indirection_unary` bound their
-  // operand parse with `stop_at_binary_op`, restricting a prefix unary to
-  // postfix-only continuations, so it binds tightly: `-a + b` is
-  // `(-a) + b`, not `-(a + b)`. This matters beyond precedence aesthetics:
-  // without the bound, `*buf = 10` would parse as `*(buf = 10)` (assigning
-  // into `buf` itself, then dereferencing the result) instead of
-  // `(*buf) = 10` (assigning through the pointer). A postfix continuation
-  // (`.`/`(`/`[`) still continues the same operand rather than ending it,
-  // so `!r.is_err()` still correctly parses as `!(r.is_err())`.
+  // operand parse with `stop_at_binary_op`, so a prefix unary binds
+  // tightly: `-a + b` is `(-a) + b`, and `*buf = 10` assigns through the
+  // pointer instead of parsing as `*(buf = 10)`. A postfix continuation
+  // (`.`/`(`/`[`) still continues the same operand, so `!r.is_err()`
+  // parses as `!(r.is_err())`.
   Vec<str> names;
   names.init(0);
   names.push("a");
