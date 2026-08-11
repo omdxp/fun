@@ -26,7 +26,7 @@ fun default_outcome() TestOutcome {
 }
 
 // Runs test `i` and reports its outcome over `out`. A forked virtual task's
-// body, one per discovered test -- see `run_discovered_tests`.
+// body, one per discovered test. See `run_discovered_tests`.
 async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
   TestOutcome o;
   o.index = i;

@@ -1,4 +1,4 @@
-// AST node types for the self-hosted Fun compiler.
+// AST node types.
 // 
 // `DataType` and `Node` share this file because they're mutually
 // recursive (array-size expressions need `Node`, declarations need
@@ -7,7 +7,7 @@
 // `compound`. Optional child nodes are plain `Node*` fields compared
 // against `nil`; optional `Vec<T>` fields pair a `bin has_X` flag with
 // an always-`.init(0)`-ed value, since an uninitialized `Vec<T>` reads
-// garbage length -- always build node payloads through the `_new()`
+// garbage length; always build node payloads through the `_new()`
 // constructors below, never a bare declaration.
 
 imp ..lexer.token;
@@ -39,7 +39,7 @@ pub enum DataTypeType {
 }
 
 // A function-type signature attached to a DataType's `fn_sig` (for a
-// function-type parameter, `fun(T1, T2) R name` -- see DataType.fn_sig).
+// function-type parameter, `fun(T1, T2) R name`; see DataType.fn_sig).
 pub compound FnTypeSig {
   Vec<DataType*> params;
   DataType* rtype;
@@ -96,7 +96,7 @@ pub compound NodeFlags {
   bin is_public;
   bin is_used;
   // True for a `.String`-kind node built from a backtick raw string
-  // literal -- see `Token.is_raw_string`'s doc comment. Set by the parser
+  // literal; see `Token.is_raw_string`'s doc comment. Set by the parser
   // when constructing this node from its token; codegen and the
   // formatter both key off it for `.String` nodes specifically.
   bin is_raw_string;
@@ -153,7 +153,7 @@ pub enum WarningControlAction {
 // Kept as a free function (rather than only the `From<str>` quirk impl
 // below) because callers that validate a warning-control directive from
 // source (`allow unknown_id;`) need to detect and report an invalid id as a
-// real compile error -- `From<T>`'s `from(T value)` is void/best-effort by
+// real compile error; `From<T>`'s `from(T value)` is void/best-effort by
 // contract (see std.quirks), which can't express that failure.
 pub fun warning_id_from_string(str name) Option<WarningId> {
   fit name {
@@ -177,7 +177,7 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
 
 // `id.from(str)` mutates `*self` in place on a recognized name, matching
 // `From<T>`'s documented best-effort contract (leaves `self` unchanged on
-// an unrecognized one) -- built on the fallible free function above rather
+// an unrecognized one), built on the fallible free function above rather
 // than duplicating the string table.
 impl WarningId as From<str> {
   pub from(str value) {
@@ -189,7 +189,7 @@ impl WarningId as From<str> {
   }
 }
 
-// `id.to()` instead of a free function -- WarningId -> str is exactly the
+// `id.to()` instead of a free function: WarningId -> str is exactly the
 // shape std.quirks' `To<T>` conversion quirk is for.
 impl WarningId as To<str> {
   pub to() str {
@@ -215,7 +215,7 @@ impl WarningId as To<str> {
 // ===== Per-node-kind payload types =====
 // Each compound below is the payload of exactly one `NodeKind` variant
 // (named identically, minus the `Node`/`Kind` suffix). One with a
-// `Vec<T>` field gets a paired `_new()` constructor -- use it instead of
+// `Vec<T>` field gets a paired `_new()` constructor; use it instead of
 // a bare declaration (see the file-level note above).
 
 // A binary (or, with `right` absent, unary-ish) operator expression, e.g.
@@ -269,7 +269,7 @@ pub fun compound_init_node_new() CompoundInitNode {
 }
 
 // A variable declaration: `Type name;` or `Type name = val;` (`let name =
-// val;` too -- `var_type` carries the "infer from val" placeholder until
+// val;` too: `var_type` carries the "infer from val" placeholder until
 // typecheck resolves it).
 pub compound VariableNode {
   DataType* var_type;
@@ -294,7 +294,7 @@ pub fun body_node_new() BodyNode {
 }
 
 // A function declaration: `fun name(args) rtype { body }` (a bodyless one,
-// `has_body = false`, is a binding/prototype -- see `std.c.*`).
+// `has_body = false`, is a binding/prototype; see `std.c.*`).
 pub compound FunctionNode {
   DataType* rtype;
   bin has_rtype;
@@ -463,7 +463,7 @@ pub compound QuirkArg {
 }
 
 // One required method signature inside a `quirk Name { ... }` declaration
-// (no body -- quirks only declare a contract; `impl Type as Name` supplies
+// (no body, quirks only declare a contract; `impl Type as Name` supplies
 // the implementation).
 pub compound QuirkMethodSig {
   str name;
@@ -504,7 +504,7 @@ pub fun quirk_node_new() QuirkNode {
   ret q;
 }
 
-// One variant of an `enum Name { variants }` declaration -- a plain
+// One variant of an `enum Name { variants }` declaration: a plain
 // enumerator, or a data-carrying (tagged union) one if `has_payload`.
 pub compound EnumVariant {
   str name;
@@ -564,7 +564,7 @@ pub compound ImplNode {
   bin has_quirk_name;
   // Set when the `as` clause names a concrete instantiation of a generic
   // quirk whose argument is not the enclosing impl's own type param (`as
-  // To<num>`) -- the mangled name (`To__num`) of that distinct quirk
+  // To<num>`), the mangled name (`To__num`) of that distinct quirk
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
   bin has_quirk_concrete_instantiation;
@@ -619,7 +619,7 @@ pub enum NodeKind {
   Expression(ExprNode),
   ExpressionParenthesis(Node*),
   // Reuses TokenData's Num/Dec variants, which already distinguish
-  // integer vs decimal literals -- exactly what a Number node needs.
+  // integer vs decimal literals, exactly what a Number node needs.
   Number(TokenData),
   Identifier(str),
   String(str),
@@ -639,7 +639,7 @@ pub enum NodeKind {
   StatementDefer(Node*),
   StatementIf(IfStmtNode),
   StatementElseIf(IfStmtNode),
-  // The body of an `else` -- a `Node*` (not specifically a `BodyNode`)
+  // The body of an `else`, a `Node*` (not specifically a `BodyNode`)
   // since, like if/elif, it can be either a `{ ... }` block or a single
   // statement (`else ret 0;`).
   StatementElse(Node*),

@@ -25,10 +25,7 @@ fun _str_len(str s) num {
 }
 
 impl Vec<T> as Sized {
-  // Return the number of elements.
-  // 
-  // Returns:
-  // - element count
+  // Returns the number of elements.
   pub len() num {
     ret self.len;
   }

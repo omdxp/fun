@@ -19,7 +19,7 @@ pub enum Associativity {
 
 // An operator's resolved precedence: its rank (lower binds tighter) and
 // associativity. `found = false` for a string that isn't a real operator
-// at all (the caller's bug, not a valid "no precedence" state -- every
+// at all (the caller's bug, not a valid "no precedence" state): every
 // operator token the lexer produces has an entry below).
 pub compound OpPrecedence {
   num rank;
@@ -114,7 +114,7 @@ pub fun op_precedence_for(str op) OpPrecedence {
 
 // True when `op_left`, the already-built outer operator, should keep its
 // operand rather than ceding it to `op_right`, the operator just found
-// to its right -- i.e. whether `(a op_left b) op_right c` is already the
+// to its right, i.e. whether `(a op_left b) op_right c` is already the
 // correct grouping, rather than `a op_left (b op_right c)`.
 // Same-operator chains group by the operator's own associativity;
 // otherwise a right-associative left operator never yields, and
@@ -143,7 +143,7 @@ pub fun is_unary_operator(str op) bin {
 }
 
 // True if `op` is the pointer-indirection operator (`*p`). A narrower
-// check than `is_unary_operator` -- indirection needs its own parsing
+// check than `is_unary_operator`: indirection needs its own parsing
 // path since a following run of `*`s is a pointer-depth count, not a
 // chain of separate unary operators.
 pub fun is_indirection_operator(str op) bin {
@@ -156,7 +156,7 @@ pub fun is_left_operanded_unary_operator(str op) bin {
 }
 
 // True if `t` is an `Operator` token that, appearing after a complete
-// primary expression, is a binary/infix operator -- i.e. it would combine
+// primary expression, is a binary/infix operator, i.e. it would combine
 // the primary with a following operand rather than continue it. Postfix-
 // continuation operators (`.`, `[`, `(`) return false (they extend the
 // primary instead). Used to decide whether a just-parsed condition
@@ -199,9 +199,9 @@ test "op_precedence_for reports not-found for an unrecognized string" {
 
 test "left_has_priority favors the tighter-binding operator" {
   // '*' binds tighter than '+': in `a + b * c`, the already-built '+'
-  // does not keep its operand -- '*' needs it instead.
+  // does not keep its operand; '*' needs it instead.
   assert !left_has_priority("+", "*"), "'+' should yield to a tighter '*' on its right";
-  // The reverse: '*' already built, '+' found to the right -- '*' keeps it.
+  // The reverse: '*' already built, '+' found to the right, so '*' keeps it.
   assert left_has_priority("*", "+"), "'*' should keep its operand against a looser '+'";
 }
 

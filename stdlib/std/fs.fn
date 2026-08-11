@@ -245,7 +245,7 @@ impl Fs {
     ret __fun_path_is_dir(path) != 0;
   }
 
-  // Creates a single directory. The parent must already exist -- this is not
+  // Creates a single directory. The parent must already exist; this is not
   // recursive (see `walk_dir` for recursive traversal of existing
   // directories; a recursive `mkdir -p` is not provided here). Errs on
   // failure, including if the directory already exists.

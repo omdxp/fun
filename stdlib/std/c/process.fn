@@ -80,7 +80,7 @@ pub fun posix_spawnp(
 
 // Waits for child `pid` to exit, writing the raw wait status to `status`
 // (real C `int*`, see the `pipe` note above on why this is `i32*` and not
-// `num*` -- decode with the bit ops described in this module's header
+// `num*`; decode with the bit ops described in this module's header
 // comment). `options` is 0 for a normal blocking wait. Returns the pid of
 // the child whose state changed, or -1 on failure (C semantics).
 pub fun waitpid(num pid, i32* status, num options) num;

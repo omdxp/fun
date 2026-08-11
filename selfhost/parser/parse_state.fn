@@ -1,7 +1,6 @@
-// Parser-relevant compile state for the self-hosted Fun compiler:
-// the token stream and cursor, output node storage, scope/symbol
-// tracking, the cross-module duplicate-symbol registry, and the current
-// diagnostic position.
+// Parser-relevant compile state: the token stream and cursor, output
+// node storage, scope/symbol tracking, the cross-module duplicate-symbol
+// registry, and the current diagnostic position.
 
 imp ..ast.ast;
 imp ..lexer.token;

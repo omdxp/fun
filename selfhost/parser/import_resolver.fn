@@ -23,7 +23,7 @@ imp std.result;
 // `.` characters becomes `N / 2` `../` parent segments plus one extra
 // `/` when N is odd (a single `.` between segments, e.g. `lexer.token`,
 // is the odd case; a leading `..`/`....` run is always even). Shared by
-// `resolve_import_path` for both a local and a `std.*` import -- only
+// `resolve_import_path` for both a local and a `std.*` import; only
 // `root` differs.
 fun _convert_dotted_path(str root, str import_path) str {
   StringBuilder sb = string_builder_init(64);
@@ -179,11 +179,11 @@ pub compound ProgramMergeResult {
 
 // Recursively discovers `path`'s (transitive) import graph and collects
 // just the name of each public top-level `compound` declared anywhere in
-// it (into `out`, keyed by name) -- a lightweight first pass so
+// it (into `out`, keyed by name): a lightweight first pass so
 // `is_known_compound_symbol` can recognize a compound from another file
 // before that file's own real parse starts. Doesn't reuse a full
 // `Parser.parse()`, since that needs `is_known_compound_symbol` to
-// already know about not-yet-visited files -- the circularity this pass
+// already know about not-yet-visited files; the circularity this pass
 // exists to avoid. Instead, `imp` statements are parsed via the real
 // `Parser.parse_import` to discover the import graph accurately, and a
 // top-level `pub compound name` is found via a raw, depth-tracked token
@@ -350,8 +350,8 @@ fun _parse_and_merge(
     }
   }
 
-  // Pass 2: rename any colliding plain function before pushing anything
-  // -- see `_rename_colliding_functions`.
+  // Pass 2: rename any colliding plain function before pushing anything.
+  // See `_rename_colliding_functions`.
   if !equals(current_alias, "") {
     _rename_colliding_functions(&state.nodes, merged, current_alias, rename_keys, rename_targets);
   }
@@ -413,7 +413,7 @@ fun _rename_colliding_functions(
 }
 
 // True when `merged` already contains a top-level plain function named
-// `name` -- see `_rename_colliding_functions`.
+// `name`, see `_rename_colliding_functions`.
 fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
   num mi = 0;
   for mi < merged.len {

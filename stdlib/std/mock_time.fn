@@ -76,7 +76,7 @@ impl MockClock as Clock {
 
 impl MockClock {
   // Moves the fake clock forward by `seconds` (or backward, given a
-  // negative value) -- instant, no real waiting.
+  // negative value); instant, no real waiting.
   pub advance(num seconds) {
     self.current.epoch = add_seconds(self.current.epoch, seconds);
   }

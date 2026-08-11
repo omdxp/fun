@@ -1,11 +1,6 @@
-// Blocking bounded channels built on std.sync.
-// 
-// This module provides a minimal channel primitive suitable as a runtime
-// building block for higher-level concurrency features.
-// 
-// Notes:
-// - Synchronization is dispatched through std.sync_runtime backends.
-// - Async wrappers are await-friendly APIs over the same blocking semantics.
+// Blocking bounded channels built on std.sync, dispatched through
+// std.sync_runtime backends. Async wrappers are await-friendly APIs over
+// the same blocking semantics.
 
 imp std.sync;
 imp std.sync_runtime;
@@ -50,13 +45,7 @@ pub compound Channel<T> {
   num select_wait_backoff_steps;
 }
 
-// Create a single-slot channel.
-// 
-// Params:
-// - default_value: initial value used to initialize storage
-// 
-// Returns:
-// - initialized channel
+// Creates a single-slot channel, initialized with default_value.
 pub fun channel_new<T>(T default_value) Channel<T> {
   Channel<T> ch;
   ch.mu = runtime_mutex_new();
@@ -88,14 +77,8 @@ pub fun channel_new<T>(T default_value) Channel<T> {
   ret ch;
 }
 
-// Create a bounded channel with explicit capacity.
-// 
-// Params:
-// - default_value: initial value used to initialize storage
-// - capacity: requested channel capacity (values <= 0 become 1)
-// 
-// Returns:
-// - initialized channel
+// Creates a bounded channel with the given capacity (values <= 0 become 1),
+// initialized with default_value.
 pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   if capacity <= 0 {
     capacity = 1;
@@ -158,10 +141,7 @@ fun channel_normalize_abs_time(ChannelAbsTime* ts) {
   }
 }
 
-// Build an absolute timeout from a millisecond duration.
-// 
-// Note:
-// - Uses `clock_gettime` and keeps millisecond-scale precision.
+// Builds an absolute timeout from a millisecond duration using clock_gettime.
 fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   if out == nil {
     ret CHANNEL_RC_NULL_ARG;
@@ -241,11 +221,8 @@ fun channel_sanitize_backoff_steps(num backoff_steps) num {
   ret backoff_steps;
 }
 
-// Remaining time (ms) until absolute deadline.
-// 
-// Returns:
-// - remaining milliseconds rounded up
-// - 0 when already expired or on clock failure
+// Remaining time in milliseconds until the absolute deadline, rounded up
+// (0 when already expired or on clock failure).
 fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
   if abs_time == nil {
     ret 0;
@@ -284,12 +261,8 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
   ret out_ms;
 }
 
-// Compute per-round select wait duration with bounded adaptive backoff.
-// 
-// Strategy:
-// - Start from base_wait_slice_ms.
-// - Back off exponentially with idle rounds.
-// - Clamp to rem_ms when rem_ms >= 0.
+// Computes the per-round select wait duration: starts at base_wait_slice_ms,
+// backs off exponentially with idle rounds, and clamps to rem_ms.
 fun channel_compute_wait_slice_ms(
   num base_wait_slice_ms,
   num rem_ms,
@@ -323,11 +296,8 @@ fun channel_compute_wait_slice_ms(
   ret wait_ms;
 }
 
-// Returns true when an optional cancellation flag is set.
-// 
-// Convention:
-// - nil flag pointer means cancellation is disabled.
-// - nonzero flag value means cancelled.
+// Returns true when an optional cancellation flag is set (nil disables
+// cancellation; nonzero means cancelled).
 fun channel_is_cancelled(num* cancel_flag) bin {
   if cancel_flag == nil {
     ret false;
@@ -389,10 +359,8 @@ fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
   ret &token.flag;
 }
 
-// Shared channel return codes exposed as helpers.
-// 
-// Note:
-// - Some APIs intentionally alias meanings to the same numeric code.
+// Shared channel return codes. Some APIs intentionally alias meanings to
+// the same numeric code.
 pub const num CHANNEL_RC_OK = 0;
 pub const num CHANNEL_RC_CLOSED = 1;
 pub const num CHANNEL_RC_TIMEOUT = 2;
@@ -492,10 +460,7 @@ impl Channel<T> {
     ret .Error(rc);
   }
 
-  // Initialize internal synchronization primitives.
-  // 
-  // Returns:
-  // - 0 on success, nonzero error code on failure
+  // Initializes internal synchronization primitives.
   pub init() num {
     if self.has_buffer == false {
       ret CHANNEL_RC_ALLOC_FAILED;
@@ -544,12 +509,8 @@ impl Channel<T> {
     ret self.select_wait_backoff_steps;
   }
 
-  // Send one value, blocking while the slot is full.
-  // 
-  // Returns:
-  // - 0 on success
-  // - -1 when channel is closed
-  // - nonzero pthread error codes on synchronization failures
+  // Sends one value, blocking while the channel is full. Returns 0 on
+  // success, -1 if closed, or a nonzero pthread error code on sync failure.
   pub send(T value) num {
     let rc = self.init();
     if rc != 0 {
@@ -590,36 +551,18 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Send one value, blocking up to timeout_ms while full.
-  // 
-  // Params:
-  // - value: value to send
-  // - timeout_ms: max wait in milliseconds
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed
-  // - 2 on timeout while still full
-  // - -2 when storage allocation failed
-  // - nonzero pthread error codes on synchronization failures
+  // Sends one value, blocking up to timeout_ms while full. Returns 0 on
+  // success, 1 if closed, 2 on timeout, -2 on allocation failure, or a
+  // nonzero pthread error code on sync failure.
   pub send_timeout(T value, num timeout_ms) num {
     ret self.send_timeout_with_cancel(value, timeout_ms, nil);
   }
 
-  // Send one value, blocking up to timeout_ms while full, with optional cancellation.
-  // 
-  // Params:
-  // - value: value to send
-  // - timeout_ms: max wait in milliseconds (negative means wait forever)
-  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed
-  // - 2 on timeout while still full
-  // - 3 when cancelled
-  // - -2 when storage allocation failed
-  // - nonzero pthread error codes on synchronization failures
+  // Sends one value, blocking up to timeout_ms while full (negative waits
+  // forever), with optional cancellation via cancel_flag (nonzero =>
+  // cancelled). Returns 0 on success, 1 if closed, 2 on timeout, 3 if
+  // cancelled, -2 on allocation failure, or a nonzero pthread error code on
+  // sync failure.
   pub send_timeout_with_cancel(T value, num timeout_ms, num* cancel_flag) num {
     let rc = self.init();
     if rc != 0 {
@@ -727,22 +670,15 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Send one value, waiting forever while full, with optional cancellation.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed
-  // - 3 when cancelled
-  // - -2 when storage allocation failed
-  // - nonzero pthread error codes on synchronization failures
+  // Sends one value, waiting forever while full, with optional cancellation.
+  // Returns 0 on success, 1 if closed, 3 if cancelled, -2 on allocation
+  // failure, or a nonzero pthread error code on sync failure.
   pub send_with_cancel(T value, num* cancel_flag) num {
     ret self.send_timeout_with_cancel(value, -1, cancel_flag);
   }
 
-  // Send one value, blocking up to timeout_ms while full, with optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as send_timeout_with_cancel
+  // Sends one value, blocking up to timeout_ms while full, with optional
+  // token cancellation. Same return codes as send_timeout_with_cancel.
   pub send_timeout_with_token(T value, num timeout_ms, ChannelCancelToken* cancel_token) num {
     ret self.send_timeout_with_cancel(
       value,
@@ -751,18 +687,14 @@ impl Channel<T> {
     );
   }
 
-  // Send one value, waiting forever while full, with optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as send_with_cancel
+  // Sends one value, waiting forever while full, with optional token
+  // cancellation. Same return codes as send_with_cancel.
   pub send_with_token(T value, ChannelCancelToken* cancel_token) num {
     ret self.send_with_cancel(value, channel_cancel_token_flag_ptr(cancel_token));
   }
 
-  // Await-friendly wrapper for send.
-  // 
-  // Note:
-  // - This remains a blocking channel send under the hood.
+  // Await-friendly wrapper for send (still a blocking channel send under
+  // the hood).
   pub async send_async(T value) num {
     ret self.send(value);
   }
@@ -782,14 +714,9 @@ impl Channel<T> {
     ret self.send_timeout_with_token(value, timeout_ms, cancel_token);
   }
 
-  // Try sending one value without blocking.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed
-  // - 2 when channel is full
-  // - -2 when storage allocation failed
-  // - nonzero pthread error codes on synchronization failures
+  // Tries sending one value without blocking. Returns 0 on success, 1 if
+  // closed, 2 if full, -2 on allocation failure, or a nonzero pthread error
+  // code on sync failure.
   pub try_send(T value) num {
     let rc = self.init();
     if rc != 0 {
@@ -820,16 +747,9 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Receive one value into out, blocking while empty.
-  // 
-  // Params:
-  // - out: destination pointer
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed and no value is available
-  // - -1 when out is null
-  // - nonzero pthread error codes on synchronization failures
+  // Receives one value into out, blocking while empty. Returns 0 on
+  // success, 1 if closed with nothing available, -1 if out is null, or a
+  // nonzero pthread error code on sync failure.
   pub recv_into(T* out) num {
     if out == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -872,37 +792,18 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Receive one value into out, blocking up to timeout_ms while empty.
-  // 
-  // Params:
-  // - out: destination pointer
-  // - timeout_ms: max wait in milliseconds
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed and empty
-  // - 2 on timeout while still empty
-  // - -1 when out is null
-  // - nonzero pthread error codes on synchronization failures
+  // Receives one value into out, blocking up to timeout_ms while empty.
+  // Returns 0 on success, 1 if closed and empty, 2 on timeout, -1 if out is
+  // null, or a nonzero pthread error code on sync failure.
   pub recv_timeout_into(T* out, num timeout_ms) num {
     ret self.recv_timeout_into_with_cancel(out, timeout_ms, nil);
   }
 
-  // Receive one value into out, blocking up to timeout_ms while empty,
-  // with optional cancellation.
-  // 
-  // Params:
-  // - out: destination pointer
-  // - timeout_ms: max wait in milliseconds (negative means wait forever)
-  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed and empty
-  // - 2 on timeout while still empty
-  // - 3 when cancelled
-  // - -1 when out is null
-  // - nonzero pthread error codes on synchronization failures
+  // Receives one value into out, blocking up to timeout_ms while empty
+  // (negative waits forever), with optional cancellation via cancel_flag
+  // (nonzero => cancelled). Returns 0 on success, 1 if closed and empty, 2
+  // on timeout, 3 if cancelled, -1 if out is null, or a nonzero pthread
+  // error code on sync failure.
   pub recv_timeout_into_with_cancel(T* out, num timeout_ms, num* cancel_flag) num {
     if out == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -1010,11 +911,8 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Receive one value, blocking while empty.
-  // 
-  // Returns:
-  // - received value on success
-  // - zeroed value when channel is closed and empty or on sync failure
+  // Receives one value, blocking while empty. Returns a zeroed value if
+  // closed and empty or on sync failure.
   pub recv() T {
     let out = self.zero_value();
     let rc = self.recv_into(&out);
@@ -1024,23 +922,17 @@ impl Channel<T> {
     ret out;
   }
 
-  // Receive one value into out, waiting forever while empty, with optional cancellation.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when channel is closed and empty
-  // - 3 when cancelled
-  // - -1 when out is null
-  // - nonzero pthread error codes on synchronization failures
+  // Receives one value into out, waiting forever while empty, with optional
+  // cancellation. Returns 0 on success, 1 if closed and empty, 3 if
+  // cancelled, -1 if out is null, or a nonzero pthread error code on sync
+  // failure.
   pub recv_into_with_cancel(T* out, num* cancel_flag) num {
     ret self.recv_timeout_into_with_cancel(out, -1, cancel_flag);
   }
 
-  // Receive one value into out, blocking up to timeout_ms while empty,
-  // with optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as recv_timeout_into_with_cancel
+  // Receives one value into out, blocking up to timeout_ms while empty,
+  // with optional token cancellation. Same return codes as
+  // recv_timeout_into_with_cancel.
   pub recv_timeout_into_with_token(T* out, num timeout_ms, ChannelCancelToken* cancel_token) num {
     ret self.recv_timeout_into_with_cancel(
       out,
@@ -1049,20 +941,14 @@ impl Channel<T> {
     );
   }
 
-  // Receive one value into out, waiting forever while empty,
-  // with optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as recv_into_with_cancel
+  // Receives one value into out, waiting forever while empty, with optional
+  // token cancellation. Same return codes as recv_into_with_cancel.
   pub recv_into_with_token(T* out, ChannelCancelToken* cancel_token) num {
     ret self.recv_into_with_cancel(out, channel_cancel_token_flag_ptr(cancel_token));
   }
 
-  // Receive one value, blocking up to timeout_ms while empty.
-  // 
-  // Returns:
-  // - received value on success
-  // - zeroed value when timeout/closed empty/sync error occurs
+  // Receives one value, blocking up to timeout_ms while empty. Returns a
+  // zeroed value on timeout, closed-and-empty, or sync error.
   pub recv_timeout(num timeout_ms) T {
     let out = self.zero_value();
     let rc = self.recv_timeout_into(&out, timeout_ms);
@@ -1072,11 +958,9 @@ impl Channel<T> {
     ret out;
   }
 
-  // Receive one value, blocking up to timeout_ms while empty, with optional cancellation.
-  // 
-  // Returns:
-  // - received value on success
-  // - zeroed value when timeout/closed empty/cancelled/sync error occurs
+  // Receives one value, blocking up to timeout_ms while empty, with
+  // optional cancellation. Returns a zeroed value on timeout,
+  // closed-and-empty, cancellation, or sync error.
   pub recv_timeout_with_cancel(num timeout_ms, num* cancel_flag) T {
     let out = self.zero_value();
     let rc = self.recv_timeout_into_with_cancel(&out, timeout_ms, cancel_flag);
@@ -1086,37 +970,28 @@ impl Channel<T> {
     ret out;
   }
 
-  // Receive one value, waiting forever while empty, with optional cancellation.
-  // 
-  // Returns:
-  // - received value on success
-  // - zeroed value when closed/cancelled/sync error occurs
+  // Receives one value, waiting forever while empty, with optional
+  // cancellation. Returns a zeroed value if closed, cancelled, or on sync
+  // error.
   pub recv_with_cancel(num* cancel_flag) T {
     ret self.recv_timeout_with_cancel(-1, cancel_flag);
   }
 
-  // Receive one value, blocking up to timeout_ms while empty,
-  // with optional token cancellation.
-  // 
-  // Returns:
-  // - same return behavior as recv_timeout_with_cancel
+  // Receives one value, blocking up to timeout_ms while empty, with
+  // optional token cancellation. Same return behavior as
+  // recv_timeout_with_cancel.
   pub recv_timeout_with_token(num timeout_ms, ChannelCancelToken* cancel_token) T {
     ret self.recv_timeout_with_cancel(timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
   }
 
-  // Receive one value, waiting forever while empty,
-  // with optional token cancellation.
-  // 
-  // Returns:
-  // - same return behavior as recv_with_cancel
+  // Receives one value, waiting forever while empty, with optional token
+  // cancellation. Same return behavior as recv_with_cancel.
   pub recv_with_token(ChannelCancelToken* cancel_token) T {
     ret self.recv_with_cancel(channel_cancel_token_flag_ptr(cancel_token));
   }
 
-  // Await-friendly wrapper for recv.
-  // 
-  // Note:
-  // - This remains a blocking channel receive under the hood.
+  // Await-friendly wrapper for recv (still a blocking channel receive under
+  // the hood).
   pub async recv_async() T {
     ret self.recv();
   }
@@ -1155,11 +1030,9 @@ impl Channel<T> {
     ret self.recv_timeout_with_token(timeout_ms, cancel_token);
   }
 
-  // Receive one value as a RecvResult you can `fit` on. Blocks while empty; resolves
-  // to Ok(value)/Closed/Error — never Timeout (no deadline) or Cancelled (no token).
-  // 
-  // Returns:
-  // - RecvResult.Ok(value) on success; Closed when drained+closed; Error(rc) otherwise
+  // Receives one value as a RecvResult you can `fit` on. Blocks while
+  // empty; resolves to Ok(value)/Closed/Error — never Timeout (no deadline)
+  // or Cancelled (no token).
   pub recv_result() RecvResult<T> {
     let out = self.zero_value();
     let rc = self.recv_into(&out);
@@ -1267,17 +1140,9 @@ impl Channel<T> {
     ret self.send_result_with_token(value, cancel_token);
   }
 
-  // Try receiving one value without blocking.
-  // 
-  // Params:
-  // - out: destination pointer
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when closed and empty
-  // - 2 when open but empty
-  // - -1 when out is null
-  // - nonzero pthread error codes on synchronization failures
+  // Tries receiving one value without blocking. Returns 0 on success, 1 if
+  // closed and empty, 2 if open but empty, -1 if out is null, or a nonzero
+  // pthread error code on sync failure.
   pub try_recv(T* out) num {
     if out == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -1312,13 +1177,9 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Wait for a receive signal on a hint channel for up to timeout_ms.
-  // 
-  // Returns:
-  // - 0 when woken or wait skipped
-  // - 2 on timeout
-  // - -1 when hint is null
-  // - other nonzero codes on synchronization failures
+  // Waits for a receive signal on a hint channel for up to timeout_ms.
+  // Returns 0 when woken or the wait was skipped, 2 on timeout, -1 if hint
+  // is null, or another nonzero code on sync failure.
   pub wait_recv_hint_timeout(Channel<T>* hint, num timeout_ms) num {
     if hint == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -1359,19 +1220,11 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Try receiving from self or another channel without blocking.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 when both channels are open/empty in this polling step
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
+  // Tries receiving from self or another channel without blocking;
+  // out_index is set to 0 for self or 1 for other. Returns 0 on success, 1
+  // if both channels are closed and empty, 2 if both are open/empty this
+  // step, -1 if any pointer is null, or another nonzero code on sync
+  // failure.
   pub select_try_recv_with(Channel<T>* other, T* out, num* out_index) num {
     if other == nil || out == nil || out_index == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -1403,19 +1256,11 @@ impl Channel<T> {
     ret CHANNEL_RC_EMPTY;
   }
 
-  // Try receiving from self or another channel, else take the default branch.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other, -1 for default)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 3 when default branch is selected (both open/empty in this step)
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
+  // Tries receiving from self or another channel, else takes the default
+  // branch; out_index is set to 0 for self, 1 for other, or -1 for
+  // default. Returns 0 on success, 1 if both channels are closed and
+  // empty, 3 if the default branch is taken, -1 if any pointer is null, or
+  // another nonzero code on sync failure.
   pub select_recv_default_with(Channel<T>* other, T* out, num* out_index) num {
     let rc = self.select_try_recv_with(other, out, out_index);
     if rc == CHANNEL_RC_EMPTY {
@@ -1425,25 +1270,12 @@ impl Channel<T> {
     ret rc;
   }
 
-  // Receive from self or another channel, polling until timeout, with
-  // explicit wait-slice/backoff-step overrides and optional cancellation.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
-  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 on timeout
-  // - 3 when cancelled
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
+  // Receives from self or another channel, polling until timeout, with
+  // explicit wait_slice_ms/backoff_steps overrides (clamped to >= 1 and
+  // 0..8 respectively) and optional cancellation via cancel_flag.
+  // out_index is set to 0 for self or 1 for other. Returns 0 on success, 1
+  // if both channels are closed and empty, 2 on timeout, 3 if cancelled,
+  // -1 if any pointer is null, or another nonzero code on sync failure.
   pub select_recv_timeout_with_tuning_cancel(
     Channel<T>* other,
     T* out,
@@ -1555,11 +1387,9 @@ impl Channel<T> {
     ret CHANNEL_RC_TIMEOUT;
   }
 
-  // Receive from self or another channel, polling until timeout, with
-  // explicit wait tuning and optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as select_recv_timeout_with_tuning_cancel
+  // Receives from self or another channel, polling until timeout, with
+  // explicit wait tuning and optional token cancellation. Same return
+  // codes as select_recv_timeout_with_tuning_cancel.
   pub select_recv_timeout_with_tuning_token(
     Channel<T>* other,
     T* out,
@@ -1624,22 +1454,11 @@ impl Channel<T> {
     );
   }
 
-  // Try receiving from self + two other channels without blocking, using
-  // a rotating start index for fairness.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 when all three channels are open/empty in this polling step
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
+  // Tries receiving from self + two other channels without blocking, using
+  // a rotating next_index (0=self, 1=other_a, 2=other_b) as the probe start
+  // for fairness. Returns 0 on success, 1 if all three channels are closed
+  // and empty, 2 if all are open/empty this step, -1 if any pointer is
+  // null, or another nonzero code on sync failure.
   pub select_try_recv3_rr_with(
     Channel<T>* other_a,
     Channel<T>* other_b,
@@ -1701,21 +1520,10 @@ impl Channel<T> {
     ret CHANNEL_RC_EMPTY;
   }
 
-  // Try receiving from self + two other channels, else take the default branch.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (-1 for default)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 3 when default branch is selected (all open/empty in this step)
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
+  // Tries receiving from self + two other channels, else takes the default
+  // branch (out_index set to -1). Returns 0 on success, 1 if all three
+  // channels are closed and empty, 3 if the default branch is taken, -1 if
+  // any pointer is null, or another nonzero code on sync failure.
   pub select_recv3_rr_default_with(
     Channel<T>* other_a,
     Channel<T>* other_b,
@@ -1731,16 +1539,11 @@ impl Channel<T> {
     ret rc;
   }
 
-  // Receive from self + two other channels, polling until timeout, with
+  // Receives from self + two other channels, polling until timeout, with
   // fairness rotation, explicit wait tuning, and optional cancellation.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 on timeout
-  // - 3 when cancelled
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
+  // Returns 0 on success, 1 if all three channels are closed and empty, 2
+  // on timeout, 3 if cancelled, -1 if any pointer is null, or another
+  // nonzero code on sync failure.
   pub select_recv_timeout3_rr_with_tuning_cancel(
     Channel<T>* other_a,
     Channel<T>* other_b,
@@ -1847,11 +1650,10 @@ impl Channel<T> {
     ret CHANNEL_RC_TIMEOUT;
   }
 
-  // Receive from self + two other channels, polling until timeout, with
-  // fairness rotation, explicit wait tuning, and optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as select_recv_timeout3_rr_with_tuning_cancel
+  // Receives from self + two other channels, polling until timeout, with
+  // fairness rotation, explicit wait tuning, and optional token
+  // cancellation. Same return codes as
+  // select_recv_timeout3_rr_with_tuning_cancel.
   pub select_recv_timeout3_rr_with_tuning_token(
     Channel<T>* other_a,
     Channel<T>* other_b,
@@ -1902,11 +1704,9 @@ impl Channel<T> {
     );
   }
 
-  // Receive one value from self and forward it to dst using async channel APIs.
-  // 
-  // Returns:
-  // - 0 on success
-  // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
+  // Receives one value from self and forwards it to dst using async
+  // channel APIs. Returns 0 on success, or the timeout/closed/cancelled/
+  // null_arg code propagated from the recv/send paths.
   pub async forward_one_to_async(Channel<T>* dst, num timeout_ms) num {
     if dst == nil {
       ret CHANNEL_RC_NULL_ARG;
@@ -1921,11 +1721,9 @@ impl Channel<T> {
     ret await dst.send_timeout_async(value, timeout_ms);
   }
 
-  // Token-aware variant of forward_one_to_async.
-  // 
-  // Returns:
-  // - 0 on success
-  // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
+  // Token-aware variant of forward_one_to_async. Returns 0 on success, or
+  // the timeout/closed/cancelled/null_arg code propagated from the
+  // recv/send paths.
   pub async forward_one_to_with_token_async(
     Channel<T>* dst,
     num timeout_ms,
@@ -1944,17 +1742,11 @@ impl Channel<T> {
     ret await dst.send_timeout_with_token_async(value, timeout_ms, cancel_token);
   }
 
-  // Receive one value from self or other and forward it to dst using async APIs.
-  // 
-  // Params:
-  // - other: second source channel pointer
-  // - dst: destination channel pointer
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - out_index: selected source index (0=self, 1=other)
-  // 
-  // Returns:
-  // - 0 on success
-  // - timeout/closed/cancelled/null_arg values propagated from select/send paths
+  // Receives one value from self or other and forwards it to dst using
+  // async APIs; out_index is set to 0 for self or 1 for other (negative
+  // timeout_ms waits forever). Returns 0 on success, or the
+  // timeout/closed/cancelled/null_arg code propagated from the select/send
+  // paths.
   pub async select_forward_one_to_async(
     Channel<T>* other,
     Channel<T>* dst,
@@ -1982,11 +1774,9 @@ impl Channel<T> {
     ret await dst.send_timeout_async(value, timeout_ms);
   }
 
-  // Token-aware variant of select_forward_one_to_async.
-  // 
-  // Returns:
-  // - 0 on success
-  // - timeout/closed/cancelled/null_arg values propagated from select/send paths
+  // Token-aware variant of select_forward_one_to_async. Returns 0 on
+  // success, or the timeout/closed/cancelled/null_arg code propagated from
+  // the select/send paths.
   pub async select_forward_one_to_with_token_async(
     Channel<T>* other,
     Channel<T>* dst,
@@ -2015,14 +1805,7 @@ impl Channel<T> {
     ret await dst.send_timeout_with_token_async(value, timeout_ms, cancel_token);
   }
 
-  // Close channel and wake blocked senders/receivers.
-  // 
-  // Notes:
-  // - Idempotent: calling close() multiple times keeps the channel closed.
-  // 
-  // Returns:
-  // - 0 on success
-  // - nonzero backend sync/init code on failure
+  // Closes the channel and wakes blocked senders/receivers. Idempotent.
   pub close() num {
     let rc = self.init();
     if rc != 0 {
@@ -2041,26 +1824,20 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Read closed state as an unsynchronized snapshot.
-  // 
-  // Note:
-  // - For coordinated checks, guard state with the channel mutex.
+  // Reads closed state as an unsynchronized snapshot; guard with the
+  // channel mutex for coordinated checks.
   pub is_closed() bin {
     ret self.closed;
   }
 
-  // Current queued value count as an unsynchronized snapshot.
-  // 
-  // Note:
-  // - For coordinated checks, guard state with the channel mutex.
+  // Current queued value count as an unsynchronized snapshot; guard with
+  // the channel mutex for coordinated checks.
   pub len() num {
     ret self.count;
   }
 
-  // True when no values are currently queued (unsynchronized snapshot).
-  // 
-  // Note:
-  // - For coordinated checks, guard state with the channel mutex.
+  // True when no values are currently queued (unsynchronized snapshot;
+  // guard with the channel mutex for coordinated checks).
   pub is_empty() bin {
     ret self.count == 0;
   }
@@ -2070,17 +1847,10 @@ impl Channel<T> {
     ret self.cap;
   }
 
-  // Grow the buffer to at least `new_cap`, preserving any already-queued
-  // values in order. No-op if `new_cap` is not larger than the current
-  // capacity.
-  // 
-  // Params:
-  // - new_cap: minimum capacity the buffer should have afterward
-  // 
-  // Returns:
-  // - 0 on success (including the no-op case)
-  // - nonzero backend sync/init code on failure
-  // - a nonzero alloc-failure code if the new buffer could not be allocated
+  // Grows the buffer to at least new_cap, preserving already-queued values
+  // in order (no-op if new_cap isn't larger than the current capacity).
+  // Returns 0 on success (including the no-op case), or a nonzero
+  // sync/init/alloc-failure code on failure.
   pub grow_capacity(num new_cap) num {
     let rc = self.init();
     if rc != 0 {
@@ -2126,14 +1896,8 @@ impl Channel<T> {
     ret CHANNEL_RC_OK;
   }
 
-  // Destroy channel storage and synchronization primitives.
-  // 
-  // Note:
-  // - Call only after all send/recv activity has stopped.
-  // 
-  // Returns:
-  // - 0 on success
-  // - nonzero backend sync destroy code on failure
+  // Destroys channel storage and synchronization primitives. Call only
+  // after all send/recv activity has stopped.
   pub destroy() num {
     if self.has_buffer == true {
       free(self.data);

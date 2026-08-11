@@ -11,7 +11,7 @@ pub fun __fun_dir_open(str path) raw*;
 
 // Reads the next entry's name from a directory handle, or `nil` once entries
 // are exhausted. Includes `.`/`..` and the platform's usual ordering
-// guarantees (i.e. none) -- callers that want a filtered/sorted listing do
+// guarantees (i.e. none); callers that want a filtered/sorted listing do
 // that themselves.
 pub fun __fun_dir_read_name(raw* dirp) str;
 
@@ -23,6 +23,6 @@ pub fun __fun_dir_close(raw* dirp) num;
 // (including on a null/missing path).
 pub fun __fun_path_is_dir(str path) num;
 
-// Creates a single directory (not recursive -- the parent must already
+// Creates a single directory (not recursive; the parent must already
 // exist). Returns 0 on success, -1 on failure (including if it already exists).
 pub fun __fun_make_dir(str path) num;

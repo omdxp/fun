@@ -1,4 +1,4 @@
-// String helpers implemented in Fun.
+// String helpers.
 
 imp std.c.mem;
 imp std.c.io;
@@ -15,13 +15,7 @@ pub compound StringBuilder {
   num total_len;
 }
 
-// Create a string builder with initial capacity.
-// 
-// Params:
-// - cap: initial capacity for internal parts
-// 
-// Returns:
-// - initialized string builder
+// Creates a string builder with the given initial capacity.
 pub fun string_builder_init(num cap) StringBuilder {
   StringBuilder b;
   b.parts.init(cap);
@@ -30,37 +24,25 @@ pub fun string_builder_init(num cap) StringBuilder {
 }
 
 impl StringBuilder as Sized {
-  // Return the total length of appended content.
-  // 
-  // Returns:
-  // - total character count across all fragments
+  // Returns the total length of appended content.
   pub len() num {
     ret self.total_len;
   }
 
-  // Return true when no content has been appended.
-  // 
-  // Returns:
-  // - true when the builder is empty
+  // True when no content has been appended.
   pub is_empty() bin {
     ret self.total_len == 0;
   }
 }
 
 impl StringBuilder {
-  // Append a string fragment.
-  // 
-  // Params:
-  // - s: fragment to append
+  // Appends a string fragment.
   pub append(str s) {
     self.parts.push(s);
     self.total_len = self.total_len + _string_len(s);
   }
 
-  // Append a single character.
-  // 
-  // Params:
-  // - c: character to append
+  // Appends a single character.
   pub append_char(chr c) {
     str tmp = malloc(2);
     if tmp == nil {
@@ -72,10 +54,7 @@ impl StringBuilder {
     self.total_len = self.total_len + 1;
   }
 
-  // Append a number as decimal digits.
-  // 
-  // Params:
-  // - n: integer to append
+  // Appends a number as decimal digits.
   pub append_num(num n) {
     let s = format_num(n);
     if s == nil {
@@ -85,11 +64,7 @@ impl StringBuilder {
     self.parts.push(s);
   }
 
-  // Append a decimal value with the requested precision.
-  // 
-  // Params:
-  // - d: decimal value to append
-  // - places: number of decimal places to render
+  // Appends a decimal value with the given number of decimal places.
   pub append_dec(dec d, num places) {
     let s = format_dec(d, places);
     if s == nil {
@@ -111,10 +86,7 @@ impl StringBuilder {
     self.total_len = 0;
   }
 
-  // Build the final joined string.
-  // 
-  // Returns:
-  // - concatenated string containing every fragment
+  // Builds the final joined string from every fragment.
   pub build() str {
     ret self.parts.join("");
   }
@@ -136,35 +108,16 @@ fun _is_space(chr c) bin {
 }
 
 // Length of a string.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - number of characters
 pub fun len(str s) num {
   ret _string_len(s);
 }
 
 // True when string is empty.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - true if empty
 pub fun is_empty(str s) bin {
   ret _string_len(s) == 0;
 }
 
-// Compare two strings for equality.
-// 
-// Params:
-// - a: first string
-// - b: second string
-// 
-// Returns:
-// - true if equal
+// Compares two strings for equality.
 pub fun equals(str a, str b) bin {
   num i = 0;
   for true {
@@ -180,14 +133,7 @@ pub fun equals(str a, str b) bin {
   }
 }
 
-// Check whether s starts with prefix.
-// 
-// Params:
-// - s: input string
-// - prefix: prefix to test
-// 
-// Returns:
-// - true if prefix matches
+// True when s starts with prefix.
 pub fun starts_with(str s, str prefix) bin {
   let sl = _string_len(s);
   let pl = _string_len(prefix);
@@ -204,14 +150,7 @@ pub fun starts_with(str s, str prefix) bin {
   ret true;
 }
 
-// Check whether s ends with suffix.
-// 
-// Params:
-// - s: input string
-// - suffix: suffix to test
-// 
-// Returns:
-// - true if suffix matches
+// True when s ends with suffix.
 pub fun ends_with(str s, str suffix) bin {
   let sl = _string_len(s);
   let su = _string_len(suffix);
@@ -230,26 +169,11 @@ pub fun ends_with(str s, str suffix) bin {
 }
 
 // True when needle appears in s.
-// 
-// Params:
-// - s: input string
-// - needle: substring to search
-// 
-// Returns:
-// - true if found
 pub fun contains(str s, str needle) bin {
   ret index_of_str(s, needle) != -1;
 }
 
-// Substring by start/length.
-// 
-// Params:
-// - s: input string
-// - start: starting index
-// - length: substring length
-// 
-// Returns:
-// - new string (or null on alloc failure)
+// Substring by start/length (nil on allocation failure).
 pub fun substr(str s, num start, num length) str {
   str out = malloc(length + 1);
   if out == nil {
@@ -280,13 +204,7 @@ pub fun try_substr(str s, num start, num length) Result<str, Error> {
   ret .Ok(out);
 }
 
-// Trim whitespace from both ends.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - trimmed string
+// Trims whitespace from both ends.
 pub fun trim(str s) str {
   let n = _string_len(s);
   if n == 0 {
@@ -319,13 +237,7 @@ pub fun trim(str s) str {
   ret substr(s, start, out_len);
 }
 
-// Trim whitespace from the left.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - trimmed string
+// Trims whitespace from the left.
 pub fun trim_left(str s) str {
   let n = _string_len(s);
   if n == 0 {
@@ -343,13 +255,7 @@ pub fun trim_left(str s) str {
   ret substr(s, start, n - start);
 }
 
-// Trim whitespace from the right.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - trimmed string
+// Trims whitespace from the right.
 pub fun trim_right(str s) str {
   let n = _string_len(s);
   if n == 0 {
@@ -367,14 +273,7 @@ pub fun trim_right(str s) str {
   ret substr(s, 0, end);
 }
 
-// Split on a delimiter.
-// 
-// Params:
-// - s: input string
-// - delim: delimiter character
-// 
-// Returns:
-// - Vec<str> of segments
+// Splits s on delim into a Vec<str> of segments.
 pub fun split(str s, chr delim) Vec<str> {
   Vec<str> parts;
   parts.init(4);
@@ -398,13 +297,7 @@ pub fun split(str s, chr delim) Vec<str> {
   ret parts;
 }
 
-// Split on any whitespace (one or more).
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - Vec<str> of segments
+// Splits s on runs of whitespace into a Vec<str> of segments.
 pub fun split_whitespace(str s) Vec<str> {
   Vec<str> parts;
   parts.init(4);
@@ -434,26 +327,12 @@ pub fun split_whitespace(str s) Vec<str> {
   ret parts;
 }
 
-// Join parts with a separator.
-// 
-// Params:
-// - parts: vector of strings
-// - sep: separator string
-// 
-// Returns:
-// - joined string
+// Joins parts with sep.
 pub fun join(Vec<str>* parts, str sep) str {
   ret parts.join(sep);
 }
 
-// First index of a character.
-// 
-// Params:
-// - s: input string
-// - ch: character
-// 
-// Returns:
-// - index or -1
+// First index of ch in s, or -1 if not found.
 pub fun index_of_char(str s, chr ch) num {
   num i = 0;
   for s[i] != 0 {
@@ -465,14 +344,7 @@ pub fun index_of_char(str s, chr ch) num {
   ret -1;
 }
 
-// Last index of a character.
-// 
-// Params:
-// - s: input string
-// - ch: character
-// 
-// Returns:
-// - index or -1
+// Last index of ch in s, or -1 if not found.
 pub fun last_index_of_char(str s, chr ch) num {
   let i = _string_len(s);
   for i > 0 {
@@ -484,14 +356,7 @@ pub fun last_index_of_char(str s, chr ch) num {
   ret -1;
 }
 
-// First index of a substring.
-// 
-// Params:
-// - s: input string
-// - needle: substring
-// 
-// Returns:
-// - index or -1
+// First index of needle in s, or -1 if not found.
 pub fun index_of_str(str s, str needle) num {
   let sl = _string_len(s);
   let nl = _string_len(needle);
@@ -520,14 +385,7 @@ pub fun index_of_str(str s, str needle) num {
   ret -1;
 }
 
-// Count occurrences of a substring.
-// 
-// Params:
-// - s: input string
-// - needle: substring
-// 
-// Returns:
-// - number of occurrences
+// Counts non-overlapping occurrences of needle in s.
 pub fun count(str s, str needle) num {
   let nl = _string_len(needle);
   if nl == 0 {
@@ -556,14 +414,7 @@ pub fun count(str s, str needle) num {
   ret total;
 }
 
-// Strip a prefix if present.
-// 
-// Params:
-// - s: input string
-// - prefix: prefix to strip
-// 
-// Returns:
-// - stripped string or original if not present
+// Strips prefix if present, else returns s unchanged.
 pub fun strip_prefix(str s, str prefix) str {
   if starts_with(s, prefix) == false {
     ret substr(s, 0, _string_len(s));
@@ -571,14 +422,7 @@ pub fun strip_prefix(str s, str prefix) str {
   ret substr(s, _string_len(prefix), _string_len(s) - _string_len(prefix));
 }
 
-// Strip a suffix if present.
-// 
-// Params:
-// - s: input string
-// - suffix: suffix to strip
-// 
-// Returns:
-// - stripped string or original if not present
+// Strips suffix if present, else returns s unchanged.
 pub fun strip_suffix(str s, str suffix) str {
   if ends_with(s, suffix) == false {
     ret substr(s, 0, _string_len(s));
@@ -588,13 +432,7 @@ pub fun strip_suffix(str s, str suffix) str {
   ret substr(s, 0, sl - su);
 }
 
-// Split a string into lines.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - Vec<str> of lines
+// Splits s into lines.
 pub fun split_lines(str s) Vec<str> {
   let parts = split(s, '\n');
   num i = 0;
@@ -612,13 +450,7 @@ pub fun split_lines(str s) Vec<str> {
   ret parts;
 }
 
-// Convert ASCII string to lowercase.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - new lowercase string
+// Converts an ASCII string to lowercase.
 pub fun to_lower(str s) str {
   let n = _string_len(s);
   str out = malloc(n + 1);
@@ -649,13 +481,7 @@ pub fun to_lower(str s) str {
   ret out;
 }
 
-// Convert ASCII string to uppercase.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - new uppercase string
+// Converts an ASCII string to uppercase.
 pub fun to_upper(str s) str {
   let n = _string_len(s);
   str out = malloc(n + 1);
@@ -686,14 +512,7 @@ pub fun to_upper(str s) str {
   ret out;
 }
 
-// Repeat a string n times.
-// 
-// Params:
-// - s: input string
-// - times: repeat count
-// 
-// Returns:
-// - new repeated string
+// Repeats s the given number of times.
 pub fun repeat(str s, num times) str {
   if times <= 0 {
     ret substr(s, 0, 0);
@@ -717,15 +536,7 @@ pub fun repeat(str s, num times) str {
   ret out;
 }
 
-// Replace all occurrences of a character.
-// 
-// Params:
-// - s: input string
-// - from: character to replace
-// - to: replacement character
-// 
-// Returns:
-// - new string
+// Replaces all occurrences of one character with another.
 pub fun replace_char(str s, chr from, chr to) str {
   let n = _string_len(s);
   str out = malloc(n + 1);
@@ -745,15 +556,7 @@ pub fun replace_char(str s, chr from, chr to) str {
   ret out;
 }
 
-// Replace all occurrences of a substring.
-// 
-// Params:
-// - s: input string
-// - needle: substring to replace
-// - repl: replacement string
-// 
-// Returns:
-// - new string
+// Replaces all occurrences of needle with repl.
 pub fun replace_str(str s, str needle, str repl) str {
   let nl = _string_len(needle);
   if nl == 0 {
@@ -791,15 +594,9 @@ pub fun replace_str(str s, str needle, str repl) str {
   ret out;
 }
 
-// Parse a signed integer from a string (lenient: stops at the first non-digit and
+// Parses a signed integer from a string (lenient: stops at the first non-digit and
 // returns what it parsed, so `"12x"` -> 12 and `"abc"` -> 0). When you need to know
 // the string was a *valid* integer, use `try_parse_int`.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - parsed number
 pub fun parse_int(str s) num {
   num i = 0;
   num sign = 1;
@@ -845,13 +642,7 @@ pub fun try_parse_int(str s) Result<num, Error> {
   ret .Ok(parse_int(s));
 }
 
-// Format a num as a decimal string.
-// 
-// Params:
-// - n: the integer to format
-// 
-// Returns:
-// - heap-allocated string; caller owns the memory
+// Formats a num as a decimal string (heap-allocated; caller owns the memory).
 pub fun format_num(num n) str {
   // Max i64 is 19 digits + sign + NUL = 21 bytes.
   str buf = malloc(21);
@@ -894,14 +685,8 @@ pub fun format_num(num n) str {
   ret buf;
 }
 
-// Format a dec as a string with a fixed number of decimal places.
-// 
-// Params:
-// - d:      the value to format
-// - places: decimal places to show (0..9; clamped)
-// 
-// Returns:
-// - heap-allocated string; caller owns the memory
+// Formats a dec as a string with the given number of decimal places
+// (clamped to 0..9); heap-allocated, caller owns the memory.
 pub fun format_dec(dec d, num places) str {
   if places < 0 {
     places = 0;
@@ -931,13 +716,7 @@ pub fun format_dec(dec d, num places) str {
   ret buf;
 }
 
-// Format a bin as "true" or "false".
-// 
-// Params:
-// - b: the boolean to format
-// 
-// Returns:
-// - "true" or "false" (static string, do not free)
+// Formats a bin as "true" or "false" (static string, do not free).
 pub fun format_bin(bin b) str {
   if b {
     ret "true";
@@ -945,14 +724,8 @@ pub fun format_bin(bin b) str {
   ret "false";
 }
 
-// Parse a decimal string into a dec (lenient: stops at the first invalid char, so
+// Parses a decimal string into a dec (lenient: stops at the first invalid char, so
 // malformed input yields a partial/0.0 result). Use `try_parse_dec` to validate.
-// 
-// Params:
-// - s: string like "3.14" or "-0.5"
-// 
-// Returns:
-// - parsed dec value (0.0 on empty input)
 pub fun parse_dec(str s) dec {
   num i = 0;
   dec sign = 1.0;

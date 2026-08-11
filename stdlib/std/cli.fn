@@ -48,7 +48,7 @@ pub fun cli_parse(str[] args) CliArgs {
 // - supports --key value
 // - supports -k value
 // - supports -abc (bundled short flags)
-// - supports -- to end option parsing
+// - supports `--` to end option parsing
 pub fun cli_parse_ext(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);

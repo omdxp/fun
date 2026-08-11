@@ -1,4 +1,4 @@
-// Lexical scope tracking for the self-hosted Fun compiler.
+// Lexical scope tracking.
 
 imp ..ast.ast;
 imp std.vec;

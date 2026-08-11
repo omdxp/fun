@@ -35,7 +35,7 @@ pub fun map_type_to_c(str type_str) str {
 // Returns `dyn`'s C spelling: `int8_t`/`uint8_t`/.../`int64_t`/`uint64_t`
 // for the four standard widths, or C23's `_BitInt(N)` extension for any
 // other width (an arbitrary bit-width int is syntactically accepted by
-// the parser but rare in practice) -- matching the original exactly.
+// the parser but rare in practice).
 pub fun dynamic_int_type_to_c(DynamicIntType dyn) str {
   if dyn.bits == 8 {
     if dyn.is_signed {

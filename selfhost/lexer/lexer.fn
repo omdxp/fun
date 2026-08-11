@@ -1,5 +1,4 @@
-// The self-hosted Fun compiler's lexer: turns Fun source text into a
-// Vec<Token>.
+// Turns source text into a `Vec<Token>`.
 // 
 // Reads the whole source into a `str` up front (via `std.fs`) and lexes
 // with an index cursor. `asm { ... }` bodies lex as ordinary
@@ -27,7 +26,7 @@ pub compound Lexer {
   str filename;
   // Every token emitted so far. Kept on the lexer itself (rather than only
   // handed back up to a driver loop) because the hex/binary special-number
-  // check below needs to inspect -- and pop -- the preceding emitted token.
+  // check below needs to inspect, and pop, the preceding emitted token.
   Vec<Token> tokens;
 }
 
@@ -81,7 +80,7 @@ fun _parse_radix(str digits, num base) num {
 }
 
 // A zero-valued Token, used as the (unused) error-path payload for
-// `Result<Token, Error>` -- callers check `is_err()` before ever reading it.
+// `Result<Token, Error>`; callers check `is_err()` before ever reading it.
 fun token_zero() Token {
   Token t;
   t.type = .NewLine;
@@ -99,7 +98,7 @@ fun token_zero() Token {
   ret t;
 }
 
-// True for any character except a newline/carriage-return/NUL -- used to
+// True for any character except a newline/carriage-return/NUL, used to
 // read a line comment up to (not including) its terminator.
 fun _not_newline(chr c) bin {
   ret c != '\n' && c != '\r' && c != 0;
@@ -326,7 +325,7 @@ impl Lexer {
     }
 
     if !is_digit(self._peek()) {
-      // Not a real exponent -- restore the cursor exactly.
+      // Not a real exponent; restore the cursor exactly.
       self.pos = save_pos;
       self.line = save_line;
       self.col = save_col;
@@ -408,7 +407,7 @@ impl Lexer {
         self._advance(); // '.'
         b.append(".0");
       }
-      // Else: identifier or another dot follows -- leave the '.' unconsumed
+      // Else: identifier or another dot follows; leave the '.' unconsumed
       // so it lexes as member-access/range afterward.
     }
 
@@ -479,7 +478,7 @@ impl Lexer {
   }
 
   // Reads a `"..."` string literal. Escapes are passed through verbatim
-  // into the buffer (kept as a literal `\` + the escape char) -- codegen
+  // into the buffer (kept as a literal `\` + the escape char); codegen
   // emits the text straight into a C string literal, which interprets `\n`
   // /`\t`/etc. itself. This also means an escaped quote `\"` does not
   // prematurely end the Fun string literal.
@@ -558,8 +557,8 @@ impl Lexer {
   // `;`, goes on its own following line).
   // 
   // The buffer holds the literal bytes (unlike `_read_string`, whose
-  // buffer keeps escape sequences verbatim for direct re-embedding in C)
-  // -- `t.is_raw_string = true` tells codegen to escape this content when
+  // buffer keeps escape sequences verbatim for direct re-embedding in C).
+  // `t.is_raw_string = true` tells codegen to escape this content when
   // emitting the C string literal, and tells the formatter to reproduce
   // the backtick spelling verbatim rather than requoting the buffer.
   _read_raw_string() Result<Token, Error> {
@@ -661,7 +660,7 @@ impl Lexer {
 
   // Reads an operator, applying maximal munch (greedily consuming up to 3
   // characters) then backing off to the longest prefix that's actually a
-  // valid operator -- e.g. `a >=-1` must lex as `>=` then `-1`, not
+  // valid operator: e.g. `a >=-1` must lex as `>=` then `-1`, not
   // over-consume into an invalid `>=-`.
   _read_operator() Result<Token, Error> {
     let start = self._start_pos();
@@ -736,8 +735,8 @@ impl Lexer {
     ret .Ok(t);
   }
 
-  // True if the most recently emitted token was a bare integer literal `0`
-  // -- the only context in which a following `b`/`x` starts a special
+  // True if the most recently emitted token was a bare integer literal `0`,
+  // the only context in which a following `b`/`x` starts a special
   // binary/hex number rather than an ordinary identifier.
   _prev_token_is_bare_zero() bin {
     let last = self.tokens.last();
@@ -871,7 +870,7 @@ impl Lexer {
 
     // `b`/`x` prefix special numbers (`0b0101`, `0xFF`) only apply right
     // after a bare `0` (the digit-reading path above already consumed it as
-    // an ordinary Number token) -- otherwise `b`/`x` are ordinary identifier
+    // an ordinary Number token); otherwise `b`/`x` are ordinary identifier
     // starts (`x`, `box`, ...).
     if (c == 'b' || c == 'x') && self._prev_token_is_bare_zero() {
       self._pop_last_token();
@@ -1030,13 +1029,13 @@ test "lexes number suffixes without tracking their distinction" {
 }
 
 test "lexes string literals with escapes preserved verbatim" {
-  // Source text (6 chars): "hi\n" -- a quoted string containing a literal
+  // Source text (6 chars): "hi\n" is a quoted string containing a literal
   // backslash-n, not a real newline.
   let toks = _lex("\"hi\\n\"");
   assert toks.len == 1, "expected 1 token";
   assert toks.get(0).type == .String, "expected String token";
   fit toks.get(0).data {
-    // The token's own text is 4 chars: h, i, backslash, n -- verbatim, since
+    // The token's own text is 4 chars (h, i, backslash, n) verbatim, since
     // the emitted C string literal reinterprets `\n` itself at compile time.
     .Sval(s) -> { assert equals(s, "hi\\n"), "expected verbatim 'hi\\n'"; }
     _ -> { panic("expected Sval"); }
@@ -1093,7 +1092,7 @@ test "lexes a multi-line raw string block, explicitly closed on the last line" {
 }
 
 test "lexes character literals with escapes decoded" {
-  // Source text (4 chars): '\n' -- a quoted character escape.
+  // Source text (4 chars): '\n' is a quoted character escape.
   let toks = _lex("'\\n'");
   assert toks.len == 1, "expected 1 token";
   fit toks.get(0).data {

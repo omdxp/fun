@@ -1,6 +1,5 @@
-// Entry point for the self-hosted Fun compiler: wires the lexer,
-// import-aware parser, and codegen together to turn a `.fn` file into C
-// output.
+// Compiler entry point: wires the lexer, import-aware parser, and
+// codegen together to turn a `.fn` file into C output.
 // 
 // Takes positional arguments (`<input.fn> [<output.c>]`) and only writes
 // a `.c` file; it doesn't invoke a C compiler or run the result.

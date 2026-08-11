@@ -1,4 +1,4 @@
-// Token types for the self-hosted Fun compiler's lexer.
+// Token types produced by the lexer.
 // 
 // A `Number` token distinguishes integer vs decimal by which `TokenData`
 // variant it carries (`Num` vs `Dec`).
@@ -54,7 +54,7 @@ pub compound Token {
   // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
   // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences
   // verbatim, ready for direct re-embedding in C), a raw string's data
-  // holds the literal bytes with no escape processing at all -- codegen
+  // holds the literal bytes with no escape processing at all; codegen
   // must escape this content when emitting the C string literal, and the
   // formatter must reproduce the backtick spelling verbatim rather than
   // requoting the buffer.

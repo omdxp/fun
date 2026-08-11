@@ -1,4 +1,4 @@
-// Symbol table entries for the self-hosted Fun compiler.
+// Symbol table entries.
 // 
 // A symbol's kind and payload are combined into a single `SymbolKind`
 // data-carrying enum, so there's no separate tag field that could disagree
