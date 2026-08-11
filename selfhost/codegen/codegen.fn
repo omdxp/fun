@@ -7664,17 +7664,13 @@ impl Codegen {
     self.state.write(";\n\n");
   }
 
-  // Emits a non-generic `compound Name { fields }` declaration as a C
-  // struct typedef: `typedef struct Name { <type> <field>; ... } Name;`.
-  // A generic compound (`has_type_params`) is instead only recorded as a
-  // template (`Codegen.generic_compound_names`) and never emitted
-  // directly, matching the rule that only a concrete monomorphized
-  // specialization is ever emitted (`ensure_compound_instantiated`).
-  // Assumes any by-value nested compound/enum dependency is already
-  // emitted; callers needing dependency ordering
-  // (`ensure_plain_type_emitted`, `emit_global_variable`) handle that
-  // first. A sized array field (`T[3]`) gets no special treatment here,
-  // unlike an unsized one (see `dtype_is_array_as_pointer`).
+  // Emits a non-generic `compound Name { fields }` as a C struct typedef.
+  // A generic compound is only recorded as a template and never emitted
+  // directly; only a concrete monomorphization is. Assumes any by-value
+  // nested type dependency is already emitted, which
+  // `ensure_plain_type_emitted` and `emit_global_variable` handle first.
+  // A sized array field (`T[3]`) gets no special treatment here, unlike
+  // an unsized one.
   emit_compound(Node node) Option<CodegenErrorKind> {
     if self.is_std_c_signature_node(node) {
       ret .None;
@@ -7746,14 +7742,12 @@ impl Codegen {
     }
   }
 
-  // Emits a top-level `const`/`let` declaration as a C file-scope
-  // global. Doesn't reuse the local-`Variable` statement case's
-  // indent/`record_local*` bookkeeping, since there's no enclosing
-  // function scope here and no later pass needs a top-level const's
-  // inferred type recorded. `pub transpile` runs this pass before
-  // impls/functions, so a global used inside any function/method body
-  // already has its C declaration textually earlier in the file; there
-  // is no separate forward-declaration pass for globals.
+  // Emits a top-level `const`/`let` declaration as a C file-scope global.
+  // Doesn't reuse the local-`Variable` case's indent and `record_local`
+  // bookkeeping, there being no enclosing function scope and no later
+  // pass needing a global's inferred type. `pub transpile` runs this pass
+  // before impls and functions, so a global used in any body is already
+  // declared textually earlier; globals get no forward-declaration pass.
   emit_global_variable(Node node) Option<CodegenErrorKind> {
     if self.is_std_c_signature_node(node) {
       ret .None;
@@ -7761,21 +7755,17 @@ impl Codegen {
     fit node.kind {
       .Variable(v) -> {
         bin is_let = equals(v.var_type.type_str, "__let_infer__");
-        // `pub transpile`'s top-level pass ordering emits every global
-        // before any plain compound/enum's full body, which breaks for a
-        // global whose declared type is itself a plain compound/enum
-        // (`Counter[] counters = [Counter{...}, Counter{...}];`).
-        // Ensures the type's full body is emitted first; a harmless
-        // no-op, via `Codegen.emitted_plain_types`'s memoization, for a
-        // builtin scalar or anything already emitted.
+        // `pub transpile` emits every global before any plain type's full
+        // body, which breaks for a global whose declared type is itself a
+        // plain compound or enum. This emits that body first; memoization
+        // makes it a no-op for a scalar or an already-emitted type.
         let gt_err = self.ensure_plain_type_emitted(v.var_type.type_str);
         if gt_err.is_some() {
           ret gt_err;
         }
-        // An unsized array global (`T[] buf = malloc(...);`) decays to
-        // a pointer, same as `emit_statement`'s local check, unless it's
-        // initialized with a bracket array literal, which stays a
-        // fixed-size global array.
+        // An unsized array global (`T[] buf = malloc(...);`) decays to a
+        // pointer, as a local does, unless it's initialized with a
+        // bracket array literal, which stays a fixed-size global array.
         bin arr_as_ptr = false;
         if !is_let {
           arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
@@ -7806,10 +7796,9 @@ impl Codegen {
         }
         self.state.write(" ");
         self.state.write(v.name);
-        // An array declarator (`[24]`, `[]`) lands after the name in C,
-        // same as `emit_statement`'s local handling. Only an explicitly
-        // array-typed global is handled here; a bare `let arr = [...]`
-        // global has no bracket-literal type inference.
+        // An array declarator (`[24]`, `[]`) lands after the name in C, as
+        // for a local. Only an explicitly array-typed global is handled;
+        // a bare `let arr = [...]` global gets no literal inference.
         if !is_let && !arr_as_ptr && v.var_type.is_array {
           if v.var_type.array_brackets.len > 0 {
             for bnode : v.var_type.array_brackets {
@@ -7873,13 +7862,10 @@ impl Codegen {
   }
 
   // Pre-registers every plain top-level function's name and parameter
-  // types (see `Codegen.function_names`), without emitting any C. A
-  // whole-program pass run before any function body is emitted, so a
-  // call to a function defined later in source order still resolves,
-  // same reasoning as `register_impl_methods`. A generic function is
-  // instead only recorded whole; see
-  // `Codegen.generic_function_templates`. Monomorphized lazily, from
-  // its call site, by `maybe_instantiate_generic_function`.
+  // types, emitting no C. A whole-program pass run before any body, so a
+  // call to a function defined later in source order still resolves. A
+  // generic function is instead recorded whole and monomorphized lazily
+  // from its call site.
   register_function_signatures(Vec<Node> nodes) {
     for n : nodes {
       fit n.kind {
@@ -7889,8 +7875,8 @@ impl Codegen {
           } else {
             Vec<DataType*> param_types;
             param_types.init(0);
-            // Each param's default value expression (`nil` when it has
-            // none); see `Codegen.function_default_values`.
+            // Each param's default value expression, `nil` when it has
+            // none.
             Vec<Node*> default_values;
             default_values.init(0);
             if f.has_args {
@@ -7911,16 +7897,12 @@ impl Codegen {
             self.function_names.push(f.name);
             self.function_param_types.push(param_types);
             self.function_default_values.push(default_values);
-            // Only a Fun-defined variadic function (`f.has_body`) gets
-            // the `__fun_vtags`-tag-array call-site treatment; see
-            // `emit_call`. A bodyless variadic binding (e.g.
-            // `std.c.io`'s `pub fun snprintf(str dst, num n, str fmt,
-            // ...) num;`) is a real C variadic function, expecting
-            // ordinary C varargs, with no `__fun_vtags` param and no tag
-            // array. Marking it variadic here too would make a call
-            // like `snprintf(buf, 48, fmt, d)` pass a tag-array pointer
-            // where `%f` expects a `double`, silently reading garbage
-            // instead of the real value.
+            // Only a variadic function with a body gets the
+            // `__fun_vtags` tag-array call-site treatment. A bodyless
+            // variadic binding such as `std.c.io`'s `snprintf` is a real
+            // C variadic function expecting ordinary varargs; marking it
+            // variadic here would pass a tag-array pointer where `%f`
+            // expects a `double`, silently reading garbage.
             self.function_is_variadic.push(f.is_variadic && f.has_body);
             if f.has_rtype {
               self.function_rtypes.push(f.rtype);
@@ -7934,10 +7916,9 @@ impl Codegen {
     }
   }
 
-  // Looks up `fn_name`'s fixed (named, non-`...`) argument count when
-  // it's a known, registered variadic plain function; see `emit_call`
-  // for how a call site uses this. `.None` means either the function
-  // isn't registered, or it is but isn't variadic.
+  // Looks up `fn_name`'s fixed (named, non-`...`) argument count when it
+  // is a registered variadic plain function. `.None` means the function
+  // isn't registered, or isn't variadic.
   lookup_function_variadic_fixed_len(str fn_name) Option<num> {
     num i = 0;
     for i < self.function_names.len {
@@ -7952,9 +7933,8 @@ impl Codegen {
     ret .None;
   }
 
-  // Looks up `fn_name`'s declared return type; see
-  // `Codegen.function_rtypes`. `.None` means the function isn't
-  // registered (unknown, a method, or a generic function).
+  // Looks up `fn_name`'s declared return type. `.None` means it isn't
+  // registered: unknown, a method, or a generic function.
   lookup_function_rtype(str fn_name) Option<DataType*> {
     num i = 0;
     for i < self.function_names.len {
@@ -7970,11 +7950,10 @@ impl Codegen {
     ret .None;
   }
 
-  // Looks up whether `bare_name`, referenced through `alias`, was
-  // renamed at merge time due to a collision with a differently-aliased
-  // import's same-named function; see `Codegen.alias_rename_keys`.
-  // `.None` means no such rename happened; callers fall back to the
-  // bare name unqualified.
+  // Looks up whether `bare_name`, referenced through `alias`, was renamed
+  // at merge time after colliding with a differently-aliased import's
+  // same-named function. `.None` means no rename happened, and callers
+  // fall back to the bare unqualified name.
   lookup_alias_rename(str alias, str bare_name) Option<str> {
     str key = format("{str}::{str}", alias, bare_name);
     num i = 0;
@@ -7987,13 +7966,10 @@ impl Codegen {
     ret .None;
   }
 
-  // Infers a call argument expression's bare type name, for binding a
-  // generic function's type parameter from its call site; see
-  // `maybe_instantiate_generic_function`. Covers a known local (its
-  // recorded type), a call to an already-registered plain function (its
-  // declared return type), a literal, or a plain field chain (via
-  // `resolve_field_chain`). Anything else is unresolvable, rejected
-  // rather than guessed.
+  // Infers a call argument's bare type name, for binding a generic
+  // function's type parameter from its call site. Covers a known local, a
+  // call to a registered plain function, a literal, and a plain field
+  // chain; anything else is rejected rather than guessed.
   infer_arg_type_name(Node* arg) Option<str> {
     fit arg.kind {
       .Identifier(name) -> { ret self.lookup_local_type_name(name); }
@@ -8008,10 +7984,9 @@ impl Codegen {
       .Character(_) -> { ret .Some("chr"); }
       .Boolean(_) -> { ret .Some("bin"); }
       .Expression(e) -> {
-        // A qualified enum-variant constant (`Job.Quit`) infers `T` as
-        // the enum's name directly. Checked before the `()` call case
-        // below, since a qualified access and a call are both
-        // `.Expression` nodes but share nothing else structurally.
+        // A qualified enum-variant constant (`Job.Quit`) infers `T` as the
+        // enum's name. Checked before the `()` call case below, since a
+        // qualified access and a call are both `.Expression` nodes.
         if equals(e.op, ".") && e.has_left && e.has_right {
           fit e.left.kind {
             .Identifier(enum_name) -> {
@@ -8027,8 +8002,7 @@ impl Codegen {
             _ -> {}
           }
           // Not a qualified enum-variant constant: a plain field chain
-          // (`nbox.value`) resolves via the same `resolve_field_chain`
-          // a method call's receiver resolution uses.
+          // such as `nbox.value` resolves via `resolve_field_chain`.
           let chain = self.resolve_field_chain(arg);
           if chain.is_some() {
             ret .Some(chain.unwrap().type_name);
@@ -8053,11 +8027,9 @@ impl Codegen {
     }
   }
 
-  // Companion to `infer_arg_type_name`, for the one shape that matters
-  // to its caller (`maybe_instantiate_generic_function`'s type-param
-  // inference, which needs to know whether the generated function's
-  // param should be `T` or `T*`): a known local's recorded pointer-ness.
-  // `false` for every other shape `infer_arg_type_name` resolves.
+  // Companion to `infer_arg_type_name`, resolving a known local's
+  // recorded pointer-ness so type-param inference knows whether the
+  // generated param should be `T` or `T*`. `false` for every other shape.
   infer_arg_is_pointer(Node* arg) bin {
     fit arg.kind {
       .Identifier(name) -> {
@@ -8080,15 +8052,12 @@ impl Codegen {
     }
   }
 
-  // Infers a bare array literal's Fun-level element type name and
-  // nesting depth (1 for a flat `[1, 2, 3]`, one more per level of
-  // further nesting), needed for `infer_let_expr_type`'s `.Bracket` case
-  // (`let arr = [1, 2, 3];`), which has no declared type to read. Only
-  // the first element at each level is inspected, assuming a
-  // rectangular literal, the same assumption
-  // `emit_multidim_inner_declarators` makes for the declaration side.
-  // `.None` when the first element's type can't be determined this way,
-  // or the literal has no elements.
+  // Infers a bare array literal's Fun-level element type name and nesting
+  // depth, for `let arr = [1, 2, 3];`, which has no declared type to
+  // read. Only the first element at each level is inspected, assuming a
+  // rectangular literal, as `emit_multidim_inner_declarators` does on the
+  // declaration side. `.None` when the first element's type can't be
+  // determined, or the literal is empty.
   infer_array_literal_elem_type_and_depth(Node* lit) Option<ArrayLiteralElemInfo> {
     fit lit.kind {
       .Bracket(inner) -> {
@@ -8127,14 +8096,11 @@ impl Codegen {
     }
   }
 
-  // Companion to `infer_arg_type_name`, for `maybe_instantiate_generic_
-  // function`'s nested type-param inference (a param declared `Pair<L,
-  // R> p`, matching a type param inside the param's `generic_args`
-  // rather than its bare type). Needs the argument's full structural
-  // `DataType`, not just the bare name `infer_arg_type_name` returns.
-  // Covers a known local, via `lookup_local_dtype`, and a literal (a
-  // bare `DataType` with no generic args). Anything else is
-  // unresolvable here.
+  // Companion to `infer_arg_type_name` for nested type-param inference,
+  // where a param declared `Pair<L, R> p` matches a type param inside its
+  // `generic_args` rather than its bare type. Needs the argument's full
+  // structural `DataType`, so it covers a known local and a literal;
+  // anything else is unresolvable here.
   infer_arg_dtype(Node* arg) Option<DataType> {
     fit arg.kind {
       .Identifier(name) -> { ret self.lookup_local_dtype(name); }
@@ -8181,17 +8147,13 @@ impl Codegen {
     }
   }
 
-  // Infers a `let NAME = <expr>;` declaration's type, for this
-  // codegen's own bookkeeping (`record_local`, so a later bare-shorthand
-  // `fit`/chained field access/method call on `NAME` still resolves).
-  // The C declaration always emits GNU C's `__auto_type` regardless
-  // (see `emit_statement`'s `.Variable` case), so a failed inference
-  // here only means `NAME` isn't a known local afterward, not that the
-  // declaration is rejected. Covers the same shapes `infer_arg_type_name`
-  // does, plus a method call (`recv.method()`), resolved via
-  // `resolve_field_chain` and `lookup_impl_method_rtype`, the same two
-  // lookups `emit_fit`'s call-subject handling uses. Anything else is
-  // unresolvable, rejected rather than guessed.
+  // Infers a `let NAME = <expr>;` declaration's type for this codegen's
+  // bookkeeping, so a later shorthand `fit`, field access, or method call
+  // on `NAME` resolves. The C declaration emits `__auto_type` either way,
+  // so a failed inference only means `NAME` isn't a known local
+  // afterward. Covers the shapes `infer_arg_type_name` does, plus a
+  // method call resolved via `resolve_field_chain` and
+  // `lookup_impl_method_rtype`.
   infer_let_expr_type(Node* val) Option<DataType> {
     fit val.kind {
       .Identifier(name) -> {
@@ -8207,13 +8169,9 @@ impl Codegen {
         }
         ret .Some(dt);
       }
-      // `let arr = [1, 2, 3];` (and its multi-dimensional
-      // generalization) is a bare array literal, with no declared type
-      // to read. Without this, `arr` would never be recorded as a known
-      // local, so a later `for x : arr` would reject it as an
-      // unrecognized iterable. See
-      // `infer_array_literal_elem_type_and_depth` for how the element
-      // type/nesting depth are derived.
+      // A bare array literal has no declared type to read. Without this,
+      // `arr` would never be recorded as a known local and a later
+      // `for x : arr` would reject it as an unrecognized iterable.
       .Bracket(_) -> {
         let info = self.infer_array_literal_elem_type_and_depth(val);
         if info.is_none() {
@@ -8226,22 +8184,16 @@ impl Codegen {
         dt.array_depth = i.depth;
         ret .Some(dt);
       }
-      // `let p = Point{x = 1, y = 2};`: an explicit compound literal
-      // (`ci.has_dtype`) carries its type name directly, no inference
-      // needed. A bare `.{...}` shorthand initializer has no
-      // `expected_compound_type` to resolve against here; unlike
-      // `resolve_unique_enum_for_variant`'s global-uniqueness fallback
-      // for a bare enum shorthand, a compound literal's field names
-      // aren't a reliable uniqueness key.
+      // An explicit compound literal carries its type name directly. A
+      // bare `.{...}` shorthand has no `expected_compound_type` to
+      // resolve against here, and unlike a bare enum shorthand it has no
+      // global-uniqueness fallback: field names aren't a reliable key.
       .CompoundInit(ci) -> {
         if ci.has_dtype {
-          // A bare `Box{value = 7}` (no explicit `<T>`) needs the same
-          // field-value-based generic-arg inference `emit_expr`'s
-          // `.CompoundInit` case uses; see
-          // `infer_generic_compound_init_args`. Without this, `nbox`'s
-          // recorded local type would stay the template's bare,
-          // ungeneric name, so a later `nbox.value` field read couldn't
-          // resolve `value`'s real type.
+          // A bare `Box{value = 7}` with no explicit `<T>` needs the same
+          // field-value-based generic-arg inference `emit_expr` uses.
+          // Otherwise the recorded local type stays the template's bare
+          // name and a later `nbox.value` read can't resolve its type.
           DataType effective_dtype = *ci.init_dtype;
           if effective_dtype.generic_args.len == 0 {
             let inferred_gargs = self.infer_generic_compound_init_args(
@@ -8286,12 +8238,10 @@ impl Codegen {
         ret .Some(dt);
       }
       .Expression(e) -> {
-        // A plain field-access initializer (`let ct = self.current_token;`)
-        // resolves the whole chain via `resolve_field_chain`, the same
-        // resolution a later `ct.pos.line` read of this local needs.
-        // Without this case, `ct` would never be recorded as a known
-        // local, so any further field access off it would be rejected as
-        // an unrecognized local.
+        // A plain field-access initializer resolves the whole chain via
+        // `resolve_field_chain`, the same resolution a later `ct.pos.line`
+        // read needs. Without it `ct` is never a known local and any
+        // further field access off it is rejected.
         if equals(e.op, ".") {
           let chain = self.resolve_field_chain(val);
           if chain.is_none() {
@@ -8305,10 +8255,9 @@ impl Codegen {
           }
           ret .Some(dt);
         }
-        // `let m = f[0];` where `f` is a known pointer-typed local
-        // (`Foo* f`): C's `pointer[0]` is `*pointer`, a value of the
-        // pointee's type, not another pointer. Only a bare-identifier
-        // receiver is resolved here; a chained/computed receiver falls
+        // For `let m = f[0];` with a pointer-typed `f`, C's `pointer[0]`
+        // is `*pointer`, a value of the pointee's type. Only a
+        // bare-identifier receiver resolves here; anything computed falls
         // through to `.None`.
         if equals(e.op, "[]") && e.has_left {
           fit e.left.kind {
@@ -8334,15 +8283,11 @@ impl Codegen {
             if rt.is_some() {
               ret .Some(*rt.unwrap());
             }
-            // A call to a generic function template isn't in the plain
-            // registry `lookup_function_rtype` reads. Infers its actual,
-            // substituted return type via the same instantiation
-            // `emit_call` already triggers for this call; idempotent,
-            // since `maybe_instantiate_generic_function` dedups via
-            // `emitted_generic_instantiations`, so calling it again
-            // here is a cheap no-op past the first time.
-            // `GenericCallResolution.rtype` already carries the
-            // substituted return type directly.
+            // A generic function template isn't in the plain registry
+            // `lookup_function_rtype` reads, so its substituted return
+            // type comes from the same instantiation `emit_call`
+            // triggers. Idempotent: instantiation dedups, so a repeat
+            // call is a cheap no-op.
             if e.has_right {
               for tmpl : self.generic_function_templates {
                 fit tmpl.kind {
@@ -8381,13 +8326,11 @@ impl Codegen {
             let recv_r = recv_r_opt.unwrap();
             // A quirk-typed receiver dispatches through the quirk's
             // declared method signature, not `lookup_impl_method_rtype`,
-            // which only knows about concrete impls' registered methods,
-            // never a quirk's abstract contract. `recv_r.type_name` is
-            // the quirk's mangled concrete identity (`To__MyEnum`);
-            // strip the matching quirk's bare-name prefix off it to
-            // recover the concrete argument, then substitute it for the
-            // quirk's type param in the matching method's declared
-            // return type, mirroring `ensure_quirk_instantiated`.
+            // which only knows concrete impls' registered methods.
+            // `recv_r.type_name` is the mangled concrete identity
+            // (`To__MyEnum`), so stripping the quirk's bare-name prefix
+            // recovers the concrete argument, which then substitutes for
+            // the quirk's type param in the method's return type.
             if self.quirk_names.contains(recv_r.type_name) {
               num qdi2 = 0;
               for qdi2 < self.quirk_decl_names.len {
@@ -8428,10 +8371,9 @@ impl Codegen {
           _ -> { ret .None; }
         }
       }
-      // `let boxed = *pb;`: a single pointer-dereference initializer
-      // resolves `pb`'s chain first via `resolve_field_chain`, then
-      // drops one level of `pointer_depth` to match, since a
-      // dereferenced pointer local is a plain value.
+      // A single pointer-dereference initializer (`let boxed = *pb;`)
+      // resolves `pb`'s chain first, then drops one level of
+      // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
           ret .None;
@@ -8464,14 +8406,12 @@ impl Codegen {
   }
 
   // Falls back to contextual inference for a generic function's type
-  // param `tp` when the call's arguments don't reveal it (e.g. a bare
-  // shorthand argument with no type info of its own). Matches `f`'s
-  // declared return type structurally against the current enclosing
-  // function's concrete return type (`Codegen.current_fn_rtype_dt`, same
-  // base name and generic-arg count), finds where `tp` appears bare in
-  // `f`'s return type, and resolves the enclosing function's return type
-  // at that same position. `.None` when there's no enclosing function
-  // context, the shapes don't match, or `tp` never appears bare.
+  // param `tp` when the call's arguments don't reveal it, as with a bare
+  // shorthand argument. Matches `f`'s declared return type structurally
+  // against the enclosing function's concrete return type, finds where
+  // `tp` appears bare, and reads the enclosing return type at that
+  // position. `.None` with no enclosing context, on a shape mismatch, or
+  // when `tp` never appears bare.
   infer_generic_function_type_param_from_context(FunctionNode f, str tp) Option<str> {
     if !f.has_rtype || self.current_fn_rtype_dt.is_none() {
       ret .None;
