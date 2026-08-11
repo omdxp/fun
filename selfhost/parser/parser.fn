@@ -1,16 +1,10 @@
-// The parser: turns a token stream into an AST.
-// 
-// Covers the full expression grammar, every statement form (`let`, `ret`,
-// `assert`, `if`/`elif`/`else`, all three `for` shapes, `fit` with
-// data-carrying-enum destructuring, `defer`/`break`/`continue`/`fork`,
-// `allow`/`expect`), every top-level declaration form (`imp`, `test`,
-// `compound`, `enum`, `quirk`, `impl`, `fun`), and a top-level `parse()`
-// loop that ties them into a whole parseable file. `asm`/inline-assembly
-// is not parsed; the lexer defers raw asm-body lexing to match.
-// 
-// Chaining `.field` directly onto a `Vec<T*>.get(...)` call can emit `.`
-// instead of `->` and fail to compile; bind the call result to a `let`
-// first (`let x = vec.get(i); x.field`) to avoid it.
+// The parser: turns a token stream into an AST, covering the full
+// expression grammar, every statement and top-level declaration form,
+// and the top-level `parse()` loop that ties them into a whole file.
+// `asm`/inline-assembly is not parsed; the lexer defers raw asm-body
+// lexing to match. Note: chaining `.field` directly onto a
+// `Vec<T*>.get(...)` call can emit `.` instead of `->` and fail to
+// compile -- bind the call result to a `let` first.
 
 imp parse_state;
 imp datatype_defs;
@@ -42,11 +36,9 @@ pub enum ParseErrorKind {
 
 impl ParseState {
   // Logs a diagnostic with the current position in the token stream.
-  // 
-  // Params:
-  // - msg: the already-formatted diagnostic message (build it with
-  // `std.io.format` before calling, since Fun's varargs sugar is meant
-  // for `{placeholder}`-style formatting, not passthrough to `fprintf`)
+  // `msg` should already be formatted (via `std.io.format`), since
+  // Fun's varargs sugar is for `{placeholder}` formatting, not a
+  // passthrough to `fprintf`.
   pub err(str msg) {
     if !self.emit_stderr {
       ret;
@@ -527,17 +519,14 @@ impl ParseState {
   }
 
   // Parses `<T>` or `<T: a | b, U: c>` generic type parameters in a
-  // function/impl header, as opposed to `parse_generic_type_args`, which
-  // parses generic arguments at a type-reference site. A no-op when
-  // there's no `<...>` at all, since generics are optional.
-  // 
-  // Fills `out_params` with the parameter names. When any parameter
-  // carries a `: constraint` bound, also fills `out_forced_insts` with the
-  // Cartesian product of every parameter's constraint set: one combo per
-  // product term, each a `Vec<str>` of one concrete type per parameter in
-  // parameter order (e.g. `<T: num | dec>` produces `[["num"], ["dec"]]`;
-  // `<T: num | dec, U: a | b>` produces all four `[T, U]` pairings).
-  // Constraint names are captured as plain strings, not interpreted here.
+  // function/impl header (as opposed to `parse_generic_type_args`, which
+  // parses generic arguments at a type-reference site). A no-op when
+  // there's no `<...>` at all. Fills `out_params` with the parameter
+  // names, and when any parameter carries a `: constraint` bound, fills
+  // `out_forced_insts` with the Cartesian product of every parameter's
+  // constraint set (e.g. `<T: num | dec, U: a | b>` produces all four
+  // `[T, U]` pairings). Constraint names are captured as plain strings,
+  // not interpreted here.
   pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>>* out_forced_insts) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
@@ -645,14 +634,12 @@ impl ParseState {
     ret .None;
   }
 
-  // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
-  // if the next significant token opens one. A no-op when it doesn't, since
-  // a type name may simply not be generic.
-  // 
-  // Array-typed arguments (`Vec<num[]>`) aren't supported: this method lives
-  // on `ParseState`, which has no expression-parsing capability, while
-  // array brackets need `Parser.parse_array_brackets`. A generic arg
-  // starting with `[` falls through to `parse_datatype`, which reports
+  // Parses a bracketed generic-argument list (`<T, U>`) into
+  // `dt.generic_args`, if the next significant token opens one (a no-op
+  // otherwise). Array-typed arguments (`Vec<num[]>`) aren't supported:
+  // this method lives on `ParseState`, which lacks the expression-parsing
+  // capability `parse_array_brackets` needs -- a generic arg starting
+  // with `[` falls through to `parse_datatype`, which reports
   // `InvalidDataType`.
   pub parse_generic_type_args(DataType* dt) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
@@ -697,16 +684,13 @@ impl ParseState {
   }
 
   // Parses a function-type parameter's datatype: `fun(T1, T2, ...) R`.
-  // Called from `parse_datatype` when the leading token is the `fun`
-  // keyword. Fills `dt.fn_sig` with the parsed params and return type
-  // (each recursively parsed, so they can themselves be builtins, user
-  // types, or another function type) and sets `type_str` to the fixed
-  // placeholder `"fun(...)"`, since codegen reads `fn_sig` directly. An
-  // omitted return type defaults to `void`, but only when nothing follows
-  // the closing `)`: a bare identifier immediately after is always
-  // consumed as the return type, even if it was meant as the enclosing
-  // parameter's own name, so `fun(chr) pred` with no return type
-  // misparses `pred` as the return type.
+  // Called from `parse_datatype` on a leading `fun` keyword. Fills
+  // `dt.fn_sig` with the recursively-parsed params and return type, and
+  // sets `type_str` to the fixed placeholder `"fun(...)"` since codegen
+  // reads `fn_sig` directly. Gotcha: a bare identifier right after the
+  // closing `)` is always consumed as the return type, so `fun(chr)
+  // pred` with no return type misparses `pred` as one instead of
+  // defaulting to `void`.
   pub parse_fn_type_datatype(DataType* dt) Option<ParseErrorKind> {
     self.token_next(); // consume 'fun'
     let operr = self.expect_op("(");
@@ -779,15 +763,14 @@ impl ParseState {
     ret .None;
   }
 
-  // Parses a type annotation into `dt`: a builtin scalar keyword, a
+  // Parses a type annotation into `dt`: a builtin scalar keyword or
   // user-defined/identifier-based name (optionally alias-qualified,
-  // `mod.Type`), its generic arguments if any, then a trailing run of `*`
-  // pointer-depth markers. Trailing array-bracket suffixes (`num[5]`,
-  // `str[]`) are handled separately by `parse_array_brackets`, called
-  // explicitly by each site that allows one (`parse_variable`, compound
-  // fields, enum payloads, quirk/function/impl-method arg/return types).
-  // A leading `fun` keyword delegates to `parse_fn_type_datatype` instead
-  // of the ordinary keyword/identifier handling below.
+  // `mod.Type`), its generic arguments if any, then a trailing run of
+  // `*` pointer-depth markers. A leading `fun` keyword delegates to
+  // `parse_fn_type_datatype` instead. Trailing array-bracket suffixes
+  // (`num[5]`, `str[]`) are handled separately by
+  // `parse_array_brackets`, called explicitly by each site that allows
+  // one.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
@@ -822,11 +805,11 @@ impl ParseState {
         ret .Some(ParseErrorKind.InvalidDataType);
       }
     } else {
-      // Identifier-based types (e.g. C typedefs like `size_t`, or a
-      // user compound/enum) are allowed. A small set of common C typedef
-      // names get tagged with a numeric semantic type so arithmetic/
-      // comparisons typecheck, while still emitting the original
-      // identifier in C via `type_str`.
+      // Identifier-based types (e.g. platform typedefs like `size_t`, or
+      // a user compound/enum) are allowed. A small set of common typedef
+      // names get tagged with a numeric semantic type so
+      // arithmetic/comparisons typecheck, while still emitting the
+      // original identifier via `type_str`.
       let builtin_kind = get_datatype_type(name);
       if builtin_kind != DataTypeType.Unknown {
         dt.kind = builtin_kind;
@@ -873,14 +856,13 @@ impl ParseState {
     ret .None;
   }
 
-  // True if the `<...>` starting at the cursor looks like a type parameter
-  // list (`<T>`, `<T, U>`, `<T: a | b>`) rather than concrete generic
-  // arguments (`<num>`, `<Vec<str>>`). Pure lookahead; consumes nothing.
-  // Used by `parse_impl` to distinguish `impl Vec<T> { ... }` (T is a new
-  // type param the impl introduces) from `impl Vec<num> { ... }` (a
-  // concrete monomorphizing impl). Every segment must be a bare identifier,
-  // optionally with `: constraint | constraint` bounds, all the way to the
-  // closing `>`/`>>`; anything else means it's argument syntax instead.
+  // True if the `<...>` starting at the cursor looks like a type
+  // parameter list (`<T>`, `<T: a | b>`) rather than concrete generic
+  // arguments (`<num>`, `<Vec<str>>`). Pure lookahead, consumes nothing.
+  // Used by `parse_impl` to distinguish `impl Vec<T> { ... }` (a new type
+  // param) from `impl Vec<num> { ... }` (a concrete monomorphizing impl).
+  // Every segment must be a bare identifier, optionally with `:
+  // constraint | constraint` bounds, all the way to the closing `>`/`>>`.
   pub impl_generic_args_are_params() bin {
     num off = 0;
     let first_opt = self.token_peek_n(off);
@@ -963,12 +945,10 @@ impl ParseState {
     }
   }
 
-  // Returns the `token_peek_n` offset of the token right after a
-  // `<...>` generic-argument list starting at `off`, if the token at
-  // `off` is `<`; otherwise returns `off` unchanged (nothing to skip).
-  // Pure lookahead, consumes nothing. Used to look past a possibly-
-  // generic type name (`Box<num>`) to see what follows it, e.g. whether
-  // a compound-literal `{` comes next.
+  // Returns the `token_peek_n` offset just past a `<...>` generic-
+  // argument list starting at `off` (or `off` unchanged if there's no
+  // `<` there). Pure lookahead, consumes nothing -- used to look past a
+  // possibly-generic type name (`Box<num>`) to see what follows it.
   pub skip_generic_args_tokens(num off) num {
     let first_opt = self.token_peek_n(off);
     if first_opt.is_none() || !token_is_operator(first_opt.unwrap(), "<") {
@@ -1090,29 +1070,24 @@ pub compound Parser {
   // `Enum.Variant(x, y)` introduce new identifiers not yet in scope.
   bin in_fit_condition;
 
-  // True for the entire duration of parsing a `fit` statement (subject
-  // expression, every arm's condition, and every arm's body). Stops the
+  // True for the entire duration of parsing a `fit` statement. Stops the
   // general expression loop from swallowing a following `->` as a binary
-  // operator, since `->` is only ever the fit-arm delimiter. Without this,
-  // `fit x { 1 -> { a; } ...` over-consumes: after parsing `1`, the loop
-  // would see `->` and keep parsing rightward through the arm's body.
+  // operator (it's only ever the fit-arm delimiter) -- without this,
+  // `fit x { 1 -> { a; } ...` over-consumes past `1` into the arm body.
   bin in_fit_statement;
 
   // True while parsing a bounded operand (`await expr`, `fork call`, a
-  // channel receive `<-ch`) that must stop at the first binary operator
-  // rather than continuing to consume rightward: `await f(x) + 1` is
-  // `(await f(x)) + 1`, not `await (f(x) + 1)`. Postfix continuations
-  // (`(`, `[`, `.`) still continue the primary; only checked once a
-  // primary already exists on the stack.
+  // channel receive `<-ch`) that must stop at the first binary operator:
+  // `await f(x) + 1` is `(await f(x)) + 1`, not `await (f(x) + 1)`.
+  // Postfix continuations (`(`, `[`, `.`) still continue the primary.
   bin stop_at_binary_op;
 
   // True while parsing a value expression that must stop at a top-level
   // comma rather than treating it as the comma operator, e.g. a
   // compound-literal field's value (`Point{ x = 1, y = 2 }`) -- without
-  // this, `x`'s value expression would greedily consume `1, y = 2`.
-  // Unlike `stop_at_binary_op`, this stops at a comma unconditionally.
-  // Commas nested inside a further `(...)`/`[...]` aren't affected, so
-  // `x = f(a, b)` still parses its call args fully.
+  // this, `x`'s value would greedily consume `1, y = 2`. Unlike
+  // `stop_at_binary_op`, this stops unconditionally; a comma nested
+  // inside `(...)`/`[...]` is unaffected (`f(a, b)` still parses fully).
   bin stop_at_comma;
 }
 
@@ -1259,13 +1234,12 @@ impl Parser {
           .None -> {}
         }
 
-        // `_` is a wildcard identifier (used by `fit` default branches):
-        // accepted even when not declared. Otherwise an identifier that
-        // isn't a known scope entity/symbol/global symbol is only valid
-        // as a member-access target, an ALL_CAPS C-macro-style constant,
-        // an out-of-order function call (`foo(...)`), a possible enum
-        // member access (`Foo.Bar`), or inside a `fit` condition (where
-        // data-carrying-enum pattern bindings aren't in scope yet).
+        // `_` is a wildcard identifier (used by `fit` default branches),
+        // accepted even when not declared. Otherwise an unknown
+        // identifier is only valid as a member-access target, an
+        // all-caps constant-style name, an out-of-order function call, a
+        // possible enum member access (`Foo.Bar`), or inside a `fit`
+        // condition (where pattern bindings aren't in scope yet).
         if !equals(name, "_") {
           if !is_member_access {
             if !is_sizeof_type_operand && self.state.get_scope_entity(name) == nil {
@@ -1373,12 +1347,10 @@ impl Parser {
   }
 
   // Parses a compound-literal initializer body `{ field = value, ... }`
-  // and pushes a `CompoundInit` node: `Type{...}` when `has_dt` is true
-  // (`dt` already parsed by the caller), or the type-inferred shorthand
-  // `.{...}` when it's false (`dt` is unused). `pos`/`has_pos` is the
-  // node's own position -- the caller's choice (`Type`'s own token for
-  // the named form, the `.` token for the shorthand), falling back to
-  // the `{` token's position when the caller doesn't have one.
+  // and pushes a `CompoundInit` node: `Type{...}` when `has_dt` (`dt`
+  // already parsed by the caller), or `.{...}` when not (`dt` unused).
+  // `pos`/`has_pos` is the node's own position, the caller's choice --
+  // falling back to the `{` token's position when the caller has none.
   pub parse_compound_init(DataType* dt, bin has_dt, Pos pos, bin has_pos) Option<ParseErrorKind> {
     let lbrace_tok = self.state.token_peek_next();
     let lberr = self.state.expect_sym('{');
@@ -1468,15 +1440,14 @@ impl Parser {
   }
 
   // Rewrites `node = (a op1 (b op2 c))` in place to `((a op1 b) op2 c)`: a
-  // left tree rotation used by `parse_reorder_expression` to fix precedence
-  // when `op1` should bind tighter than (or equal to) `op2`, but the
-  // parser's naive left-to-right build produced the right-heavy shape
-  // instead. A no-op when the right child isn't itself an `Expression` or
-  // either side is missing.
-  // 
-  // Structurally identical to `parse_node_move_right_left_to_left` below;
-  // kept as two separate functions, each called from a different trigger
-  // condition in `parse_reorder_expression`.
+  // left tree rotation used by `parse_reorder_expression` to fix
+  // precedence when `op1` should bind tighter than (or equal to) `op2`
+  // but the naive left-to-right build produced the right-heavy shape. A
+  // no-op when the right child isn't an `Expression` or either side is
+  // missing. Structurally identical to
+  // `parse_node_move_right_left_to_left` below; kept separate since each
+  // is called from a different trigger condition in
+  // `parse_reorder_expression`.
   pub parse_node_shift_children_left(Node* node) {
     fit node.kind {
       .Expression(exp) -> {
