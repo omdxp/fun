@@ -21,6 +21,11 @@ imp std.io;
 imp std.c.io;
 imp std.c.mem;
 
+// Maximum recursive-descent depth for the expression parser. Set well
+// above any plausible hand-written expression, but low enough that the
+// limit is reported as an error rather than overflowing the stack.
+const num max_parse_expr_depth = 600;
+
 // Errors the parser can report.
 pub enum ParseErrorKind {
   InvalidSymbol,
@@ -1598,6 +1603,15 @@ impl Parser {
   // `sizeof` isn't a keyword, so `sizeof(Type)` takes the ordinary call path
   // with a callee named `sizeof`.
   pub parse_expressionable_single() Option<ParseErrorKind> {
+    // Each nesting level costs several native frames, so pathological
+    // input (deeply nested parentheses, very long operator chains) would
+    // otherwise overflow the stack instead of reporting an error.
+    if self.expr_depth >= max_parse_expr_depth {
+      self.state.err("expression nests too deeply to parse");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    self.expr_depth = self.expr_depth + 1;
+    defer self.expr_depth = self.expr_depth - 1;
     fit self.state.token_peek_next() {
       .Some(t) -> {
         // A `fit` arm's comma-separated multi-pattern list only supports
