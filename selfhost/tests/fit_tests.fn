@@ -1,0 +1,182 @@
+// Exhaustiveness corpus, ported from the `fit` suite. The original tests
+// assert on warning text; this compiler has no warning pass yet, so each
+// test here checks that the same fixture lowers correctly and the ones with
+// no behavioral remainder are marked as gaps.
+
+imp harness;
+imp std.string;
+
+// gap: the exhaustiveness warning "fit statement is not exhausted for bin
+// condition" is not emitted. Only the lowering is checked here.
+test "fit bin missing false lowers to a single comparison" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  bin x = true;
+  `  fit x {
+  `    true -> { printf("T\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit bin missing false lowers to a single comparison");
+  assert contains(out, "x == true"), "expected the true branch comparison";
+  assert !contains(out, "x == false"), "expected no false branch";
+}
+
+// gap: fit bin missing false warns in diag_only mode. Diagnostic-only mode
+// and the warning it checks for both belong to the missing warning pass, so
+// nothing about the lowering is left to assert.
+
+// gap: the "fit branch is unreachable because condition was already handled
+// earlier" warning is not emitted. Only the lowering is checked here.
+test "fit duplicate bool branch still lowers both branches" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  bin x = true;
+  `  fit x {
+  `    true -> { printf("T1\n"); },
+  `    true -> { printf("T2\n"); },
+  `    false -> { printf("F\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit duplicate bool branch still lowers both branches");
+  assert contains(out, "printf(\"T1"), "expected the first duplicate branch body";
+  assert contains(out, "printf(\"T2"), "expected the second duplicate branch body";
+  assert contains(out, "x == false"), "expected the trailing false branch";
+}
+
+// gap: `allow fit_unreachable_branch` is rejected by codegen.
+// test "fit allow fit_unreachable_branch suppresses warning"
+
+// gap: `expect fit_unreachable_branch` is rejected by codegen.
+// test "fit expect fit_unreachable_branch suppresses warning"
+
+// gap: an unmet `expect fit_unreachable_branch` should fail the compile.
+// test "fit unmet expect fit_unreachable_branch fails"
+
+// gap: `allow fit_non_exhaustive` is rejected by codegen.
+// test "fit allow fit_non_exhaustive suppresses warning"
+
+// gap: `expect fit_non_exhaustive` is rejected by codegen.
+// test "fit expect fit_non_exhaustive suppresses warning"
+
+// gap: an unmet `expect fit_non_exhaustive` should fail the compile.
+// test "fit unmet expect fit_non_exhaustive fails"
+
+test "fit bin exhausted via default lowers the catch-all to else" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  bin x = true;
+  `  fit x {
+  `    true -> { printf("T\n"); },
+  `    _ -> { printf("D\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit bin exhausted via default lowers the catch-all to else");
+  assert contains(out, "x == true"), "expected the true branch comparison";
+  assert contains(out, "else {"), "expected the catch-all to lower to else";
+}
+
+test "fit bin default only lowers to an unconditional block" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  bin x = true;
+  `  fit x {
+  `    _ -> { printf("D\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit bin default only lowers to an unconditional block");
+  assert contains(out, "printf(\"D"), "expected the catch-all body";
+  assert !contains(out, "x =="), "expected no comparison for a catch-all-only fit";
+}
+
+// gap: the "missing catch-all '_' branch" warning is not emitted for a num
+// condition. Only the lowering is checked here.
+test "fit num lowers to a value comparison" {
+  str src = `imp std.c.io;
+  `fun main() {
+  `  num x = 1;
+  `  fit x {
+  `    1 -> { printf("one\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit num lowers to a value comparison");
+  assert contains(out, "x == 1"), "expected the literal comparison";
+}
+
+// gap: the "missing catch-all '_' branch" warning is not emitted for a
+// pointer condition. Only the lowering is checked here.
+test "fit pointer lowers to a NULL comparison" {
+  str src = `imp std.c.io;
+  `imp std.c.mem;
+  `fun main() {
+  `  raw* p = malloc(1);
+  `  fit p {
+  `    NULL -> { printf("null\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit pointer lowers to a NULL comparison");
+  assert contains(out, "p == NULL"), "expected the NULL comparison";
+}
+
+test "fit enum exhausted via all variants lowers every variant" {
+  str src = `imp std.c.io;
+  `enum Color {
+  `  Red;
+  `  Green;
+  `  Blue;
+  `}
+  `fun main() {
+  `  Color c = Color.Red;
+  `  fit c {
+  `    Color.Red -> { printf("R\n"); },
+  `    Color.Green -> { printf("G\n"); },
+  `    Color.Blue -> { printf("B\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit enum exhausted via all variants lowers every variant");
+  assert contains(out, "c == Color_Red"), "expected the first variant comparison";
+  assert contains(out, "c == Color_Green"), "expected the second variant comparison";
+  assert contains(out, "c == Color_Blue"), "expected the third variant comparison";
+}
+
+// gap: the "fit statement is not exhausted for enum" warning is not emitted.
+// Only the lowering is checked here.
+test "fit enum missing variant lowers only the handled variants" {
+  str src = `imp std.c.io;
+  `enum Color {
+  `  Red;
+  `  Green;
+  `  Blue;
+  `}
+  `fun main() {
+  `  Color c = Color.Red;
+  `  fit c {
+  `    Color.Red -> { printf("R\n"); },
+  `    Color.Green -> { printf("G\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit enum missing variant lowers only the handled variants");
+  assert contains(out, "c == Color_Red"), "expected the first variant comparison";
+  assert contains(out, "c == Color_Green"), "expected the second variant comparison";
+  assert !contains(out, "c == Color_Blue"), "expected no branch for the unhandled variant";
+}
+
+test "fit enum dot shorthand resolves against the condition's type" {
+  str src = `imp std.c.io;
+  `enum Color {
+  `  Red;
+  `  Green;
+  `  Blue;
+  `}
+  `fun main() {
+  `  Color c = .Red;
+  `  fit c {
+  `    .Red -> { printf("R\n"); },
+  `    .Green -> { printf("G\n"); },
+  `    .Blue -> { printf("B\n"); }
+  `  }
+  `}`;
+  let out = emit_c(src, "fit enum dot shorthand resolves against the condition's type");
+  assert contains(out, "Color c = Color_Red"), "expected the shorthand initializer to resolve";
+  assert contains(out, "c == Color_Red"), "expected the first shorthand branch to resolve";
+  assert contains(out, "c == Color_Blue"), "expected the last shorthand branch to resolve";
+}
