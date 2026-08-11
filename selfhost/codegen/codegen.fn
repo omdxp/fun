@@ -6554,11 +6554,10 @@ impl Codegen {
   }
 
   // Emits `stmts[start_i]` (a `StatementIf`) chained with every
-  // immediately-following `StatementElseIf`/`StatementElse` sibling as a
-  // single C `if (...) { } else if (...) { } else { }` construct, and
-  // returns the index just past the whole chain. `if`/`elif`/`else` are
-  // parsed as three independent sibling statement kinds, not a nested
-  // tree, so chaining them needs this adjacency lookahead.
+  // immediately-following `StatementElseIf`/`StatementElse` sibling as
+  // one C `if (...) { } else if (...) { } else { }`, returning the index
+  // past the chain. `if`/`elif`/`else` parse as three independent sibling
+  // statement kinds, not a nested tree, so chaining needs this lookahead.
   emit_if_chain(Vec<Node*> stmts, num start_i, num* out_next_i) Option<CodegenErrorKind> {
     Node* if_stmt = stmts.get(start_i);
     fit if_stmt.kind {
@@ -6608,15 +6607,13 @@ impl Codegen {
     ret .None;
   }
 
-  // True for a statement kind that's known to always leave its
-  // enclosing block (a `ret`/`break`/`continue`, or a bare `panic(...)`
-  // statement, which always aborts), used by `emit_statements` to
-  // decide whether fall-through defer cleanup is needed after the last
-  // statement in a block. Conservative: an if/elif/else chain is never
-  // treated as a terminator here even when every branch returns, since
-  // proving that would need real branch-coverage analysis, so such a
-  // block harmlessly emits dead but valid fall-through defer cleanup
-  // too.
+  // True for a statement kind that always leaves its enclosing block: a
+  // `ret`/`break`/`continue`, or a bare `panic(...)`. `emit_statements`
+  // uses it to decide whether fall-through defer cleanup is needed after
+  // a block's last statement. An if/elif/else chain is never a terminator
+  // here even when every branch returns, since proving that needs
+  // branch-coverage analysis, so such a block emits dead but valid
+  // cleanup.
   node_is_scope_terminator(Node stmt) bin {
     fit stmt.kind {
       .StatementReturn(_) -> { ret true; }
@@ -6628,14 +6625,13 @@ impl Codegen {
   }
 
   // Pushes a new `defer` scope frame, marking `defer_stack`'s current
-  // length as where this block's defers begin; see
-  // `Codegen.defer_stack`.
+  // length as where this block's defers begin.
   push_defer_scope() {
     self.defer_scope_starts.push(self.defer_stack.len);
   }
 
-  // Pops the innermost `defer` scope frame and discards its (by now
-  // already-emitted, one way or another) entries from `defer_stack`.
+  // Pops the innermost `defer` scope frame and discards its by-now
+  // already-emitted entries from `defer_stack`.
   pop_defer_scope() {
     if self.defer_scope_starts.len == 0 {
       ret;
@@ -6644,10 +6640,9 @@ impl Codegen {
     self.defer_stack.resize(start, nil);
   }
 
-  // Emits, without removing, every pending defer from `defer_stack`'s
-  // end back down to `start_index`, in reverse (LIFO) registration
-  // order, each as an ordinary statement via `emit_body`; see
-  // `Codegen.defer_stack`.
+  // Emits, without removing, every pending defer from `defer_stack`'s end
+  // back down to `start_index`, in reverse registration order, each as an
+  // ordinary statement.
   emit_defers_from(num start_index) Option<CodegenErrorKind> {
     num i = self.defer_stack.len;
     for i > start_index {
@@ -6672,34 +6667,30 @@ impl Codegen {
     ret self.emit_defers_from(start);
   }
 
-  // Emits every currently pending defer, back to function entry, used
-  // at a `ret` statement, which unwinds every enclosing block at once.
-  // This codegen doesn't distinguish frame kinds (see
-  // `Codegen.defer_stack`), so "back to function entry" and "back to
-  // index 0" are the same thing here.
+  // Emits every pending defer back to function entry, for a `ret`, which
+  // unwinds every enclosing block at once. Frame kinds aren't
+  // distinguished, so function entry is always index 0.
   emit_function_scope_defers() Option<CodegenErrorKind> {
     ret self.emit_defers_from(0);
   }
 
   // Emits `stmts` in order, one statement per line, chaining any
   // `StatementIf`/`StatementElseIf`/`StatementElse` run into a single C
-  // if/else-if/else construct via `emit_if_chain`. Pushes/pops its own
-  // `defer` scope frame around the whole statement list; see
-  // `Codegen.defer_stack`. Every block, not just a function's top-level
-  // body, is its own defer scope.
+  // if/else-if/else construct. Pushes and pops a `defer` scope frame
+  // around the list: every block, not just a function's top-level body,
+  // is its own defer scope.
   emit_statements(Vec<Node*> stmts) Option<CodegenErrorKind> {
     self.push_defer_scope();
     num i = 0;
     bin last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
-      // Armed fresh for every statement, relative to whatever buffer
-      // `self.state` currently is. When that's an isolated scratch
-      // buffer mid-swap, this tracks a position within that scratch, so
-      // a nested trigger from deeper in this same body can splice its
-      // inline prototype into that same scratch, before whichever
-      // statement triggered it. Restored to the outer value by the
-      // swap's own code once it's done, same as `hoist_insert_pos`.
+      // Armed fresh per statement, relative to whatever buffer
+      // `self.state` currently is. Mid-swap that's a scratch buffer, so a
+      // nested trigger from deeper in this body splices its inline
+      // prototype into the same scratch, before the statement that
+      // triggered it. The swap restores the outer value afterward, as it
+      // does for `hoist_insert_pos`.
       self.current_stmt_start_pos = .Some(self.state.out.len());
       bin is_if = false;
       fit stmt.kind {
@@ -6737,10 +6728,9 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits `body`: every statement in order when it's a `Body` block, or
-  // just the one statement when it's a single braceless statement (an
-  // `if`/`for`/... body doesn't require `{ }` when it's a single
-  // statement -- see `_parse_if_body`'s doc comment in the parser).
+  // Emits `body`: every statement in order for a `Body` block, or the one
+  // statement for a braceless body, since an `if`/`for` body doesn't
+  // require `{ }` around a single statement.
   emit_body(Node body) Option<CodegenErrorKind> {
     fit body.kind {
       .Body(bn) -> { ret self.emit_statements(bn.statements); }
@@ -6748,17 +6738,14 @@ impl Codegen {
     }
   }
 
-  // Emits one function parameter (a `Variable` node with no
-  // initializer) as `<type> <name>`, and records it as a local for
-  // `.`/`->` decisions; see `Codegen.local_names`. A function-type
-  // parameter (`fun(T1, T2) R name`) instead needs C's function-pointer
-  // declarator shape, which wraps the name rather than preceding it
-  // (`R (*name)(T1, T2)`), handled as its own case before the ordinary
-  // `write_type` path below. A call through such a parameter (`cb(a,
-  // b)`) needs no special handling at the call site, since its C type
-  // is already a real function pointer. Recorded as a local under an
-  // empty type name, so a later `.field`/`.method()` off it is rejected
-  // rather than guessed.
+  // Emits one function parameter as `<type> <name>` and records it as a
+  // local for `.`/`->` decisions. A function-type parameter
+  // (`fun(T1, T2) R name`) needs C's function-pointer declarator, which
+  // wraps the name rather than preceding it (`R (*name)(T1, T2)`), so it
+  // is handled before the ordinary `write_type` path. Calling through
+  // such a parameter needs nothing special at the call site, its C type
+  // already being a function pointer; it is recorded under an empty type
+  // name so a later `.field` off it is rejected rather than guessed.
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
@@ -6786,18 +6773,13 @@ impl Codegen {
           self.record_local(v.name, "", false);
           ret .None;
         }
-        // An unsized array parameter (`T[] src`) decays to a pointer,
-        // same as an unsized array field/local (see
-        // `dtype_is_array_as_pointer`); `write_type` never adds this
-        // star itself since it only knows about
-        // `pointer_depth`/`flags.is_pointer`, so it's added here
-        // explicitly, unconditionally stacking on top of whatever
-        // pointer depth `write_type` already wrote. Gating this on
-        // `!dtype_is_pointer(param_dt)` instead would drop the array's
-        // level whenever the argument is itself already a pointer
-        // (`Vec<Node*>`'s `push_many(Node* src, ...)` needs
-        // `Node** src`: one level for the array, one because each
-        // element is already a `Node*`).
+        // An unsized array parameter (`T[] src`) decays to a pointer.
+        // `write_type` only knows `pointer_depth`/`flags.is_pointer`, so
+        // the star is added here, unconditionally stacking on whatever
+        // depth it already wrote. Gating on `!dtype_is_pointer(param_dt)`
+        // would drop the array's level whenever the element is itself a
+        // pointer: `Vec<Node*>`'s `push_many(Node* src, ...)` needs
+        // `Node** src`, one level for the array and one for the element.
         bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
         let wt = self.write_type(*v.var_type);
         if wt.is_none() {
@@ -6821,11 +6803,10 @@ impl Codegen {
     }
   }
 
-  // Emits a plain (no generics, no variadics) top-level function
-  // declaration as a C function definition: `<rtype> <name>(<args>) {
-  // <body> }` (or `(void)` for a zero-arg function, matching C
-  // convention -- an empty `()` in C means "unspecified arguments", not
-  // "no arguments").
+  // Emits a plain (no generics, no variadics) top-level function as a C
+  // definition: `<rtype> <name>(<args>) { <body> }`, with `(void)` for a
+  // zero-arg function, since an empty `()` in C means "unspecified
+  // arguments" rather than "no arguments".
   pub emit_function(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
@@ -6835,21 +6816,12 @@ impl Codegen {
     }
   }
 
-  // Does the actual work of `pub emit_function`, under an explicit
-  // `emit_name` rather than `node`'s own mangled `Function.name`, so
-  // `maybe_instantiate_generic_impl_methods` can emit the same template
-  // method body once per concrete instantiation, each under its own
-  // further-mangled C symbol. `current_fn_rtype_name` is set from the
-  // resolved, post-substitution return type name, so a generic method's
-  // bare-`T` return type resolves against the active instantiation for
-  // `ret <shorthand>;`; see `Codegen.current_fn_rtype_name`.
-  // True when `node` was declared in a `std/c/*.fn` binding file (a
-  // signature-only module documenting an existing C header, e.g.
-  // `std/c/time.fn`'s `tm`/`timespec` or `std/c/io.fn`'s `FILE`). Such a
-  // declaration exists so Fun call sites/field accesses can typecheck
-  // against it; the real system header is the sole source of truth for
-  // the actual C definition, so codegen must never emit competing C
-  // text for one of these nodes.
+  // True when `node` was declared in a `std/c/*.fn` binding file, a
+  // signature-only module documenting an existing C header such as
+  // `std/c/time.fn`'s `tm` or `std/c/io.fn`'s `FILE`. Such a declaration
+  // exists so call sites and field accesses can typecheck against it; the
+  // system header remains the sole source of truth, so codegen must never
+  // emit competing C text for one of these nodes.
   is_std_c_signature_node(Node node) bin {
     if !node.has_pos {
       ret false;
@@ -6857,22 +6829,19 @@ impl Codegen {
     ret contains(node.pos.filename, "/std/c/") || contains(node.pos.filename, "\\std\\c\\");
   }
 
-  // Emits the wrapper C functions an `async fun`/`async` method needs
-  // around its ordinary body: a per-function payload struct holding its
-  // args plus its result, an entry trampoline running on a dedicated OS
-  // thread that unpacks/repacks through that payload, a spawn helper, an
-  // await helper (join, extract result, free), and a call helper that
-  // `await expr` actually calls (see `emit_await`); a `fork expr;`
-  // reuses the same payload struct through a second entry/call pair (see
-  // `emit_fork_stmt`). There is no state machine or coroutine transform
-  // -- `await` spawns a thread and immediately joins it, `fork` enqueues
-  // onto the scheduler's worker pool without waiting. `emit_name` is the
-  // function's final emitted C name, relied on by the entry trampoline
-  // and the call helper's synchronous-fallback path, and covers a
-  // monomorphized `async` method once per instantiation. A call to a
-  // known-async function that's neither `await`ed nor `fork`ed emits
-  // with no diagnostic, and a function-pointer-typed argument is
-  // rejected outright rather than supported.
+  // Emits the wrapper C functions an `async` function or method needs
+  // around its ordinary body: a payload struct holding its args and
+  // result, an entry trampoline running on a dedicated OS thread that
+  // unpacks and repacks through that payload, a spawn helper, an await
+  // helper that joins and extracts the result, and the call helper
+  // `await expr` invokes. A `fork expr;` reuses the same payload struct
+  // through a second entry and call pair. There is no state machine or
+  // coroutine transform: `await` spawns a thread and immediately joins
+  // it, `fork` enqueues onto the scheduler's worker pool without waiting.
+  // `emit_name` is the function's final C name, used by the entry
+  // trampoline and the call helper's synchronous fallback, and covers a
+  // monomorphized `async` method once per instantiation. A
+  // function-pointer-typed argument is rejected rather than supported.
   emit_async_function_support(Node node, str emit_name) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
@@ -6900,10 +6869,9 @@ impl Codegen {
           }
         }
 
-        // 0. Forward-declare `emit_name` itself: the entry trampoline
-        // and the call helper's sync-fallback paths below both call it
-        // directly, but its real definition is emitted right after this
-        // whole helper set returns; see `emit_function_named`.
+        // 0. Forward-declare `emit_name`: the entry trampoline and the
+        // call helper's sync-fallback path both call it directly, but its
+        // definition is emitted after this helper set returns.
         let fwt = self.write_type(*f.rtype);
         if fwt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
@@ -6933,7 +6901,7 @@ impl Codegen {
         str payload_name = pnb.build();
 
         // 1. Payload struct: one field per arg, plus `__result` unless
-        // `f`'s own return type is `void`.
+        // the return type is `void`.
         self.state.write("typedef struct ");
         self.state.write(payload_name);
         self.state.write(" {\n");
@@ -7026,9 +6994,8 @@ impl Codegen {
         }
         self.state.write("}\n");
 
-        // 5. Call helper: what `await expr` lowers to; see `emit_expr`'s
-        // `"await"` case. Degrades to a direct synchronous call to
-        // `emit_name` on `malloc`/spawn failure.
+        // 5. Call helper: what `await expr` lowers to. Degrades to a
+        // direct synchronous call on malloc or spawn failure.
         self.state.write("static ");
         let cwt = self.write_type(*f.rtype);
         if cwt.is_none() {
@@ -7121,14 +7088,12 @@ impl Codegen {
         }
         self.state.write("}\n\n");
 
-        // 6. Fork support, only when `fork` is used anywhere in the
-        // program, not just on this function. Reuses the same payload
-        // struct as above. The entry runs the function then frees the
-        // payload itself, since the result is discarded and `fork` is
-        // fire-and-forget; the call helper enqueues onto the scheduler
-        // (`__fun_go`; see `write_prelude`) instead of spawning and
-        // joining, with the same malloc-failure degrade-to-sync fallback
-        // as the await call helper.
+        // 6. Fork support, emitted only when `fork` is used anywhere in
+        // the program. Reuses the payload struct above; the entry runs
+        // the function then frees the payload itself, the result being
+        // discarded, and the call helper enqueues onto the scheduler via
+        // `__fun_go` rather than spawning and joining, with the same
+        // degrade-to-sync fallback as the await call helper.
         if self.uses_fork {
           self.state.write("static void __fun_fork_entry_");
           self.state.write(emit_name);
@@ -7211,41 +7176,40 @@ impl Codegen {
     }
   }
 
+  // Does the work of `pub emit_function` under an explicit `emit_name`
+  // rather than `node`'s mangled `Function.name`, so the same template
+  // method body can be emitted once per concrete instantiation, each
+  // under its own further-mangled C symbol. `current_fn_rtype_name` is
+  // set from the resolved post-substitution return type, so a generic
+  // method's bare-`T` return type resolves against the active
+  // instantiation for `ret <shorthand>;`.
   emit_function_named(Node node, str emit_name) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
-        // A bodyless function (`;`-only, e.g. every `std.c.*` binding)
-        // is a signature-only declaration, not something this codegen
-        // should emit C text for: the real system header is the
-        // authoritative declaration, and this codegen's own param types
-        // aren't necessarily identical to it (e.g. `size_t` vs
-        // `int64_t`), so emitting a competing prototype/definition would
-        // cause a redefinition or "conflicting types" error. The
-        // function's signature is still fully known to this codegen's
-        // bookkeeping via `register_function_signatures`, called before
-        // any emission pass runs, so skipping C-text emission here
-        // doesn't affect call-site resolution.
+        // A bodyless function, such as every `std.c.*` binding, is a
+        // signature-only declaration. The system header is authoritative
+        // and its param types need not match these (`size_t` versus
+        // `int64_t`), so emitting a competing prototype would cause a
+        // conflicting-types error. `register_function_signatures` already
+        // recorded the signature before any emission pass, so skipping C
+        // text here doesn't affect call-site resolution.
         if !f.has_body {
           ret .None;
         }
-        // An `async fun`/`async` method's body is transpiled as an
-        // ordinary C function below; there's no state machine or
-        // coroutine transform. All the "asyncness" lives in a small set
-        // of wrapper functions generated around it (payload struct,
-        // entry trampoline, spawn/await/call helpers; see
-        // `emit_async_function_support`). `await expr` lowers to a call
-        // to the call helper, which runs this function on a dedicated
-        // OS thread and joins it. `main` is excluded, since nothing ever
-        // `await`s it.
+        // An `async` body is transpiled as an ordinary C function below,
+        // with no state machine or coroutine transform; the asyncness
+        // lives in the wrapper functions `emit_async_function_support`
+        // generates around it. `main` is excluded, since nothing `await`s
+        // it.
         if f.is_async && !equals(emit_name, "main") {
           let aserr = self.emit_async_function_support(node, emit_name);
           if aserr.is_some() {
             ret aserr;
           }
         }
-        // Fresh per function; see `Codegen.local_names`. Not scoped to
-        // nested blocks, so an inner `{ }` shadowing an outer local of
-        // the same name isn't tracked correctly.
+        // Fresh per function, and not scoped to nested blocks, so an
+        // inner `{ }` shadowing an outer local of the same name isn't
+        // tracked correctly.
         self.local_names.init(0);
         self.local_is_pointer.init(0);
         self.local_type_name.init(0);
@@ -7253,25 +7217,20 @@ impl Codegen {
         self.local_multidim_names.init(0);
         self.local_multidim_roots.init(0);
         self.local_multidim_depths.init(0);
-        // Fresh per function too; see `Codegen.defer_stack`. A previous
-        // function's leftover pending defers must never bleed into this
-        // one.
+        // Fresh per function too: a previous function's leftover pending
+        // defers must never bleed into this one.
         self.defer_stack.init(0);
         self.defer_scope_starts.init(0);
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
-        // `write_type` always writes the return type's naive C
-        // spelling directly to `self.state` as a side effect of
-        // resolving it. For `main`, that text must never reach the real
-        // output, since its written return type is always the literal
-        // `int` forced below, so it's captured into a throwaway scratch
-        // buffer and discarded once `rt` (the resolved name, still
-        // needed for `current_fn_rtype_name`/`_dt`) is in hand.
-        // `hoist_insert_pos` is suspended for the swap, same as every
-        // other scratch-buffer swap in this file, so a nested hoisted
-        // emission triggered from inside `write_type` splices into the
-        // real buffer rather than this throwaway one.
+        // `write_type` writes the return type's C spelling to
+        // `self.state` as a side effect of resolving it. For `main` that
+        // text must never reach the output, the signature being forced to
+        // `int` below, so it is captured into a throwaway scratch buffer
+        // and discarded once `rt` is in hand. `hoist_insert_pos` is
+        // suspended for the swap, so a nested hoisted emission splices
+        // into the real buffer.
         bin is_main = equals(emit_name, "main");
         CodegenState rtype_scratch = codegen_state_new();
         CodegenState* saved_rtype_state = self.state;
@@ -7290,18 +7249,14 @@ impl Codegen {
         }
         self.current_fn_rtype_name = rt.unwrap();
         self.current_fn_rtype_dt = .Some(self.resolve_type_subst(*f.rtype));
-        // C's `main` must be `int main(void)`, `int main(int argc,
-        // char** argv)`, or `int main(int argc, char** argv, char**
-        // envp)`, never anything else, regardless of this function's
-        // Fun-level signature. `current_fn_rtype_name`/`_dt` above are
-        // still set from the real Fun-declared return type, needed for
-        // `ret <shorthand>;`/local-inference bookkeeping inside the
-        // body; only the written C signature is overridden here. A bare
-        // `int64_t`-returning `return expr;` inside an `int`-declared
-        // function is valid C, so the body needs no special handling.
-        // No params emits the standard `argc`/`argv` pair; exactly one
-        // `str[] name` param keeps that name but still takes real OS
-        // argv; anything else emits the user's params verbatim.
+        // C's `main` must be `int main(void)` or take `argc`/`argv`
+        // (optionally `envp`), regardless of the Fun-level signature.
+        // Only the written C signature is overridden here;
+        // `current_fn_rtype_name`/`_dt` above stay set from the declared
+        // return type for the body's own bookkeeping. No params emits the
+        // standard `argc`/`argv` pair; a single `str[] name` param keeps
+        // that name but still takes OS argv; anything else emits the
+        // declared params verbatim.
         bin main_is_single_str_array = false;
         if is_main && f.has_args && f.args.len == 1 {
           let main_arg0 = f.args.get(0);
@@ -7343,41 +7298,32 @@ impl Codegen {
         } elif !f.is_variadic {
           self.state.write("void");
         }
-        // A variadic function (`fun f(str fmt, ...)`) gets two extra
-        // trailing C params beyond its named ones: `const char*
-        // __fun_vtags` (a per-call type-tag string, one character per
-        // vararg, NUL-terminated, built at each call site; see
-        // `emit_call`), then the real `...`.
+        // A variadic function gets two extra trailing C params beyond its
+        // named ones: `const char* __fun_vtags`, a NUL-terminated
+        // per-call type-tag string with one character per vararg, then
+        // the real `...`.
         if f.is_variadic {
           if f.has_args && f.args.len > 0 {
             self.state.write(", ");
           }
           self.state.write("const char* __fun_vtags, ...");
         }
-        // A bodyless function is a signature-only declaration, not a
-        // definition, so it emits as a bare prototype (`TYPE
-        // name(params);`), relying on the real C library's definition
-        // being linked in separately. An empty-bodied `{ }` definition
-        // here would shadow libc's own `malloc`/`calloc`/`realloc`/`free`
-        // with conflicting no-op redefinitions.
+        // A bodyless function emits as a bare prototype, relying on the
+        // library definition being linked in separately. An empty `{ }`
+        // definition would shadow libc's own `malloc`/`free` with no-op
+        // redefinitions.
         if !f.has_body {
           self.state.write(");\n");
           ret .None;
         }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
-        // A variadic function's body always starts by unpacking its
-        // real varargs (via `__fun_vtags`/C's `va_arg`) into a
-        // `Vec<str>` named `vargs`, a synthetic local the parser already
-        // recognizes as scope-registered but never declared, so the
-        // body can read it by name; this is what materializes it. Every
-        // vararg gets stringified (via `fmt_num`/`fmt_dec`/`fmt_bin`/
-        // `fmt_chr`/`fmt_raw`, matching each `__fun_tag` character
-        // `emit_call`'s call-site tagging writes) rather than kept as
-        // its native C type, since `vargs` is always a `Vec<str>`. No
-        // `Display`-trait dispatch for a non-builtin vararg value: every
-        // vararg reaching this codegen's call graph is a builtin scalar
-        // (`str`/`num`/`chr`).
+        // A variadic body starts by unpacking its varargs, through
+        // `__fun_vtags` and `va_arg`, into a `Vec<str>` named `vargs`:
+        // the synthetic local the parser registers in scope but never
+        // declares. Each vararg is stringified by the `fmt_*` helper
+        // matching its `__fun_tag` character rather than kept in its
+        // native C type, since `vargs` is always a `Vec<str>`.
         if f.is_variadic {
           self.state.write_indent();
           self.state.write("Vec__str vargs;\n");
@@ -7429,10 +7375,9 @@ impl Codegen {
           self.state.indent_level = self.state.indent_level - 1;
           self.state.write_indent();
           self.state.write("}\n");
-          // Recorded as a known local so the body's own reads of `vargs`
-          // resolve like any other `Vec<str>` value would, with
-          // `resolve_type_name` ensuring `Vec__str` is instantiated
-          // regardless of program order.
+          // Recorded as a known local so the body's reads of `vargs`
+          // resolve like any other `Vec<str>`, with `resolve_type_name`
+          // instantiating `Vec__str` regardless of program order.
           DataType* vargs_str_arg = malloc(sizeof(DataType));
           *vargs_str_arg = dtype_new();
           vargs_str_arg.type_str = "str";
@@ -7457,17 +7402,15 @@ impl Codegen {
     }
   }
 
-  // Companion to `ensure_plain_type_emitted` (below), for a by-value
-  // field whose type is a quirk rather than a plain compound/enum.
-  // `emit_quirk_vtable_machinery` normally only runs once per concrete
-  // impl, in `pub transpile`'s late, per-impl pass, at that impl's
-  // source position, which is too late for a plain compound embedding
-  // the quirk by value earlier in the file. This finds the first
-  // concrete (non-generic) impl of `type_name` anywhere in the program
-  // and triggers its machinery early instead, safe to call regardless
-  // of whether that impl's turn in the later pass has already happened,
-  // via `Codegen.emitted_quirk_impl_vtables`'s memoization. A no-op
-  // when `type_name` isn't a quirk with any concrete impl at all.
+  // Companion to `ensure_plain_type_emitted`, for a by-value field whose
+  // type is a quirk rather than a plain compound or enum.
+  // `emit_quirk_vtable_machinery` normally runs once per concrete impl in
+  // `pub transpile`'s late per-impl pass, at that impl's source position,
+  // which is too late for a compound embedding the quirk by value
+  // earlier. This finds the first concrete impl of `type_name` and
+  // triggers its machinery early; `emitted_quirk_impl_vtables` memoizes,
+  // so it's safe whether or not the later pass already ran. A no-op when
+  // `type_name` isn't a quirk with a concrete impl.
   ensure_quirk_vtable_emitted_early(str type_name) Option<CodegenErrorKind> {
     for n : self.all_nodes {
       fit n.kind {
@@ -7483,19 +7426,14 @@ impl Codegen {
   }
 
   // Ensures a plain (non-generic) compound or enum named `type_name` is
-  // fully emitted, recursively emitting any other plain compound/enum it
-  // embeds by value first. Replaces a flat "all enums, then all
-  // compounds" pass, which breaks once by-value dependencies run in both
-  // directions across files, with the same lazy, dependency-triggered,
-  // memoized emission generic types get
-  // (`ensure_compound_instantiated`/`ensure_enum_instantiated`), keyed
-  // by bare name. A by-pointer field/payload is exempt -- it only needs
-  // the forward-declared struct name already handled by `pub
-  // transpile`'s forward-declare pass, and recursing into it could
-  // misfire on a genuinely self-referential type. `.None` means success
-  // even when `type_name` isn't a known plain compound/enum; `nodes` is
-  // searched by a linear scan on each call rather than through a
-  // separate lookup table.
+  // fully emitted, recursively emitting any plain compound or enum it
+  // embeds by value first: the same lazy, dependency-triggered, memoized
+  // emission generic types get, keyed by bare name. A flat "all enums,
+  // then all compounds" pass breaks once by-value dependencies run in
+  // both directions across files. A by-pointer field or payload is
+  // exempt, needing only the forward-declared struct name, and recursing
+  // into it could misfire on a self-referential type. `.None` means
+  // success, including when `type_name` isn't a known plain type.
   ensure_plain_type_emitted(str type_name) Option<CodegenErrorKind> {
     num ei = 0;
     for ei < self.emitted_plain_types.len {
@@ -7508,9 +7446,8 @@ impl Codegen {
       fit n.kind {
         .Compound(c) -> {
           if equals(c.name, type_name) && !c.has_type_params {
-            // Pushed before recursing, not after emission finishes; see
-            // `Codegen.emitted_plain_types`. A genuine cycle is caught
-            // as "already emitted" instead of recursing forever.
+            // Pushed before recursing, not after emission finishes, so a
+            // cycle is caught instead of recursing forever.
             self.emitted_plain_types.push(type_name);
             for f : c.fields {
               if !dtype_is_pointer(*f.dtype) && !dtype_is_array_as_pointer(*f.dtype) {
@@ -7518,27 +7455,22 @@ impl Codegen {
                 if fderr.is_some() {
                   ret fderr;
                 }
-                // A by-value field whose type is a quirk needs the same
-                // early-emission treatment, but `ensure_plain_type_
-                // emitted` just above never finds anything for it,
-                // since a quirk is neither a `.Compound` nor an `.Enum`
-                // node; see `ensure_quirk_vtable_emitted_early`.
+                // A by-value quirk field needs the same early emission,
+                // but the call above never finds it: a quirk is neither
+                // a `.Compound` nor an `.Enum` node.
                 let fqerr = self.ensure_quirk_vtable_emitted_early(f.dtype.type_str);
                 if fqerr.is_some() {
                   ret fqerr;
                 }
-                // A by-value field that's itself a generic
-                // instantiation (`Vec<DataType*> generic_args;`) hides
-                // its dependency inside `generic_args`: the
-                // instantiation's monomorphized methods may
-                // pointer-subscript a field/param typed as a concrete
-                // argument, which needs that argument's complete type,
-                // not just a forward decl. Must run here, before
-                // `self.emit_compound(n)` below starts writing this
-                // type's body, since doing it later would splice a
-                // nested type's definition into the middle of this
-                // type's still-open struct. Skips a further-generic
-                // argument (`Vec<Vec<T>*>`).
+                // A by-value field that is itself a generic instantiation
+                // (`Vec<DataType*> generic_args;`) hides its dependency
+                // inside `generic_args`: the instantiation's
+                // monomorphized methods may subscript a field typed as a
+                // concrete argument, needing that argument's complete
+                // type. Must run before `emit_compound` starts writing
+                // this type's body, or a nested definition would splice
+                // into a still-open struct. Skips a further-generic
+                // argument.
                 for garg : f.dtype.generic_args {
                   if garg.generic_args.len == 0 {
                     let gerr = self.ensure_plain_type_emitted(garg.type_str);
@@ -7594,17 +7526,12 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits a non-generic `enum Name { variants }` declaration: either a
-  // plain C enum typedef (`typedef enum Name { Name_Variant1,
-  // Name_Variant2 = <val>, ... } Name;`) when no variant carries a
-  // payload, or the tagged-union discriminant-enum-plus-struct/union
-  // layout (see `emit_tagged_union_enum`) when at least one does. Also
-  // registers the enum (`record_enum`) so a later `EnumName.Variant`
-  // qualified access resolves. A generic enum (`has_type_params`) is
-  // instead only recorded as a template (`Codegen.generic_enum_names`)
-  // and never emitted directly, matching `emit_compound`'s rule for a
-  // generic compound: only a concrete monomorphized specialization
-  // (`ensure_enum_instantiated`) is ever emitted.
+  // Emits a non-generic `enum Name { variants }`: a plain C enum typedef
+  // when no variant carries a payload, or the tagged-union layout when
+  // one does. Registers the enum so a later `EnumName.Variant` access
+  // resolves. A generic enum is only recorded as a template and never
+  // emitted directly, as with a generic compound; only a concrete
+  // monomorphization is emitted.
   emit_enum(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Enum(e) -> {
