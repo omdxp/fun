@@ -457,3 +457,240 @@ test "default parameter values: free fn + method, omitting trailing args fills d
   assert contains(out, "three(1, 2, base())"), "expected a defaulted call expression to be materialized";
   assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
 }
+
+// skipped: the deadlock watchdog test asserts on a stalled process aborting,
+// which needs the built binary.
+
+// skipped: Display dispatch through `{}` only kicks in once std.io's
+// println_fmt is resolved, which the harness does not do.
+
+// skipped: the exhaustive-fit Display test has the same std.io dependency.
+
+// skipped: workspace-shadowing and cross-file private-name collision both need
+// sibling files on disk.
+
+test "fit statement with an explicit catch-all branch compiles and evaluates correctly" {
+  str src = `imp std.c.io;
+  `enum Token { Num(num), Ident, Plus, Minus, Star, Slash, LParen, RParen, Eof }
+  `fun classify(Token t) num {
+  `  fit t {
+  `    Token.Num(n) -> { ret n; }
+  `    Token.Ident -> { ret 1; }
+  `    _ -> { ret 0; }
+  `  }
+  `}
+  `fun main() num {
+  `  printf("%lld %lld %lld\n", classify(Token.Num(5)), classify(Token.Ident), classify(Token.Eof));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "fit statement with an explicit catch-all branch compiles and evaluates correctly"
+  );
+  assert contains(out, "t.tag == Token_Num"), "expected the payload branch to test its tag";
+  assert contains(out, "t.tag == Token_Ident"), "expected the payload-free branch to test its tag";
+  assert contains(out, "} else {"), "expected the catch-all to lower to a trailing else";
+}
+
+// skipped: the multi-file torture program compiles a directory of sources, not
+// a single in-memory string.
+
+test "fit on a chr subject checks every branch, not just the first (regression)" {
+  str src = `imp std.c.io;
+  `fun classify(chr c) str {
+  `  fit c {
+  `    '+' -> { ret "plus"; }
+  `    '-' -> { ret "minus"; }
+  `    '*' -> { ret "star"; }
+  `    '/' -> { ret "slash"; }
+  `    _ -> { ret "other"; }
+  `  }
+  `}
+  `fun main() num {
+  `  printf("%s %s %s %s %s\n", classify('+'), classify('-'), classify('*'), classify('/'), classify('x'));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "fit on a chr subject checks every branch, not just the first (regression)"
+  );
+  assert contains(out, "c == '+'"), "expected the first char branch";
+  assert contains(out, "c == '-'"), "expected the second char branch";
+  assert contains(out, "c == '*'"), "expected the third char branch";
+  assert contains(out, "c == '/'"), "expected the fourth char branch";
+}
+
+test "an enum variant payload of a generic-compound type matches its own declared type" {
+  str src = `imp std.c.io;
+  `compound Bag<T> { T first; }
+  `impl Bag<T> { pub get() T { ret self.first; } }
+  `enum E { A(str, Bag<num>) }
+  `fun consume(str name, Bag<num> v) num {
+  `  ret v.get();
+  `}
+  `fun handle(E e) num {
+  `  fit e {
+  `    E.A(name, items) -> { ret consume(name, items); }
+  `  }
+  `  ret -1;
+  `}
+  `fun main() num {
+  `  Bag<num> v;
+  `  v.first = 42;
+  `  printf("%lld\n", handle(E.A("x", v)));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "an enum variant payload of a generic-compound type matches its own declared type"
+  );
+  assert contains(out, "Bag__num _1;"), "expected the payload field at the monomorphized type";
+  assert contains(out, "consume(name, items)"), "expected the bound payload to pass the type check";
+}
+
+test "sizeof(generic type param) is not resolved against an unrelated global type of the same bare name" {
+  str src = `imp std.c.io;
+  `enum E { Variant }
+  `compound Pair<T, E> { T a; }
+  `impl Pair<T, E> { pub esize() num { ret sizeof(E); } }
+  `fun main() num {
+  `  Pair<num, str> p;
+  `  printf("%lld\n", p.esize());
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "sizeof(generic type param) is not resolved against an unrelated global type of the same bare name"
+  );
+  assert contains(out, "sizeof(char*)"), "expected sizeof to use the substituted type param, not the global enum";
+}
+
+test "a generic container instantiated with a pointer type argument mangles distinctly" {
+  str src = `imp std.c.io;
+  `compound Node { num value; }
+  `compound Bag<T> { T slot; }
+  `impl Bag<T> { pub put(T v) { self.slot = v; } pub get() T { ret self.slot; } }
+  `fun main() num {
+  `  Bag<Node> plain;
+  `  Node a;
+  `  a.value = 7;
+  `  plain.put(a);
+  `  Bag<Node*> ptrs;
+  `  Node b;
+  `  b.value = 42;
+  `  ptrs.put(&b);
+  `  Node got_plain = plain.get();
+  `  Node* got_ptr = ptrs.get();
+  `  printf("%lld %lld\n", got_plain.value, got_ptr.value);
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic container instantiated with a pointer type argument mangles distinctly"
+  );
+  assert contains(out, "Bag__Node_ptr1"), "expected the pointer instantiation to mangle distinctly";
+  assert contains(out, "Bag__Node__put(Bag__Node* self, Node v)"), "expected the by-value instantiation to keep its own signature";
+  assert contains(out, "Bag__Node_ptr1__put(Bag__Node_ptr1* self, Node* v)"), "expected the pointer instantiation to take a pointer";
+}
+
+test "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature" {
+  str src = `imp std.c.io;
+  `compound Node { num value; }
+  `quirk Box<T> { get() T; }
+  `compound PtrBox { Node* held; }
+  `impl PtrBox as Box<Node*> {
+  `  get() Node* { ret self.held; }
+  `}
+  `fun main() num {
+  `  PtrBox b;
+  `  Node n;
+  `  n.value = 33;
+  `  b.held = &n;
+  `  Node* got = b.get();
+  `  printf("%lld\n", got.value);
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature"
+  );
+  assert contains(out, "Box__Node_ptr1_vtable"), "expected the quirk instantiation to mangle its pointer argument";
+  assert contains(out, "Node* PtrBox__Box__get(PtrBox* self)"), "expected the impl method to keep its pointer return type";
+}
+
+// gap: `sizeof(Node*)` on a user-defined type name is a parse error; only a
+// primitive type keyword folds its trailing stars.
+// test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
+// str src = `imp std.c.io;
+// `compound Node { num value; }
+// `fun main() num {
+// `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
+// assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
+// }
+
+// gap: a recursive generic enum's self-referential payload pointer is emitted
+// with the unsubstituted template name (`List*` rather than `List__dec*`), so
+// the C does not compile.
+// test "self-referential recursive generic enum (List<T>) via generic helper functions" {
+// str src = `imp std.c.io;
+// `imp std.c.mem;
+// `enum List<T> { Cons(T, List<T>*), Nil }
+// `fun list_nil<T>(T type_hint) List<T>* {
+// `  List<T>* n = malloc(sizeof(List<T>));
+// `  *n = List.Nil;
+// `  ret n;
+// `}
+// `fun list_push<T>(T v, List<T>* tail) List<T>* {
+// `  List<T>* n = malloc(sizeof(List<T>));
+// `  *n = List.Cons(v, tail);
+// `  ret n;
+// `}
+// `fun list_head<T>(List<T>* l, T fallback) T {
+// `  fit *l {
+// `    List.Cons(v, tail) -> { ret v; }
+// `    List.Nil -> { ret fallback; }
+// `  }
+// `}
+// `fun main() num {
+// `  List<dec>* nil_list = list_nil(0.0);
+// `  List<dec>* l = list_push(2.0, list_push(1.0, nil_list));
+// `  printf("head = %.1f\n", list_head(l, 0.0));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "self-referential recursive generic enum (List<T>) via generic helper functions");
+// assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
+// }
+
+// gap: same unsubstituted self-referential payload pointer as above.
+// test "a PLAIN (non-generic) function can fit-match and destructure a concrete generic-enum instantiation through a pointer" {
+// str src = `imp std.c.io;
+// `imp std.c.mem;
+// `enum List<T> { Cons(T, List<T>*), Nil }
+// `fun list_nil<T>(T type_hint) List<T>* {
+// `  List<T>* n = malloc(sizeof(List<T>));
+// `  *n = List.Nil;
+// `  ret n;
+// `}
+// `fun list_push<T>(T v, List<T>* tail) List<T>* {
+// `  List<T>* n = malloc(sizeof(List<T>));
+// `  *n = List.Cons(v, tail);
+// `  ret n;
+// `}
+// `fun list_sum(List<dec>* l) dec {
+// `  fit *l {
+// `    List.Cons(v, tail) -> { ret v + list_sum(tail); }
+// `    List.Nil -> { ret 0.0; }
+// `  }
+// `}
+// `fun main() num {
+// `  List<dec>* nil_list = list_nil(0.0);
+// `  List<dec>* l = list_push(3.0, list_push(2.0, list_push(1.0, nil_list)));
+// `  printf("sum = %.1f\n", list_sum(l));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "a PLAIN (non-generic) function can fit-match a concrete generic-enum instantiation");
+// assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
+// }
