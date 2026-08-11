@@ -4403,8 +4403,8 @@ impl Codegen {
         self.hoist_insert_pos = recv_tmp_splice_pos;
         str recv_tmp_text = recv_tmp_stmt_sb.build();
         self.emit_hoisted(recv_tmp_text);
-        // See `adjust_pos_after_splice`'s own doc comment for why
-        // `saved_recv_tmp_hoist_pos` needs manual adjustment here too.
+        // `saved_recv_tmp_hoist_pos` is a captured local, so this splice
+        // needs a manual adjustment.
         if recv_tmp_splice_pos.is_some() {
           saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
             saved_recv_tmp_hoist_pos,
@@ -4426,11 +4426,9 @@ impl Codegen {
     for arg : args {
       self.state.write(", ");
       // A bare enum-variant shorthand resolves against the callee
-      // method's declared parameter type at this position; see
-      // `Codegen.impl_method_param_types`, mirroring `emit_call`'s
-      // handling for a plain function call. An unresolvable
-      // callee/position leaves
-      // `expected_enum_type`/`expected_compound_type` untouched.
+      // method's declared parameter type at this position, as in
+      // `emit_call`. Anything unresolvable leaves the expected types
+      // untouched.
       let ptype = self.lookup_impl_method_param_type(recv_r.type_name, method_name, arg_idx);
       str prev_expected = self.expected_enum_type;
       str prev_expected_compound = self.expected_compound_type;
@@ -4449,9 +4447,8 @@ impl Codegen {
       }
       arg_idx = arg_idx + 1;
     }
-    // See `emit_call`'s own identical fill-in for a plain function's
-    // trailing defaults -- same mechanism, just keyed by (owner type,
-    // bare method name) instead of a plain function name.
+    // The same trailing-default fill-in `emit_call` does for a plain
+    // function, keyed by (owner type, bare method name) instead.
     let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
     if method_defaults.is_some() {
       let mdparam_types = self.lookup_impl_method_param_types(recv_r.type_name, method_name);
@@ -4468,14 +4465,12 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits `await expr`. `expr` must be a call (`f(args...)` or
-  // `recv.method(args...)`); lowers to a call to that callee's "call
-  // helper" (`__fun_async_call_<mangled name>`) instead of the plain
-  // mangled name -- see `emit_async_or_fork_call` for the resolution.
-  // Only a generic impl method's async method is monomorphized here, not
-  // a generic plain async function. A quirk-typed receiver degrades to a
-  // plain synchronous call instead, since the concrete callee behind a
-  // quirk dispatch isn't known until runtime.
+  // Emits `await expr`, where `expr` must be a call. Lowers to the
+  // callee's call helper (`__fun_async_call_<mangled name>`) rather than
+  // its plain mangled name. Only a generic impl method's async method is
+  // monomorphized here, not a generic plain async function. A quirk-typed
+  // receiver degrades to a synchronous call, since the concrete callee
+  // behind a quirk dispatch isn't known until runtime.
   emit_await(Node* operand) Option<CodegenErrorKind> {
     fit operand.kind {
       .Expression(e) -> {
@@ -4498,22 +4493,18 @@ impl Codegen {
     ret self.emit_async_or_fork_call(operand, "__fun_async_call_");
   }
 
-  // `fork expr;` is fire-and-forget: enqueued onto the scheduler
-  // (`__fun_go`; see `emit_async_function_support`) rather than
-  // spawned-and-joined. Otherwise identical lowering to `await`, using
-  // `__fun_fork_call_` instead of `__fun_async_call_`; see
-  // `emit_async_or_fork_call`.
+  // `fork expr;` is fire-and-forget: enqueued onto the scheduler via
+  // `__fun_go` rather than spawned and joined. Lowers like `await`, using
+  // the `__fun_fork_call_` prefix.
   emit_fork_stmt(Node* expr) Option<CodegenErrorKind> {
     ret self.emit_async_or_fork_call(expr, "__fun_fork_call_");
   }
 
-  // Shared lowering for `await`/`fork` over `f(args...)` or
-  // `recv.method(args...)`: both rewrite the call to
-  // `<prefix><mangled callee name>(args...)`, with the same
-  // receiver/self-arg handling an ordinary call gets via
-  // `resolve_field_chain`/`lookup_impl_method`. A separate
-  // implementation from `emit_call`/`emit_method_call`, since neither
-  // has a seam to intercept just the callee name.
+  // Shared lowering for `await` and `fork` over `f(args...)` or
+  // `recv.method(args...)`: both rewrite the call to `<prefix><mangled
+  // callee name>(args...)`, with the receiver and self-arg handling an
+  // ordinary call gets. Separate from `emit_call`/`emit_method_call`,
+  // since neither has a seam to intercept just the callee name.
   emit_async_or_fork_call(Node* operand, str prefix) Option<CodegenErrorKind> {
     fit operand.kind {
       .Expression(e) -> {
@@ -4602,11 +4593,9 @@ impl Codegen {
 
   // Emits a tagged-union compound literal for `EnumName.Variant(args...)`:
   // ((EnumName){ .tag = EnumName_Variant, .payload.Variant = { ._0 = (a0), ... } })
-  // matching the struct layout `emit_tagged_union_enum` emits -- payload
-  // field names `_0`, `_1`, ... line up positionally with the union
-  // struct's own fields. `args_node` is the call's (possibly
-  // comma-flattened) argument-list node; reuses `flatten_call_args`
-  // directly, same as an ordinary call.
+  // matching the struct layout `emit_tagged_union_enum` emits, where
+  // payload field names `_0`, `_1`, ... line up positionally with the
+  // union struct's fields.
   emit_enum_variant_construction(str enum_name, str variant_name, Node* args_node) Option<CodegenErrorKind> {
     Vec<Node*> args;
     args.init(0);
@@ -4632,8 +4621,7 @@ impl Codegen {
       self.state.write(" = (");
       // A bare enum-variant shorthand nested inside another variant's
       // construction (`.Ok(.Some(t))`) resolves against this position's
-      // payload type; see `Codegen.enum_variant_payload_owner`. An
-      // unresolvable enum/variant/position leaves `expected_enum_type`
+      // payload type. Anything unresolvable leaves `expected_enum_type`
       // untouched.
       let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, i);
       str prev_expected = self.expected_enum_type;
@@ -4652,13 +4640,10 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits `arr[i]` as C `arr[i]`; the parser already built this as
-  // `Expression{ op = "[]", left = arr, right = Bracket(i) }` (see
-  // `parser.parse_for_bracket`). Needs no type resolution: C's `[]`
-  // composes directly with whatever `arr` already emitted as, and this
-  // codegen doesn't track element types. Reused automatically as an
-  // assignment target too, since `=` dispatches its left side through
-  // this same path.
+  // Emits `arr[i]` as C `arr[i]`, from the parser's `Expression{ op =
+  // "[]", left = arr, right = Bracket(i) }`. Needs no type resolution:
+  // C's `[]` composes with whatever `arr` emitted as. Also serves as an
+  // assignment target, since `=` dispatches its left side through here.
   emit_index(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
@@ -4682,15 +4667,13 @@ impl Codegen {
   }
 
   // Emits `recv.field` as C `recv.field` or `recv->field`, deciding
-  // `.`/`->` from `recv`'s declared pointer-ness
-  // (`lookup_local_is_pointer`). Also recognizes a qualified
-  // enum-variant-constant access (`EnumName.Variant`, checked first),
-  // emitting the mangled C constant (`EnumName_Variant`) instead of
-  // treating `EnumName` as a receiver, and a bare shorthand (`.Variant`)
-  // resolved against `expected_enum_type`; both only apply to a
-  // single-level receiver (`Identifier`/`Blank`). A chained access
-  // (`a.b.c`) instead recurses through `emit_receiver_and_resolve_type`
-  // to resolve `.`/`->` at every link; an unrecognized receiver shape is
+  // `.`/`->` from `recv`'s declared pointer-ness. Also recognizes a
+  // qualified enum-variant constant (`EnumName.Variant`, checked first),
+  // emitting `EnumName_Variant` rather than treating `EnumName` as a
+  // receiver, and a bare `.Variant` shorthand resolved against
+  // `expected_enum_type`; both apply only to a single-level receiver. A
+  // chained access recurses through `emit_receiver_and_resolve_type` to
+  // resolve `.`/`->` at every link, and an unrecognized receiver shape is
   // rejected rather than guessed.
   emit_field_access(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
@@ -4706,17 +4689,15 @@ impl Codegen {
     bin is_bare_shorthand = false;
     bin left_is_single_level = false;
 
-    // `alias.EnumName.Variant` used as a value (not a call, which
-    // `emit_call` handles separately). `e.left` here is `alias.EnumName`,
-    // an Expression rather than a bare Identifier, so this is checked
-    // before the ordinary single-level case below; see
-    // `Codegen.import_aliases`.
+    // `alias.EnumName.Variant` used as a value rather than a call, which
+    // `emit_call` handles. `e.left` is `alias.EnumName`, an Expression
+    // rather than a bare Identifier, so this is checked before the
+    // ordinary single-level case below.
     fit e.left.kind {
       .Expression(inner_e) -> {
         if equals(inner_e.op, ".") && inner_e.has_left && inner_e.has_right {
-          // Gated on NOT already a known local -- see `emit_call`'s own
-          // identical gate for why (a real local always shadows a
-          // same-named global alias).
+          // Gated on not already being a known local, since a local
+          // always shadows a same-named global alias.
           bin inner_left_is_alias = false;
           fit inner_e.left.kind {
             .Identifier(aname) -> {
@@ -4740,10 +4721,8 @@ impl Codegen {
       _ -> {}
     }
     if left_is_single_level {
-      // Matched the alias case above -- skip the ordinary single-level
-      // check below entirely (it would otherwise see `e.left` as an
-      // unrecognized `.Expression` and leave `left_is_single_level`
-      // untouched anyway, but skipping is clearer than relying on that).
+      // The alias case above matched, so the ordinary single-level check
+      // below is skipped.
     } else {
       fit e.left.kind {
         .Identifier(name) -> {
@@ -4751,10 +4730,9 @@ impl Codegen {
           left_is_single_level = true;
         }
         .Blank -> {
-          // Bare shorthand (`.Variant`, no `EnumName.` qualifier); see
-          // `Codegen.expected_enum_type`. Must not fall through to the
-          // chained-access path below if this doesn't pan out, since
-          // there's no receiver identifier to look up at all.
+          // Bare shorthand (`.Variant`, no `EnumName.` qualifier). Must
+          // not fall through to the chained-access path below if it
+          // doesn't resolve: there's no receiver identifier to look up.
           is_bare_shorthand = true;
           left_is_single_level = true;
           enum_recv_name = self.expected_enum_type;
@@ -4762,13 +4740,10 @@ impl Codegen {
         _ -> {}
       }
     }
-    // `Option<num> b = Option.None;` is a qualified variant against a
-    // generic enum's bare template name, which is never itself
-    // registered in `enum_names` (only a concrete instantiation like
-    // "Option__num" is, once `ensure_enum_instantiated` mangles it).
-    // Falls back to `expected_enum_type`, which already holds that
-    // mangled name here, when the bare template name alone doesn't
-    // resolve.
+    // `Option<num> b = Option.None;` qualifies against a generic enum's
+    // bare template name, which is never registered in `enum_names` (only
+    // a concrete instantiation like `Option__num` is), so it falls back
+    // to `expected_enum_type`, which already holds that mangled name.
     if left_is_single_level && !is_bare_shorthand && !self.enum_has_variant(
       enum_recv_name,
       field_name
@@ -4789,9 +4764,8 @@ impl Codegen {
     ) {
       if self.enum_is_tagged_union_named(enum_recv_name) {
         // A tagged union's payload-less variant used as a bare value
-        // (no call) still needs the tag set: `((Enum){ .tag =
-        // Enum_Variant })`, not just the bare discriminant constant; see
-        // `emit_enum` for the struct layout.
+        // still needs the tag set: `((Enum){ .tag = Enum_Variant })`, not
+        // just the bare discriminant constant.
         self.state.write("((");
         self.state.write(enum_recv_name);
         self.state.write("){ .tag = ");
@@ -4823,17 +4797,15 @@ impl Codegen {
     ret .None;
   }
 
-  // Resolves `recv`'s C text and declared type (name + pointer-ness)
-  // without writing anything to `self.state`; the pure counterpart to
-  // `emit_receiver_and_resolve_type` below, needed wherever a receiver's
-  // text must be computed once but written multiple times (e.g.
-  // `emit_fit`'s subject, re-emitted per branch). `recv` is either a
-  // plain identifier, resolved as a known local, or a `.`-Expression
-  // recursed through this same function to resolve its own receiver
-  // first. `.None` means `recv` isn't a shape/type this codegen can
-  // resolve, and the caller must treat that as unresolvable rather than
-  // guess; enum-variant/bare-shorthand shapes never appear mid-chain, so
-  // this only ever needs to handle plain field access.
+  // Resolves `recv`'s C text and declared type without writing to
+  // `self.state`: the pure counterpart to
+  // `emit_receiver_and_resolve_type`, for wherever a receiver's text is
+  // computed once and written several times, such as `emit_fit`'s
+  // subject. `recv` is a plain identifier resolved as a known local, or a
+  // `.`-Expression recursed through here to resolve its own receiver
+  // first. `.None` means the shape isn't resolvable and the caller must
+  // not guess. Enum-variant and bare-shorthand shapes never appear
+  // mid-chain, so only plain field access is handled.
   resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
@@ -4853,17 +4825,11 @@ impl Codegen {
       .Expression(inner_e) -> {
         // A call as the receiver (`tok.unwrap().type`), with no
         // intermediate `let` binding. Resolved in two steps: the call's
-        // declared return type (a plain function via
-        // `lookup_function_rtype`, or a method call via
-        // `resolve_field_chain` plus `lookup_impl_method_rtype`, the
-        // same two lookups `infer_let_expr_type`'s "()" case uses), then
-        // the call's rendered C text, which, unlike every other link in
-        // a chain, can't be built by simple string concatenation, since
-        // a call has real emission logic already living in
-        // `emit_expr`/`emit_call`. Rendered into a throwaway scratch
-        // buffer, the same swap-self.state-then-restore technique
-        // `emit_hoisted`'s callers use, purely to capture that text
-        // without writing it here.
+        // declared return type, then its rendered C text. Unlike every
+        // other link in a chain, that text can't be built by string
+        // concatenation, since a call's emission logic lives in
+        // `emit_expr`/`emit_call`, so it is captured by rendering into a
+        // throwaway scratch buffer.
         if equals(inner_e.op, "()") && inner_e.has_left {
           Option<DataType> call_rtype = .None;
           fit inner_e.left.kind {
@@ -4880,14 +4846,11 @@ impl Codegen {
                   .Identifier(n) -> { method_name = n; }
                   _ -> {}
                 }
-                // `alias.func(args)` -- a plain function call qualified
-                // by an import alias -- shares the same `.`-`()` AST
-                // shape as an ordinary method call. Same
-                // alias-vs-method disambiguation `emit_call` uses:
-                // `recv_e.left` is a known alias, not a receiver object,
-                // so `method_name` is really the callee's bare name,
-                // resolved via the plain-function lookup instead of
-                // `lookup_impl_method_rtype`. Checked first.
+                // `alias.func(args)`, a plain function call qualified by
+                // an import alias, shares the `.`-`()` AST shape of a
+                // method call. When `recv_e.left` is a known alias rather
+                // than a receiver, `method_name` is the callee's bare
+                // name and resolves via the plain-function lookup.
                 bin left_is_known_alias2 = false;
                 if !equals(method_name, "") {
                   fit recv_e.left.kind {
@@ -4908,14 +4871,11 @@ impl Codegen {
                   let recv_r_opt = self.resolve_field_chain(recv_e.left);
                   if recv_r_opt.is_some() {
                     let recv_r2 = recv_r_opt.unwrap();
-                    // A method declaring its own generic type param
-                    // needs the combined (impl's plus this call's own)
-                    // substitution `maybe_instantiate_generic_impl_
-                    // method_own_params` builds; `lookup_impl_method_
-                    // rtype` below only knows the impl's static
-                    // registration, the raw unsubstituted template
-                    // return type. Checked first, so chaining off such a
-                    // call's result resolves correctly.
+                    // A method declaring its own generic type param needs
+                    // the combined substitution
+                    // `maybe_instantiate_generic_impl_method_own_params`
+                    // builds; `lookup_impl_method_rtype` below only knows
+                    // the raw unsubstituted template return type.
                     if inner_e.has_right && self.impl_method_has_own_type_params(
                       recv_r2.type_name,
                       method_name
@@ -4954,15 +4914,12 @@ impl Codegen {
           }
 
           // `hoist_insert_pos`/`current_stmt_start_pos` are suspended for
-          // this scratch-buffer swap, same as every other swap in this
-          // file, so a nested hoisted emission (e.g. a generic impl
-          // method reached for the first time as this call's receiver)
+          // this scratch-buffer swap, so a nested hoisted emission
           // splices into the real buffer rather than this throwaway one.
           // `suppress_generic_impl_method_draining` additionally stops a
-          // method from being emitted while `self.state` points here;
-          // it's enqueued instead and drained once the real state is
-          // restored below, unless an outer drain or probe is already in
-          // progress.
+          // method from being emitted while `self.state` points here; it
+          // is enqueued instead and drained once the real state is
+          // restored, unless an outer drain or probe is already running.
           if self.hoist_scratch_depth == 0 {
             self.root_state = self.state;
             self.root_hoist_pos = self.hoist_insert_pos;
@@ -4985,16 +4942,13 @@ impl Codegen {
           self.suppress_generic_impl_method_draining = prev_suppress;
           self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
           if self.hoist_scratch_depth == 0 {
-            // Exiting nested receiver-chain territory entirely.
-            // `root_stmt_start_pos` holds the true current position
-            // after any receiver-temp-hoist splices during this nested
-            // session, which may be ahead of the just-restored
-            // `saved_call_stmt_start_pos` snapshot; sync back to it so a
-            // further receiver-temp-hoist for an enclosing call splices
-            // after everything already spliced during the nested
-            // session. `hoist_insert_pos` needs the same resync, since a
-            // nested instantiation triggered from inside `recv`'s
-            // evaluation advances `root_hoist_pos` directly.
+            // Leaving nested receiver-chain territory. `root_stmt_start
+            // _pos` holds the current position after any splices made
+            // during the nested session and can be ahead of the restored
+            // `saved_call_stmt_start_pos`, so syncing back to it keeps a
+            // further receiver-temp hoist after everything already
+            // spliced. `hoist_insert_pos` needs the same resync, since a
+            // nested instantiation advances `root_hoist_pos` directly.
             self.current_stmt_start_pos = self.root_stmt_start_pos;
             self.hoist_insert_pos = self.root_hoist_pos;
           }
@@ -5005,14 +4959,12 @@ impl Codegen {
             ret .None;
           }
 
-          // The call's rendered text is an rvalue: fine to embed
-          // directly for a further `.field` read, but not addressable, so
-          // a caller needing `&<receiver>` would otherwise emit invalid
-          // C. `is_call_result` flags this so such a caller can hoist an
-          // addressable temp itself right before taking the address; see
-          // `emit_method_call`. Not hoisted unconditionally here, which
-          // would needlessly inject an extra statement for a plain field
-          // read that never needs addressing.
+          // The call's rendered text is an rvalue: fine to embed for a
+          // further `.field` read, but not addressable, so a caller
+          // needing `&<receiver>` would emit invalid C. `is_call_result`
+          // flags it so such a caller hoists an addressable temp itself.
+          // Hoisting here unconditionally would inject an extra statement
+          // for a plain field read that never needs addressing.
           ChainResolution r;
           r.text = call_scratch.out.build();
           r.type_name = resolved_name_opt.unwrap();
@@ -5052,22 +5004,19 @@ impl Codegen {
         r.type_name = field_info.type_name;
         r.is_pointer = field_info.is_pointer;
         r.dtype = field_info.dtype;
-        // Propagated, not reset to `false`: reading a `.field` off a
-        // call-result receiver is still not addressable in C, so the
-        // whole chain inherits the innermost receiver's rvalue-ness.
+        // Propagated, not reset: a `.field` read off a call-result
+        // receiver is still not addressable in C, so the chain inherits
+        // the innermost receiver's rvalue-ness.
         r.is_call_result = recv_r.is_call_result;
         ret .Some(r);
       }
-      // `(expr).field`/`await (expr).method(...)`: a parenthesized
-      // receiver resolves exactly like its unwrapped inner expression;
-      // the parens carry no separate meaning here.
+      // A parenthesized receiver resolves like its unwrapped inner
+      // expression; the parens carry no separate meaning here.
       .ExpressionParenthesis(inner) -> { ret self.resolve_field_chain(inner); }
-      // `(*ptr_expr).field`: a single pointer-dereference receiver
-      // resolves its own operand first, then flips `is_pointer` (a
-      // dereferenced pointer is a plain value, addressed with `.` for
-      // any further link) and drops one level of `dtype`'s
-      // `pointer_depth` to match. Only a single, non-left-operanded `*`;
-      // the multi-level form (`**pp`) isn't produced here.
+      // `(*ptr_expr).field`: a dereference receiver resolves its operand
+      // first, then clears `is_pointer` and drops one level of `dtype`'s
+      // `pointer_depth`, since a dereferenced pointer is a plain value.
+      // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
           ret .None;
@@ -5091,9 +5040,8 @@ impl Codegen {
             dd.pointer_depth = dd.pointer_depth - 1;
           }
           // `dtype_is_pointer` also honors `flags.is_pointer`
-          // independently of `pointer_depth` (a `T*` parameter's flag),
-          // so this must be cleared too or it would still read as a
-          // pointer after the deref.
+          // independently of `pointer_depth`, so clearing it too is what
+          // keeps the deref from still reading as a pointer.
           dd.flags.is_pointer = false;
           deref_dtype = .Some(dd);
         }
@@ -5126,24 +5074,20 @@ impl Codegen {
     ret .Some(info);
   }
 
-  // Emits one statement, followed by its trailing newline (each
-  // statement `emit_statements` iterates ends its own line).
-  // `StatementIf`/`StatementElseIf`/`StatementElse` are not handled
-  // here: they're only valid chained together, which needs sibling
-  // lookahead only `emit_statements` has. Reaching this function
-  // directly for one of those is a caller bug, so it errors explicitly
-  // rather than emitting an invalid lone fragment.
+  // Emits one statement plus its trailing newline.
+  // `StatementIf`/`StatementElseIf`/`StatementElse` aren't handled here:
+  // they're only valid chained together, which needs the sibling
+  // lookahead only `emit_statements` has, so reaching this with one of
+  // them errors rather than emitting an invalid lone fragment.
   pub emit_statement(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .StatementReturn(exp) -> {
-        // `main` always emits as `int main(...)` in C regardless of its
-        // declared Fun-level return type; see `emit_function_named`. A
-        // `ret <expr>;` inside it can only write the real expression
-        // when the declared type is a scalar `num`; anything else must
-        // discard the expression and just report success, since
-        // returning a struct/enum value from a function C declares to
-        // return `int` is a compile error. Pending defers still run
-        // first either way; only the value is skipped.
+        // `main` always emits as `int main(...)` regardless of its
+        // declared Fun-level return type, so `ret <expr>;` can write the
+        // real expression only when that type is a scalar `num`; anything
+        // else must discard it and report success, since returning a
+        // struct from an `int`-returning C function is an error. Pending
+        // defers still run either way; only the value is skipped.
         bin main_discards_return = false;
         if self.in_main {
           main_discards_return = true;
@@ -5155,22 +5099,20 @@ impl Codegen {
           }
         }
         if main_discards_return {
-          // The discarded expression is still evaluated, into a
-          // throwaway scratch buffer purely for its side effects.
-          // `hoist_insert_pos` is suspended for the swap, same as every
-          // other scratch-buffer swap in this file, so a nested hoisted
-          // type dependency doesn't splice at a stale position into this
-          // tiny buffer; a generic function/type reached only from here
-          // never gets hoisted, since lazy triggers fire only as a side
-          // effect of `emit_expr` writing somewhere real.
+          // The discarded expression is still evaluated for its side
+          // effects, into a throwaway scratch buffer. `hoist_insert_pos`
+          // is suspended for the swap so a nested hoisted type dependency
+          // doesn't splice at a stale position into this tiny buffer; a
+          // generic function reached only from here is never hoisted,
+          // since lazy triggers fire only when `emit_expr` writes
+          // somewhere real.
           if exp != nil {
             CodegenState main_discard_scratch = codegen_state_new();
             CodegenState* saved_discard_state = self.state;
             let saved_discard_hoist_pos = self.hoist_insert_pos;
-            // `current_stmt_start_pos` suspended too, same as
-            // `hoist_insert_pos` just above, so a method call inside
-            // this discarded expression can't use a real-buffer-sized
-            // position as a slice bound against this tiny scratch
+            // Suspended alongside `hoist_insert_pos`, so a method call
+            // inside the discarded expression can't use a
+            // real-buffer-sized position as a bound on this scratch
             // buffer.
             let saved_discard_stmt_start_pos = self.current_stmt_start_pos;
             self.state = &main_discard_scratch;
@@ -5192,17 +5134,14 @@ impl Codegen {
           self.state.write("return 0;\n");
           ret .None;
         }
-        // A `ret` unwinds every enclosing block at once, so any
-        // pending `defer` must run first; see `Codegen.defer_stack`. The
-        // common case, no `defer` anywhere in this function, keeps the
-        // plain single-statement form. When defers are pending, the
-        // return expression is evaluated into an `__auto_type` temp
-        // first, so a deferred statement can't retroactively change what
-        // gets returned by mutating a variable the expression already
-        // read.
-        // A `ret` value coerced to a quirk-typed return needs the same
-        // coercion call wrapped around it as a `Variable` initializer
-        // does; see `resolve_quirk_coerce_concrete_type`.
+        // A `ret` unwinds every enclosing block at once, so pending
+        // `defer` bodies run first. With no defers this keeps the plain
+        // single-statement form; otherwise the return expression is
+        // evaluated into an `__auto_type` temp first, so a deferred
+        // statement can't change what gets returned by mutating a
+        // variable the expression already read. A `ret` value coerced to
+        // a quirk-typed return gets the same coercion wrap a `Variable`
+        // initializer does.
         bin ret_did_quirk_coerce = false;
         str ret_quirk_concrete = "";
         if exp != nil && self.quirk_names.contains(self.current_fn_rtype_name) {
@@ -5287,10 +5226,9 @@ impl Codegen {
         // `let NAME = <expr>;` (the `__let_infer__` sentinel from
         // `parse_let`) always emits GNU C's `__auto_type`, letting the C
         // compiler do the real inference. `infer_let_expr_type` is tried
-        // purely as a bonus for this codegen's own bookkeeping, so a
-        // later bare-shorthand/field access/method call on `NAME`
-        // resolves; when it can't infer anything, `NAME` just isn't a
-        // known local afterward.
+        // only for this codegen's own bookkeeping, so a later shorthand
+        // or method call on `NAME` resolves; when it infers nothing,
+        // `NAME` simply isn't a known local afterward.
         bin is_let = equals(v.var_type.type_str, "__let_infer__");
         bin have_resolved = false;
         str resolved_name = "";
@@ -5298,11 +5236,10 @@ impl Codegen {
         Option<DataType> resolved_dtype = .None;
 
         // An unsized array local (`T[] new_data = malloc(...);`) decays
-        // to a pointer, same as an unsized array field; see
-        // `dtype_is_array_as_pointer`. Only when it's not initialized
-        // with a bracket array literal, which stays a genuine stack
-        // array. `write_type` doesn't know about the initializer, so
-        // this is decided here.
+        // to a pointer, like an unsized array field, unless it's
+        // initialized with a bracket array literal, which stays a stack
+        // array. Decided here, since `write_type` can't see the
+        // initializer.
         bin arr_as_ptr = false;
         if !is_let {
           arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
@@ -5314,28 +5251,23 @@ impl Codegen {
           }
         }
 
-        // `const` on a pointer-typed binding must land after the
-        // pointer star(s) (`Type* const name`: the pointer itself can't
-        // be reassigned) rather than before the base type (`const Type*
-        // name`: a stricter guarantee this codegen doesn't enforce). For
-        // a `__auto_type`-inferred const, the pointer-ness isn't known
-        // yet, so `const` always lands before; `const __auto_type x =
-        // 5;` is valid GNU C either way.
+        // `const` on a pointer-typed binding lands after the pointer
+        // stars (`Type* const name`, the pointer itself can't be
+        // reassigned) rather than before the base type (`const Type*
+        // name`, a stricter guarantee this codegen doesn't enforce). For
+        // an `__auto_type`-inferred const the pointer-ness isn't known
+        // yet, so `const` lands before; that's valid GNU C either way.
         bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr);
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
 
-        // `let arr = [1, 2, 3];` needs a real, explicitly-typed array
-        // declaration (`int64_t arr[] = {1, 2, 3};`), not `__auto_type`:
-        // `__auto_type x = (int64_t[]){1, 2, 3};` decays to a pointer at
-        // the point of initialization, unlike a genuinely declared array
-        // local. This codegen's raw-array iteration fast path
-        // (`emit_for_iter`) depends on `sizeof(arr)/sizeof(arr[0])`
-        // giving the real element count, so an `__auto_type` decay would
-        // break iteration down to a single element. `let_lit_elem_c_type`/
-        // `let_lit_depth` are reused below for the array declarator
-        // after the name.
+        // `let arr = [1, 2, 3];` needs an explicitly-typed array
+        // declaration (`int64_t arr[] = {1, 2, 3};`), not `__auto_type`,
+        // which would decay to a pointer at initialization.
+        // `emit_for_iter`'s raw-array fast path depends on
+        // `sizeof(arr)/sizeof(arr[0])` giving the real element count, so
+        // that decay would cut iteration to a single element.
         bin let_is_bracket_literal = false;
         str let_lit_elem_c_type = "int64_t";
         num let_lit_depth = 1;
@@ -5361,11 +5293,9 @@ impl Codegen {
           let subst_dt = self.resolve_type_subst(*v.var_type);
           resolved_name = wt.unwrap();
           resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
-          // Unconditional on `arr_as_ptr` alone; see
-          // `emit_function_param`. The array-decay's pointer level is
-          // always additional to whatever `write_type` already wrote for
-          // `subst_dt`'s pointer depth, even when `subst_dt` is itself
-          // already a pointer.
+          // The array decay's pointer level is always additional to
+          // whatever `write_type` wrote for `subst_dt`'s pointer depth,
+          // even when `subst_dt` is itself a pointer.
           if arr_as_ptr {
             self.state.write("*");
           }
@@ -5377,16 +5307,13 @@ impl Codegen {
         }
         self.state.write(" ");
         self.state.write(v.name);
-        // A sized/unsized array declarator (`[24]`, `[]`) lands after the
-        // name in C, unlike every other type modifier above.
-        // `let_is_bracket_literal`'s declarator (leading `[]`, C infers
-        // the outer count from the initializer, same as the
-        // explicitly-typed path below; inner dims, if any, from
-        // `emit_multidim_inner_declarators`) is entirely separate from
-        // the ordinary explicitly-typed one below, since there's no
-        // `v.var_type.array_brackets` to read for a `let`. Otherwise
-        // skipped for `let` and for `arr_as_ptr`, already decayed to a
-        // `*` above, so no brackets.
+        // An array declarator (`[24]`, `[]`) lands after the name in C,
+        // unlike every other type modifier above.
+        // `let_is_bracket_literal` needs its own path, since a `let` has
+        // no `v.var_type.array_brackets` to read: a leading `[]` whose
+        // count C infers from the initializer, plus inner dimensions from
+        // `emit_multidim_inner_declarators`. Skipped entirely for
+        // `arr_as_ptr`, already decayed to a `*` above.
         if let_is_bracket_literal {
           self.state.write("[]");
           if let_lit_depth > 1 {
@@ -5414,14 +5341,11 @@ impl Codegen {
             }
           } elif v.var_type.array_depth > 1 {
             // A multi-dimensional array with no explicit bracket sizes
-            // anywhere (`num[][] matrix = [[1, 2, 3], [4, 5, 6]];`): the
-            // leading dimension stays `[]` (C infers it from the
-            // initializer), but every other dimension needs an explicit
+            // (`num[][] matrix = [[1, 2], [3, 4]];`). The leading
+            // dimension stays `[]`, but every other needs an explicit
             // size (`T[][N]` is legal C, `T[][]` is not), derived from
-            // the initializer literal's shape via
-            // `emit_multidim_inner_declarators`. Falls back to plain
-            // `[]`-per-dimension when there's no bracket-literal
-            // initializer to derive sizes from at all.
+            // the initializer's shape. Falls back to `[]` per dimension
+            // when there's no bracket literal to derive sizes from.
             self.state.write("[]");
             bin wrote_inner_dims = false;
             if v.has_val {
@@ -5446,15 +5370,12 @@ impl Codegen {
         }
         if v.has_val {
           self.state.write(" = ");
-          // A bare shorthand in a `Variable` initializer resolves
-          // against that variable's declared type (see
-          // `Codegen.expected_enum_type`), resolved via
-          // `resolve_type_name` rather than the bare
-          // `v.var_type.type_str` since a generic declared type's bare
-          // string is just the unresolved template name, which
-          // `enum_has_variant` never recognizes. For `let`, this is just
-          // `__let_infer__`, so a bare shorthand initializer correctly
-          // fails to resolve.
+          // A bare shorthand in a `Variable` initializer resolves against
+          // the variable's declared type, via `resolve_type_name` rather
+          // than the bare `v.var_type.type_str`, since a generic declared
+          // type's bare string is the unresolved template name that
+          // `enum_has_variant` never recognizes. For `let` it is
+          // `__let_infer__`, so a bare shorthand fails to resolve.
           let prev_expected = self.expected_enum_type;
           let resolved_decl_type = self.resolve_type_name(*v.var_type);
           if resolved_decl_type.is_some() {
@@ -5462,16 +5383,13 @@ impl Codegen {
           } else {
             self.expected_enum_type = v.var_type.type_str;
           }
-          // A bare `.{...}` compound-literal shorthand initializer
-          // resolves against `expected_compound_type`, the same way a
-          // bare enum shorthand resolves against `expected_enum_type`
-          // just above.
+          // A bare `.{...}` compound-literal initializer resolves against
+          // `expected_compound_type`, as an enum shorthand does above.
           let prev_expected_compound = self.expected_compound_type;
           self.expected_compound_type = self.expected_enum_type;
-          // A `let` has no declared type to resolve a bare
-          // enum-variant shorthand initializer against (`let color =
-          // .Red;`), so this falls back to global uniqueness; see
-          // `resolve_unique_enum_for_variant`.
+          // A `let` has no declared type to resolve a bare enum-variant
+          // initializer against (`let color = .Red;`), so this falls back
+          // to global uniqueness.
           if is_let {
             fit v.val.kind {
               .Expression(ve) -> {
@@ -5496,18 +5414,14 @@ impl Codegen {
             }
           }
           // A declaration's initializer is one of the contexts where a
-          // bare `[1, 2, 3]` array literal needs the bare brace-list
-          // form; see `Codegen.in_array_initializer`.
+          // bare `[1, 2, 3]` array literal needs the brace-list form.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
-          // A quirk-typed declaration's initializer needs a coercion
-          // call wrapped around the RHS; see
-          // `resolve_quirk_coerce_concrete_type`.
+          // A quirk-typed declaration's initializer needs a coercion call
+          // wrapped around the RHS.
           bin did_quirk_coerce = false;
           // A concrete quirk instantiation is registered under its
-          // mangled identity (`To__num`), not the bare
-          // `v.var_type.type_str`; see `resolve_type_name`'s identical
-          // fallback.
+          // mangled identity (`To__num`), not `v.var_type.type_str`.
           str var_quirk_type = v.var_type.type_str;
           if !self.quirk_names.contains(var_quirk_type) && v.var_type.generic_args.len > 0 {
             StringBuilder vq_sb = string_builder_init(16);
@@ -5532,10 +5446,9 @@ impl Codegen {
               did_quirk_coerce = true;
             }
           }
-          // `let_is_bracket_literal` already declared a real,
-          // explicitly-typed array above, so `emit_expr`'s `.Bracket`
-          // case just needs the bare brace-list form here; no GNU
-          // compound-literal cast wrapper needed.
+          // `let_is_bracket_literal` already declared an explicitly-typed
+          // array above, so `emit_expr`'s `.Bracket` case needs only the
+          // brace-list form, no compound-literal cast wrapper.
           let verr = self.emit_expr(*v.val);
           if did_quirk_coerce {
             self.state.write(")");
@@ -5583,11 +5496,9 @@ impl Codegen {
         self.state.write_indent();
         ret self.emit_fit(f);
       }
-      // A bare expression used as a statement (an assignment, a call
-      // for its side effect, `x++;`, ...) parses as a plain
-      // `.Expression`/`.Unary` node directly, with no dedicated
-      // `StatementExpression` wrapper. Emit it as `<expr>;` followed by
-      // its own newline.
+      // A bare expression used as a statement parses as a plain
+      // `.Expression`/`.Unary` node, with no `StatementExpression`
+      // wrapper, and emits as `<expr>;`.
       .Expression(_) -> {
         self.state.write_indent();
         let eerr = self.emit_expr(node);
@@ -5607,8 +5518,8 @@ impl Codegen {
         ret .None;
       }
       .Panic(_) -> {
-        // A bare `panic("msg");` statement, same "no dedicated statement
-        // wrapper" reasoning as `.Expression`/`.Unary` just above.
+        // A bare `panic("msg");` statement, with no statement wrapper of
+        // its own, as with `.Expression`/`.Unary` above.
         self.state.write_indent();
         let perr = self.emit_expr(node);
         if perr.is_some() {
@@ -5618,11 +5529,10 @@ impl Codegen {
         ret .None;
       }
       .StatementAssert(a) -> {
-        // `assert cond;` / `assert cond, "msg";` lowers to a plain
-        // `if (!(cond)) { ...; abort(); }`. This codegen has no
-        // test-mode runner, so there's no recovered-assertion path to
-        // support; `.Test` nodes are skipped entirely by an ordinary
-        // compile, see `NodeKind.Test`.
+        // `assert cond;` and `assert cond, "msg";` lower to
+        // `if (!(cond)) { ...; abort(); }`. There is no test-mode runner
+        // here and so no recovered-assertion path; an ordinary compile
+        // skips `.Test` nodes entirely.
         self.state.write_indent();
         self.state.write("if (!(");
         let cerr = self.emit_expr(*a.condition);
@@ -5643,8 +5553,8 @@ impl Codegen {
       }
       .StatementDefer(body) -> {
         // `defer <body>;` registers `body` onto `Codegen.defer_stack`
-        // rather than emitting anything here directly; it's replicated
-        // as an ordinary statement wherever this block's scope ends.
+        // rather than emitting anything here; it is replicated as an
+        // ordinary statement wherever this block's scope ends.
         self.defer_stack.push(body);
         ret .None;
       }
@@ -5661,10 +5571,9 @@ impl Codegen {
     }
   }
 
-  // Emits `for { ... }` (infinite) or `for cond { ... }` as the direct C
-  // equivalent: `while (1) { ... }` / `while (cond) { ... }` -- a
-  // conditional `for` has no init/increment clauses of its own, so a
-  // `while` loop is exactly the same construct.
+  // Emits `for { ... }` or `for cond { ... }` as `while (1) { ... }` or
+  // `while (cond) { ... }`. A conditional `for` has no init or increment
+  // clause, so a `while` loop is the same construct.
   emit_for_cond(ForCondNode fc) Option<CodegenErrorKind> {
     if fc.has_condition {
       self.state.write("while (");
@@ -5688,10 +5597,8 @@ impl Codegen {
   }
 
   // Emits `for i : start..end { ... }` as `for (int64_t i = start; i <
-  // end; i++) { ... }`. `range_expr` is always an `Expression{ op = ".." }`
-  // (start on the left, end on the right) -- see `parse_for_statement`'s
-  // doc comment in the parser for how the range/condition forms are
-  // disambiguated at parse time.
+  // end; i++) { ... }`. `range_expr` is always an
+  // `Expression{ op = ".." }` with start on the left and end on the right.
   emit_for_range(ForRangeNode fr) Option<CodegenErrorKind> {
     fit fr.range_expr.kind {
       .Expression(e) -> {
@@ -8671,9 +8578,8 @@ impl Codegen {
             dd.pointer_depth = dd.pointer_depth - 1;
           }
           // `dtype_is_pointer` also honors `flags.is_pointer`
-          // independently of `pointer_depth` (a `T*` parameter's flag),
-          // so this must be cleared too or it would still read as a
-          // pointer after the deref.
+          // independently of `pointer_depth`, so clearing it too is what
+          // keeps the deref from still reading as a pointer.
           dd.flags.is_pointer = false;
           ret .Some(dd);
         }
