@@ -1,0 +1,459 @@
+// Compiler test corpus, batch C. Each test states its input as source text
+// and checks the emitted C. Ported from the `tests/` suite so the same
+// expectations run against this compiler.
+
+imp harness;
+imp std.string;
+
+test "ra3: no crash on field access of a generic-impl method returning a compound" {
+  str src = `imp std.c.io;
+  `compound Inner { num code; }
+  `compound Box<T> { T v; }
+  `impl Box<T> { get_inner() Inner { Inner i; i.code = 42; ret i; } }
+  `fun main() num { Box<num> b; printf("%lld\n", b.get_inner().code); ret 0; }`;
+  let out = emit_c(
+    src,
+    "ra3: no crash on field access of a generic-impl method returning a compound"
+  );
+  assert contains(out, "Box__num"), "expected the monomorphized box type";
+  assert contains(out, "get_inner"), "expected the method to be emitted";
+}
+
+// gap: chaining a method onto a quirk-returning quirk method result is
+// rejected as an unsupported node.
+// test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
+// str src = `imp std.c.io;
+// `compound C { num val; }
+// `quirk QC { gv() num; }
+// `impl C as QC { gv() num { ret self.val; } }
+// `compound B { C c; }
+// `quirk QB { to_c() QC; }
+// `impl B as QB { to_c() QC { ret &self.c; } }
+// `compound A { B b; }
+// `quirk QA { to_b() QB; }
+// `impl A as QA { to_b() QB { ret &self.b; } }
+// `fun main() num {
+// `  A a; a.b.c.val = 123; QA qa = &a;
+// `  printf("%lld\n", qa.to_b().to_c().gv());
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "ra3: deep method chains");
+// assert contains(out, "A__QA__to_b"), "expected the outermost quirk method";
+// }
+
+test "ra3: deep method chains (generic-method chain)" {
+  str src = `imp std.c.io;
+  `compound Box<T> { T value; }
+  `impl Box<T> { pub get() T { ret self.value; } pub with(T x) Box<T> { ret Box<T>{value = x}; } }
+  `fun main() num {
+  `  let bx = Box<num>{value = 10};
+  `  printf("%lld\n", bx.with(99).get());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "ra3: deep method chains (generic-method chain)");
+  assert contains(out, "Box__num__with"), "expected the monomorphized generic method";
+  assert contains(out, "Box__num__get"), "expected the chained method on its result";
+}
+
+test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field" {
+  str src = `imp std.c.io;
+  `compound Inner { num v; }
+  `compound Outer { Inner* inner; }
+  `quirk HasV { getV() num; }
+  `impl Inner as HasV { getV() num { ret self.v; } }
+  `fun extract(Outer* o) HasV { ret o.inner; }
+  `fun main() num {
+  `  Inner p = Inner{v = 55};
+  `  Inner* pp = &p; Inner** ppp = &pp;
+  `  HasV a = *ppp;
+  `  HasV b = (&p);
+  `  Inner i = Inner{v = 99};
+  `  Outer o = Outer{inner = &i};
+  `  printf("%lld %lld %lld\n", a.getV(), b.getV(), extract(&o).getV());
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field"
+  );
+  assert contains(out, "Inner__HasV__getV"), "expected the quirk implementation";
+  assert contains(out, "__fun_coerce_Inner_HasV"), "expected the coercion helper";
+}
+
+test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable" {
+  str src = `imp std.c.io;
+  `quirk Named { name() str; }
+  `compound Box<T> { T[] data; num n; }
+  `impl Box<T> { pub fill(T[] src, num c) { self.data = src; self.n = c; } pub at(num i) T { ret self.data[i]; } }
+  `compound Dog { num age; }
+  `impl Dog as Named { pub name() str { ret "rex"; } pub age_years() num { ret self.age; } }
+  `fun main() num {
+  `  Box<num> b;
+  `  num[] arr = [10, 20, 30];
+  `  b.fill(arr, 3);
+  `  Dog d; d.age = 5;
+  `  printf("%lld %lld\n", b.at(1), d.age_years());
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable"
+  );
+  assert contains(out, "Box__num__fill"), "expected the monomorphized fill method";
+  assert contains(out, "Dog__Named__age_years"), "expected the extra pub method in the as-Quirk impl";
+}
+
+test "P3: nil literal lowers to NULL and coerces to pointer/str" {
+  str src = `imp std.c.io;
+  `compound Node { num val; Node* next; }
+  `fun main() num {
+  `  num* p = nil;
+  `  Node tail = Node{val = 2, next = nil};
+  `  Node head = Node{val = 1, next = &tail};
+  `  num isnil = 0; if p == nil { isnil = 1; }
+  `  num sum = 0; Node* cur = &head;
+  `  for cur != nil { sum = sum + cur.val; cur = cur.next; }
+  `  printf("%lld %lld\n", isnil, sum);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: nil literal lowers to NULL and coerces to pointer/str");
+  assert contains(out, "NULL"), "expected nil to lower to the C null-pointer constant";
+}
+
+// The harness compiles a fixture on its own without resolving imports, so
+// fixtures that need a channel declare a local stand-in rather than pulling
+// in `std.channel`.
+test "P3: fork spawns virtual threads onto the M:N scheduler" {
+  str src = `imp std.c.io;
+  `async fun worker(num v) { printf("%lld\n", v * 10); }
+  `fun main() num {
+  `  fork worker(1);
+  `  fork worker(2);
+  `  fork worker(3);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: fork spawns virtual threads onto the M:N scheduler");
+  assert contains(out, "__fun_go("), "expected the scheduler spawn call";
+  assert contains(out, "__fun_fork_call_worker"), "expected the per-callee fork helper";
+  assert contains(out, "__fun_sched_wait_idle"), "expected the main drain";
+}
+
+test "P3: channel operators ch <- v and <-ch desugar to send/recv" {
+  str src = `imp std.c.io;
+  `compound Channel<T> { T v; }
+  `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
+  `fun main() num {
+  `  Channel<num> ch;
+  `  ch <- 7;
+  `  ch <- 3 + 4;
+  `  let a = <-ch;
+  `  num b = <-ch;
+  `  printf("%lld %lld\n", a, b);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: channel operators ch <- v and <-ch desugar to send/recv");
+  assert contains(out, "Channel__num__send(&ch, 7)"), "expected the statement send to desugar";
+  assert contains(out, "Channel__num__recv(&ch)"), "expected the recv to desugar";
+}
+
+test "P3: a <- b is a channel send, but x < -y stays a comparison (munch)" {
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  num a = 5; num y = 3;
+  `  bin lt = a < -y;
+  `  bin gt = a > -y;
+  `  printf("%d %d\n", lt, gt);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: a <- b is a channel send, but x < -y stays a comparison (munch)");
+  assert contains(out, "(-y)"), "expected the negation to survive as a unary minus";
+  assert !contains(out, "send"), "expected no channel send to be produced";
+}
+
+test "fork target async fn is not flagged unused" {
+  str src = `imp std.c.io;
+  `compound Channel<T> { T v; }
+  `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
+  `async fun worker(Channel<num>* out, num v) {
+  `  out <- v * v;
+  `}
+  `fun main() num {
+  `  Channel<num> ch;
+  `  fork worker(&ch, 5);
+  `  num r = <- ch;
+  `  printf("%lld\n", r);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fork target async fn is not flagged unused");
+  assert contains(out, "worker"), "expected the forked function to be emitted";
+}
+
+test "channel of a data-carrying enum, received and matched with fit" {
+  str src = `imp std.c.io;
+  `compound Channel<T> { T v; }
+  `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {
+  `  fit <- inbox {
+  `    Msg.Compute(v) -> { outbox <- Msg.Result(v * v); }
+  `    Msg.Stop -> { outbox <- Msg.Stop; }
+  `    _ -> {}
+  `  }
+  `}
+  `fun main() num {
+  `  Channel<Msg> inbox;
+  `  Channel<Msg> outbox;
+  `  fork worker(&inbox, &outbox);
+  `  inbox <- Msg.Compute(6);
+  `  fit <- outbox {
+  `    Msg.Result(r) -> { printf("result=%lld\n", r); }
+  `    _ -> { printf("other\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "channel of a data-carrying enum, received and matched with fit");
+  assert contains(out, "Channel__Msg"), "expected the channel to specialize on the enum";
+  assert contains(out, "tag == Msg_Result"), "expected the fit to test the variant tag";
+}
+
+test "generic data enum: Option<num> construct, pass, fit, payload binding" {
+  str src = `imp std.c.io;
+  `enum Option<T> { Some(T), None }
+  `fun describe(Option<num> o) num {
+  `  fit o {
+  `    Option.Some(v) -> { ret v; }
+  `    Option.None -> { ret -1; }
+  `  }
+  `  ret -2;
+  `}
+  `fun main() num {
+  `  Option<num> a = Option.Some(42);
+  `  Option<num> b = .None;
+  `  printf("%lld %lld\n", describe(a), describe(b));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "generic data enum: Option<num> construct, pass, fit, payload binding");
+  assert contains(out, "Option__num"), "expected the monomorphized enum type";
+}
+
+test "generic data enum: Result<T, E> with two type params and mixed payloads" {
+  str src = `imp std.c.io;
+  `enum Res<T, E> { Ok(T), Err(E) }
+  `fun main() num {
+  `  Res<num, str> a = Res.Ok(7);
+  `  Res<num, str> b = Res.Err("boom");
+  `  fit a {
+  `    Res.Ok(v) -> { printf("ok %lld\n", v); }
+  `    Res.Err(e) -> { printf("err %s\n", e); }
+  `  }
+  `  fit b {
+  `    Res.Ok(v) -> { printf("ok %lld\n", v); }
+  `    Res.Err(e) -> { printf("err %s\n", e); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "generic data enum: Result<T, E> with two type params and mixed payloads");
+  assert contains(out, "Res__num__str"), "expected the two-parameter monomorphization";
+}
+
+// gap: a `fit` whose subject is a call expression returning a generic enum is
+// rejected as an unsupported node. Binding the result to a local first works.
+// test "generic fn returning a generic enum monomorphizes the enum type (regression)" {
+// str src = `imp std.c.io;
+// `enum RR<T> { Ok(T), Closed, Error(num) }
+// `fun wrap<T>(num rc, T value) RR<T> {
+// `  if rc == 0 { ret RR.Ok(value); }
+// `  ret RR.Error(rc);
+// `}
+// `fun main() num {
+// `  fit wrap(0, 42) {
+// `    RR.Ok(v) -> { printf("ok %lld\n", v); }
+// `    RR.Closed -> { printf("closed\n"); }
+// `    RR.Error(e) -> { printf("err %lld\n", e); }
+// `  }
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "generic fn returning a generic enum monomorphizes the enum type");
+// assert contains(out, "RR__num"), "expected the monomorphized enum typedef";
+// }
+
+test "generic fn returning a generic enum monomorphizes the enum type via a local" {
+  str src = `imp std.c.io;
+  `enum RR<T> { Ok(T), Closed, Error(num) }
+  `fun wrap<T>(num rc, T value) RR<T> {
+  `  if rc == 0 { ret RR.Ok(value); }
+  `  ret RR.Error(rc);
+  `}
+  `fun main() num {
+  `  RR<num> r = wrap(0, 42);
+  `  fit r {
+  `    RR.Ok(v) -> { printf("ok %lld\n", v); }
+  `    RR.Closed -> { printf("closed\n"); }
+  `    RR.Error(e) -> { printf("err %lld\n", e); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "generic fn returning a generic enum monomorphizes the enum type via a local"
+  );
+  assert contains(out, "RR__num"), "expected the monomorphized enum typedef";
+}
+
+test "default parameter values: free fn, method, multi-default, explicit override" {
+  str src = `imp std.c.io;
+  `fun three(num a, num b = 2, num c = 3) num { ret a * 100 + b * 10 + c; }
+  `compound Box { num v; }
+  `impl Box {
+  `  pub add(num x, num y = 100) num { ret self.v + x + y; }
+  `}
+  `fun main() num {
+  `  printf("%lld %lld %lld\n", three(1), three(1, 5), three(1, 5, 9));
+  `  Box b; b.v = 1000;
+  `  printf("%lld %lld\n", b.add(1), b.add(1, 1));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "default parameter values: free fn, method, multi-default, explicit override"
+  );
+  assert !contains(out, "= 2)"), "expected the C signature to carry no default";
+  assert contains(out, "three(1, 2, 3)"), "expected both defaults filled at the call site";
+  assert contains(out, "three(1, 5, 3)"), "expected only the trailing default filled";
+  assert contains(out, "Box__add(&b, 1, 100)"), "expected a method default to be filled";
+}
+
+// gap: a required parameter following a defaulted one is accepted instead of
+// rejected.
+// test "default parameter rejected: required param after a defaulted one" {
+// str src = `fun f(num x = 1, num y) num { ret x + y; }
+// `fun main() num { ret f(1, 2); }`;
+// let r = transpile_source(src);
+// assert r.is_err(), "expected the bad parameter order to be rejected";
+// }
+
+test "default parameter rejected: default references self" {
+  str src = `compound C { num cfg; }
+  `impl C { pub poll(num slice = self.cfg) num { ret slice; } }
+  `fun main() num { C c; c.cfg = 1; ret c.poll(); }`;
+  let r = transpile_source(src);
+  assert r.is_err(), "expected a self-referencing default to be rejected";
+}
+
+// gap: a call omitting every argument to an all-defaulted function emits a
+// leading comma, producing invalid C.
+// test "default parameter longhand enum values work for generic enums" {
+// str src = `imp std.c.io;
+// `enum Option<T> { Some(T), None }
+// `fun pick(Option<num> v = Option.None) num {
+// `  fit v {
+// `    Option.Some(n) -> { ret n; }
+// `    Option.None -> { ret 7; }
+// `  }
+// `  ret -1;
+// `}
+// `fun main() num {
+// `  printf("%lld %lld\n", pick(), pick(Option.Some(9)));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "default parameter longhand enum values work for generic enums");
+// assert contains(out, "Option__num_None"), "expected the monomorphized variant tag";
+// }
+
+// gap: a generic function with a trailing defaulted parameter, called without
+// it, is neither monomorphized nor emitted.
+// test "default parameter after a generic-typed param: omitting the trailing default still typechecks" {
+// str src = `imp std.c.io;
+// `compound Node<T> { T value; Node<T>* next; }
+// `fun show<T>(Node<T>* head, bin with_addr = false) T {
+// `  if with_addr { printf("with_addr=true\n"); } else { printf("with_addr=false\n"); }
+// `  ret head.value;
+// `}
+// `fun main() num {
+// `  Node<num> n;
+// `  n.value = 5;
+// `  n.next = nil;
+// `  let a = show(&n);
+// `  let b = show(&n, true);
+// `  printf("%lld %lld\n", a, b);
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "default parameter after a generic-typed param");
+// assert contains(out, "show__num((&n), false)"), "expected the default filled at the monomorphized call";
+// }
+
+test "quirk-impl method call chains onto a call-expression receiver" {
+  str src = `imp std.c.io;
+  `quirk Sized { len() num; is_empty() bin; }
+  `compound Bag<T> { num len; }
+  `impl Bag<T> as Sized { pub len() num { ret self.len; } pub is_empty() bin { ret self.len == 0; } }
+  `fun make_bag() Bag<num> {
+  `  Bag<num> v;
+  `  v.len = 2;
+  `  ret v;
+  `}
+  `fun main() num {
+  `  printf("%lld %d\n", make_bag().len(), make_bag().is_empty());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "quirk-impl method call chains onto a call-expression receiver");
+  assert contains(out, "Bag__num__Sized__len"), "expected the quirk method, not the same-named field";
+  assert contains(out, "__fun_recv_tmp"), "expected the call receiver hoisted into a temporary";
+}
+
+// skipped: std.log's rotating sink needs import resolution and the assertion is
+// about the log file the built binary writes.
+
+// gap: `for x : c` over a value implementing a user Iterator quirk is rejected
+// as an unsupported node.
+// test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
+// str src = `imp std.c.io;
+// `enum Option<T> { Some(T), None }
+// `quirk Iterator<T> { next() Option<T>; }
+// `compound Counter { num cur; num limit; }
+// `impl Counter as Iterator<num> {
+// `  pub next() Option<num> {
+// `    if self.cur >= self.limit { ret Option.None; }
+// `    num v = self.cur;
+// `    self.cur = self.cur + 1;
+// `    ret Option.Some(v);
+// `  }
+// `}
+// `fun main() num {
+// `  Counter c = Counter{cur = 0, limit = 5};
+// `  num sum = 0;
+// `  for x : c {
+// `    if x == 3 { break; }
+// `    sum = sum + x;
+// `  }
+// `  printf("%lld\n", sum);
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "for item : iterable drives a user Iterator");
+// assert contains(out, "Counter__Iterator__next"), "expected the loop to call next()";
+// }
+
+// skipped: `for k, v :: map` needs std.map, which the harness cannot resolve.
+
+test "default parameter values: free fn + method, omitting trailing args fills defaults" {
+  str src = `imp std.c.io;
+  `fun base() num { ret 100; }
+  `fun three(num a, num b = 2, num c = base()) num { ret a * 1000 + b * 10 + c; }
+  `compound Box { num v; }
+  `impl Box {
+  `  pub add(num x, num y = 50) num { ret self.v + x + y; }
+  `}
+  `fun main() num {
+  `  printf("%lld %lld %lld\n", three(1), three(1, 5), three(1, 5, 9));
+  `  Box b;
+  `  b.v = 1000;
+  `  printf("%lld %lld\n", b.add(1), b.add(1, 1));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "default parameter values: free fn + method, omitting trailing args fills defaults"
+  );
+  assert contains(out, "three(1, 2, base())"), "expected a defaulted call expression to be materialized";
+  assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
+}
