@@ -8432,22 +8432,14 @@ impl Codegen {
     ret .None;
   }
 
-  // Given `fn_name` (a call's plain-identifier callee) and its
-  // already-flattened arguments, checks whether `fn_name` matches a
-  // registered generic function template
-  // (`Codegen.generic_function_templates`). If so, infers each type
-  // param's concrete binding from whichever positional argument's
-  // declared parameter type is a bare occurrence of that type param
-  // (`infer_arg_type_name`), monomorphizes the function body under a
-  // mangled name (`<name>__<arg1>__<arg2>...`, deduped via
-  // `emitted_generic_instantiations`, the shared registry generic
-  // compounds/enums/impls use), and returns that name for `emit_call` to
-  // use as the C callee. Every inferred binding is treated as a bare
-  // value type, with no pointer-arg mangling, and the monomorphized
-  // body's own call arguments don't get bare-shorthand resolution the
-  // way a plain function's calls do. `.None` means `fn_name` isn't a
-  // generic function template, or a type param's binding couldn't be
-  // inferred from this call's arguments.
+  // Monomorphizes a call to a registered generic function template,
+  // inferring each type param's binding from whichever positional
+  // argument's declared param type is a bare occurrence of it, then
+  // emitting the body under a mangled `<name>__<arg1>__<arg2>...` and
+  // returning that name for `emit_call` to use as the C callee. Every
+  // inferred binding is a bare value type, with no pointer-arg mangling.
+  // `.None` when `fn_name` isn't a template, or a type param's binding
+  // can't be inferred from this call's arguments.
   maybe_instantiate_generic_function(str fn_name, Vec<Node*> args) Option<GenericCallResolution> {
     for tmpl : self.generic_function_templates {
       fit tmpl.kind {
@@ -9748,9 +9740,8 @@ test "emit_statement emits a bare panic(...) as a statement" {
 }
 
 test "emit_statement emits 'assert cond, msg;' as an if/abort with the message printed" {
-  // `assert !r.is_err(), "tokenize() returned an
-  // error";` needs an `emit_statement` case for `.StatementAssert`,
-  // rejected as `CodegenErrorKind.UnsupportedNode` without one.
+  // An `assert cond, "msg";` statement needs its own `emit_statement`
+  // case; without one it is rejected as `UnsupportedNode`.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   Node* cond = malloc(sizeof(Node));
@@ -10492,9 +10483,8 @@ test "emit_function emits a plain no-arg function definition with indentation" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
-  // Named "run", not "main" -- this test is about generic function-
-  // emission mechanics, not `main`'s own special C-entry-point
-  // signature handling (which has its own dedicated tests).
+  // Named "run", not "main": this covers generic function-emission
+  // mechanics, not `main`'s forced C entry-point signature.
   FunctionNode fnv = function_node_new();
   fnv.name = "run";
   fnv.has_name = true;
@@ -12581,7 +12571,7 @@ test "emit_expr rejects a bare-shorthand pattern with no expected_enum_type in c
   variants.push("Some");
   variants.push("None");
   g.record_enum("Option", variants, true);
-  // expected_enum_type deliberately left empty (no ambient context).
+  // `expected_enum_type` is left empty: no ambient context.
 
   Node* blank = malloc(sizeof(Node));
   *blank = node_new(NodeKind.Blank);
@@ -12985,9 +12975,9 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   *body = node_new(NodeKind.Body(bn));
 
   FunctionNode fnv = function_node_new();
-  // Double-mangled, exactly as `_parse_impl_method` names a quirk-impl's
-  // method (`Type__Quirk__method`) -- codegen must reproduce this
-  // verbatim, not invent its own scheme.
+  // Double-mangled, exactly as `_parse_impl_method` names a quirk impl's
+  // method (`Type__Quirk__method`); codegen must reproduce that
+  // verbatim rather than invent its own scheme.
   fnv.name = "Point__To__convert";
   fnv.has_name = true;
   DataType* rtype = malloc(sizeof(DataType));
@@ -13114,9 +13104,9 @@ test "emit_compound records a generic compound as a template without emitting it
   assert equals(st.out.build(), ""), "expected nothing emitted for a generic template itself, only its monomorphizations";
 }
 
-// Shared setup for the generic-compound-instantiation tests below: records
-// `compound Box<T> { T value; }` as a template (no C emitted for the
-// template itself -- see the test above).
+// Shared setup for the generic-compound-instantiation tests below,
+// recording `compound Box<T> { T value; }` as a template. No C is emitted
+// for the template itself.
 fun _record_box_template(Codegen* g) {
   CompoundNode c = compound_node_new();
   c.name = "Box";
@@ -14435,9 +14425,9 @@ test "emit_expr emits array indexing as C '[]'" {
 }
 
 test "emit_expr emits an explicit 'Type{ field = value, ... }' compound literal" {
-  // `DynamicIntType{is_signed = ..., bits = ...}` needs
-  // an `emit_expr` case for `.CompoundInit`, rejected as
-  // `CodegenErrorKind.UnsupportedNode` without one.
+  // An explicit `Type{field = ...}` literal needs its own `emit_expr`
+  // case for `.CompoundInit`; without one it is rejected as
+  // `UnsupportedNode`.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -14511,7 +14501,7 @@ test "emit_expr resolves a bare '.{ field = value, ... }' compound literal again
 test "emit_expr rejects a bare '.{...}' compound literal with no expected_compound_type in context" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
-  // expected_compound_type deliberately left empty (no ambient context).
+  // `expected_compound_type` is left empty: no ambient context.
 
   CompoundInitNode ci = compound_init_node_new();
   ci.has_dtype = false;
@@ -15479,9 +15469,8 @@ test "transpile emits the prelude followed by every top-level function" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
-  // Named "run", not "main" -- this test is about generic top-level
-  // function emission, not `main`'s own special C-entry-point
-  // signature handling (which has its own dedicated tests).
+  // Named "run", not "main": this covers generic top-level function
+  // emission, not `main`'s forced C entry-point signature.
   FunctionNode fnv = function_node_new();
   fnv.name = "run";
   fnv.has_name = true;
