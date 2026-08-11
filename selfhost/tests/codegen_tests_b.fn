@@ -499,3 +499,300 @@ test "private field (leading underscore): same-module read/write/self access wor
   assert contains(out, "self->_password"), "expected self access inside a method";
   assert contains(out, "u._password = 99"), "expected same-module write access";
 }
+
+test "data-carrying enum: construct + pattern-match with payload bindings" {
+  str src = `imp std.c.io;
+  `enum Val { I(num), Pair(num, num), Nil }
+  `fun sum(Val v) num {
+  `  fit v {
+  `    Val.I(x) -> { ret x; }
+  `    Val.Pair(a, b) -> { ret a + b; }
+  `    Val.Nil -> { ret 0; }
+  `  }
+  `  ret -1;
+  `}
+  `fun main() num {
+  `  Val a = Val.I(7);
+  `  Val b = Val.Pair(3, 4);
+  `  Val c = Val.Nil;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "data-carrying enum: construct + pattern-match with payload bindings");
+  assert contains(out, "Val_tag"), "expected a discriminant enum";
+  assert contains(out, "} payload;"), "expected a payload union";
+  assert contains(out, "v.payload.I._0"), "expected the single-payload binding";
+  assert contains(out, "v.payload.Pair._0"), "expected the multi-payload binding";
+}
+
+test "data-carrying enum: shorthand .Variant(x) and _ catch-all" {
+  str src = `imp std.c.io;
+  `enum Opt { Some(num), None }
+  `fun get(Opt o) num {
+  `  fit o {
+  `    Opt.Some(v) -> { ret v; }
+  `    _ -> { ret -9; }
+  `  }
+  `  ret 0;
+  `}
+  `fun main() num { num a = get(Opt.Some(5)); ret 0; }`;
+  let out = emit_c(src, "data-carrying enum: shorthand .Variant(x) and _ catch-all");
+  assert contains(out, ".tag = Opt_Some"), "expected the tagged construction";
+  assert contains(out, "o.payload.Some._0"), "expected the payload binding";
+  assert contains(out, "else {"), "expected the catch-all branch";
+}
+
+test "data-carrying enum: shorthand construction in typed var-init and return" {
+  str src = `imp std.c.io;
+  `enum Opt { Some(num), None }
+  `fun mk(num x) Opt { ret .Some(x); }
+  `fun get(Opt o) num {
+  `  fit o {
+  `    Opt.Some(v) -> { ret v; }
+  `    Opt.None -> { ret -1; }
+  `  }
+  `  ret 0;
+  `}
+  `fun main() num {
+  `  Opt a = .Some(9);
+  `  Opt b = .None;
+  `  num c = get(mk(42));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "data-carrying enum: shorthand construction in typed var-init and return");
+  assert contains(out, ".tag = Opt_Some"), "expected the shorthand to resolve its enum";
+  assert contains(out, ".tag = Opt_None"), "expected the payload-free shorthand";
+}
+
+test "plain (payload-free) enum still lowers to a C enum" {
+  str src = `imp std.c.io;
+  `enum Color { Red, Green, Blue }
+  `fun main() num { Color c = Color.Green; ret 0; }`;
+  let out = emit_c(src, "plain (payload-free) enum still lowers to a C enum");
+  assert contains(out, "typedef enum Color {"), "expected a classic C enum";
+  assert !contains(out, "Color_tag"), "expected no tagged-union discriminant";
+}
+
+test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
+  str src = `imp std.c.io;
+  `quirk Speaker { speak() str; }
+  `compound Dog { num age; }
+  `impl Dog as Speaker { speak() str { ret "woof"; } }
+  `fun describe(num n, Speaker s, str tag) {
+  `  printf("%lld %s %s\n", n, s.speak(), tag);
+  `}
+  `fun plain(num a, num b) num { ret a + b; }
+  `fun main() num {
+  `  Dog d = Dog{age = 3};
+  `  describe(7, &d, "hi");
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce");
+  assert contains(out, "describe(7, __fun_coerce_Dog_"), "expected the quirk argument to be wrapped";
+  assert contains(out, "int64_t plain(int64_t a, int64_t b)"), "expected the non-quirk callee untouched";
+}
+
+test "generic compound coerces to a quirk at a call site and via var-init" {
+  str src = `imp std.c.io;
+  `quirk Sized { size() num; }
+  `compound Box<T> { T v; }
+  `impl Box<num> as Sized { size() num { ret 8; } }
+  `fun report(Sized s) num { ret s.size(); }
+  `fun main() num {
+  `  Box<num> b = Box<num>{v = 42};
+  `  num viaCall = report(&b);
+  `  Sized sz = &b;
+  `  num viaVar = sz.size();
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "generic compound coerces to a quirk at a call site and via var-init");
+  assert contains(out, "report(__fun_coerce_Box__num_"), "expected the call site to use the mangled helper";
+  assert contains(out, "Sized sz = __fun_coerce_Box__num_"), "expected the var-init to use the mangled helper";
+}
+
+// gap: a quirk method called on a call result emits the receiver expression
+// twice (`make(&st).vtable->weight(make(&st).self)`), so the receiver call runs
+// twice instead of being materialized into a temp.
+// test "quirk method dispatched on a call result materializes the receiver once" { }
+
+// gap: a fixed-size array compound field (`num[3] data;`) is emitted as a
+// scalar/pointer rather than an inline `int64_t data[3]`, in both plain and
+// generic compounds.
+// test "P0: fixed-size array compound field is inline, not a pointer" { }
+// test "reaudit R1: generic compound fixed-size array field is inline" { }
+// test "reaudit: array-literal struct field init (single + multi element)" { }
+
+test "P0: unsized array compound field stays a pointer" {
+  str src = `compound Dyn { num[] data; num n; }
+  `fun main() num { ret 0; }`;
+  let out = emit_c(src, "P0: unsized array compound field stays a pointer");
+  assert contains(out, "int64_t* data"), "expected an unsized array field to stay a pointer";
+}
+
+// gap: comparing two different enums by ordinal (`a == b` for `enum A`/`enum B`)
+// is accepted instead of rejected.
+// test "P0: cross-enum equality is rejected, same-enum and enum-vs-num still allowed" { }
+
+// gap: a fit branch labelled with a different enum's variant is accepted.
+// test "P0: fit with a different enum's variant as a branch is rejected" { }
+
+test "P0: char escapes are preserved and an unknown escape is rejected" {
+  str src = `imp std.c.io;
+  `fun main() num { printf("%d %d %d\n", '\r', '\t', '\0'); ret 0; }`;
+  let out = emit_c(src, "P0: char escapes are preserved and an unknown escape is rejected");
+  assert contains(out, "'\\r'"), "expected the carriage-return escape";
+  assert contains(out, "'\\t'"), "expected the tab escape";
+  assert contains(out, "'\\0'"), "expected the nul escape";
+
+  str bad = `fun main() { chr q = '\q'; }`;
+  let r = transpile_source(bad);
+  assert r.is_err(), "expected an unrecognized char escape to be rejected";
+}
+
+test "P0: block comment is lexed; unterminated and stray token error cleanly" {
+  str src = `/* a top-level block comment */
+  `imp std.c.io;
+  `fun main() num {
+  `  /* multi
+  `     line */
+  `  printf("ok\n");
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P0: block comment is lexed; unterminated and stray token error cleanly");
+  assert contains(out, "printf(\"ok"), "expected the surviving statement";
+  assert !contains(out, "block comment"), "expected the comment to be skipped";
+
+  let unterminated = transpile_source(`/* never closed`);
+  assert unterminated.is_err(), "expected an unterminated block comment to be rejected";
+
+  str stray = `* 5
+  `fun main() {}`;
+  let r = transpile_source(stray);
+  assert r.is_err(), "expected a stray top-level operator to be rejected";
+}
+
+// gap: a pathologically deep parenthesized expression overflows the stack
+// (SIGSEGV) instead of reporting a depth-guard error, so the fixture cannot be
+// run in-process.
+// test "P0: pathologically deep expression errors cleanly instead of crashing" { }
+
+test "P1: plain-impl method chaining on call results materializes once" {
+  str src = `imp std.c.io;
+  `compound C { num v; }
+  `impl C { add(num n) C { C r; r.v = self.v + n; ret r; } get() num { ret self.v; } }
+  `fun mk(num n) C { C c; c.v = n; ret c; }
+  `fun main() num {
+  `  C c; c.v = 1;
+  `  printf("%lld %lld\n", c.add(2).add(3).get(), mk(7).get());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P1: plain-impl method chaining on call results materializes once");
+  assert contains(out, "__fun_recv_tmp"), "expected the rvalue receiver in a temp";
+  assert !contains(out, ").add("), "expected no raw member access on a call result";
+  assert !contains(out, ").get("), "expected no raw member access on a call result";
+}
+
+// gap: coercing `&arr[i]` or `&struct.field` to a quirk, and quirk-typed array
+// elements, are rejected by codegen with "unsupported node".
+// test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" { }
+// test "reaudit Q: ptr->quirk coercion on field assign and array-literal elements" { }
+
+// gap: returning a coerced self from a quirk method, and chaining onto a
+// quirk-returning quirk method, are rejected with "unsupported node".
+// test "reaudit Q: return coerced self + chaining on a quirk-returning quirk method" { }
+
+test "P1: fit on dec, comma multi-label, duplicate enum case" {
+  str src = `imp std.c.io;
+  `enum Color { Red, Green, Blue }
+  `fun main() num {
+  `  dec d = 1.0;
+  `  fit d { 1.0 -> { printf("d1\n"); }, _ -> { printf("d?\n"); } }
+  `  num x = 2;
+  `  fit x { 1, 2 -> { printf("lo\n"); }, _ -> { printf("hi\n"); } }
+  `  Color c = Color.Green;
+  `  fit c { Color.Green -> { printf("g1\n"); }, Color.Green -> { printf("g2\n"); }, _ -> {} }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P1: fit on dec, comma multi-label, duplicate enum case");
+  assert contains(out, "d == 1.0"), "expected the dec label compared by value";
+  assert contains(out, "x == 1 || x == 2"), "expected the comma labels to become a disjunction";
+  assert contains(out, "c == Color_Green"), "expected the enum label comparison";
+  assert contains(out, "else if"), "expected the duplicate case to stay a separate branch";
+}
+
+test "P1: sizeof of primitive/pointer/compound/generic variables" {
+  str src = `imp std.c.io;
+  `compound P { num x; num y; }
+  `fun main() num {
+  `  num n = 0; str s = ""; dec d = 0.0; bin b = true; num* p = &n; P pt;
+  `  printf("%lld %lld %lld\n", sizeof(n), sizeof(p), sizeof(pt));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P1: sizeof of primitive/pointer/compound/generic variables");
+  assert contains(out, "sizeof(n)"), "expected a primitive value operand";
+  assert contains(out, "sizeof(p)"), "expected a pointer value operand";
+  assert contains(out, "sizeof(pt)"), "expected a compound value operand";
+  assert !contains(out, "sizeof(num)"), "expected no raw language keyword in the C output";
+}
+
+// gap: a pointer-as-array element field access (`pts[0].x` where `pts` is a
+// `Point*`) and an array literal passed directly as a call argument are
+// rejected with "unsupported node".
+// test "P1: pointer-as-array element field access uses dot, array-literal call arg, array fixes" { }
+
+test "P1: let inference from dereferenced generic pointer yields the value type" {
+  str src = `imp std.c.io;
+  `compound Box<T> { T v; }
+  `fun main() num {
+  `  Box<num> b; b.v = 7;
+  `  Box<num>* pb = &b;
+  `  let boxed = *pb;
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "P1: let inference from dereferenced generic pointer yields the value type"
+  );
+  assert contains(out, "boxed = (*pb)"), "expected the deref to be the initializer";
+  assert !contains(out, "Box__num* boxed"), "expected a value, not a pointer";
+}
+
+// gap: a hex string escape is not bounded to two digits, so `"\x42C"` is passed
+// through verbatim instead of being split into `"\x42" "C"`.
+// test "P1: hex string escape is bounded to two digits" { }
+
+// gap: an empty enum declaration and `let x = <void call>` are both accepted
+// instead of rejected.
+// test "P1: empty enum, let-from-void, and format arg-mismatch are rejected" { }
+
+// gap: a `Box<num>` argument is accepted where a `Box<str>` parameter is
+// declared, so distinct instantiations are interchangeable.
+// test "reaudit: distinct generic instantiations are not interchangeable types" { }
+
+// gap: a pointer type operand to sizeof (`sizeof(num*)`) is a parse error.
+// test "reaudit: sizeof accepts pointer types" { }
+
+test "reaudit: await binds tighter than a following binary operator" {
+  str src = `imp std.c.io;
+  `async fun inc(num x) num { ret x + 1; }
+  `async fun main() {
+  `  num r = await inc(5) + 1;
+  `}`;
+  let out = emit_c(src, "reaudit: await binds tighter than a following binary operator");
+  assert contains(out, "inc(5) + 1)"), "expected the await to bind to the call alone";
+}
+
+test "reaudit: defer that mutates a returned variable does not corrupt the value" {
+  str src = `imp std.c.io;
+  `fun expr_ret() num {
+  `  num x = 5;
+  `  defer x = 999;
+  `  ret x + 1;
+  `}
+  `fun main() num { ret 0; }`;
+  let out = emit_c(
+    src,
+    "reaudit: defer that mutates a returned variable does not corrupt the value"
+  );
+  assert contains(out, "__fun_defer_ret = (x + 1)"), "expected the return value snapshotted first";
+  assert contains(out, "return __fun_defer_ret"), "expected the snapshot to be returned";
+}
