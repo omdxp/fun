@@ -1,0 +1,136 @@
+// AST predicate and semantics corpus, ported from the `ast` and
+// `semantics` suites. These build nodes and scopes directly.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..semantics.scope;
+imp ..semantics.symbol;
+imp std.string;
+imp std.vec;
+imp std.option;
+
+test "ast predicates classify nodes correctly" {
+  Node num_node = node_new(NodeKind.Number(TokenData.Num(1)));
+  Node id_node = node_new(NodeKind.Identifier("x"));
+  Node str_node = node_new(NodeKind.String("s"));
+  Node bool_node = node_new(NodeKind.Boolean(true));
+
+  Node paren_node = node_new(NodeKind.ExpressionParenthesis(&num_node));
+
+  UnaryNode un;
+  un.is_left_operanded_unary = false;
+  un.op = "-";
+  un.operand = &num_node;
+  un.has_indirection = false;
+  un.indirection_depth = 0;
+  Node unary_node = node_new(NodeKind.Unary(un));
+
+  ExprNode assign;
+  assign.left = &id_node;
+  assign.has_left = true;
+  assign.right = &num_node;
+  assign.has_right = true;
+  assign.op = "=";
+  Node assign_node = node_new(NodeKind.Expression(assign));
+
+  ExprNode eq;
+  eq.left = &id_node;
+  eq.has_left = true;
+  eq.right = &num_node;
+  eq.has_right = true;
+  eq.op = "==";
+  Node eq_node = node_new(NodeKind.Expression(eq));
+
+  Node index_inner = node_new(NodeKind.Bracket(&num_node));
+  ExprNode index;
+  index.left = &id_node;
+  index.has_left = true;
+  index.right = &index_inner;
+  index.has_right = true;
+  index.op = "[]";
+  Node index_node = node_new(NodeKind.Expression(index));
+
+  assert node_is_expressionable(num_node), "a number is expressionable";
+  assert node_is_expressionable(id_node), "an identifier is expressionable";
+  assert node_is_expressionable(str_node), "a string is expressionable";
+  assert node_is_expressionable(bool_node), "a boolean is expressionable";
+  assert node_is_expressionable(unary_node), "a unary is expressionable";
+  assert node_is_expressionable(paren_node), "a parenthesized expression is expressionable";
+
+  assert node_is_value_type(num_node), "a number is a value type";
+  assert node_is_value_type(id_node), "an identifier is a value type";
+  assert node_is_value_type(str_node), "a string is a value type";
+  assert node_is_value_type(unary_node), "a unary is a value type";
+  assert node_is_value_type(paren_node), "a parenthesized expression is a value type";
+
+  assert node_is_expression(assign_node, "="), "the assignment carries the '=' operator";
+  assert node_is_assignment(assign_node), "'=' is an assignment";
+  assert !node_is_assignment(eq_node), "'==' is not an assignment";
+
+  assert node_is_array(index_node), "'[]' is an array access";
+  assert node_is_expression(index_node, "[]"), "the index carries the '[]' operator";
+}
+
+test "a new scope starts empty and unparented" {
+  Scope s = scope_new();
+  defer s.deinit();
+  assert s.entities.len == 0, "expected no entities";
+  assert !s.has_parent, "expected no parent scope";
+}
+
+test "a scope holds the entities pushed into it, in order" {
+  Scope s = scope_new();
+  defer s.deinit();
+
+  ScopeEntity e1 = scope_entity_new("entity1");
+  ScopeEntity e2 = scope_entity_new("entity2");
+  s.entities.push(&e1);
+  s.entities.push(&e2);
+
+  assert s.entities.len == 2, "expected both entities";
+  assert s.entities.get(0) == &e1, "expected the first entity first";
+  assert s.entities.get(1) == &e2, "expected the second entity second";
+}
+
+test "a scope resolves the last-declared entity and lookups by name" {
+  Scope s = scope_new();
+  defer s.deinit();
+
+  ScopeEntity e1 = scope_entity_new("entity1");
+  ScopeEntity e2 = scope_entity_new("entity2");
+  ScopeEntity e3 = scope_entity_new("entity3");
+  s.entities.push(&e1);
+  s.entities.push(&e2);
+  s.entities.push(&e3);
+
+  assert s.last_entity_at_scope() == &e3, "expected the most recently pushed entity";
+  assert s.get_entity_by_name("entity1") == &e1, "expected a lookup by name";
+  assert s.get_entity_by_name("missing") == nil, "expected nil for an undeclared name";
+}
+
+// skipped: the original "Scope iteration works correctly" test drives a
+// start_iteration/iterate_back cursor. This Scope exposes
+// last_entity_at_scope and get_entity_by_name instead, covered above.
+
+test "get_node_symbol returns a node only for node symbols" {
+  Node n = node_new(NodeKind.Number(TokenData.Num(1)));
+
+  Symbol s_node = symbol_new("x");
+  s_node.kind = SymbolKind.NodeSym(n);
+  Symbol s_unknown = symbol_new("y");
+
+  let got = get_node_symbol(s_node);
+  assert got.is_some(), "expected a node for a node symbol";
+  fit got.unwrap().kind {
+    .Number(_) -> {}
+    _ -> { panic("expected the original Number node"); }
+  }
+  assert get_node_symbol(s_unknown).is_none(), "expected no node for an unknown symbol";
+}
+
+test "a symbol table can be instantiated" {
+  SymbolTable t = symbol_table_new("t");
+  defer t.symbols.free();
+  assert equals(t.name, "t"), "expected the table's name";
+  assert t.symbols.len == 0, "expected an empty table";
+}
