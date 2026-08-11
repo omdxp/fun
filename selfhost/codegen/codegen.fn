@@ -377,10 +377,10 @@ pub compound Codegen {
   // Whether any `fork` statement appears in the program, computed once
   // before the prelude is written.
   bin uses_fork;
-  // Whether the program defines its own top-level function under a name
-  // `<math.h>` also declares; `write_prelude` skips `#include <math.h>`
-  // when true.
-  bin skip_math_h;
+  // Names of program-defined functions that collide with a C binding
+  // symbol declared in `std/c/*`. Emitted under a `__fun_shadow__`
+  // prefix so they never clash with the real libc declaration.
+  Vec<str> c_shadow_names;
   // True while emitting `main`'s own body. `main`'s forced `int` C
   // signature means `ret <expr>;` can only emit the real expression when
   // its declared return type is a scalar `num`; any other type discards
@@ -480,7 +480,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
-  g.skip_math_h = false;
+  g.c_shadow_names.init(0);
   g.in_main = false;
   ret g;
 }
@@ -551,44 +551,51 @@ fun uses_fork_in(Vec<Node> nodes) bin {
   ret false;
 }
 
-// True when the program defines its own top-level function under a name
-// `<math.h>` also declares (`log`, `sin`, `pow`, ...). `write_prelude`
-// includes `<math.h>` unconditionally, but a same-named Fun function
-// (e.g. `std/log.fn`'s `log`) then collides with libm's declaration.
-// Checked once before the prelude is written, so `write_prelude` can
-// skip the include in that case.
-fun program_defines_libm_colliding_name(Vec<Node> nodes) bin {
+// True when `node` was declared in a `std/c/*.fn` binding file.
+fun node_is_std_c_binding(Node n) bin {
+  if !n.has_pos {
+    ret false;
+  }
+  ret contains(n.pos.filename, "/std/c/") || contains(n.pos.filename, "\\std\\c\\");
+}
+
+// Collects every program-defined function whose name also names a C
+// binding declared in `std/c/*` (`std/log.fn`'s `log` against libc's
+// `log(double)`, say). Such a function is emitted under a
+// `__fun_shadow__` prefix, so the C declaration it would otherwise
+// clash with stays usable.
+fun collect_c_shadow_names(Vec<Node> nodes) Vec<str> {
+  Vec<str> binding_names;
+  binding_names.init(0);
+  defer binding_names.free();
   for n : nodes {
     fit n.kind {
       .Function(f) -> {
-        // A bodyless function (a signature binding, like `std.c.math`'s
-        // `pub fun sqrt(dec x) dec;`) is a re-declaration of the same
-        // libm symbol, not a collision, and still needs `<math.h>`'s
-        // declaration visible. Only a function with a body under one of
-        // these names is a genuine collision.
-        if !f.has_body {
-          continue;
-        }
-        if equals(f.name, "sqrt") || equals(f.name, "sin") || equals(f.name, "cos") || equals(
-          f.name,
-          "tan"
-        ) || equals(f.name, "asin") || equals(f.name, "acos") || equals(f.name, "atan") || equals(
-          f.name,
-          "atan2"
-        ) || equals(f.name, "cbrt") || equals(f.name, "pow") || equals(f.name, "exp") || equals(
-          f.name,
-          "log"
-        ) || equals(f.name, "log10") || equals(f.name, "log2") || equals(f.name, "floor") || equals(
-          f.name,
-          "ceil"
-        ) || equals(f.name, "round") || equals(f.name, "trunc") || equals(f.name, "fmod") {
-          ret true;
+        if !f.has_body && node_is_std_c_binding(n) {
+          binding_names.push(f.name);
         }
       }
       _ -> {}
     }
   }
-  ret false;
+
+  Vec<str> out;
+  out.init(0);
+  for n2 : nodes {
+    fit n2.kind {
+      .Function(f2) -> {
+        // `main` keeps its name: C requires the real entry point.
+        if !f2.has_body || equals(f2.name, "main") || node_is_std_c_binding(n2) {
+          continue;
+        }
+        if binding_names.contains(f2.name) && !out.contains(f2.name) {
+          out.push(f2.name);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret out;
 }
 
 // Shifts a tracked buffer position right by `splice_len` if it falls at
@@ -1647,7 +1654,9 @@ impl Codegen {
   // param-writing logic.
   emit_function_prototype(Node n) Option<CodegenErrorKind> {
     fit n.kind {
-      .Function(f) -> { ret self.emit_generic_impl_method_prototype(n, f.name); }
+      .Function(f) -> {
+        ret self.emit_generic_impl_method_prototype(n, self.effective_function_name(f.name));
+      }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
     }
   }
@@ -2086,6 +2095,29 @@ impl Codegen {
   // `prototype_type_is_unsafe_early`). Mirrors
   // `ensure_plain_impl_method_prototype_emitted`, sourced from the
   // plain-function registry instead, with no `self` param to prepend.
+  // The C name to emit for the program-defined function `name`: prefixed
+  // when it would otherwise shadow a C binding of the same name; see
+  // `Codegen.c_shadow_names`. Lookups keyed by the Fun name still use the
+  // bare one.
+  effective_function_name(str name) str {
+    if !self.c_shadow_names.contains(name) {
+      ret name;
+    }
+    StringBuilder sb = string_builder_init(16);
+    sb.append("__fun_shadow__");
+    sb.append(name);
+    ret sb.build();
+  }
+
+  // The C name to emit for a call's callee: alias-qualified calls name a
+  // C binding directly and keep their raw name.
+  emit_callee_name(str name, bin alias_qualified) str {
+    if alias_qualified {
+      ret name;
+    }
+    ret self.effective_function_name(name);
+  }
+
   ensure_plain_function_prototype_emitted(str fn_name) {
     if self.suppress_generic_impl_method_draining {
       ret;
@@ -2150,7 +2182,7 @@ impl Codegen {
     let pf_rt = self.write_type(*pf_rtype);
     if pf_rt.is_some() {
       self.state.write(" ");
-      self.state.write(fn_name);
+      self.state.write(self.effective_function_name(fn_name));
       self.state.write("(");
       bin pf_first = true;
       for pf_pt4 : pf_param_types {
@@ -3669,6 +3701,9 @@ impl Codegen {
       ret .Some(CodegenErrorKind.InvalidNode);
     }
     str callee_name = "";
+    // An alias-qualified callee (`cmath.log(x)`) names the C binding
+    // directly, so it keeps its raw name; see `effective_function_name`.
+    bin callee_is_alias_qualified = false;
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
       .Expression(recv_e) -> {
@@ -3692,6 +3727,7 @@ impl Codegen {
             }
           }
           if left_is_known_alias {
+            callee_is_alias_qualified = true;
             if !recv_e.has_right {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
@@ -3796,7 +3832,7 @@ impl Codegen {
         var_len = args.len - fixed_len;
       }
       if var_len == 0 {
-        self.state.write(callee_name);
+        self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
         self.state.write("(");
         num vc_i = 0;
         for vc_i < fixed_len {
@@ -3883,7 +3919,7 @@ impl Codegen {
         }
         va_i = va_i + 1;
       }
-      self.state.write(callee_name);
+      self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
       self.state.write("(");
       num vf_i = 0;
       for vf_i < fixed_len {
@@ -4078,7 +4114,7 @@ impl Codegen {
       // `maybe_instantiate_generic_function` above instead.
       self.ensure_plain_function_prototype_emitted(callee_name);
     }
-    self.state.write(callee_name);
+    self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
     self.state.write("(");
 
     bin first = true;
@@ -7046,7 +7082,9 @@ impl Codegen {
   // "no arguments").
   pub emit_function(Node node) Option<CodegenErrorKind> {
     fit node.kind {
-      .Function(f) -> { ret self.emit_function_named(node, f.name); }
+      .Function(f) -> {
+        ret self.emit_function_named(node, self.effective_function_name(f.name));
+      }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
     }
   }
@@ -8753,34 +8791,15 @@ impl Codegen {
     }
   }
 
-  // Given `fn_name` (a call's plain-identifier callee) and its
-  // already-flattened call arguments, checks whether `fn_name` matches a
-  // registered generic function template; see
-  // `Codegen.generic_function_templates`. If so, infers each type
-  // param's concrete binding from whichever positional argument's
-  // declared parameter type is a bare occurrence of that type param
-  // (via `infer_arg_type_name`), monomorphizes the function body under a
-  // mangled name (`<name>__<arg1>__<arg2>...`, deduped via
-  // `emitted_generic_instantiations`, the same shared registry generic
-  // compounds/enums/impls use), and returns that mangled name for
-  // `emit_call` to use as the C callee. `.None` means `fn_name` isn't a
-  // generic function template, or a type param's binding couldn't be
-  // inferred from this call's arguments.
-  // 
-  // No pointer-arg mangling: every inferred binding is treated as a bare
-  // value type. The monomorphized body's own call arguments don't get
-  // bare-shorthand resolution the way a plain function's calls do.
   // Falls back to contextual inference for a generic function's type
-  // param `tp` when the call's arguments don't reveal it at all (e.g. a
-  // bare shorthand argument that carries no type info by itself).
-  // Matches `f`'s declared return type structurally against the current
-  // enclosing function's concrete return type
-  // (`Codegen.current_fn_rtype_dt`, same base name, same generic-arg
-  // count), finds the position where `tp` appears as a bare occurrence
-  // in `f`'s return type, and resolves the enclosing function's return
-  // type at that same position. `.None` when there's no enclosing
-  // function context, the return-type shapes don't match, or `tp`
-  // doesn't appear bare in `f`'s return type.
+  // param `tp` when the call's arguments don't reveal it (e.g. a bare
+  // shorthand argument with no type info of its own). Matches `f`'s
+  // declared return type structurally against the current enclosing
+  // function's concrete return type (`Codegen.current_fn_rtype_dt`, same
+  // base name and generic-arg count), finds where `tp` appears bare in
+  // `f`'s return type, and resolves the enclosing function's return type
+  // at that same position. `.None` when there's no enclosing function
+  // context, the shapes don't match, or `tp` never appears bare.
   infer_generic_function_type_param_from_context(FunctionNode f, str tp) Option<str> {
     if !f.has_rtype || self.current_fn_rtype_dt.is_none() {
       ret .None;
@@ -8801,6 +8820,22 @@ impl Codegen {
     ret .None;
   }
 
+  // Given `fn_name` (a call's plain-identifier callee) and its
+  // already-flattened arguments, checks whether `fn_name` matches a
+  // registered generic function template
+  // (`Codegen.generic_function_templates`). If so, infers each type
+  // param's concrete binding from whichever positional argument's
+  // declared parameter type is a bare occurrence of that type param
+  // (`infer_arg_type_name`), monomorphizes the function body under a
+  // mangled name (`<name>__<arg1>__<arg2>...`, deduped via
+  // `emitted_generic_instantiations`, the shared registry generic
+  // compounds/enums/impls use), and returns that name for `emit_call` to
+  // use as the C callee. Every inferred binding is treated as a bare
+  // value type, with no pointer-arg mangling, and the monomorphized
+  // body's own call arguments don't get bare-shorthand resolution the
+  // way a plain function's calls do. `.None` means `fn_name` isn't a
+  // generic function template, or a type param's binding couldn't be
+  // inferred from this call's arguments.
   maybe_instantiate_generic_function(str fn_name, Vec<Node*> args) Option<GenericCallResolution> {
     for tmpl : self.generic_function_templates {
       fit tmpl.kind {
@@ -9536,12 +9571,7 @@ impl Codegen {
     `#include <ctype.h>
     `#include <limits.h>
     ``);
-    // A program defining its own top-level function under a name libm
-    // also declares would collide with `<math.h>`'s declaration if this
-    // were unconditional; see `Codegen.skip_math_h`.
-    if !self.skip_math_h {
-      self.state.write("#include <math.h>\n");
-    }
+    self.state.write("#include <math.h>\n");
     // `stdout`/`stderr`/`stdin` are macros/globals, not callable, and
     // differ per libc, so wrapping each in a tiny `static` function lets
     // `std.c.io`'s bodyless `stdout_stream()`/`stderr_stream()`/
@@ -9861,7 +9891,7 @@ impl Codegen {
     // time any pass needs to know whether the program uses `fork`; see
     // `Codegen.uses_fork`.
     self.uses_fork = uses_fork_in(nodes);
-    self.skip_math_h = program_defines_libm_colliding_name(nodes);
+    self.c_shadow_names = collect_c_shadow_names(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
     // Registers every generic quirk's declaration, pure bookkeeping, no
