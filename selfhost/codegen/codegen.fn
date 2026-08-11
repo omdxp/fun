@@ -9396,35 +9396,27 @@ impl Codegen {
   }
 
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
-  // in `nodes`; anything else is skipped, not an error, since a
-  // whole-file parse can contain declarations not reachable here, like
-  // `imp`. Every impl's methods are pre-registered
-  // (`register_impl_methods`) first, before enums or compounds are even
-  // looked at, since a generic impl's template must already be in
-  // `generic_impl_templates` before the enum/compound pass runs: a
-  // plain compound/enum's field can itself be a generic instantiation
-  // that immediately triggers monomorphizing that type's methods. Enums
-  // are emitted next, registering their names/variants as a side effect
-  // (see `emit_enum`), then compounds, all before any impl-method/
-  // function body is generated, so a method calling another type's
-  // method, or referencing an enum/compound, resolves regardless of
-  // declaration order. Impl methods are then emitted (see `emit_impl`)
-  // in a fourth pass, before plain top-level functions in a fifth, so a
-  // plain function calling a method doesn't need a forward
+  // in `nodes`, skipping anything else without error. Impl methods are
+  // pre-registered first, since a generic impl's template must be in
+  // `generic_impl_templates` before the enum and compound pass: a plain
+  // type's field can be a generic instantiation that immediately triggers
+  // monomorphizing that type's methods. Types come next, registering
+  // their names as a side effect, all before any body is generated, so a
+  // method calling another type's method resolves regardless of
+  // declaration order. Impl methods are then emitted before plain
+  // top-level functions, so a function calling a method needs no forward
   // declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.all_nodes = nodes;
     // Computed before the prelude is written, so it's available by the
-    // time any pass needs to know whether the program uses `fork`; see
-    // `Codegen.uses_fork`.
+    // time any pass needs to know whether the program uses `fork`.
     self.uses_fork = uses_fork_in(nodes);
     self.c_shadow_names = collect_c_shadow_names(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
-    // Registers every generic quirk's declaration, pure bookkeeping, no
-    // C text, before anything that could reference a concrete
-    // instantiation of one as a bare type needs to resolve it; see
-    // `Codegen.quirk_decl_names`.
+    // Registers every generic quirk's declaration, pure bookkeeping with
+    // no C text, before anything referencing a concrete instantiation of
+    // one as a bare type needs to resolve it.
     for n : nodes {
       fit n.kind {
         .Quirk(q) -> {
@@ -9437,29 +9429,22 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Impl methods are pre-registered first, before either the enum or
-    // compound pass, since a generic impl's template must already be in
-    // `generic_impl_templates` by the time `emit_enum`/`emit_compound`
-    // run: a non-generic compound/enum's field can itself be a generic
-    // instantiation that immediately triggers
-    // `maybe_instantiate_generic_impl_methods`.
+    // Pre-registered before the enum and compound passes, since a
+    // non-generic type's field can be a generic instantiation that
+    // immediately triggers `maybe_instantiate_generic_impl_methods`.
     for n : nodes {
       fit n.kind {
         .Impl(i) -> { self.register_impl_methods(n); }
         _ -> {}
       }
     }
-    // Forward-declares every plain (non-generic) compound's struct name
-    // (`typedef struct X X;`, no body) before any compound/enum's full
-    // body, or the function-prototype pass right below, is emitted, so
-    // every type name is nameable regardless of param/return position.
-    // `emit_compound`/`emit_enum` rely purely on source order, a type
-    // referencing another must be declared textually after it, which
-    // breaks down for a set of mutually self-referential compounds.
-    // Only compounds are handled directly below; a plain tagged-union
-    // enum needs the same treatment for a self-referential (or
-    // mutually-referential) pointer payload (`enum Expr { Neg(Expr*),
-    // ... }`).
+    // Forward-declares every plain compound's struct name (`typedef
+    // struct X X;`) before any type body or the prototype pass below, so
+    // every type name is usable regardless of position. `emit_compound`
+    // and `emit_enum` rely on source order alone, which breaks down for
+    // mutually self-referential compounds. A plain tagged-union enum
+    // needs the same treatment for a self-referential pointer payload
+    // (`enum Expr { Neg(Expr*), ... }`).
     for n : nodes {
       fit n.kind {
         .Compound(c) -> {
@@ -9491,14 +9476,10 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Registers every generic enum/compound template, pure bookkeeping,
-    // no C text (see `emit_enum`/`emit_compound`'s `has_type_params`
-    // branches), before the function-prototype pass just below, since a
-    // plain function/method's signature can reference a generic
-    // instantiation that needs the template already known to resolve.
-    // Also needed before any non-generic type's fields get resolved
-    // further below, since a plain type's field can itself be a
-    // generic instantiation.
+    // Registers every generic enum and compound template, pure
+    // bookkeeping with no C text, before the prototype pass below: a
+    // plain signature can reference a generic instantiation that needs
+    // its template known to resolve, as can a plain type's field.
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -9520,34 +9501,20 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Forward-declares every plain (non-generic) top-level function's
-    // and plain impl method's C prototype before any of their bodies,
-    // since `emit_function`/`emit_impl` rely purely on source order,
-    // which breaks the moment a plain function/method calls another
-    // declared later in the file. Mirrors the plain-compound
-    // forward-declare pass just above.
-    // 
-    // Positioned here, right after `register_impl_methods`, not
-    // alongside the plain-compound pass, because a plain impl method can
-    // get called from way earlier than its textual position: a generic
-    // method reached lazily during the enum/compound pass below can
-    // resolve to a concrete override registered by
-    // `register_impl_methods` just above and get its body emitted right
-    // then.
-    // 
-    // Excludes a `std/c/*.fn` binding node (see
-    // `is_std_c_signature_node`), since forward-declaring one would be
-    // a conflicting-types redeclaration against the real system header.
-    // Also excludes any function/method whose signature isn't safe this
-    // early (see `prototype_type_is_unsafe_early`), which falls back to
-    // natural source order instead.
-    // 
-    // Also excludes `main` outright, since `emit_function_prototype`
-    // doesn't know about `main`'s special C-entry-point signature
-    // handling (forced `int`, forced `argc`/`argv`; see
-    // `emit_function_named`), so a forward-declared prototype here
-    // would disagree with the real definition emitted later. Not a real
-    // gap: nothing else in the program calls `main` recursively.
+    // Forward-declares every plain top-level function's and plain impl
+    // method's C prototype before any body, since `emit_function` and
+    // `emit_impl` rely on source order alone, which breaks as soon as one
+    // calls another declared later. Positioned right after
+    // `register_impl_methods` rather than alongside the compound pass,
+    // because a plain impl method can be called far earlier than its
+    // textual position: a generic method reached lazily during the type
+    // pass below can resolve to a concrete override and be emitted there.
+    // Excludes a `std/c/*.fn` binding node, whose forward declaration
+    // would conflict with the system header, and any signature not safe
+    // this early, which falls back to source order. `main` is excluded
+    // too, since `emit_function_prototype` doesn't know about its forced
+    // entry-point signature and would disagree with the real definition;
+    // nothing calls `main` recursively.
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
@@ -9576,17 +9543,13 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Top-level `const`/`let` globals are emitted before enums/compounds,
-    // not just before impls/functions. Every other pass here can lazily
-    // hoist a monomorphized generic definition to whatever
-    // `self.state.out.len()` happens to be when it's first triggered
-    // (see `Codegen.hoist_insert_pos`), and that first trigger can fire
-    // as early as the enum/compound pass itself, e.g. a plain compound
-    // field whose type is a generic instantiation. A global emitted
-    // after that point would land textually later than a hoisted method
-    // body that already references it. Constants are simple literals
-    // with no compound/enum type dependency of their own, so moving
-    // them first has nothing to lose.
+    // Globals are emitted before types, not just before impls and
+    // functions. Any pass can hoist a monomorphized generic definition to
+    // wherever the output currently ends, and that first trigger can fire
+    // as early as the type pass, so a global emitted later would land
+    // after a hoisted method body that already references it. Globals are
+    // literals with no type dependency, so moving them first costs
+    // nothing.
     for n : nodes {
       fit n.kind {
         .Variable(v) -> {
@@ -9599,14 +9562,11 @@ impl Codegen {
         _ -> {}
       }
     }
-    // Every plain (non-generic) enum/compound is emitted lazily, on
-    // first reference, instead of via two flat "all enums, then all
-    // compounds" passes; see `ensure_plain_type_emitted` for why a flat
-    // pass order can't satisfy every real dependency direction. Iterating
-    // `nodes` here just walks every plain type in source order and
-    // ensures each is emitted; most will already be done by the time
-    // this reaches them, having been pulled in as a dependency of an
-    // earlier one.
+    // Every plain enum and compound is emitted lazily on first reference
+    // rather than through two flat passes, which can't satisfy every
+    // dependency direction. This walk just ensures each plain type is
+    // emitted; most are already done, pulled in as an earlier type's
+    // dependency.
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -9629,19 +9589,13 @@ impl Codegen {
       }
     }
     // Forces a concrete monomorphizing impl's target type (`impl
-    // Vec<num> { ... }`, `i.concrete_dtype` holding the real `Vec<num>`
-    // this was mangled from) to be instantiated now, before this impl's
-    // method bodies are emitted below. Positioned after the enum/
-    // compound pass above, so the template is already registered, but
-    // before the impl-body pass below: a method's implicit `self`
-    // parameter is already a bare, non-generic `Vec__num*`, so
-    // referencing `self.<field>` inside such a method never goes
-    // through the ordinary lazy-instantiation path, and `Vec__num`'s
-    // field records would otherwise only exist if something else in
-    // the program happened to instantiate `Vec<num>` first, which isn't
-    // guaranteed. Tries compound first, then enum; a plain,
-    // already-non-generic impl's `has_concrete_dtype` is simply false
-    // and skips this entirely.
+    // Vec<num> { ... }`) to be instantiated now, after the type pass
+    // registered the template but before the impl bodies below. Such a
+    // method's implicit `self` is already a bare `Vec__num*`, so
+    // `self.<field>` never goes through the lazy-instantiation path, and
+    // `Vec__num`'s field records would otherwise exist only if something
+    // else happened to instantiate `Vec<num>` first. Tries compound then
+    // enum; an already-non-generic impl skips this entirely.
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
@@ -9656,16 +9610,11 @@ impl Codegen {
         _ -> {}
       }
     }
-    // A single combined pass, walking `nodes` once in true source
-    // order, emits every plain impl's methods and every plain
-    // function's body, rather than two separate flat "all impls, then
-    // all functions" passes. Two flat passes would unconditionally emit
-    // every impl method before every plain function, even when a plain
-    // function is textually earlier in source and an impl method calls
-    // it and both are excluded from the early forward-declare pass
-    // above, falling back to natural source position. Same
-    // one-combined-pass fix already applied to plain enums/compounds
-    // above.
+    // One combined pass in source order emits every plain impl's methods
+    // and every plain function's body. Two flat passes would put every
+    // impl method before every plain function, breaking the case where a
+    // function is textually earlier, an impl method calls it, and both
+    // were excluded from the forward-declare pass above.
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
@@ -10092,11 +10041,9 @@ test "emit_statement emits a 'let' declaration as '__auto_type', inferring its t
 }
 
 test "emit_statement infers a 'let' declaration's type from a plain field-access initializer, so a chained field read off of it still resolves" {
-  // a `let ct = self.current_token; ... ct.pos.line
-  // ...` initializer needs `infer_let_expr_type` to resolve the whole
-  // chain via `resolve_field_chain`, the same resolution a later read
-  // off of it needs; otherwise the later `ct.pos.line` read is rejected
-  // as an unrecognized local.
+  // A `let ct = self.current_token;` initializer needs
+  // `infer_let_expr_type` to resolve the whole chain, or the later
+  // `ct.pos.line` read is rejected as an unrecognized local.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("self", "ParseState", true);
@@ -10152,13 +10099,9 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
 }
 
 test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was inferred from a method call" {
-  // `let last = self.tokens.last(); fit last { .Some(t)
-  // -> {...} .None -> {...} }` needs `last`'s type resolved, not left
-  // as the un-inferred "__let_infer__" sentinel, or `fit`'s
-  // bare-shorthand pattern match against it is rejected.
-  // `infer_let_expr_type` resolves a method-call initializer's type
-  // through the same `resolve_field_chain`/`lookup_impl_method_rtype`
-  // lookups `emit_fit`'s call-subject handling uses.
+  // `let last = self.tokens.last();` followed by a `fit last` needs
+  // `last`'s type resolved rather than left as the `__let_infer__`
+  // sentinel, or the bare-shorthand pattern match is rejected.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -10584,11 +10527,9 @@ test "emit_function emits a plain no-arg function definition with indentation" {
 }
 
 test "emit_function emits a deferred statement at ordinary fall-through, after the rest of the body" {
-  // `.StatementDefer` (e.g. `defer free(loc);`) needs
-  // an `emit_statement` case. A `defer` doesn't emit anything at its
-  // source position; it's replicated at the block's actual exit point
-  // instead, here just ordinary fall-through off the end of the
-  // function body.
+  // A `defer` emits nothing at its source position; it is replicated at
+  // the block's real exit point, here the fall-through off the end of
+  // the function body.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -10658,10 +10599,9 @@ test "emit_function emits a deferred statement at ordinary fall-through, after t
 }
 
 test "emit_function emits a deferred statement before an early 'ret', snapshotting the return value first" {
-  // `ret <expr>;` must evaluate `<expr>` before any
-  // pending defer runs, since a defer might mutate a variable the
-  // expression already read, so a `ret` with pending defers snapshots
-  // into `__auto_type __fun_defer_ret` first.
+  // `ret <expr>;` must evaluate `<expr>` before any pending defer runs,
+  // a defer being able to mutate a variable the expression already read,
+  // so it snapshots into `__auto_type __fun_defer_ret` first.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -11251,12 +11191,10 @@ test "emit_statement emits a Vec iterator for with an explicit index name" {
 }
 
 test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Vec instantiation, not just the bare 'Vec' stand-in" {
-  // a real `Vec<str> local;` declaration records its
-  // local under `write_type`'s resolved (mangled) name, "Vec__str",
-  // never the bare "Vec" every other test in this file hand-records via
-  // `record_local` directly. `emit_for_iter`'s "is this a Vec?" check
-  // must not require an exact match against "Vec", or it rejects every
-  // real declaration outright.
+  // A real `Vec<str> local;` declaration records its local under
+  // `write_type`'s mangled name `Vec__str`, never the bare `Vec` the
+  // other tests hand-record. `emit_for_iter`'s Vec check must not
+  // require an exact `Vec` match, or it rejects every real declaration.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("items", "Vec__str", false);
@@ -11287,15 +11225,11 @@ test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Ve
 }
 
 test "emit_statement records a Vec iterator's own item as a known local, so a NESTED iterator over it resolves" {
-  // `for existing : combos { for et : existing { ... }
-  // }` with `combos: Vec<Vec<str>>` needs the outer loop's item
-  // (`existing`) recorded as a known local, or the inner loop over it
-  // is rejected outright. `Codegen.local_dtype` holds `combos`'s
-  // full `DataType` (`Vec<Vec<str>>`, recorded via `record_local_typed`
-  // the same way a real `Variable` declaration/parameter does) lets
-  // `emit_for_iter` read the element type (`Vec<str>`) directly off
-  // `generic_args`, rather than reverse-engineering it from a mangled
-  // name string.
+  // Iterating `combos: Vec<Vec<str>>` and then its item needs the outer
+  // loop's item recorded as a known local, or the inner loop is
+  // rejected. `local_dtype` holds `combos`'s full `DataType`, so
+  // `emit_for_iter` reads the element type off `generic_args` instead of
+  // reverse-engineering it from a mangled name.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -11325,11 +11259,10 @@ test "emit_statement records a Vec iterator's own item as a known local, so a NE
   outer_vec.generic_args.push(inner_vec);
   g.record_local_typed("combos", "Vec__Vec__str", false, outer_vec);
 
-  // Pre-warm Vec<str>'s own monomorphization (into a throwaway scratch
-  // buffer) so the assertion below can match the for-loop's exact text
-  // without also accounting for the one-time "typedef struct Vec__str
-  // {...}" emission emit_for_iter's own element-type resolution below
-  // would otherwise trigger inline.
+  // Pre-warms `Vec<str>`'s monomorphization into a throwaway buffer, so
+  // the assertion below matches the for-loop's exact text without the
+  // one-time `typedef struct Vec__str {...}` that element-type
+  // resolution would otherwise emit inline.
   CodegenState warm_st = codegen_state_new();
   CodegenState* real_state = g.state;
   g.state = &warm_st;
@@ -11534,10 +11467,9 @@ test "emit_statement rejects a fit over a call subject (no temp-var hoisting)" {
 }
 
 test "emit_statement rejects a conditionless fit branch that carries bindings" {
-  // Not reachable from real parsed source (a `_` default arm never has
-  // destructuring bindings), but exercised directly as a defensive
-  // invariant check: `has_bindings` must not be treated as a normal
-  // default arm just because `has_condition` is false.
+  // Not reachable from parsed source, a `_` default arm never carrying
+  // bindings, but checked directly: `has_bindings` must not be treated
+  // as a normal default arm just because `has_condition` is false.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -11726,12 +11658,9 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
 }
 
 test "emit_statement emits a fit over a method-call subject with a CHAINED field-access receiver" {
-  // `fit self.state.token_peek_prev_n(1) { ... }` needs
-  // the method-call-subject branch to accept a receiver
-  // (`self.state`) that's itself a chained field access, not just a
-  // bare local matching a plain `.Identifier`. The receiver resolves
-  // via `resolve_field_chain`, the same lookup
-  // `emit_method_call`/`infer_let_expr_type` use.
+  // `fit self.state.token_peek_prev_n(1) { ... }` needs the
+  // method-call-subject branch to accept a receiver that is itself a
+  // chained field access, not only a bare `.Identifier` local.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("self", "Parser", true);
