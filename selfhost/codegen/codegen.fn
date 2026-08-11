@@ -5636,26 +5636,19 @@ impl Codegen {
     }
   }
 
-  // Emits `for item : arr { ... }` / `for i, item :: arr { ... }` as a
+  // Emits `for item : arr { ... }` and `for i, item :: arr { ... }` as a
   // Vec fast path: `for (int64_t idx = 0; idx < arr.len; idx++) {
-  // __auto_type item = arr.data[idx]; ... }`, reading straight from
-  // `Vec<T>`'s `.len`/`.data` fields rather than a generic
-  // `Iterator`-quirk `.next()` dispatch. `idx` is `fi.index_name` when
-  // given, else a synthetic `__fun_i`; `__auto_type` lets the C compiler
-  // infer `item`'s type, so this codegen never needs to know `T` itself.
-  // `arr` must be a plain identifier that's a known local whose declared
-  // type is some instantiation of `Vec<T>`, checked structurally via
-  // `lookup_local_dtype` when available, else by name (bare "Vec" or a
-  // "Vec__"-prefixed mangled instantiation).
+  // __auto_type item = arr.data[idx]; ... }`, reading `Vec<T>`'s
+  // `.len`/`.data` directly rather than dispatching through an
+  // `Iterator`-quirk `.next()`. `idx` is `fi.index_name` when given, else
+  // a synthetic `__fun_i`, and `__auto_type` lets the C compiler infer
+  // `item`'s type, so `T` never needs to be known here.
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
-    // The iterable is either a plain identifier (a known local, checked
-    // structurally via `lookup_local_dtype` or by name; see this
-    // function's doc comment) or a chained field access (`for a :
-    // dt.generic_args { ... }`), resolved via `resolve_field_chain`
-    // instead. `ChainResolution.dtype` carries the field's full
-    // structured `DataType` too, when `record_compound_typed` recorded
-    // it, letting `item` be recorded as a known local of its real
-    // element type here too, same as the identifier case below.
+    // The iterable is either a plain identifier, checked structurally via
+    // `lookup_local_dtype` or by name, or a chained field access resolved
+    // via `resolve_field_chain`. `ChainResolution.dtype` carries the
+    // field's structured `DataType` when `record_compound_typed` had one,
+    // so `item` can be recorded with its real element type either way.
     str arr_text = "";
     Option<DataType> arr_dtype = .None;
     Option<str> arr_type_name = .None;
@@ -5668,10 +5661,9 @@ impl Codegen {
         iterable_is_identifier = true;
       }
       .Expression(e) -> {
-        // `.` (a chained field access) or `()` (a call, e.g.
-        // `for k : squares.keys() { ... }`); `resolve_field_chain`
-        // already handles a call node passed directly to it, not just
-        // one nested as someone else's receiver.
+        // A chained field access, or a call such as
+        // `for k : squares.keys() { ... }`. `resolve_field_chain` handles
+        // a call node passed directly, not only one nested as a receiver.
         if !equals(e.op, ".") && !equals(e.op, "()") {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
@@ -5687,14 +5679,13 @@ impl Codegen {
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
 
-    // Element `DataType`, when knowable structurally, lets `item` be
-    // recorded as a known local of its real type below, so a further
-    // nested iteration over it resolves too. `arr_dtype` being `.Some`
-    // doesn't always mean it's structural: a local from a monomorphized
-    // generic method's registered return type has an already-mangled
-    // `type_str` (e.g. "Vec__GenericEnumVariantTemplate") with empty
-    // `generic_args`. Recognized as a Vec either way, but only the
-    // structural case can also resolve `item`'s element type.
+    // A structurally knowable element `DataType` lets `item` be recorded
+    // as a known local of its real type below, so a nested iteration over
+    // it resolves too. `arr_dtype` being `.Some` doesn't guarantee that:
+    // a local from a monomorphized method's return type has an
+    // already-mangled `type_str` with empty `generic_args`. Either shape
+    // is recognized as a Vec, but only the structural one resolves the
+    // element type.
     Option<DataType> elem_dt = .None;
     bin is_vec = false;
     if arr_dtype.is_some() {
@@ -5712,11 +5703,9 @@ impl Codegen {
         is_vec = true;
       }
     }
-    // A genuine sized array local (`num[] arr`, not decayed to a
-    // pointer; see `dtype_is_array_as_pointer`) has no `.len`/`.data` in
-    // C; its length comes from the `sizeof(arr)/sizeof(arr[0])` trick
-    // instead. See this function's tail for how a multi-dimensional raw
-    // array generalizes this, via `Codegen.local_multidim_names`.
+    // A sized array local (`num[] arr`, not decayed to a pointer) has no
+    // `.len`/`.data` in C, so its length comes from
+    // `sizeof(arr)/sizeof(arr[0])` instead.
     bin is_raw_array = false;
     str elem_c_type = "int64_t";
     // Defaults to 1 (an ordinary single-dimension array) when
@@ -5734,14 +5723,13 @@ impl Codegen {
         }
       }
     }
-    // `Set<T>`/`Map<K, V>` (a bare identifier, structurally known) drive
-    // `for item : set`/`for key : map`/`for key, value :: map` through
-    // the `iter()`/`next()`/`Option` protocol instead of a direct index.
-    // Requires the collection's structural generic args, since the
-    // mangled-name-only case can't recover the element type needed to
+    // A structurally known `Set<T>` or `Map<K, V>` iterates through the
+    // `iter()`/`next()`/`Option` protocol instead of a direct index. This
+    // needs the collection's structural generic args, since a
+    // mangled-name-only type can't recover the element type needed to
     // instantiate `SetIter<T>`/`MapIter<K, V>`/`Option<T>`, and a bare
-    // identifier receiver, since an expression receiver would be an
-    // rvalue and `&<rvalue>` to call `.iter()` on it is invalid C.
+    // identifier receiver, since an rvalue receiver can't take `&` to
+    // call `.iter()` on it.
     if !is_vec && !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
       let coll_dt = arr_dtype.unwrap();
       bin is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
@@ -5821,16 +5809,12 @@ impl Codegen {
         self.state.write(opt_tmp);
         self.state.write(" = ");
         self.state.write(iter_name);
-        // `SetIter<T>`/`MapIter<K, V>` both declare `next` under
-        // `impl ... as Iterator<...>`, a quirked impl block, unlike
-        // `iter`/`get`'s plain ones just above. A quirked impl's mangled
-        // method name embeds the quirk name
-        // (`owner__QuirkName__method`; see
-        // `emit_one_generic_impl_method`), so the plain `owner__method`
-        // this function otherwise uses doesn't resolve here. Hardcoding
-        // "Iterator" matches both stdlib types' actual declarations,
-        // acceptable since this branch is already scoped to Set/Map
-        // specifically, not a general Iterator-quirk dispatch.
+        // `SetIter<T>` and `MapIter<K, V>` declare `next` under
+        // `impl ... as Iterator<...>`, unlike the plain `iter`/`get`
+        // above. A quirked impl mangles to `owner__QuirkName__method`, so
+        // the plain `owner__method` form doesn't resolve here.
+        // Hardcoding "Iterator" is safe because this branch is scoped to
+        // Set and Map, not a general Iterator-quirk dispatch.
         self.state.write("__Iterator__next(&");
         self.state.write(it_tmp);
         self.state.write(");\n");
@@ -5915,14 +5899,12 @@ impl Codegen {
       idx_name = fi.index_name;
     }
 
-    // A Vec-typed iterable that isn't a bare identifier (e.g.
-    // `squares.keys()`) is an rvalue: `arr_text` is a call's rendered
-    // text, and re-embedding it in both the loop condition and the body
-    // would re-evaluate the call once per condition check and once per
-    // iteration, re-allocating a new Vec each time. Materialized into a
-    // temp once up front instead. Raw arrays never reach here as a
-    // non-identifier, since the earlier `is_array` check already
-    // requires a real local.
+    // A Vec-typed iterable that isn't a bare identifier, such as
+    // `squares.keys()`, is an rvalue: re-embedding `arr_text` in both the
+    // loop condition and the body would re-evaluate the call each time,
+    // re-allocating a Vec per iteration, so it is materialized into a
+    // temp up front. Raw arrays never reach here as a non-identifier,
+    // since the earlier `is_array` check requires a real local.
     bin needs_vec_src_temp = is_vec && !iterable_is_identifier;
     str vec_src_text = arr_text;
     if needs_vec_src_temp {
@@ -5942,17 +5924,13 @@ impl Codegen {
       self.state.write_indent();
     }
 
-    // A multi-dimensional raw array's length bound for this level can't
-    // be computed from `arr_text` once `arr_text` is a nested item
-    // (`row` in `for item : row`, itself a previous `for row : matrix`
-    // loop's item), since `row`'s runtime value has already decayed to
-    // a pointer. `Codegen.local_multidim_names` tracks this: when
-    // `arr_text` was itself registered as a multi-dim item, `len_root`/
-    // `len_offset` redirect the bound expression back to the true root
-    // array name with the right number of leading `[0]` index levels.
-    // Defaults to `arr_text` itself with zero leading `[0]`s for the
-    // ordinary case, a 1D array or the outermost loop over a multi-dim
-    // one.
+    // A multi-dimensional raw array's length bound can't be computed from
+    // `arr_text` once that is a nested item (`row` in `for item : row`),
+    // since `row`'s runtime value has already decayed to a pointer. When
+    // `arr_text` was registered as a multi-dim item,
+    // `len_root`/`len_offset` redirect the bound back to the root array
+    // name with the right number of leading `[0]` levels; otherwise they
+    // default to `arr_text` with zero levels.
     str len_root = arr_text;
     num len_offset = 0;
     if is_raw_array && iterable_is_identifier {
@@ -5963,11 +5941,10 @@ impl Codegen {
         len_offset = m.depth;
       }
     }
-    // How many dimensions are left below this one: 0 for an ordinary 1D
-    // array or the innermost level of a multi-dim one (`item` is a plain
-    // scalar), 1 for a 2D array's row (`item` decays to a single-star
-    // pointer), 2+ for a 3D+ array's layer (`item` needs `__auto_type`
-    // to deduce a "pointer to array" type; see below).
+    // How many dimensions are left below this one: 0 when `item` is a
+    // plain scalar, 1 for a 2D array's row, where `item` decays to a
+    // single-star pointer, and 2 or more for a deeper array's layer,
+    // where `item` needs `__auto_type` to deduce a pointer-to-array type.
     num element_depth = 0;
     if is_raw_array && raw_array_depth > 0 {
       element_depth = raw_array_depth - 1;
@@ -6001,14 +5978,11 @@ impl Codegen {
     self.state.write("++) {\n");
     self.state.indent_level = self.state.indent_level + 1;
     self.state.write_indent();
-    // An element that's itself still an array of 2+ dimensions (a 3D+
-    // array's layer, `item = tensor[idx]` where `tensor` is
-    // `num[][][]`) needs `__auto_type` so the compiler deduces the
-    // correct "pointer to array" type (`int64_t (*)[4]`); a naive
-    // pointer-star expansion would be a flat double pointer instead,
-    // losing the inner dimension's stride. A 1D array or a 2D array's
-    // row has no such ambiguity: plain `elem_c_type` plus the right
-    // number of stars.
+    // An element that is itself an array of two or more dimensions needs
+    // `__auto_type` so the compiler deduces the pointer-to-array type
+    // (`int64_t (*)[4]`); a naive pointer-star expansion would give a
+    // flat double pointer, losing the inner dimension's stride. A 1D
+    // array or a 2D row takes `elem_c_type` plus stars.
     if is_vec || element_depth >= 2 {
       self.state.write("__auto_type ");
     } else {
@@ -6030,11 +6004,10 @@ impl Codegen {
     }
     self.state.write(idx_name);
     self.state.write("];\n");
-    // `item` is recorded as a known local of the element type too, when
-    // `elem_dt` was resolved above; otherwise it's left unrecorded, so a
-    // later `item.field`/nested-iteration read is rejected rather than
-    // guessed. Dereferencing it (`*item`) works either way, since that
-    // doesn't need a locals lookup at all.
+    // `item` is recorded as a known local of the element type when
+    // `elem_dt` resolved above; otherwise it stays unrecorded, so a later
+    // `item.field` read is rejected rather than guessed. `*item` works
+    // either way, needing no locals lookup.
     if elem_dt.is_some() {
       let edt = elem_dt.unwrap();
       let elem_name = self.resolve_type_name(edt);
@@ -6042,12 +6015,10 @@ impl Codegen {
         self.record_local_typed(fi.item_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
       }
     }
-    // A raw array's item is also recorded as a known local of the
-    // decremented-depth type, so a further nested `for x : item` can
-    // resolve `arr_dtype`/`is_raw_array` structurally for `item`'s name,
-    // not just track its multidim root/depth (registered separately,
-    // right below, only when `item` is still an array after this
-    // level).
+    // A raw array's item is recorded at the decremented depth, so a
+    // nested `for x : item` can resolve `is_raw_array` structurally for
+    // `item`'s name rather than relying on its multidim root and depth,
+    // registered separately just below.
     if is_raw_array && raw_arr_dt.is_some() {
       DataType item_dt = raw_arr_dt.unwrap();
       item_dt.array_depth = element_depth;
@@ -6075,17 +6046,13 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits one `fit` branch that matches a tagged-union enum variant
-  // (bare shorthand `.Variant`/`.Variant(x)`, or qualified
-  // `EnumName.Variant`/`EnumName.Variant(x)`, with or without
-  // destructuring bindings) as `subj.tag == EnumName_Variant { ... }`
-  // (or `subj->tag == ...` when `subj_is_pointer`), chained with a
-  // leading `if`/`else if` per `wrote_branch`, matching the
-  // literal-chain path's convention in `emit_fit`. Each positional
-  // binding name gets its own `__auto_type name =
-  // subj.payload.Variant._N;` declaration first. Also registers each
-  // binding as a known local when its payload field type is on record;
-  // see `Codegen.enum_variant_payload_owner`.
+  // Emits one `fit` branch matching a tagged-union enum variant, bare or
+  // qualified and with or without destructuring bindings, as
+  // `subj.tag == EnumName_Variant { ... }` (`subj->tag` when
+  // `subj_is_pointer`), chained with a leading `if`/`else if` per
+  // `wrote_branch`. Each positional binding gets an `__auto_type name =
+  // subj.payload.Variant._N;` declaration first, and is registered as a
+  // known local when its payload field type is on record.
   emit_fit_enum_branch(
     str subj_name,
     bin subj_is_pointer,
@@ -6129,14 +6096,9 @@ impl Codegen {
         self.state.write("._");
         self.state.write(format_num(bi));
         self.state.write(";\n");
-        // See `Codegen.enum_variant_payload_owner`'s doc comment: a
-        // known payload field type means `bname` is registered as a
-        // known local too, so further access on it inside the branch
-        // (a chained field access, another `fit`, a method call --
-        // `_prev_token_is_bare_zero`'s real body, e.g., destructures
-        // `t` then reads `t.data`) resolves. An unresolvable payload
-        // type just leaves `bname` unregistered, same as everywhere
-        // else in this file.
+        // A known payload field type registers `bname` as a known local,
+        // so further access on it inside the branch resolves. An
+        // unresolvable payload type leaves `bname` unregistered.
         let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, bi);
         if payload_info.is_some() {
           let info = payload_info.unwrap();
@@ -6155,13 +6117,11 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits one `fit` branch that matches a plain (payload-less) enum's
-  // variant (bare shorthand `.Variant`, or qualified `EnumName.Variant`;
-  // no destructuring, since a plain enum has no payload to bind) as
-  // `subj == EnumName_Variant { ... }` (or `(*subj) == ...` when
-  // `subj_is_pointer`): a direct C-enum-value comparison, not
-  // `emit_fit_enum_branch`'s `.tag ==`, since that shape only exists on
-  // a tagged-union struct.
+  // Emits one `fit` branch matching a plain (payload-less) enum variant
+  // as `subj == EnumName_Variant { ... }`, or `(*subj) == ...` when
+  // `subj_is_pointer`. A direct C-enum-value comparison rather than
+  // `emit_fit_enum_branch`'s `.tag ==`, which only exists on a
+  // tagged-union struct. No destructuring, there being no payload.
   emit_fit_plain_enum_branch(
     str subj_name,
     bin subj_is_pointer,
@@ -6198,30 +6158,26 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits `fit subject { patterns -> { body } ... }` as a chain of C
-  // `if`/`else if`/`else` blocks. A branch's condition is a tagged-union
-  // enum-variant pattern (bare or qualified, destructuring or not; see
-  // `emit_fit_enum_branch`) when it has the `Identifier . Identifier` or
-  // `Blank . Identifier` shape and names a known enum/variant, else a
-  // literal pattern compared against `subject` (`strcmp(...) == 0` for
-  // `str`, `==` otherwise; a comma-chained pattern matches any of its
-  // values). An unrecognized enum/variant or subject shape is rejected
-  // rather than guessed. `subject` must be a plain identifier, a
-  // `*name` pointer dereference, a chained field access, or a
-  // `receiver.method()` call matching `emit_method_call` exactly; the
-  // first three are re-evaluated per branch since none has a side
-  // effect when read twice, while a call subject is hoisted into one
-  // `__auto_type __fit_subjN = <call>;` temp (`next_fit_subj_name`)
-  // with its bare-shorthand enum type resolved from the callee's
-  // declared return type rather than a local's.
-  // Next unique name for `emit_fit`'s call-subject temp
-  // (`__fit_subj1`, `__fit_subj2`, ...); see
-  // `Codegen.fit_subj_temp_counter`.
+  // Next unique name for `emit_fit`'s call-subject temp (`__fit_subj1`,
+  // `__fit_subj2`, ...).
   next_fit_subj_name() str {
     self.fit_subj_temp_counter = self.fit_subj_temp_counter + 1;
     ret format("__fit_subj{num}", self.fit_subj_temp_counter);
   }
 
+  // Emits `fit subject { patterns -> { body } ... }` as a chain of C
+  // `if`/`else if`/`else` blocks. A branch condition is a tagged-union
+  // enum-variant pattern when it has the `Identifier . Identifier` or
+  // `Blank . Identifier` shape and names a known enum variant, else a
+  // literal pattern compared against `subject` (`strcmp(...) == 0` for
+  // `str`, `==` otherwise; a comma-chained pattern matches any of its
+  // values). An unrecognized enum or subject shape is rejected rather
+  // than guessed. `subject` must be a plain identifier, a `*name`
+  // dereference, a chained field access, or a `receiver.method()` call.
+  // The first three are re-evaluated per branch, none having a side
+  // effect when read twice; a call subject is hoisted into one
+  // `__auto_type __fit_subjN = <call>;` temp whose bare-shorthand enum
+  // type comes from the callee's declared return type.
   emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
     str subj_name = "";
     bin subj_is_pointer = false;
@@ -6233,12 +6189,10 @@ impl Codegen {
         subj_is_pointer = self.lookup_local_is_pointer(name).unwrap_or(false);
       }
       .Unary(u) -> {
-        // `fit await self.foo(...) { ... }`: the subject is an
-        // `await`-wrapped call. Resolves the callee's return type via
-        // the same two lookups the plain "()"-call case below uses,
-        // then hoists a temp `__auto_type __fit_subj` holding the
-        // lowered await call (`emit_await`, not a plain
-        // `emit_expr`/`emit_method_call`).
+        // An `await`-wrapped call subject (`fit await self.foo(...)`).
+        // Resolves the callee's return type with the same lookups the
+        // plain `()`-call case below uses, then hoists an `__auto_type
+        // __fit_subj` temp holding the lowered await call.
         if equals(u.op, "await") {
           ExprNode await_call;
           fit u.operand.kind {
@@ -6309,11 +6263,9 @@ impl Codegen {
           if !dot_e.has_left || !dot_e.has_right {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
-          // `fit <plain function call>(...) { ... }`: the callee is a
-          // bare `.Identifier`, not a `recv.method()` `.Expression`,
-          // resolved via the same `lookup_function_rtype` lookup
-          // `infer_let_expr_type`'s "()" case uses, and emitted the same
-          // way the method-call branch below does.
+          // A plain function-call subject, whose callee is a bare
+          // `.Identifier` rather than a `recv.method()` `.Expression`,
+          // resolved via `lookup_function_rtype`.
           bin is_plain_fn_call = false;
           str plain_fn_name = "";
           fit dot_e.left.kind {
@@ -6354,10 +6306,8 @@ impl Codegen {
             if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
-            // The receiver may itself be a chained field access, not
-            // just a bare local, resolved via `resolve_field_chain`,
-            // the same lookup `emit_method_call`/`infer_let_expr_type`
-            // use for a chained method-call receiver.
+            // The receiver may be a chained field access rather than a
+            // bare local, so it resolves via `resolve_field_chain`.
             let recv_chain = self.resolve_field_chain(recv_e.left);
             if recv_chain.is_none() {
               ret .Some(CodegenErrorKind.UnsupportedNode);
@@ -6445,16 +6395,13 @@ impl Codegen {
               .Identifier(vn) -> { variant_name = vn; }
               _ -> {}
             }
-            // An explicit `EnumName.Variant` condition (`Option.Some(x)
-            // ->`) writes the enum's bare template name when the
-            // subject is a generic enum, but only the monomorphized
-            // instantiation's mangled name (e.g. "Option__num") is ever
-            // registered. The bare-shorthand form doesn't hit this, since
-            // it already falls back to `subj_type` directly. If the
-            // plain lookup fails, but `enum_name` is a known generic
-            // template and `subj_type` is one of its concrete
-            // instantiations, treat the condition as matching
-            // `subj_type`'s variant instead.
+            // An explicit `EnumName.Variant` condition names the bare
+            // template when the subject is a generic enum, but only the
+            // mangled instantiation is registered. When the plain lookup
+            // fails and `subj_type` is a concrete instantiation of
+            // `enum_name`, the condition matches `subj_type`'s variant
+            // instead. Bare shorthand skips this, already falling back to
+            // `subj_type`.
             bin has_variant = self.enum_has_variant(enum_name, variant_name);
             str effective_enum_name = enum_name;
             if !has_variant && have_enum_name && subj_type.is_some() {
@@ -6469,10 +6416,8 @@ impl Codegen {
             }
             if have_enum_name && has_variant {
               // A plain (payload-less) enum has no `.tag` field, so it
-              // needs a different comparison than a tagged-union
-              // subject's `.tag == ...`; see
-              // `emit_fit_plain_enum_branch`, decided per recorded
-              // enum.
+              // needs a different comparison from a tagged union's
+              // `.tag == ...`.
               if self.enum_is_tagged_union_named(effective_enum_name) {
                 let eerr = self.emit_fit_enum_branch(
                   subj_name,
