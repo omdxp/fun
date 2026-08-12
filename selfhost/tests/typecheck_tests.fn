@@ -1,0 +1,266 @@
+// Type checking cases: a program, and whether the checker accepts it.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..semantics.typecheck;
+imp std.string;
+imp std.result;
+
+// Parses `src` and checks it, reporting the message of the first type
+// error, or an empty string when the program checks out.
+fun check(str src) str {
+  let tokens = tokenize(src, "t.fn");
+  if tokens.is_err() {
+    ret "lex error";
+  }
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret "parse error";
+  }
+  let checked = typecheck_program(&state.nodes);
+  if checked.is_err() {
+    ret checked.unwrap_err().message;
+  }
+  ret "";
+}
+
+fun rejects(str src, str label) {
+  assert !equals(check(src), ""), label;
+}
+
+fun accepts(str src, str label) {
+  str got = check(src);
+  assert equals(got, ""), label;
+}
+
+test "a value must fit the type it initializes" {
+  rejects(`fun main() {
+  `  num x = "hi";
+  `}`, "expected a string not to initialize a number");
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  dec y = x;
+    `}`,
+    "expected a whole number to widen into a decimal"
+  );
+}
+
+test "a decimal does not narrow into a whole number on its own" {
+  rejects(
+    `fun main() {
+    `  dec x = 1.5;
+    `  num y = x;
+    `}`,
+    "expected the narrowing to be rejected"
+  );
+}
+
+test "a returned value must fit what the function promises" {
+  rejects(`fun f() num {
+  `  ret true;
+  `}`, "expected a truth value not to stand for a number");
+  accepts(`fun f() num {
+  `  ret 1;
+  `}`, "expected a number to be returned");
+}
+
+test "a call passes what the callee declares" {
+  rejects(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1);
+    `}`,
+    "expected the missing argument to be reported"
+  );
+  rejects(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1, "two");
+    `}`,
+    "expected the argument type to be reported"
+  );
+  accepts(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1, 2);
+    `}`,
+    "expected the call to check out"
+  );
+}
+
+test "a parameter with a default may be left out" {
+  accepts(
+    `fun greet(str name, str greeting = "hi") str { ret greeting; }
+    `fun main() {
+    `  str s = greet("world");
+    `}`,
+    "expected the defaulted parameter to be optional"
+  );
+}
+
+test "only an async function awaits, and only an async call is awaited" {
+  rejects(
+    `async fun work() num { ret 1; }
+    `fun main() {
+    `  num x = await work();
+    `}`,
+    "expected await outside an async function to be rejected"
+  );
+  rejects(
+    `fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = await work();
+    `}`,
+    "expected awaiting a plain call to be rejected"
+  );
+  rejects(
+    `async fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = work();
+    `}`,
+    "expected the missing await to be reported"
+  );
+  accepts(
+    `async fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = await work();
+    `}`,
+    "expected the awaited call to check out"
+  );
+}
+
+test "a const binding is not assigned again" {
+  rejects(
+    `fun main() {
+    `  const num x = 5;
+    `  x = 10;
+    `}`,
+    "expected the reassignment to be rejected"
+  );
+  rejects(
+    `const num MAX = 100;
+    `fun bump() {
+    `  MAX = 200;
+    `}`,
+    "expected the global reassignment to be rejected"
+  );
+}
+
+test "an array literal holds one type" {
+  rejects(
+    `fun main() {
+    `  num[] arr = [1, "x"];
+    `}`,
+    "expected the mixed literal to be rejected"
+  );
+  accepts(
+    `fun main() {
+    `  num[] arr = [1, 2, 3];
+    `}`,
+    "expected the uniform literal to check out"
+  );
+}
+
+test "a decimal has no remainder" {
+  rejects(
+    `fun main() {
+    `  dec x = 5.0 % 2.0;
+    `}`,
+    "expected the remainder of a decimal to be rejected"
+  );
+}
+
+test "a field is read from the type that declares it" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num x = c.missing;
+    `}`,
+    "expected the unknown field to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num x = c.base;
+    `}`,
+    "expected the declared field to be read"
+  );
+}
+
+test "an async method is awaited like an async function" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  async add(num x) num { ret self.base + x; }
+    `}
+    `async fun main() {
+    `  Counter c;
+    `  num out = c.add(2);
+    `}`,
+    "expected the missing await on a method to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  async add(num x) num { ret self.base + x; }
+    `}
+    `async fun main() {
+    `  Counter c;
+    `  num out = await c.add(2);
+    `}`,
+    "expected the awaited method call to check out"
+  );
+}
+
+test "a generic function's type parameters stand for anything" {
+  accepts(
+    `fun id<T>(T x) T { ret x; }
+    `fun main() {
+    `  num out = id(2);
+    `  str s = id("hi");
+    `}`,
+    "expected a type parameter to accept either call"
+  );
+}
+
+test "nil stands for a pointer, and zero for a null one" {
+  accepts(
+    `fun main() {
+    `  num* p = nil;
+    `  str s = nil;
+    `}`,
+    "expected nil to stand for a pointer and a string"
+  );
+}
+
+test "a method call is checked against what the method declares" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  add(num x) num { ret self.base + x; }
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num out = c.add(1, 2);
+    `}`,
+    "expected the extra argument to a method to be reported"
+  );
+}

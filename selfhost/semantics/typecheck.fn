@@ -150,9 +150,10 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   if to.array_depth != from.array_depth {
     ret false;
   }
-  // The numeric kinds convert into each other, as C does.
+  // A whole number widens into a decimal, but a decimal does not narrow
+  // back into one without being asked to.
   if _is_numeric(to) && _is_numeric(from) {
-    ret true;
+    ret to.base == DataTypeType.Dec || from.base != DataTypeType.Dec;
   }
   if to.base != from.base {
     ret false;
@@ -207,9 +208,15 @@ fun _error(str message, Node* node) TypeError {
   ret e;
 }
 
-// The types of everything in scope, innermost last.
+// A name in scope: what it holds, and whether it may be assigned again.
+pub compound Binding {
+  CheckedType type;
+  bin is_const;
+}
+
+// The names in scope, innermost last.
 pub compound TypeEnv {
-  Vec<Map<str, CheckedType>> scopes;
+  Vec<Map<str, Binding>> scopes;
 }
 
 pub fun type_env_new() TypeEnv {
@@ -220,7 +227,7 @@ pub fun type_env_new() TypeEnv {
 
 impl TypeEnv {
   pub push() {
-    Map<str, CheckedType> scope;
+    Map<str, Binding> scope;
     scope.init(8);
     self.scopes.push(scope);
   }
@@ -229,30 +236,46 @@ impl TypeEnv {
     if self.scopes.len == 0 {
       ret;
     }
-    Map<str, CheckedType> scope = self.scopes.pop();
+    Map<str, Binding> scope = self.scopes.pop();
     scope.free();
   }
 
   pub define(str name, CheckedType type) {
+    self.bind(name, type, false);
+  }
+
+  pub bind(str name, CheckedType type, bin is_const) {
     if self.scopes.len == 0 {
       self.push();
     }
-    Map<str, CheckedType>* scope = &self.scopes.data[self.scopes.len - 1];
-    scope.put(name, type);
+    Binding b;
+    b.type = type;
+    b.is_const = is_const;
+    Map<str, Binding>* scope = &self.scopes.data[self.scopes.len - 1];
+    scope.put(name, b);
   }
 
-  // The type bound to `name`, searching inner scopes first.
-  pub lookup(str name) Option<CheckedType> {
+  // What `name` is bound to, searching inner scopes first.
+  pub binding(str name) Option<Binding> {
     num i = self.scopes.len;
     for i > 0 {
       i = i - 1;
-      Map<str, CheckedType>* scope = &self.scopes.data[i];
+      Map<str, Binding>* scope = &self.scopes.data[i];
       let found = scope.at(name);
       if found.is_some() {
         ret found;
       }
     }
     ret .None;
+  }
+
+  // The type bound to `name`, searching inner scopes first.
+  pub lookup(str name) Option<CheckedType> {
+    let found = self.binding(name);
+    if found.is_none() {
+      ret .None;
+    }
+    ret .Some(found.unwrap().type);
   }
 
   pub free() {
@@ -263,12 +286,97 @@ impl TypeEnv {
   }
 }
 
+// What a compound holds, keyed by field name.
+compound CompoundInfo {
+  Map<str, CheckedType> fields;
+  // A generic compound's fields mention its type parameters, which
+  // stand for whatever an instantiation supplies.
+  bin is_generic;
+}
+
+// The methods declared on a type, keyed by method name. A quirk's
+// methods are registered the same way, since a call reads the same.
+compound MethodTable {
+  Map<str, FnSig> methods;
+}
+
+fun _method_table_new() MethodTable {
+  MethodTable t;
+  t.methods.init(8);
+  ret t;
+}
+
+// The bare name of a method whose declared name carries the type it
+// belongs to, as `Counter__add` carries `Counter`.
+// Drops a method's receiver, which is declared as its first parameter
+// but supplied by the call's receiver rather than its arguments.
+fun _without_self(FnSig sig, FunctionNode f) FnSig {
+  if f.args.len == 0 {
+    ret sig;
+  }
+  bin leads_with_self = false;
+  Node* first = f.args.get(0);
+  fit first.kind {
+    .Variable(v) -> { leads_with_self = equals(v.name, "self"); }
+    _ -> {}
+  }
+  if !leads_with_self {
+    ret sig;
+  }
+  FnSig out = sig;
+  out.args.init(sig.args.len);
+  num i = 1;
+  for i < sig.args.len {
+    out.args.push(sig.args.get(i));
+    i = i + 1;
+  }
+  out.min_args = sig.min_args;
+  if out.min_args > 0 {
+    out.min_args = out.min_args - 1;
+  }
+  ret out;
+}
+
+fun _method_leaf_name(str declared, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(declared, prefix) {
+    ret substr(declared, len(prefix), len(declared) - len(prefix));
+  }
+  ret declared;
+}
+
+// The signature a quirk's method declaration promises.
+fun _signature_of_quirk_method(QuirkMethodSig m) FnSig {
+  FnSig sig;
+  sig.args.init(m.args.len);
+  sig.rtype = checked_unknown();
+  if m.rtype != nil {
+    sig.rtype = checked_from_dtype(m.rtype);
+  }
+  sig.is_variadic = false;
+  sig.is_async = m.is_async;
+  sig.is_generic = false;
+  sig.ambiguous = false;
+  sig.min_args = m.args.len;
+  for a : m.args {
+    sig.args.push(checked_from_dtype(a.dtype));
+  }
+  ret sig;
+}
+
 // What the checker carries while walking one program.
 compound Checker {
   Map<str, FnSig> fns;
   // The quirks a program declares. A pointer to a compound that
   // implements one stands where the quirk is expected.
   Set<str> quirks;
+  // What each declared compound holds, and what each type and quirk
+  // declares as methods.
+  Map<str, CompoundInfo> compounds;
+  Map<str, MethodTable> methods;
   // The return type of the function being walked, and whether it may
   // await.
   CheckedType rtype;
@@ -281,6 +389,8 @@ fun _checker_new() Checker {
   Checker c;
   c.fns.init(32);
   c.quirks = set_init("", 16);
+  c.compounds.init(16);
+  c.methods.init(16);
   c.rtype = checked_unknown();
   c.in_async = false;
   c.failed = false;
@@ -288,6 +398,36 @@ fun _checker_new() Checker {
 }
 
 impl Checker {
+  // Records the methods an impl block supplies for its type. A generic
+  // impl's methods mention type parameters, which stand for whatever an
+  // instantiation supplies.
+  register_impl(ImplNode block) {
+    let existing = self.methods.at(block.type_name);
+    MethodTable table = _method_table_new();
+    if existing.is_some() {
+      table = existing.unwrap();
+    }
+    for m : block.methods {
+      fit m.kind {
+        .Function(f) -> {
+          if !f.has_name {
+            continue;
+          }
+          FnSig sig = _without_self(_signature_of(f), f);
+          if block.has_type_params && block.type_params.len > 0 {
+            sig.is_generic = true;
+            sig = _erase_signature(sig, &block.type_params);
+          }
+          // A method's declared name carries the type it belongs to
+          // (`Counter__add`), while a call names it on its own.
+          table.methods.put(_method_leaf_name(f.name, block.type_name), sig);
+        }
+        _ -> {}
+      }
+    }
+    self.methods.put(block.type_name, table);
+  }
+
   // True when a value of type `from` can stand where `to` is expected,
   // including where `to` is a quirk a pointer satisfies.
   assignable(CheckedType to, CheckedType from) bin {
@@ -330,6 +470,39 @@ fun _erase_type_params(FunctionNode f, CheckedType t) CheckedType {
     ret checked_unknown();
   }
   ret t;
+}
+
+// Erases a type named by one of `names`, which stands for whatever an
+// instantiation supplies rather than a type of its own.
+fun _erase_named(CheckedType t, Vec<str>* names) CheckedType {
+  if equals(t.name, "") {
+    ret t;
+  }
+  num i = 0;
+  for i < names.len {
+    if equals(names.get(i), t.name) {
+      ret checked_unknown();
+    }
+    i = i + 1;
+  }
+  ret t;
+}
+
+// The same, over a whole signature: an impl's type parameters reach its
+// methods' return types and parameters.
+fun _erase_signature(FnSig sig, Vec<str>* names) FnSig {
+  if names.len == 0 {
+    ret sig;
+  }
+  FnSig out = sig;
+  out.rtype = _erase_named(sig.rtype, names);
+  out.args.init(sig.args.len);
+  num i = 0;
+  for i < sig.args.len {
+    out.args.push(_erase_named(sig.args.get(i), names));
+    i = i + 1;
+  }
+  ret out;
 }
 
 fun _signature_of(FunctionNode f) FnSig {
@@ -445,11 +618,52 @@ impl Checker {
         ret checked_unknown();
       }
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
+      .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
       .Unary(u) -> { ret self.infer_unary(u, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
     }
     ret checked_unknown();
+  }
+
+  // The type an array literal holds, which every element must share.
+  infer_bracket(Node* node, Node* items, TypeEnv* env) CheckedType {
+    Vec<Node*> elements;
+    elements.init(4);
+    defer elements.free();
+    _call_args(items, &elements);
+
+    CheckedType held = checked_unknown();
+    num i = 0;
+    for i < elements.len {
+      CheckedType element = self.infer(elements.get(i), env);
+      i = i + 1;
+      if is_unknown(element) {
+        continue;
+      }
+      if is_unknown(held) {
+        held = element;
+        continue;
+      }
+      if !can_assign(held, element) && !can_assign(element, held) {
+        self.fail(
+          format(
+            "an array literal holds one type, found {str} and {str}",
+            type_name(held),
+            type_name(element)
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+    }
+    if is_unknown(held) {
+      ret checked_unknown();
+    }
+    CheckedType t = held;
+    t.is_array = true;
+    t.array_depth = held.array_depth + 1;
+    ret t;
   }
 
   infer_unary(UnaryNode u, TypeEnv* env) CheckedType {
@@ -482,9 +696,38 @@ impl Checker {
     if equals(e.op, "()") {
       ret self.check_call(node, e, env, false);
     }
-    // A field access, an index, or a comma list needs the type registry
-    // the checker does not carry yet.
-    if equals(e.op, ".") || equals(e.op, "[]") || equals(e.op, ",") {
+    if _is_assignment(e.op) {
+      self.check_assignment(node, e, env);
+      ret checked_unknown();
+    }
+    // A decimal has no remainder to take.
+    if equals(e.op, "%") && e.has_left && e.has_right {
+      CheckedType left = self.infer(e.left, env);
+      CheckedType right = self.infer(e.right, env);
+      if left.base == DataTypeType.Dec || right.base == DataTypeType.Dec {
+        self.fail("the remainder operator does not apply to a decimal", node);
+        ret checked_unknown();
+      }
+    }
+    if equals(e.op, ".") {
+      ret self.infer_field(node, e, env);
+    }
+    // An index reads what the sequence holds, which the checker follows
+    // only through an array.
+    if equals(e.op, "[]") {
+      if !e.has_left {
+        ret checked_unknown();
+      }
+      CheckedType base = self.infer(e.left, env);
+      if !base.is_array {
+        ret checked_unknown();
+      }
+      CheckedType held = base;
+      held.array_depth = base.array_depth - 1;
+      held.is_array = held.array_depth > 0;
+      ret held;
+    }
+    if equals(e.op, ",") {
       ret checked_unknown();
     }
     if _is_comparison(e.op) || _is_logical(e.op) {
@@ -508,6 +751,164 @@ impl Checker {
     ret left;
   }
 
+  // The type a field access reads, and the name of the type it reads
+  // from. A method call is a field access whose result is called.
+  infer_field(Node* node, ExprNode e, TypeEnv* env) CheckedType {
+    if !e.has_left || !e.has_right {
+      ret checked_unknown();
+    }
+    CheckedType receiver = self.infer(e.left, env);
+    str field = _callee_name(e.right);
+    if equals(field, "") {
+      ret checked_unknown();
+    }
+    let info = self.compounds.at(receiver.name);
+    if info.is_none() {
+      ret checked_unknown();
+    }
+    CompoundInfo holder = info.unwrap();
+    // A generic compound's fields are written in terms of its type
+    // parameters, which stand for whatever the instantiation supplied.
+    if holder.is_generic {
+      ret checked_unknown();
+    }
+    let found = holder.fields.at(field);
+    if found.is_some() {
+      ret found.unwrap();
+    }
+    // A method reads as a field until it is called.
+    if self.has_method(receiver.name, field) {
+      ret checked_unknown();
+    }
+    self.fail(format("'{str}' has no field '{str}'", receiver.name, field), node);
+    ret checked_unknown();
+  }
+
+  has_method(str type_name, str method) bin {
+    let table = self.methods.at(type_name);
+    if table.is_none() {
+      ret false;
+    }
+    MethodTable found = table.unwrap();
+    ret found.methods.at(method).is_some();
+  }
+
+  // The signature of `method` on `type_name`, if the type declares one.
+  method_signature(str type_name, str method) Option<FnSig> {
+    let table = self.methods.at(type_name);
+    if table.is_none() {
+      ret .None;
+    }
+    MethodTable found = table.unwrap();
+    ret found.methods.at(method);
+  }
+
+  // The signature a call through a receiver resolves to, if the checker
+  // can name both the receiver's type and the method.
+  resolve_method_call(ExprNode callee, TypeEnv* env) Option<FnSig> {
+    if !callee.has_left || !callee.has_right {
+      ret .None;
+    }
+    CheckedType receiver = self.infer(callee.left, env);
+    if equals(receiver.name, "") {
+      ret .None;
+    }
+    str method = _callee_name(callee.right);
+    if equals(method, "") {
+      ret .None;
+    }
+    ret self.method_signature(receiver.name, method);
+  }
+
+  // True when a call through a receiver reaches an async method, or one
+  // the checker cannot resolve, which it does not second-guess.
+  awaits_async_method(ExprNode e, TypeEnv* env) bin {
+    if !e.has_left {
+      ret true;
+    }
+    fit e.left.kind {
+      .Expression(callee) -> {
+        if !equals(callee.op, ".") {
+          ret true;
+        }
+        let resolved = self.resolve_method_call(callee, env);
+        if resolved.is_none() {
+          ret true;
+        }
+        ret resolved.unwrap().is_async;
+      }
+      _ -> { ret true; }
+    }
+    ret true;
+  }
+
+  // Checks a call written through a receiver, which resolves to a
+  // method the receiver's type declares.
+  check_method_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env, bin awaited) CheckedType {
+    if !e.has_left {
+      ret checked_unknown();
+    }
+    Option<FnSig> resolved = .None;
+    str method = "";
+    fit e.left.kind {
+      .Expression(callee) -> {
+        if equals(callee.op, ".") {
+          method = _callee_name(callee.right);
+          resolved = self.resolve_method_call(callee, env);
+        }
+      }
+      _ -> {}
+    }
+    if resolved.is_none() {
+      ret checked_unknown();
+    }
+    FnSig sig = resolved.unwrap();
+    if sig.is_async && !awaited {
+      self.fail(format("call to async method '{str}' needs await", method), node);
+      ret checked_unknown();
+    }
+    self.check_arguments(node, method, sig, args, env);
+    ret sig.rtype;
+  }
+
+  // Checks the arguments of a call against what the callee declares. A
+  // generic callee's parameters stand for whatever the call supplies,
+  // so only the shape of such a call is checked.
+  check_arguments(Node* node, str name, FnSig sig, Vec<Node*>* args, TypeEnv* env) {
+    if !sig.is_variadic {
+      if args.len > sig.args.len {
+        self.fail(format("too many arguments to '{str}'", name), node);
+        ret;
+      }
+      if args.len < sig.min_args {
+        self.fail(format("too few arguments to '{str}'", name), node);
+        ret;
+      }
+    }
+    if sig.is_generic {
+      ret;
+    }
+    num i = 0;
+    for i < args.len && i < sig.args.len {
+      CheckedType want = sig.args.get(i);
+      CheckedType got = self.infer(args.get(i), env);
+      if !self.assignable(want, got) {
+        self.fail(
+          format(
+            "argument {num} of '{str}' expects {str}, found {str}",
+            i + 1,
+            name,
+            type_name(want),
+            type_name(got)
+          ),
+          args.get(i)
+        );
+        ret;
+      }
+      i = i + 1;
+    }
+  }
+
   // Checks `await operand`: only an async function may await, and only
   // an async call is worth awaiting.
   check_await(UnaryNode u, TypeEnv* env) CheckedType {
@@ -515,7 +916,7 @@ impl Checker {
       self.fail("await is only allowed in an async function", u.operand);
       ret checked_unknown();
     }
-    if !self.awaits_async_call(u.operand) {
+    if !self.awaits_async_call(u.operand, env) {
       self.fail("await expects a call to an async function", u.operand);
       ret checked_unknown();
     }
@@ -541,12 +942,12 @@ impl Checker {
 
   // True when `node` calls something the checker knows to be async, or
   // something it cannot resolve, which it does not second-guess.
-  awaits_async_call(Node* node) bin {
+  awaits_async_call(Node* node, TypeEnv* env) bin {
     if node == nil {
       ret false;
     }
     fit node.kind {
-      .ExpressionParenthesis(inner) -> { ret self.awaits_async_call(inner); }
+      .ExpressionParenthesis(inner) -> { ret self.awaits_async_call(inner, env); }
       .Expression(e) -> {
         if !equals(e.op, "()") {
           ret false;
@@ -556,9 +957,7 @@ impl Checker {
         }
         str name = _callee_name(e.left);
         if equals(name, "") {
-          // A method call resolves through a receiver the checker does
-          // not model yet.
-          ret true;
+          ret self.awaits_async_method(e, env);
         }
         let known = self.fns.at(name);
         if known.is_none() {
@@ -596,7 +995,7 @@ impl Checker {
       name = _callee_name(e.left);
     }
     if equals(name, "") {
-      ret checked_unknown();
+      ret self.check_method_call(node, e, &args, env, awaited);
     }
     let known = self.fns.at(name);
     if known.is_none() {
@@ -611,41 +1010,27 @@ impl Checker {
       self.fail(format("call to async function '{str}' needs await", name), node);
       ret checked_unknown();
     }
-    // A generic function's parameters stand for whatever the call site
-    // supplies, so only its shape is checked here.
-    if !sig.is_variadic {
-      if args.len > sig.args.len {
-        self.fail(format("too many arguments to '{str}'", name), node);
-        ret sig.rtype;
-      }
-      if args.len < sig.min_args {
-        self.fail(format("too few arguments to '{str}'", name), node);
-        ret sig.rtype;
-      }
-    }
-    if !sig.is_generic {
-      i = 0;
-      for i < args.len && i < sig.args.len {
-        CheckedType want = sig.args.get(i);
-        CheckedType got = self.infer(args.get(i), env);
-        if !self.assignable(want, got) {
-          self.fail(
-            format(
-              "argument {num} of '{str}' expects {str}, found {str}",
-              i + 1,
-              name,
-              type_name(want),
-              type_name(got)
-            ),
-            args.get(i)
-          );
-          ret sig.rtype;
-        }
-        i = i + 1;
-      }
-    }
+    self.check_arguments(node, name, sig, &args, env);
     ret sig.rtype;
   }
+}
+
+// True for `=` and the operators that read and write in one step.
+fun _is_assignment(str op) bin {
+  if equals(op, "=") {
+    ret true;
+  }
+  if len(op) < 2 || op[len(op) - 1] != '=' {
+    ret false;
+  }
+  str head = substr(op, 0, len(op) - 1);
+  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") || equals(
+    head,
+    "%"
+  ) || equals(head, "&") || equals(head, "|") || equals(head, "^") || equals(head, "<<") || equals(
+    head,
+    ">>"
+  );
 }
 
 fun _is_comparison(str op) bin {
@@ -726,6 +1111,43 @@ impl Checker {
     env.pop();
   }
 
+  // Rejects an assignment to a name declared const, and checks that the
+  // value assigned fits what the name holds.
+  check_assignment(Node* node, ExprNode e, TypeEnv* env) {
+    if !e.has_left {
+      ret;
+    }
+    fit e.left.kind {
+      .Identifier(name) -> {
+        let bound = env.binding(name);
+        if bound.is_none() {
+          ret;
+        }
+        Binding b = bound.unwrap();
+        if b.is_const {
+          self.fail(format("cannot assign to '{str}', which is const", name), node);
+          ret;
+        }
+        if !equals(e.op, "=") || !e.has_right {
+          ret;
+        }
+        CheckedType value = self.infer(e.right, env);
+        if !self.assignable(b.type, value) {
+          self.fail(
+            format(
+              "cannot assign {str} to '{str}' of type {str}",
+              type_name(value),
+              name,
+              type_name(b.type)
+            ),
+            node
+          );
+        }
+      }
+      _ -> {}
+    }
+  }
+
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
     if v.has_val {
@@ -746,7 +1168,7 @@ impl Checker {
         ret;
       }
     }
-    env.define(v.name, declared);
+    env.bind(v.name, declared, v.is_const);
   }
 
   check_return(Node* stmt, Node* value, TypeEnv* env) {
@@ -766,13 +1188,25 @@ impl Checker {
     }
   }
 
-  // Walks one function with its parameters in scope.
-  check_function(FunctionNode f) {
+  // Walks one function with the globals and its parameters in scope.
+  check_function(FunctionNode f, Vec<Node>* nodes) {
     if !f.has_body {
       ret;
     }
     TypeEnv env = type_env_new();
     defer env.free();
+    env.push();
+    num g = 0;
+    for g < nodes.len {
+      Node* global = &nodes.data[g];
+      g = g + 1;
+      fit global.kind {
+        .Variable(v) -> {
+          env.bind(v.name, checked_from_dtype(v.var_type), v.is_const);
+        }
+        _ -> {}
+      }
+    }
     env.push();
     for a : f.args {
       fit a.kind {
@@ -793,6 +1227,7 @@ impl Checker {
     self.rtype = previous;
     self.in_async = previous_async;
     env.pop();
+    env.pop();
   }
 }
 
@@ -801,6 +1236,8 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
   Checker checker = _checker_new();
   defer checker.fns.free();
   defer checker.quirks.free();
+  defer checker.compounds.free();
+  defer checker.methods.free();
 
   num i = 0;
   for i < nodes.len {
@@ -819,7 +1256,30 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
           checker.fns.put(f.name, sig);
         }
       }
-      .Quirk(q) -> { checker.quirks.add(q.name); }
+      .Quirk(q) -> {
+        checker.quirks.add(q.name);
+        MethodTable table = _method_table_new();
+        for m : q.methods {
+          // A generic quirk's methods mention its type parameters, which
+          // stand for whatever the implementing type supplies.
+          FnSig sig = _signature_of_quirk_method(m);
+          if q.is_generic {
+            sig = _erase_signature(sig, &q.type_params);
+          }
+          table.methods.put(m.name, sig);
+        }
+        checker.methods.put(q.name, table);
+      }
+      .Compound(c) -> {
+        CompoundInfo info;
+        info.fields.init(c.fields.len + 1);
+        info.is_generic = c.has_type_params && c.type_params.len > 0;
+        for field : c.fields {
+          info.fields.put(field.name, checked_from_dtype(field.dtype));
+        }
+        checker.compounds.put(c.name, info);
+      }
+      .Impl(block) -> { checker.register_impl(block); }
       _ -> {}
     }
   }
@@ -829,7 +1289,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
     Node* node = &nodes.data[i];
     i = i + 1;
     fit node.kind {
-      .Function(f) -> { checker.check_function(f); }
+      .Function(f) -> { checker.check_function(f, nodes); }
       _ -> {}
     }
     if checker.failed {
@@ -844,7 +1304,8 @@ test "a value stands for a type it can be assigned to" {
   CheckedType dec_t = checked_of(DataTypeType.Dec);
   CheckedType str_t = checked_of(DataTypeType.Str);
   CheckedType bin_t = checked_of(DataTypeType.Bin);
-  assert can_assign(num_t, dec_t), "expected the numeric kinds to convert";
+  assert can_assign(dec_t, num_t), "expected a whole number to widen into a decimal";
+  assert !can_assign(num_t, dec_t), "expected a decimal not to narrow on its own";
   assert !can_assign(num_t, str_t), "expected a string not to stand for a number";
   assert !can_assign(num_t, bin_t), "expected a truth value not to stand for a number";
   assert can_assign(checked_unknown(), str_t), "expected an unresolved type to accept anything";
