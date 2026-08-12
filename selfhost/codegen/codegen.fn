@@ -9308,18 +9308,152 @@ impl Codegen {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
     }
+    // Spawning has no counterpart on Windows, so the bindings are backed
+    // there by a compatibility layer over the platform's own process API.
     if program_uses_std_c_header(self.all_nodes, "process.fn") {
-      self.state.write("#include <spawn.h>\n");
-      self.state.write("#include <sys/wait.h>\n");
-      self.state.write("#include <unistd.h>\n");
-      // The environment is a global, spelled differently per platform,
-      // so it is reached through a wrapper.
-      self.state.write("#ifdef _WIN32\n");
-      self.state.write("static char** environ_ptr(void){ return _environ; }\n");
-      self.state.write("#else\n");
-      self.state.write("extern char** environ;\n");
-      self.state.write("static char** environ_ptr(void){ return environ; }\n");
-      self.state.write("#endif\n");
+      self.state.write(`
+      `#if defined(_WIN32)
+      `#pragma push_macro("close")
+      `#undef close
+      `#include <windows.h>
+      `#include <io.h>
+      `#include <fcntl.h>
+      `#include <process.h>
+      `#pragma pop_macro("close")
+      `
+      `#include <sys/types.h>
+      `typedef void* posix_spawnattr_t;
+      `typedef struct {
+      `    int has_dup2_1; int dup2_1_fd;
+      `    int has_dup2_2; int dup2_2_fd;
+      `} posix_spawn_file_actions_t;
+      `
+      `long long posix_spawn_file_actions_init(posix_spawn_file_actions_t* fa) {
+      `    if (fa == NULL) return -1;
+      `    fa->has_dup2_1 = 0;
+      `    fa->has_dup2_2 = 0;
+      `    return 0;
+      `}
+      `
+      `long long posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* fa) {
+      `    (void)fa;
+      `    return 0;
+      `}
+      `
+      `long long posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t* fa, long long fildes, long long newfildes) {
+      `    if (fa == NULL) return -1;
+      `    if (newfildes == 1) { fa->has_dup2_1 = 1; fa->dup2_1_fd = (int)fildes; return 0; }
+      `    if (newfildes == 2) { fa->has_dup2_2 = 1; fa->dup2_2_fd = (int)fildes; return 0; }
+      `    return -1;
+      `}
+      `
+      `long long posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* fa, long long fildes) {
+      `    (void)fa; (void)fildes;
+      `    return 0;
+      `}
+      `
+      `static char* __fun_win_build_cmdline(char** argv) {
+      `    size_t cap = 256, len = 0;
+      `    char* out = (char*)malloc(cap);
+      `    if (out == NULL) return NULL;
+      `    for (int i = 0; argv[i] != NULL; i++) {
+      `        const char* a = argv[i];
+      `        size_t alen = strlen(a);
+      `        int needs_quotes = (alen == 0);
+      `        for (size_t j = 0; j < alen && !needs_quotes; j++) {
+      `            if (a[j] == ' ' || a[j] == '\t' || a[j] == '"') needs_quotes = 1;
+      `        }
+      `        size_t need = alen * 2 + 3;
+      `        while (len + need + 2 > cap) {
+      `            cap *= 2;
+      `            char* n = (char*)realloc(out, cap);
+      `            if (n == NULL) { free(out); return NULL; }
+      `            out = n;
+      `        }
+      `        if (i > 0) out[len++] = ' ';
+      `        if (needs_quotes) out[len++] = '"';
+      `        size_t backslashes = 0;
+      `        for (size_t j = 0; j < alen; j++) {
+      `            char c = a[j];
+      `            if (c == '\\') { backslashes++; out[len++] = c; continue; }
+      `            if (c == '"') {
+      `                for (size_t k = 0; k <= backslashes; k++) out[len++] = '\\';
+      `                out[len++] = '"';
+      `                backslashes = 0;
+      `                continue;
+      `            }
+      `            backslashes = 0;
+      `            out[len++] = c;
+      `        }
+      `        if (needs_quotes) {
+      `            for (size_t k = 0; k < backslashes; k++) out[len++] = '\\';
+      `            out[len++] = '"';
+      `        }
+      `    }
+      `    out[len] = '\0';
+      `    return out;
+      `}
+      `
+      `long long posix_spawnp(pid_t* pid, const char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {
+      `    (void)file; (void)attrp; (void)envp;
+      `    if (pid == NULL || argv == NULL) return -1;
+      `
+      `    STARTUPINFOA si;
+      `    PROCESS_INFORMATION pi;
+      `    memset(&si, 0, sizeof(si));
+      `    memset(&pi, 0, sizeof(pi));
+      `    si.cb = sizeof(si);
+      `
+      `    BOOL inherit = FALSE;
+      `    if (file_actions != NULL && (file_actions->has_dup2_1 || file_actions->has_dup2_2)) {
+      `        si.dwFlags |= STARTF_USESTDHANDLES;
+      `        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+      `        si.hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);
+      `        si.hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);
+      `        if (file_actions->has_dup2_1) SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        if (file_actions->has_dup2_2) SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        inherit = TRUE;
+      `    }
+      `
+      `    char* cmdline = __fun_win_build_cmdline(argv);
+      `    if (cmdline == NULL) return -1;
+      `    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, 0, NULL, NULL, &si, &pi);
+      `    free(cmdline);
+      `    if (!ok) return -1;
+      `
+      `    CloseHandle(pi.hThread);
+      `    CloseHandle(pi.hProcess);
+      `    *pid = (pid_t)pi.dwProcessId;
+      `    return 0;
+      `}
+      `
+      `long long waitpid(pid_t pid, int32_t* status, long long options) {
+      `    (void)options;
+      `    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
+      `    if (h == NULL) return -1;
+      `    WaitForSingleObject(h, INFINITE);
+      `    DWORD code = 0;
+      `    GetExitCodeProcess(h, &code);
+      `    CloseHandle(h);
+      `    if (status != NULL) *status = (int32_t)((code & 0xFF) << 8);
+      `    return (long long)pid;
+      `}
+      `
+      `long long pipe(int32_t* fds) {
+      `    return (long long)_pipe(fds, 4096, _O_BINARY);
+      `}
+      `#else
+      `#include <spawn.h>
+      `#include <sys/wait.h>
+      `#include <unistd.h>
+      `#endif
+      `#ifdef _WIN32
+      `static char** environ_ptr(void){ return _environ; }
+      `#else
+      `extern char** environ;
+      `static char** environ_ptr(void){ return environ; }
+      `#endif
+      ``);
     }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
