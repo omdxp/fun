@@ -501,3 +501,61 @@ test "a builtin declares no methods" {
     "expected a method on a number to be reported"
   );
 }
+
+test "a constrained compound accepts only the instantiations it lists" {
+  rejects(
+    `compound Box<T: num | str> {
+    `  T val;
+    `}
+    `fun main() {
+    `  Box<bin> b = Box<bin>{val = true};
+    `}`,
+    "expected the unlisted instantiation to be rejected"
+  );
+  accepts(
+    `compound Box<T: num | str> {
+    `  T val;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{val = 5};
+    `}`,
+    "expected a listed instantiation to check out"
+  );
+}
+
+test "a literal without arguments takes them from the fields it writes" {
+  rejects(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `fun main() {
+    `  let boxed = Box{value = 7};
+    `  boxed.value = true;
+    `}`,
+    "expected the inferred instantiation to be checked"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `fun main() {
+    `  let boxed = Box{value = 7};
+    `  boxed.value = 9;
+    `}`,
+    "expected a matching assignment to check out"
+  );
+}
+
+test "a raw pointer is how array storage is allocated" {
+  accepts(
+    `fun allocate(num n) raw* { ret nil; }
+    `compound Pool {
+    `  num[] slots;
+    `}
+    `fun main() {
+    `  Pool p;
+    `  p.slots = allocate(4);
+    `}`,
+    "expected raw storage to be assignable to an array field"
+  );
+}

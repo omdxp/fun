@@ -188,7 +188,9 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   if to.base == DataTypeType.Raw && (from.pointer_depth > 0 || from.base == DataTypeType.Str) {
     ret true;
   }
-  if from.base == DataTypeType.Raw && (to.pointer_depth > 0 || to.base == DataTypeType.Str) {
+  // A raw pointer stands for any pointer, and for the array storage a
+  // pointer is how you allocate.
+  if from.base == DataTypeType.Raw && (to.pointer_depth > 0 || to.is_array || to.base == DataTypeType.Str) {
     ret true;
   }
   // An array stands for a pointer to what it holds, as it does in C,
@@ -357,8 +359,10 @@ impl TypeEnv {
 compound CompoundInfo {
   Map<str, CheckedType> fields;
   // The parameters the fields are written in terms of, which an
-  // instantiation supplies arguments for.
+  // instantiation supplies arguments for, and the combinations of
+  // concrete types those parameters are allowed to stand for.
   Vec<str> type_params;
+  Vec<Vec<str>> bounds;
   // A generic compound's fields mention its type parameters, which
   // stand for whatever an instantiation supplies.
   bin is_generic;
@@ -516,6 +520,11 @@ impl Checker {
     if can_assign(to, from) {
       ret true;
     }
+    // A name the program never declares is a type parameter that no
+    // instantiation resolved, which stands for anything.
+    if !self.names_a_declared_type(to) || !self.names_a_declared_type(from) {
+      ret true;
+    }
     // An enum with no payloads is written as, and reads as, a number.
     if self.reads_as_number(to) && self.reads_as_number(from) {
       ret true;
@@ -524,6 +533,21 @@ impl Checker {
       ret from.pointer_depth > 0 || self.quirks.has(from.name);
     }
     ret false;
+  }
+
+  // True when a type names something the program declares, as opposed to
+  // a parameter standing in for whatever an instantiation supplies.
+  names_a_declared_type(CheckedType t) bin {
+    if t.base != DataTypeType.Unknown {
+      ret true;
+    }
+    if equals(t.name, "") {
+      ret true;
+    }
+    if self.compounds.at(t.name).is_some() || self.quirks.has(t.name) || self.plain_enums.has(t.name) {
+      ret true;
+    }
+    ret self.methods.at(t.name).is_some();
   }
 
   // True for a value that stands in a numeric position: a number, or an
@@ -783,11 +807,54 @@ impl Checker {
       }
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
       .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
+      .CompoundInit(init) -> { ret self.infer_compound_init(node, init, env); }
       .Unary(u) -> { ret self.infer_unary(u, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
     }
     ret checked_unknown();
+  }
+
+  // The type a compound literal builds. A generic one written without
+  // arguments takes them from the fields it initializes.
+  infer_compound_init(Node* node, CompoundInitNode init, TypeEnv* env) CheckedType {
+    if !init.has_dtype {
+      ret checked_unknown();
+    }
+    CheckedType built = checked_from_dtype(init.init_dtype);
+    self.check_instantiation(built, node);
+    if self.failed {
+      ret checked_unknown();
+    }
+    let info = self.compounds.at(built.name);
+    if info.is_none() {
+      ret built;
+    }
+    CompoundInfo holder = info.unwrap();
+    if !holder.is_generic || built.generic_args.len > 0 {
+      ret built;
+    }
+    // Each parameter stands for the type of the first field written in
+    // terms of it.
+    num p = 0;
+    for p < holder.type_params.len {
+      str param = holder.type_params.get(p);
+      p = p + 1;
+      CheckedType stands_for = checked_unknown();
+      for f : init.fields {
+        let declared = holder.fields.at(f.name);
+        if declared.is_none() {
+          continue;
+        }
+        if !equals(declared.unwrap().name, param) {
+          continue;
+        }
+        stands_for = self.infer(f.value, env);
+        break;
+      }
+      built.generic_args.push(stands_for);
+    }
+    ret built;
   }
 
   // The type an array literal holds, which every element must share.
@@ -1054,6 +1121,49 @@ impl Checker {
     }
     self.check_arguments(node, method, sig, args, env);
     ret sig.rtype;
+  }
+
+  // Checks the arguments an instantiation supplies against the types its
+  // parameters are allowed to stand for.
+  check_instantiation(CheckedType t, Node* at) {
+    if t.generic_args.len == 0 || equals(t.name, "") {
+      ret;
+    }
+    let info = self.compounds.at(t.name);
+    if info.is_none() {
+      ret;
+    }
+    CompoundInfo holder = info.unwrap();
+    if holder.bounds.len == 0 {
+      ret;
+    }
+    num p = 0;
+    for p < holder.type_params.len && p < t.generic_args.len {
+      str param = holder.type_params.get(p);
+      CheckedType supplied = t.generic_args.get(p);
+      num at_param = p;
+      p = p + 1;
+      if is_unknown(supplied) {
+        continue;
+      }
+      str supplied_name = type_name(supplied);
+      bin listed = false;
+      num b = 0;
+      for b < holder.bounds.len {
+        Vec<str> combination = holder.bounds.get(b);
+        b = b + 1;
+        if at_param < combination.len && equals(combination.get(at_param), supplied_name) {
+          listed = true;
+        }
+      }
+      if !listed {
+        self.fail(
+          format("'{str}' does not accept {str} for '{str}'", t.name, supplied_name, param),
+          at
+        );
+        ret;
+      }
+    }
   }
 
   // Checks the types a call supplies for the callee's type parameters
@@ -1417,6 +1527,26 @@ impl Checker {
       ret;
     }
     fit e.left.kind {
+      .Expression(target) -> {
+        if !equals(target.op, ".") || !equals(e.op, "=") || !e.has_right {
+          ret;
+        }
+        CheckedType field = self.infer_field(node, target, env);
+        if self.failed {
+          ret;
+        }
+        CheckedType value = self.infer(e.right, env);
+        if !self.assignable(field, value) {
+          self.fail(
+            format(
+              "cannot assign {str} to a field of type {str}",
+              type_name(value),
+              type_name(field)
+            ),
+            node
+          );
+        }
+      }
       .Identifier(name) -> {
         let bound = env.binding(name);
         if bound.is_none() {
@@ -1449,6 +1579,10 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    self.check_instantiation(declared, stmt);
+    if self.failed {
+      ret;
+    }
     if v.has_val {
       CheckedType value = self.infer(v.val, env);
       // A `let` takes the type of its value rather than checking one.
@@ -1670,10 +1804,16 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         CompoundInfo info;
         info.fields.init(c.fields.len + 1);
         info.type_params.init(0);
+        info.bounds.init(0);
         info.is_generic = c.has_type_params && c.type_params.len > 0;
         if c.has_type_params {
           for p : c.type_params {
             info.type_params.push(p);
+          }
+        }
+        if c.has_type_param_forced_insts {
+          for b : c.type_param_forced_insts {
+            info.bounds.push(b);
           }
         }
         for field : c.fields {
