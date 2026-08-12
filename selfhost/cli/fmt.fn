@@ -42,11 +42,7 @@ pub fun token_text(Token t) str {
     .Number -> { ret _number_text(t); }
     .Boolean -> { ret _boolean_text(t); }
     .String -> { ret _string_text(t); }
-    .Symbol -> {
-      StringBuilder b = string_builder_init(2);
-      b.append_char(_cval_of(t));
-      ret b.build();
-    }
+    .Symbol -> { ret _symbol_text(t); }
     .NewLine -> { ret "\n"; }
   }
   ret "";
@@ -73,6 +69,30 @@ fun _comment_text(Token t) str {
   StringBuilder b = string_builder_init(len(body) + 4);
   b.append("// ");
   b.append(body);
+  ret b.build();
+}
+
+// A character literal carries a char just as a symbol does, so the
+// span it covered in source is what tells them apart: `'x'` spans more
+// than one column, `(` spans one.
+fun _symbol_text(Token t) str {
+  let c = _cval_of(t);
+  StringBuilder b = string_builder_init(6);
+  if t.pos.end_col - t.pos.start_col <= 1 {
+    b.append_char(c);
+    ret b.build();
+  }
+  b.append_char('\'');
+  fit c {
+    '\n' -> { b.append("\\n"); }
+    '\t' -> { b.append("\\t"); }
+    '\r' -> { b.append("\\r"); }
+    '\\' -> { b.append("\\\\"); }
+    '\'' -> { b.append("\\'"); }
+    '\0' -> { b.append("\\0"); }
+    _ -> { b.append_char(c); }
+  }
+  b.append_char('\'');
   ret b.build();
 }
 
@@ -148,10 +168,12 @@ impl FmtState {
   }
 }
 
-// True when `text` names a keyword that a space must follow, as in
-// `ret x` or `let y`, rather than one that takes a delimiter next.
-fun _keyword_takes_space(str text) bin {
-  ret !equals(text, "true") && !equals(text, "false") && !equals(text, "nil");
+// True for a symbol that can be written directly against its operand.
+fun _is_prefix_operator(str text) bin {
+  ret equals(text, "-") || equals(text, "!") || equals(text, "~") || equals(text, "&") || equals(
+    text,
+    "*"
+  );
 }
 
 // Whether a space belongs between `prev` and the token now being
@@ -162,6 +184,9 @@ fun _needs_space(Token prev, Token cur) bin {
 
   // Nothing sits before a closing delimiter or a separator.
   if equals(c, ")") || equals(c, "]") || equals(c, ",") || equals(c, ";") {
+    ret false;
+  }
+  if equals(p, "(") || equals(p, "[") {
     ret false;
   }
   // A member access binds tight, but a leading `.` that starts a bare
@@ -195,32 +220,26 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(p, "<") && !prev.whitespace {
     ret false;
   }
-  // A pointer star binds to the type it belongs to, unlike
-  // multiplication. Whether the source wrote it adjacent tells the two
-  // apart. A run of stars stays together for a deeper pointer.
+  // A prefix operator binds to its operand, unlike the same symbol used
+  // between two values. Whether the source wrote it adjacent tells the
+  // two apart, which also covers a pointer star in a declaration.
+  if _is_prefix_operator(p) {
+    ret prev.whitespace;
+  }
   if equals(c, "*") && !prev.whitespace {
     ret false;
   }
-  if equals(p, "*") {
-    ret !equals(c, "*");
-  }
   // A call's or index's opening delimiter binds to the name before it.
+  // A call, an index, or an array type binds its bracket to whatever
+  // names it, which is what the source wrote adjacently.
   if equals(c, "(") || equals(c, "[") {
-    if prev.type == TokenType.Identifier {
-      ret false;
-    }
-    if equals(p, ")") || equals(p, "]") {
-      ret false;
-    }
+    ret prev.whitespace;
   }
   if equals(p, "(") || equals(p, "[") {
     ret false;
   }
   if equals(p, ",") || equals(p, ";") {
     ret true;
-  }
-  if prev.type == TokenType.Keyword {
-    ret _keyword_takes_space(p);
   }
   ret true;
 }
@@ -291,9 +310,14 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     str text = token_text(t);
 
+    // A brace that binds to the name before it opens a compound
+    // literal rather than a block, so it stays on its own line only
+    // when it does not fit.
+    bin is_literal_brace = equals(text, "{") && s.has_prev && !s.prev.whitespace && s.prev.type == TokenType.Identifier;
+
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
-    if equals(text, "{") && s.has_prev && equals(token_text(s.prev), "->") {
+    if equals(text, "{") && s.has_prev && (equals(token_text(s.prev), "->") || is_literal_brace) {
       let close = _simple_block_end(&tokens, i);
       if close > i {
         num width = s.indent * 2 + _inline_width(&tokens, i, close);
