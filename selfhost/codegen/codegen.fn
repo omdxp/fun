@@ -370,6 +370,9 @@ pub compound Codegen {
   // `ret <expr>;` can only emit the real expression when the declared
   // return type is a scalar `num`; any other type discards it. Saved and
   // restored around nested function-body emission.
+  // What the rejected node was and where it came from, filled in when
+  // codegen gives up so the failure can name it.
+  str error_note;
   // Emit test blocks and a runner in place of the program's own `main`.
   bin test_mode;
   bin in_main;
@@ -467,6 +470,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
   g.c_shadow_names.init(0);
+  g.error_note = "";
   g.test_mode = false;
   g.in_main = false;
   ret g;
@@ -3213,6 +3217,25 @@ impl Codegen {
   }
 
   // Emits `node` as a C expression.
+  // Records what codegen could not emit, with the node's own position
+  // when it carries one, so the failure names it instead of reporting a
+  // bare "unsupported node".
+  note_unsupported(Node node, str stage) {
+    if !equals(self.error_note, "") {
+      ret;
+    }
+    str where = "";
+    if node.has_pos {
+      where = format(
+        " at {str}:{str}:{str}",
+        node.pos.filename,
+        format_num(node.pos.line),
+        format_num(node.pos.col)
+      );
+    }
+    self.error_note = format("{str} ({str}){str}", node_kind_name(node.kind), stage, where);
+  }
+
   pub emit_expr(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Number(data) -> {
@@ -3506,7 +3529,10 @@ impl Codegen {
         self.state.write(")");
         ret .None;
       }
-      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+      _ -> {
+        self.note_unsupported(node, "expression");
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
     }
   }
 
@@ -5668,7 +5694,13 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
-      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+      // `allow`/`expect` control diagnostics rather than describing
+      // runtime behavior, so they contribute no C of their own.
+      .StatementWarningControl(_) -> { ret .None; }
+      _ -> {
+        self.note_unsupported(node, "statement");
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
     }
   }
 
@@ -9780,6 +9812,7 @@ impl Codegen {
           self.hoist_insert_pos = .Some(self.state.out.len());
           let ierr = self.emit_impl(n);
           if ierr.is_some() {
+            self.note_unsupported(n, "in an impl block");
             ret ierr;
           }
           let qerr = self.emit_quirk_vtable_machinery(n);
@@ -9794,6 +9827,7 @@ impl Codegen {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function(n);
             if ferr.is_some() {
+              self.note_unsupported(n, format("in function `{str}`", f.name));
               ret ferr;
             }
           }
@@ -9826,6 +9860,7 @@ impl Codegen {
           self.state.indent_level = self.state.indent_level + 1;
           let berr = self.emit_body(*t.body);
           if berr.is_some() {
+            self.note_unsupported(n, format("in test `{str}`", t.name));
             ret berr;
           }
           self.state.indent_level = self.state.indent_level - 1;

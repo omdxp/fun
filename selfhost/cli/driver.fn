@@ -232,10 +232,15 @@ pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin tes
   let cg_err = cg.transpile(merged.nodes);
   fit cg_err {
     .Some(kind) -> {
+      str what = "unsupported node";
       fit kind {
-        .UnsupportedNode -> { ret .Err("codegen failed: unsupported node"); }
-        .InvalidNode -> { ret .Err("codegen failed: invalid node"); }
+        .UnsupportedNode -> {}
+        .InvalidNode -> { what = "invalid node"; }
       }
+      if !equals(cg.error_note, "") {
+        ret .Err(format("codegen failed: {str}: {str}", what, cg.error_note));
+      }
+      ret .Err(format("codegen failed: {str}", what));
     }
     .None -> {}
   }

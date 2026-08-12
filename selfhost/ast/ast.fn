@@ -682,6 +682,34 @@ pub compound Node {
   bin has_binded;
 }
 
+// Names `kind` for a diagnostic, so a rejected node can say what it was.
+pub fun node_kind_name(NodeKind kind) str {
+  fit kind {
+    .Number(_) -> { ret "number"; }
+    .String(_) -> { ret "string"; }
+    .Character(_) -> { ret "character"; }
+    .Boolean(_) -> { ret "boolean"; }
+    .Identifier(_) -> { ret "identifier"; }
+    .Expression(_) -> { ret "expression"; }
+    .ExpressionParenthesis(_) -> { ret "parenthesized expression"; }
+    .Unary(_) -> { ret "unary expression"; }
+    .Bracket(_) -> { ret "bracket literal"; }
+    .CompoundInit(_) -> { ret "compound literal"; }
+    .Variable(_) -> { ret "variable declaration"; }
+    .Function(_) -> { ret "function"; }
+    .Compound(_) -> { ret "compound declaration"; }
+    .Enum(_) -> { ret "enum declaration"; }
+    .Quirk(_) -> { ret "quirk declaration"; }
+    .Impl(_) -> { ret "impl block"; }
+    .Import(_) -> { ret "import"; }
+    .Test(_) -> { ret "test block"; }
+    .StatementWarningControl(_) -> { ret "warning control"; }
+    .Body(_) -> { ret "block"; }
+    .Blank -> { ret "blank"; }
+    _ -> { ret "node"; }
+  }
+}
+
 pub fun node_new(NodeKind kind) Node {
   Node n;
   n.kind = kind;
