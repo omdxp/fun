@@ -1580,10 +1580,19 @@ fn fitArmInlineClose(toks: []const token.Token, open_idx: usize, source: []const
 fn trailingCommentStart(line: []const u8) ?usize {
     var in_str = false;
     var in_chr = false;
+    // A backtick raw string keeps its body verbatim, `//` included, so a
+    // `//` inside one is not a comment. An unterminated raw string runs to
+    // the end of the line, which is exactly how a multi-line raw string's
+    // continuation lines read.
+    var in_raw = false;
     var i: usize = 0;
     var first_code: ?usize = null; // first non-space code column
     while (i < line.len) : (i += 1) {
         const c = line[i];
+        if (in_raw) {
+            if (c == '`') in_raw = false;
+            continue;
+        }
         if (in_str) {
             if (c == '\\') {
                 i += 1;
@@ -1603,6 +1612,11 @@ fn trailingCommentStart(line: []const u8) ?usize {
         }
         if (c == '\'') {
             in_chr = true;
+            if (first_code == null) first_code = i;
+            continue;
+        }
+        if (c == '`') {
+            in_raw = true;
             if (first_code == null) first_code = i;
             continue;
         }
