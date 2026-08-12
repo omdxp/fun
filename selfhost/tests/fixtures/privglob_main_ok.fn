@@ -1,0 +1,7 @@
+imp std.c.io;
+imp privglob_lib as g;
+
+fun main() num {
+  printf("%lld\n", g.shared_g);
+  ret 0;
+}

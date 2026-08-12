@@ -1,0 +1,5 @@
+imp privalias_lib as a;
+
+fun main() num {
+  ret a.secret();
+}

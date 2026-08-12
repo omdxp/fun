@@ -1,0 +1,7 @@
+imp std.c.io;
+imp privalias_lib as a;
+
+fun main() num {
+  printf("%lld\n", a.visible());
+  ret 0;
+}

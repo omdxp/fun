@@ -1,0 +1,6 @@
+imp std.io as myio;
+
+fun main() {
+  str s = myio.format("v={num}", 7);
+  myio.println(s);
+}

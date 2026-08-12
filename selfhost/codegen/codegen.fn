@@ -4784,6 +4784,25 @@ impl Codegen {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
 
+    // `alias.global` reads a public global from an aliased import. The
+    // import is flattened into one program, so the global keeps its own
+    // name and the alias qualifier is dropped. Gated on not being a
+    // known local, which always shadows a same-named alias.
+    fit e.left.kind {
+      .Identifier(alias_name) -> {
+        if self.import_aliases.contains(alias_name) && self.lookup_local_type_name(alias_name).is_none() {
+          let renamed = self.lookup_alias_rename(alias_name, field_name);
+          if renamed.is_some() {
+            self.state.write(renamed.unwrap());
+          } else {
+            self.state.write(field_name);
+          }
+          ret .None;
+        }
+      }
+      _ -> {}
+    }
+
     let recv_info_opt = self.emit_receiver_and_resolve_type(e.left);
     if recv_info_opt.is_none() {
       ret .Some(CodegenErrorKind.UnsupportedNode);
@@ -8010,6 +8029,24 @@ impl Codegen {
           ret .None;
         }
         if !equals(e.op, "()") || !e.has_left {
+          // A comparison yields `bin`; other binary operators yield
+          // whichever operand resolves, so an argument like `n - 1`
+          // still infers a type param.
+          if equals(e.op, "==") || equals(e.op, "!=") || equals(e.op, "<") || equals(e.op, "<=") || equals(
+            e.op,
+            ">"
+          ) || equals(e.op, ">=") || equals(e.op, "&&") || equals(e.op, "||") {
+            ret .Some("bin");
+          }
+          if e.has_left {
+            let left_type = self.infer_arg_type_name(e.left);
+            if left_type.is_some() {
+              ret left_type;
+            }
+          }
+          if e.has_right {
+            ret self.infer_arg_type_name(e.right);
+          }
           ret .None;
         }
         fit e.left.kind {

@@ -1,0 +1,14 @@
+pub compound Account {
+  num id;
+  num _balance;
+}
+
+impl Account {
+  pub balance() num {
+    ret self._balance;
+  }
+}
+
+pub fun new_account(num id, num bal) Account {
+  ret Account{id = id, _balance = bal};
+}

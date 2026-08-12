@@ -1,0 +1,8 @@
+imp privfield_lib as a;
+imp std.c.io;
+
+fun main() num {
+  Account acc = a.new_account(1, 100);
+  printf("%lld\n", acc.balance());
+  ret 0;
+}

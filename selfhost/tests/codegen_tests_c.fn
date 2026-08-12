@@ -694,3 +694,384 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
 // let out = emit_c(src, "a PLAIN (non-generic) function can fit-match a concrete generic-enum instantiation");
 // assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
 // }
+
+// skipped: constructing the generic enum from non-generic code also needs
+// std.io's Display formatting, and hits the same unsubstituted self-referential
+// payload as the two tests above.
+
+test "a generic function can call itself recursively (self-recursive generic function call)" {
+  str src = `imp std.c.io;
+  `fun countdown<T>(T label, num n) num {
+  `  if n <= 0 { ret 0; }
+  `  ret 1 + countdown(label, n - 1);
+  `}
+  `fun main() num {
+  `  printf("%lld\n", countdown("x", 5));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function can call itself recursively (self-recursive generic function call)"
+  );
+  assert contains(out, "countdown__str(char* label, int64_t n)"), "expected one monomorphization inferred from the argument";
+  assert contains(out, "countdown__str(label, (n - 1))"), "expected the recursive call to reuse it";
+}
+
+test "a generic array-typed value (T[]) compares against nil like any other pointer" {
+  str src = `imp std.c.io;
+  `imp std.c.mem;
+  `compound Box<T> {
+  `  T[] data;
+  `}
+  `impl Box<T> {
+  `  pub alloc(num n) num {
+  `    self.data = malloc(sizeof(T) * n);
+  `    if self.data == nil {
+  `      ret 1;
+  `    }
+  `    ret 0;
+  `  }
+  `}
+  `fun main() num {
+  `  num[] a = malloc(sizeof(num) * 4);
+  `  printf("%d %d\n", a == nil, nil == a);
+  `  free(a);
+  `  Box<num> b;
+  `  printf("%lld\n", b.alloc(4));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic array-typed value (T[]) compares against nil like any other pointer"
+  );
+  assert contains(out, "self->data == NULL"), "expected the generic array field to compare against NULL";
+  assert contains(out, "NULL == a"), "expected nil on the left to compare too";
+}
+
+// skipped: WaitGroup comes from std.task and the assertion is about the built
+// binary not deadlocking.
+
+test "a generic function calling a DIFFERENT generic function from its own body gets that callee emitted (indirect instantiation)" {
+  str src = `imp std.c.io;
+  `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `fun double_it<T>(T x) T {
+  `  ret identity(x) + identity(x);
+  `}
+  `fun level3<T>(T x) T {
+  `  ret x;
+  `}
+  `fun level2<T>(T x) T {
+  `  ret level3(x) + level3(x);
+  `}
+  `fun level1<T>(T x) T {
+  `  ret level2(x) + level2(x);
+  `}
+  `fun main() num {
+  `  printf("%lld %lld\n", double_it(21), level1(5));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function calling a DIFFERENT generic function from its own body gets that callee emitted (indirect instantiation)"
+  );
+  assert contains(out, "identity__num(int64_t x)"), "expected the indirectly reached callee to be emitted";
+  assert contains(out, "level3__num(int64_t x)"), "expected discovery to reach three levels deep";
+}
+
+test "indirect generic instantiation discovery does not cross-substitute unrelated generic functions sharing a type param name" {
+  str src = `imp std.c.io;
+  `compound Box<T> {
+  `  T value;
+  `}
+  `fun make_box<T>(T v) Box<T> {
+  `  Box<T> b;
+  `  b.value = v;
+  `  ret b;
+  `}
+  `fun dead_caller<T>(T v) Box<T> {
+  `  ret make_box(v);
+  `}
+  `fun live_caller<T>(T v) T {
+  `  ret v;
+  `}
+  `fun main() num {
+  `  printf("%lld\n", live_caller(7));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "indirect generic instantiation discovery does not cross-substitute unrelated generic functions sharing a type param name"
+  );
+  assert contains(out, "live_caller__num"), "expected the called generic function to be emitted";
+  assert !contains(out, "make_box__num"), "expected the never-called generic function to stay uninstantiated";
+}
+
+test "a self-recursive CONSTRAINED generic function calling itself with the abstract T passes its own bound" {
+  str src = `imp std.c.io;
+  `fun sum_down<T: num | dec>(T n) T {
+  `  if n <= 0 {
+  `    ret n;
+  `  }
+  `  ret n + sum_down(n - 1);
+  `}
+  `fun main() num {
+  `  printf("%lld\n", sum_down(5));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a self-recursive CONSTRAINED generic function calling itself with the abstract T passes its own bound"
+  );
+  assert contains(out, "sum_down__num(int64_t n)"), "expected the bound to admit the num instantiation";
+  assert contains(out, "sum_down__num((n - 1))"), "expected the recursive call to reuse it";
+}
+
+// gap: a call violating a generic bound is accepted instead of rejected.
+// test "a self-recursive CONSTRAINED generic function rejects a bound violation" {
+// str src = `imp std.c.io;
+// `fun sum_down<T: num | dec>(T n) T {
+// `  if n <= 0 {
+// `    ret n;
+// `  }
+// `  ret n + sum_down(n - 1);
+// `}
+// `fun main() num {
+// `  printf("%s\n", sum_down("hi"));
+// `  ret 0;
+// `}`;
+// let r = transpile_source(src);
+// assert r.is_err(), "expected the constraint violation to be rejected";
+// }
+
+test "a generic impl method calling a DIFFERENT generic free function from its own body gets that callee emitted" {
+  str src = `imp std.c.io;
+  `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `compound Box<T> {
+  `  T value;
+  `}
+  `impl Box<T> {
+  `  pub get() T {
+  `    ret identity(self.value);
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  b.value = 99;
+  `  printf("%lld\n", b.get());
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl method calling a DIFFERENT generic free function from its own body gets that callee emitted"
+  );
+  assert contains(out, "identity__num(int64_t x)"), "expected the free function reached from the method body";
+  assert contains(out, "Box__num__get"), "expected the monomorphized method";
+}
+
+// gap: a generic free function instantiated from a method's own type param is
+// substituted with the impl's type argument instead of the method's, so
+// `identity__str` is emitted taking int64_t.
+// test "an impl method can declare its OWN generic type parameter beyond the impl's" {
+// str src = `imp std.c.io;
+// `fun identity<T>(T x) T {
+// `  ret x;
+// `}
+// `compound Box<T> {
+// `  T value;
+// `}
+// `impl Box<T> {
+// `  pub map<U>(U other) U {
+// `    ret identity(other);
+// `  }
+// `  pub sum_with<U: num | dec>(U other) U {
+// `    ret other + other;
+// `  }
+// `}
+// `fun main() num {
+// `  Box<num> b;
+// `  b.value = 1;
+// `  printf("%lld %s %lld\n", b.map(77), b.map("hello"), b.sum_with(21));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "an impl method can declare its OWN generic type parameter beyond the impl's");
+// assert contains(out, "identity__str(char* x)"), "expected the callee substituted with the method's type argument";
+// }
+
+// gap: a method's own generic bound is not enforced against a violating call.
+// test "a method's own generic type param constraint is still enforced against a real violation" {
+// str src = `imp std.c.io;
+// `compound Box<T> {
+// `  T value;
+// `}
+// `impl Box<T> {
+// `  pub sum_with<U: num | dec>(U other) U {
+// `    ret other + other;
+// `  }
+// `}
+// `fun main() num {
+// `  Box<num> b;
+// `  b.value = 1;
+// `  printf("%s\n", b.sum_with("bad"));
+// `  ret 0;
+// `}`;
+// let r = transpile_source(src);
+// assert r.is_err(), "expected the constraint violation to be rejected";
+// }
+
+// Known gap: a method declaring its own type param on a NON-generic impl
+// is not monomorphized. `impl_method_has_own_type_params` only scans
+// generic impl templates, so a plain `impl Registry` never reaches the
+// own-param instantiation path and the literal `U` reaches the output.
+// The generic-impl form (`impl Box<T>`) does work.
+// test "an impl method's own generic type param also works on a non-generic impl/compound" {
+// str src = `imp std.c.io;
+// `fun identity<T>(T x) T {
+// `  ret x;
+// `}
+// `compound Registry {
+// `  num count;
+// `}
+// `impl Registry {
+// `  pub echo<U>(U x) U {
+// `    ret identity(x);
+// `  }
+// `}
+// `fun main() num {
+// `  Registry r;
+// `  r.count = 0;
+// `  printf("%lld\n", r.echo(123));
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "an impl method's own generic type param also works on a non-generic impl/compound");
+// assert contains(out, "Registry__echo__num"), "expected the method monomorphized on its own type param";
+// assert contains(out, "identity__num"), "expected the free function reached through it";
+// }
+
+test "a method with its own type param calling a SIBLING method that also has its own type param" {
+  str src = `imp std.c.io;
+  `compound Box<T> {
+  `  T value;
+  `}
+  `impl Box<T> {
+  `  pub inner<U>(U x) U {
+  `    ret x;
+  `  }
+  `  pub outer<V>(V x) V {
+  `    ret self.inner(x);
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  b.value = 0;
+  `  printf("%lld\n", b.outer(9));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a method with its own type param calling a SIBLING method that also has its own type param"
+  );
+  assert contains(out, "Box__num__outer__num"), "expected the outer method monomorphized";
+  assert contains(out, "Box__num__inner__num"), "expected the sibling reached from its body";
+}
+
+test "method chaining on a generic method's own-type-param call result monomorphizes correctly" {
+  str src = `imp std.c.io;
+  `compound Box<T> {
+  `  T value;
+  `}
+  `impl Box<T> {
+  `  pub wrap<U>(U x) Box<U> {
+  `    Box<U> b;
+  `    b.value = x;
+  `    ret b;
+  `  }
+  `  pub get() T {
+  `    ret self.value;
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  b.value = 0;
+  `  printf("%s\n", b.wrap("chained").get());
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "method chaining on a generic method's own-type-param call result monomorphizes correctly"
+  );
+  assert contains(out, "Box__str Box__num__wrap__str"), "expected the result type monomorphized on the method's own type param";
+  assert contains(out, "char* Box__str__get(Box__str* self)"), "expected the chained method resolved against that result";
+}
+
+// gap: the fit arms test the unsubstituted tag `Maybe__U_Has` while the value
+// carries `Maybe__str_Has`, so no arm matches.
+// test "constructing a generic enum from a method's own type param does not cross-substitute via a name collision" {
+// str src = `imp std.c.io;
+// `enum Maybe<T> {
+// `  Has(T),
+// `  None,
+// `}
+// `compound Box<T> {
+// `  T value;
+// `}
+// `impl Box<T> {
+// `  pub wrap<U>(U x) Maybe<U> {
+// `    ret Maybe.Has(x);
+// `  }
+// `}
+// `fun main() num {
+// `  Box<num> b;
+// `  b.value = 0;
+// `  fit b.wrap("hi") {
+// `    .Has(v) -> { printf("%s\n", v); }
+// `    .None -> { printf("none\n"); }
+// `  }
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "constructing a generic enum from a method's own type param");
+// assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
+// }
+
+test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
+  str src = `imp std.c.io;
+  `pub fun fork() num {
+  `  ret 42;
+  `}
+  `fun main() num {
+  `  let pid = fork();
+  `  printf("%lld\n", pid);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fork is a CONTEXTUAL keyword: usable as an ordinary function");
+  assert contains(out, "fork()"), "expected an ordinary call, not a scheduler spawn";
+  assert !contains(out, "__fun_go("), "expected no scheduler runtime to be emitted";
+}
+
+// gap: a `str[]` return type is emitted as `char*` while the body returns
+// `char**`.
+// test "array return types: T[] is a valid function return type, with a body and signature-only" {
+// str src = `imp std.c.io;
+// `imp std.c.mem;
+// `pub fun unused_signature_only() str[];
+// `fun make_names() str[] {
+// `  str[] out = malloc(sizeof(str) * 3);
+// `  out[0] = "a";
+// `  out[1] = "b";
+// `  out[2] = nil;
+// `  ret out;
+// `}
+// `fun main() num {
+// `  str[] names = make_names();
+// `  printf("%s %s\n", names[0], make_names()[1]);
+// `  ret 0;
+// `}`;
+// let out = emit_c(src, "array return types: T[] is a valid function return type");
+// assert contains(out, "char** make_names"), "expected the array return type to lower to a pointer-to-pointer";
+// }
+
+// skipped: std.process and std.fs both need import resolution and assert on
+// what the built binary observes on the real system.
