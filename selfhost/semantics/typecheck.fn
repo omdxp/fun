@@ -8,6 +8,7 @@
 
 imp ..ast.ast;
 imp ..lexer.token;
+imp ..parser.datatype_defs;
 imp std.string;
 imp std.io;
 imp std.vec;
@@ -485,6 +486,50 @@ impl Checker {
     self.failed = true;
     self.error = _error(message, node);
   }
+}
+
+// Calls the language supplies rather than a program declaring them.
+fun _is_builtin_call(str name) bin {
+  fit name {
+    "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin", "va_arg_chr", "va_arg_str", "va_arg_raw" -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// True for a name that reads as a type rather than a value, which is
+// what `sizeof` measures.
+fun _names_a_type(Node* node) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Identifier(name) -> {
+      if keyword_is_datatype(name) {
+        ret true;
+      }
+      ret len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z';
+    }
+    .Unary(u) -> {
+      // A pointer or array spelling of a type still names one.
+      ret _names_a_type(u.operand);
+    }
+    // A generic instantiation is written the way a comparison is, so its
+    // type is the name on the left.
+    .Expression(e) -> {
+      if !e.has_left {
+        ret false;
+      }
+      ret _names_a_type(e.left);
+    }
+    .ExpressionParenthesis(inner) -> { ret _names_a_type(inner); }
+    // A generic instantiation written without fields parses as a
+    // compound literal carrying the type it names.
+    .CompoundInit(init) -> { ret init.has_dtype && init.fields.len == 0; }
+    _ -> { ret false; }
+  }
+  ret false;
 }
 
 // The signature a function declaration promises.
@@ -1034,8 +1079,21 @@ impl Checker {
     if equals(name, "") {
       ret self.check_method_call(node, e, &args, env, awaited);
     }
+    if _is_builtin_call(name) {
+      if equals(name, "sizeof") {
+        if args.len != 1 || !_names_a_type(args.get(0)) {
+          self.fail("sizeof measures a type", node);
+        }
+        ret checked_of(DataTypeType.Num);
+      }
+      ret checked_unknown();
+    }
     let known = self.fns.at(name);
     if known.is_none() {
+      // A name bound in scope holds a function rather than naming one.
+      if env.lookup(name).is_none() {
+        self.fail(format("no function named '{str}'", name), node);
+      }
       ret checked_unknown();
     }
     FnSig sig = known.unwrap();
@@ -1082,6 +1140,16 @@ fun _is_logical(str op) bin {
 }
 
 impl Checker {
+  // A condition asks a question, so it holds a truth value rather than
+  // something that merely stands in for one.
+  check_condition(Node* condition, TypeEnv* env) {
+    CheckedType t = self.infer(condition, env);
+    if is_unknown(t) || t.base == DataTypeType.Bin {
+      ret;
+    }
+    self.fail(format("a condition expects bin, found {str}", type_name(t)), condition);
+  }
+
   // Walks an expression written as a statement, for the checks made
   // along the way rather than for the type it produces.
   walk_expr(Node* node, TypeEnv* env) {
@@ -1105,11 +1173,11 @@ impl Checker {
       .Variable(v) -> { self.check_variable(stmt, v, env); }
       .StatementReturn(value) -> { self.check_return(stmt, value, env); }
       .StatementIf(ifn) -> {
-        _ = self.infer(ifn.condition, env);
+        self.check_condition(ifn.condition, env);
         self.check_statement(ifn.body, env);
       }
       .StatementElseIf(ein) -> {
-        _ = self.infer(ein.condition, env);
+        self.check_condition(ein.condition, env);
         self.check_statement(ein.body, env);
       }
       .StatementElse(body) -> { self.check_statement(body, env); }

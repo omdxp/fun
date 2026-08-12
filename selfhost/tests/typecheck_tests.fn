@@ -355,8 +355,12 @@ test "an enum with no payloads reads as a number" {
 }
 
 test "an array stands for a pointer to what it holds" {
+  // The callee is declared here rather than imported: this harness checks
+  // the source it is given on its own, without resolving imports.
   accepts(
-    `imp std.c.mem;
+    `fun release(raw* p) {
+    `  ret;
+    `}
     `compound Item {
     `  num v;
     `}
@@ -365,8 +369,53 @@ test "an array stands for a pointer to what it holds" {
     `}
     `fun main() {
     `  Holder h;
-    `  free(h.items);
+    `  release(h.items);
     `}`,
     "expected an array of compounds to stand for a raw pointer"
+  );
+}
+
+test "a call names a function that exists" {
+  rejects(`fun main() {
+  `  missing();
+  `}`, "expected the unknown callee to be reported");
+  accepts(
+    `fun helper() num { ret 1; }
+    `fun main() {
+    `  num x = helper();
+    `}`,
+    "expected the declared callee to check out"
+  );
+}
+
+test "sizeof measures a type, not a value" {
+  rejects(`fun main() {
+  `  num s = sizeof(1);
+  `}`, "expected a value operand to be rejected");
+  accepts(
+    `compound Item {
+    `  num v;
+    `}
+    `fun main() {
+    `  num a = sizeof(Item);
+    `  num b = sizeof(num);
+    `}`,
+    "expected a type operand to check out"
+  );
+}
+
+test "a condition holds a truth value" {
+  rejects(
+    `fun main() {
+    `  if 1 { ret; }
+    `}`,
+    "expected a number as a condition to be rejected"
+  );
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  if x > 0 { ret; }
+    `}`,
+    "expected a comparison to check out"
   );
 }
