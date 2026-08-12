@@ -72,27 +72,9 @@ fun _comment_text(Token t) str {
   ret b.build();
 }
 
-// A character literal carries a char just as a symbol does, so the
-// span it covered in source is what tells them apart: `'x'` spans more
-// than one column, `(` spans one.
 fun _symbol_text(Token t) str {
-  let c = _cval_of(t);
-  StringBuilder b = string_builder_init(6);
-  if t.pos.end_col - t.pos.start_col <= 1 {
-    b.append_char(c);
-    ret b.build();
-  }
-  b.append_char('\'');
-  fit c {
-    '\n' -> { b.append("\\n"); }
-    '\t' -> { b.append("\\t"); }
-    '\r' -> { b.append("\\r"); }
-    '\\' -> { b.append("\\\\"); }
-    '\'' -> { b.append("\\'"); }
-    '\0' -> { b.append("\\0"); }
-    _ -> { b.append_char(c); }
-  }
-  b.append_char('\'');
+  StringBuilder b = string_builder_init(2);
+  b.append_char(_cval_of(t));
   ret b.build();
 }
 
@@ -113,6 +95,18 @@ fun _number_text(Token t) str {
     .Num(n) -> { ret format_num(n); }
     .Dec(d) -> { ret format_dec(d, 6); }
     _ -> { ret ""; }
+  }
+}
+
+// True for a character literal, which is a number-kind token carrying a
+// char rather than a numeric value.
+pub fun is_char_literal(Token t) bin {
+  if t.type != TokenType.Number {
+    ret false;
+  }
+  fit t.data {
+    .Cval(_) -> { ret true; }
+    _ -> { ret false; }
   }
 }
 
@@ -344,11 +338,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     str text = token_text(t);
     // A raw string and a character literal are both reproduced from
-    // source: one is verbatim by definition, and the other shares its
-    // payload with an ordinary symbol.
-    if (t.type == TokenType.String && t.is_raw_string) || t.type == TokenType.Symbol {
+    // source: one is verbatim by definition, and the other carries a
+    // decoded char that no longer shows how it was written.
+    if (t.type == TokenType.String && t.is_raw_string) || is_char_literal(t) {
       let verbatim = _source_span(src, &starts, t.pos);
-      if !equals(verbatim, "") && (t.type != TokenType.Symbol || starts_with(verbatim, "'")) {
+      if !equals(verbatim, "") {
         text = verbatim;
       }
     }
