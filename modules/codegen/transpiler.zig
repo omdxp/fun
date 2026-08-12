@@ -13679,7 +13679,7 @@ pub const TranspileProcess = struct {
                 const seg_start = idx_opt + 2;
                 if (seg_start + needle.len <= mangled.len and mem.eql(u8, mangled[seg_start .. seg_start + needle.len], needle)) {
                     const seg_end = seg_start + needle.len;
-                    if (seg_end == mangled.len or (seg_end + 1 <= mangled.len and mem.eql(u8, mangled[seg_end .. seg_end + 2], "__"))) {
+                    if (seg_end == mangled.len or (seg_end + 2 <= mangled.len and mem.eql(u8, mangled[seg_end .. seg_end + 2], "__"))) {
                         return true;
                     }
                 }

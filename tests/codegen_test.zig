@@ -6815,6 +6815,42 @@ test "iterating a field holding a Vec of pointers keeps the element's pointer de
     try std.testing.expectEqualStrings("12\n", stdout);
 }
 
+test "a compound holding a generic instance of itself compiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "self_generic_field.fn";
+    const c_path = "self_generic_field.c";
+    const exe_path = if (builtin.os.tag == .windows) "self_generic_field.exe" else "self_generic_field";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: deciding whether a mangled name mentions a type parameter
+    // read two bytes after a segment while only checking that one was left,
+    // so a name ending right after the segment (`Vec__Ty`) indexed past the
+    // end and panicked instead of compiling.
+    const input =
+        "imp std.vec;\n" ++
+        "imp std.c.io;\n" ++
+        "compound Ty { str name; Vec<Ty> args; }\n" ++
+        "fun main() num {\n" ++
+        "  Ty t; t.name = \"Vec\"; t.args.init(1);\n" ++
+        "  Ty a; a.name = \"num\"; a.args.init(0);\n" ++
+        "  t.args.push(a);\n" ++
+        "  printf(\"%s<%s>\\n\", t.name, t.args.get(0).name);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("Vec<num>\n", stdout);
+}
+
 test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" {
     const allocator = std.testing.allocator;
     const ifilepath = "p1_quirk_coerce.fn";
