@@ -124,6 +124,11 @@ impl Fs {
     ret write_all(path, data);
   }
 
+  // Deletes the file at `path`, returning true on success.
+  pub remove_file(str path) bin {
+    ret remove(path) == 0;
+  }
+
   // Writes `data` to a file, with Result.
   pub try_write_string(str path, str data) Result<bin, Error> {
     let ok_write = write_all(path, data);
@@ -315,6 +320,12 @@ pub fun read_bytes(str path, num max_len) str {
 pub fun write_string(str path, str data) bin {
   let f = fs();
   ret f.write_string(path, data);
+}
+
+// Deletes the file at `path`, returning true on success.
+pub fun remove_file(str path) bin {
+  let f = fs();
+  ret f.remove_file(path);
 }
 
 // Appends `data` to a file, returning true on success.
