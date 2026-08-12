@@ -1,6 +1,16 @@
 const std = @import("std");
 const cli = @import("cli");
 
+/// A directory of this test's own, named after `prefix`, for a build that would
+/// otherwise write into the repository the tests run in.
+fn makeCliTempDir(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
+    const ts = std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds;
+    const name = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ prefix, ts });
+    errdefer allocator.free(name);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, name);
+    return name;
+}
+
 fn cleanupCliTestArtifacts() void {
     const cwd = std.Io.Dir.cwd();
 
@@ -106,17 +116,24 @@ test "parse_args keeps directory input for -fmt-check-all" {
 
 test "run_build: compiles a fun.toml manifest's bin target and it runs correctly" {
     const allocator = std.testing.allocator;
-    defer cleanupCliTestArtifacts();
 
-    const manifest_path = "fun.toml";
-    const fn_path = "cli_run_build_hello.fn";
-    const exe_path = if (@import("builtin").target.os.tag == .windows)
-        "fun-out/bin/cli_run_build_hello.exe"
+    // The build runs in a directory of its own. Writing the manifest into the
+    // working directory would overwrite the repository's own `fun.toml`, and
+    // deleting it afterwards would take that file with it.
+    const root = try makeCliTempDir(allocator, "cli_run_build");
+    defer allocator.free(root);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, root) catch {};
+
+    const manifest_path = try std.fs.path.join(allocator, &.{ root, "fun.toml" });
+    defer allocator.free(manifest_path);
+    const fn_path = try std.fs.path.join(allocator, &.{ root, "cli_run_build_hello.fn" });
+    defer allocator.free(fn_path);
+    const exe_leaf = if (@import("builtin").target.os.tag == .windows)
+        "cli_run_build_hello.exe"
     else
-        "fun-out/bin/cli_run_build_hello";
-    defer std.Io.Dir.cwd().deleteFile(std.testing.io, manifest_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(std.testing.io, fn_path) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, "fun-out") catch {};
+        "cli_run_build_hello";
+    const exe_path = try std.fs.path.join(allocator, &.{ root, "fun-out", "bin", exe_leaf });
+    defer allocator.free(exe_path);
 
     {
         const f = try std.Io.Dir.cwd().createFile(std.testing.io, manifest_path, .{ .truncate = true });
@@ -138,7 +155,7 @@ test "run_build: compiles a fun.toml manifest's bin target and it runs correctly
             "}\n");
     }
 
-    try cli.run_build(allocator, std.testing.io, false);
+    try cli.run_build_in(allocator, std.testing.io, root, false);
 
     const exe_abs = blk: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -157,7 +174,15 @@ test "run_build: compiles a fun.toml manifest's bin target and it runs correctly
 }
 
 test "run_build: missing fun.toml reports ManifestNotFound" {
-    // No manifest written in this test's CWD; the surrounding suite doesn't
-    // leave one behind either (cleaned up via defers in the tests above).
-    try std.testing.expectError(cli.CliError.ManifestNotFound, cli.run_build(std.testing.allocator, std.testing.io, false));
+    const allocator = std.testing.allocator;
+
+    // An empty directory of its own, so the result does not depend on whether
+    // the repository the tests run in happens to carry a manifest.
+    const root = try makeCliTempDir(allocator, "cli_run_build_missing");
+    defer allocator.free(root);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, root) catch {};
+
+    try std.testing.expectError(cli.CliError.ManifestNotFound, cli.run_build_in(allocator, std.testing.io, root, false));
 }
+
+

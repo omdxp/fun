@@ -3705,7 +3705,16 @@ pub fn compile_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, 
 /// paths). Fun's own `imp` already does path-based module resolution, so
 /// the manifest only needs to declare build TARGETS, not an import graph.
 pub fn run_build(allocator: mem.Allocator, io: std.Io, debug_info: bool) !void {
-    const manifest_path = "fun.toml";
+    return run_build_in(allocator, io, ".", debug_info);
+}
+
+/// Builds the manifest in `root` rather than the working directory. Every path
+/// the build reads or writes -- the manifest, each target's source, the
+/// generated C, and the installed executable -- is resolved against `root`, so
+/// a build never depends on where it was started from.
+pub fn run_build_in(allocator: mem.Allocator, io: std.Io, root: []const u8, debug_info: bool) !void {
+    const manifest_path = try std.fs.path.join(allocator, &.{ root, "fun.toml" });
+    defer allocator.free(manifest_path);
     const text = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return CliError.ManifestNotFound,
         else => return err,
@@ -3715,14 +3724,21 @@ pub fn run_build(allocator: mem.Allocator, io: std.Io, debug_info: bool) !void {
     var m = try manifest.parse(allocator, text);
     defer m.deinit();
 
-    try std.Io.Dir.cwd().createDirPath(io, "fun-out/bin");
+    const bin_dir = try std.fs.path.join(allocator, &.{ root, "fun-out", "bin" });
+    defer allocator.free(bin_dir);
+    try std.Io.Dir.cwd().createDirPath(io, bin_dir);
 
     for (m.bins) |b| {
-        const out_c_path = try std.fmt.allocPrint(allocator, "{s}.fun-build.c", .{b.name});
+        const out_c_name = try std.fmt.allocPrint(allocator, "{s}.fun-build.c", .{b.name});
+        defer allocator.free(out_c_name);
+        const out_c_path = try std.fs.path.join(allocator, &.{ root, out_c_name });
         defer allocator.free(out_c_path);
         defer std.Io.Dir.cwd().deleteFile(io, out_c_path) catch {};
 
-        var tp = try codegen.TranspileProcess.init(allocator, b.path, out_c_path, .{
+        const src_path = try std.fs.path.join(allocator, &.{ root, b.path });
+        defer allocator.free(src_path);
+
+        var tp = try codegen.TranspileProcess.init(allocator, src_path, out_c_path, .{
             .exec = false,
             .outf = true,
             .debug_info = debug_info,
@@ -3737,10 +3753,12 @@ pub fn run_build(allocator: mem.Allocator, io: std.Io, debug_info: bool) !void {
         try pp.parse();
         try tp.transpile();
 
-        const exe_name = if (builtin.target.os.tag == .windows)
-            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}.exe", .{b.name})
+        const exe_leaf = if (builtin.target.os.tag == .windows)
+            try std.fmt.allocPrint(allocator, "{s}.exe", .{b.name})
         else
-            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}", .{b.name});
+            try allocator.dupe(u8, b.name);
+        defer allocator.free(exe_leaf);
+        const exe_name = try std.fs.path.join(allocator, &.{ bin_dir, exe_leaf });
         defer allocator.free(exe_name);
 
         try compile_to_exe(allocator, io, out_c_path, exe_name, debug_info);
