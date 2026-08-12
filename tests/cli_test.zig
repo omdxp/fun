@@ -184,5 +184,3 @@ test "run_build: missing fun.toml reports ManifestNotFound" {
 
     try std.testing.expectError(cli.CliError.ManifestNotFound, cli.run_build_in(allocator, std.testing.io, root, false));
 }
-
-
