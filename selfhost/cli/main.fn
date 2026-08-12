@@ -14,18 +14,6 @@ fun _fail(str msg) num {
   ret 1;
 }
 
-// Collects argv into a `Vec<str>`, dropping the program name.
-fun _args_after_program_name(str[] args) Vec<str> {
-  Vec<str> out;
-  out.init(0);
-  num i = 1;
-  for args[i] != 0 {
-    out.push(args[i]);
-    i = i + 1;
-  }
-  ret out;
-}
-
 // The version of the package in the working directory. `fun build`
 // injects this into a program it builds, so a compiled program reads its
 // own version as a constant instead of reading the manifest at runtime.
@@ -41,10 +29,7 @@ fun package_version() str {
 }
 
 fun main(str[] args) num {
-  let argv = _args_after_program_name(args);
-  defer argv.free();
-
-  Options opts = parse_args(&argv);
+  Options opts = parse_args(args);
   defer opts.free();
 
   if opts.has_error {
@@ -54,33 +39,41 @@ fun main(str[] args) num {
     println(package_version());
     ret 0;
   }
-  if opts.show_help || equals(opts.input, "") {
+  if opts.show_help {
     println(help_text());
-    if equals(opts.input, "") && !opts.show_help {
-      ret 1;
-    }
     ret 0;
+  }
+  if equals(opts.subcommand, "build") {
+    ret build_project();
+  }
+  if equals(opts.subcommand, "test") {
+    ret _fail("`fun test` is not available yet");
+  }
+  if equals(opts.input, "") {
+    println(help_text());
+    ret 1;
   }
   if !exists(opts.input) {
     ret _fail(format("no such file: {str}", opts.input));
   }
 
-  str c_path = with_extension(opts.input, ".c");
+  // `-out` names the generated C file, defaulting to the input's own
+  // name with a `.c` extension.
+  str c_path = opts.output;
+  if equals(c_path, "") {
+    c_path = with_extension(opts.input, ".c");
+  }
   let lowered = compile_to_c(opts.input, c_path, &opts.defines);
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());
   }
 
-  // `-no-exec` without `-outf` still leaves the C behind, since that is
-  // the only artifact the run produced.
+  // `-no-exec` stops at the C, which is the artifact it was asked for.
   if opts.no_exec {
     ret 0;
   }
 
-  str exe_path = opts.output;
-  if equals(exe_path, "") {
-    exe_path = with_extension(opts.input, "");
-  }
+  str exe_path = format("{str}{str}", with_extension(opts.input, ""), exe_suffix());
 
   let cc_code = compile_c_to_exe(c_path, exe_path, opts.debug_info);
   if !opts.keep_c {

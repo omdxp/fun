@@ -374,6 +374,40 @@ pub fun make_dir(str path) Result<bin, Error> {
   ret f.make_dir(path);
 }
 
+// Creates `path` and any missing parent directories. Succeeds when the
+// directory already exists. Accepts either separator, so a path written
+// for one platform still works on another.
+pub fun make_dir_all(str path) Result<bin, Error> {
+  if equals(path, "") {
+    ret .Ok(true);
+  }
+  if is_dir(path) {
+    ret .Ok(true);
+  }
+
+  num i = 0;
+  let n = len(path);
+  for i < n {
+    let c = path[i];
+    if (c == '/' || c == '\\') && i > 0 {
+      let parent = substr(path, 0, i);
+      if !is_dir(parent) && !equals(parent, "") {
+        let made = make_dir(parent);
+        if made.is_err() && !is_dir(parent) {
+          ret made;
+        }
+      }
+    }
+    i = i + 1;
+  }
+
+  let made = make_dir(path);
+  if made.is_err() && !is_dir(path) {
+    ret made;
+  }
+  ret .Ok(true);
+}
+
 // Lists the immediate entries of a directory (excludes `.`/`..`).
 pub fun list_dir(str path) Result<Vec<str>, Error> {
   let f = fs();

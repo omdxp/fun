@@ -8,6 +8,7 @@
 
 imp ..parser.import_resolver;
 imp ..ast.ast;
+imp manifest;
 imp ..codegen.codegen;
 imp ..codegen.codegen_state;
 imp std.string;
@@ -17,6 +18,7 @@ imp std.result;
 imp std.io;
 imp std.fs;
 imp std.sys;
+imp std.cli;
 imp std.process;
 imp std.path;
 imp std.runtime_backend;
@@ -30,6 +32,8 @@ pub compound Define {
 
 // What the arguments asked for.
 pub compound Options {
+  // `build`, `test`, or "" for a plain compile.
+  str subcommand;
   str input;
   str output;
   // Compile only, leaving the executable unrun.
@@ -51,6 +55,7 @@ pub compound Options {
 
 fun _options_new() Options {
   Options o;
+  o.subcommand = "";
   o.input = "";
   o.output = "";
   o.no_exec = false;
@@ -72,107 +77,69 @@ impl Options {
   }
 }
 
-// Reads `args` (argv without the program name) into `Options`. Anything
-// after `--` belongs to the compiled program, not to the compiler.
-pub fun parse_args(Vec<str>* args) Options {
+// The flags that take a separate value.
+fun _value_flags() Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  out.push("in");
+  out.push("out");
+  out.push("D");
+  ret out;
+}
+
+// Reads `argv` into `Options`. A subcommand, when present, is the first
+// argument, and anything after `--` belongs to the compiled program.
+pub fun parse_args(str[] argv) Options {
   Options o = _options_new();
-  num i = 0;
-  bin rest_are_program_args = false;
 
-  for i < args.len {
-    str arg = args.get(i);
+  Vec<str> value_flags = _value_flags();
+  defer value_flags.free();
+  CliArgs parsed = cli_parse_flags(argv, &value_flags);
+  defer parsed.free();
 
-    if rest_are_program_args {
-      o.program_args.push(arg);
-      i = i + 1;
-      continue;
+  num first_positional = 0;
+  let leading = parsed.at_positional(0);
+  if leading.is_some() {
+    str head = leading.unwrap();
+    if equals(head, "build") || equals(head, "test") {
+      o.subcommand = head;
+      first_positional = 1;
     }
+  }
 
-    if equals(arg, "--") {
-      rest_are_program_args = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-help") || equals(arg, "-h") {
-      o.show_help = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-version") {
-      o.show_version = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-no-exec") {
-      o.no_exec = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-outf") {
-      o.keep_c = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-g") {
-      o.debug_info = true;
-      i = i + 1;
-      continue;
-    }
-    if equals(arg, "-D") {
-      if i + 1 >= args.len {
-        o.has_error = true;
-        o.error_text = "-D needs a `name=value` pair";
-        ret o;
-      }
-      let pair = args.get(i + 1);
-      let eq = index_of_char(pair, '=');
-      if eq == -1 {
-        o.has_error = true;
-        o.error_text = format("-D expects `name=value`, found `{str}`", pair);
-        ret o;
-      }
-      Define d;
-      d.name = substr(pair, 0, eq);
-      d.value = substr(pair, eq + 1, len(pair) - (eq + 1));
-      o.defines.push(d);
-      i = i + 2;
-      continue;
-    }
-    if equals(arg, "-in") {
-      if i + 1 >= args.len {
-        o.has_error = true;
-        o.error_text = "-in needs a file path";
-        ret o;
-      }
-      o.input = args.get(i + 1);
-      i = i + 2;
-      continue;
-    }
-    if equals(arg, "-out") {
-      if i + 1 >= args.len {
-        o.has_error = true;
-        o.error_text = "-out needs a file path";
-        ret o;
-      }
-      o.output = args.get(i + 1);
-      i = i + 2;
-      continue;
-    }
-    if starts_with(arg, "-") {
+  o.show_help = parsed.has("help") || parsed.has("h");
+  o.show_version = parsed.has("version");
+  o.no_exec = parsed.has("no-exec");
+  o.keep_c = parsed.has("outf");
+  o.debug_info = parsed.has("g");
+  o.input = parsed.get_or("in", "");
+  o.output = parsed.get_or("out", "");
+
+  let define = parsed.at("D");
+  if define.is_some() {
+    str pair = define.unwrap();
+    let eq = index_of_char(pair, '=');
+    if eq == -1 {
       o.has_error = true;
-      o.error_text = format("unknown option `{str}`", arg);
+      o.error_text = format("-D expects `name=value`, found `{str}`", pair);
       ret o;
     }
+    Define d;
+    d.name = substr(pair, 0, eq);
+    d.value = substr(pair, eq + 1, len(pair) - (eq + 1));
+    o.defines.push(d);
+  }
 
-    // A bare path is the input, so `fun file.fn` works without `-in`.
-    if equals(o.input, "") {
+  // A bare path is the input, so `fun file.fn` works without `-in`.
+  num i = first_positional;
+  for i < parsed.positionals.len {
+    str arg = parsed.positionals.get(i);
+    if equals(o.input, "") && !equals(o.subcommand, "test") {
       o.input = arg;
-      i = i + 1;
-      continue;
+    } else {
+      o.program_args.push(arg);
     }
-    o.has_error = true;
-    o.error_text = format("unexpected argument `{str}`", arg);
-    ret o;
+    i = i + 1;
   }
   ret o;
 }
@@ -309,6 +276,33 @@ pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
   ret code;
 }
 
+// Compiles `c_path` to an object at `obj_path` without linking, which is
+// how a library target is checked: it has no entry point to link.
+pub fun compile_c_to_object(str c_path, str obj_path) num {
+  str cc = c_compiler();
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(cc);
+
+  if compiler_is_msvc(cc) {
+    argv_args.push("/nologo");
+    argv_args.push("/c");
+    argv_args.push(c_path);
+    argv_args.push(format("/Fo:{str}", obj_path));
+  } else {
+    argv_args.push("-c");
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(obj_path);
+  }
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
 // Qualifies a bare executable name so it is run from the current
 // directory rather than searched for on `PATH`. Windows already looks in
 // the current directory, so only POSIX needs the prefix.
@@ -350,85 +344,108 @@ pub fun help_text() str {
   `  fun -version
   `
   `  -in <file>    Input file to compile.
-  `  -out <file>   Output path (defaults to the input's own name).
+  `  -out <file>   Write the generated C here.
   `  -no-exec      Compile only, without running the result.
   `  -outf         Keep the generated C file.
   `  -g            Build with debug information.
   `  --            Pass every following argument to the compiled program.`;
 }
 
+fun _argv(Vec<str>* parts) str[] {
+  str[] out = malloc(sizeof(str) * (parts.len + 2));
+  out[0] = "fun";
+  num i = 0;
+  for i < parts.len {
+    out[i + 1] = parts.get(i);
+    i = i + 1;
+  }
+  out[parts.len + 1] = nil;
+  ret out;
+}
+
 test "parses an input path and an output path" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("-in");
-  args.push("main.fn");
-  args.push("-out");
-  args.push("prog");
-  let o = parse_args(&args);
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-out");
+  a.push("prog");
+  let o = parse_args(_argv(&a));
   assert !o.has_error, "expected the arguments to parse";
   assert equals(o.input, "main.fn"), "expected the input path";
   assert equals(o.output, "prog"), "expected the output path";
 }
 
 test "accepts a bare path as the input" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("main.fn");
-  let o = parse_args(&args);
-  assert !o.has_error, "expected a bare path to be accepted";
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("main.fn");
+  let o = parse_args(_argv(&a));
   assert equals(o.input, "main.fn"), "expected the input path";
 }
 
 test "collects the flags" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("-in");
-  args.push("main.fn");
-  args.push("-no-exec");
-  args.push("-outf");
-  args.push("-g");
-  let o = parse_args(&args);
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-no-exec");
+  a.push("-outf");
+  a.push("-g");
+  let o = parse_args(_argv(&a));
   assert o.no_exec, "expected -no-exec";
   assert o.keep_c, "expected -outf";
   assert o.debug_info, "expected -g";
 }
 
 test "everything after -- belongs to the program" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("-in");
-  args.push("main.fn");
-  args.push("--");
-  args.push("-not-a-compiler-flag");
-  args.push("value");
-  let o = parse_args(&args);
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("--");
+  a.push("passed");
+  let o = parse_args(_argv(&a));
   defer o.free();
-  assert !o.has_error, "expected the arguments to parse";
-  assert o.program_args.len == 2, "expected both program arguments";
-  assert equals(o.program_args.get(0), "-not-a-compiler-flag"), "expected the argument verbatim";
+  assert o.program_args.len == 1, "expected the program argument";
+  assert equals(o.program_args.get(0), "passed"), "expected the argument verbatim";
 }
 
-test "an unknown option is reported" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("-nope");
-  let o = parse_args(&args);
-  assert o.has_error, "expected an unknown option to be rejected";
-  assert contains(o.error_text, "-nope"), "expected the option to be named";
+test "recognizes a build subcommand" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("build");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "build"), "expected the build subcommand";
 }
 
-test "a flag missing its value is reported" {
-  Vec<str> args;
-  args.init(0);
-  defer args.free();
-  args.push("-in");
-  let o = parse_args(&args);
-  assert o.has_error, "expected a missing value to be rejected";
+test "reads a -D define" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-D");
+  a.push("TAG=v1.2.3");
+  a.push("main.fn");
+  let o = parse_args(_argv(&a));
+  defer o.free();
+  assert o.defines.len == 1, "expected the define";
+  assert equals(o.defines.get(0).name, "TAG"), "expected the define's name";
+  assert equals(o.defines.get(0).value, "v1.2.3"), "expected the define's value";
+}
+
+test "a malformed -D is reported" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-D");
+  a.push("NOEQUALS");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a malformed define to be rejected";
 }
 
 test "with_extension replaces an existing extension" {
@@ -462,4 +479,93 @@ test "the msvc compiler is recognized by name" {
   assert compiler_is_msvc("cl.exe"), "expected cl.exe to be msvc";
   assert !compiler_is_msvc("cc"), "expected cc to be gcc-style";
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
+}
+
+// Reads `./fun.toml` and fills in whatever it left implicit.
+pub fun load_manifest() Result<Manifest, str> {
+  if !exists("fun.toml") {
+    ret .Err("no fun.toml in this directory");
+  }
+  let parsed = parse_manifest(read_to_string("fun.toml"));
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  Manifest m = parsed.unwrap();
+  resolve_targets(&m, "");
+  ret .Ok(m);
+}
+
+// The constants every build makes available to the program: the package
+// name and version, taken from the manifest.
+pub fun manifest_defines(Manifest* m) Vec<Define> {
+  Vec<Define> out;
+  out.init(0);
+  Define name;
+  name.name = "PACKAGE_NAME";
+  name.value = m.package_name;
+  out.push(name);
+  Define version;
+  version.name = "PACKAGE_VERSION";
+  version.value = m.version;
+  out.push(version);
+  ret out;
+}
+
+// Compiles every target the manifest declares, writing executables to
+// `fun-out/bin`. A library has no entry point, so it is compiled to an
+// object under `fun-out/lib` to prove it builds, never linked.
+pub fun build_project() num {
+  let loaded = load_manifest();
+  if loaded.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
+    ret 1;
+  }
+  Manifest m = loaded.unwrap();
+  defer m.free();
+
+  if m.kind() == PackageKind.Empty {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\npackage `{str}` declares no [lib] or [[bin]] target", m.package_name)
+    );
+    ret 1;
+  }
+
+  Vec<Define> defines = manifest_defines(&m);
+  defer defines.free();
+
+  if m.has_lib {
+    make_dir_all("fun-out/lib");
+    str c_path = path_join("fun-out/lib", format("{str}.c", m.lib.name));
+    let lowered = compile_to_c(m.lib.path, c_path, &defines);
+    if lowered.is_err() {
+      writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+      ret 1;
+    }
+    let code = compile_c_to_object(c_path, path_join("fun-out/lib", format("{str}.o", m.lib.name)));
+    if code != 0 {
+      ret 1;
+    }
+    println(format("checked {str}", m.lib.name));
+  }
+
+  num i = 0;
+  for i < m.bins.len {
+    BinTarget* b = &m.bins.data[i];
+    make_dir_all("fun-out/bin");
+    str c_path = path_join("fun-out/bin", format("{str}.c", b.name));
+    let lowered = compile_to_c(b.path, c_path, &defines);
+    if lowered.is_err() {
+      writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+      ret 1;
+    }
+    str exe = path_join("fun-out/bin", format("{str}{str}", b.name, exe_suffix()));
+    let code = compile_c_to_exe(c_path, exe, false);
+    if code != 0 {
+      ret 1;
+    }
+    println(format("built {str} -> {str}", b.name, exe));
+    i = i + 1;
+  }
+  ret 0;
 }
