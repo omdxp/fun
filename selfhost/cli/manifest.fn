@@ -10,10 +10,10 @@
 // import graph.
 
 imp std.string;
+imp std.toml;
 imp std.vec;
 imp std.option;
 imp std.result;
-imp std.error;
 imp std.io;
 imp std.fs;
 
@@ -70,39 +70,12 @@ impl Manifest {
   }
 }
 
-// Unwraps a double-quoted value. `.None` when `value` is not quoted.
-fun _quoted_value(str value) Option<str> {
-  let n = len(value);
-  if n < 2 {
-    ret .None;
-  }
-  if value[0] != '"' || value[n - 1] != '"' {
-    ret .None;
-  }
-  ret .Some(substr(value, 1, n - 2));
-}
-
-// Drops a trailing `# comment`. Manifest values are paths and names, so
-// a `#` inside a quoted string is not expected.
-fun _strip_comment(str line) str {
-  let idx = index_of_char(line, '#');
-  if idx == -1 {
-    ret line;
-  }
-  ret trim(substr(line, 0, idx));
-}
-
-fun _is_table_header(str line) bin {
-  ret starts_with(line, "[") && ends_with(line, "]");
-}
-
-fun _is_array_table_header(str line) bin {
-  ret starts_with(line, "[[") && ends_with(line, "]]");
-}
-
-// Parses `text` as a manifest. Targets are taken exactly as declared;
+// Reads `text` as a manifest. Targets are taken exactly as declared;
 // see `resolve_targets` for filling in the conventional defaults.
 pub fun parse_manifest(str text) Result<Manifest, str> {
+  let doc = parse_document(text);
+  defer doc.free();
+
   Manifest m;
   m.package_name = "";
   m.version = "";
@@ -111,127 +84,63 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.lib.path = "";
   m.bins.init(0);
 
-  // 0 = none, 1 = package, 2 = lib, 3 = bin
-  num section = 0;
-  str cur_bin_name = "";
-  str cur_bin_path = "";
-  bin in_bin = false;
-
-  let lines = split(text, '\n');
-  defer lines.free();
-  for line_text : lines {
-    str line = _strip_comment(trim(line_text));
-    if len(line) == 0 {
-      continue;
-    }
-
-    if _is_array_table_header(line) {
-      str name = trim(substr(line, 2, len(line) - 4));
-      if !equals(name, "bin") {
-        ret .Err(format("unknown table `[[{str}]]`", name));
-      }
-      if in_bin {
-        let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
-        if flushed.is_some() {
-          ret .Err(flushed.unwrap());
-        }
-      }
-      cur_bin_name = "";
-      cur_bin_path = "";
-      in_bin = true;
-      section = 3;
-      continue;
-    }
-
-    if _is_table_header(line) {
-      if in_bin {
-        let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
-        if flushed.is_some() {
-          ret .Err(flushed.unwrap());
-        }
-        in_bin = false;
-        cur_bin_name = "";
-        cur_bin_path = "";
-      }
-      str name = trim(substr(line, 1, len(line) - 2));
-      if equals(name, "package") {
-        section = 1;
-      } elif equals(name, "lib") {
-        section = 2;
-        m.has_lib = true;
-      } else {
-        ret .Err(format("unknown table `[{str}]`", name));
-      }
-      continue;
-    }
-
-    let eq = index_of_char(line, '=');
-    if eq == -1 {
-      ret .Err(format("expected `key = value`, found `{str}`", line));
-    }
-    str key = trim(substr(line, 0, eq));
-    str raw_val = trim(substr(line, eq + 1, len(line) - (eq + 1)));
-    let val_opt = _quoted_value(raw_val);
-    if val_opt.is_none() {
-      ret .Err(format("value for `{str}` must be a quoted string", key));
-    }
-    str val = val_opt.unwrap();
-
-    if section == 1 {
-      if equals(key, "name") {
-        m.package_name = val;
-      } elif equals(key, "version") {
-        m.version = val;
-      }
-    } elif section == 2 {
-      if equals(key, "name") {
-        m.lib.name = val;
-      } elif equals(key, "path") {
-        m.lib.path = val;
-      }
-    } elif section == 3 {
-      if equals(key, "name") {
-        cur_bin_name = val;
-      } elif equals(key, "path") {
-        cur_bin_path = val;
-      }
-    } else {
-      ret .Err(format("`{str}` appears before any table header", key));
-    }
+  let pkg = doc.table("package");
+  if pkg.is_none() {
+    ret .Err("fun.toml is missing its [package] table");
   }
-
-  if in_bin {
-    let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
-    if flushed.is_some() {
-      ret .Err(flushed.unwrap());
-    }
-  }
-
+  m.package_name = pkg.unwrap().get_str("name");
   if equals(m.package_name, "") {
     ret .Err("[package] is missing a `name`");
   }
+  m.version = pkg.unwrap().get_str("version");
   if equals(m.version, "") {
     m.version = "0.0.0";
   }
-  ret .Ok(m);
-}
 
-// Appends the pending `[[bin]]`, or reports what it was missing.
-fun _flush_bin(Vec<BinTarget>* bins, str name, str path) Option<str> {
-  if equals(name, "") && equals(path, "") {
-    ret .None;
+  num ti = 0;
+  for ti < doc.tables.len {
+    str tname = doc.tables.get(ti).name;
+    if !equals(tname, "package") && !equals(tname, "lib") {
+      ret .Err(format("unknown table `[{str}]`", tname));
+    }
+    ti = ti + 1;
   }
-  if equals(name, "") {
-    ret .Some("a [[bin]] is missing a `name`");
+  num ai = 0;
+  for ai < doc.array_tables.len {
+    str aname = doc.array_tables.get(ai).name;
+    if !equals(aname, "bin") {
+      ret .Err(format("unknown table `[[{str}]]`", aname));
+    }
+    ai = ai + 1;
   }
-  if equals(path, "") {
-    ret .Some(format("[[bin]] `{str}` is missing a `path`", name));
+
+  let lib = doc.table("lib");
+  if lib.is_some() {
+    m.has_lib = true;
+    m.lib.name = lib.unwrap().get_str("name");
+    m.lib.path = lib.unwrap().get_str("path");
   }
-  BinTarget b;
-  b.name = name;
-  b.path = path;
-  bins.push(b);
-  ret .None;
+
+  let bins = doc.array("bin");
+  defer bins.free();
+  num i = 0;
+  for i < bins.len {
+    str name = bins.get(i).get_str("name");
+    str path = bins.get(i).get_str("path");
+    if equals(name, "") {
+      ret .Err("a [[bin]] is missing a `name`");
+    }
+    if equals(path, "") {
+      ret .Err(format("[[bin]] `{str}` is missing a `path`", name));
+    }
+    BinTarget b;
+    b.name = name;
+    b.path = path;
+    m.bins.push(b);
+    i = i + 1;
+  }
+
+  ret .Ok(m);
 }
 
 // Fills in whatever the manifest left implicit, relative to `root`:
@@ -382,11 +291,11 @@ test "a bin without a path is rejected" {
   assert r.is_err(), "expected a bin with no path to be rejected";
 }
 
-test "an unquoted value is rejected" {
+test "a value keeps its quotes stripped" {
   str text = `[package]
-  `name = demo`;
-  let r = parse_manifest(text);
-  assert r.is_err(), "expected an unquoted value to be rejected";
+  `name = "demo"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.package_name, "demo"), "expected the quotes to be stripped";
 }
 
 test "an unknown table is rejected" {

@@ -119,15 +119,56 @@ fun _tv_dup(str s) str {
 }
 
 // A parsed TOML document: keys mapped to typed values.
-pub compound TomlDoc {
+// A `[name]` section's own `key = value` pairs.
+pub compound TomlTable {
+  str name;
   Map<str, TomlValue> values;
+}
+
+pub compound TomlDoc {
+  // Keys written before any section header.
+  Map<str, TomlValue> values;
+  // `[name]` sections, in the order they appear.
+  Vec<TomlTable> tables;
+  // `[[name]]` entries, in the order they appear, one per occurrence.
+  Vec<TomlTable> array_tables;
 }
 
 // Create an empty TOML document.
 pub fun toml_doc_init() TomlDoc {
   TomlDoc d;
   d.values.init(8);
+  d.tables.init(0);
+  d.array_tables.init(0);
   ret d;
+}
+
+// An empty `[name]` section.
+pub fun toml_table_init(str name) TomlTable {
+  TomlTable t;
+  t.name = name;
+  t.values.init(8);
+  ret t;
+}
+
+impl TomlTable {
+  // Look up a key within this section.
+  pub get(str key) Option<TomlValue> {
+    ret self.values.at(key);
+  }
+
+  // The string value for `key`, or "" when absent or not a string.
+  pub get_str(str key) str {
+    let v = self.values.at(key);
+    if v.is_none() {
+      ret "";
+    }
+    ret v.unwrap().as_str().unwrap_or("");
+  }
+
+  pub free() {
+    self.values.free();
+  }
 }
 
 impl TomlDoc {
@@ -146,9 +187,49 @@ impl TomlDoc {
     ret self.values.len();
   }
 
+  // The first `[name]` section, or None when there is none.
+  pub table(str name) Option<TomlTable> {
+    num i = 0;
+    for i < self.tables.len {
+      if equals(self.tables.get(i).name, name) {
+        ret .Some(self.tables.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Every `[[name]]` entry, in the order they appear.
+  pub array(str name) Vec<TomlTable> {
+    Vec<TomlTable> out;
+    out.init(0);
+    num i = 0;
+    for i < self.array_tables.len {
+      if equals(self.array_tables.get(i).name, name) {
+        out.push(self.array_tables.get(i));
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
+
   // Free internal storage.
   pub free() {
     self.values.free();
+    num i = 0;
+    for i < self.tables.len {
+      TomlTable* t = &self.tables.data[i];
+      t.free();
+      i = i + 1;
+    }
+    self.tables.free();
+    num j = 0;
+    for j < self.array_tables.len {
+      TomlTable* a = &self.array_tables.data[j];
+      a.free();
+      j = j + 1;
+    }
+    self.array_tables.free();
   }
 
   // Render the document back to `key = value` lines.
@@ -187,8 +268,26 @@ fun _toml_is_digit(chr c) bin {
   ret c >= '0' && c <= '9';
 }
 
+// Drops a trailing `# comment`, respecting a quoted value so a `#`
+// inside quotes is kept.
+fun _strip_trailing_comment(str text) str {
+  num i = 0;
+  bin in_quotes = false;
+  let n = len(text);
+  for i < n {
+    if text[i] == '"' {
+      in_quotes = !in_quotes;
+    } elif text[i] == '#' && !in_quotes {
+      ret trim(substr(text, 0, i));
+    }
+    i = i + 1;
+  }
+  ret text;
+}
+
 // Classify a raw (trimmed) TOML value string into a typed TomlValue.
-fun _classify(str text) TomlValue {
+fun _classify(str raw_text) TomlValue {
+  let text = _strip_trailing_comment(raw_text);
   let n = _tv_strlen(text);
   if n == 0 {
     ret .Str(text);
@@ -247,24 +346,70 @@ fun _parse_line_into(TomlDoc* out, str line) {
   out.set(key, _classify(value_text));
 }
 
-// Parse a flat TOML document (`key = value` per line).
+// True for a `[name]` header, including the `[[name]]` form.
+fun _is_header(str line) bin {
+  ret starts_with(line, "[") && ends_with(line, "]");
+}
+
+// Routes `line` into the document's top level, its current `[name]`
+// section, or its current `[[name]]` entry.
+fun _route_line(TomlDoc* out, str line, num section, num index) {
+  if section == 0 {
+    _parse_line_into(out, line);
+    ret;
+  }
+  let eq_idx = index_of_char(line, '=');
+  if eq_idx == -1 {
+    ret;
+  }
+  let key = trim(substr(line, 0, eq_idx));
+  let value_text = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+  if len(key) <= 0 {
+    ret;
+  }
+  if section == 1 {
+    TomlTable* t = &out.tables.data[index];
+    t.values.put(key, _classify(value_text));
+  } else {
+    TomlTable* a = &out.array_tables.data[index];
+    a.values.put(key, _classify(value_text));
+  }
+}
+
+// Parse a TOML document: top-level `key = value` lines, `[name]`
+// sections, and repeated `[[name]]` entries. Nested sub-tables are not
+// split apart, so `[a.b]` is a section literally named "a.b".
 pub fun parse_document(str s) TomlDoc {
   let out = toml_doc_init();
-  num i = 0;
-  num start = 0;
-  for s[i] != 0 {
-    if s[i] == '\n' {
-      let line = substr(s, start, i - start);
-      _parse_line_into(&out, line);
-      i = i + 1;
-      start = i;
-    } else {
-      i = i + 1;
+  // 0 = top level, 1 = a [name] section, 2 = a [[name]] entry.
+  num section = 0;
+  num index = 0;
+
+  let lines = split(s, '\n');
+  defer lines.free();
+  for raw_line : lines {
+    let line = trim(raw_line);
+    if len(line) == 0 {
+      continue;
     }
-  }
-  if i > start {
-    let line = substr(s, start, i - start);
-    _parse_line_into(&out, line);
+    if line[0] == '#' {
+      continue;
+    }
+    if _is_header(line) {
+      if starts_with(line, "[[") && ends_with(line, "]]") {
+        let name = trim(substr(line, 2, len(line) - 4));
+        out.array_tables.push(toml_table_init(name));
+        section = 2;
+        index = out.array_tables.len - 1;
+      } else {
+        let name = trim(substr(line, 1, len(line) - 2));
+        out.tables.push(toml_table_init(name));
+        section = 1;
+        index = out.tables.len - 1;
+      }
+      continue;
+    }
+    _route_line(&out, line, section, index);
   }
   ret out;
 }
@@ -307,4 +452,72 @@ impl TomlDoc as From<str> {
       _parse_line_into(self, line);
     }
   }
+}
+
+test "parses top-level scalars" {
+  let doc = parse_document("name = \"fun\"\nversion = 1\nstable = true\n");
+  defer doc.free();
+  assert equals(doc.get("name").unwrap().as_str().unwrap_or(""), "fun"), "expected the string value";
+  assert doc.get("version").unwrap().as_int().unwrap_or(0) == 1, "expected the integer value";
+  assert doc.get("stable").unwrap().as_bool().unwrap_or(false), "expected the boolean value";
+}
+
+test "parses a named section" {
+  let doc = parse_document("[package]\nname = \"demo\"\nversion = \"1.0\"\n");
+  defer doc.free();
+  let t = doc.table("package");
+  assert t.is_some(), "expected the package section";
+  assert equals(t.unwrap().get_str("name"), "demo"), "expected the section's name value";
+  assert equals(t.unwrap().get_str("version"), "1.0"), "expected the section's version value";
+}
+
+test "a key after a section header does not land at the top level" {
+  let doc = parse_document("[package]\nname = \"demo\"\n");
+  defer doc.free();
+  assert doc.get("name").is_none(), "expected the key to belong to the section";
+}
+
+test "parses repeated array-of-table entries in order" {
+  let doc = parse_document("[[bin]]\nname = \"one\"\n\n[[bin]]\nname = \"two\"\n");
+  defer doc.free();
+  let bins = doc.array("bin");
+  defer bins.free();
+  assert bins.len == 2, "expected both entries";
+  assert equals(bins.get(0).get_str("name"), "one"), "expected the first entry";
+  assert equals(bins.get(1).get_str("name"), "two"), "expected the second entry";
+}
+
+test "sections and array-of-tables coexist" {
+  let doc = parse_document("[package]\nname = \"demo\"\n\n[lib]\npath = \"src/lib.fn\"\n\n[[bin]]\nname = \"app\"\n");
+  defer doc.free();
+  assert equals(doc.table("package").unwrap().get_str("name"), "demo"), "expected the package section";
+  assert equals(doc.table("lib").unwrap().get_str("path"), "src/lib.fn"), "expected the lib section";
+  let bins = doc.array("bin");
+  defer bins.free();
+  assert bins.len == 1, "expected the single bin entry";
+}
+
+test "comments and blank lines are skipped" {
+  let doc = parse_document("# a comment\n\n[package]\nname = \"demo\"\n");
+  defer doc.free();
+  assert equals(doc.table("package").unwrap().get_str("name"), "demo"), "expected the value past the comment";
+}
+
+test "an absent section reports None" {
+  let doc = parse_document("[package]\nname = \"demo\"\n");
+  defer doc.free();
+  assert doc.table("nope").is_none(), "expected an absent section to report None";
+}
+
+test "a trailing comment is dropped from a value" {
+  let doc = parse_document("name = \"demo\" # trailing\ncount = 3 # another\n");
+  defer doc.free();
+  assert equals(doc.get("name").unwrap().as_str().unwrap_or(""), "demo"), "expected the value without its comment";
+  assert doc.get("count").unwrap().as_int().unwrap_or(0) == 3, "expected the integer without its comment";
+}
+
+test "a hash inside quotes is kept" {
+  let doc = parse_document("tag = \"a#b\"\n");
+  defer doc.free();
+  assert equals(doc.get("tag").unwrap().as_str().unwrap_or(""), "a#b"), "expected the quoted hash to survive";
 }
