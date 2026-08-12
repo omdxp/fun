@@ -922,34 +922,32 @@ test "a generic impl method calling a DIFFERENT generic free function from its o
 // assert r.is_err(), "expected the constraint violation to be rejected";
 // }
 
-// Known gap: a method declaring its own type param on a NON-generic impl
-// is not monomorphized. `impl_method_has_own_type_params` only scans
-// generic impl templates, so a plain `impl Registry` never reaches the
-// own-param instantiation path and the literal `U` reaches the output.
-// The generic-impl form (`impl Box<T>`) does work.
-// test "an impl method's own generic type param also works on a non-generic impl/compound" {
-// str src = `imp std.c.io;
-// `fun identity<T>(T x) T {
-// `  ret x;
-// `}
-// `compound Registry {
-// `  num count;
-// `}
-// `impl Registry {
-// `  pub echo<U>(U x) U {
-// `    ret identity(x);
-// `  }
-// `}
-// `fun main() num {
-// `  Registry r;
-// `  r.count = 0;
-// `  printf("%lld\n", r.echo(123));
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "an impl method's own generic type param also works on a non-generic impl/compound");
-// assert contains(out, "Registry__echo__num"), "expected the method monomorphized on its own type param";
-// assert contains(out, "identity__num"), "expected the free function reached through it";
-// }
+test "an impl method's own generic type param also works on a non-generic impl/compound" {
+  str src = `imp std.c.io;
+  `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `compound Registry {
+  `  num count;
+  `}
+  `impl Registry {
+  `  pub echo<U>(U x) U {
+  `    ret identity(x);
+  `  }
+  `}
+  `fun main() num {
+  `  Registry r;
+  `  r.count = 0;
+  `  printf("%lld\n", r.echo(123));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "an impl method's own generic type param also works on a non-generic impl/compound"
+  );
+  assert contains(out, "Registry__echo__num"), "expected the method monomorphized on its own type param";
+  assert contains(out, "identity__num"), "expected the free function reached through it";
+}
 
 test "a method with its own type param calling a SIBLING method that also has its own type param" {
   str src = `imp std.c.io;

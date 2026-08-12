@@ -2374,6 +2374,32 @@ impl Codegen {
   // declares its own generic type params on top of the impl's
   // (`impl Box<T> { pub wrap<U>(U x) Box<U> { ... } }`).
   impl_method_has_own_type_params(str owner_type, str bare_name) bin {
+    // A plain impl's own methods can declare type params too, and are
+    // monomorphized through the same path with an empty impl-level
+    // substitution.
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(pi) -> {
+          if !pi.has_type_params && equals(pi.type_name, owner_type) {
+            StringBuilder ppfx = string_builder_init(16);
+            ppfx.append(pi.type_name);
+            ppfx.append("__");
+            str ptpfx = ppfx.build();
+            for pm : pi.methods {
+              fit pm.kind {
+                .Function(pfn) -> {
+                  if pfn.has_type_params && equals(strip_prefix(pfn.name, ptpfx), bare_name) {
+                    ret true;
+                  }
+                }
+                _ -> {}
+              }
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -2406,7 +2432,10 @@ impl Codegen {
   // from `args`. Signature and body are hoisted together to the current
   // statement's position, with no separate prototype step. Returns the
   // combined mangled name plus the substituted return type, or `.None`
-  // when inference fails or `owner_type` isn't a known instantiation.
+  // when inference fails.
+  // 
+  // A plain impl contributes no substitution of its own, so the combined
+  // one reduces to the method's own params.
   maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
     num ii = 0;
     bin found_inst = false;
@@ -2417,15 +2446,38 @@ impl Codegen {
       }
       ii = ii + 1;
     }
-    if !found_inst {
-      ret .None;
-    }
-    str base_name = self.instantiation_base_name.get(ii);
-    let impl_arg_type_names = self.instantiation_arg_type_names.get(ii);
-    let impl_arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
-    let impl_arg_dtypes = self.instantiation_arg_dtypes.get(ii);
 
-    for tmpl : self.generic_impl_templates {
+    str base_name = owner_type;
+    Vec<str> impl_arg_type_names;
+    impl_arg_type_names.init(0);
+    Vec<bin> impl_arg_is_pointer;
+    impl_arg_is_pointer.init(0);
+    Vec<DataType*> impl_arg_dtypes;
+    impl_arg_dtypes.init(0);
+    Vec<Node> candidates;
+    candidates.init(0);
+    if found_inst {
+      base_name = self.instantiation_base_name.get(ii);
+      impl_arg_type_names = self.instantiation_arg_type_names.get(ii);
+      impl_arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+      impl_arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+      for gt : self.generic_impl_templates {
+        candidates.push(gt);
+      }
+    } else {
+      for n : self.all_nodes {
+        fit n.kind {
+          .Impl(pi) -> {
+            if !pi.has_type_params && equals(pi.type_name, owner_type) {
+              candidates.push(n);
+            }
+          }
+          _ -> {}
+        }
+      }
+    }
+
+    for tmpl : candidates {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || i.type_params.len != impl_arg_type_names.len {
@@ -8873,6 +8925,18 @@ impl Codegen {
           ret .None;
         }
         for m : i.methods {
+          // A method declaring its own type params is emitted per call
+          // site by `maybe_instantiate_generic_impl_method_own_params`;
+          // emitting the template here too would leave its unsubstituted
+          // param names in the output as literal C type names.
+          bin own_params = false;
+          fit m.kind {
+            .Function(mf) -> { own_params = mf.has_type_params; }
+            _ -> {}
+          }
+          if own_params {
+            continue;
+          }
           let merr = self.emit_function(*m);
           if merr.is_some() {
             ret merr;
@@ -9559,6 +9623,16 @@ impl Codegen {
           if !i.has_type_params {
             for m : i.methods {
               if self.is_std_c_signature_node(*m) || !self.function_prototype_is_safe_early(*m) {
+                continue;
+              }
+              // Emitted per call site once its own type params are
+              // known; see `emit_impl`.
+              bin m_own_params = false;
+              fit m.kind {
+                .Function(mfn) -> { m_own_params = mfn.has_type_params; }
+                _ -> {}
+              }
+              if m_own_params {
                 continue;
               }
               self.hoist_insert_pos = .Some(self.state.out.len());
