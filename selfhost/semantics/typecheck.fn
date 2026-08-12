@@ -198,6 +198,12 @@ pub compound FnSig {
   // Set when the name belongs to more than one declaration, where a
   // call cannot be matched to one of them by name alone.
   bin ambiguous;
+  // The type parameters the declaration names, the types each one is
+  // allowed to stand for (empty where unconstrained), and, per
+  // parameter, the type parameter it is written as (empty otherwise).
+  Vec<str> type_params;
+  Vec<Vec<str>> bounds;
+  Vec<str> arg_params;
 }
 
 // Where checking failed, and why.
@@ -598,12 +604,31 @@ fun _signature_of(FunctionNode f) FnSig {
   sig.is_async = f.is_async;
   sig.is_generic = f.has_type_params && f.type_params.len > 0;
   sig.ambiguous = false;
+  sig.type_params.init(0);
+  sig.bounds.init(0);
+  sig.arg_params.init(f.args.len);
+  if f.has_type_params {
+    for p : f.type_params {
+      sig.type_params.push(p);
+    }
+  }
+  if f.has_type_param_forced_insts {
+    for b : f.type_param_forced_insts {
+      sig.bounds.push(b);
+    }
+  }
   sig.min_args = 0;
   bin counting = true;
   for a : f.args {
     fit a.kind {
       .Variable(v) -> {
-        sig.args.push(_erase_type_params(f, checked_from_dtype(v.var_type)));
+        CheckedType declared = checked_from_dtype(v.var_type);
+        str written = "";
+        if _is_type_param(f, declared.name) {
+          written = declared.name;
+        }
+        sig.arg_params.push(written);
+        sig.args.push(_erase_type_params(f, declared));
         // A parameter with a default value, and everything after it,
         // may be left out by the caller.
         if v.has_val {
@@ -612,7 +637,10 @@ fun _signature_of(FunctionNode f) FnSig {
           sig.min_args = sig.min_args + 1;
         }
       }
-      _ -> { sig.args.push(checked_unknown()); }
+      _ -> {
+        sig.arg_params.push("");
+        sig.args.push(checked_unknown());
+      }
     }
   }
   ret sig;
@@ -953,6 +981,67 @@ impl Checker {
     ret sig.rtype;
   }
 
+  // Checks the types a call supplies for the callee's type parameters
+  // against the types each one is allowed to stand for.
+  check_type_bounds(Node* node, str name, FnSig sig, Vec<Node*>* args, TypeEnv* env) {
+    if sig.bounds.len == 0 || sig.type_params.len == 0 {
+      ret;
+    }
+    num p = 0;
+    for p < sig.type_params.len {
+      str param = sig.type_params.get(p);
+      // Each entry names one concrete type per parameter, so what this
+      // parameter may stand for is that position across the entries.
+      Vec<str> allowed;
+      allowed.init(sig.bounds.len);
+      defer allowed.free();
+      num b = 0;
+      for b < sig.bounds.len {
+        Vec<str> combination = sig.bounds.get(b);
+        b = b + 1;
+        if p < combination.len {
+          allowed.push(combination.get(p));
+        }
+      }
+      p = p + 1;
+      if allowed.len == 0 {
+        continue;
+      }
+      // The first argument written as this parameter is what it stands
+      // for at this call.
+      num i = 0;
+      for i < args.len && i < sig.arg_params.len {
+        str written = sig.arg_params.get(i);
+        num at = i;
+        i = i + 1;
+        if !equals(written, param) {
+          continue;
+        }
+        CheckedType supplied = self.infer(args.get(at), env);
+        if is_unknown(supplied) {
+          break;
+        }
+        str supplied_name = type_name(supplied);
+        bin listed = false;
+        num a = 0;
+        for a < allowed.len {
+          if equals(allowed.get(a), supplied_name) {
+            listed = true;
+          }
+          a = a + 1;
+        }
+        if !listed {
+          self.fail(
+            format("'{str}' does not accept {str} for '{str}'", name, supplied_name, param),
+            node
+          );
+          ret;
+        }
+        break;
+      }
+    }
+  }
+
   // Checks the arguments of a call against what the callee declares. A
   // generic callee's parameters stand for whatever the call supplies,
   // so only the shape of such a call is checked.
@@ -968,6 +1057,7 @@ impl Checker {
       }
     }
     if sig.is_generic {
+      self.check_type_bounds(node, name, sig, args, env);
       ret;
     }
     num i = 0;
@@ -1339,13 +1429,29 @@ impl Checker {
     for i < names.len {
       str name = names.get(i);
       i = i + 1;
-      if !self.has_method(block.type_name, name) {
+      let supplied = self.method_signature(block.type_name, name);
+      if supplied.is_none() {
         self.fail(
           format(
             "'{str}' does not supply '{str}', which '{str}' requires",
             block.type_name,
             name,
             block.quirk_name
+          ),
+          nil
+        );
+        ret;
+      }
+      // A method that must be awaited is not interchangeable with one
+      // that must not be.
+      let promised = required.methods.at(name);
+      if promised.is_some() && promised.unwrap().is_async != supplied.unwrap().is_async {
+        self.fail(
+          format(
+            "'{str}' does not match how '{str}' declares '{str}'",
+            block.type_name,
+            block.quirk_name,
+            name
           ),
           nil
         );

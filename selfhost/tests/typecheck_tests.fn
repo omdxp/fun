@@ -419,3 +419,49 @@ test "a condition holds a truth value" {
     "expected a comparison to check out"
   );
 }
+
+test "a constrained type parameter accepts only what it lists" {
+  rejects(
+    `fun f<T: num | str>(T x) T { ret x; }
+    `fun main() {
+    `  dec d = 3.5;
+    `  let a = f(d);
+    `}`,
+    "expected an unlisted type to be rejected"
+  );
+  accepts(
+    `fun f<T: num | str>(T x) T { ret x; }
+    `fun main() {
+    `  let a = f(1);
+    `  let b = f("hi");
+    `}`,
+    "expected both listed types to be accepted"
+  );
+}
+
+test "an impl matches how its quirk declares a method" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `quirk AsyncCounter {
+    `  async add(num x) num;
+    `}
+    `impl Counter as AsyncCounter {
+    `  add(num x) num { ret self.base + x; }
+    `}`,
+    "expected the missing async to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `quirk AsyncCounter {
+    `  async add(num x) num;
+    `}
+    `impl Counter as AsyncCounter {
+    `  async add(num x) num { ret self.base + x; }
+    `}`,
+    "expected the matching signature to check out"
+  );
+}
