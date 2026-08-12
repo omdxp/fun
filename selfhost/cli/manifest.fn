@@ -1,0 +1,411 @@
+// Reads the `fun.toml` project manifest.
+// 
+// A package may build a library, one or more binaries, or both. Targets
+// can be declared explicitly, or left out entirely and discovered from
+// the conventional `src/lib.fn` and `src/main.fn` paths.
+// 
+// Only the subset of TOML the manifest needs is parsed: top-level
+// tables, arrays of tables, and quoted string values. Fun resolves
+// imports by path, so a manifest declares build targets, never an
+// import graph.
+
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.error;
+imp std.io;
+imp std.fs;
+
+// A source file compiled to an executable.
+pub compound BinTarget {
+  str name;
+  str path;
+}
+
+// A source file compiled as a library: checked and compiled to an
+// object, never linked, since it has no entry point.
+pub compound LibTarget {
+  str name;
+  str path;
+}
+
+// What a package builds.
+pub enum PackageKind {
+  // No target declared and none discovered.
+  Empty,
+  // A library only.
+  Lib,
+  // One or more executables only.
+  Bin,
+  // A library alongside one or more executables.
+  Mixed,
+}
+
+pub compound Manifest {
+  str package_name;
+  str version;
+  bin has_lib;
+  LibTarget lib;
+  Vec<BinTarget> bins;
+}
+
+impl Manifest {
+  // What this package builds, once targets have been resolved.
+  pub kind() PackageKind {
+    if self.has_lib && self.bins.len > 0 {
+      ret .Mixed;
+    }
+    if self.has_lib {
+      ret .Lib;
+    }
+    if self.bins.len > 0 {
+      ret .Bin;
+    }
+    ret .Empty;
+  }
+
+  pub free() {
+    self.bins.free();
+  }
+}
+
+// Unwraps a double-quoted value. `.None` when `value` is not quoted.
+fun _quoted_value(str value) Option<str> {
+  let n = len(value);
+  if n < 2 {
+    ret .None;
+  }
+  if value[0] != '"' || value[n - 1] != '"' {
+    ret .None;
+  }
+  ret .Some(substr(value, 1, n - 2));
+}
+
+// Drops a trailing `# comment`. Manifest values are paths and names, so
+// a `#` inside a quoted string is not expected.
+fun _strip_comment(str line) str {
+  let idx = index_of_char(line, '#');
+  if idx == -1 {
+    ret line;
+  }
+  ret trim(substr(line, 0, idx));
+}
+
+fun _is_table_header(str line) bin {
+  ret starts_with(line, "[") && ends_with(line, "]");
+}
+
+fun _is_array_table_header(str line) bin {
+  ret starts_with(line, "[[") && ends_with(line, "]]");
+}
+
+// Parses `text` as a manifest. Targets are taken exactly as declared;
+// see `resolve_targets` for filling in the conventional defaults.
+pub fun parse_manifest(str text) Result<Manifest, str> {
+  Manifest m;
+  m.package_name = "";
+  m.version = "";
+  m.has_lib = false;
+  m.lib.name = "";
+  m.lib.path = "";
+  m.bins.init(0);
+
+  // 0 = none, 1 = package, 2 = lib, 3 = bin
+  num section = 0;
+  str cur_bin_name = "";
+  str cur_bin_path = "";
+  bin in_bin = false;
+
+  let lines = split(text, '\n');
+  defer lines.free();
+  for line_text : lines {
+    str line = _strip_comment(trim(line_text));
+    if len(line) == 0 {
+      continue;
+    }
+
+    if _is_array_table_header(line) {
+      str name = trim(substr(line, 2, len(line) - 4));
+      if !equals(name, "bin") {
+        ret .Err(format("unknown table `[[{str}]]`", name));
+      }
+      if in_bin {
+        let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
+        if flushed.is_some() {
+          ret .Err(flushed.unwrap());
+        }
+      }
+      cur_bin_name = "";
+      cur_bin_path = "";
+      in_bin = true;
+      section = 3;
+      continue;
+    }
+
+    if _is_table_header(line) {
+      if in_bin {
+        let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
+        if flushed.is_some() {
+          ret .Err(flushed.unwrap());
+        }
+        in_bin = false;
+        cur_bin_name = "";
+        cur_bin_path = "";
+      }
+      str name = trim(substr(line, 1, len(line) - 2));
+      if equals(name, "package") {
+        section = 1;
+      } elif equals(name, "lib") {
+        section = 2;
+        m.has_lib = true;
+      } else {
+        ret .Err(format("unknown table `[{str}]`", name));
+      }
+      continue;
+    }
+
+    let eq = index_of_char(line, '=');
+    if eq == -1 {
+      ret .Err(format("expected `key = value`, found `{str}`", line));
+    }
+    str key = trim(substr(line, 0, eq));
+    str raw_val = trim(substr(line, eq + 1, len(line) - (eq + 1)));
+    let val_opt = _quoted_value(raw_val);
+    if val_opt.is_none() {
+      ret .Err(format("value for `{str}` must be a quoted string", key));
+    }
+    str val = val_opt.unwrap();
+
+    if section == 1 {
+      if equals(key, "name") {
+        m.package_name = val;
+      } elif equals(key, "version") {
+        m.version = val;
+      }
+    } elif section == 2 {
+      if equals(key, "name") {
+        m.lib.name = val;
+      } elif equals(key, "path") {
+        m.lib.path = val;
+      }
+    } elif section == 3 {
+      if equals(key, "name") {
+        cur_bin_name = val;
+      } elif equals(key, "path") {
+        cur_bin_path = val;
+      }
+    } else {
+      ret .Err(format("`{str}` appears before any table header", key));
+    }
+  }
+
+  if in_bin {
+    let flushed = _flush_bin(&m.bins, cur_bin_name, cur_bin_path);
+    if flushed.is_some() {
+      ret .Err(flushed.unwrap());
+    }
+  }
+
+  if equals(m.package_name, "") {
+    ret .Err("[package] is missing a `name`");
+  }
+  if equals(m.version, "") {
+    m.version = "0.0.0";
+  }
+  ret .Ok(m);
+}
+
+// Appends the pending `[[bin]]`, or reports what it was missing.
+fun _flush_bin(Vec<BinTarget>* bins, str name, str path) Option<str> {
+  if equals(name, "") && equals(path, "") {
+    ret .None;
+  }
+  if equals(name, "") {
+    ret .Some("a [[bin]] is missing a `name`");
+  }
+  if equals(path, "") {
+    ret .Some(format("[[bin]] `{str}` is missing a `path`", name));
+  }
+  BinTarget b;
+  b.name = name;
+  b.path = path;
+  bins.push(b);
+  ret .None;
+}
+
+// Fills in whatever the manifest left implicit, relative to `root`:
+// a `[lib]` with no path uses `src/lib.fn`, and a manifest declaring no
+// targets at all picks up `src/lib.fn` and `src/main.fn` when they
+// exist, each named after the package.
+pub fun resolve_targets(Manifest* m, str root) {
+  str lib_path = _join(root, "src/lib.fn");
+  str main_path = _join(root, "src/main.fn");
+
+  if m.has_lib {
+    if equals(m.lib.path, "") {
+      m.lib.path = lib_path;
+    }
+    if equals(m.lib.name, "") {
+      m.lib.name = m.package_name;
+    }
+  }
+
+  if !m.has_lib && m.bins.len == 0 {
+    if exists(lib_path) {
+      m.has_lib = true;
+      m.lib.name = m.package_name;
+      m.lib.path = lib_path;
+    }
+    if exists(main_path) {
+      BinTarget b;
+      b.name = m.package_name;
+      b.path = main_path;
+      m.bins.push(b);
+    }
+  }
+}
+
+// Joins a directory and a relative path. An empty root leaves `rel`
+// as-is, so a manifest read from the working directory keeps the plain
+// relative paths it declared.
+fun _join(str root, str rel) str {
+  if equals(root, "") || equals(root, ".") {
+    ret rel;
+  }
+  StringBuilder b = string_builder_init(32);
+  b.append(root);
+  if !ends_with(root, "/") {
+    b.append("/");
+  }
+  b.append(rel);
+  ret b.build();
+}
+
+test "parses a package with a single binary" {
+  str text = `[package]
+  `name = "demo"
+  `version = "1.2.3"
+  `
+  `[[bin]]
+  `name = "app"
+  `path = "src/main.fn"`;
+  let r = parse_manifest(text);
+  assert r.is_ok(), "expected the manifest to parse";
+  let m = r.unwrap();
+  assert equals(m.package_name, "demo"), "expected the package name";
+  assert equals(m.version, "1.2.3"), "expected the declared version";
+  assert m.bins.len == 1, "expected one binary target";
+  assert equals(m.bins.get(0).name, "app"), "expected the binary's name";
+  assert equals(m.bins.get(0).path, "src/main.fn"), "expected the binary's path";
+  assert m.kind() == PackageKind.Bin, "expected a binary-only package";
+}
+
+test "parses several binaries" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[[bin]]
+  `name = "one"
+  `path = "src/one.fn"
+  `
+  `[[bin]]
+  `name = "two"
+  `path = "src/two.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.bins.len == 2, "expected both binary targets";
+  assert equals(m.bins.get(1).name, "two"), "expected the second target";
+}
+
+test "parses a library-only package" {
+  str text = `[package]
+  `name = "mylib"
+  `
+  `[lib]
+  `path = "src/lib.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.has_lib, "expected a library target";
+  assert equals(m.lib.path, "src/lib.fn"), "expected the library path";
+  assert m.kind() == PackageKind.Lib, "expected a library-only package";
+}
+
+test "parses a package building both a library and a binary" {
+  str text = `[package]
+  `name = "both"
+  `
+  `[lib]
+  `path = "src/lib.fn"
+  `
+  `[[bin]]
+  `name = "cli"
+  `path = "src/main.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.kind() == PackageKind.Mixed, "expected a mixed package";
+  assert m.has_lib, "expected the library target";
+  assert m.bins.len == 1, "expected the binary target";
+}
+
+test "a version left out defaults to 0.0.0" {
+  str text = `[package]
+  `name = "demo"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.version, "0.0.0"), "expected the default version";
+  assert m.kind() == PackageKind.Empty, "expected no targets before resolution";
+}
+
+test "comments and blank lines are ignored" {
+  str text = `# a leading comment
+  `[package]
+  `name = "demo" # trailing
+  `
+  `# another
+  `version = "0.1.0"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.package_name, "demo"), "expected the name without the comment";
+  assert equals(m.version, "0.1.0"), "expected the version";
+}
+
+test "a missing package name is rejected" {
+  str text = `[package]
+  `version = "0.1.0"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a manifest with no package name to be rejected";
+}
+
+test "a bin without a path is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[[bin]]
+  `name = "app"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a bin with no path to be rejected";
+}
+
+test "an unquoted value is rejected" {
+  str text = `[package]
+  `name = demo`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected an unquoted value to be rejected";
+}
+
+test "an unknown table is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[nope]
+  `key = "value"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected an unknown table to be rejected";
+}
+
+test "a lib with no path resolves to the conventional source file" {
+  str text = `[package]
+  `name = "mylib"
+  `
+  `[lib]`;
+  Manifest m = parse_manifest(text).unwrap();
+  resolve_targets(&m, "");
+  assert equals(m.lib.path, "src/lib.fn"), "expected the conventional library path";
+  assert equals(m.lib.name, "mylib"), "expected the library to take the package name";
+}
