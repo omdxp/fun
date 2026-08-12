@@ -251,11 +251,14 @@ fun _needs_space(Token prev, Token cur) bin {
     if prev.type == TokenType.Identifier || equals(p, ")") || equals(p, "]") {
       ret false;
     }
+    if equals(p, "..") || equals(p, "...") {
+      ret false;
+    }
     ret true;
   }
   // The relative-import prefix and the range operator bind to what
   // follows them, while a keyword before one keeps its space.
-  if equals(p, "..") {
+  if equals(p, "..") || equals(p, "...") {
     ret false;
   }
   if equals(c, "..") {
@@ -418,6 +421,173 @@ fun _written_text(str src, Vec<num>* starts, Token t) str {
   ret token_text(t);
 }
 
+// The index of the `//` that starts a trailing comment on `line`, or -1
+// when the line has none. A `//` inside a string, a character literal,
+// or a raw string is part of the value, not a comment.
+fun _trailing_comment_start(str line) num {
+  bin in_str = false;
+  bin in_chr = false;
+  bin in_raw = false;
+  num first_code = -1;
+  num i = 0;
+  let n = len(line);
+  for i < n {
+    let c = line[i];
+    if in_raw {
+      if c == '`' {
+        in_raw = false;
+      }
+      i = i + 1;
+      continue;
+    }
+    if in_str {
+      if c == '\\' {
+        i = i + 1;
+      } elif c == '"' {
+        in_str = false;
+      }
+      i = i + 1;
+      continue;
+    }
+    if in_chr {
+      if c == '\\' {
+        i = i + 1;
+      } elif c == '\'' {
+        in_chr = false;
+      }
+      i = i + 1;
+      continue;
+    }
+    if c == '"' || c == '\'' || c == '`' {
+      if first_code < 0 {
+        first_code = i;
+      }
+      if c == '"' {
+        in_str = true;
+      } elif c == '\'' {
+        in_chr = true;
+      } else {
+        in_raw = true;
+      }
+      i = i + 1;
+      continue;
+    }
+    if c == '/' && i + 1 < n && line[i + 1] == '/' {
+      if first_code >= 0 && first_code < i {
+        ret i;
+      }
+      ret -1;
+    }
+    if c != ' ' && c != '\t' {
+      if first_code < 0 {
+        first_code = i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// The width of the code on `line` before the comment starting at
+// `cstart`, with the spaces between them dropped.
+fun _code_width_before(str line, num cstart) num {
+  num n = cstart;
+  for n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t') {
+    n = n - 1;
+  }
+  ret n;
+}
+
+fun _indent_width(str line) num {
+  num i = 0;
+  let n = len(line);
+  for i < n && (line[i] == ' ' || line[i] == '\t') {
+    i = i + 1;
+  }
+  ret i;
+}
+
+// Aligns each run of trailing comments to one column past the widest
+// code in the run. A run ends at the first line that carries no trailing
+// comment or sits at a different indent, so only neighbouring comments
+// line up with each other.
+fun _align_trailing_comments(str text) str {
+  Vec<str> lines = split_lines(text);
+  defer lines.free();
+  StringBuilder out = string_builder_init(len(text) + 64);
+  num li = 0;
+  for li < lines.len {
+    str line = lines.get(li);
+    num cstart = _trailing_comment_start(line);
+    if cstart < 0 {
+      out.append(line);
+      out.append_char('\n');
+      li = li + 1;
+      continue;
+    }
+    let run_indent = _indent_width(line);
+    num run_end = li;
+    num target = 0;
+    for run_end < lines.len {
+      str candidate = lines.get(run_end);
+      num c = _trailing_comment_start(candidate);
+      if c < 0 || _indent_width(candidate) != run_indent {
+        break;
+      }
+      let width = _code_width_before(candidate, c);
+      if width > target {
+        target = width;
+      }
+      run_end = run_end + 1;
+    }
+    num k = li;
+    for k < run_end {
+      str ln = lines.get(k);
+      num cs = _trailing_comment_start(ln);
+      num code_width = _code_width_before(ln, cs);
+      out.append(substr(ln, 0, code_width));
+      out.append(repeat(" ", target - code_width + 1));
+      out.append(substr(ln, cs, len(ln) - cs));
+      out.append_char('\n');
+      k = k + 1;
+    }
+    li = run_end;
+  }
+  // Splitting leaves an empty piece after the final newline, so the
+  // rebuilt text ends with exactly one.
+  str joined = out.build();
+  num end = len(joined);
+  for end > 0 && joined[end - 1] == '\n' {
+    end = end - 1;
+  }
+  StringBuilder trimmed = string_builder_init(end + 1);
+  trimmed.append(substr(joined, 0, end));
+  trimmed.append_char('\n');
+  ret trimmed.build();
+}
+
+// The index of the `;` that ends the `asm` statement starting at `i`.
+// Returns `i` when the statement never closes.
+fun _asm_statement_end(Vec<Token>* tokens, num i) num {
+  num depth = 0;
+  num j = i;
+  for j < tokens.len {
+    Token t = tokens.get(j);
+    if t.type == TokenType.Symbol {
+      let c = _cval_of(t);
+      if c == '(' || c == '{' || c == '[' {
+        depth = depth + 1;
+      } elif c == ')' || c == '}' || c == ']' {
+        depth = depth - 1;
+      } elif c == ';' && depth <= 0 {
+        ret j;
+      }
+    }
+    j = j + 1;
+  }
+  ret i;
+}
+
 // Formats `src`, or reports the stage that rejected it.
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
@@ -447,6 +617,17 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     if s.force_break {
       s.force_break = false;
+      bin stays = equals(text, ",") || equals(text, ";") || equals(text, ")") || equals(text, "]");
+      if stays && s.pending_newlines == 0 {
+        s.write(text);
+        s.has_prev = true;
+        s.prev = t;
+        i = i + 1;
+        if equals(text, ";") || equals(text, ",") {
+          s.force_break = true;
+        }
+        continue;
+      }
       bin trailing = t.type == TokenType.Comment && s.pending_newlines == 0;
       if trailing {
         s.space();
@@ -468,11 +649,41 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A brace that binds to the name before it opens a compound
     // literal rather than a block, so it stays on its own line only
     // when it does not fit.
-    bin is_literal_brace = equals(text, "{") && s.has_prev && !s.prev.whitespace && (s.prev.type == TokenType.Identifier || equals(token_text(s.prev), "."));
+    if t.type == TokenType.Keyword && equals(text, "asm") {
+      let close = _asm_statement_end(&tokens, i);
+      if close > i {
+        Token last = tokens.get(close);
+        Pos span = t.pos;
+        span.end_line = last.pos.end_line;
+        span.end_col = last.pos.end_col;
+        let verbatim = _source_span(src, &starts, span);
+        if !equals(verbatim, "") {
+          s.flush_newlines();
+          s.write(verbatim);
+          s.force_break = true;
+          s.pending_newlines = 0;
+          s.has_prev = false;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+
+    str prev_text = "";
+    if s.has_prev {
+      prev_text = token_text(s.prev);
+    }
+    // A literal also follows the generic arguments of the type it names,
+    // as in `Box<T>{value = x}`.
+    bin literal_lead = s.prev.type == TokenType.Identifier || equals(prev_text, ".") || equals(
+      prev_text,
+      ">"
+    ) || equals(prev_text, ">>");
+    bin is_literal_brace = equals(text, "{") && s.has_prev && !s.prev.whitespace && literal_lead;
 
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
-    if equals(text, "{") && !is_literal_brace && s.has_prev && equals(token_text(s.prev), "->") {
+    if equals(text, "{") && !is_literal_brace && s.has_prev && equals(prev_text, "->") {
       let close = _simple_block_end(&tokens, i);
       if close > i {
         num start = s.col + 1;
@@ -500,7 +711,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
             s.prev = it;
             j = j + 1;
           }
-          s.newline();
+          s.force_break = true;
           s.pending_newlines = 0;
           i = close + 1;
           continue;
@@ -600,7 +811,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
   if !s.at_line_start {
     s.newline();
   }
-  ret .Ok(s.out.build());
+  ret .Ok(_align_trailing_comments(s.out.build()));
 }
 
 test "formats a function body with one statement per line" {
