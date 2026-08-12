@@ -370,6 +370,8 @@ pub compound Codegen {
   // `ret <expr>;` can only emit the real expression when the declared
   // return type is a scalar `num`; any other type discards it. Saved and
   // restored around nested function-body emission.
+  // Emit test blocks and a runner in place of the program's own `main`.
+  bin test_mode;
   bin in_main;
 }
 
@@ -465,6 +467,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.defer_scope_starts.init(0);
   g.uses_fork = false;
   g.c_shadow_names.init(0);
+  g.test_mode = false;
   g.in_main = false;
   ret g;
 }
@@ -5624,9 +5627,9 @@ impl Codegen {
       }
       .StatementAssert(a) -> {
         // `assert cond;` and `assert cond, "msg";` lower to
-        // `if (!(cond)) { ...; abort(); }`. There is no test-mode runner
-        // here and so no recovered-assertion path; an ordinary compile
-        // skips `.Test` nodes entirely.
+        // `if (!(cond)) { ...; abort(); }`. Under a test run the failure
+        // returns to the runner instead, so the tests after it still
+        // run; outside one, a failed assertion is a real bug.
         self.state.write_indent();
         self.state.write("if (!(");
         let cerr = self.emit_expr(*a.condition);
@@ -5642,7 +5645,11 @@ impl Codegen {
           }
           self.state.write("); ");
         }
-        self.state.write("abort(); }\n");
+        if self.test_mode {
+          self.state.write("longjmp(__fun_test_jmp, 1); }\n");
+        } else {
+          self.state.write("abort(); }\n");
+        }
         ret .None;
       }
       .StatementDefer(body) -> {
@@ -9239,6 +9246,12 @@ impl Codegen {
     }
     // Process spawning needs its own headers, and they exist only on
     // POSIX, so a program that never spawns stays portable without them.
+    // A failing assertion under a test run returns to the runner rather
+    // than ending the process, which needs a jump target per thread.
+    if self.test_mode {
+      self.state.write("#include <setjmp.h>\n");
+      self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
+    }
     if program_uses_std_c_header(self.all_nodes, "process.fn") {
       self.state.write("#include <spawn.h>\n");
       self.state.write("#include <sys/wait.h>\n");
@@ -9775,7 +9788,9 @@ impl Codegen {
           }
         }
         .Function(f) -> {
-          if !f.has_type_params {
+          // A test run supplies its own entry point, so the program's
+          // own `main` is left out rather than competing with it.
+          if !f.has_type_params && !(self.test_mode && equals(f.name, "main")) {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function(n);
             if ferr.is_some() {
@@ -9786,6 +9801,102 @@ impl Codegen {
         _ -> {}
       }
     }
+
+    if self.test_mode {
+      ret self.emit_test_runner(nodes);
+    }
+    ret .None;
+  }
+
+  // Emits each test block as its own function, then an entry point that
+  // runs them and reports what passed. An optional argument names a
+  // single test to run.
+  emit_test_runner(Vec<Node> nodes) Option<CodegenErrorKind> {
+    Vec<str> names;
+    names.init(0);
+    defer names.free();
+
+    num index = 0;
+    for n : nodes {
+      fit n.kind {
+        .Test(t) -> {
+          names.push(t.name);
+          self.hoist_insert_pos = .None;
+          self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
+          self.state.indent_level = self.state.indent_level + 1;
+          let berr = self.emit_body(*t.body);
+          if berr.is_some() {
+            ret berr;
+          }
+          self.state.indent_level = self.state.indent_level - 1;
+          self.state.write("}\n\n");
+          index = index + 1;
+        }
+        _ -> {}
+      }
+    }
+
+    if names.len == 0 {
+      self.state.write("int main(void) {\n");
+      self.state.write("    printf(\"no tests found\\n\");\n");
+      self.state.write("    return 0;\n");
+      self.state.write("}\n");
+      ret .None;
+    }
+
+    self.state.write("static void __fun_test_dispatch(int64_t i) {\n");
+    self.state.write("    switch (i) {\n");
+    num di = 0;
+    for di < names.len {
+      self.state.write(format(
+        "        case {str}: __fun_test_{str}(); break;\n",
+        format_num(di),
+        format_num(di)
+      ));
+      di = di + 1;
+    }
+    self.state.write("    }\n");
+    self.state.write("}\n\n");
+
+    self.state.write("static char* __fun_test_name(int64_t i) {\n");
+    self.state.write("    switch (i) {\n");
+    num ni = 0;
+    for ni < names.len {
+      // A test name reaches here as it was written in source, where it
+      // was already a string literal, so it needs no further escaping.
+      self.state.write(format("        case {str}: return \"", format_num(ni)));
+      self.state.write(names.get(ni));
+      self.state.write("\";\n");
+      ni = ni + 1;
+    }
+    self.state.write("    }\n");
+    self.state.write("    return \"\";\n");
+    self.state.write("}\n\n");
+
+    self.state.write("int main(int argc, char** argv) {\n");
+    self.state.write("    const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
+    self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
+    self.state.write("    int64_t ran = 0;\n");
+    self.state.write("    int64_t passed = 0;\n");
+    self.state.write("    for (int64_t i = 0; i < total; i++) {\n");
+    self.state.write("        char* name = __fun_test_name(i);\n");
+    self.state.write("        if (filter && strcmp(filter, name) != 0) { continue; }\n");
+    self.state.write("        ran++;\n");
+    self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
+    self.state.write("            __fun_test_dispatch(i);\n");
+    self.state.write("            passed++;\n");
+    self.state.write("            printf(\"test: %s ... PASS\\n\", name);\n");
+    self.state.write("        } else {\n");
+    self.state.write("            printf(\"test: %s ... FAIL\\n\", name);\n");
+    self.state.write("        }\n");
+    self.state.write("    }\n");
+    self.state.write("    if (filter && ran == 0) {\n");
+    self.state.write("        printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
+    self.state.write("        return 1;\n");
+    self.state.write("    }\n");
+    self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
+    self.state.write("    return passed == ran ? 0 : 1;\n");
+    self.state.write("}\n");
     ret .None;
   }
 }

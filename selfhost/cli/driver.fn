@@ -134,7 +134,7 @@ pub fun parse_args(str[] argv) Options {
   num i = first_positional;
   for i < parsed.positionals.len {
     str arg = parsed.positionals.get(i);
-    if equals(o.input, "") && !equals(o.subcommand, "test") {
+    if equals(o.input, "") {
       o.input = arg;
     } else {
       o.program_args.push(arg);
@@ -201,6 +201,12 @@ fun _const_string_node(str name, str value) Node {
 // program as constants. The error text names the stage that rejected the
 // program.
 pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false);
+}
+
+// Lowers `input` to C, emitting a test runner in place of the program's
+// own entry point when `test_mode` is set.
+pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin test_mode) Result<bin, str> {
   let parsed = parse_program_with_imports(input);
   if parsed.is_err() {
     ret .Err(parsed.unwrap_err());
@@ -218,6 +224,7 @@ pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, 
 
   CodegenState state = codegen_state_new();
   Codegen cg = codegen_new(&state);
+  cg.test_mode = test_mode;
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -568,4 +575,38 @@ pub fun build_project() num {
     i = i + 1;
   }
   ret 0;
+}
+
+// Compiles `input` with its test blocks and runs them, passing `args` on
+// so a single test can be named. Returns the runner's exit code.
+pub fun run_tests(str input, Vec<str>* args) num {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  if exists("fun.toml") {
+    let loaded = load_manifest();
+    if loaded.is_ok() {
+      Manifest m = loaded.unwrap();
+      defines.free();
+      defines = manifest_defines(&m);
+    }
+  }
+
+  str c_path = with_extension(input, ".test.c");
+  let lowered = compile_to_c_mode(input, c_path, &defines, true);
+  if lowered.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+    ret 1;
+  }
+
+  str exe = format("{str}{str}", with_extension(input, ".test"), exe_suffix());
+  let cc_code = compile_c_to_exe(c_path, exe, false);
+  remove_file(c_path);
+  if cc_code != 0 {
+    ret 1;
+  }
+
+  let code = run_exe(exe, args);
+  remove_file(exe);
+  ret code;
 }
