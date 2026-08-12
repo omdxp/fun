@@ -289,6 +289,37 @@ fun _inline_width(Vec<Token>* tokens, num from, num to) num {
   ret width;
 }
 
+// Byte offsets where each line of `src` begins.
+fun _line_starts(str src) Vec<num> {
+  Vec<num> out;
+  out.init(0);
+  out.push(0);
+  num i = 0;
+  let n = len(src);
+  for i < n {
+    if src[i] == '\n' {
+      out.push(i + 1);
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The text `p` spans in `src`. A raw string is reproduced from source
+// rather than rebuilt, since its body is verbatim and a multi-line one
+// carries a backtick on every line it continues onto.
+fun _source_span(str src, Vec<num>* starts, Pos p) str {
+  if p.line <= 0 || p.line > starts.len || p.end_line <= 0 || p.end_line > starts.len {
+    ret "";
+  }
+  let from = starts.get(p.line - 1) + p.col - 1;
+  let to = starts.get(p.end_line - 1) + p.end_col - 1;
+  if to <= from || to > len(src) {
+    ret "";
+  }
+  ret substr(src, from, to - from);
+}
+
 // Formats `src`, or reports the stage that rejected it.
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
@@ -296,6 +327,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
     ret .Err("lex error");
   }
   let tokens = lexed.unwrap();
+
+  Vec<num> starts = _line_starts(src);
+  defer starts.free();
 
   FmtState s = fmt_state_new();
   num i = 0;
@@ -309,6 +343,15 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
 
     str text = token_text(t);
+    // A raw string and a character literal are both reproduced from
+    // source: one is verbatim by definition, and the other shares its
+    // payload with an ordinary symbol.
+    if (t.type == TokenType.String && t.is_raw_string) || t.type == TokenType.Symbol {
+      let verbatim = _source_span(src, &starts, t.pos);
+      if !equals(verbatim, "") && (t.type != TokenType.Symbol || starts_with(verbatim, "'")) {
+        text = verbatim;
+      }
+    }
 
     // A brace that binds to the name before it opens a compound
     // literal rather than a block, so it stays on its own line only

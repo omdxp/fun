@@ -668,13 +668,19 @@ impl Lexer {
     let op0 = self._advance();
     b.append_char(op0);
 
+    // Whitespace consumed while looking ahead still counts as following
+    // the token, so an ordinary `=` is not mistaken for one written
+    // against what comes next.
+    bin skipped_space = false;
     if op0 == '=' {
       // Always treat `==` as one token, even with whitespace in between.
       for self._peek() == ' ' || self._peek() == '\t' {
         self._advance();
+        skipped_space = true;
       }
       if self._peek() == '=' {
         b.append_char(self._advance());
+        skipped_space = false;
       }
     } elif (op0 == '!' || op0 == '*') && self._peek() == '=' {
       b.append_char(self._advance());
@@ -701,7 +707,7 @@ impl Lexer {
       t.type = .Operator;
       t.data = .Sval(text);
       t.pos = p;
-      t.whitespace = false;
+      t.whitespace = skipped_space;
       t.is_raw_string = false;
       ret .Ok(t);
     }
