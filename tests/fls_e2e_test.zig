@@ -7908,9 +7908,9 @@ test "fls e2e: a bare call is not shadowed by an unrelated compound field of the
     var def_res = try lsp.waitResponse(did, 15000);
     defer def_res.deinit();
     const def_val = try jsonResultFromResponseObj(def_res.parsed.value.object);
-    // stdlib/std/string.fn:152: `pub fun len(str s) num {` (0-indexed line
-    // 151, `len` starting at character 8 after `pub fun `).
-    try expectDefinitionPointsTo(allocator, def_val, "string.fn", 151, 8);
+    // stdlib/std/string.fn:111: `pub fun len(str s) num {` (0-indexed line
+    // 110, `len` starting at character 8 after `pub fun `).
+    try expectDefinitionPointsTo(allocator, def_val, "string.fn", 110, 8);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
