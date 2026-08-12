@@ -15,10 +15,15 @@ pub compound FmtState {
   StringBuilder out;
   num indent;
   bin at_line_start;
+  // True when a separator ended the line and the break has not been
+  // written yet, which is what lets a trailing comment stay put.
+  bin force_break;
   // How many delimiters are still open, so a construct broken across
   // lines keeps its continuation lines indented under the line that
   // opened it.
   num open_delims;
+  // True while a line continues a construct opened on an earlier one.
+  bin continuation;
   // Width already written on the current line, which is what a
   // decision about breaking a construct is measured against.
   num col;
@@ -42,6 +47,8 @@ pub fun fmt_state_new() FmtState {
   s.at_line_start = true;
   s.col = 0;
   s.open_delims = 0;
+  s.force_break = false;
+  s.continuation = false;
   s.pending_newlines = 0;
   s.has_prev = false;
   s.in_doc_fence = false;
@@ -163,7 +170,7 @@ impl FmtState {
   pub write(str text) {
     if self.at_line_start {
       num level = self.indent;
-      if self.open_delims > 0 {
+      if self.continuation {
         level = level + 1;
       }
       num i = 0;
@@ -291,7 +298,7 @@ fun _needs_space(Token prev, Token cur) bin {
 }
 
 // How wide a line may get before a construct is broken across lines.
-const num MAX_LINE_WIDTH = 80;
+const num MAX_LINE_WIDTH = 100;
 
 // The index just past the `}` that closes the block opening at `open`,
 // or `open` itself when the block contains another block or never
@@ -324,22 +331,44 @@ fun _simple_block_end(Vec<Token>* tokens, num open) num {
   ret open;
 }
 
-// The width the tokens in `[from, to]` occupy when written on one line.
+// The number of closing delimiters written one after another from `i`.
+fun _leading_closers(Vec<Token>* tokens, num i) num {
+  num n = 0;
+  num j = i;
+  for j < tokens.len {
+    Token t = tokens.get(j);
+    if t.type != TokenType.Symbol {
+      ret n;
+    }
+    let c = _cval_of(t);
+    if c != ')' && c != ']' {
+      ret n;
+    }
+    n = n + 1;
+    j = j + 1;
+  }
+  ret n;
+}
+
+// The width the tokens in `[from, to]` occupy when written on one line,
+// counting a separator after each one.
 fun _inline_width(Vec<Token>* tokens, num from, num to) num {
-  num width = 0;
+  num width = 2;
   num i = from;
-  bin first = true;
   for i <= to {
     Token t = tokens.get(i);
     if t.type == TokenType.NewLine {
       i = i + 1;
       continue;
     }
-    if !first && _needs_space(tokens.get(i - 1), t) {
-      width = width + 1;
+    if t.type == TokenType.Symbol {
+      let c = _cval_of(t);
+      if c == '{' || c == '}' || c == ';' {
+        i = i + 1;
+        continue;
+      }
     }
-    width = width + len(token_text(t));
-    first = false;
+    width = width + len(token_text(t)) + 1;
     i = i + 1;
   }
   ret width;
@@ -416,6 +445,26 @@ pub fun format_source(str src, str filename) Result<str, str> {
       text = _comment_line(_sval_of(t), s.in_doc_fence);
     }
 
+    if s.force_break {
+      s.force_break = false;
+      bin trailing = t.type == TokenType.Comment && s.pending_newlines == 0;
+      if trailing {
+        s.space();
+        s.write(text);
+        s.newline();
+        s.pending_newlines = 0;
+        s.has_prev = false;
+        i = i + 1;
+        continue;
+      } else {
+        s.newline();
+        if s.pending_newlines > 1 {
+          s.newline();
+        }
+      }
+      s.pending_newlines = 0;
+    }
+
     // A brace that binds to the name before it opens a compound
     // literal rather than a block, so it stays on its own line only
     // when it does not fit.
@@ -426,7 +475,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if equals(text, "{") && !is_literal_brace && s.has_prev && equals(token_text(s.prev), "->") {
       let close = _simple_block_end(&tokens, i);
       if close > i {
-        num start = s.col;
+        num start = s.col + 1;
         if s.at_line_start {
           start = s.indent * 2;
         }
@@ -441,10 +490,10 @@ pub fun format_source(str src, str filename) Result<str, str> {
               continue;
             }
             str itext = _written_text(src, &starts, it);
-            if !s.at_line_start && s.has_prev {
-              if _needs_space(s.prev, it) {
-                s.space();
-              }
+            bin empty = equals(token_text(s.prev), "{") && equals(itext, "}");
+            bin pad = !empty && (equals(token_text(s.prev), "{") || equals(itext, "}"));
+            if !s.at_line_start && s.has_prev && (pad || _needs_space(s.prev, it)) {
+              s.space();
             }
             s.write(itext);
             s.has_prev = true;
@@ -505,6 +554,10 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     s.flush_newlines();
 
+    if s.at_line_start {
+      s.continuation = s.open_delims - _leading_closers(&tokens, i) > 0;
+    }
+
     if equals(text, ")") || equals(text, "]") {
       if s.open_delims > 0 {
         s.open_delims = s.open_delims - 1;
@@ -524,11 +577,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if equals(text, "{") {
       s.literal_braces.push(false);
       s.indent = s.indent + 1;
-      s.newline();
+      s.force_break = true;
       s.pending_newlines = 0;
     }
     if equals(text, ";") {
-      s.newline();
+      s.force_break = true;
       s.pending_newlines = 0;
     }
     if t.type == TokenType.Comment {

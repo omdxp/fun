@@ -426,11 +426,9 @@ impl Lexer {
     ret .Ok(out);
   }
 
-  // Reads a `0x...` hex literal's digits (called right after popping the
-  // preceding bare `0` token and consuming the `x`) and returns the parsed
-  // Number token.
-  _read_number_hex() Token {
-    let start = self._start_pos();
+  // Reads a `0x...` hex literal's digits, starting from `start`, which is
+  // where the already-popped leading `0` sat.
+  _read_number_hex(Pos start) Token {
     self._advance(); // 'x'
     let digits = self._read_hex_digits();
     let v = _parse_radix(digits, 16);
@@ -446,8 +444,7 @@ impl Lexer {
   }
 
   // Like `_read_number_hex`, but for a `0b...` binary literal.
-  _read_number_binary() Token {
-    let start = self._start_pos();
+  _read_number_binary(Pos start) Token {
     self._advance(); // 'b'
     let digits = self._read_digits();
     let v = _parse_radix(digits, 2);
@@ -760,8 +757,12 @@ impl Lexer {
   // Removes the just-checked bare-zero token from `self.tokens` before
   // replacing it with the real hex/binary literal (see the hex/binary
   // dispatch in `_next_inner`).
-  _pop_last_token() {
-    self.tokens.pop();
+  // Removes the last recorded token and reports where it started, which
+  // is where a `0x`/`0b` literal really begins once its leading `0` has
+  // been read as a token of its own.
+  _pop_last_token() Pos {
+    let t = self.tokens.pop();
+    ret t.pos;
   }
 
   // Reads the next token, or `None` at end of input, and records it onto
@@ -886,11 +887,11 @@ impl Lexer {
     // an ordinary Number token); otherwise `b`/`x` are ordinary identifier
     // starts (`x`, `box`, ...).
     if (c == 'b' || c == 'x') && self._prev_token_is_bare_zero() {
-      self._pop_last_token();
+      let start = self._pop_last_token();
       if c == 'b' {
-        ret .Ok(.Some(self._read_number_binary()));
+        ret .Ok(.Some(self._read_number_binary(start)));
       }
-      ret .Ok(.Some(self._read_number_hex()));
+      ret .Ok(.Some(self._read_number_hex(start)));
     }
 
     if _is_ident_start(c) {
