@@ -15,11 +15,21 @@ pub compound FmtState {
   StringBuilder out;
   num indent;
   bin at_line_start;
+  // How many delimiters are still open, so a construct broken across
+  // lines keeps its continuation lines indented under the line that
+  // opened it.
+  num open_delims;
+  // Width already written on the current line, which is what a
+  // decision about breaking a construct is measured against.
+  num col;
   // How many newlines have been seen since the last emitted token, so a
   // blank line in the source survives as a blank line.
   num pending_newlines;
   bin has_prev;
   Token prev;
+  // One entry per open brace, true where the brace opened a compound
+  // literal rather than a block.
+  Vec<bin> literal_braces;
   // True between the ``` markers of a fenced block in a doc comment,
   // where a comment body keeps the indentation it was written with.
   bin in_doc_fence;
@@ -30,9 +40,12 @@ pub fun fmt_state_new() FmtState {
   s.out = string_builder_init(1024);
   s.indent = 0;
   s.at_line_start = true;
+  s.col = 0;
+  s.open_delims = 0;
   s.pending_newlines = 0;
   s.has_prev = false;
   s.in_doc_fence = false;
+  s.literal_braces.init(0);
   ret s;
 }
 
@@ -149,19 +162,31 @@ impl FmtState {
   // Writes `text`, indenting first when it starts a line.
   pub write(str text) {
     if self.at_line_start {
+      num level = self.indent;
+      if self.open_delims > 0 {
+        level = level + 1;
+      }
       num i = 0;
-      for i < self.indent {
+      for i < level {
         self.out.append("  ");
         i = i + 1;
       }
+      self.col = level * 2;
       self.at_line_start = false;
     }
     self.out.append(text);
+    self.col = self.col + len(text);
+  }
+
+  pub space() {
+    self.out.append(" ");
+    self.col = self.col + 1;
   }
 
   pub newline() {
     self.out.append_char('\n');
     self.at_line_start = true;
+    self.col = 0;
   }
 
   // Ends the current line, keeping at most one blank line between
@@ -204,6 +229,9 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(p, "{") && equals(c, "}") {
     ret false;
   }
+  if equals(p, "{") || equals(c, "}") || equals(c, "{") {
+    ret prev.whitespace;
+  }
   if equals(p, "(") || equals(p, "[") {
     ret false;
   }
@@ -232,7 +260,7 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(c, "<") && !prev.whitespace && prev.type == TokenType.Identifier {
     ret false;
   }
-  if equals(c, ">") && !prev.whitespace {
+  if (equals(c, ">") || equals(c, ">>")) && !prev.whitespace {
     ret false;
   }
   if equals(p, "<") && !prev.whitespace {
@@ -391,14 +419,18 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A brace that binds to the name before it opens a compound
     // literal rather than a block, so it stays on its own line only
     // when it does not fit.
-    bin is_literal_brace = equals(text, "{") && s.has_prev && !s.prev.whitespace && s.prev.type == TokenType.Identifier;
+    bin is_literal_brace = equals(text, "{") && s.has_prev && !s.prev.whitespace && (s.prev.type == TokenType.Identifier || equals(token_text(s.prev), "."));
 
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
-    if equals(text, "{") && s.has_prev && (equals(token_text(s.prev), "->") || is_literal_brace) {
+    if equals(text, "{") && !is_literal_brace && s.has_prev && equals(token_text(s.prev), "->") {
       let close = _simple_block_end(&tokens, i);
       if close > i {
-        num width = s.indent * 2 + _inline_width(&tokens, i, close);
+        num start = s.col;
+        if s.at_line_start {
+          start = s.indent * 2;
+        }
+        num width = start + _inline_width(&tokens, i, close);
         if width <= MAX_LINE_WIDTH {
           s.flush_newlines();
           num j = i;
@@ -411,7 +443,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
             str itext = _written_text(src, &starts, it);
             if !s.at_line_start && s.has_prev {
               if _needs_space(s.prev, it) {
-                s.out.append(" ");
+                s.space();
               }
             }
             s.write(itext);
@@ -427,9 +459,36 @@ pub fun format_source(str src, str filename) Result<str, str> {
       }
     }
 
+    if is_literal_brace {
+      s.flush_newlines();
+      if !s.at_line_start && s.has_prev && _needs_space(s.prev, t) {
+        s.space();
+      }
+      s.write(text);
+      s.literal_braces.push(true);
+      s.has_prev = true;
+      s.prev = t;
+      i = i + 1;
+      continue;
+    }
+    if equals(text, "}") && s.literal_braces.len > 0 && s.literal_braces.get(s.literal_braces.len - 1) {
+      s.literal_braces.pop();
+      if !s.at_line_start && s.has_prev && _needs_space(s.prev, t) {
+        s.space();
+      }
+      s.write(text);
+      s.has_prev = true;
+      s.prev = t;
+      i = i + 1;
+      continue;
+    }
+
     // A closing brace dedents before it is written, and always starts
     // its own line.
     if equals(text, "}") {
+      if s.literal_braces.len > 0 {
+        s.literal_braces.pop();
+      }
       if s.indent > 0 {
         s.indent = s.indent - 1;
       }
@@ -446,14 +505,24 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     s.flush_newlines();
 
+    if equals(text, ")") || equals(text, "]") {
+      if s.open_delims > 0 {
+        s.open_delims = s.open_delims - 1;
+      }
+    }
+
     if !s.at_line_start && s.has_prev {
       if _needs_space(s.prev, t) {
-        s.out.append(" ");
+        s.space();
       }
     }
     s.write(text);
 
+    if equals(text, "(") || equals(text, "[") {
+      s.open_delims = s.open_delims + 1;
+    }
     if equals(text, "{") {
+      s.literal_braces.push(false);
       s.indent = s.indent + 1;
       s.newline();
       s.pending_newlines = 0;
