@@ -14915,6 +14915,32 @@ pub const TranspileProcess = struct {
                 }
             }
         }
+        // Same for a FIELD holding a generic instance (`Holder.entries:
+        // Map<str, num>`): the field lookup below yields the bare base name
+        // (`Map`), which loses the args a chained method's return type must be
+        // monomorphized against -- leaving the placeholder (`Option__V`) in the
+        // materialized-receiver temp of `h.entries.at(k).is_some()`.
+        if (node.type == .Expression and node.node_variant != null and
+            mem.eql(u8, node.node_variant.?.exp.op, "."))
+        {
+            const dot = node.node_variant.?.exp;
+            if (dot.left) |left| {
+                if (dot.right) |right| {
+                    if (right.type == .Identifier and right.data != null) {
+                        if (self.expr_named_type_from_scope(left.*)) |left_name| {
+                            const canon = self.canonical_compound_name(left_name);
+                            if (self.lookup_compound_field(canon, right.data.?.sval.items)) |fdt| {
+                                if (fdt.type == .Unknown and fdt.pointer_depth <= 1 and fdt.generic_args != null) {
+                                    if (self.type_name_mangled_for_emit(fdt) catch null) |mangled| {
+                                        return mangled; // arena-owned
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (self.expr_named_type_from_scope(node)) |n| {
             // Accept a compound OR a data enum: a method receiver can be an enum value
             // (`v.as_num()` where `v: JsonValue`), not just a compound.

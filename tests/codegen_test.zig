@@ -6732,6 +6732,46 @@ test "P1: plain-impl method chaining on call results materializes once" {
     try std.testing.expectEqualStrings("6 7\n", stdout);
 }
 
+test "method chaining on a generic-instance FIELD keeps the receiver's type args" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "field_generic_chain.fn";
+    const c_path = "field_generic_chain.c";
+    const exe_path = if (builtin.os.tag == .windows) "field_generic_chain.exe" else "field_generic_chain";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: a chained call whose receiver is a FIELD holding a generic
+    // instance (`h.entries.at(k).is_some()`) resolved the field to its bare base
+    // name (`Map`), losing the type args, so the materialized receiver temp was
+    // declared with the un-substituted placeholder `Option__V`.
+    const input =
+        "imp std.map;\n" ++
+        "imp std.option;\n" ++
+        "imp std.c.io;\n" ++
+        "compound Holder { Map<str, num> entries; }\n" ++
+        "fun main() num {\n" ++
+        "  Holder h;\n" ++
+        "  h.entries.init(4);\n" ++
+        "  h.entries.put(\"a\", 1);\n" ++
+        "  bin found = h.entries.at(\"a\").is_some();\n" ++
+        "  bin missing = h.entries.at(\"b\").is_some();\n" ++
+        "  printf(\"%d %d\\n\", found, missing);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Option__V") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("1 0\n", stdout);
+}
+
 test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" {
     const allocator = std.testing.allocator;
     const ifilepath = "p1_quirk_coerce.fn";
