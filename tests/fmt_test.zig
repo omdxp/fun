@@ -1481,3 +1481,30 @@ test "-fmt keeps a space between a fuzz block's name string and its parameter li
     defer allocator.free(got2);
     try std.testing.expectEqualStrings(got, got2);
 }
+
+test "a raw string keeps a // in its body verbatim" {
+    const allocator = std.testing.allocator;
+
+    // A backtick raw string is verbatim, so a `//` inside one is part of
+    // the value, not a trailing comment. The comment-alignment pass read
+    // it as one and rewrote the spacing, changing the string.
+    const input =
+        "fun main() num {\n" ++
+        "  str s = `// not a comment\n" ++
+        "  `second line`;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmtrawcomment", input);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(input, got);
+}
