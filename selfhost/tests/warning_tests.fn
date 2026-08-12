@@ -1,0 +1,204 @@
+// Warning cases: a program, and what the analysis is expected to notice
+// about it.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.result;
+
+// Parses `src` and reports what the analysis notices, joined into one
+// string, or the message of the expectation that went unmet.
+fun notice(str src, bin report_unused) str {
+  let tokens = tokenize(src, "t.fn");
+  if tokens.is_err() {
+    ret "lex error";
+  }
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let failed = p.parse();
+  if failed.is_some() {
+    ret "parse error";
+  }
+  let found = analyze(&state.nodes, &state.nodes, report_unused, "t.fn");
+  if found.is_err() {
+    ret found.unwrap_err();
+  }
+  Vec<Warning> warnings = found.unwrap();
+  defer warnings.free();
+  StringBuilder b = string_builder_init(128);
+  num i = 0;
+  for i < warnings.len {
+    Warning w = warnings.get(i);
+    i = i + 1;
+    b.append(warning_id_name(w.id));
+    b.append(": ");
+    b.append(w.message);
+    b.append("\n");
+  }
+  ret b.build();
+}
+
+fun notices(str src, str needle, str label) {
+  assert contains(notice(src, false), needle), label;
+}
+
+fun notices_unused(str src, str needle, str label) {
+  assert contains(notice(src, true), needle), label;
+}
+
+fun says_nothing(str src, str label) {
+  assert equals(notice(src, false), ""), label;
+}
+
+test "returning the address of a local is noticed" {
+  notices(
+    `fun bad() num* {
+    `  num x = 1;
+    `  ret &x;
+    `}`,
+    "returning address of local variable",
+    "expected the address of a local to be noticed"
+  );
+  says_nothing(
+    `fun ok() num* {
+    `  num* p = nil;
+    `  ret p;
+    `}`,
+    "expected a pointer local to be returned quietly"
+  );
+}
+
+test "a statement after one that always exits is noticed" {
+  notices(
+    `fun main() num {
+    `  ret 0;
+    `  num x = 1;
+    `}`,
+    "unreachable",
+    "expected the unreachable statement to be noticed"
+  );
+}
+
+test "an assert that cannot fail is noticed" {
+  notices(
+    `fun main() {
+    `  assert true, "always";
+    `}`,
+    "always true",
+    "expected the constant assert to be noticed"
+  );
+}
+
+test "a control silences what it names, wherever it is written" {
+  says_nothing(
+    `fun main() num {
+    `  ret 0;
+    `  allow unreachable_code, "left in during a refactor";
+    `  num x = 1;
+    `}`,
+    "expected the control to cover the whole body"
+  );
+}
+
+test "an expectation that never fires is an error" {
+  assert contains(
+    notice(
+      `fun ok() num* {
+      `  expect return_local_ptr, "should fail when the warning disappears";
+      `  num* p = nil;
+      `  ret p;
+      `}`,
+      false
+    ),
+    "was not emitted"
+  ), "expected the unmet expectation to be reported";
+}
+
+test "a declaration nothing reads is noticed when asked" {
+  notices_unused(
+    `fun demo() void {
+    `  num value = 1;
+    `}`,
+    "unused variable 'value'",
+    "expected the unused local to be noticed"
+  );
+  says_nothing(
+    `fun demo() void {
+    `  num value = 1;
+    `}`,
+    "expected silence when unused declarations are not asked for"
+  );
+}
+
+test "a function that promises a value must hand one back" {
+  notices(
+    `fun f(num x) num {
+    `  num y = x;
+    `}`,
+    "without returning a value",
+    "expected the missing return to be noticed"
+  );
+  says_nothing(
+    `fun f(num x) num {
+    `  for true {
+    `    ret x;
+    `  }
+    `}`,
+    "expected a loop that never finishes to be accepted"
+  );
+}
+
+test "a fit that misses a case is noticed" {
+  notices(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `  }
+    `}`,
+    "does not handle",
+    "expected the missing variant to be noticed"
+  );
+  says_nothing(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `    Color.Green -> { ret; }
+    `  }
+    `}`,
+    "expected a fit covering every variant to be accepted"
+  );
+}
+
+test "a branch an earlier one already covers is noticed" {
+  notices(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `    Color.Red -> { ret; }
+    `    Color.Green -> { ret; }
+    `  }
+    `}`,
+    "already covered",
+    "expected the duplicate branch to be noticed"
+  );
+}

@@ -104,7 +104,7 @@ fun main(str[] args) num {
   if equals(c_path, "") {
     c_path = default_c_path(opts.input, ".c");
   }
-  let lowered = compile_to_c(opts.input, c_path, &opts.defines);
+  let lowered = compile_to_c_mode(opts.input, c_path, &opts.defines, false, opts.warn_unused);
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());
   }

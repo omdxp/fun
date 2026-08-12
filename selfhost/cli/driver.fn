@@ -8,6 +8,9 @@
 
 imp ..parser.import_resolver;
 imp ..semantics.typecheck;
+imp ..semantics.warnings;
+imp ..parser.parse_state;
+imp ..parser.parser;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp fmt;
@@ -49,6 +52,8 @@ pub compound Options {
   bin debug_info;
   bin show_help;
   bin show_version;
+  // Report declarations nothing reads.
+  bin warn_unused;
   // Rewrite the input in place, and with `fmt_all` its local imports too.
   bin fmt;
   bin fmt_all;
@@ -75,6 +80,7 @@ fun _options_new() Options {
   o.debug_info = false;
   o.show_help = false;
   o.show_version = false;
+  o.warn_unused = false;
   o.fmt = false;
   o.fmt_all = false;
   o.fmt_check = false;
@@ -128,6 +134,7 @@ pub fun parse_args(str[] argv) Options {
   o.no_exec = parsed.has("no-exec");
   o.keep_c = parsed.has("outf");
   o.debug_info = parsed.has("g");
+  o.warn_unused = parsed.has("warn-unused");
   o.fmt = parsed.has("fmt");
   o.fmt_all = parsed.has("fmt-all");
   o.fmt_check = parsed.has("fmt-check");
@@ -246,12 +253,41 @@ fun _const_string_node(str name, str value) Node {
 // program as constants. The error text names the stage that rejected the
 // program.
 pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
-  ret compile_to_c_mode(input, out_path, defines, false);
+  ret compile_to_c_mode(input, out_path, defines, false, false);
+}
+
+// Lowers `input` to C, reporting declarations nothing reads.
+pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, true);
+}
+
+// Parses one file on its own, without resolving what it imports.
+fun _parse_file(str path) Result<Vec<Node>, str> {
+  str src = read_to_string(path);
+  let lexed = tokenize(src, path);
+  if lexed.is_err() {
+    ret .Err(format("could not read {str}", path));
+  }
+  ParseState state = parse_state_new(path, src);
+  state.tokens = lexed.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let failed = p.parse();
+  if failed.is_some() {
+    ret .Err(format("could not read {str}", path));
+  }
+  ret .Ok(state.nodes);
 }
 
 // Lowers `input` to C, emitting a test runner in place of the program's
 // own entry point when `test_mode` is set.
-pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin test_mode) Result<bin, str> {
+pub fun compile_to_c_mode(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  bin test_mode,
+  bin warn_unused
+) Result<bin, str> {
   let parsed = parse_program_with_imports(input);
   if parsed.is_err() {
     ret .Err(parsed.unwrap_err());
@@ -289,6 +325,36 @@ pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin tes
       ));
     }
     ret .Err(e.message);
+  }
+
+  // Warnings are reported after checking, so a program that does not
+  // compile is not also told what it might have meant. They are read
+  // from the file's own parse: merging drops the import statements, and
+  // what another file declares is its own business.
+  let reparsed = _parse_file(input);
+  if reparsed.is_err() {
+    ret .Err(reparsed.unwrap_err());
+  }
+  Vec<Node> own_nodes = reparsed.unwrap();
+  let noticed = analyze(&own_nodes, &merged.nodes, warn_unused, input);
+  if noticed.is_err() {
+    ret .Err(noticed.unwrap_err());
+  }
+  Vec<Warning> warnings = noticed.unwrap();
+  defer warnings.free();
+  num wi = 0;
+  for wi < warnings.len {
+    Warning w = warnings.get(wi);
+    wi = wi + 1;
+    StringBuilder line = string_builder_init(96);
+    line.append("[Warning:");
+    line.append(warning_id_name(w.id));
+    line.append("] ");
+    line.append(w.message);
+    if w.has_pos {
+      line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
+    }
+    writeln_to(Sink.Stderr, line.build());
   }
 
   CodegenState state = codegen_state_new();
@@ -684,7 +750,7 @@ pub fun run_tests(str input, Vec<str>* args) num {
   }
 
   str c_path = default_c_path(input, ".test.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, true);
+  let lowered = compile_to_c_mode(input, c_path, &defines, true, false);
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
