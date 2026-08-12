@@ -465,3 +465,39 @@ test "an impl matches how its quirk declares a method" {
     "expected the matching signature to check out"
   );
 }
+
+test "a field reads through what the instantiation supplied" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  str s = b.v;
+    `}`,
+    "expected the substituted field type to be checked"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  num n = b.v;
+    `}`,
+    "expected the substituted field type to be read"
+  );
+}
+
+test "a builtin declares no methods" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  num out = b.v.add(2);
+    `}`,
+    "expected a method on a number to be reported"
+  );
+}

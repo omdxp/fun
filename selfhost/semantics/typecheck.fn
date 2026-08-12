@@ -30,6 +30,9 @@ pub compound CheckedType {
   bin is_panic_literal;
   // The written name of a user-defined type, empty for a builtin.
   str name;
+  // The arguments a generic instantiation supplied, in the order the
+  // type declares its parameters.
+  Vec<CheckedType> generic_args;
 }
 
 pub fun checked_unknown() CheckedType {
@@ -41,6 +44,7 @@ pub fun checked_unknown() CheckedType {
   t.is_null_literal = false;
   t.is_panic_literal = false;
   t.name = "";
+  t.generic_args.init(0);
   ret t;
 }
 
@@ -70,6 +74,35 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   }
   if t.base == DataTypeType.Unknown {
     t.name = dt.type_str;
+  }
+  num i = 0;
+  for i < dt.generic_args.len {
+    t.generic_args.push(checked_from_dtype(dt.generic_args.get(i)));
+    i = i + 1;
+  }
+  ret t;
+}
+
+// Replaces each type parameter in `t` with what the instantiation
+// supplied for it, leaving anything else as written.
+pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) CheckedType {
+  if params.len == 0 || args.len == 0 {
+    ret t;
+  }
+  num i = 0;
+  for i < params.len && i < args.len {
+    if !equals(t.name, "") && equals(params.get(i), t.name) {
+      // The parameter stands for the argument, while whatever was
+      // written around it (a pointer, an array) still applies.
+      CheckedType out = args.get(i);
+      out.pointer_depth = out.pointer_depth + t.pointer_depth;
+      if t.is_array {
+        out.is_array = true;
+        out.array_depth = out.array_depth + t.array_depth;
+      }
+      ret out;
+    }
+    i = i + 1;
   }
   ret t;
 }
@@ -114,6 +147,24 @@ pub fun type_name(CheckedType t) str {
   i = 0;
   for i < t.array_depth {
     b.append("[]");
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// The name an instantiation is registered under, which carries its
+// arguments the way an impl on a concrete instantiation is written
+// (`impl Vec<str>` registers as `Vec__str`).
+pub fun mangled_name(CheckedType t) str {
+  if t.generic_args.len == 0 {
+    ret t.name;
+  }
+  StringBuilder b = string_builder_init(len(t.name) + 8);
+  b.append(t.name);
+  num i = 0;
+  for i < t.generic_args.len {
+    b.append("__");
+    b.append(mangled_name(t.generic_args.get(i)));
     i = i + 1;
   }
   ret b.build();
@@ -305,6 +356,9 @@ impl TypeEnv {
 // What a compound holds, keyed by field name.
 compound CompoundInfo {
   Map<str, CheckedType> fields;
+  // The parameters the fields are written in terms of, which an
+  // instantiation supplies arguments for.
+  Vec<str> type_params;
   // A generic compound's fields mention its type parameters, which
   // stand for whatever an instantiation supplies.
   bin is_generic;
@@ -877,14 +931,21 @@ impl Checker {
       ret checked_unknown();
     }
     CompoundInfo holder = info.unwrap();
-    // A generic compound's fields are written in terms of its type
-    // parameters, which stand for whatever the instantiation supplied.
-    if holder.is_generic {
-      ret checked_unknown();
-    }
     let found = holder.fields.at(field);
     if found.is_some() {
-      ret found.unwrap();
+      CheckedType declared = found.unwrap();
+      if holder.is_generic {
+        // Without the arguments the instantiation supplied, the field's
+        // type is whatever the parameter stood for.
+        if receiver.generic_args.len == 0 {
+          ret checked_unknown();
+        }
+        ret substitute(declared, &holder.type_params, &receiver.generic_args);
+      }
+      ret declared;
+    }
+    if holder.is_generic && receiver.generic_args.len == 0 {
+      ret checked_unknown();
     }
     // A method reads as a field until it is called.
     if self.has_method(receiver.name, field) {
@@ -901,6 +962,19 @@ impl Checker {
     }
     MethodTable found = table.unwrap();
     ret found.methods.at(method).is_some();
+  }
+
+  // A method reaches a receiver either through an impl on its
+  // instantiation or through one on the type itself.
+  receiver_method(CheckedType receiver, str method) Option<FnSig> {
+    str instantiated = mangled_name(receiver);
+    if !equals(instantiated, receiver.name) {
+      let found = self.method_signature(instantiated, method);
+      if found.is_some() {
+        ret found;
+      }
+    }
+    ret self.method_signature(receiver.name, method);
   }
 
   // The signature of `method` on `type_name`, if the type declares one.
@@ -927,7 +1001,7 @@ impl Checker {
     if equals(method, "") {
       ret .None;
     }
-    ret self.method_signature(receiver.name, method);
+    ret self.receiver_method(receiver, method);
   }
 
   // True when a call through a receiver reaches an async method, or one
@@ -970,6 +1044,7 @@ impl Checker {
       _ -> {}
     }
     if resolved.is_none() {
+      self.check_receiver_has_method(node, e, method, env);
       ret checked_unknown();
     }
     FnSig sig = resolved.unwrap();
@@ -1039,6 +1114,35 @@ impl Checker {
         }
         break;
       }
+    }
+  }
+
+  // Reports a method called on a value whose type declares none. Only a
+  // receiver the checker resolved completely is judged, so an unmodelled
+  // one is left alone.
+  check_receiver_has_method(Node* node, ExprNode e, str method, TypeEnv* env) {
+    if equals(method, "") || !e.has_left {
+      ret;
+    }
+    fit e.left.kind {
+      .Expression(callee) -> {
+        if !equals(callee.op, ".") || !callee.has_left {
+          ret;
+        }
+        CheckedType receiver = self.infer(callee.left, env);
+        // Only a builtin is judged here: it declares no methods at all,
+        // while a named type reaches them through impls the checker does
+        // not always see, and a pointer or array is not the receiver
+        // itself.
+        if receiver.base == DataTypeType.Unknown || receiver.pointer_depth > 0 || receiver.is_array {
+          ret;
+        }
+        if self.receiver_method(receiver, method).is_some() {
+          ret;
+        }
+        self.fail(format("{str} has no method '{str}'", type_name(receiver), method), node);
+      }
+      _ -> {}
     }
   }
 
@@ -1565,7 +1669,13 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
       .Compound(c) -> {
         CompoundInfo info;
         info.fields.init(c.fields.len + 1);
+        info.type_params.init(0);
         info.is_generic = c.has_type_params && c.type_params.len > 0;
+        if c.has_type_params {
+          for p : c.type_params {
+            info.type_params.push(p);
+          }
+        }
         for field : c.fields {
           info.fields.put(field.name, checked_from_dtype(field.dtype));
         }
