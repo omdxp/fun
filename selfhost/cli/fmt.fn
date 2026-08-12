@@ -20,6 +20,9 @@ pub compound FmtState {
   num pending_newlines;
   bin has_prev;
   Token prev;
+  // True between the ``` markers of a fenced block in a doc comment,
+  // where a comment body keeps the indentation it was written with.
+  bin in_doc_fence;
 }
 
 pub fun fmt_state_new() FmtState {
@@ -29,6 +32,7 @@ pub fun fmt_state_new() FmtState {
   s.at_line_start = true;
   s.pending_newlines = 0;
   s.has_prev = false;
+  s.in_doc_fence = false;
   ret s;
 }
 
@@ -63,13 +67,27 @@ fun _cval_of(Token t) chr {
 }
 
 // The lexer keeps only a comment's body, so the marker is written back
-// with exactly one space after it. An empty comment stays bare.
-fun _comment_text(Token t) str {
-  str body = trim(_sval_of(t));
+// with exactly one space after it. Inside a fenced block the body is
+// kept as written, since the indentation there is part of the code.
+fun _comment_line(str body, bin in_fence) str {
   StringBuilder b = string_builder_init(len(body) + 4);
+  if in_fence {
+    b.append("//");
+    b.append(body);
+    ret b.build();
+  }
   b.append("// ");
-  b.append(body);
+  b.append(trim(body));
   ret b.build();
+}
+
+fun _comment_text(Token t) str {
+  ret _comment_line(_sval_of(t), false);
+}
+
+// True for the ``` line that opens or closes a fenced block.
+fun _is_fence_marker(str body) bin {
+  ret starts_with(trim(body), "```");
 }
 
 fun _symbol_text(Token t) str {
@@ -180,6 +198,12 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(c, ")") || equals(c, "]") || equals(c, ",") || equals(c, ";") {
     ret false;
   }
+  if equals(c, ":") {
+    ret prev.whitespace;
+  }
+  if equals(p, "{") && equals(c, "}") {
+    ret false;
+  }
   if equals(p, "(") || equals(p, "[") {
     ret false;
   }
@@ -246,8 +270,12 @@ const num MAX_LINE_WIDTH = 80;
 // closes. Used to decide whether a short block can stay on one line.
 fun _simple_block_end(Vec<Token>* tokens, num open) num {
   num i = open + 1;
+  num semicolons = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
+    if t.type == TokenType.Comment {
+      ret open;
+    }
     if t.type == TokenType.Symbol {
       let c = _cval_of(t);
       if c == '{' {
@@ -255,6 +283,12 @@ fun _simple_block_end(Vec<Token>* tokens, num open) num {
       }
       if c == '}' {
         ret i;
+      }
+      if c == ';' {
+        semicolons = semicolons + 1;
+        if semicolons > 1 {
+          ret open;
+        }
       }
     }
     i = i + 1;
@@ -314,6 +348,19 @@ fun _source_span(str src, Vec<num>* starts, Pos p) str {
   ret substr(src, from, to - from);
 }
 
+// The text a token is written back as. A raw string and a numeric
+// literal come from source: one is verbatim by definition, and the
+// other keeps the precision, base, and spelling it was written with.
+fun _written_text(str src, Vec<num>* starts, Token t) str {
+  if (t.type == TokenType.String && t.is_raw_string) || t.type == TokenType.Number {
+    let verbatim = _source_span(src, starts, t.pos);
+    if !equals(verbatim, "") {
+      ret verbatim;
+    }
+  }
+  ret token_text(t);
+}
+
 // Formats `src`, or reports the stage that rejected it.
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
@@ -336,15 +383,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
       continue;
     }
 
-    str text = token_text(t);
-    // A raw string and a character literal are both reproduced from
-    // source: one is verbatim by definition, and the other carries a
-    // decoded char that no longer shows how it was written.
-    if (t.type == TokenType.String && t.is_raw_string) || is_char_literal(t) {
-      let verbatim = _source_span(src, &starts, t.pos);
-      if !equals(verbatim, "") {
-        text = verbatim;
-      }
+    str text = _written_text(src, &starts, t);
+    if t.type == TokenType.Comment {
+      text = _comment_line(_sval_of(t), s.in_doc_fence);
     }
 
     // A brace that binds to the name before it opens a compound
@@ -367,7 +408,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
               j = j + 1;
               continue;
             }
-            str itext = token_text(it);
+            str itext = _written_text(src, &starts, it);
             if !s.at_line_start && s.has_prev {
               if _needs_space(s.prev, it) {
                 s.out.append(" ");
@@ -422,6 +463,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.pending_newlines = 0;
     }
     if t.type == TokenType.Comment {
+      if _is_fence_marker(_sval_of(t)) {
+        s.in_doc_fence = !s.in_doc_fence;
+      }
       s.newline();
       s.pending_newlines = 0;
     }
