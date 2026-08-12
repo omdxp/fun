@@ -373,6 +373,9 @@ pub compound Codegen {
   // What the rejected node was and where it came from, filled in when
   // codegen gives up so the failure can name it.
   str error_note;
+  // The innermost node being emitted, kept as a breadcrumb so a failure
+  // deep in an expression still reports a position.
+  str last_where;
   // Emit test blocks and a runner in place of the program's own `main`.
   bin test_mode;
   bin in_main;
@@ -471,6 +474,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.uses_fork = false;
   g.c_shadow_names.init(0);
   g.error_note = "";
+  g.last_where = "";
   g.test_mode = false;
   g.in_main = false;
   ret g;
@@ -3217,6 +3221,20 @@ impl Codegen {
   }
 
   // Emits `node` as a C expression.
+  // Remembers `node` as the innermost one being emitted.
+  mark_node(Node node) {
+    if !node.has_pos {
+      ret;
+    }
+    self.last_where = format(
+      "{str} at {str}:{str}:{str}",
+      node_kind_name(node.kind),
+      node.pos.filename,
+      format_num(node.pos.line),
+      format_num(node.pos.col)
+    );
+  }
+
   // Records what codegen could not emit, with the node's own position
   // when it carries one, so the failure names it instead of reporting a
   // bare "unsupported node".
@@ -3237,6 +3255,7 @@ impl Codegen {
   }
 
   pub emit_expr(Node node) Option<CodegenErrorKind> {
+    self.mark_node(node);
     fit node.kind {
       .Number(data) -> {
         fit data {
@@ -5203,6 +5222,7 @@ impl Codegen {
   // lookahead only `emit_statements` has, so reaching this with one of
   // them errors rather than emitting an invalid lone fragment.
   pub emit_statement(Node node) Option<CodegenErrorKind> {
+    self.mark_node(node);
     fit node.kind {
       .StatementReturn(exp) -> {
         // `main` always emits as `int main(...)` regardless of its
@@ -9855,7 +9875,21 @@ impl Codegen {
       fit n.kind {
         .Test(t) -> {
           names.push(t.name);
-          self.hoist_insert_pos = .None;
+          // A test body is a function body, so it starts from the same
+          // clean slate one does: its own locals and its own defers.
+          self.local_names.init(0);
+          self.local_is_pointer.init(0);
+          self.local_type_name.init(0);
+          self.local_dtype.init(0);
+          self.local_multidim_names.init(0);
+          self.local_multidim_roots.init(0);
+          self.local_multidim_depths.init(0);
+          self.defer_stack.init(0);
+          self.defer_scope_starts.init(0);
+          self.in_main = false;
+          // Anything a test body instantiates belongs at file scope,
+          // ahead of the test function, not nested inside it.
+          self.hoist_insert_pos = .Some(self.state.out.len());
           self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
           self.state.indent_level = self.state.indent_level + 1;
           let berr = self.emit_body(*t.body);

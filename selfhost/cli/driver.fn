@@ -238,7 +238,18 @@ pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin tes
         .InvalidNode -> { what = "invalid node"; }
       }
       if !equals(cg.error_note, "") {
+        if !equals(cg.last_where, "") {
+          ret .Err(format(
+            "codegen failed: {str}: {str}, near {str}",
+            what,
+            cg.error_note,
+            cg.last_where
+          ));
+        }
         ret .Err(format("codegen failed: {str}: {str}", what, cg.error_note));
+      }
+      if !equals(cg.last_where, "") {
+        ret .Err(format("codegen failed: {str}, near {str}", what, cg.last_where));
       }
       ret .Err(format("codegen failed: {str}", what));
     }
