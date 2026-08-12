@@ -9,6 +9,7 @@
 imp ..ast.ast;
 imp ..lexer.token;
 imp ..parser.import_resolver;
+imp ..parser.datatype_defs;
 imp std.string;
 imp std.vec;
 imp std.set;
@@ -55,6 +56,15 @@ compound Analysis {
   // What each enum declares, so a `fit` over one can be told whether it
   // covers every variant.
   Map<str, Vec<str>> enum_variants;
+  // The functions a fork can name, and the types whose fields say
+  // whether a value guards itself.
+  Map<str, FunctionNode> functions;
+  Map<str, CompoundNode> compound_decls;
+  // What each local in the function being walked is declared as.
+  Map<str, str> local_types;
+  // True while walking a function that creates a wait group with no
+  // room of its own.
+  bin waits_on_unsized_group;
   // The file being compiled. A program is merged with everything it
   // imports, and what those files declare and read is their own
   // business, so only this one is judged.
@@ -73,6 +83,10 @@ fun _analysis_new() Analysis {
   a.report_unused = false;
   a.file = "";
   a.enum_variants.init(8);
+  a.functions.init(16);
+  a.compound_decls.init(16);
+  a.local_types.init(16);
+  a.waits_on_unsized_group = false;
   a.allowed = set_init("", 8);
   a.expected = set_init("", 8);
   a.met = set_init("", 8);
@@ -117,6 +131,9 @@ impl Analysis {
     self.expected.free();
     self.met.free();
     self.enum_variants.free();
+    self.functions.free();
+    self.compound_decls.free();
+    self.local_types.free();
   }
 }
 
@@ -193,7 +210,9 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
       if v.var_type != nil {
         out.add(v.var_type.type_str);
       }
-      _collect_reads(v.val, out);
+      if v.has_val {
+        _collect_reads(v.val, out);
+      }
     }
     .StatementIf(ifn) -> {
       _collect_reads(ifn.condition, out);
@@ -353,6 +372,412 @@ fun _pattern_variant(Node* condition) str {
   ret "";
 }
 
+// The value a numeric literal holds, with a leading minus applied.
+// Reports nothing for anything that is not written as one.
+fun _literal_value(Node* node) Option<num> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .Number(data) -> {
+      fit data {
+        .Num(value) -> { ret .Some(value); }
+        _ -> { ret .None; }
+      }
+      ret .None;
+    }
+    .ExpressionParenthesis(inner) -> { ret _literal_value(inner); }
+    .Unary(u) -> {
+      if !equals(u.op, "-") {
+        ret .None;
+      }
+      let inner = _literal_value(u.operand);
+      if inner.is_none() {
+        ret .None;
+      }
+      ret .Some(0 - inner.unwrap());
+    }
+    _ -> { ret .None; }
+  }
+  ret .None;
+}
+
+// The range a sized integer type holds, as the pair its bits allow.
+fun _int_range(DynamicIntType t, num* low, num* high) {
+  // A 64-bit type covers everything the checker can represent, so it is
+  // left alone rather than measured against a wider type.
+  num bits = t.bits;
+  if bits >= 64 {
+    *low = 0;
+    *high = 0;
+    ret;
+  }
+  num span = 1;
+  num i = 0;
+  for i < bits {
+    span = span * 2;
+    i = i + 1;
+  }
+  if t.is_signed {
+    *low = 0 - (span / 2);
+    *high = (span / 2) - 1;
+    ret;
+  }
+  *low = 0;
+  *high = span - 1;
+}
+
+// The name a `receiver.method(...)` call is made on, anywhere inside
+// `node`. Empty when the call is not written there.
+fun _method_receiver(Node* node, str method) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left {
+        fit e.left.kind {
+          .Expression(callee) -> {
+            if equals(callee.op, ".") && callee.has_left && callee.has_right {
+              str named = "";
+              fit callee.right.kind {
+                .Identifier(name) -> { named = name; }
+                _ -> {}
+              }
+              if starts_with(named, method) {
+                str receiver = _plain_name(callee.left);
+                if !equals(receiver, "") {
+                  ret receiver;
+                }
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+      if e.has_left {
+        str found = _method_receiver(e.left, method);
+        if !equals(found, "") {
+          ret found;
+        }
+      }
+      if e.has_right {
+        ret _method_receiver(e.right, method);
+      }
+      ret "";
+    }
+    .ExpressionParenthesis(inner) -> { ret _method_receiver(inner, method); }
+    .Variable(v) -> {
+      if !v.has_val {
+        ret "";
+      }
+      ret _method_receiver(v.val, method);
+    }
+    .StatementReturn(value) -> { ret _method_receiver(value, method); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// The room a channel is created with, for a declaration that creates
+// one. A channel asked for less than one still holds one.
+fun _channel_capacity(Node* value) Option<num> {
+  if value == nil {
+    ret .None;
+  }
+  fit value.kind {
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left {
+        ret .None;
+      }
+      str callee = "";
+      fit e.left.kind {
+        .Identifier(name) -> { callee = name; }
+        _ -> {}
+      }
+      if !equals(callee, "channel_new_cap") || !e.has_right {
+        ret .None;
+      }
+      Vec<Node*> args;
+      args.init(2);
+      defer args.free();
+      _flatten_arguments(e.right, &args);
+      if args.len < 2 {
+        ret .None;
+      }
+      let room = _literal_value(args.get(1));
+      if room.is_none() {
+        ret .None;
+      }
+      if room.unwrap() < 1 {
+        ret .Some(1);
+      }
+      ret room;
+    }
+    _ -> { ret .None; }
+  }
+  ret .None;
+}
+
+// The name an expression reads, for an expression that is just a name.
+fun _plain_name(Node* node) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Identifier(name) -> { ret name; }
+    .ExpressionParenthesis(inner) -> { ret _plain_name(inner); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// True when a body creates a wait group with no room, which only works
+// if something grows it before the tasks arrive.
+fun _creates_empty_wait_group(Node* body) bin {
+  if body == nil {
+    ret false;
+  }
+  fit body.kind {
+    .Body(inner) -> {
+      for st : inner.statements {
+        if _creates_empty_wait_group(st) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Variable(v) -> {
+      if !v.has_val {
+        ret false;
+      }
+      fit v.val.kind {
+        .Expression(e) -> {
+          if !equals(e.op, "()") || !e.has_left {
+            ret false;
+          }
+          str callee = "";
+          fit e.left.kind {
+            .Identifier(name) -> { callee = name; }
+            _ -> {}
+          }
+          if !equals(callee, "wait_group_new") || !e.has_right {
+            ret false;
+          }
+          Vec<Node*> args;
+          args.init(2);
+          defer args.free();
+          _flatten_arguments(e.right, &args);
+          if args.len == 0 {
+            ret false;
+          }
+          let room = _literal_value(args.get(0));
+          ret room.is_some() && room.unwrap() == 0;
+        }
+        _ -> { ret false; }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// The arguments of a call, which are written as one comma expression
+// when there is more than one.
+fun _flatten_arguments(Node* node, Vec<Node*>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") && e.has_left && e.has_right {
+        _flatten_arguments(e.left, out);
+        _flatten_arguments(e.right, out);
+        ret;
+      }
+    }
+    .ExpressionParenthesis(inner) -> {
+      _flatten_arguments(inner, out);
+      ret;
+    }
+    .Blank -> { ret; }
+    _ -> {}
+  }
+  out.push(node);
+}
+
+// True when `body` writes through `param`, either into a field it
+// points at or into the value itself.
+fun _writes_through(Node* body, str param) bin {
+  if body == nil {
+    ret false;
+  }
+  fit body.kind {
+    .Body(inner) -> {
+      for st : inner.statements {
+        if _writes_through(st, param) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Expression(e) -> {
+      if _is_assignment_op(e.op) && e.has_left {
+        if _reads_through(e.left, param) {
+          ret true;
+        }
+      }
+      if e.has_left && _writes_through(e.left, param) {
+        ret true;
+      }
+      if e.has_right && _writes_through(e.right, param) {
+        ret true;
+      }
+      ret false;
+    }
+    .ExpressionParenthesis(x) -> { ret _writes_through(x, param); }
+    .Variable(v) -> { ret v.has_val && _writes_through(v.val, param); }
+    .StatementIf(ifn) -> { ret _writes_through(ifn.body, param); }
+    .StatementElseIf(ein) -> { ret _writes_through(ein.body, param); }
+    .StatementElse(b) -> { ret _writes_through(b, param); }
+    .StatementDefer(x) -> { ret _writes_through(x, param); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> { ret _writes_through(c.body, param); }
+        .Range(r) -> { ret _writes_through(r.body, param); }
+        .Iter(it) -> { ret _writes_through(it.body, param); }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when an expression reaches into what `param` points at, as the
+// left side of an assignment does.
+fun _reads_through(Node* node, str param) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Identifier(name) -> { ret equals(name, param); }
+    .Expression(e) -> {
+      if !e.has_left {
+        ret false;
+      }
+      ret _reads_through(e.left, param);
+    }
+    .Unary(u) -> { ret _reads_through(u.operand, param); }
+    .ExpressionParenthesis(inner) -> { ret _reads_through(inner, param); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+fun _is_assignment_op(str op) bin {
+  if equals(op, "=") {
+    ret true;
+  }
+  if len(op) < 2 || op[len(op) - 1] != '=' {
+    ret false;
+  }
+  str head = substr(op, 0, len(op) - 1);
+  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") || equals(
+    head,
+    "%"
+  );
+}
+
+// The name a `&name` argument reads the address of, empty for anything
+// else.
+fun _address_of_name(Node* node) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Unary(u) -> {
+      if !equals(u.op, "&") || u.operand == nil {
+        ret "";
+      }
+      fit u.operand.kind {
+        .Identifier(name) -> { ret name; }
+        _ -> { ret ""; }
+      }
+      ret "";
+    }
+    .ExpressionParenthesis(inner) -> { ret _address_of_name(inner); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// True when a call names `method` on any receiver, which is how a
+// wait group is grown or a value is guarded.
+fun _calls_method(Node* node, str method) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Body(body) -> {
+      for st : body.statements {
+        if _calls_method(st, method) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Expression(e) -> {
+      if equals(e.op, ".") && e.has_right {
+        fit e.right.kind {
+          .Identifier(name) -> {
+            if equals(name, method) {
+              ret true;
+            }
+          }
+          _ -> {}
+        }
+      }
+      if e.has_left && _calls_method(e.left, method) {
+        ret true;
+      }
+      if e.has_right && _calls_method(e.right, method) {
+        ret true;
+      }
+      ret false;
+    }
+    .ExpressionParenthesis(x) -> { ret _calls_method(x, method); }
+    .Variable(v) -> { ret v.has_val && _calls_method(v.val, method); }
+    .StatementIf(ifn) -> { ret _calls_method(ifn.body, method); }
+    .StatementDefer(x) -> { ret _calls_method(x, method); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when a body forks a task.
+fun _contains_fork(Node* node) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .StatementFork(_) -> { ret true; }
+    .Body(body) -> {
+      for st : body.statements {
+        if _contains_fork(st) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .StatementIf(ifn) -> { ret _contains_fork(ifn.body); }
+    .StatementElse(b) -> { ret _contains_fork(b); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
 impl Analysis {
   // Walks a body, noticing what is written after a statement that always
   // exits and what a `ret` hands back.
@@ -388,7 +813,13 @@ impl Analysis {
       }
       .Variable(v) -> {
         locals.add(v.name);
-        self.walk_body(v.val, locals);
+        if v.var_type != nil {
+          self.local_types.put(v.name, v.var_type.type_str);
+        }
+        self.check_literal_range(stmt, v);
+        if v.has_val {
+          self.walk_body(v.val, locals);
+        }
       }
       .StatementReturn(value) -> {
         if _takes_address_of_local(value, locals) {
@@ -413,12 +844,172 @@ impl Analysis {
       .StatementDefer(inner) -> { self.walk_body(inner, locals); }
       .StatementFor(kind) -> {
         fit kind {
-          .Cond(c) -> { self.walk_body(c.body, locals); }
-          .Range(r) -> { self.walk_body(r.body, locals); }
-          .Iter(it) -> { self.walk_body(it.body, locals); }
+          .Cond(c) -> {
+            self.check_forking_loop(stmt, c.body);
+            self.walk_body(c.body, locals);
+          }
+          .Range(r) -> {
+            self.check_forking_loop(stmt, r.body);
+            self.walk_body(r.body, locals);
+          }
+          .Iter(it) -> {
+            self.check_forking_loop(stmt, it.body);
+            self.walk_body(it.body, locals);
+          }
         }
       }
       _ -> {}
+    }
+  }
+
+  // A loop that forks hands the same values to several tasks at once.
+  check_forking_loop(Node* stmt, Node* body) {
+    if !_contains_fork(body) {
+      ret;
+    }
+    // A wait group the loop never grows is waited on for arrivals that
+    // were never counted.
+    if self.waits_on_unsized_group && !_calls_method(body, "add") {
+      self.report(
+        .BlockingForkDeadlock,
+        "a wait group created with no room is never grown before the tasks it waits for are forked",
+        stmt
+      );
+    }
+    self.check_shared_captures(body);
+  }
+
+  // Reports a value handed to several tasks that write through it.
+  check_shared_captures(Node* body) {
+    if body == nil {
+      ret;
+    }
+    fit body.kind {
+      .Body(inner) -> {
+        for st : inner.statements {
+          self.check_shared_captures(st);
+        }
+      }
+      .StatementFork(call) -> { self.check_forked_call(call); }
+      .StatementIf(ifn) -> { self.check_shared_captures(ifn.body); }
+      .StatementElse(b) -> { self.check_shared_captures(b); }
+      _ -> {}
+    }
+  }
+
+  check_forked_call(Node* call) {
+    if call == nil {
+      ret;
+    }
+    fit call.kind {
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left || !e.has_right {
+          ret;
+        }
+        str callee = "";
+        fit e.left.kind {
+          .Identifier(name) -> { callee = name; }
+          _ -> {}
+        }
+        if equals(callee, "") {
+          ret;
+        }
+        let known = self.functions.at(callee);
+        if known.is_none() {
+          ret;
+        }
+        FunctionNode f = known.unwrap();
+        Vec<Node*> args;
+        args.init(4);
+        defer args.free();
+        _flatten_arguments(e.right, &args);
+        num i = 0;
+        for i < args.len && i < f.args.len {
+          str shared = _address_of_name(args.get(i));
+          num at = i;
+          i = i + 1;
+          if equals(shared, "") {
+            continue;
+          }
+          if self.guards_itself(shared) {
+            continue;
+          }
+          str param = "";
+          Node* declared = f.args.get(at);
+          fit declared.kind {
+            .Variable(v) -> { param = v.name; }
+            _ -> {}
+          }
+          if equals(param, "") {
+            continue;
+          }
+          if _writes_through(f.body, param) {
+            self.report(
+              .SharedMutableCaptureRace,
+              format("'{str}' is handed to several tasks that write through it", shared),
+              call
+            );
+            ret;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // True when the type of `name` carries something that guards access to
+  // it, which is what makes sharing it safe.
+  guards_itself(str name) bin {
+    let declared = self.local_types.at(name);
+    if declared.is_none() {
+      ret false;
+    }
+    let info = self.compound_decls.at(declared.unwrap());
+    if info.is_none() {
+      ret false;
+    }
+    CompoundNode c = info.unwrap();
+    for field : c.fields {
+      if field.dtype != nil && equals(field.dtype.type_str, "Mutex") {
+        ret true;
+      }
+    }
+    ret false;
+  }
+
+  // Reports a literal a sized integer cannot hold, which is a value the
+  // declaration silently changes.
+  check_literal_range(Node* stmt, VariableNode v) {
+    if v.var_type == nil || !v.has_val {
+      ret;
+    }
+    let sized = parse_dynamic_int_datatype(v.var_type.type_str);
+    if sized.is_none() {
+      ret;
+    }
+    let written = _literal_value(v.val);
+    if written.is_none() {
+      ret;
+    }
+    num low = 0;
+    num high = 0;
+    _int_range(sized.unwrap(), &low, &high);
+    if low == 0 && high == 0 {
+      ret;
+    }
+    num value = written.unwrap();
+    if value < low || value > high {
+      self.report(
+        .IntegerLiteralOutOfRange,
+        format(
+          "{num} does not fit in {str}, which holds {num} to {num}",
+          value,
+          v.var_type.type_str,
+          low,
+          high
+        ),
+        stmt
+      );
     }
   }
 
@@ -497,6 +1088,98 @@ impl Analysis {
     }
   }
 
+  // Reports more sends into a channel than it can hold when nothing in
+  // the same body receives from it: those sends wait forever.
+  check_channel_sends(Node* body) {
+    if body == nil {
+      ret;
+    }
+    fit body.kind {
+      .Body(statements) -> {
+        Map<str, num> capacity;
+        capacity.init(4);
+        defer capacity.free();
+        Map<str, num> sent;
+        sent.init(4);
+        defer sent.free();
+        Set<str> received = set_init("", 4);
+        defer received.free();
+
+        for st : statements.statements {
+          fit st.kind {
+            .Variable(v) -> {
+              if !v.has_val {
+                continue;
+              }
+              let room = _channel_capacity(v.val);
+              if room.is_some() {
+                capacity.put(v.name, room.unwrap());
+                sent.put(v.name, 0);
+              }
+              // A receive is often written as the value a name takes.
+              str drained = _method_receiver(v.val, "recv");
+              if !equals(drained, "") {
+                received.add(drained);
+              }
+              str pushed = _method_receiver(v.val, "send");
+              if !equals(pushed, "") {
+                let already = sent.at(pushed);
+                if already.is_some() {
+                  sent.put(pushed, already.unwrap() + 1);
+                }
+              }
+            }
+            _ -> {
+              // A send is written `ch <- v` and reaches here as the
+              // `send` method it stands for; a receive is `recv`.
+              str target = _method_receiver(st, "send");
+              if !equals(target, "") {
+                let already = sent.at(target);
+                if already.is_some() {
+                  sent.put(target, already.unwrap() + 1);
+                }
+              }
+              str source = _method_receiver(st, "recv");
+              if !equals(source, "") {
+                received.add(source);
+              }
+            }
+          }
+        }
+
+        Vec<str> names = capacity.keys();
+        defer names.free();
+        num i = 0;
+        for i < names.len {
+          str name = names.get(i);
+          i = i + 1;
+          if received.has(name) {
+            continue;
+          }
+          let room = capacity.at(name);
+          let count = sent.at(name);
+          if room.is_none() || count.is_none() {
+            continue;
+          }
+          if count.unwrap() > room.unwrap() {
+            self.report(
+              .ChannelCapacityOverflow,
+              format(
+                "'{str}' holds {num} but is sent {num} values with nothing receiving them",
+                name,
+                room.unwrap(),
+                count.unwrap()
+              ),
+              body
+            );
+            ret;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
   // Walks one function, with the names it declares tracked so a returned
   // address can be recognized as pointing at one of them.
   walk_function(FunctionNode f) {
@@ -505,6 +1188,9 @@ impl Analysis {
     }
     Set<str> locals = set_init("", 8);
     defer locals.free();
+    self.local_types.clear();
+    self.waits_on_unsized_group = _creates_empty_wait_group(f.body);
+    self.check_channel_sends(f.body);
     self.walk_body(f.body, &locals);
     // A function that names a return type promises a value on every
     // path, and a void one promises nothing.
@@ -834,7 +1520,6 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
   Analysis state = _analysis_new();
   state.report_unused = report_unused;
   state.file = file;
-
   // What each enum declares is read first, so a `fit` over one can be
   // judged wherever it is written.
   num e = 0;
@@ -842,6 +1527,12 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
     Node* node = &program.data[e];
     e = e + 1;
     fit node.kind {
+      .Function(f) -> {
+        if f.has_name {
+          state.functions.put(f.name, f);
+        }
+      }
+      .Compound(c) -> { state.compound_decls.put(c.name, c); }
       .Enum(decl) -> {
         Vec<str> names;
         names.init(decl.variants.len);
@@ -966,7 +1657,9 @@ fun _collect_reads(Node* node, Set<str>* out) {
           out.add(g.type_str);
         }
       }
-      _collect_reads(v.val, out);
+      if v.has_val {
+        _collect_reads(v.val, out);
+      }
     }
     .StatementReturn(value) -> { _collect_reads(value, out); }
     .StatementDefer(inner) -> { _collect_reads(inner, out); }

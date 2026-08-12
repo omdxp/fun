@@ -202,3 +202,77 @@ test "a branch an earlier one already covers is noticed" {
     "expected the duplicate branch to be noticed"
   );
 }
+
+test "a literal a sized integer cannot hold is noticed" {
+  notices(
+    `fun main() {
+    `  u2 a = 5;
+    `}`,
+    "does not fit",
+    "expected the out-of-range literal to be noticed"
+  );
+  says_nothing(
+    `fun main() {
+    `  u8 a = 200;
+    `  i8 b = -100;
+    `}`,
+    "expected literals within range to be accepted"
+  );
+}
+
+test "a value several tasks write through is noticed" {
+  notices(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun bump(Counter* c) {
+    `  c.n = c.n + 1;
+    `}
+    `fun main() {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork bump(&counter);
+    `  }
+    `}`,
+    "write through it",
+    "expected the shared mutable capture to be noticed"
+  );
+  says_nothing(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun peek(Counter* c) {
+    `  let v = c.n;
+    `}
+    `fun main() {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork peek(&counter);
+    `  }
+    `}`,
+    "expected a read-only capture to be accepted"
+  );
+}
+
+test "sends beyond a channel's room with nothing receiving are noticed" {
+  notices(
+    `fun main() {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  c <- 2;
+    `  c <- 3;
+    `}`,
+    "nothing receiving",
+    "expected the over-send to be noticed"
+  );
+  says_nothing(
+    `fun main() {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  let x = <- c;
+    `  c <- 2;
+    `  let y = <- c;
+    `}`,
+    "expected sends a receive drains to be accepted"
+  );
+}
