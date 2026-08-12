@@ -1,0 +1,7 @@
+[package]
+name = "fun"
+version = "0.45.0"
+
+[[bin]]
+name = "fun"
+path = "selfhost/cli/main.fn"

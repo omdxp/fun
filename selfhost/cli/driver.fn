@@ -1,0 +1,424 @@
+// Command-line driver: turns arguments into a compile, and optionally
+// builds and runs the result.
+// 
+// Compiling a program happens in two steps. The first lowers Fun to C,
+// which this module owns. The second hands that C to a host compiler,
+// chosen by `FUN_CC` or by platform default, and runs the executable it
+// produces.
+
+imp ..parser.import_resolver;
+imp ..ast.ast;
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+imp std.fs;
+imp std.sys;
+imp std.process;
+imp std.c.mem;
+
+// A constant supplied by the build rather than written in source.
+pub compound Define {
+  str name;
+  str value;
+}
+
+// What the arguments asked for.
+pub compound Options {
+  str input;
+  str output;
+  // Compile only, leaving the executable unrun.
+  bin no_exec;
+  // Keep the generated C instead of removing it after the build.
+  bin keep_c;
+  // Build with debug information.
+  bin debug_info;
+  bin show_help;
+  bin show_version;
+  // Arguments after `--`, passed to the compiled program.
+  Vec<str> program_args;
+  // Constants injected into the program, from `-D name=value`.
+  Vec<Define> defines;
+  // Set when parsing failed, with `error_text` explaining why.
+  bin has_error;
+  str error_text;
+}
+
+fun _options_new() Options {
+  Options o;
+  o.input = "";
+  o.output = "";
+  o.no_exec = false;
+  o.keep_c = false;
+  o.debug_info = false;
+  o.show_help = false;
+  o.show_version = false;
+  o.program_args.init(0);
+  o.defines.init(0);
+  o.has_error = false;
+  o.error_text = "";
+  ret o;
+}
+
+impl Options {
+  pub free() {
+    self.program_args.free();
+    self.defines.free();
+  }
+}
+
+// Reads `args` (argv without the program name) into `Options`. Anything
+// after `--` belongs to the compiled program, not to the compiler.
+pub fun parse_args(Vec<str>* args) Options {
+  Options o = _options_new();
+  num i = 0;
+  bin rest_are_program_args = false;
+
+  for i < args.len {
+    str arg = args.get(i);
+
+    if rest_are_program_args {
+      o.program_args.push(arg);
+      i = i + 1;
+      continue;
+    }
+
+    if equals(arg, "--") {
+      rest_are_program_args = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-help") || equals(arg, "-h") {
+      o.show_help = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-version") {
+      o.show_version = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-no-exec") {
+      o.no_exec = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-outf") {
+      o.keep_c = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-g") {
+      o.debug_info = true;
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "-D") {
+      if i + 1 >= args.len {
+        o.has_error = true;
+        o.error_text = "-D needs a `name=value` pair";
+        ret o;
+      }
+      let pair = args.get(i + 1);
+      let eq = index_of_char(pair, '=');
+      if eq == -1 {
+        o.has_error = true;
+        o.error_text = format("-D expects `name=value`, found `{str}`", pair);
+        ret o;
+      }
+      Define d;
+      d.name = substr(pair, 0, eq);
+      d.value = substr(pair, eq + 1, len(pair) - (eq + 1));
+      o.defines.push(d);
+      i = i + 2;
+      continue;
+    }
+    if equals(arg, "-in") {
+      if i + 1 >= args.len {
+        o.has_error = true;
+        o.error_text = "-in needs a file path";
+        ret o;
+      }
+      o.input = args.get(i + 1);
+      i = i + 2;
+      continue;
+    }
+    if equals(arg, "-out") {
+      if i + 1 >= args.len {
+        o.has_error = true;
+        o.error_text = "-out needs a file path";
+        ret o;
+      }
+      o.output = args.get(i + 1);
+      i = i + 2;
+      continue;
+    }
+    if starts_with(arg, "-") {
+      o.has_error = true;
+      o.error_text = format("unknown option `{str}`", arg);
+      ret o;
+    }
+
+    // A bare path is the input, so `fun file.fn` works without `-in`.
+    if equals(o.input, "") {
+      o.input = arg;
+      i = i + 1;
+      continue;
+    }
+    o.has_error = true;
+    o.error_text = format("unexpected argument `{str}`", arg);
+    ret o;
+  }
+  ret o;
+}
+
+// Replaces `path`'s extension with `ext`, or appends when it has none.
+pub fun with_extension(str path, str ext) str {
+  let dot = last_index_of_char(path, '.');
+  let slash = last_index_of_char(path, '/');
+  StringBuilder b = string_builder_init(32);
+  if dot == -1 || dot < slash {
+    b.append(path);
+  } else {
+    b.append(substr(path, 0, dot));
+  }
+  b.append(ext);
+  ret b.build();
+}
+
+// The host C compiler to shell, honoring `FUN_CC`.
+pub fun c_compiler() str {
+  str override_cc = env("FUN_CC");
+  if !equals(override_cc, "") {
+    ret override_cc;
+  }
+  ret "cc";
+}
+
+// Builds a `pub const str name = "value";` declaration, so a value known
+// only to the build is reachable from source as an ordinary constant.
+fun _const_string_node(str name, str value) Node {
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "str";
+
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(NodeKind.String(value));
+
+  VariableNode v;
+  v.var_type = dt;
+  v.name = name;
+  v.val = val;
+  v.has_val = true;
+  v.is_const = true;
+  ret node_new(NodeKind.Variable(v));
+}
+
+// Lowers `input` to C at `out_path`, with `defines` available to the
+// program as constants. The error text names the stage that rejected the
+// program.
+pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
+  let parsed = parse_program_with_imports(input);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  // Injected ahead of the program's own declarations, so anything in it
+  // can refer to them.
+  num di = defines.len;
+  for di > 0 {
+    di = di - 1;
+    Define* d = &defines.data[di];
+    merged.nodes.insert(0, _const_string_node(d.name, d.value));
+  }
+
+  CodegenState state = codegen_state_new();
+  Codegen cg = codegen_new(&state);
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+
+  let cg_err = cg.transpile(merged.nodes);
+  fit cg_err {
+    .Some(kind) -> {
+      fit kind {
+        .UnsupportedNode -> { ret .Err("codegen failed: unsupported node"); }
+        .InvalidNode -> { ret .Err("codegen failed: invalid node"); }
+      }
+    }
+    .None -> {}
+  }
+
+  str c_source = state.out.build();
+  if !write_string(out_path, c_source) {
+    ret .Err(format("could not write {str}", out_path));
+  }
+  ret .Ok(true);
+}
+
+// Builds `c_path` into `exe_path`. Returns the compiler's exit code.
+pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(c_compiler());
+  argv_args.push(c_path);
+  argv_args.push("-o");
+  argv_args.push(exe_path);
+  if debug_info {
+    argv_args.push("-g");
+  } else {
+    argv_args.push("-g0");
+  }
+  argv_args.push("-pthread");
+  argv_args.push("-lm");
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
+// Qualifies a bare executable name with `./`, since spawning searches
+// `PATH` for anything that does not look like a path.
+pub fun executable_path(str path) str {
+  if contains(path, "/") || contains(path, "\\") {
+    ret path;
+  }
+  StringBuilder b = string_builder_init(16);
+  b.append("./");
+  b.append(path);
+  ret b.build();
+}
+
+// Runs `exe_path` with `args`, inheriting this process's streams, and
+// returns its exit code.
+pub fun run_exe(str exe_path, Vec<str>* args) num {
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(executable_path(exe_path));
+  num i = 0;
+  for i < args.len {
+    argv_args.push(args.get(i));
+    i = i + 1;
+  }
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
+pub fun help_text() str {
+  ret `usage:
+  `  fun -in <input.fn> [-out <output>] [-no-exec] [-outf] [-g] [-- <program args>]
+  `  fun -version
+  `
+  `  -in <file>    Input file to compile.
+  `  -out <file>   Output path (defaults to the input's own name).
+  `  -no-exec      Compile only, without running the result.
+  `  -outf         Keep the generated C file.
+  `  -g            Build with debug information.
+  `  --            Pass every following argument to the compiled program.`;
+}
+
+test "parses an input path and an output path" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("-in");
+  args.push("main.fn");
+  args.push("-out");
+  args.push("prog");
+  let o = parse_args(&args);
+  assert !o.has_error, "expected the arguments to parse";
+  assert equals(o.input, "main.fn"), "expected the input path";
+  assert equals(o.output, "prog"), "expected the output path";
+}
+
+test "accepts a bare path as the input" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("main.fn");
+  let o = parse_args(&args);
+  assert !o.has_error, "expected a bare path to be accepted";
+  assert equals(o.input, "main.fn"), "expected the input path";
+}
+
+test "collects the flags" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("-in");
+  args.push("main.fn");
+  args.push("-no-exec");
+  args.push("-outf");
+  args.push("-g");
+  let o = parse_args(&args);
+  assert o.no_exec, "expected -no-exec";
+  assert o.keep_c, "expected -outf";
+  assert o.debug_info, "expected -g";
+}
+
+test "everything after -- belongs to the program" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("-in");
+  args.push("main.fn");
+  args.push("--");
+  args.push("-not-a-compiler-flag");
+  args.push("value");
+  let o = parse_args(&args);
+  defer o.free();
+  assert !o.has_error, "expected the arguments to parse";
+  assert o.program_args.len == 2, "expected both program arguments";
+  assert equals(o.program_args.get(0), "-not-a-compiler-flag"), "expected the argument verbatim";
+}
+
+test "an unknown option is reported" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("-nope");
+  let o = parse_args(&args);
+  assert o.has_error, "expected an unknown option to be rejected";
+  assert contains(o.error_text, "-nope"), "expected the option to be named";
+}
+
+test "a flag missing its value is reported" {
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  args.push("-in");
+  let o = parse_args(&args);
+  assert o.has_error, "expected a missing value to be rejected";
+}
+
+test "with_extension replaces an existing extension" {
+  assert equals(with_extension("main.fn", ".c"), "main.c"), "expected the extension replaced";
+  assert equals(with_extension("src/main.fn", ".c"), "src/main.c"), "expected the directory kept";
+}
+
+test "with_extension appends when there is none" {
+  assert equals(with_extension("main", ".c"), "main.c"), "expected the extension appended";
+}
+
+test "with_extension ignores a dot in a parent directory" {
+  assert equals(with_extension("a.b/main", ".c"), "a.b/main.c"), "expected only the file's own name to matter";
+}
+
+test "executable_path qualifies a bare name" {
+  assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+}
+
+test "executable_path leaves a path alone" {
+  assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
+  assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+}

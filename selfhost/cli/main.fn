@@ -1,26 +1,12 @@
-// Compiler entry point: wires the lexer, import-aware parser, and
-// codegen together to turn a `.fn` file into C output.
-// 
-// Takes positional arguments (`<input.fn> [<output.c>]`) and only writes
-// a `.c` file; it doesn't invoke a C compiler or run the result.
+// Compiler entry point: reads the command line, lowers the input to C,
+// then builds and runs it unless asked not to.
 
-imp ..parser.import_resolver;
-imp ..codegen.codegen;
-imp ..codegen.codegen_state;
-imp std.cli;
-imp std.fs;
+imp driver;
+imp manifest;
+imp std.string;
+imp std.vec;
 imp std.io;
-imp std.c.mem;
-
-// Renders a `CodegenErrorKind` as a human-readable word. This is the
-// coarsest possible diagnostic: which of the two failure shapes it was,
-// nothing more.
-fun _codegen_error_kind_name(CodegenErrorKind kind) str {
-  fit kind {
-    .UnsupportedNode -> { ret "unsupported node"; }
-    .InvalidNode -> { ret "invalid node"; }
-  }
-}
+imp std.fs;
 
 fun _fail(str msg) num {
   writeln_to(Sink.Stderr, format(`[Error]
@@ -28,47 +14,81 @@ fun _fail(str msg) num {
   ret 1;
 }
 
-// Lexes, resolves `imp`s, parses, and transpiles `in_path` to C, writing
-// the result to `out_path`. Returns a C-style exit code (0 success).
-fun compile_file(str in_path, str out_path) num {
-  let parsed = parse_program_with_imports(in_path);
+// Collects argv into a `Vec<str>`, dropping the program name.
+fun _args_after_program_name(str[] args) Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  num i = 1;
+  for args[i] != 0 {
+    out.push(args[i]);
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The version of the package in the working directory. `fun build`
+// injects this into a program it builds, so a compiled program reads its
+// own version as a constant instead of reading the manifest at runtime.
+fun package_version() str {
+  if !exists("fun.toml") {
+    ret "0.0.0";
+  }
+  let parsed = parse_manifest(read_to_string("fun.toml"));
   if parsed.is_err() {
-    ret _fail(parsed.unwrap_err());
+    ret "0.0.0";
   }
-  let merge_result = parsed.unwrap();
-  let nodes = merge_result.nodes;
-
-  CodegenState state = codegen_state_new();
-  Codegen cg = codegen_new(&state);
-  cg.import_aliases = merge_result.aliases;
-  cg.alias_rename_keys = merge_result.alias_rename_keys;
-  cg.alias_rename_targets = merge_result.alias_rename_targets;
-  let cg_err = cg.transpile(nodes);
-  fit cg_err {
-    .Some(kind) -> {
-      let msg = format("codegen failed: {str}", _codegen_error_kind_name(kind));
-      defer free(msg);
-      ret _fail(msg);
-    }
-    .None -> {}
-  }
-
-  str c_source = state.out.build();
-  if !write_string(out_path, c_source) {
-    let msg = format("failed to write output file: {str}", out_path);
-    defer free(msg);
-    ret _fail(msg);
-  }
-  ret 0;
+  ret parsed.unwrap().version;
 }
 
 fun main(str[] args) num {
-  CliArgs cli = cli_parse(args);
-  fit cli.at_positional(0) {
-    .Some(in_path) -> {
-      let out_path = cli.at_positional(1).unwrap_or("a.out.c");
-      ret compile_file(in_path, out_path);
-    }
-    .None -> { ret _fail("usage: selfhost_main <input.fn> [<output.c>]"); }
+  let argv = _args_after_program_name(args);
+  defer argv.free();
+
+  Options opts = parse_args(&argv);
+  defer opts.free();
+
+  if opts.has_error {
+    ret _fail(opts.error_text);
   }
+  if opts.show_version {
+    println(package_version());
+    ret 0;
+  }
+  if opts.show_help || equals(opts.input, "") {
+    println(help_text());
+    if equals(opts.input, "") && !opts.show_help {
+      ret 1;
+    }
+    ret 0;
+  }
+  if !exists(opts.input) {
+    ret _fail(format("no such file: {str}", opts.input));
+  }
+
+  str c_path = with_extension(opts.input, ".c");
+  let lowered = compile_to_c(opts.input, c_path, &opts.defines);
+  if lowered.is_err() {
+    ret _fail(lowered.unwrap_err());
+  }
+
+  // `-no-exec` without `-outf` still leaves the C behind, since that is
+  // the only artifact the run produced.
+  if opts.no_exec {
+    ret 0;
+  }
+
+  str exe_path = opts.output;
+  if equals(exe_path, "") {
+    exe_path = with_extension(opts.input, "");
+  }
+
+  let cc_code = compile_c_to_exe(c_path, exe_path, opts.debug_info);
+  if !opts.keep_c {
+    remove_file(c_path);
+  }
+  if cc_code != 0 {
+    ret _fail("the C compiler rejected the generated program");
+  }
+
+  ret run_exe(exe_path, &opts.program_args);
 }
