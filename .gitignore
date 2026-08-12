@@ -14,3 +14,10 @@ website/reference/public/versions/
 
 # Example-run scratch output written to the repo root by std demo programs
 _tmp_*.txt
+
+# Build output from `fun build`.
+fun-out/
+
+# Executables built next to their source by `fun -in <file>` (the file
+# keeps its name with no extension, or .exe on Windows).
+*.exe

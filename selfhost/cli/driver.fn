@@ -18,6 +18,8 @@ imp std.io;
 imp std.fs;
 imp std.sys;
 imp std.process;
+imp std.path;
+imp std.runtime_backend;
 imp std.c.mem;
 
 // A constant supplied by the build rather than written in source.
@@ -177,16 +179,18 @@ pub fun parse_args(Vec<str>* args) Options {
 
 // Replaces `path`'s extension with `ext`, or appends when it has none.
 pub fun with_extension(str path, str ext) str {
-  let dot = last_index_of_char(path, '.');
-  let slash = last_index_of_char(path, '/');
-  StringBuilder b = string_builder_init(32);
-  if dot == -1 || dot < slash {
-    b.append(path);
-  } else {
-    b.append(substr(path, 0, dot));
+  if equals(ext, "") {
+    ret strip_ext(path);
   }
-  b.append(ext);
-  ret b.build();
+  ret change_ext(path, ext);
+}
+
+// The suffix an executable carries on this platform.
+pub fun exe_suffix() str {
+  if runtime_backend_is_windows() {
+    ret ".exe";
+  }
+  ret "";
 }
 
 // The host C compiler to shell, honoring `FUN_CC`.
@@ -195,7 +199,16 @@ pub fun c_compiler() str {
   if !equals(override_cc, "") {
     ret override_cc;
   }
+  if runtime_backend_is_windows() {
+    ret "cl";
+  }
   ret "cc";
+}
+
+// True when `cc` takes MSVC-style arguments rather than gcc-style ones.
+pub fun compiler_is_msvc(str cc) bin {
+  let name = basename(cc);
+  ret equals(name, "cl") || equals(name, "cl.exe");
 }
 
 // Builds a `pub const str name = "value";` declaration, so a value known
@@ -261,21 +274,34 @@ pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, 
 }
 
 // Builds `c_path` into `exe_path`. Returns the compiler's exit code.
+// MSVC spells its arguments differently and links the C runtime itself,
+// so the thread and math flags apply only to gcc-style compilers.
 pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+  str cc = c_compiler();
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
-  argv_args.push(c_compiler());
-  argv_args.push(c_path);
-  argv_args.push("-o");
-  argv_args.push(exe_path);
-  if debug_info {
-    argv_args.push("-g");
+  argv_args.push(cc);
+
+  if compiler_is_msvc(cc) {
+    argv_args.push("/nologo");
+    argv_args.push(c_path);
+    if debug_info {
+      argv_args.push("/Zi");
+    }
+    argv_args.push(format("/Fe:{str}", exe_path));
   } else {
-    argv_args.push("-g0");
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(exe_path);
+    if debug_info {
+      argv_args.push("-g");
+    } else {
+      argv_args.push("-g0");
+    }
+    argv_args.push("-pthread");
+    argv_args.push("-lm");
   }
-  argv_args.push("-pthread");
-  argv_args.push("-lm");
 
   str[] argv = argv_from(&argv_args);
   let code = spawn_inherited(argv);
@@ -283,9 +309,13 @@ pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
   ret code;
 }
 
-// Qualifies a bare executable name with `./`, since spawning searches
-// `PATH` for anything that does not look like a path.
+// Qualifies a bare executable name so it is run from the current
+// directory rather than searched for on `PATH`. Windows already looks in
+// the current directory, so only POSIX needs the prefix.
 pub fun executable_path(str path) str {
+  if runtime_backend_is_windows() {
+    ret path;
+  }
   if contains(path, "/") || contains(path, "\\") {
     ret path;
   }
@@ -421,4 +451,15 @@ test "executable_path qualifies a bare name" {
 test "executable_path leaves a path alone" {
   assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
   assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+}
+
+test "with_extension handles a windows-style path" {
+  assert equals(with_extension("src\\main.fn", ".c"), "src\\main.c"), "expected a backslash path to keep its directory";
+}
+
+test "the msvc compiler is recognized by name" {
+  assert compiler_is_msvc("cl"), "expected cl to be msvc";
+  assert compiler_is_msvc("cl.exe"), "expected cl.exe to be msvc";
+  assert !compiler_is_msvc("cc"), "expected cc to be gcc-style";
+  assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
