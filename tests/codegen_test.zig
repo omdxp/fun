@@ -6772,6 +6772,49 @@ test "method chaining on a generic-instance FIELD keeps the receiver's type args
     try std.testing.expectEqualStrings("1 0\n", stdout);
 }
 
+test "iterating a field holding a Vec of pointers keeps the element's pointer depth" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "field_vec_ptr_iter.fn";
+    const c_path = "field_vec_ptr_iter.c";
+    const exe_path = if (builtin.os.tag == .windows) "field_vec_ptr_iter.exe" else "field_vec_ptr_iter";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: the loop's Option temp was named with the depth-0 mangler,
+    // which drops an element's own pointer depth, so a `Vec<Item*>` iterated
+    // through a FIELD declared `Option__Item` (never emitted) instead of
+    // `Option__Item_ptr1`. Only reachable once a field receiver resolves with
+    // its type args, which is why the earlier chaining fix exposed it.
+    const input =
+        "imp std.vec;\n" ++
+        "imp std.c.io;\n" ++
+        "compound Item { num v; }\n" ++
+        "compound Holder { Vec<Item*> items; }\n" ++
+        "fun main() num {\n" ++
+        "  Holder h;\n" ++
+        "  h.items.init(2);\n" ++
+        "  Item a; a.v = 7;\n" ++
+        "  Item b; b.v = 5;\n" ++
+        "  h.items.push(&a);\n" ++
+        "  h.items.push(&b);\n" ++
+        "  num total = 0;\n" ++
+        "  for it : h.items { total = total + it.v; }\n" ++
+        "  printf(\"%lld\\n\", total);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("12\n", stdout);
+}
+
 test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" {
     const allocator = std.testing.allocator;
     const ifilepath = "p1_quirk_coerce.fn";
