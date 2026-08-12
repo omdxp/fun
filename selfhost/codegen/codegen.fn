@@ -524,6 +524,24 @@ fun node_contains_fork(Node* node) bin {
 // flattened top-level declaration list. Imports are already resolved and
 // flattened in before codegen runs, so imported children need no separate
 // recursion.
+// True when the program pulled in the bindings declared by `std/c/<file>`.
+// Imports are flattened before codegen, so the binding declarations
+// themselves are what identifies which C headers the program needs.
+fun program_uses_std_c_header(Vec<Node> nodes, str file) bin {
+  for n : nodes {
+    if !n.has_pos {
+      continue;
+    }
+    if !ends_with(n.pos.filename, file) {
+      continue;
+    }
+    if contains(n.pos.filename, "/std/c/") || contains(n.pos.filename, "\\std\\c\\") {
+      ret true;
+    }
+  }
+  ret false;
+}
+
 fun uses_fork_in(Vec<Node> nodes) bin {
   for n : nodes {
     if node_contains_fork(&n) {
@@ -9209,7 +9227,11 @@ impl Codegen {
     `#include <ctype.h>
     `#include <limits.h>
     ``);
-    self.state.write("#include <math.h>\n");
+    // `<math.h>` declares names a program may define itself (`log`), so
+    // it is emitted only when the math bindings are actually imported.
+    if program_uses_std_c_header(self.all_nodes, "math.fn") {
+      self.state.write("#include <math.h>\n");
+    }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
     // bodyless stream bindings resolve portably.
@@ -13772,7 +13794,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -14012,7 +14033,6 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -15108,7 +15128,6 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    `#include <math.h>
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
