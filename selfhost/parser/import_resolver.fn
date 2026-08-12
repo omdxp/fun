@@ -66,7 +66,11 @@ fun _convert_dotted_path(str root, str import_path) str {
 // Backslashes are normalized to `/` first so a Windows-style path
 // collapses into the same dedup key.
 fun _normalize_path(str path) str {
-  Vec<str> segs = split(replace_char(path, '\\', '/'), '/');
+  str slashed = replace_char(path, '\\', '/');
+  // An absolute path keeps its root: dropping the empty first segment
+  // would turn it into a relative one.
+  bin absolute = len(slashed) > 0 && slashed[0] == '/';
+  Vec<str> segs = split(slashed, '/');
   Vec<str> parts;
   parts.init(8);
   for seg : segs {
@@ -83,6 +87,9 @@ fun _normalize_path(str path) str {
     }
   }
   StringBuilder sb = string_builder_init(64);
+  if absolute {
+    sb.append("/");
+  }
   bin first = true;
   for p : parts {
     if !first {
@@ -677,4 +684,14 @@ test "parse_program_with_imports resolves a compound-literal expression whose ty
     }
   }
   assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
+}
+
+test "an absolute path keeps its root through normalization" {
+  str got = _normalize_path("/tmp/project/src/../main.fn");
+  assert equals(got, "/tmp/project/main.fn"), "expected the leading separator to survive";
+}
+
+test "a relative path stays relative through normalization" {
+  str got = _normalize_path("selfhost/parser/../ast/ast.fn");
+  assert equals(got, "selfhost/ast/ast.fn"), "expected the collapsed relative path";
 }
