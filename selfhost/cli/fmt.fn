@@ -236,7 +236,10 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(p, "{") && equals(c, "}") {
     ret false;
   }
-  if equals(p, "{") || equals(c, "}") || equals(c, "{") {
+  if equals(c, "{") {
+    ret true;
+  }
+  if equals(p, "{") || equals(c, "}") {
     ret prev.whitespace;
   }
   if equals(p, "(") || equals(p, "[") {
@@ -617,6 +620,17 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     if s.force_break {
       s.force_break = false;
+      // A continuation keyword belongs on the line the block closed on,
+      // however the source wrote it.
+      if equals(text, "else") || equals(text, "elif") {
+        s.space();
+        s.write(text);
+        s.pending_newlines = 0;
+        s.has_prev = true;
+        s.prev = t;
+        i = i + 1;
+        continue;
+      }
       bin stays = equals(text, ",") || equals(text, ";") || equals(text, ")") || equals(text, "]");
       if stays && s.pending_newlines == 0 {
         s.write(text);
@@ -721,9 +735,6 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     if is_literal_brace {
       s.flush_newlines();
-      if !s.at_line_start && s.has_prev && _needs_space(s.prev, t) {
-        s.space();
-      }
       s.write(text);
       s.literal_braces.push(true);
       s.has_prev = true;
@@ -757,6 +768,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
       }
       s.pending_newlines = 0;
       s.write(text);
+      s.force_break = true;
       s.has_prev = true;
       s.prev = t;
       i = i + 1;
