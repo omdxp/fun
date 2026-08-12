@@ -160,6 +160,31 @@ pub fun exe_suffix() str {
   ret "";
 }
 
+// Where build output goes, so nothing lands next to the sources.
+pub fun out_dir() str {
+  ret "fun-out";
+}
+
+// The generated C for `input`, under the build directory.
+pub fun default_c_path(str input, str suffix) str {
+  make_dir_all(out_dir());
+  StringBuilder b = string_builder_init(16);
+  b.append(strip_ext(basename(input)));
+  b.append(suffix);
+  ret path_join(out_dir(), b.build());
+}
+
+// The executable built from `input`, under the build directory.
+pub fun default_exe_path(str input, str suffix) str {
+  str dir = path_join(out_dir(), "bin");
+  make_dir_all(dir);
+  StringBuilder b = string_builder_init(16);
+  b.append(strip_ext(basename(input)));
+  b.append(suffix);
+  b.append(exe_suffix());
+  ret path_join(dir, b.build());
+}
+
 // The host C compiler to shell, honoring `FUN_CC`.
 pub fun c_compiler() str {
   str override_cc = env("FUN_CC");
@@ -608,14 +633,14 @@ pub fun run_tests(str input, Vec<str>* args) num {
     }
   }
 
-  str c_path = with_extension(input, ".test.c");
+  str c_path = default_c_path(input, ".test.c");
   let lowered = compile_to_c_mode(input, c_path, &defines, true);
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
   }
 
-  str exe = format("{str}{str}", with_extension(input, ".test"), exe_suffix());
+  str exe = default_exe_path(input, ".test");
   let cc_code = compile_c_to_exe(c_path, exe, false);
   remove_file(c_path);
   if cc_code != 0 {

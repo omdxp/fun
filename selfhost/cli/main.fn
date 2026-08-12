@@ -63,7 +63,7 @@ fun main(str[] args) num {
   // name with a `.c` extension.
   str c_path = opts.output;
   if equals(c_path, "") {
-    c_path = with_extension(opts.input, ".c");
+    c_path = default_c_path(opts.input, ".c");
   }
   let lowered = compile_to_c(opts.input, c_path, &opts.defines);
   if lowered.is_err() {
@@ -75,7 +75,7 @@ fun main(str[] args) num {
     ret 0;
   }
 
-  str exe_path = format("{str}{str}", with_extension(opts.input, ""), exe_suffix());
+  str exe_path = default_exe_path(opts.input, "");
 
   let cc_code = compile_c_to_exe(c_path, exe_path, opts.debug_info);
   if !opts.keep_c {

@@ -3,10 +3,8 @@
 zig-out
 zig-cache
 node_modules/
-# Transpiler C output emitted to the repo root (e.g. `fun -in x.fn -out x.c`)
-# during local codegen/drift runs. Root-anchored so tracked fixtures elsewhere
-# (e.g. tests/**) are unaffected.
-/*.c
+# Generated C, wherever a build or a manual `-out` puts it.
+*.c
 website/reference/dist/
 website/reference/dist-server/
 website/reference/src/generated/content.json

@@ -373,8 +373,8 @@ pub compound Codegen {
   // What the rejected node was and where it came from, filled in when
   // codegen gives up so the failure can name it.
   str error_note;
-  // The innermost node being emitted, kept as a breadcrumb so a failure
-  // deep in an expression still reports a position.
+  // The innermost node being emitted, so a failure deep in an
+  // expression still reports a position.
   str last_where;
   // Emit test blocks and a runner in place of the program's own `main`.
   bin test_mode;
@@ -2173,8 +2173,8 @@ impl Codegen {
         }
         pf_first = false;
         self.write_type(*pf_pt4);
-        // An array parameter decays to a pointer, the same extra level
-        // the definition writes, or the two disagree.
+        // An array parameter decays to a pointer, matching what the
+        // definition writes.
         if dtype_is_array_as_pointer(*pf_pt4) {
           self.state.write("*");
         }
@@ -3236,8 +3236,7 @@ impl Codegen {
   }
 
   // Records what codegen could not emit, with the node's own position
-  // when it carries one, so the failure names it instead of reporting a
-  // bare "unsupported node".
+  // when it carries one.
   note_unsupported(Node node, str stage) {
     if !equals(self.error_note, "") {
       ret;
@@ -8419,6 +8418,11 @@ impl Codegen {
             ret .None;
           }
           let r = chain.unwrap();
+          // Keeps the structural type, whose generic arguments a later
+          // `for x : value` needs.
+          if r.dtype.is_some() {
+            ret .Some(r.dtype.unwrap());
+          }
           DataType dt = dtype_new();
           dt.type_str = r.type_name;
           if r.is_pointer {
@@ -9296,10 +9300,10 @@ impl Codegen {
     if program_uses_std_c_header(self.all_nodes, "math.fn") {
       self.state.write("#include <math.h>\n");
     }
-    // Process spawning needs its own headers, and they exist only on
-    // POSIX, so a program that never spawns stays portable without them.
-    // A failing assertion under a test run returns to the runner rather
-    // than ending the process, which needs a jump target per thread.
+    // These headers exist only on POSIX, so a program that never
+    // spawns stays portable without them.
+    // A failing assertion returns to the runner, which needs a jump
+    // target per thread.
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
@@ -9308,9 +9312,8 @@ impl Codegen {
       self.state.write("#include <spawn.h>\n");
       self.state.write("#include <sys/wait.h>\n");
       self.state.write("#include <unistd.h>\n");
-      // The environment is a global rather than a callable symbol, and
-      // platforms spell it differently, so it is reached through a
-      // wrapper for the same reason the stream wrappers exist.
+      // The environment is a global, spelled differently per platform,
+      // so it is reached through a wrapper.
       self.state.write("#ifdef _WIN32\n");
       self.state.write("static char** environ_ptr(void){ return _environ; }\n");
       self.state.write("#else\n");
@@ -9875,8 +9878,8 @@ impl Codegen {
       fit n.kind {
         .Test(t) -> {
           names.push(t.name);
-          // A test body is a function body, so it starts from the same
-          // clean slate one does: its own locals and its own defers.
+          // A test body starts from the same clean slate a function
+          // body does.
           self.local_names.init(0);
           self.local_is_pointer.init(0);
           self.local_type_name.init(0);
@@ -9887,8 +9890,8 @@ impl Codegen {
           self.defer_stack.init(0);
           self.defer_scope_starts.init(0);
           self.in_main = false;
-          // Anything a test body instantiates belongs at file scope,
-          // ahead of the test function, not nested inside it.
+          // Instantiations belong at file scope, not nested inside the
+          // test function.
           self.hoist_insert_pos = .Some(self.state.out.len());
           self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
           self.state.indent_level = self.state.indent_level + 1;
