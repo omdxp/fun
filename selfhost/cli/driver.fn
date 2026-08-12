@@ -7,6 +7,7 @@
 // produces.
 
 imp ..parser.import_resolver;
+imp ..semantics.typecheck;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp fmt;
@@ -264,6 +265,30 @@ pub fun compile_to_c_mode(str input, str out_path, Vec<Define>* defines, bin tes
     di = di - 1;
     Define* d = &defines.data[di];
     merged.nodes.insert(0, _const_string_node(d.name, d.value));
+  }
+
+  // Type checking runs over the merged program, so a call into an
+  // imported module is checked against the signature it was declared
+  // with.
+  let checked = typecheck_program(&merged.nodes);
+  if checked.is_err() {
+    TypeError e = checked.unwrap_err();
+    if e.has_pos {
+      // The node's own file, which is not the entry file when the error
+      // is in something it imported.
+      str where = e.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        e.message,
+        where,
+        e.pos.line,
+        e.pos.col
+      ));
+    }
+    ret .Err(e.message);
   }
 
   CodegenState state = codegen_state_new();

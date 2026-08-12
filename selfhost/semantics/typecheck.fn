@@ -1,0 +1,892 @@
+// Type checking.
+// 
+// The checker walks each function body with the types of everything in
+// scope, infers the type of every expression it meets, and reports the
+// first place where a value cannot stand for the type expected of it.
+// Anything it cannot resolve infers as unknown, which stands for any
+// type, so a gap in the checker never rejects a correct program.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp std.string;
+imp std.io;
+imp std.vec;
+imp std.map;
+imp std.set;
+imp std.option;
+imp std.result;
+
+// What a value is, as far as the checker can tell.
+pub compound CheckedType {
+  DataTypeType base;
+  bin is_array;
+  num array_depth;
+  num pointer_depth;
+  // `nil`, which stands for a pointer or a string of any type.
+  bin is_null_literal;
+  // `panic(...)`, which never produces a value and so stands for any
+  // type expected of it.
+  bin is_panic_literal;
+  // The written name of a user-defined type, empty for a builtin.
+  str name;
+}
+
+pub fun checked_unknown() CheckedType {
+  CheckedType t;
+  t.base = .Unknown;
+  t.is_array = false;
+  t.array_depth = 0;
+  t.pointer_depth = 0;
+  t.is_null_literal = false;
+  t.is_panic_literal = false;
+  t.name = "";
+  ret t;
+}
+
+pub fun checked_of(DataTypeType base) CheckedType {
+  CheckedType t = checked_unknown();
+  t.base = base;
+  ret t;
+}
+
+// The checked form of a written type annotation.
+pub fun checked_from_dtype(DataType* dt) CheckedType {
+  CheckedType t = checked_unknown();
+  if dt == nil {
+    ret t;
+  }
+  t.base = dt.kind;
+  t.is_array = dt.is_array;
+  t.array_depth = dt.array_depth;
+  t.pointer_depth = dt.pointer_depth;
+  if dt.flags.is_pointer && t.pointer_depth == 0 {
+    t.pointer_depth = 1;
+  }
+  if t.base == DataTypeType.Unknown {
+    t.name = dt.type_str;
+  }
+  ret t;
+}
+
+// A name the checker cannot resolve stands for any type, so it never
+// rejects what it does not understand.
+pub fun is_unknown(CheckedType t) bin {
+  if t.base != DataTypeType.Unknown {
+    ret false;
+  }
+  // A `let` carries a placeholder until its value is known, which is
+  // exactly what the checker fills in.
+  ret equals(t.name, "") || equals(t.name, LET_INFER_TYPE);
+}
+
+// The placeholder the parser writes for a `let` declaration's type.
+pub const str LET_INFER_TYPE = "__let_infer__";
+
+pub fun type_name(CheckedType t) str {
+  str base = "unknown";
+  fit t.base {
+    .Void -> { base = "void"; }
+    .Raw -> { base = "raw"; }
+    .Chr -> { base = "chr"; }
+    .Str -> { base = "str"; }
+    .Dec -> { base = "dec"; }
+    .Num -> { base = "num"; }
+    .Bin -> { base = "bin"; }
+    .Unknown -> {
+      if !equals(t.name, "") {
+        base = t.name;
+      }
+    }
+  }
+  StringBuilder b = string_builder_init(len(base) + 4);
+  b.append(base);
+  num i = 0;
+  for i < t.pointer_depth {
+    b.append("*");
+    i = i + 1;
+  }
+  i = 0;
+  for i < t.array_depth {
+    b.append("[]");
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// True when a value of type `from` can stand where `to` is expected.
+pub fun can_assign(CheckedType to, CheckedType from) bin {
+  if is_unknown(to) || is_unknown(from) {
+    ret true;
+  }
+  if from.is_panic_literal {
+    ret true;
+  }
+  // `nil`, and the zero it is written as, stand for any pointer, and
+  // for a string, which is one. Zero remains a number besides.
+  if from.is_null_literal && (to.pointer_depth > 0 || to.base == DataTypeType.Str || to.base == DataTypeType.Raw) {
+    ret true;
+  }
+  // A raw pointer stands for any pointer, in either direction, and a
+  // string is a pointer.
+  if to.base == DataTypeType.Raw && (from.pointer_depth > 0 || from.base == DataTypeType.Str) {
+    ret true;
+  }
+  if from.base == DataTypeType.Raw && (to.pointer_depth > 0 || to.base == DataTypeType.Str) {
+    ret true;
+  }
+  if to.pointer_depth != from.pointer_depth {
+    ret false;
+  }
+  // An array stands for a pointer to what it holds, as it does in C,
+  // and an array of characters is what a string is.
+  if from.is_array && !to.is_array {
+    if to.base == DataTypeType.Str && from.base == DataTypeType.Chr {
+      ret true;
+    }
+    if to.pointer_depth + 1 == from.array_depth + from.pointer_depth {
+      ret to.base == from.base || to.base == DataTypeType.Raw;
+    }
+  }
+  if to.array_depth != from.array_depth {
+    ret false;
+  }
+  // The numeric kinds convert into each other, as C does.
+  if _is_numeric(to) && _is_numeric(from) {
+    ret true;
+  }
+  if to.base != from.base {
+    ret false;
+  }
+  if to.base == DataTypeType.Unknown {
+    ret equals(to.name, from.name);
+  }
+  ret true;
+}
+
+fun _is_numeric(CheckedType t) bin {
+  if t.pointer_depth > 0 || t.is_array {
+    ret false;
+  }
+  // A truth value is not a number: it neither widens into one nor
+  // stands for one.
+  ret t.base == DataTypeType.Num || t.base == DataTypeType.Dec || t.base == DataTypeType.Chr;
+}
+
+// What a function accepts and returns.
+pub compound FnSig {
+  CheckedType rtype;
+  Vec<CheckedType> args;
+  // The number of leading parameters a caller must pass; the rest carry
+  // defaults.
+  num min_args;
+  bin is_variadic;
+  bin is_async;
+  // A generic function's checks are left to the instantiation, since a
+  // type parameter stands for whatever the call site supplies.
+  bin is_generic;
+  // Set when the name belongs to more than one declaration, where a
+  // call cannot be matched to one of them by name alone.
+  bin ambiguous;
+}
+
+// Where checking failed, and why.
+pub compound TypeError {
+  str message;
+  Pos pos;
+  bin has_pos;
+}
+
+fun _error(str message, Node* node) TypeError {
+  TypeError e;
+  e.message = message;
+  e.has_pos = false;
+  if node != nil && node.has_pos {
+    e.pos = node.pos;
+    e.has_pos = true;
+  }
+  ret e;
+}
+
+// The types of everything in scope, innermost last.
+pub compound TypeEnv {
+  Vec<Map<str, CheckedType>> scopes;
+}
+
+pub fun type_env_new() TypeEnv {
+  TypeEnv e;
+  e.scopes.init(4);
+  ret e;
+}
+
+impl TypeEnv {
+  pub push() {
+    Map<str, CheckedType> scope;
+    scope.init(8);
+    self.scopes.push(scope);
+  }
+
+  pub pop() {
+    if self.scopes.len == 0 {
+      ret;
+    }
+    Map<str, CheckedType> scope = self.scopes.pop();
+    scope.free();
+  }
+
+  pub define(str name, CheckedType type) {
+    if self.scopes.len == 0 {
+      self.push();
+    }
+    Map<str, CheckedType>* scope = &self.scopes.data[self.scopes.len - 1];
+    scope.put(name, type);
+  }
+
+  // The type bound to `name`, searching inner scopes first.
+  pub lookup(str name) Option<CheckedType> {
+    num i = self.scopes.len;
+    for i > 0 {
+      i = i - 1;
+      Map<str, CheckedType>* scope = &self.scopes.data[i];
+      let found = scope.at(name);
+      if found.is_some() {
+        ret found;
+      }
+    }
+    ret .None;
+  }
+
+  pub free() {
+    for self.scopes.len > 0 {
+      self.pop();
+    }
+    self.scopes.free();
+  }
+}
+
+// What the checker carries while walking one program.
+compound Checker {
+  Map<str, FnSig> fns;
+  // The quirks a program declares. A pointer to a compound that
+  // implements one stands where the quirk is expected.
+  Set<str> quirks;
+  // The return type of the function being walked, and whether it may
+  // await.
+  CheckedType rtype;
+  bin in_async;
+  bin failed;
+  TypeError error;
+}
+
+fun _checker_new() Checker {
+  Checker c;
+  c.fns.init(32);
+  c.quirks = set_init("", 16);
+  c.rtype = checked_unknown();
+  c.in_async = false;
+  c.failed = false;
+  ret c;
+}
+
+impl Checker {
+  // True when a value of type `from` can stand where `to` is expected,
+  // including where `to` is a quirk a pointer satisfies.
+  assignable(CheckedType to, CheckedType from) bin {
+    if can_assign(to, from) {
+      ret true;
+    }
+    if self.quirks.has(to.name) {
+      ret from.pointer_depth > 0 || self.quirks.has(from.name);
+    }
+    ret false;
+  }
+
+  // Records the first failure; later ones are consequences of it.
+  fail(str message, Node* node) {
+    if self.failed {
+      ret;
+    }
+    self.failed = true;
+    self.error = _error(message, node);
+  }
+}
+
+// The signature a function declaration promises.
+// True when `name` is one of the function's own type parameters, which
+// stands for whatever a call site supplies rather than a fixed type.
+fun _is_type_param(FunctionNode f, str name) bin {
+  if !f.has_type_params {
+    ret false;
+  }
+  for p : f.type_params {
+    if equals(p, name) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+fun _erase_type_params(FunctionNode f, CheckedType t) CheckedType {
+  if _is_type_param(f, t.name) {
+    ret checked_unknown();
+  }
+  ret t;
+}
+
+fun _signature_of(FunctionNode f) FnSig {
+  FnSig sig;
+  sig.args.init(f.args.len);
+  sig.rtype = checked_unknown();
+  if f.has_rtype {
+    sig.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
+  }
+  sig.is_variadic = f.is_variadic;
+  sig.is_async = f.is_async;
+  sig.is_generic = f.has_type_params && f.type_params.len > 0;
+  sig.ambiguous = false;
+  sig.min_args = 0;
+  bin counting = true;
+  for a : f.args {
+    fit a.kind {
+      .Variable(v) -> {
+        sig.args.push(_erase_type_params(f, checked_from_dtype(v.var_type)));
+        // A parameter with a default value, and everything after it,
+        // may be left out by the caller.
+        if v.has_val {
+          counting = false;
+        } elif counting {
+          sig.min_args = sig.min_args + 1;
+        }
+      }
+      _ -> { sig.args.push(checked_unknown()); }
+    }
+  }
+  ret sig;
+}
+
+// The name a call's callee refers to, empty when it is not a plain call
+// to a named function.
+fun _callee_name(Node* callee) str {
+  if callee == nil {
+    ret "";
+  }
+  fit callee.kind {
+    .Identifier(name) -> { ret name; }
+    _ -> { ret ""; }
+  }
+}
+
+// The arguments of a call, whose AST shape is a comma expression when
+// there is more than one.
+fun _call_args(Node* node, Vec<Node*>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") && e.has_left && e.has_right {
+        _call_args(e.left, out);
+        _call_args(e.right, out);
+        ret;
+      }
+    }
+    // A call's argument list is parenthesized, and the parentheses are
+    // a node of their own.
+    .ExpressionParenthesis(inner) -> {
+      _call_args(inner, out);
+      ret;
+    }
+    // An empty argument list still carries a node, which is not an
+    // argument.
+    .Blank -> { ret; }
+    _ -> {}
+  }
+  out.push(node);
+}
+
+impl Checker {
+  // The type a literal, name, or operator expression produces. Anything
+  // the checker does not model infers as unknown.
+  infer(Node* node, TypeEnv* env) CheckedType {
+    if node == nil {
+      ret checked_unknown();
+    }
+    fit node.kind {
+      .Number(data) -> {
+        fit data {
+          .Dec(_) -> { ret checked_of(DataTypeType.Dec); }
+          .Cval(_) -> { ret checked_of(DataTypeType.Chr); }
+          .Num(value) -> {
+            CheckedType t = checked_of(DataTypeType.Num);
+            // Zero is how a null pointer is written.
+            t.is_null_literal = value == 0;
+            ret t;
+          }
+          _ -> { ret checked_of(DataTypeType.Num); }
+        }
+      }
+      .String(_) -> { ret checked_of(DataTypeType.Str); }
+      .Character(_) -> { ret checked_of(DataTypeType.Chr); }
+      .Boolean(_) -> { ret checked_of(DataTypeType.Bin); }
+      .Nil -> {
+        CheckedType t = checked_of(DataTypeType.Raw);
+        t.is_null_literal = true;
+        ret t;
+      }
+      .Panic(_) -> {
+        CheckedType t = checked_unknown();
+        t.is_panic_literal = true;
+        ret t;
+      }
+      .Identifier(name) -> {
+        let found = env.lookup(name);
+        if found.is_some() {
+          ret found.unwrap();
+        }
+        ret checked_unknown();
+      }
+      .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
+      .Unary(u) -> { ret self.infer_unary(u, env); }
+      .Expression(e) -> { ret self.infer_expression(node, e, env); }
+      _ -> { ret checked_unknown(); }
+    }
+    ret checked_unknown();
+  }
+
+  infer_unary(UnaryNode u, TypeEnv* env) CheckedType {
+    if equals(u.op, "await") {
+      ret self.check_await(u, env);
+    }
+    CheckedType operand = self.infer(u.operand, env);
+    if equals(u.op, "&") {
+      CheckedType t = operand;
+      t.pointer_depth = operand.pointer_depth + 1;
+      ret t;
+    }
+    if equals(u.op, "*") {
+      if operand.pointer_depth == 0 {
+        ret checked_unknown();
+      }
+      CheckedType t = operand;
+      t.pointer_depth = operand.pointer_depth - 1;
+      ret t;
+    }
+    if equals(u.op, "!") {
+      ret checked_of(DataTypeType.Bin);
+    }
+    ret operand;
+  }
+
+  // The type a binary operator produces, checking a call's arguments
+  // against what the callee declares along the way.
+  infer_expression(Node* node, ExprNode e, TypeEnv* env) CheckedType {
+    if equals(e.op, "()") {
+      ret self.check_call(node, e, env, false);
+    }
+    // A field access, an index, or a comma list needs the type registry
+    // the checker does not carry yet.
+    if equals(e.op, ".") || equals(e.op, "[]") || equals(e.op, ",") {
+      ret checked_unknown();
+    }
+    if _is_comparison(e.op) || _is_logical(e.op) {
+      ret checked_of(DataTypeType.Bin);
+    }
+    if !e.has_left {
+      ret checked_unknown();
+    }
+    CheckedType left = self.infer(e.left, env);
+    if !e.has_right {
+      ret left;
+    }
+    CheckedType right = self.infer(e.right, env);
+    // Arithmetic on two numeric kinds widens to the wider one.
+    if right.base == DataTypeType.Dec && left.base == DataTypeType.Num {
+      ret right;
+    }
+    if is_unknown(left) {
+      ret right;
+    }
+    ret left;
+  }
+
+  // Checks `await operand`: only an async function may await, and only
+  // an async call is worth awaiting.
+  check_await(UnaryNode u, TypeEnv* env) CheckedType {
+    if !self.in_async {
+      self.fail("await is only allowed in an async function", u.operand);
+      ret checked_unknown();
+    }
+    if !self.awaits_async_call(u.operand) {
+      self.fail("await expects a call to an async function", u.operand);
+      ret checked_unknown();
+    }
+    ret self.infer_awaited(u.operand, env);
+  }
+
+  // The type an awaited call produces, checked as an ordinary call.
+  infer_awaited(Node* operand, TypeEnv* env) CheckedType {
+    if operand == nil {
+      ret checked_unknown();
+    }
+    fit operand.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") {
+          ret self.check_call(operand, e, env, true);
+        }
+      }
+      .ExpressionParenthesis(inner) -> { ret self.infer_awaited(inner, env); }
+      _ -> {}
+    }
+    ret self.infer(operand, env);
+  }
+
+  // True when `node` calls something the checker knows to be async, or
+  // something it cannot resolve, which it does not second-guess.
+  awaits_async_call(Node* node) bin {
+    if node == nil {
+      ret false;
+    }
+    fit node.kind {
+      .ExpressionParenthesis(inner) -> { ret self.awaits_async_call(inner); }
+      .Expression(e) -> {
+        if !equals(e.op, "()") {
+          ret false;
+        }
+        if !e.has_left {
+          ret true;
+        }
+        str name = _callee_name(e.left);
+        if equals(name, "") {
+          // A method call resolves through a receiver the checker does
+          // not model yet.
+          ret true;
+        }
+        let known = self.fns.at(name);
+        if known.is_none() {
+          ret true;
+        }
+        FnSig sig = known.unwrap();
+        if sig.ambiguous {
+          ret true;
+        }
+        ret sig.is_async;
+      }
+      _ -> { ret false; }
+    }
+    ret false;
+  }
+
+  // Checks a call against the callee's signature and reports its return
+  // type.
+  check_call(Node* node, ExprNode e, TypeEnv* env, bin awaited) CheckedType {
+    Vec<Node*> args;
+    args.init(4);
+    defer args.free();
+    if e.has_right {
+      _call_args(e.right, &args);
+    }
+
+    num i = 0;
+    for i < args.len {
+      _ = self.infer(args.get(i), env);
+      i = i + 1;
+    }
+
+    str name = "";
+    if e.has_left {
+      name = _callee_name(e.left);
+    }
+    if equals(name, "") {
+      ret checked_unknown();
+    }
+    let known = self.fns.at(name);
+    if known.is_none() {
+      ret checked_unknown();
+    }
+    FnSig sig = known.unwrap();
+    if sig.ambiguous {
+      ret checked_unknown();
+    }
+    // An async call produces its value only once awaited.
+    if sig.is_async && !awaited {
+      self.fail(format("call to async function '{str}' needs await", name), node);
+      ret checked_unknown();
+    }
+    // A generic function's parameters stand for whatever the call site
+    // supplies, so only its shape is checked here.
+    if !sig.is_variadic {
+      if args.len > sig.args.len {
+        self.fail(format("too many arguments to '{str}'", name), node);
+        ret sig.rtype;
+      }
+      if args.len < sig.min_args {
+        self.fail(format("too few arguments to '{str}'", name), node);
+        ret sig.rtype;
+      }
+    }
+    if !sig.is_generic {
+      i = 0;
+      for i < args.len && i < sig.args.len {
+        CheckedType want = sig.args.get(i);
+        CheckedType got = self.infer(args.get(i), env);
+        if !self.assignable(want, got) {
+          self.fail(
+            format(
+              "argument {num} of '{str}' expects {str}, found {str}",
+              i + 1,
+              name,
+              type_name(want),
+              type_name(got)
+            ),
+            args.get(i)
+          );
+          ret sig.rtype;
+        }
+        i = i + 1;
+      }
+    }
+    ret sig.rtype;
+  }
+}
+
+fun _is_comparison(str op) bin {
+  ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") || equals(
+    op,
+    "<="
+  ) || equals(op, ">=");
+}
+
+fun _is_logical(str op) bin {
+  ret equals(op, "&&") || equals(op, "||");
+}
+
+impl Checker {
+  // Walks an expression written as a statement, for the checks made
+  // along the way rather than for the type it produces.
+  walk_expr(Node* node, TypeEnv* env) {
+    _ = self.infer(node, env);
+  }
+
+  // Walks a statement, checking whatever it declares, returns, or
+  // evaluates.
+  check_statement(Node* stmt, TypeEnv* env) {
+    if stmt == nil || self.failed {
+      ret;
+    }
+    fit stmt.kind {
+      .Body(body) -> {
+        env.push();
+        for s : body.statements {
+          self.check_statement(s, env);
+        }
+        env.pop();
+      }
+      .Variable(v) -> { self.check_variable(stmt, v, env); }
+      .StatementReturn(value) -> { self.check_return(stmt, value, env); }
+      .StatementIf(ifn) -> {
+        _ = self.infer(ifn.condition, env);
+        self.check_statement(ifn.body, env);
+      }
+      .StatementElseIf(ein) -> {
+        _ = self.infer(ein.condition, env);
+        self.check_statement(ein.body, env);
+      }
+      .StatementElse(body) -> { self.check_statement(body, env); }
+      .StatementDefer(inner) -> { self.check_statement(inner, env); }
+      .StatementFor(kind) -> { self.check_for(kind, env); }
+      .Expression(_) -> { self.walk_expr(stmt, env); }
+      .ExpressionParenthesis(_) -> { self.walk_expr(stmt, env); }
+      .Unary(_) -> { self.walk_expr(stmt, env); }
+      _ -> {}
+    }
+  }
+
+  check_for(ForKind kind, TypeEnv* env) {
+    env.push();
+    fit kind {
+      .Cond(c) -> {
+        if c.has_condition {
+          _ = self.infer(c.condition, env);
+        }
+        self.check_statement(c.body, env);
+      }
+      .Range(r) -> {
+        env.define(r.index_name, checked_of(DataTypeType.Num));
+        self.check_statement(r.body, env);
+      }
+      .Iter(it) -> {
+        // What the loop walks holds values of a type the checker does
+        // not model yet.
+        env.define(it.item_name, checked_unknown());
+        if it.has_index_name {
+          env.define(it.index_name, checked_of(DataTypeType.Num));
+        }
+        self.check_statement(it.body, env);
+      }
+    }
+    env.pop();
+  }
+
+  check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
+    CheckedType declared = checked_from_dtype(v.var_type);
+    if v.has_val {
+      CheckedType value = self.infer(v.val, env);
+      // A `let` takes the type of its value rather than checking one.
+      if is_unknown(declared) {
+        declared = value;
+      } elif !self.assignable(declared, value) {
+        self.fail(
+          format(
+            "cannot initialize '{str}' of type {str} with {str}",
+            v.name,
+            type_name(declared),
+            type_name(value)
+          ),
+          stmt
+        );
+        ret;
+      }
+    }
+    env.define(v.name, declared);
+  }
+
+  check_return(Node* stmt, Node* value, TypeEnv* env) {
+    if value == nil {
+      ret;
+    }
+    CheckedType got = self.infer(value, env);
+    if !self.assignable(self.rtype, got) {
+      self.fail(
+        format(
+          "cannot return {str} from a function returning {str}",
+          type_name(got),
+          type_name(self.rtype)
+        ),
+        stmt
+      );
+    }
+  }
+
+  // Walks one function with its parameters in scope.
+  check_function(FunctionNode f) {
+    if !f.has_body {
+      ret;
+    }
+    TypeEnv env = type_env_new();
+    defer env.free();
+    env.push();
+    for a : f.args {
+      fit a.kind {
+        .Variable(v) -> {
+          env.define(v.name, _erase_type_params(f, checked_from_dtype(v.var_type)));
+        }
+        _ -> {}
+      }
+    }
+    CheckedType previous = self.rtype;
+    bin previous_async = self.in_async;
+    self.in_async = f.is_async;
+    self.rtype = checked_unknown();
+    if f.has_rtype {
+      self.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
+    }
+    self.check_statement(f.body, &env);
+    self.rtype = previous;
+    self.in_async = previous_async;
+    env.pop();
+  }
+}
+
+// Checks a whole program, reporting the first type error it finds.
+pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
+  Checker checker = _checker_new();
+  defer checker.fns.free();
+  defer checker.quirks.free();
+
+  num i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    fit node.kind {
+      .Function(f) -> {
+        if f.has_name {
+          FnSig sig = _signature_of(f);
+          // A name that resolves to more than one declaration cannot be
+          // matched to one of them here.
+          let existing = checker.fns.at(f.name);
+          if existing.is_some() {
+            sig.ambiguous = true;
+          }
+          checker.fns.put(f.name, sig);
+        }
+      }
+      .Quirk(q) -> { checker.quirks.add(q.name); }
+      _ -> {}
+    }
+  }
+
+  i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    fit node.kind {
+      .Function(f) -> { checker.check_function(f); }
+      _ -> {}
+    }
+    if checker.failed {
+      ret .Err(checker.error);
+    }
+  }
+  ret .Ok(true);
+}
+
+test "a value stands for a type it can be assigned to" {
+  CheckedType num_t = checked_of(DataTypeType.Num);
+  CheckedType dec_t = checked_of(DataTypeType.Dec);
+  CheckedType str_t = checked_of(DataTypeType.Str);
+  CheckedType bin_t = checked_of(DataTypeType.Bin);
+  assert can_assign(num_t, dec_t), "expected the numeric kinds to convert";
+  assert !can_assign(num_t, str_t), "expected a string not to stand for a number";
+  assert !can_assign(num_t, bin_t), "expected a truth value not to stand for a number";
+  assert can_assign(checked_unknown(), str_t), "expected an unresolved type to accept anything";
+}
+
+test "nil and zero stand for a pointer, and zero stays a number" {
+  CheckedType raw_t = checked_of(DataTypeType.Raw);
+  raw_t.pointer_depth = 1;
+  CheckedType zero = checked_of(DataTypeType.Num);
+  zero.is_null_literal = true;
+  assert can_assign(raw_t, zero), "expected zero to stand for a null pointer";
+  assert can_assign(checked_of(DataTypeType.Num), zero), "expected zero to remain a number";
+}
+
+test "an array stands for a pointer to what it holds" {
+  CheckedType chars;
+  chars = checked_of(DataTypeType.Chr);
+  chars.is_array = true;
+  chars.array_depth = 1;
+  assert can_assign(checked_of(DataTypeType.Str), chars), "expected characters to stand for a string";
+}
+
+test "a written type reads back as what it was written as" {
+  CheckedType pointer = checked_of(DataTypeType.Num);
+  pointer.pointer_depth = 1;
+  assert equals(type_name(pointer), "num*"), "expected the pointer spelling";
+  CheckedType named = checked_unknown();
+  named.name = "Counter";
+  assert equals(type_name(named), "Counter"), "expected the written name";
+}
+
+test "a scope hides an outer binding of the same name" {
+  TypeEnv env = type_env_new();
+  defer env.free();
+  env.push();
+  env.define("x", checked_of(DataTypeType.Num));
+  env.push();
+  env.define("x", checked_of(DataTypeType.Str));
+  let inner = env.lookup("x");
+  assert inner.is_some(), "expected the name to resolve";
+  assert inner.unwrap().base == DataTypeType.Str, "expected the inner binding";
+  env.pop();
+  let outer = env.lookup("x");
+  assert outer.unwrap().base == DataTypeType.Num, "expected the outer binding to return";
+}
