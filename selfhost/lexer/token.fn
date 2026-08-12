@@ -47,9 +47,9 @@ pub compound Token {
   TokenType type;
   TokenData data;
   Pos pos;
-  // True when the token is preceded by whitespace (space/tab), as opposed
-  // to being immediately adjacent to the previous token. The formatter and
-  // some parser disambiguation rules (e.g. `fork` vs a call) rely on this.
+  // True when whitespace (space/tab) follows the token, as opposed to the
+  // next token being immediately adjacent. This is what tells `Vec<T>`
+  // and `Type*` apart from a comparison or a multiplication.
   bin whitespace;
   // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
   // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences

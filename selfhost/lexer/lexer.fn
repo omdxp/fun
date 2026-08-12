@@ -785,6 +785,13 @@ impl Lexer {
     let c = self._peek();
 
     if c == ' ' || c == '\t' || c == '\r' {
+      // Whitespace is not a token of its own, but the token before it is
+      // marked as being followed by some, which is what tells a pointer
+      // or generic-argument spelling apart from an operator.
+      if self.tokens.len > 0 {
+        Token* last = &self.tokens.data[self.tokens.len - 1];
+        last.whitespace = true;
+      }
       self._advance();
       ret self._next_inner();
     }

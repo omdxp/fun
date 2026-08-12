@@ -183,10 +183,22 @@ fun _needs_space(Token prev, Token cur) bin {
   if equals(c, "..") {
     ret prev.type == TokenType.Keyword;
   }
+  // Generic arguments bind to the name they belong to, unlike a
+  // comparison. Whether the source wrote them adjacent tells the two
+  // apart, the same way the pointer star below is decided.
+  if equals(c, "<") && !prev.whitespace && prev.type == TokenType.Identifier {
+    ret false;
+  }
+  if equals(c, ">") && !prev.whitespace {
+    ret false;
+  }
+  if equals(p, "<") && !prev.whitespace {
+    ret false;
+  }
   // A pointer star binds to the type it belongs to, unlike
   // multiplication. Whether the source wrote it adjacent tells the two
   // apart. A run of stars stays together for a deeper pointer.
-  if equals(c, "*") && !cur.whitespace {
+  if equals(c, "*") && !prev.whitespace {
     ret false;
   }
   if equals(p, "*") {
@@ -213,6 +225,51 @@ fun _needs_space(Token prev, Token cur) bin {
   ret true;
 }
 
+// How wide a line may get before a construct is broken across lines.
+const num MAX_LINE_WIDTH = 80;
+
+// The index just past the `}` that closes the block opening at `open`,
+// or `open` itself when the block contains another block or never
+// closes. Used to decide whether a short block can stay on one line.
+fun _simple_block_end(Vec<Token>* tokens, num open) num {
+  num i = open + 1;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.Symbol {
+      let c = _cval_of(t);
+      if c == '{' {
+        ret open;
+      }
+      if c == '}' {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret open;
+}
+
+// The width the tokens in `[from, to]` occupy when written on one line.
+fun _inline_width(Vec<Token>* tokens, num from, num to) num {
+  num width = 0;
+  num i = from;
+  bin first = true;
+  for i <= to {
+    Token t = tokens.get(i);
+    if t.type == TokenType.NewLine {
+      i = i + 1;
+      continue;
+    }
+    if !first && _needs_space(tokens.get(i - 1), t) {
+      width = width + 1;
+    }
+    width = width + len(token_text(t));
+    first = false;
+    i = i + 1;
+  }
+  ret width;
+}
+
 // Formats `src`, or reports the stage that rejected it.
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
@@ -233,6 +290,40 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
 
     str text = token_text(t);
+
+    // A `fit` arm whose body is a single short block stays on one line,
+    // which is how arms read when written by hand.
+    if equals(text, "{") && s.has_prev && equals(token_text(s.prev), "->") {
+      let close = _simple_block_end(&tokens, i);
+      if close > i {
+        num width = s.indent * 2 + _inline_width(&tokens, i, close);
+        if width <= MAX_LINE_WIDTH {
+          s.flush_newlines();
+          num j = i;
+          for j <= close {
+            Token it = tokens.get(j);
+            if it.type == TokenType.NewLine {
+              j = j + 1;
+              continue;
+            }
+            str itext = token_text(it);
+            if !s.at_line_start && s.has_prev {
+              if _needs_space(s.prev, it) {
+                s.out.append(" ");
+              }
+            }
+            s.write(itext);
+            s.has_prev = true;
+            s.prev = it;
+            j = j + 1;
+          }
+          s.newline();
+          s.pending_newlines = 0;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
 
     // A closing brace dedents before it is written, and always starts
     // its own line.
