@@ -23,7 +23,7 @@ async fun main() {
 
   str first_line_raw = NULL;
   str first_line = "";
-  if lines.try_recv(&first_line_raw) == channel_rc_ok() {
+  if lines.try_recv(&first_line_raw) == CHANNEL_RC_OK {
     first_line = first_line_raw;
   }
 

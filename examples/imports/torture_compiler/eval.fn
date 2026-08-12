@@ -6,7 +6,7 @@ imp std.vec;
 imp ast;
 
 // max/min reduce over a variable-arity Vec<Expr*> -- any argument count.
-fun eval_call(str name, Vec<Expr *> args, Map<str, dec>* env) dec {
+fun eval_call(str name, Vec<Expr*> args, Map<str, dec>* env) dec {
   fit name {
     "max" -> {
       dec best = eval(args.get(0), env);

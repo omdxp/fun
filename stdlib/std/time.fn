@@ -1,16 +1,11 @@
 // Time helpers.
-// 
-// Usage:
-// ```
-// Timestamp t = now();
-// str iso = time_format_iso(t);
-// ```
 
 imp std.c.time;
 imp std.c.io;
 imp std.c.mem;
 imp std.c.string;
 imp std.result;
+imp std.error;
 
 // Timestamp wrapper (epoch seconds).
 pub compound Timestamp {
@@ -19,9 +14,6 @@ pub compound Timestamp {
 }
 
 // Current timestamp (epoch seconds).
-// 
-// Returns:
-// - Timestamp with epoch seconds
 pub fun now() Timestamp {
   Timestamp t;
   t.epoch = time(nil);
@@ -117,48 +109,23 @@ impl Timestamp {
 }
 
 // Current epoch seconds.
-// 
-// Returns:
-// - seconds since epoch
 pub fun now_epoch() num {
   let t = now();
   ret t.epoch;
 }
 
-// Add seconds to an epoch value.
-// 
-// Params:
-// - epoch: seconds since epoch
-// - delta: seconds to add
-// 
-// Returns:
-// - new epoch value
+// Adds `delta` seconds to an epoch value.
 pub fun add_seconds(num epoch, num delta) num {
   ret epoch + delta;
 }
 
 // Difference between two epoch values in seconds.
-// 
-// Params:
-// - a: first epoch
-// - b: second epoch
-// 
-// Returns:
-// - difference in seconds
 pub fun diff_seconds(num a, num b) dec {
   ret difftime(a, b);
 }
 
-// Format an epoch value with a custom format.
-// 
-// Params:
-// - epoch: seconds since epoch
-// - buf: output buffer
-// - buf_len: buffer capacity
-// - format: strftime format
-// 
-// Returns:
-// - number of bytes written
+// Formats an epoch value with a custom strftime format. Returns the number
+// of bytes written.
 pub fun format_local(num epoch, str buf, num buf_len, str format) num {
   Timestamp t;
   t.epoch = epoch;
@@ -166,24 +133,16 @@ pub fun format_local(num epoch, str buf, num buf_len, str format) num {
 }
 
 // Format an epoch value with a custom format (Result).
-pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num> {
+pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num, Error> {
   let n = format_local(epoch, buf, buf_len, format);
   if n <= 0 {
     ret err_kind(.Unexpected, "format_local failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
-// Format an epoch value with a custom format (UTC).
-// 
-// Params:
-// - epoch: seconds since epoch
-// - buf: output buffer
-// - buf_len: buffer capacity
-// - format: strftime format
-// 
-// Returns:
-// - number of bytes written
+// Formats an epoch value with a custom strftime format (UTC). Returns the
+// number of bytes written.
 pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
   Timestamp t;
   t.epoch = epoch;
@@ -191,23 +150,16 @@ pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
 }
 
 // Format an epoch value with a custom format (UTC) with Result.
-pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num> {
+pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num, Error> {
   let n = format_utc(epoch, buf, buf_len, format);
   if n <= 0 {
     ret err_kind(.Unexpected, "format_utc failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
-// Format an epoch value using C's human-readable format (ctime).
-// 
-// Params:
-// - epoch: seconds since epoch
-// - buf: output buffer
-// - buf_len: buffer capacity
-// 
-// Returns:
-// - number of bytes written
+// Formats an epoch value using C's human-readable format (ctime). Returns
+// the number of bytes written.
 pub fun format_human(num epoch, str buf, num buf_len) num {
   raw* tbuf = _time_buf_from_epoch(epoch);
   if tbuf == nil {
@@ -222,16 +174,10 @@ pub fun format_human(num epoch, str buf, num buf_len) num {
   ret n;
 }
 
-// Format an epoch value using C's human-readable format (ctime) as a C string.
-// 
-// Params:
-// - epoch: seconds since epoch
-// 
-// Returns:
-// - pointer to a SHARED static buffer (or null). Do NOT free it, and do NOT
-// hold it across another time call (now/format_*): the next ctime/localtime
-// overwrites it. Copy it (e.g. into your own buffer) if you need to keep it.
-// For a caller-owned, copy-safe result, use `format_human(epoch, buf, len)`.
+// Formats an epoch value using C's human-readable format (ctime), returning
+// a pointer into a shared static buffer (or null). Don't free it or hold it
+// across another time call, since the next ctime/localtime overwrites it;
+// use `format_human(epoch, buf, len)` for a caller-owned, copy-safe result.
 pub fun format_human_cstr(num epoch) str {
   raw* tbuf = _time_buf_from_epoch(epoch);
   if tbuf == nil {
@@ -242,78 +188,56 @@ pub fun format_human_cstr(num epoch) str {
   ret cstr;
 }
 
-// Format current time with default format.
-// 
-// Params:
-// - buf: output buffer
-// - buf_len: buffer capacity
-// 
-// Returns:
-// - number of bytes written
+// Formats the current time with the default format. Returns the number of
+// bytes written.
 pub fun now_string(str buf, num buf_len) num {
   let t = now();
   let n = t.to_string(buf, buf_len);
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%d", t.epoch);
+  ret snprintf(buf, buf_len, "%lld", t.epoch);
 }
 
 // Format current time with default format (Result).
-pub fun try_now_string(str buf, num buf_len) Result<num> {
+pub fun try_now_string(str buf, num buf_len) Result<num, Error> {
   let n = now_string(buf, buf_len);
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
-// Format current time with default format (UTC).
-// 
-// Params:
-// - buf: output buffer
-// - buf_len: buffer capacity
-// 
-// Returns:
-// - number of bytes written
+// Formats the current time with the default format (UTC). Returns the
+// number of bytes written.
 pub fun now_string_utc(str buf, num buf_len) num {
   let t = now();
   let n = t.to_string_utc(buf, buf_len);
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%d", t.epoch);
+  ret snprintf(buf, buf_len, "%lld", t.epoch);
 }
 
 // Format current time with default format (UTC) with Result.
-pub fun try_now_string_utc(str buf, num buf_len) Result<num> {
+pub fun try_now_string_utc(str buf, num buf_len) Result<num, Error> {
   let n = now_string_utc(buf, buf_len);
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string_utc failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
-// Format current time using C's human-readable format (ctime).
-// 
-// Params:
-// - buf: output buffer
-// - buf_len: buffer capacity
-// 
-// Returns:
-// - number of bytes written
+// Formats the current time using C's human-readable format (ctime).
+// Returns the number of bytes written.
 pub fun now_human(str buf, num buf_len) num {
   let t = now();
   ret format_human(t.epoch, buf, buf_len);
 }
 
-// Return a human-readable string for the current time (ctime).
-// 
-// Returns:
-// - pointer to a SHARED static buffer (or null). Do NOT free it, and do NOT
-// hold it across another time call: the next ctime/localtime overwrites it.
-// Copy it if you need to keep it, or use `now_human(buf, len)` for a
-// caller-owned result.
+// Human-readable string for the current time (ctime), as a pointer into a
+// shared static buffer (or null). Don't free it or hold it across another
+// time call; use `now_human(buf, len)` for a caller-owned result.
 pub fun now_human_cstr() str {
   let t = now();
   ret format_human_cstr(t.epoch);

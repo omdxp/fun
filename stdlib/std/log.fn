@@ -1,38 +1,18 @@
 // Structured logging.
 // 
-// A `Logger` filters by severity, renders records as human-readable Text or as
-// one JSON object per line, and routes output to any `std.io.Sink` (stdout,
-// stderr, a file, or a rotating file). Records may carry typed key/value fields.
-// 
-// Simple usage (back-compatible):
-// ```
-// Logger l = logger_init(.Info);
-// l.info("hello");                 // [INFO] <ts> hello
-// ```
-// 
-// Structured usage (fluent builder — returns records BY VALUE and is chainable):
-// ```
-// l.info_r("request served")
-//   .str_field("path", "/api")
-//   .num_field("status", 200)
-//   .emit();
-// ```
-// 
-// JSON output to a file:
-// ```
-// let f = open_write("app.log");
-// Logger jl = logger_json(.Debug).to_sink(Sink.File(f));
-// jl.warn("disk low");            // {"level":"WARN","ts":"...","msg":"disk low"}
-// ```
+// A `Logger` filters by severity, renders records as human-readable text or
+// as one JSON object per line, and routes output to any `std.io.Sink`
+// (stdout, stderr, a file, or a rotating file). Records may carry typed
+// key/value fields, either via direct calls (`l.info(...)`) or a chainable
+// builder (`l.info_r(...).str_field(...).emit()`).
 
 imp std.io;
 imp std.string;
 imp std.vec;
 imp std.time;
 
-// Log severity levels, with explicit ordered values so filtering is a stable
-// integer comparison and there is room to insert future levels. `Debug`/`Info`/
-// `Warn`/`Error` keep their historical names; `Trace` and `Fatal` are added.
+// Log severity levels with explicit ordered values, so filtering is a stable
+// integer comparison and there's room to insert levels between the existing ones.
 pub enum LogLevel {
   // Very verbose tracing.
   Trace = 0,
@@ -74,14 +54,7 @@ pub compound Field {
 
 // Field constructors (ergonomic sugar over `FieldVal`).
 
-// Build a string-valued field.
-// 
-// Params:
-// - k: field key
-// - v: field value
-// 
-// Returns:
-// - the constructed field
+// Builds a string-valued field.
 pub fun fstr(str k, str v) Field {
   Field f;
   f.key = k;
@@ -89,14 +62,7 @@ pub fun fstr(str k, str v) Field {
   ret f;
 }
 
-// Build a numeric-valued field.
-// 
-// Params:
-// - k: field key
-// - v: field value
-// 
-// Returns:
-// - the constructed field
+// Builds a numeric-valued field.
 pub fun fnum(str k, num v) Field {
   Field f;
   f.key = k;
@@ -104,14 +70,7 @@ pub fun fnum(str k, num v) Field {
   ret f;
 }
 
-// Build a decimal-valued field.
-// 
-// Params:
-// - k: field key
-// - v: field value
-// 
-// Returns:
-// - the constructed field
+// Builds a decimal-valued field.
 pub fun fdec(str k, dec v) Field {
   Field f;
   f.key = k;
@@ -119,14 +78,7 @@ pub fun fdec(str k, dec v) Field {
   ret f;
 }
 
-// Build a boolean-valued field.
-// 
-// Params:
-// - k: field key
-// - v: field value
-// 
-// Returns:
-// - the constructed field
+// Builds a boolean-valued field.
 pub fun fbin(str k, bin v) Field {
   Field f;
   f.key = k;
@@ -150,13 +102,7 @@ pub compound Logger {
   bin route_err;
 }
 
-// Create a Text logger writing to stdout with timestamps on.
-// 
-// Params:
-// - level: minimum severity to emit
-// 
-// Returns:
-// - initialized logger
+// Creates a Text logger writing to stdout with timestamps on, filtering below `level`.
 pub fun logger_init(
   LogLevel level,
   LogFormat format = .Text,
@@ -175,26 +121,14 @@ pub fun logger_init(
   ret l;
 }
 
-// Create a JSON logger writing to stdout.
-// 
-// Params:
-// - level: minimum severity to emit
-// 
-// Returns:
-// - initialized logger with `format` set to `LogFormat.Json`
+// Creates a JSON logger writing to stdout, filtering below `level`.
 pub fun logger_json(LogLevel level) Logger {
   let l = logger_init(level);
   l.format = LogFormat.Json;
   ret l;
 }
 
-// Convert a log level to its label string.
-// 
-// Params:
-// - level: severity to convert
-// 
-// Returns:
-// - the level's uppercase label (`"TRACE"`, `"DEBUG"`, ...)
+// Converts a log level to its uppercase label (`"TRACE"`, `"DEBUG"`, ...).
 pub fun level_name(LogLevel level) str {
   fit level {
     .Trace -> { ret "TRACE"; }
@@ -258,10 +192,10 @@ fun field_val_json_into(StringBuilder* b, FieldVal* v) {
   }
 }
 
-// A pending log record + the builder for attaching structured fields. Returned
-// BY VALUE from the `*_r`/`record` entrypoints and chained by value:
-// `l.info_r("m").num_field("n", 1).emit()`. When `live` is false (below the
-// logger threshold) every builder method and `emit()` are cheap no-ops.
+// A pending log record plus the builder for attaching structured fields.
+// Returned by value from the `*_r`/`record` entrypoints and chained by value:
+// `l.info_r("m").num_field("n", 1).emit()`. When `live` is false the record
+// is below the logger threshold, so every builder method and `emit()` are no-ops.
 pub compound LogRecord {
   // Severity this record was opened at.
   LogLevel level;
@@ -282,13 +216,7 @@ pub compound LogRecord {
 }
 
 impl LogRecord {
-  // Attach a prebuilt field.
-  // 
-  // Params:
-  // - f: field to attach
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a prebuilt field; chainable.
   pub with(Field f) LogRecord {
     if self.live {
       self.fields.push(f);
@@ -296,14 +224,7 @@ impl LogRecord {
     ret *self;
   }
 
-  // Attach a typed field.
-  // 
-  // Params:
-  // - key: field key
-  // - v: field value
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a typed field; chainable.
   pub field(str key, FieldVal v) LogRecord {
     if self.live {
       Field f;
@@ -314,50 +235,22 @@ impl LogRecord {
     ret *self;
   }
 
-  // Attach a string-valued field.
-  // 
-  // Params:
-  // - k: field key
-  // - v: field value
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a string-valued field; chainable.
   pub str_field(str k, str v) LogRecord {
     ret self.field(k, FieldVal.Str(v));
   }
 
-  // Attach a numeric-valued field.
-  // 
-  // Params:
-  // - k: field key
-  // - v: field value
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a numeric-valued field; chainable.
   pub num_field(str k, num v) LogRecord {
     ret self.field(k, FieldVal.Num(v));
   }
 
-  // Attach a decimal-valued field.
-  // 
-  // Params:
-  // - k: field key
-  // - v: field value
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a decimal-valued field; chainable.
   pub dec_field(str k, dec v) LogRecord {
     ret self.field(k, FieldVal.Dec(v));
   }
 
-  // Attach a boolean-valued field.
-  // 
-  // Params:
-  // - k: field key
-  // - v: field value
-  // 
-  // Returns:
-  // - the record by value (chainable)
+  // Attaches a boolean-valued field; chainable.
   pub bin_field(str k, bin v) LogRecord {
     ret self.field(k, FieldVal.Bin(v));
   }
@@ -377,6 +270,13 @@ impl LogRecord {
     let sb = string_builder_init(64);
     let n = self.fields.len();
 
+    // Stack-allocated buffer for an RFC3339 UTC timestamp (e.g.
+    // "2026-07-28T08:50:11Z"), avoiding a heap allocation on every log call.
+    chr[32] ts_buf;
+    if self.with_timestamp {
+      now().format_utc(ts_buf, 32, "%Y-%m-%dT%H:%M:%SZ");
+    }
+
     fit self.format {
       .Text -> {
         sb.append_char('[');
@@ -384,7 +284,7 @@ impl LogRecord {
         sb.append_char(']');
         if self.with_timestamp {
           sb.append_char(' ');
-          sb.append(now_human_cstr());
+          sb.append(ts_buf);
         }
         if len(self.name) > 0 {
           sb.append(" [");
@@ -411,7 +311,7 @@ impl LogRecord {
         sb.append_char('"');
         if self.with_timestamp {
           sb.append(",\"ts\":\"");
-          json_escape_into(&sb, now_human_cstr());
+          json_escape_into(&sb, ts_buf);
           sb.append_char('"');
         }
         if len(self.name) > 0 {
@@ -445,95 +345,50 @@ impl LogRecord {
 }
 
 impl Logger {
-  // Set the minimum severity level.
-  // 
-  // Params:
-  // - level: new minimum severity threshold
+  // Sets the minimum severity level to emit.
   pub set_level(LogLevel level) {
     self.level = level;
   }
 
-  // Return true when a level would be emitted.
-  // 
-  // Params:
-  // - level: severity to test
-  // 
-  // Returns:
-  // - true when the logger would emit messages at this level
+  // Returns true when `level` would be emitted by this logger.
   pub enabled(LogLevel level) bin {
     ret level >= self.level;
   }
 
   // Fluent configuration (each returns the Logger by value, so calls chain).
 
-  // Set the output rendering format.
-  // 
-  // Params:
-  // - f: rendering format
-  // 
-  // Returns:
-  // - the logger by value (chainable)
+  // Sets the output rendering format; chainable.
   pub as_format(LogFormat f) Logger {
     self.format = f;
     ret *self;
   }
 
-  // Set the destination sink.
-  // 
-  // Params:
-  // - s: destination sink
-  // 
-  // Returns:
-  // - the logger by value (chainable)
+  // Sets the destination sink; chainable.
   pub to_sink(Sink s) Logger {
     self.sink = s;
     ret *self;
   }
 
-  // Set the logger name, included in rendered records when non-empty.
-  // 
-  // Params:
-  // - name: logger name
-  // 
-  // Returns:
-  // - the logger by value (chainable)
+  // Sets the logger name, included in rendered records when non-empty; chainable.
   pub named(str name) Logger {
     self.name = name;
     ret *self;
   }
 
-  // Toggle routing Warn+ records to stderr regardless of `sink`.
-  // 
-  // Params:
-  // - on: whether to route Warn+ to stderr
-  // 
-  // Returns:
-  // - the logger by value (chainable)
+  // Toggles routing Warn+ records to stderr regardless of `sink`; chainable.
   pub route_errors(bin on) Logger {
     self.route_err = on;
     ret *self;
   }
 
-  // Toggle whether records are prefixed with a timestamp.
-  // 
-  // Params:
-  // - on: whether to include a timestamp
-  // 
-  // Returns:
-  // - the logger by value (chainable)
+  // Toggles whether records are prefixed with a timestamp; chainable.
   pub with_timestamps(bin on) Logger {
     self.with_timestamp = on;
     ret *self;
   }
 
-  // Open a builder record for `level`/`msg`. Prefer the `*_r` shortcuts.
-  // 
-  // Params:
-  // - level: record severity
-  // - msg: record message
-  // 
-  // Returns:
-  // - a `LogRecord` ready for chained field attachment and `emit()`
+  // Opens a builder record for `level`/`msg`, ready for chained field
+  // attachment and `emit()`. Prefer the `*_r` shortcuts.
   pub record(LogLevel level, str msg) LogRecord {
     LogRecord r;
     r.level = level;
@@ -574,65 +429,38 @@ impl Logger {
     ret self.record(.Fatal, msg);
   }
 
-  // Emit a bare message immediately (no structured fields). Back-compatible.
-  // 
-  // Params:
-  // - level: message severity
-  // - msg: message text
+  // Emits a bare message immediately, with no structured fields.
   pub log(LogLevel level, str msg) {
     let r = self.record(level, msg);
     r.emit();
   }
 
-  // Log a trace-level message.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs a trace-level message.
   pub trace(str msg) {
     self.log(.Trace, msg);
   }
-  // Log a debug-level message.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs a debug-level message.
   pub debug(str msg) {
     self.log(.Debug, msg);
   }
-  // Log an info-level message.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs an info-level message.
   pub info(str msg) {
     self.log(.Info, msg);
   }
-  // Log a warning-level message.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs a warning-level message.
   pub warn(str msg) {
     self.log(.Warn, msg);
   }
-  // Log an error-level message.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs an error-level message.
   pub error(str msg) {
     self.log(.Error, msg);
   }
-  // Log a fatal-level message. The emitter flushes its sink afterward.
-  // 
-  // Params:
-  // - msg: message text
+  // Logs a fatal-level message. The emitter flushes its sink afterward.
   pub fatal(str msg) {
     self.log(.Fatal, msg);
   }
 
-  // Log a tagged message (back-compatible convenience).
-  // 
-  // Params:
-  // - level: message severity
-  // - tag: short tag prefix, attached as a `tag` field
-  // - msg: message text
+  // Logs a message tagged with a `tag` field.
   pub log_tag(LogLevel level, str tag, str msg) {
     if level >= self.level {
       let r = self.record(level, msg);
@@ -640,12 +468,7 @@ impl Logger {
     }
   }
 
-  // Log a single numeric field (back-compatible convenience).
-  // 
-  // Params:
-  // - level: message severity
-  // - label: field label
-  // - value: numeric value to log
+  // Logs a single numeric field under `label`, with no message.
   pub log_num(LogLevel level, str label, num value) {
     if level >= self.level {
       let r = self.record(level, "");
@@ -653,12 +476,7 @@ impl Logger {
     }
   }
 
-  // Log a single decimal field (back-compatible convenience).
-  // 
-  // Params:
-  // - level: message severity
-  // - label: field label
-  // - value: decimal value to log
+  // Logs a single decimal field under `label`, with no message.
   pub log_dec(LogLevel level, str label, dec value) {
     if level >= self.level {
       let r = self.record(level, "");
@@ -666,12 +484,7 @@ impl Logger {
     }
   }
 
-  // Log a single boolean field (back-compatible convenience).
-  // 
-  // Params:
-  // - level: message severity
-  // - label: field label
-  // - value: boolean value to log
+  // Logs a single boolean field under `label`, with no message.
   pub log_bin(LogLevel level, str label, bin value) {
     if level >= self.level {
       let r = self.record(level, "");
@@ -680,69 +493,47 @@ impl Logger {
   }
 }
 
-// --- One-off free helpers (back-compatible) -------------------------------------------
+// --- One-off free helpers -------------------------------------------------------------
 // These log at their level through a default stdout Text logger with a Trace
 // threshold (so every one-off message is emitted).
 
-// Log `msg` at `level` through a default stdout Text logger.
-// 
-// Params:
-// - level: message severity
-// - msg: message text
+// Logs `msg` at `level` through a default stdout Text logger.
 pub fun log(LogLevel level, str msg) {
   let l = logger_init(.Trace);
   l.log(level, msg);
 }
 
-// Log a trace-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs a trace-level message through a default stdout Text logger.
 pub fun log_trace(str msg) {
   let l = logger_init(.Trace);
   l.trace(msg);
 }
 
-// Log a debug-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs a debug-level message through a default stdout Text logger.
 pub fun log_debug(str msg) {
   let l = logger_init(.Trace);
   l.debug(msg);
 }
 
-// Log an info-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs an info-level message through a default stdout Text logger.
 pub fun log_info(str msg) {
   let l = logger_init(.Trace);
   l.info(msg);
 }
 
-// Log a warning-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs a warning-level message through a default stdout Text logger.
 pub fun log_warn(str msg) {
   let l = logger_init(.Trace);
   l.warn(msg);
 }
 
-// Log an error-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs an error-level message through a default stdout Text logger.
 pub fun log_error(str msg) {
   let l = logger_init(.Trace);
   l.error(msg);
 }
 
-// Log a fatal-level message through a default stdout Text logger.
-// 
-// Params:
-// - msg: message text
+// Logs a fatal-level message through a default stdout Text logger.
 pub fun log_fatal(str msg) {
   let l = logger_init(.Trace);
   l.fatal(msg);

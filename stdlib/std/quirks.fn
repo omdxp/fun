@@ -6,25 +6,16 @@
 
 // Basic size/introspection for collections.
 pub quirk Sized {
-  // Return the number of elements or items.
-  // 
-  // Returns:
-  // - element or item count
+  // Returns the number of elements or items.
   len() num;
-  // Return true when there are no elements or items.
-  // 
-  // Returns:
-  // - true when the value is empty
+  // Returns true when there are no elements or items.
   is_empty() bin;
 }
 
 // Types that can render themselves as a string. Implemented by the collections,
 // Error, and the serialization value types so any of them can be `to_string`-ed.
 pub quirk Display {
-  // Render the value as text.
-  // 
-  // Returns:
-  // - string representation of the value
+  // Renders the value as text.
   to_string() str;
 }
 
@@ -48,17 +39,12 @@ pub quirk Clearable {
 // }
 // ```
 pub quirk Iterator<T> {
-  // Advance and return the next element, or None when exhausted.
-  // 
-  // Returns:
-  // - `Some(item)` while elements remain
-  // - `None` after the iterator is exhausted
+  // Advances and returns `Some(item)` while elements remain, `None` once exhausted.
   next() Option<T>;
 }
 
-// Convert this value INTO a `T`. Fun has no reflection/derive, so each type
-// hand-implements the conversion — the explicit equivalent of a derived
-// `Into<T>`.
+// Converts this value into a `T`. Fun has no reflection or derive macros, so
+// each type hand-implements the conversion.
 // 
 // ```
 // impl Point as To<JsonValue> {
@@ -82,8 +68,8 @@ pub quirk To<T> {
   to() T;
 }
 
-// Rebuild this value FROM a `T` (e.g. `impl Config as From<JsonValue>`).
-// Reads state from the source value:
+// Rebuilds this value from a `T` (e.g. `impl Config as From<JsonValue>`),
+// reading state from the source value:
 // 
 // ```
 // impl Config as From<JsonValue> {

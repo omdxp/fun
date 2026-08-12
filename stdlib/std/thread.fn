@@ -1,15 +1,13 @@
 // Thread helpers using pthread-shaped APIs.
 // 
-// Notes:
-// - On POSIX, these map to native pthread APIs.
-// - On Windows, backend compatibility layers provide equivalent behavior.
-// 
-// Usage:
-// Thread t = thread_new();
-// num rc = t.start(entry_ptr, arg_ptr);
+// On POSIX, these map to native pthread APIs. On Windows, backend
+// compatibility layers provide equivalent behavior. Unless noted otherwise,
+// these return 0 on success (including as a no-op when already in the
+// target state) and a nonzero backend error code on failure.
 
 imp std.c.thread;
 imp std.result;
+imp std.error;
 
 // Managed thread handle.
 pub compound Thread {
@@ -19,10 +17,7 @@ pub compound Thread {
   bin started;
 }
 
-// Create a thread handle in stopped state.
-// 
-// Returns:
-// - new Thread value
+// Creates a thread handle in stopped state.
 pub fun thread_new() Thread {
   Thread t;
   t.started = false;
@@ -30,16 +25,7 @@ pub fun thread_new() Thread {
 }
 
 impl Thread {
-  // Start this thread.
-  // 
-  // Params:
-  // - entry: pthread entry function pointer
-  // - arg: user data passed to entry
-  // 
-  // Returns:
-  // - 0 on success
-  // - 0 when already started (no-op)
-  // - nonzero backend error code on failure
+  // Starts this thread running `entry(arg)`.
   pub start(raw* entry, raw* arg) num {
     if self.started == true {
       ret 0;
@@ -51,15 +37,7 @@ impl Thread {
     ret rc;
   }
 
-  // Join this thread.
-  // 
-  // Params:
-  // - out_ret: optional output pointer for entry return value
-  // 
-  // Returns:
-  // - 0 on success
-  // - 0 when not started (no-op)
-  // - nonzero backend error code on failure
+  // Joins this thread, optionally writing its entry function's return value to `out_ret`.
   pub join(raw* out_ret) num {
     if self.started == false {
       ret 0;
@@ -71,12 +49,7 @@ impl Thread {
     ret rc;
   }
 
-  // Detach this thread.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 0 when not started (no-op)
-  // - nonzero backend error code on failure
+  // Detaches this thread.
   pub detach() num {
     if self.started == false {
       ret 0;
@@ -89,18 +62,7 @@ impl Thread {
   }
 }
 
-// Start a thread via pointer receiver helper.
-// 
-// Params:
-// - thread: thread handle pointer
-// - entry: pthread entry function pointer
-// - arg: user data passed to entry
-// 
-// Returns:
-// - 0 on success
-// - 0 when already started (no-op)
-// - -1 when thread is null
-// - nonzero backend error code on failure
+// Starts a thread via pointer receiver helper. Returns -1 when `thread` is null.
 pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
   if thread == nil {
     ret -1;
@@ -114,25 +76,15 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 
 // Start a thread with Result. `Ok(true)` on success, `Err` with the backend code
 // otherwise (where `thread_start` returns a raw nonzero/-1 code that's easy to ignore).
-pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin> {
+pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin, Error> {
   let rc = thread_start(thread, entry, arg);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_start failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
-// Join a thread via pointer receiver helper.
-// 
-// Params:
-// - thread: thread handle pointer
-// - out_ret: optional output pointer for entry return value
-// 
-// Returns:
-// - 0 on success
-// - 0 when not started (no-op)
-// - -1 when thread is null
-// - nonzero backend error code on failure
+// Joins a thread via pointer receiver helper. Returns -1 when `thread` is null.
 pub fun thread_join(Thread* thread, raw* out_ret) num {
   if thread == nil {
     ret -1;
@@ -145,24 +97,15 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 }
 
 // Join a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin> {
+pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin, Error> {
   let rc = thread_join(thread, out_ret);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_join failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
-// Detach a thread via pointer receiver helper.
-// 
-// Params:
-// - thread: thread handle pointer
-// 
-// Returns:
-// - 0 on success
-// - 0 when not started (no-op)
-// - -1 when thread is null
-// - nonzero backend error code on failure
+// Detaches a thread via pointer receiver helper. Returns -1 when `thread` is null.
 pub fun thread_detach(Thread* thread) num {
   if thread == nil {
     ret -1;
@@ -175,26 +118,20 @@ pub fun thread_detach(Thread* thread) num {
 }
 
 // Detach a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_detach(Thread* thread) Result<bin> {
+pub fun try_thread_detach(Thread* thread) Result<bin, Error> {
   let rc = thread_detach(thread);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_detach failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
-// Return the current thread id.
-// 
-// Returns:
-// - current pthread handle
+// Returns the current thread's pthread handle.
 pub fun current_thread() pthread_t {
   ret pthread_self();
 }
 
-// Compare two thread ids.
-// 
-// Returns:
-// - true when equal
+// Returns true when two thread ids refer to the same thread.
 pub fun thread_equal(pthread_t a, pthread_t b) bin {
   ret pthread_equal(a, b) != 0;
 }

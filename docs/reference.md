@@ -58,6 +58,34 @@ pub quirk Display {
 ### Built-in Types
 - `num`, `dec`, `f32`, `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `iN`, `uN`, `bin`, `chr`, `str`, `raw`
 
+### Raw Strings
+A backtick-delimited literal (`` `...` ``) needs no escaping at all: a backslash
+or an embedded double-quote is just a literal byte.
+```fun
+let path = `C:\Users\name\file.txt`;
+let msg = `she said "hi" and left`;
+```
+
+Two forms, both starting with a backtick, disambiguated purely by whether you
+close it on the same line:
+- **Inline**: closed by another backtick on the same line (as above).
+- **Multi-line**: a backtick left unclosed before the line's newline starts a
+  block. Each subsequent line that begins (after leading whitespace) with its
+  own backtick contributes its own content, joined with a real newline byte,
+  ending at the first line that doesn't:
+  ```fun
+  let sql =
+    `SELECT *
+    `FROM users
+    `WHERE id = ?
+  ;
+  ```
+  Trailing code that needs to sit on the same line as the last content line
+  can close the block explicitly instead: `` `WHERE id = ?`; ``.
+
+A literal backtick inside a raw string still needs to be avoided (there's no
+escape for it) -- use a regular `"..."` string for that rare case instead.
+
 ### Arrays
 - Syntax: `num[] arr = [1, 2, 3];`
 - Array literals require uniform element types.
@@ -254,6 +282,20 @@ fun main() {
   let p = make_point(1, 2);  // Point
   let x = p.x;               // num
   let px = nums[0];          // num
+}
+```
+
+### Constants
+- `const` declares an immutable binding, at either top level or local (function-body) scope: `const MAX = 10;` (type inferred, same rules as `let`) or `const num MAX = 10;` (explicit type). Both forms require an initializer.
+- `pub const` exports a top-level constant, same as `pub num`/`pub let` for ordinary globals.
+- Reassigning a `const` (including via `+=`/`-=`/etc.) is a compile-time error, caught at typecheck for both local and global constants:
+```fun
+const num MAX = 100;
+
+fun main() {
+  const local_max = MAX;
+  MAX = 200;       // error: cannot assign to const 'MAX'
+  local_max += 1;   // error: cannot assign to const 'local_max'
 }
 ```
 
@@ -501,6 +543,11 @@ Examples:
 - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
 - `FUN_CC="clang -O2 {src} -o {out}"`
 
+`fun fuzz` does NOT use `FUN_CC`/`FUN_CC_ARGS` — it needs a compiler whose
+toolchain bundles a coverage-guided fuzzing runtime specifically, which has
+nothing to do with your ordinary build compiler, so it has its own separate
+`FUN_FUZZ_CC` override instead (see Fuzzing below).
+
 ## Runtime Backend Selection
 
 `std.runtime_backend` selects the runtime backend with this precedence:
@@ -530,6 +577,68 @@ overhead.
 The watchdog is a diagnostic aid; it never changes the behavior of a correct
 program. Choose a threshold comfortably above your longest legitimate blocking
 wait to avoid warning on slow-but-live operations.
+
+## Testing
+- `test "description" { ... }` at the top level; body reuses ordinary statement
+  parsing (`assert`, `panic`, `if`/`for`, ... all work inside).
+- Ignored entirely by an ordinary compile (not type-checked, not emitted) —
+  matches `zig build` vs `zig test`.
+- `fun test <path>` (or `-test`) compiles every discovered `test` block into a
+  runner and runs it. Tests run CONCURRENTLY, one per virtual task (`fork`),
+  printing `test: <name> ... PASS`/`FAIL` in completion order plus a final
+  `N/N tests passed` summary.
+- `fun test <path> -- "exact name"` filters to just the matching test(s) — no
+  separate flag; this is what an editor's per-test Run/Debug button uses.
+- A failing `assert` inside a test is caught and reported as `FAIL` without
+  aborting the run — every other test still executes. `panic` still aborts
+  the whole process (no per-test recovery for it); prefer `assert`.
+- `imp std.mock_time;` gives a `Clock` quirk (`SystemClock`/`MockClock`) for
+  testing time-dependent code deterministically, with no real waiting — see
+  the Testing section of `docs/language.md` for a worked example.
+
+## Fuzzing
+- `fuzz "description" (raw* data, num len) { ... }` at the top level.
+  Parameters are written out explicitly, like an ordinary function's, but
+  the types are fixed by the fuzzing calling convention (always
+  `raw*`/`num` — a byte buffer and its length) and a declaration with any
+  other shape is rejected.
+- Ignored entirely by an ordinary compile or `fun test` run, same reasoning
+  as `test` blocks.
+- `fun fuzz <path> [<target>]` (or `-fuzz [-fuzz-target <name>]`) compiles the
+  named `fuzz` block (or the only one, if there's just one) into a harness
+  with no `main` of its own — a coverage-guided fuzzing engine's own driver
+  supplies one, generating/mutating inputs toward ones that explore new code
+  paths, and saving any input that crashes the harness for later repro.
+- Unlike `test`, a crash (a failing `assert`, a real memory error) inside a
+  `fuzz` block is the whole point — it's left to abort the process outright
+  so the engine detects it.
+- Everything after `--` passes straight through to the engine's own argv
+  (ordinary Fun program-arg passthrough, no fuzz-specific wiring) — this is
+  how you control the ENGINE (`-max_total_time=N`, `-runs=N`, `-max_len=N`,
+  a corpus directory, ...), as opposed to `-fuzz-target`, which picks which
+  Fun `fuzz` block gets built. See the engine's own `-help=1` for the full
+  flag list.
+- Needs a compiler whose toolchain bundles that coverage-guided runtime —
+  not guaranteed on every platform/default install (notably: NOT Xcode's
+  bundled clang on macOS). `fun fuzz` tries `clang` first, then falls back
+  to Homebrew's LLVM (macOS) / versioned `clang-N` (Linux) / the official
+  LLVM installer's default path (Windows) before failing with a clear
+  message.
+- `FUN_FUZZ_CC` points at a specific compiler if none of those work for you.
+  Deliberately SEPARATE from `FUN_CC` (see C Compiler Selection above) —
+  your normal build compiler has nothing to do with whether it can ALSO do
+  coverage-guided fuzzing, so `fun fuzz` never reads `FUN_CC` at all; the
+  two build paths can use different compilers safely.
+- If it compiles but hangs on running: some sandboxed/containerized
+  environments hang during AddressSanitizer's own startup, unrelated to Fun
+  or the fuzzing engine. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety
+  half of the sanitizer flag — fuzzing still runs and still finds crashes.
+- Windows is unverified: the macOS (via the Homebrew-LLVM fallback) and
+  (expected, by similar reasoning) Linux paths have actually been confirmed
+  working; Windows has not, for lack of a machine to test on. Plain LLVM
+  `clang.exe` (not `clang-cl.exe`) should in principle accept the same
+  flags, but whether the runtime is bundled and the result runs correctly
+  is genuinely unverified.
 
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
@@ -561,7 +670,7 @@ wait to avoid warning on slow-but-live operations.
 - `std.map`: generic maps (`Map<K, V>`) with typed keys/values and bytewise hashed lookups by default
 - `std.set`: sets built on maps
 - `std.option`: generic `Option<T>` container
-- `std.result`: generic `Result<T>` container
+- `std.result`: generic `Result<T, E>` container (`Ok(T)`/`Err(E)`); the free-function constructors (`ok`/`err`/`err_kind`/`err_error`) are fixed to `E = Error` — a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
 - `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, token variants `*_with_token`, timeout variants), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`, token variants `*_with_token`), dedicated cancel tokens (`ChannelCancelToken`, `channel_cancel_token_*`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), and channel-level/per-call select wait-slice/backoff tuning (timeout and blocking variants), with synchronization routed through `std.sync_runtime`
@@ -581,12 +690,17 @@ wait to avoid warning on slow-but-live operations.
 - `std.log`: structured logging. `LogLevel` (`Trace`/`Debug`/`Info`/`Warn`/`Error`/`Fatal`, explicit ordered values), `LogFormat` (`Text`/`Json`), and a `Logger` that filters by level and routes to any `std.io.Sink`. Bare methods (`info`/`warn`/`error`/...) emit immediately; the fluent by-value builder (`l.info_r("msg").str_field(k,v).num_field(k,n).emit()`) attaches typed key/value fields. Text renders `[LEVEL] <ts> [name] msg k=v`; JSON renders one object per line (deterministic field order). Fluent config: `logger_init`/`logger_json`, `as_format`/`to_sink`/`named`/`route_errors`/`with_timestamps`. `route_errors(true)` sends `Warn`+ to stderr.
 - `std.quirks`: common quirks — `Sized`, `Display`, `Clearable`, `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>` (e.g. `impl Config as To<JsonValue>`), which back `std.json`'s structured (de)serialization and `std.serde`'s text-layer `to_string`/`from_string` alike.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
+- `std.mock_time`: a `Clock` quirk for time-mocked tests — `SystemClock` (the real clock) and `MockClock` (a fully controllable fake one, advanced only via explicit `advance`/`set` calls, never real time)
+- `std.testing`: the concurrent test-mode runner (`run_discovered_tests`) `fun test` auto-imports and calls into — not intended to be used directly from ordinary Fun source
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI
 ```
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-fuzz] [-fuzz-target <name>] [-help]
+fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
+fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
 
 ## Errors and Warnings

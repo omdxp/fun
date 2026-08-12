@@ -127,6 +127,12 @@ pub const NodeType = enum {
     Boolean,
     /// Represents the `nil` literal (a null pointer/string sentinel; emits C `NULL`).
     Nil,
+    /// Represents a `panic(msg)` expression: unifies with WHATEVER type is
+    /// expected at its use site (like `nil` does for pointers), so it can be
+    /// used as `ret panic("msg");`/a `let` initializer/a fit-arm body/etc.
+    /// regardless of the surrounding type. Never actually produces a value:
+    /// prints the message and aborts.
+    Panic,
     /// Represents a `fork` statement node (fire-and-forget virtual-thread spawn).
     StatementFork,
     /// Represents an elif statement node.
@@ -167,6 +173,13 @@ pub const NodeType = enum {
     Enum,
     /// Represents an implementation block binding a compound type to a quirk.
     Impl,
+    /// Represents a `test "name" { ... }` declaration (top-level only). Skipped
+    /// entirely by an ordinary compile; only emitted/run in `fun test` mode.
+    Test,
+    /// Represents a `fuzz "name" (data, len) { ... }` declaration (top-level
+    /// only). Skipped entirely by an ordinary compile OR `fun test` mode;
+    /// only emitted/run in `fun fuzz` mode.
+    Fuzz,
     /// Represents a blank node.
     Blank,
 };
@@ -189,6 +202,11 @@ pub const Node = struct {
     pos: ?token.Pos = null,
     /// The binded node associated with the node.
     binded: ?*BindedNode = null,
+    /// True for a `.String`-type node built from a backtick raw string
+    /// literal -- see `token.Token.is_raw_string`'s doc comment. Set by
+    /// the parser when constructing this node from its token; codegen and
+    /// the formatter both key off it for `.String` nodes specifically.
+    is_raw_string: bool = false,
     /// The token data associated with the node.
     data: ?token.TokenData = null,
     /// The variant data associated with the node.
@@ -213,6 +231,13 @@ pub const Node = struct {
             right: ?*Node = null,
             /// The operator used in the expression.
             op: []const u8,
+            /// For a call expression (`op == "()"`) written with EXPLICIT generic
+            /// type arguments (`ok<num, MyErrorKind>(42)`): the parsed type args,
+            /// in source order. `null` for an ordinary call (type params are
+            /// inferred from the argument values instead — see
+            /// `bind_generic_param` in transpiler.zig). Only ever set when `op ==
+            /// "()"`.
+            generic_args: ?utils.Vector(*dtype.DataType) = null,
         },
         /// The expression in parentheses node.
         paren: struct {
@@ -227,6 +252,11 @@ pub const Node = struct {
             name: ArrayList(u8),
             /// The value of the variable.
             val: ?*Node = null,
+            /// True for a `const` declaration (immutable after initialization,
+            /// enforced at typecheck time — see `check_variable`/reassignment
+            /// checks in transpiler.zig). False for an ordinary `let`/typed
+            /// mutable declaration.
+            is_const: bool = false,
         },
         /// The unary node.
         unary: struct {
@@ -255,6 +285,35 @@ pub const Node = struct {
         bracket: struct {
             /// The inner expression of the bracket.
             inner: *Node,
+        },
+        /// A `panic(msg)` expression (see `NodeType.Panic`).
+        panic_expr: struct {
+            /// The message expression (must resolve to `str`).
+            message: *Node,
+        },
+        /// A `test "name" { ... }` declaration (see `NodeType.Test`).
+        test_decl: struct {
+            /// The test's descriptive name (borrowed from the string token,
+            /// like `warning_ctrl.reason` -- not owned by this node).
+            name: []const u8,
+            body: *Node,
+        },
+        /// A `fuzz "name" (data, len) { ... }` declaration (see
+        /// `NodeType.Fuzz`). The two parameter names are user-chosen but
+        /// their TYPES are always fixed (`raw*`/`num`, the byte-buffer +
+        /// length a fuzzing engine feeds in) -- there is no type annotation
+        /// in the source syntax, only the two bare names, since the shape
+        /// never varies.
+        fuzz_decl: struct {
+            /// The fuzz target's descriptive name.
+            name: []const u8,
+            /// The buffer parameter: a synthetic `Variable` node, always
+            /// `raw*`, named by the user in source (see `parse_fuzz`).
+            data_param: *Node,
+            /// The length parameter: a synthetic `Variable` node, always
+            /// `num`, named by the user in source.
+            len_param: *Node,
+            body: *Node,
         },
         /// The compound initializer node.
         compound_init: struct {

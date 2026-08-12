@@ -1,0 +1,171 @@
+// Corpus tests whose fixtures call into the standard library. These
+// resolve imports from disk, so they cover the paths a source-only
+// harness cannot reach.
+
+imp harness;
+imp std.string;
+
+test "std.vec: push and get monomorphize on the element type" {
+  str src = `imp std.vec;
+  `imp std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(4);
+  `  v.push(7);
+  `  printf("%lld\n", v.get(0));
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_vec_push", "std.vec push/get");
+  assert contains(out, "Vec__num"), "expected the num instantiation";
+  assert contains(out, "Vec__num__push"), "expected the monomorphized push";
+}
+
+test "std.vec: two element types produce separate instantiations" {
+  str src = `imp std.vec;
+  `fun main() num {
+  `  Vec<num> a;
+  `  a.init(2);
+  `  a.push(1);
+  `  Vec<str> b;
+  `  b.init(2);
+  `  b.push("x");
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_vec_two", "std.vec two instantiations");
+  assert contains(out, "Vec__num__push"), "expected the num instantiation";
+  assert contains(out, "Vec__str__push"), "expected the str instantiation";
+}
+
+test "std.map: put and get monomorphize on both key and value types" {
+  str src = `imp std.map;
+  `imp std.c.io;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("a", 1);
+  `  printf("%lld\n", m.get("a"));
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_map_put", "std.map put/get");
+  assert contains(out, "Map__str__num"), "expected the key/value instantiation";
+  assert contains(out, "_key_hash"), "expected a key-hash intrinsic";
+}
+
+test "std.option: Some and None resolve against the declared type" {
+  str src = `imp std.option;
+  `fun main() num {
+  `  Option<num> a = .Some(5);
+  `  Option<num> b = .None;
+  `  if a.is_some() {
+  `    ret a.unwrap();
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_option", "std.option Some/None");
+  assert contains(out, "Option__num"), "expected the num instantiation";
+  assert contains(out, "Option__num_Some"), "expected the Some tag";
+}
+
+test "std.result: Ok and Err carry their payloads" {
+  str src = `imp std.result;
+  `imp std.error;
+  `fun try_it(num n) Result<num, Error> {
+  `  if n < 0 {
+  `    ret err_kind(.Invalid, "negative", 0);
+  `  }
+  `  ret .Ok(n);
+  `}
+  `fun main() num {
+  `  let r = try_it(3);
+  `  if r.is_ok() {
+  `    ret r.unwrap();
+  `  }
+  `  ret 1;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_result", "std.result Ok/Err");
+  assert contains(out, "Result__num__Error"), "expected the payload instantiation";
+}
+
+test "std.string: builder append and build resolve through the impl" {
+  str src = `imp std.string;
+  `imp std.c.io;
+  `fun main() num {
+  `  StringBuilder b = string_builder_init(8);
+  `  b.append("hi");
+  `  printf("%s\n", b.build());
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_strbuf", "std.string builder");
+  assert contains(out, "StringBuilder__append"), "expected the append method";
+  assert contains(out, "StringBuilder__build"), "expected the build method";
+}
+
+test "std.io: println_fmt lowers to the variadic format helper" {
+  str src = `imp std.io;
+  `fun main() num {
+  `  println_fmt("n={}", 42);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_io_fmt", "std.io println_fmt");
+  assert contains(out, "__fun_vtags"), "expected the vararg tag array";
+  assert contains(out, "format_impl"), "expected the format helper";
+}
+
+test "std.set: add and has monomorphize on the element type" {
+  str src = `imp std.set;
+  `fun main() num {
+  `  Set<str> s = set_init("", 8);
+  `  s.add("a");
+  `  if s.has("a") {
+  `    ret 1;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_set", "std.set add/has");
+  assert contains(out, "Set__str"), "expected the str instantiation";
+}
+
+test "std.channel: send and recv monomorphize on the payload type" {
+  str src = `imp std.channel;
+  `fun main() num {
+  `  Channel<num> ch = channel_new(0, 4);
+  `  ch.send(1);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_channel", "std.channel send");
+  assert contains(out, "Channel__num"), "expected the num instantiation";
+  assert contains(out, "Channel__num__send"), "expected the monomorphized send";
+}
+
+test "for-each over a Vec iterates by length and index" {
+  str src = `imp std.vec;
+  `imp std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(4);
+  `  v.push(1);
+  `  v.push(2);
+  `  for x : v {
+  `    printf("%lld\n", x);
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_vec_iter", "for-each over Vec");
+  assert contains(out, ".len"), "expected the length bound";
+  assert contains(out, ".data["), "expected indexed element access";
+}
+
+test "a quirk implemented by a stdlib type dispatches through its vtable" {
+  str src = `imp std.vec;
+  `imp std.quirks;
+  `imp std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(2);
+  `  v.push(1);
+  `  printf("%lld\n", v.len());
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "sl_quirk_sized", "Sized quirk on Vec");
+  assert contains(out, "Vec__num"), "expected the instantiation";
+}

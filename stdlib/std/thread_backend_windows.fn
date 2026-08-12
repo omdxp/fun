@@ -1,33 +1,27 @@
 // Windows thread backend implementation.
 // 
-// Notes:
-// - This module defines the Windows backend contract used by std.thread_runtime.
-// - It talks directly to pthread-shaped primitives from std.c.thread_windows.
-// - Return codes follow the Windows compatibility backend.
+// Defines the Windows backend contract used by std.thread_runtime. Talks
+// directly to pthread-shaped primitives from std.c.thread_windows. Unless
+// noted otherwise, these return 0 on success (including as a no-op when
+// already in the target state) and a nonzero backend error code on failure.
 
 imp std.c.thread_windows;
 imp std.thread;
 
-// Legacy compatibility function kept for API stability.
+// Always returns 0; kept for API stability across backend implementations.
 pub fun thread_backend_windows_unavailable() num {
   ret 0;
 }
 
-// Create a new Windows backend thread handle.
+// Creates a new Windows backend thread handle.
 pub fun thread_backend_windows_new() Thread {
   Thread t;
   t.started = false;
   ret t;
 }
 
-// Start a Windows backend thread handle.
-// 
-// Returns:
-// - 0 on success
-// - 0 when already started (no-op)
-// - -1 when thread is null
-// - -2 when entry is null
-// - nonzero backend error code on failure
+// Starts a Windows backend thread handle. Returns -1 when `thread` is null,
+// -2 when `entry` is null.
 pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
   if thread == nil {
     ret -1;
@@ -49,13 +43,7 @@ pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
   ret rc;
 }
 
-// Join a Windows backend thread handle.
-// 
-// Returns:
-// - 0 on success
-// - 0 when not started (no-op)
-// - -1 when thread is null
-// - nonzero backend error code on failure
+// Joins a Windows backend thread handle. Returns -1 when `thread` is null.
 pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
   if thread == nil {
     ret -1;
@@ -74,13 +62,7 @@ pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
   ret rc;
 }
 
-// Detach a Windows backend thread handle.
-// 
-// Returns:
-// - 0 on success
-// - 0 when not started (no-op)
-// - -1 when thread is null
-// - nonzero backend error code on failure
+// Detaches a Windows backend thread handle. Returns -1 when `thread` is null.
 pub fun thread_backend_windows_detach(Thread* thread) num {
   if thread == nil {
     ret -1;

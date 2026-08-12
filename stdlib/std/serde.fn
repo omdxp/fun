@@ -1,21 +1,17 @@
-// Serialization (text layer), built directly on `std.quirks`' generic `To<T>`/
-// `From<T>`. A type that converts to/from `str` — `impl JsonValue as To<str>`,
-// `impl TomlDoc as From<str>` — is what "serializable"/"deserializable" MEANS
-// here; there's no separate `Serialize`/`Deserialize` quirk to maintain, and
-// no reason the target representation has to be `str` specifically — the same
-// `To<T>`/`From<T>` primitive generalizes to any target type (e.g. `std.json`'s
-// `to_json_value`/`to_json_string` do the identical thing with `T = JsonValue`).
+// Serialization built on `std.quirks`' generic `To<T>`/`From<T>`. A type
+// that converts to/from `str` (e.g. `impl TomlDoc as From<str>`) is what
+// serializable means here — there's no separate `Serialize`/`Deserialize`
+// quirk, and the same primitive generalizes to other target types (e.g.
+// `std.json` targets `JsonValue`).
 // 
 // ```
 // To<str> s = &doc;
 // str text = to_string(s);
 // ```
 // 
-// For STRUCTURED, typed (de)serialization of your own compounds, see
-// `std.quirks`' `To<JsonValue>`/`From<JsonValue>` (and `std.json`'s
-// `to_json_value`/`to_json_string` wrappers): Fun has no reflection or derive
-// macros, so each type hand-implements the conversion to/from a `JsonValue` —
-// the explicit, reflection-free equivalent of `#[derive(Serialize, Deserialize)]`.
+// For structured, typed (de)serialization of your own compounds, see
+// `std.quirks`'s `To<JsonValue>`/`From<JsonValue>`. Fun has no reflection or
+// derive macros, so each type hand-implements the conversion.
 
 imp std.quirks;
 

@@ -1,0 +1,5 @@
+imp std.io as myio;
+
+fun main() {
+  myio.print_fmt("count={num}", 42);
+}

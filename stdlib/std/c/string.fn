@@ -1,211 +1,75 @@
 // C strings and memory utilities (string.h)
 // 
-// Notes:
-// - `str` models a C `char*` in these bindings.
-// - Most operations assume NUL-terminated strings and valid pointers.
+// `str` models a C `char*` in these bindings.
+// Most operations assume NUL-terminated strings and valid pointers.
 
-// Returns the length of a NUL-terminated string.
-// 
-// Params:
-// - s: input string
-// 
-// Returns:
-// - number of bytes before the terminating NUL (C semantics)
+// Returns the length of a NUL-terminated string (bytes before the
+// terminating NUL, C semantics).
 pub fun strlen(str s) num;
 
-// Lexicographically compares two NUL-terminated strings.
-// 
-// Params:
-// - a: first string
-// - b: second string
-// 
-// Returns:
-// - <0, 0, >0 (C semantics)
+// Lexicographically compares two NUL-terminated strings, returning <0, 0, >0
+// (C semantics).
 pub fun strcmp(str a, str b) num;
 
-// Compares up to n characters of two strings.
-// 
-// Params:
-// - a: first string
-// - b: second string
-// - n: maximum characters to compare
-// 
-// Returns:
-// - <0, 0, >0 (C semantics)
+// Compares up to n characters of two strings, returning <0, 0, >0 (C semantics).
 pub fun strncmp(str a, str b, num n) num;
 
-// Finds the first occurrence of a character in a string.
-// 
-// Params:
-// - s: input string
-// - c: character to search for
-// 
-// Returns:
-// - pointer into s or null (C semantics)
+// Finds the first occurrence of character c in s, returning a pointer into
+// s or null (C semantics).
 pub fun strchr(str s, chr c) str;
 
-// Finds the last occurrence of a character in a string.
-// 
-// Params:
-// - s: input string
-// - c: character to search for
-// 
-// Returns:
-// - pointer into s or null (C semantics)
+// Finds the last occurrence of character c in s, returning a pointer into s
+// or null (C semantics).
 pub fun strrchr(str s, chr c) str;
 
-// Computes the length of the initial segment of s that contains none of reject.
-// 
-// Params:
-// - s: input string
-// - reject: set of rejected characters
-// 
-// Returns:
-// - length in bytes of the initial segment (C semantics)
+// Returns the length in bytes of the initial segment of s that contains
+// none of the characters in reject (C semantics).
 pub fun strcspn(str s, str reject) num;
 
-// Computes the length of the initial segment of s that contains only accept.
-// 
-// Params:
-// - s: input string
-// - accept: set of accepted characters
-// 
-// Returns:
-// - length in bytes of the initial segment (C semantics)
+// Returns the length in bytes of the initial segment of s that contains
+// only characters from accept (C semantics).
 pub fun strspn(str s, str accept) num;
 
-// Finds the first character in s that matches any character in accept.
-// 
-// Params:
-// - s: input string
-// - accept: set of accepted characters
-// 
-// Returns:
-// - pointer into s or null (C semantics)
+// Finds the first character in s that matches any character in accept,
+// returning a pointer into s or null (C semantics).
 pub fun strpbrk(str s, str accept) str;
 
-// Tokenizes a string using a set of delimiters.
-// 
-// Params:
-// - s: string to tokenize (or null to continue tokenizing)
-// - delim: delimiter character set
-// 
-// Returns:
-// - next token or null (C semantics)
+// Tokenizes s using the delimiter character set delim; pass null for s to
+// continue tokenizing. Returns the next token or null (C semantics).
 pub fun strtok(str s, str delim) str;
 
-// Returns a human-readable message for an error number.
-// 
-// Params:
-// - errnum: error number
-// 
-// Returns:
-// - pointer to message string (C semantics)
+// Returns a human-readable message for error number errnum (C semantics).
 pub fun strerror(num errnum) str;
 
-// Copies a NUL-terminated string.
-// 
-// Params:
-// - dst: destination buffer
-// - src: source string
-// 
-// Returns:
-// - dst (C semantics)
+// Copies NUL-terminated string src into dst, returning dst (C semantics).
 pub fun strcpy(str dst, str src) str;
 
-// Copies up to n characters of a string.
-// 
-// Params:
-// - dst: destination buffer
-// - src: source string
-// - n: max characters
-// 
-// Returns:
-// - dst (C semantics)
+// Copies up to n characters of src into dst, returning dst (C semantics).
 pub fun strncpy(str dst, str src, num n) str;
 
-// Appends a string to another.
-// 
-// Params:
-// - dst: destination string buffer (must have room)
-// - src: source string
-// 
-// Returns:
-// - dst (C semantics)
+// Appends src to dst (dst must have room), returning dst (C semantics).
 pub fun strcat(str dst, str src) str;
 
-// Appends up to n characters from src to dst.
-// 
-// Params:
-// - dst: destination string buffer (must have room)
-// - src: source string
-// - n: max characters
-// 
-// Returns:
-// - dst (C semantics)
+// Appends up to n characters from src to dst (dst must have room),
+// returning dst (C semantics).
 pub fun strncat(str dst, str src, num n) str;
 
-// Finds the first occurrence of needle in haystack.
-// 
-// Params:
-// - haystack: string to search
-// - needle: substring to find
-// 
-// Returns:
-// - pointer into haystack or null (C semantics)
+// Finds the first occurrence of needle in haystack, returning a pointer
+// into haystack or null (C semantics).
 pub fun strstr(str haystack, str needle) str;
 
-// Copies n bytes from src to dst (no overlap allowed).
-// 
-// Params:
-// - dst: destination memory
-// - src: source memory
-// - n: bytes
-// 
-// Returns:
-// - dst (C semantics)
+// Copies n bytes from src to dst (no overlap allowed), returning dst (C semantics).
 pub fun memcpy(raw* dst, raw* src, num n) raw*;
 
-// Copies n bytes from src to dst (overlap allowed).
-// 
-// Params:
-// - dst: destination memory
-// - src: source memory
-// - n: bytes
-// 
-// Returns:
-// - dst (C semantics)
+// Copies n bytes from src to dst (overlap allowed), returning dst (C semantics).
 pub fun memmove(raw* dst, raw* src, num n) raw*;
 
-// Sets n bytes of memory to a byte value.
-// 
-// Params:
-// - dst: destination memory
-// - val: byte value
-// - n: bytes
-// 
-// Returns:
-// - dst (C semantics)
+// Sets n bytes of dst to byte value val, returning dst (C semantics).
 pub fun memset(raw* dst, num val, num n) raw*;
 
-// Compares n bytes of two memory areas.
-// 
-// Params:
-// - a: first buffer
-// - b: second buffer
-// - n: bytes
-// 
-// Returns:
-// - <0, 0, >0 (C semantics)
+// Compares n bytes of two memory areas, returning <0, 0, >0 (C semantics).
 pub fun memcmp(raw* a, raw* b, num n) num;
 
-// Searches for a byte value in the first n bytes.
-// 
-// Params:
-// - s: memory buffer
-// - c: byte value
-// - n: bytes
-// 
-// Returns:
-// - pointer to matching byte or null (C semantics)
+// Searches for byte value c in the first n bytes of s, returning a pointer
+// to the matching byte or null (C semantics).
 fun memchr(raw* s, num c, num n) raw*;

@@ -5,6 +5,7 @@
 imp std.c.mem;
 imp std.vec;
 imp std.result;
+imp std.error;
 imp token;
 imp ast;
 imp lexer;
@@ -45,7 +46,7 @@ fun parser_mk_bin(chr op, Expr* l, Expr* r) Expr* {
   ret e;
 }
 
-fun parser_mk_call(str name, Vec<Expr *> args) Expr* {
+fun parser_mk_call(str name, Vec<Expr*> args) Expr* {
   Expr* e = malloc(sizeof(Expr));
   *e = Expr.Call(name, args);
   ret e;
@@ -139,9 +140,9 @@ impl Parser {
   // Real variable-arity call: `f()`, `f(a)`, `f(a, b, ...)`.
   parse_call(str name) Expr* {
     self.advance();
-    Vec<Expr *> args;
+    Vec<Expr*> args;
     args.init(4);
-    if ! token_is_rparen(self.peek()) {
+    if !token_is_rparen(self.peek()) {
       args.push(self.parse_expr());
       for token_is_comma(self.peek()) {
         self.advance();
@@ -153,13 +154,13 @@ impl Parser {
   }
 }
 
-pub fun parse(str src) Result<Expr *> {
+pub fun parse(str src) Result<Expr*, Error> {
   Vec<Token> toks = tokenize(src);
   Parser p = parser_new(toks);
   Expr* result = p.parse_expr();
   let trailing = p.peek();
   fit trailing {
-    Token.Eof -> { ret ok(result); }
+    Token.Eof -> { ret .Ok(result); }
     _ -> { ret err(1, "unexpected trailing tokens after expression", result); }
   }
 }

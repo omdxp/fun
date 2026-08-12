@@ -37,22 +37,22 @@ The following operations are treated as compatibility anchors:
 
 | Operation | Expected result |
 | --- | --- |
-| `try_recv` on open+empty channel | `channel_rc_empty()` (`2`) |
-| `send_timeout` when space available | `channel_rc_ok()` (`0`) |
-| `try_send` on full channel | `channel_rc_full()` (`2`) |
-| `recv_timeout_into` with queued value | `channel_rc_ok()` (`0`) and value consumed |
-| `recv_timeout_into` on open+empty channel | `channel_rc_timeout()` (`2`) |
-| `send_timeout_with_cancel` with raised cancel flag | `channel_rc_cancelled()` (`3`) |
-| `send_timeout` after `close()` | `channel_rc_closed()` (`1`) |
-| `recv_timeout_into` after close+drain | `channel_rc_closed()` (`1`) |
-| `select_recv_default_with` on two open+empty channels | `channel_rc_default()` (`3`), index `channel_select_index_default()` (`-1`) |
-| `select_recv_timeout_with_tuning_cancel` on two open+empty channels | `channel_rc_timeout()` (`2`) |
-| `select_recv_timeout_with_tuning_cancel` with raised cancel flag | `channel_rc_cancelled()` (`3`) |
+| `try_recv` on open+empty channel | `CHANNEL_RC_EMPTY` (`2`) |
+| `send_timeout` when space available | `CHANNEL_RC_OK` (`0`) |
+| `try_send` on full channel | `CHANNEL_RC_FULL` (`2`) |
+| `recv_timeout_into` with queued value | `CHANNEL_RC_OK` (`0`) and value consumed |
+| `recv_timeout_into` on open+empty channel | `CHANNEL_RC_TIMEOUT` (`2`) |
+| `send_timeout_with_cancel` with raised cancel flag | `CHANNEL_RC_CANCELLED` (`3`) |
+| `send_timeout` after `close()` | `CHANNEL_RC_CLOSED` (`1`) |
+| `recv_timeout_into` after close+drain | `CHANNEL_RC_CLOSED` (`1`) |
+| `select_recv_default_with` on two open+empty channels | `CHANNEL_RC_DEFAULT` (`3`), index `CHANNEL_SELECT_INDEX_DEFAULT` (`-1`) |
+| `select_recv_timeout_with_tuning_cancel` on two open+empty channels | `CHANNEL_RC_TIMEOUT` (`2`) |
+| `select_recv_timeout_with_tuning_cancel` with raised cancel flag | `CHANNEL_RC_CANCELLED` (`3`) |
 
 Alias constraints are also part of compatibility:
 
-- `channel_rc_timeout() == channel_rc_full() == channel_rc_empty() == 2`
-- `channel_rc_default() == channel_rc_cancelled() == 3`
+- `CHANNEL_RC_TIMEOUT == CHANNEL_RC_FULL == CHANNEL_RC_EMPTY == 2`
+- `CHANNEL_RC_DEFAULT == CHANNEL_RC_CANCELLED == 3`
 
 ## Stress Benchmark Thresholds
 
@@ -69,7 +69,7 @@ A micro-benchmark validates select round-robin fairness and timeout stability:
 
 ## CI Gate
 
-The tests in tests/codegen_test.zig are the executable gate:
+The following tests are the executable gate:
 
 - `std.channel runtime conformance matrix is stable across backend selectors`
 - `std.channel fairness and timeout benchmark stays within backend thresholds`

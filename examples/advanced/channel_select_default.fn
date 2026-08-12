@@ -6,15 +6,15 @@ fun main() {
   Channel<num> b = channel_new(0);
 
   num out = 0;
-  num idx = channel_select_index_default();
+  num idx = CHANNEL_SELECT_INDEX_DEFAULT;
   num rc = a.select_recv_default_with(&b, &out, &idx);
 
   num ok_rc = 0;
-  if rc == channel_rc_default() {
+  if rc == CHANNEL_RC_DEFAULT {
     ok_rc = 1;
   }
   num ok_idx = 0;
-  if idx == channel_select_index_default() {
+  if idx == CHANNEL_SELECT_INDEX_DEFAULT {
     ok_idx = 1;
   }
 

@@ -1,0 +1,7 @@
+imp std.c.io;
+imp agc_lib as g;
+
+fun main() num {
+  printf("%lld\n", g.ident(123));
+  ret 0;
+}

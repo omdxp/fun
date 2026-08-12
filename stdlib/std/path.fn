@@ -1,15 +1,10 @@
 // Path helpers.
-// 
-// Usage:
-// ```
-// Path p = path("/tmp");
-// str joined = p.join("file.txt");
-// ```
 
 imp std.c.mem;
 imp std.string;
 imp std.vec;
 imp std.result;
+imp std.error;
 
 // Path wrapper.
 pub compound Path {
@@ -17,13 +12,7 @@ pub compound Path {
   str value;
 }
 
-// Create a Path wrapper.
-// 
-// Params:
-// - value: path string
-// 
-// Returns:
-// - initialized path wrapper
+// Creates a Path wrapper around a path string.
 pub fun path(str value) Path {
   Path p;
   p.value = value;
@@ -31,59 +20,33 @@ pub fun path(str value) Path {
 }
 
 impl Path {
-  // Join this path with another path segment.
-  // 
-  // Params:
-  // - other: child path segment
-  // 
-  // Returns:
-  // - joined path string
+  // Joins this path with another path segment.
   pub join(str other) str {
     ret path_join(self.value, other);
   }
 
-  // Return the base name of the path.
-  // 
-  // Returns:
-  // - final path segment
+  // Final segment of the path.
   pub basename() str {
     ret basename(self.value);
   }
 
-  // Return the directory portion of the path.
-  // 
-  // Returns:
-  // - directory component of the path
+  // Directory portion of the path.
   pub dirname() str {
     ret dirname(self.value);
   }
 
-  // Return the file extension of the path.
-  // 
-  // Returns:
-  // - file extension including the leading dot
-  // - empty string when no extension is present
+  // File extension including the leading dot, or empty string if none.
   pub extname() str {
     ret extname(self.value);
   }
 
-  // Return true when the path is absolute.
-  // 
-  // Returns:
-  // - true when the path is absolute under POSIX rules
+  // True when the path is absolute under POSIX rules.
   pub is_abs() bin {
     ret is_abs(self.value);
   }
 }
 
-// Join two path segments.
-// 
-// Params:
-// - a: base path
-// - b: child path
-// 
-// Returns:
-// - joined path
+// Joins two path segments.
 pub fun path_join(str a, str b) str {
   let alen = len(a);
   let blen = len(b);
@@ -135,30 +98,16 @@ pub fun path_join(str a, str b) str {
   ret out;
 }
 
-// Join two path segments and report allocation failure as a Result.
-// 
-// Params:
-// - a: base path
-// - b: child path
-// 
-// Returns:
-// - `Ok(joined_path)` on success
-// - `Err` when allocation fails
-pub fun try_path_join(str a, str b) Result<str> {
+// Joins two path segments, returning `Err` when allocation fails.
+pub fun try_path_join(str a, str b) Result<str, Error> {
   let out = path_join(a, b);
   if out == nil {
     ret err_kind(.Invalid, "path_join failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
-// Join multiple segments.
-// 
-// Params:
-// - parts: vector of path parts
-// 
-// Returns:
-// - joined path
+// Joins multiple path segments in order.
 pub fun path_join_many(Vec<str>* parts) str {
   if parts.len() == 0 {
     ret "";
@@ -177,29 +126,16 @@ pub fun path_join_many(Vec<str>* parts) str {
   ret out;
 }
 
-// Join multiple path segments and report allocation failure as a Result.
-// 
-// Params:
-// - parts: vector of path parts
-// 
-// Returns:
-// - `Ok(joined_path)` on success
-// - `Err` when allocation fails
-pub fun try_path_join_many(Vec<str>* parts) Result<str> {
+// Joins multiple path segments, returning `Err` when allocation fails.
+pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
   let out = path_join_many(parts);
   if out == nil {
     ret err_kind(.Invalid, "path_join_many failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
-// True if path is absolute (posix).
-// 
-// Params:
-// - path: path string
-// 
-// Returns:
-// - true if absolute
+// True if path is absolute (POSIX rules).
 pub fun is_abs(str path) bin {
   if len(path) == 0 {
     ret false;
@@ -207,13 +143,7 @@ pub fun is_abs(str path) bin {
   ret path[0] == '/';
 }
 
-// Base name of a path.
-// 
-// Params:
-// - path: path string
-// 
-// Returns:
-// - last path segment
+// Last segment of a path.
 pub fun basename(str path) str {
   let path_len = len(path);
   if path_len == 0 {
@@ -235,13 +165,7 @@ pub fun basename(str path) str {
   ret substr(path, start, path_len - start);
 }
 
-// Directory name of a path.
-// 
-// Params:
-// - path: path string
-// 
-// Returns:
-// - directory portion
+// Directory portion of a path.
 pub fun dirname(str path) str {
   let path_len = len(path);
   if path_len == 0 {
@@ -265,13 +189,7 @@ pub fun dirname(str path) str {
   ret substr(path, 0, last);
 }
 
-// File extension of a path.
-// 
-// Params:
-// - path: path string
-// 
-// Returns:
-// - extension (including leading dot) or empty string
+// File extension of a path, including the leading dot, or empty string.
 pub fun extname(str path) str {
   let path_len = len(path);
   num i = path_len;
@@ -296,13 +214,7 @@ pub fun extname(str path) str {
   ret substr(path, last_dot, path_len - last_dot);
 }
 
-// Strip extension from a path.
-// 
-// Params:
-// - path: path string
-// 
-// Returns:
-// - path without extension
+// Strips the extension from a path.
 pub fun strip_ext(str path) str {
   let ext = extname(path);
   if len(ext) == 0 {
@@ -313,14 +225,7 @@ pub fun strip_ext(str path) str {
   ret substr(path, 0, plen - elen);
 }
 
-// Change or add an extension.
-// 
-// Params:
-// - path: path string
-// - new_ext: new extension (with or without leading dot)
-// 
-// Returns:
-// - path with new extension
+// Changes or adds an extension (`new_ext` with or without a leading dot).
 pub fun change_ext(str path, str new_ext) str {
   let base = strip_ext(path);
   if len(new_ext) == 0 {
@@ -360,19 +265,11 @@ pub fun change_ext(str path, str new_ext) str {
   ret out;
 }
 
-// Change or add an extension and report allocation failure as a Result.
-// 
-// Params:
-// - path: path string
-// - new_ext: new extension with or without a leading dot
-// 
-// Returns:
-// - `Ok(path_with_new_extension)` on success
-// - `Err` when allocation fails
-pub fun try_change_ext(str path, str new_ext) Result<str> {
+// Changes or adds an extension, returning `Err` when allocation fails.
+pub fun try_change_ext(str path, str new_ext) Result<str, Error> {
   let out = change_ext(path, new_ext);
   if out == nil {
     ret err_kind(.Invalid, "change_ext failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }

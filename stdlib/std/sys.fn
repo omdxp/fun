@@ -1,70 +1,45 @@
 // System utilities (process, environment, and randomness).
-// 
-// Usage:
-// ```
-// str home = env("HOME");
-// if home == nil { sys_exit(1); }
-// ```
 
 imp std.c.mem;
 imp std.result;
+imp std.error;
 
-// Read an environment variable.
-// 
-// Params:
-// - name: variable name
-// 
-// Returns:
-// - value string or null
+// Reads an environment variable, returning null if missing.
 pub fun env(str name) str {
   ret getenv(name);
 }
 
-// Read an environment variable with Result.
-pub fun try_env(str name) Result<str> {
+// Reads an environment variable with Result.
+pub fun try_env(str name) Result<str, Error> {
   let out = env(name);
   if out == nil {
     ret err_kind(.NotFound, "env missing", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
-// Exit the process with a status code.
-// 
-// Params:
-// - code: exit status
+// Exits the process with the given status code.
 pub fun sys_exit(num code) {
   exit(code);
 }
 
-// Abort the process immediately.
+// Aborts the process immediately.
 pub fun sys_abort() {
   abort();
 }
 
-// Execute a command using the host shell.
-// 
-// Params:
-// - command: command string
-// 
-// Returns:
-// - implementation-defined status code
+// Executes a command using the host shell, returning an
+// implementation-defined status code.
 pub fun sys_system(str command) num {
   ret system(command);
 }
 
-// Seed the pseudo-random generator.
-// 
-// Params:
-// - seed: seed value
+// Seeds the pseudo-random generator.
 pub fun rand_seed(num seed) {
   srand(seed);
 }
 
-// Get the next pseudo-random number.
-// 
-// Returns:
-// - integer in 0..RAND_MAX
+// Returns the next pseudo-random integer in 0..RAND_MAX.
 pub fun rand_next() num {
   ret rand();
 }

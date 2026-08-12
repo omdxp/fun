@@ -1,0 +1,5 @@
+imp std.c.io;
+
+pub fun say_hello() {
+  printf("hello\n");
+}

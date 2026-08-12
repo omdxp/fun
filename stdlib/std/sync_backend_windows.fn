@@ -1,9 +1,5 @@
-// Windows synchronization backend implementation.
-// 
-// Notes:
-// - This module defines the Windows backend contract used by std.sync_runtime.
-// - It talks directly to pthread-shaped primitives from std.c.thread_windows.
-// - Return codes follow the Windows compatibility backend.
+// Windows synchronization backend implementation, used by std.sync_runtime.
+// Talks directly to pthread-shaped primitives from std.c.thread_windows.
 
 imp std.c.thread_windows;
 imp std.sync;
@@ -27,13 +23,8 @@ pub fun sync_backend_windows_condvar_new() CondVar {
   ret c;
 }
 
-// Initialize a Windows backend mutex.
-// 
-// Returns:
-// - 0 on success
-// - 0 when already initialized (no-op)
-// - -1 when mutex is null
-// - nonzero backend error code on failure
+// Initializes a Windows backend mutex. No-op if already initialized.
+// Returns -1 when `mutex` is null.
 pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -52,12 +43,8 @@ pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
   ret rc;
 }
 
-// Lock a Windows backend mutex.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - nonzero backend error code on failure
+// Locks a Windows backend mutex, auto-initializing on first use. Returns
+// -1 when `mutex` is null.
 pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -77,12 +64,8 @@ pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
   ret rc;
 }
 
-// Try lock a Windows backend mutex.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - nonzero backend error code on failure
+// Tries to lock a Windows backend mutex without blocking, auto-initializing
+// on first use. Returns -1 when `mutex` is null.
 pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -102,13 +85,8 @@ pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
   ret rc;
 }
 
-// Unlock a Windows backend mutex.
-// 
-// Returns:
-// - 0 on success
-// - 0 when uninitialized (no-op)
-// - -1 when mutex is null
-// - nonzero backend error code on failure
+// Unlocks a Windows backend mutex. No-op if uninitialized. Returns -1 when
+// `mutex` is null.
 pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -124,13 +102,8 @@ pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
   ret rc;
 }
 
-// Destroy a Windows backend mutex.
-// 
-// Returns:
-// - 0 on success
-// - 0 when uninitialized (no-op)
-// - -1 when mutex is null
-// - nonzero backend error code on failure
+// Destroys a Windows backend mutex. No-op if uninitialized. Returns -1
+// when `mutex` is null.
 pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -149,13 +122,8 @@ pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
   ret rc;
 }
 
-// Initialize a Windows backend condition variable.
-// 
-// Returns:
-// - 0 on success
-// - 0 when already initialized (no-op)
-// - -1 when cond is null
-// - nonzero backend error code on failure
+// Initializes a Windows backend condition variable. No-op if already
+// initialized. Returns -1 when `cond` is null.
 pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -174,12 +142,8 @@ pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
   ret rc;
 }
 
-// Wait on a Windows backend condition variable.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond or mutex is null
-// - nonzero backend error code on failure
+// Waits on a Windows backend condition variable, auto-initializing both
+// on first use. Returns -1 when `cond` or `mutex` is null.
 pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
   if cond == nil || mutex == nil {
     ret -1;
@@ -213,13 +177,9 @@ pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
   ret rc;
 }
 
-// Timed wait on a Windows backend condition variable.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond or mutex is null
-// - -2 when abs_time is null
-// - nonzero backend error code on timeout/failure
+// Waits on a Windows backend condition variable until the absolute timeout
+// `abs_time`. Returns -1 when `cond` or `mutex` is null, -2 when
+// `abs_time` is null.
 pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   if cond == nil || mutex == nil {
     ret -1;
@@ -256,13 +216,8 @@ pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw
   ret rc;
 }
 
-// Signal one Windows backend condition variable waiter.
-// 
-// Returns:
-// - 0 on success
-// - 0 when uninitialized (no-op)
-// - -1 when cond is null
-// - nonzero backend error code on failure
+// Signals one Windows backend condition variable waiter. No-op if
+// uninitialized. Returns -1 when `cond` is null.
 pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -278,13 +233,8 @@ pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
   ret rc;
 }
 
-// Broadcast to all Windows backend condition variable waiters.
-// 
-// Returns:
-// - 0 on success
-// - 0 when uninitialized (no-op)
-// - -1 when cond is null
-// - nonzero backend error code on failure
+// Broadcasts to all Windows backend condition variable waiters. No-op if
+// uninitialized. Returns -1 when `cond` is null.
 pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -300,13 +250,8 @@ pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
   ret rc;
 }
 
-// Destroy a Windows backend condition variable.
-// 
-// Returns:
-// - 0 on success
-// - 0 when uninitialized (no-op)
-// - -1 when cond is null
-// - nonzero backend error code on failure
+// Destroys a Windows backend condition variable. No-op if uninitialized.
+// Returns -1 when `cond` is null.
 pub fun sync_backend_windows_condvar_destroy(CondVar* cond) num {
   if cond == nil {
     ret -1;

@@ -1,11 +1,4 @@
 // Generic map with typed keys and values.
-// 
-// Usage:
-// ```
-// Map<num, str> m;
-// m.init(8);
-// m.put(1, "a");
-// ```
 
 imp std.c.mem;
 imp std.c.string;
@@ -31,39 +24,24 @@ pub compound Map<K, V> {
 }
 
 impl Map<K, V> as Sized {
-  // Return the number of live entries.
-  // 
-  // Returns:
-  // - live entry count
+  // Returns the number of live entries.
   pub len() num {
     ret self.len;
   }
 
-  // Return true when the map holds no entries.
-  // 
-  // Returns:
-  // - true when the map is empty
+  // Returns true when the map holds no entries.
   pub is_empty() bin {
     ret self.len == 0;
   }
 
-  // Return the current slot capacity.
-  // 
-  // Returns:
-  // - allocated slot count
+  // Returns the allocated slot capacity.
   pub capacity() num {
     ret self.cap;
   }
 }
 
 impl Map<K, V> {
-  // Initialize the map with at least the requested capacity.
-  // 
-  // Params:
-  // - cap: requested initial slot capacity
-  // 
-  // Notes:
-  // - Capacities smaller than 8 are rounded up to 8.
+  // Initializes the map with at least `cap` slots, rounded up to a minimum of 8.
   pub init(num cap = 8) {
     self.key_slots = nil;
     self.value_slots = nil;
@@ -78,13 +56,7 @@ impl Map<K, V> {
     self.alloc(cap);
   }
 
-  // Ensure capacity is at least the requested size.
-  // 
-  // Params:
-  // - min_cap: minimum desired slot capacity
-  // 
-  // Notes:
-  // - Capacities smaller than 8 are rounded up to 8.
+  // Ensures capacity is at least `min_cap` slots, rounded up to a minimum of 8.
   pub reserve(num min_cap) {
     if min_cap < 8 {
       min_cap = 8;
@@ -125,10 +97,8 @@ impl Map<K, V> {
   }
 
   hash_key(K key) num {
-    // Type-aware key hash: string keys hash by CONTENTS, value-typed keys by
-    // their raw bytes. The compiler lowers __fun_key_hash per the concrete key
-    // type (this method is monomorphized). Previously this hashed the raw bytes
-    // of the key, which for `str` keys hashed the POINTER, not the string.
+    // Type-aware key hash: string keys hash by contents, value-typed keys by
+    // their raw bytes. Monomorphization lowers __fun_key_hash per key type.
     ret __fun_key_hash(key);
   }
 
@@ -210,19 +180,19 @@ impl Map<K, V> {
     ret first_tomb;
   }
 
-  // Return a zero-initialized V.
+  // Returns a zero-initialized V.
   zero_value() V {
     V out;
     memset(&out, 0, sizeof(V));
     ret out;
   }
 
-  // Read a value at a live slot index (internal).
+  // Reads the value at a live slot index.
   load_value_idx(num idx) V {
     ret self.value_slots[idx];
   }
 
-  // Write a value at a slot index (internal).
+  // Writes the value at a slot index.
   store_value_idx(num idx, V value) {
     self.value_slots[idx] = value;
   }
@@ -268,7 +238,7 @@ impl Map<K, V> {
     free(old_tomb);
   }
 
-  // Free internal storage and reset the map to an empty state.
+  // Frees internal storage and resets the map to an empty state.
   pub free() {
     self.clear();
     if self.key_slots != nil {
@@ -292,25 +262,12 @@ impl Map<K, V> {
     self.cap = 0;
   }
 
-  // Return true when a key exists in the map.
-  // 
-  // Params:
-  // - key: key to look up
-  // 
-  // Returns:
-  // - true when the key is present
+  // Returns true when the key exists in the map.
   pub has(K key) bin {
     ret self.find_live_index(key) != -1;
   }
 
-  // Return the value for a key.
-  // 
-  // Params:
-  // - key: key to look up
-  // 
-  // Returns:
-  // - stored value when the key exists
-  // - zero value of `V` when the key is missing
+  // Returns the value for a key, or the zero value of `V` when it is missing.
   pub get(K key) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -319,15 +276,7 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
-  // Return the value for a key or a fallback when it is missing.
-  // 
-  // Params:
-  // - key: key to look up
-  // - fallback: value returned when the key is absent
-  // 
-  // Returns:
-  // - stored value when the key exists
-  // - `fallback` when the key is missing
+  // Returns the value for a key, or `fallback` when it is missing.
   pub get_or(K key, V fallback) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -336,15 +285,8 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
-  // Try to read a value into an output pointer.
-  // 
-  // Params:
-  // - key: key to look up
-  // - out: destination for the value when present
-  // 
-  // Returns:
-  // - true when the key exists and `out` is written
-  // - false when the key is missing
+  // Writes the value for a key into `out` and returns true, or returns false
+  // and leaves `out` untouched when the key is missing.
   pub try_get(K key, V* out) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -354,14 +296,7 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Look up a key as an Option.
-  // 
-  // Params:
-  // - key: key to look up
-  // 
-  // Returns:
-  // - `Some(value)` when the key exists
-  // - `None` when the key is absent
+  // Returns the value for a key, or `None` when it is absent.
   pub at(K key) Option<V> {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -370,11 +305,7 @@ impl Map<K, V> {
     ret .Some(self.load_value_idx(idx));
   }
 
-  // Insert a value or replace the existing value for a key.
-  // 
-  // Params:
-  // - key: key to insert or update
-  // - value: value to store
+  // Inserts a value, replacing any existing value for the key.
   pub put(K key, V value) {
     if self.cap == 0 {
       self.alloc(8);
@@ -406,19 +337,9 @@ impl Map<K, V> {
     self.len = self.len + 1;
   }
 
-  // Insert a value only when the key is not already present.
-  // 
-  // Params:
-  // - key: key to insert
-  // - value: value to store
-  // 
-  // Returns:
-  // - true when a new entry is inserted
-  // - false when the key already exists
+  // Inserts a value only when the key is absent, returning true when it did.
+  // An existing value is left untouched.
   pub put_if_absent(K key, V value) bin {
-    // Only insert when the key is absent; do NOT overwrite an existing value.
-    // (Previously this always called put(), overwriting the existing value, then
-    // reported false — the report was right but the mutation was wrong.)
     if self.find_live_index(key) != -1 {
       ret false;
     }
@@ -426,14 +347,7 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Remove a key from the map.
-  // 
-  // Params:
-  // - key: key to remove
-  // 
-  // Returns:
-  // - true when an entry is removed
-  // - false when the key is missing
+  // Removes a key, returning true when an entry was removed.
   pub remove(K key) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -446,7 +360,7 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Remove all entries while keeping the current capacity.
+  // Removes all entries while keeping the current capacity.
   pub clear() {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
@@ -457,10 +371,7 @@ impl Map<K, V> {
     self.len = 0;
   }
 
-  // Return the live keys as a vector.
-  // 
-  // Returns:
-  // - vector containing every live key in iteration order
+  // Returns every live key as a vector, in iteration order.
   pub keys() Vec<K> {
     Vec<K> out;
     out.init(self.len);
@@ -478,10 +389,7 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Return the live values as a vector.
-  // 
-  // Returns:
-  // - vector containing every live value in iteration order
+  // Returns every live value as a vector, in iteration order.
   pub values() Vec<V> {
     Vec<V> out;
     out.init(self.len);
@@ -499,23 +407,8 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Return a forward iterator over the live keys.
-  // 
-  // Notes:
-  // - Iteration order is unspecified.
-  // - Pair the yielded keys with `get()` or `at()` to visit values.
-  // 
-  // Usage:
-  // 
-  // ```
-  // let it = m.iter_keys();
-  // for true {
-  //   fit it.next() {
-  //     Option.Some(k) -> { use(k, m.get(k)); }
-  //     Option.None -> { break; }
-  //   }
-  // }
-  // ```
+  // Returns a forward iterator over the live keys, in unspecified order.
+  // Pair the yielded keys with `get()` or `at()` to visit values.
   pub iter_keys() MapIter<K, V> {
     MapIter<K, V> it;
     it.src = self;
@@ -523,10 +416,7 @@ impl Map<K, V> {
     ret it;
   }
 
-  // Return the default key iterator.
-  // 
-  // Returns:
-  // - same iterator as `iter_keys()`
+  // Returns the default iterator, identical to `iter_keys()`.
   pub iter() MapIter<K, V> {
     ret self.iter_keys();
   }
@@ -541,11 +431,7 @@ pub compound MapIter<K, V> {
 }
 
 impl MapIter<K, V> as Iterator<K> {
-  // Return the next live key from the iterator.
-  // 
-  // Returns:
-  // - `Some(key)` for the next live slot
-  // - `None` after all slots have been examined
+  // Returns the next live key, or `None` once every slot has been examined.
   pub next() Option<K> {
     for self.idx < self.src.cap {
       let at = self.idx;
@@ -559,7 +445,7 @@ impl MapIter<K, V> as Iterator<K> {
 }
 
 impl Map<K, V> as Clearable {
-  // Remove all entries while keeping the current capacity.
+  // Removes all entries while keeping the current capacity.
   pub clear() {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
@@ -590,7 +476,7 @@ fun _map_append(str dst, num pos, str part) num {
 }
 
 impl Map<str, num> as Display {
-  // Render as `{"k": v, ...}` (entries are unordered).
+  // Renders as `{"k": v, ...}` (entries are unordered).
   pub to_string() str {
     // Generously size: per entry "\"\": " + key + 20-digit value + ", ".
     num budget = 2;
@@ -637,7 +523,7 @@ impl Map<str, num> as Display {
 }
 
 impl Map<str, str> as Display {
-  // Render as `{"k": "v", ...}` (entries are unordered).
+  // Renders as `{"k": "v", ...}` (entries are unordered).
   pub to_string() str {
     num budget = 2;
     num i = 0;

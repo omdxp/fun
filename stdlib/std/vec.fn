@@ -1,12 +1,4 @@
 // Dynamic vectors for common types.
-// 
-// Usage:
-// ```
-// Vec<num> v;
-// v.init(0);
-// v.push(1);
-// v.push(2);
-// ```
 
 imp std.c.mem;
 imp std.c.string;
@@ -33,36 +25,24 @@ fun _str_len(str s) num {
 }
 
 impl Vec<T> as Sized {
-  // Return the number of elements.
-  // 
-  // Returns:
-  // - element count
+  // Returns the number of elements.
   pub len() num {
     ret self.len;
   }
 
-  // Return true when the vector is empty.
-  // 
-  // Returns:
-  // - true when the vector holds no elements
+  // Returns true when the vector holds no elements.
   pub is_empty() bin {
     ret self.len == 0;
   }
 
-  // Return the current storage capacity.
-  // 
-  // Returns:
-  // - allocated element capacity
+  // Returns the allocated element capacity.
   pub capacity() num {
     ret self.cap;
   }
 }
 
 impl Vec<T> {
-  // Initialize the vector with an optional starting capacity.
-  //
-  // Params:
-  // - cap: requested initial capacity
+  // Initializes the vector with an optional starting capacity.
   pub init(num cap = 8) {
     self.len = 0;
     self.cap = 0;
@@ -71,24 +51,21 @@ impl Vec<T> {
     }
   }
 
-  // Create a zero value for T.
+  // Returns a zero value for T.
   zero_value() T {
     T out;
     memset(&out, 0, sizeof(T));
     ret out;
   }
 
-  // Ensure capacity is at least the requested size.
-  // 
-  // Params:
-  // - min_cap: minimum desired capacity
+  // Ensures capacity is at least `min_cap` elements.
   pub reserve(num min_cap) {
     if min_cap > self.cap {
       self.grow(min_cap);
     }
   }
 
-  // Grow backing storage to at least min_cap.
+  // Grows backing storage to hold at least `min_cap` elements.
   grow(num min_cap) {
     let new_cap = self.cap;
     if new_cap < 4 {
@@ -107,7 +84,7 @@ impl Vec<T> {
     self.cap = new_cap;
   }
 
-  // Free the backing storage and reset the vector.
+  // Frees the backing storage and resets the vector.
   pub free() {
     if self.cap != 0 {
       free(self.data);
@@ -116,36 +93,17 @@ impl Vec<T> {
     self.cap = 0;
   }
 
-  // Return the element at index without bounds checking.
-  // 
-  // Params:
-  // - i: element index
-  // 
-  // Notes:
-  // - The caller must ensure `0 <= i < len`.
-  // 
-  // Returns:
-  // - element at index `i`
+  // Returns the element at index `i`. The caller must ensure `0 <= i < len`.
   pub get(num i) T {
     ret self.data[i];
   }
 
-  // Set the element at index without bounds checking.
-  // 
-  // Params:
-  // - i: element index
-  // - value: value to write
-  // 
-  // Notes:
-  // - The caller must ensure `0 <= i < len`.
+  // Writes `value` at index `i`. The caller must ensure `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;
   }
 
-  // Append one value to the end of the vector.
-  // 
-  // Params:
-  // - value: value to append
+  // Appends one value to the end of the vector.
   pub push(T value) {
     if self.len + 1 > self.cap {
       self.grow(self.len + 1);
@@ -154,11 +112,7 @@ impl Vec<T> {
     self.len = self.len + 1;
   }
 
-  // Append multiple values from a source slice.
-  // 
-  // Params:
-  // - src: source slice
-  // - len: number of elements to append
+  // Appends the first `len` values from `src`.
   pub push_many(T[] src, num len) {
     if len <= 0 {
       ret;
@@ -172,10 +126,7 @@ impl Vec<T> {
     self.len = self.len + len;
   }
 
-  // Append values from another vector.
-  // 
-  // Params:
-  // - other: source vector
+  // Appends every value from another vector.
   pub extend(Vec<T>* other) {
     num i = 0;
     for i < other.len {
@@ -184,15 +135,8 @@ impl Vec<T> {
     }
   }
 
-  // Remove and return the last element.
-  // 
-  // Notes:
-  // - Returns the zero value of `T` when the vector is empty.
-  // - Pair with `is_empty()` or `last()` when the empty case matters.
-  // 
-  // Returns:
-  // - removed last element
-  // - zero value of `T` when the vector is empty
+  // Removes and returns the last element, or the zero value of `T` when the
+  // vector is empty. Pair with `is_empty()` or `last()` when that matters.
   pub pop() T {
     if self.len == 0 {
       ret self.zero_value();
@@ -201,14 +145,7 @@ impl Vec<T> {
     ret self.data[self.len];
   }
 
-  // Return the element at index when it is in range.
-  // 
-  // Params:
-  // - i: element index
-  // 
-  // Returns:
-  // - `Some(value)` when `i` is in range
-  // - `None` otherwise
+  // Returns `Some(value)` at index `i`, or `None` when `i` is out of range.
   pub at(num i) Option<T> {
     if i < 0 {
       ret .None;
@@ -219,11 +156,7 @@ impl Vec<T> {
     ret .Some(self.data[i]);
   }
 
-  // Return the first element when present.
-  // 
-  // Returns:
-  // - `Some(value)` for the first element
-  // - `None` when the vector is empty
+  // Returns the first element, or `None` when the vector is empty.
   pub first() Option<T> {
     if self.len == 0 {
       ret .None;
@@ -231,11 +164,7 @@ impl Vec<T> {
     ret .Some(self.data[0]);
   }
 
-  // Return the last element when present.
-  // 
-  // Returns:
-  // - `Some(value)` for the last element
-  // - `None` when the vector is empty
+  // Returns the last element, or `None` when the vector is empty.
   pub last() Option<T> {
     if self.len == 0 {
       ret .None;
@@ -243,14 +172,7 @@ impl Vec<T> {
     ret .Some(self.data[self.len - 1]);
   }
 
-  // Insert a value at an index.
-  // 
-  // Params:
-  // - idx: insertion index
-  // - value: value to insert
-  // 
-  // Notes:
-  // - `idx` is clamped into the range `[0, len]`.
+  // Inserts a value at `idx`, which is clamped into the range `[0, len]`.
   pub insert(num idx, T value) {
     if idx < 0 {
       idx = 0;
@@ -270,14 +192,8 @@ impl Vec<T> {
     self.len = self.len + 1;
   }
 
-  // Remove an element at index while preserving order.
-  // 
-  // Params:
-  // - idx: element index
-  // 
-  // Returns:
-  // - removed value when `idx` is in range
-  // - zero value of `T` otherwise
+  // Removes the element at `idx` while preserving order, returning it. Yields
+  // the zero value of `T` when `idx` is out of range.
   pub remove_at(num idx) T {
     if idx < 0 {
       ret self.zero_value();
@@ -295,14 +211,8 @@ impl Vec<T> {
     ret out;
   }
 
-  // Remove an element at index by swapping it with the last element.
-  // 
-  // Params:
-  // - idx: element index
-  // 
-  // Returns:
-  // - removed value when `idx` is in range
-  // - zero value of `T` otherwise
+  // Removes the element at `idx` by swapping in the last element, returning it.
+  // Yields the zero value of `T` when `idx` is out of range.
   pub swap_remove(num idx) T {
     if idx < 0 {
       ret self.zero_value();
@@ -318,23 +228,19 @@ impl Vec<T> {
     ret out;
   }
 
-  // Remove all elements without freeing capacity.
+  // Removes all elements without freeing capacity.
   pub clear() {
     self.len = 0;
   }
 
-  // Swap two elements in place.
-  // 
-  // Params:
-  // - i: first element index
-  // - j: second element index
+  // Swaps the elements at `i` and `j` in place.
   pub swap(num i, num j) {
     T tmp = self.data[i];
     self.data[i] = self.data[j];
     self.data[j] = tmp;
   }
 
-  // Reverse the element order in place.
+  // Reverses the element order in place.
   pub reverse() {
     if self.len <= 1 {
       ret;
@@ -348,11 +254,7 @@ impl Vec<T> {
     }
   }
 
-  // Resize the vector to a new length.
-  // 
-  // Params:
-  // - new_len: target length
-  // - value: fill value for newly created elements
+  // Resizes the vector to `new_len`, filling any new elements with `value`.
   pub resize(num new_len, T value) {
     if new_len < 0 {
       ret;
@@ -368,7 +270,7 @@ impl Vec<T> {
     }
   }
 
-  // Shrink the backing storage to the current length.
+  // Shrinks the backing storage to the current length.
   pub shrink_to_fit() {
     if self.cap == self.len {
       ret;
@@ -384,10 +286,7 @@ impl Vec<T> {
     self.cap = self.len;
   }
 
-  // Return a shallow copy with independent backing storage.
-  // 
-  // Returns:
-  // - cloned vector containing the same elements
+  // Returns a shallow copy with independent backing storage.
   pub clone() Vec<T> {
     Vec<T> out;
     out.init(self.len);
@@ -399,17 +298,8 @@ impl Vec<T> {
     ret out;
   }
 
-  // Return a new vector containing the elements in `[start, end)`.
-  // 
-  // Params:
-  // - start: inclusive start index
-  // - end: exclusive end index
-  // 
-  // Notes:
-  // - Indices are clamped to the valid range.
-  // 
-  // Returns:
-  // - new vector containing the requested slice
+  // Returns a new vector holding the elements in `[start, end)`, with both
+  // indices clamped to the valid range.
   pub slice(num start, num end) Vec<T> {
     if start < 0 {
       start = 0;
@@ -427,15 +317,32 @@ impl Vec<T> {
     ret out;
   }
 
-  // Return a forward iterator over the elements.
-  // 
-  // Returns:
-  // - iterator yielding each value once, in order
+  // Returns a forward iterator yielding each element once, in order.
   pub iter() VecIter<T> {
     VecIter<T> it;
     it.src = self;
     it.idx = 0;
     ret it;
+  }
+
+  // Sorts elements in place with a stable insertion sort, for any element type.
+  // `cmp` follows the `strcmp` convention: negative when `a` sorts before `b`,
+  // positive when after, 0 when equal.
+  pub sort_by(fun(T, T) num cmp) {
+    num i = 1;
+    for i < self.len {
+      T key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if cmp(self.data[j], key) <= 0 {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
   }
 }
 
@@ -448,11 +355,7 @@ pub compound VecIter<T> {
 }
 
 impl VecIter<T> as Iterator<T> {
-  // Return the next element from the iterator.
-  // 
-  // Returns:
-  // - `Some(value)` while elements remain
-  // - `None` once the iterator reaches the end
+  // Returns the next element, or `None` once the end is reached.
   pub next() Option<T> {
     if self.idx >= self.src.len {
       ret .None;
@@ -464,20 +367,14 @@ impl VecIter<T> as Iterator<T> {
 }
 
 impl Vec<T> as Clearable {
-  // Remove all elements without freeing capacity.
+  // Removes all elements without freeing capacity.
   pub clear() {
     self.len = 0;
   }
 }
 
 impl Vec<str> {
-  // Join string elements with a separator.
-  // 
-  // Params:
-  // - sep: separator inserted between elements
-  // 
-  // Returns:
-  // - joined string
+  // Joins the elements into one string with `sep` between them.
   pub join(str sep) str {
     let sep_len = _str_len(sep);
     let count = self.len;
@@ -531,7 +428,7 @@ impl Vec<str> {
 
 // Numeric methods shared across Vec<num> and Vec<dec> via constrained generics.
 impl Vec<T: num | dec> {
-  // Sort elements in ascending order in place.
+  // Sorts elements in ascending order in place.
   pub sort() {
     num i = 1;
     for i < self.len {
@@ -549,7 +446,7 @@ impl Vec<T: num | dec> {
     }
   }
 
-  // Sort elements in descending order in place.
+  // Sorts elements in descending order in place.
   pub sort_desc() {
     num i = 1;
     for i < self.len {
@@ -567,13 +464,7 @@ impl Vec<T: num | dec> {
     }
   }
 
-  // Return true when a value is present.
-  // 
-  // Params:
-  // - value: value to search for
-  // 
-  // Returns:
-  // - true when the value exists in the vector
+  // Returns true when the value is present.
   pub contains(T value) bin {
     num i = 0;
     for i < self.len {
@@ -585,14 +476,7 @@ impl Vec<T: num | dec> {
     ret false;
   }
 
-  // Return the index of the first matching value.
-  // 
-  // Params:
-  // - value: value to search for
-  // 
-  // Returns:
-  // - first matching index
-  // - `-1` when the value is not present
+  // Returns the index of the first matching value, or `-1` when absent.
   pub index_of(T value) num {
     num i = 0;
     for i < self.len {
@@ -604,14 +488,7 @@ impl Vec<T: num | dec> {
     ret -1;
   }
 
-  // Return the index of the first matching value as an Option.
-  // 
-  // Params:
-  // - value: value to search for
-  // 
-  // Returns:
-  // - `Some(index)` when the value is present
-  // - `None` otherwise
+  // Returns the index of the first matching value, or `None` when absent.
   pub index_of_opt(T value) Option<num> {
     num i = 0;
     for i < self.len {
@@ -623,11 +500,7 @@ impl Vec<T: num | dec> {
     ret .None;
   }
 
-  // Return the minimum value.
-  // 
-  // Returns:
-  // - minimum value in the vector
-  // - zero value of `T` when the vector is empty
+  // Returns the smallest element, or the zero value of `T` when empty.
   pub min() T {
     if self.len == 0 {
       ret self.zero_value();
@@ -643,11 +516,7 @@ impl Vec<T: num | dec> {
     ret m;
   }
 
-  // Return the minimum value as an Option.
-  // 
-  // Returns:
-  // - `Some(minimum)` when the vector is non-empty
-  // - `None` when the vector is empty
+  // Returns the smallest element, or `None` when the vector is empty.
   pub min_opt() Option<T> {
     if self.len == 0 {
       ret .None;
@@ -655,11 +524,7 @@ impl Vec<T: num | dec> {
     ret .Some(self.min());
   }
 
-  // Return the maximum value.
-  // 
-  // Returns:
-  // - maximum value in the vector
-  // - zero value of `T` when the vector is empty
+  // Returns the largest element, or the zero value of `T` when empty.
   pub max() T {
     if self.len == 0 {
       ret self.zero_value();
@@ -675,11 +540,7 @@ impl Vec<T: num | dec> {
     ret m;
   }
 
-  // Return the maximum value as an Option.
-  // 
-  // Returns:
-  // - `Some(maximum)` when the vector is non-empty
-  // - `None` when the vector is empty
+  // Returns the largest element, or `None` when the vector is empty.
   pub max_opt() Option<T> {
     if self.len == 0 {
       ret .None;
@@ -687,10 +548,7 @@ impl Vec<T: num | dec> {
     ret .Some(self.max());
   }
 
-  // Return the sum of all elements.
-  // 
-  // Returns:
-  // - sum of the vector elements
+  // Returns the sum of all elements.
   pub sum() T {
     T s = self.zero_value();
     num i = 0;
@@ -703,7 +561,7 @@ impl Vec<T: num | dec> {
 }
 
 impl Vec<num> as Display {
-  // Render as a bracketed list, e.g. "[1, 2, 3]".
+  // Renders as a bracketed list, e.g. "[1, 2, 3]".
   pub to_string() str {
     // Each 64-bit integer needs at most 20 digits plus a sign; allow 24 per
     // element, two bytes per separator, and the surrounding brackets.
@@ -759,7 +617,7 @@ fun _str_cmp(str a, str b) num {
 }
 
 impl Vec<str> {
-  // Sort elements in ascending lexicographic order in place.
+  // Sorts elements in ascending lexicographic order in place.
   pub sort() {
     num i = 1;
     for i < self.len {
@@ -777,7 +635,7 @@ impl Vec<str> {
     }
   }
 
-  // Sort elements in descending lexicographic order in place.
+  // Sorts elements in descending lexicographic order in place.
   pub sort_desc() {
     num i = 1;
     for i < self.len {
@@ -795,13 +653,7 @@ impl Vec<str> {
     }
   }
 
-  // Return true when a string value is present.
-  // 
-  // Params:
-  // - value: string to search for
-  // 
-  // Returns:
-  // - true when the value exists in the vector
+  // Returns true when the string is present.
   pub contains(str value) bin {
     num i = 0;
     for i < self.len {
@@ -813,14 +665,7 @@ impl Vec<str> {
     ret false;
   }
 
-  // Return the index of the first matching string.
-  // 
-  // Params:
-  // - value: string to search for
-  // 
-  // Returns:
-  // - first matching index
-  // - `-1` when the value is not present
+  // Returns the index of the first matching string, or `-1` when absent.
   pub index_of(str value) num {
     num i = 0;
     for i < self.len {
@@ -832,14 +677,7 @@ impl Vec<str> {
     ret -1;
   }
 
-  // Return the index of the first matching string as an Option.
-  // 
-  // Params:
-  // - value: string to search for
-  // 
-  // Returns:
-  // - `Some(index)` when the value is present
-  // - `None` otherwise
+  // Returns the index of the first matching string, or `None` when absent.
   pub index_of_opt(str value) Option<num> {
     num i = 0;
     for i < self.len {
@@ -853,7 +691,7 @@ impl Vec<str> {
 }
 
 impl Vec<str> as Display {
-  // Render as a bracketed list of quoted strings, e.g. `["a", "b"]`.
+  // Renders as a bracketed list of quoted strings, e.g. `["a", "b"]`.
   pub to_string() str {
     num total = 2;
     num i = 0;

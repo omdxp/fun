@@ -1,10 +1,4 @@
 // Generic set built on Map<T, bin>.
-// 
-// Usage:
-// ```
-// Set<str> s = set_init("", 8);
-// s.add("a");
-// ```
 
 imp std.map;
 imp std.vec;
@@ -18,14 +12,8 @@ pub compound Set<T> {
   Map<T, bin> map;
 }
 
-// Create a set with initial capacity.
-// 
-// Params:
-// - sample: sample value used only for type inference
-// - cap: initial capacity
-// 
-// Returns:
-// - initialized set
+// Creates a set with initial capacity `cap`. `sample` is used only for type
+// inference.
 pub fun set_init<T>(T sample, num cap) Set<T> {
   Set<T> s;
   _ = sample;
@@ -34,18 +22,12 @@ pub fun set_init<T>(T sample, num cap) Set<T> {
 }
 
 impl Set<T> as Sized {
-  // Return the number of elements.
-  // 
-  // Returns:
-  // - element count
+  // Number of elements in the set.
   pub len() num {
     ret self.map.len;
   }
 
-  // Return true when the set holds no elements.
-  // 
-  // Returns:
-  // - true when the set is empty
+  // True when the set holds no elements.
   pub is_empty() bin {
     ret self.map.len == 0;
   }
@@ -57,33 +39,17 @@ impl Set<T> {
     self.map.free();
   }
 
-  // Return true when a key exists in the set.
-  // 
-  // Params:
-  // - key: key to look up
-  // 
-  // Returns:
-  // - true when the key is present
+  // True when `key` is present in the set.
   pub has(T key) bin {
     ret self.map.has(key);
   }
 
-  // Add a key to the set.
-  // 
-  // Params:
-  // - key: key to insert
+  // Adds a key to the set.
   pub add(T key) {
     self.map.put(key, true);
   }
 
-  // Remove a key from the set.
-  // 
-  // Params:
-  // - key: key to remove
-  // 
-  // Returns:
-  // - true when a key is removed
-  // - false when the key is not present
+  // Removes a key from the set. Returns true when it was present.
   pub remove(T key) bin {
     ret self.map.remove(key);
   }
@@ -93,25 +59,13 @@ impl Set<T> {
     self.map.clear();
   }
 
-  // Return all members as a vector.
-  // 
-  // Notes:
-  // - A set stores its members as the backing map's keys.
-  // - The method is named `keys()` to match `Map` terminology.
-  // 
-  // Returns:
-  // - vector containing the set members
+  // All members as a vector. Named `keys()` to match `Map` terminology,
+  // since a set stores its members as the backing map's keys.
   pub keys() Vec<T> {
     ret self.map.keys();
   }
 
-  // Return a new set containing every element from this set and `other`.
-  // 
-  // Params:
-  // - other: other set to merge with
-  // 
-  // Returns:
-  // - union of the two sets
+  // Union of this set and `other`.
   pub union(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + other.map.len + 1);
@@ -132,13 +86,7 @@ impl Set<T> {
     ret out;
   }
 
-  // Return a new set containing only elements present in both sets.
-  // 
-  // Params:
-  // - other: other set to compare against
-  // 
-  // Returns:
-  // - intersection of the two sets
+  // Intersection of this set and `other`.
   pub intersection(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
@@ -156,13 +104,7 @@ impl Set<T> {
     ret out;
   }
 
-  // Return a new set containing elements from this set that are not in `other`.
-  // 
-  // Params:
-  // - other: set whose elements should be excluded
-  // 
-  // Returns:
-  // - set difference `self - other`
+  // Set difference `self - other`.
   pub difference(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
@@ -180,13 +122,7 @@ impl Set<T> {
     ret out;
   }
 
-  // Return true when every element of this set is also in `other`.
-  // 
-  // Params:
-  // - other: set to test against
-  // 
-  // Returns:
-  // - true when this set is a subset of `other`
+  // True when every element of this set is also in `other`.
   pub is_subset(Set<T>* other) bin {
     let it = self.map.iter_keys();
     for true {
@@ -202,25 +138,7 @@ impl Set<T> {
     ret true;
   }
 
-  // Return a forward iterator over the set elements.
-  // 
-  // Notes:
-  // - Iteration order is unspecified.
-  // 
-  // Usage:
-  // 
-  // ```
-  // let it = s.iter();
-  // for true {
-  //   fit it.next() {
-  //     Option.Some(x) -> { use(x); }
-  //     Option.None -> { break; }
-  //   }
-  // }
-  // ```
-  // 
-  // Returns:
-  // - iterator yielding each element once
+  // Forward iterator over the set elements, in unspecified order.
   pub iter() SetIter<T> {
     SetIter<T> it;
     it.inner = self.map.iter_keys();
@@ -235,11 +153,7 @@ pub compound SetIter<T> {
 }
 
 impl SetIter<T> as Iterator<T> {
-  // Return the next element from the iterator.
-  // 
-  // Returns:
-  // - `Some(value)` while elements remain
-  // - `None` once the iterator is exhausted
+  // Next element, or `None` once exhausted.
   pub next() Option<T> {
     ret self.inner.next();
   }

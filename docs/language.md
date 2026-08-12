@@ -15,7 +15,16 @@
     - Plain compound methods: `impl Point { ... }`
 - **Pattern Matching**: `fit x { ... }` for value-based branching.
 - **Async/Await**: Async functions are declared with `async fun ...`; async calls must be awaited with `await` inside async functions.
-- **Comments**: Use `//` for single-line comments.
+- **Comments**: Use `//` for single-line comments, or `/* ... */` for block comments.
+- **Raw strings**: `` `...` `` needs no escaping at all -- a backslash or a double-quote inside is just a literal byte. Close it on the same line for an inline literal (`` `C:\Users\name` ``), or leave it unclosed and continue on the next line by opening again with a backtick (ending at the first line that doesn't):
+  ```fun
+  let sql =
+    `SELECT *
+    `FROM users
+    `WHERE id = ?
+  ;
+  ```
+  Whether you close the backtick on the same line is itself the inline-vs-multi-line signal, so trailing code (like the `;` above) that needs to sit right after the last line can close it explicitly instead: `` `WHERE id = ?`; ``.
 
 ### Types
 - **Primitive Types**:
@@ -48,6 +57,11 @@
     - Member access uses the receiver type (for example `Point p; let x = p.x;` -> `num`).
     - Indexing an array uses the element type (for example `let v = nums[i];` -> `num`).
 - If the expression mixes numeric types, inference prefers the wider category (`dec` over `num`).
+
+#### Constants
+- `const` declares an immutable binding, at top level or local scope: `const MAX = 10;` (inferred, like `let`) or `const num MAX = 10;` (explicit type). Both forms always require an initializer.
+- `pub const` exports a top-level constant.
+- Reassigning a `const` (directly or via a compound-assignment operator like `+=`) is a compile-time typecheck error, for both local and global constants.
 
 ### Enums
 - **Declaration**: `enum Color { Red, Green, Blue }`
@@ -98,7 +112,8 @@ payload; payload-free variants still coexist.
 - **Elif**: Else-if chaining.
 - **Pattern Matching**: `fit` statement for exhaustive and non-exhaustive matches.
 - **Assert**: `assert <condition>;` aborts if condition is false. Optional message: `assert <condition>, "msg";`. Constant assertions may emit `assert_constant`.
-- **Unreachable Statements**: Statements after `ret`, `break`, or `continue` may emit `unreachable_code`.
+- **Panic**: `panic("message")` prints the message and aborts. Unlike `assert`, it's an EXPRESSION that unifies with whatever type is expected at its use site (the same way `nil` unifies with any pointer type), so it composes as a `ret` value, a `let` initializer, a fit-arm body, or a call argument: `ret panic("unreachable");`. Also usable as its own bare statement.
+- **Unreachable Statements**: Statements after `ret`, `break`, `continue`, or a bare `panic(...)` may emit `unreachable_code`.
 - **For Loops**:
     - Range: `for i : 0..10 { ... }`
     - Array: `for item : arr { ... }`
@@ -166,6 +181,163 @@ payload; payload-free variants still coexist.
       like `num* p = nil` are allowed.
     - Works for free functions and methods (including generic, `async`, and
       pointer-receiver methods).
+- **Function-type parameters**: a parameter can accept a function BY NAME and be
+  called through it, using `fun(T1, T2, ...) R` as the parameter's type (reusing
+  the `fun` keyword rather than new syntax, since it reads like the signature it
+  accepts):
+    ```fun
+    fun add(num a, num b) num { ret a + b; }
+    fun apply(num a, num b, fun(num, num) num cb) num { ret cb(a, b); }
+    apply(2, 3, add); // 5
+    ```
+    - Calls THROUGH the parameter (`cb(a, b)`) are checked against the declared
+      signature (argument count and types).
+    - Passing a function BY NAME as the argument is not itself signature-checked
+      at the call site yet — a real mismatch surfaces as a C compiler error.
+    - Only supported as a parameter type today (not as a return type, local, or
+      compound field). Used by `Vec<T>.sort_by(cmp)` for custom comparators.
+
+### Testing
+- **Declaration**: `test "description" { ... }` at the top level (like `fun`). The
+  body reuses ordinary statement parsing, so `assert`, `panic`, `if`/`for`, etc.
+  all just work inside.
+    ```fun
+    fun add(num a, num b) num { ret a + b; }
+
+    test "add works" {
+      assert add(2, 3) == 5, "expected 5";
+    }
+    ```
+- **Ignored by an ordinary compile**: matching `zig build` vs `zig test`, `fun -in
+  file.fn` never type-checks or emits `test` blocks at all — a test referencing
+  something broken doesn't stop the normal program from compiling.
+- **Running tests**: `fun test <path>` (shorthand for `fun -in <path> -test`)
+  compiles `test` blocks into a runner and runs it. Every discovered test runs
+  CONCURRENTLY (each dispatched onto its own virtual task, via the same
+  `fork`/`channel` primitives ordinary Fun code uses), printing `test: <name>
+  ... PASS`/`FAIL` as each one completes (in completion order, not declaration
+  order) and a `N/N tests passed` summary at the end.
+- **Filtering to one test**: `fun test <path> -- "exact name"` runs just the
+  matching test(s) instead of the whole file — what an editor's per-test
+  "Run"/"Debug" button uses under the hood, needing no separate flag.
+- **Failure semantics**: a failing `assert` inside a test is caught and reported
+  as `FAIL` — it does NOT abort the run, so every other test still executes.
+  `panic`, by contrast, still aborts the whole process outright (no per-test
+  recovery for it yet) — prefer `assert` over `panic` inside a test body for
+  this reason.
+- **Time-mocked tests**: `imp std.mock_time;` provides a `Clock` quirk
+  implemented by `SystemClock` (the real clock) and `MockClock` (a fully
+  controllable fake one, for tests). A function that needs "the current time"
+  to be testable should accept a `Clock` parameter instead of calling
+  `std.time`'s `now()` directly:
+    ```fun
+    imp std.mock_time;
+    imp std.time;
+
+    fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {
+      ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;
+    }
+
+    test "a token expires after its ttl" {
+      MockClock clk = mock_clock_at(0);
+      Timestamp issued = clk.now();
+      assert !is_expired(&clk, issued, 60), "should not be expired yet";
+      clk.advance(61); // instant -- no real waiting
+      assert is_expired(&clk, issued, 60), "should be expired now";
+    }
+    ```
+  A concrete value always coerces to a quirk-typed parameter by its address
+  (`&clk`), same as any other quirk coercion.
+
+### Fuzzing
+- **Declaration**: `fuzz "description" (raw* data, num len) { ... }` at the
+  top level. Parameters are written out explicitly, like an ordinary
+  function's — but the TYPES are fixed by the fuzzing calling convention
+  (`data` is always `raw*`, a byte buffer; `len` is always `num`, its
+  length), so a declaration with any other shape is rejected.
+    ```fun
+    fuzz "parser never crashes on garbage input" (raw* data, num len) {
+      parse_bytes(data, len);
+    }
+    ```
+- **Ignored by an ordinary compile or `fun test` run**: same reasoning as
+  `test` blocks — a `fuzz` block is only type-checked/emitted in its own
+  compile mode.
+- **Running**: `fun fuzz <path> [<target>]` (shorthand for `fun -in <path>
+  -fuzz [-fuzz-target <target>]`) compiles the named `fuzz` block (or the
+  only one, if a file declares just one) into a single-purpose harness and
+  runs it. The harness has no `main` of its own — a coverage-guided fuzzing
+  engine's own driver supplies one, generating inputs, tracking which code
+  paths each one reaches, and mutating toward inputs that explore new
+  behavior. When it finds an input that crashes the harness, it saves that
+  input so the crash can be reproduced and debugged afterward.
+- **A crash is the point**: unlike `test`'s recovered `assert`, an `assert` (or
+  a real memory error) inside a `fuzz` block crashes the process outright —
+  that's the signal the engine is watching for.
+- **Passing flags to the fuzzing engine itself**: everything after `--` goes
+  straight through to the compiled harness's own argv — the same
+  passthrough every other Fun program already gets, no fuzz-specific
+  wiring. This is how you control the ENGINE'S behavior (as opposed to
+  `-fuzz-target`, which picks which Fun `fuzz` block gets built):
+    ```
+    fun fuzz file.fn -- -max_total_time=30   # run for 30 seconds
+    fun fuzz file.fn -- -runs=10000          # run a fixed number of inputs
+    fun fuzz file.fn -- -max_len=256         # cap generated input size
+    fun fuzz file.fn -- corpus/              # persist/seed a corpus directory
+    ```
+  These flags belong to the underlying engine, not to `fun` itself — consult
+  its own `-help=1` output (run the compiled harness directly with that flag)
+  for the full list.
+- **Platform/toolchain caveat**: this needs a compiler whose toolchain bundles
+  a coverage-guided fuzzing runtime. That's not guaranteed on every platform
+  or default compiler install — notably, Xcode's bundled clang on macOS does
+  NOT include it. `fun fuzz` tries `clang` first, then falls back to a couple
+  of common non-default install locations (Homebrew's LLVM on macOS,
+  versioned `clang-N` on Linux since the unversioned symlink isn't always
+  installed, the official LLVM installer's default path on Windows) before
+  giving up with a clear message.
+- **`FUN_FUZZ_CC`**: point at a specific compiler if none of the automatic
+  candidates work for you. Deliberately a SEPARATE variable from `FUN_CC`
+  (the ordinary-build compiler override, see the C Compiler Selection
+  section of `docs/reference.md`) — your normal build compiler (gcc, cl,
+  ...) has nothing to do with whether it can ALSO do coverage-guided
+  fuzzing, so `fun fuzz` never looks at `FUN_CC` at all; the two can safely
+  be different compilers without stepping on each other.
+- **If it compiles but hangs immediately on running**: some restricted/
+  sandboxed/containerized environments hang during AddressSanitizer's own
+  startup (its shadow-memory setup), independent of Fun or the fuzzing engine
+  entirely. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety-detection half
+  of the sanitizer flag — coverage-guided fuzzing still runs and still finds
+  crashes/failed asserts, just without ASan's additional detection.
+- **Windows is unverified**: everything above has been confirmed working on
+  macOS (after the Homebrew-LLVM fallback) and is expected to work similarly
+  on Linux, but there is no Windows machine to test on. Plain LLVM `clang.exe`
+  (not `clang-cl.exe`, which isn't tried) should in principle accept the same
+  flags, but whether the runtime is reliably bundled and the result actually
+  runs correctly on Windows is genuinely unknown — treat it as "might work,"
+  not confirmed.
+
+### Build Manifest (`fun.toml`)
+- **Declares build targets, not an import graph**: `imp` already does path-based
+  module resolution, so a manifest only needs to name which entry file produces
+  which binary.
+    ```toml
+    [package]
+    name = "myproject"
+    version = "0.1.0"
+
+    [[bin]]
+    name = "myapp"
+    path = "src/main.fn"
+    ```
+- `version` is optional (defaults to `0.0.0`); multiple `[[bin]]` targets are
+  supported (e.g. mirroring this repo's own `fun` + `fls` binaries).
+- **`fun build`**: reads `./fun.toml`, compiles every `[[bin]]` target, and
+  installs the resulting binaries under `fun-out/bin/`. Unlike `fun -in
+  file.fn`, nothing is run afterward — matching `zig build` (compile only).
+- Only a narrow TOML subset is supported: no nested tables, no arrays of
+  scalars, no multi-line/escaped strings — just what a package name/version
+  and a flat list of binary targets need.
 
 ### Async / Await
 - **Async function declaration**: `async fun name(args) type { ... }`
@@ -303,8 +475,10 @@ fun main() num {
 - **std.net**: URL parsing, HTTP GET builder, and a best-effort local HTTP server launcher
     - Note: std.net TCP/HTTP helpers use POSIX sockets via `std.c.net`.
 - **std.option**: Generic `Option<T>` container with `some<T>`/`none<T>` helpers.
-- **std.result**: Generic `Result<T>` container with `ok<T>`/`err<T>` helpers.
+- **std.result**: Generic `Result<T, E>` container (`Ok(T)`/`Err(E)`) with `ok<T>`/`err<T>`/`err_kind<T>`/`err_error<T>` helpers (all fixed to `E = Error`; a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`).
 - **std.collections**: Collection quirk helpers (len/is_empty).
+- **std.mock_time**: `Clock` quirk (`SystemClock`/`MockClock`) for time-mocked tests — see [Testing](#testing).
+- **std.testing**: the concurrent test-mode runner `fun test` auto-imports and drives; not meant to be called from ordinary Fun source.
 
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.

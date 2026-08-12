@@ -19,6 +19,7 @@ imp std.map;
 imp std.vec;
 imp std.option;
 imp std.result;
+imp std.error;
 imp std.string;
 imp std.math;
 imp std.quirks;
@@ -116,11 +117,9 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the array elements, or None when this is not an Array.
-  // 
-  // Notes:
-  // - The returned Vec copies only the header; the elements are still shared.
-  // - Treat the returned Vec as read-only.
+  // Return the array elements, or None when this is not an Array. The
+  // returned Vec shares its elements with the original and should be
+  // treated as read-only.
   pub as_array() Option<Vec<JsonValue>> {
     fit *self {
       .Array(a) -> { ret .Some(a); }
@@ -129,12 +128,9 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the object as a Map, or None when this is not an Object.
-  // 
-  // Notes:
-  // - The returned Map copies only the header; the entries are still shared.
-  // - Treat the returned Map as read-only.
-  // - Use `m.values().data` to iterate every value, or `m.keys()` for the keys.
+  // Return the object as a Map, or None when this is not an Object. The
+  // returned Map shares its entries with the original and should be treated
+  // as read-only; use `m.values().data` to iterate values or `m.keys()` for keys.
   pub as_object() Option<Map<str, JsonValue>> {
     fit *self {
       .Object(o) -> { ret .Some(o); }
@@ -143,14 +139,7 @@ impl JsonValue {
     ret .None;
   }
 
-  // Look up a key on an object value.
-  // 
-  // Params:
-  // - key: object key to read
-  // 
-  // Returns:
-  // - `Some(value)` when this is an object and the key exists
-  // - `None` when the key is missing or this value is not an object
+  // Look up `key` on an object value; `None` if missing or not an object.
   pub get(str key) Option<JsonValue> {
     fit *self {
       .Object(o) -> { ret o.at(key); }
@@ -159,14 +148,7 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the element at an array index.
-  // 
-  // Params:
-  // - i: array index
-  // 
-  // Returns:
-  // - `Some(value)` when this is an array and `i` is in range
-  // - `None` when `i` is out of range or this value is not an array
+  // Return the element at array index `i`; `None` if out of range or not an array.
   pub index(num i) Option<JsonValue> {
     fit *self {
       .Array(a) -> { ret a.at(i); }
@@ -175,12 +157,8 @@ impl JsonValue {
     ret .None;
   }
 
-  // Return the logical length of the value.
-  // 
-  // Returns:
-  // - object entry count for `Object`
-  // - element count for `Array`
-  // - `0` for scalar values
+  // Return the logical length: entry count for Object, element count for
+  // Array, or 0 for scalar values.
   pub len() num {
     fit *self {
       .Array(a) -> { ret a.len(); }
@@ -208,20 +186,14 @@ pub fun json_bool(bin b) JsonValue {
   ret JsonValue.Bool(b);
 }
 
-// Create an empty JSON object map.
-// 
-// Returns:
-// - empty map ready to wrap as `JsonValue.Object`
+// Create an empty JSON object map, ready to wrap as `JsonValue.Object`.
 pub fun json_object() Map<str, JsonValue> {
   Map<str, JsonValue> m;
   m.init(8);
   ret m;
 }
 
-// Create an empty JSON array vector.
-// 
-// Returns:
-// - empty vector ready to wrap as `JsonValue.Array`
+// Create an empty JSON array vector, ready to wrap as `JsonValue.Array`.
 pub fun json_array() Vec<JsonValue> {
   Vec<JsonValue> v;
   v.init(8);
@@ -366,7 +338,7 @@ impl JsonParser {
   }
 
   // Parse a JSON string literal (assumes the opening quote is current).
-  parse_string() Result<str> {
+  parse_string() Result<str, Error> {
     if self.peek() != '"' {
       ret err_kind(.Parse, "expected '\"'", "");
     }
@@ -382,7 +354,7 @@ impl JsonParser {
         self.pos = self.pos + 1;
         let out = b.build();
         b.free();
-        ret ok(out);
+        ret .Ok(out);
       }
       if c == '\\' {
         self.pos = self.pos + 1;
@@ -429,7 +401,7 @@ impl JsonParser {
     ret true;
   }
 
-  parse_value() Result<JsonValue> {
+  parse_value() Result<JsonValue, Error> {
     self.skip_ws();
     let c = self.peek();
 
@@ -441,37 +413,37 @@ impl JsonParser {
     }
     if c == '"' {
       fit self.parse_string() {
-        .Ok(s) -> { ret ok(JsonValue.Str(s)); }
+        .Ok(s) -> { ret .Ok(JsonValue.Str(s)); }
         .Err(e) -> { ret err_error(e, JsonValue.Null); }
       }
     }
     if self.starts_with("true") {
       self.pos = self.pos + 4;
-      ret ok(JsonValue.Bool(true));
+      ret .Ok(JsonValue.Bool(true));
     }
     if self.starts_with("false") {
       self.pos = self.pos + 5;
-      ret ok(JsonValue.Bool(false));
+      ret .Ok(JsonValue.Bool(false));
     }
     if self.starts_with("null") {
       self.pos = self.pos + 4;
-      ret ok(JsonValue.Null);
+      ret .Ok(JsonValue.Null);
     }
     if _json_is_digit(c) || c == '-' {
       let numtext = self.parse_number_text();
-      ret ok(JsonValue.Num(parse_dec(numtext)));
+      ret .Ok(JsonValue.Num(parse_dec(numtext)));
     }
     ret err_kind(.Parse, "unexpected character in JSON", JsonValue.Null);
   }
 
-  parse_array() Result<JsonValue> {
+  parse_array() Result<JsonValue, Error> {
     self.pos = self.pos + 1;
     Vec<JsonValue> items;
     items.init(8);
     self.skip_ws();
     if self.peek() == ']' {
       self.pos = self.pos + 1;
-      ret ok(JsonValue.Array(items));
+      ret .Ok(JsonValue.Array(items));
     }
     for true {
       fit self.parse_value() {
@@ -487,23 +459,23 @@ impl JsonParser {
         self.pos = self.pos + 1;
       } elif c == ']' {
         self.pos = self.pos + 1;
-        ret ok(JsonValue.Array(items));
+        ret .Ok(JsonValue.Array(items));
       } else {
         items.free();
         ret err_kind(.Parse, "expected ',' or ']' in array", JsonValue.Null);
       }
     }
-    ret ok(JsonValue.Array(items));
+    ret .Ok(JsonValue.Array(items));
   }
 
-  parse_object() Result<JsonValue> {
+  parse_object() Result<JsonValue, Error> {
     self.pos = self.pos + 1;
     Map<str, JsonValue> entries;
     entries.init(8);
     self.skip_ws();
     if self.peek() == '}' {
       self.pos = self.pos + 1;
-      ret ok(JsonValue.Object(entries));
+      ret .Ok(JsonValue.Object(entries));
     }
     for true {
       self.skip_ws();
@@ -534,18 +506,18 @@ impl JsonParser {
         self.pos = self.pos + 1;
       } elif c == '}' {
         self.pos = self.pos + 1;
-        ret ok(JsonValue.Object(entries));
+        ret .Ok(JsonValue.Object(entries));
       } else {
         entries.free();
         ret err_kind(.Parse, "expected ',' or '}' in object", JsonValue.Null);
       }
     }
-    ret ok(JsonValue.Object(entries));
+    ret .Ok(JsonValue.Object(entries));
   }
 }
 
 // Parse JSON text into a typed `JsonValue`. Returns `Err` on malformed input.
-pub fun parse(str src) Result<JsonValue> {
+pub fun parse(str src) Result<JsonValue, Error> {
   let p = JsonParser{src = src, pos = 0};
   ret p.parse_value();
 }

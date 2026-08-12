@@ -1,0 +1,86 @@
+// POSIX process bindings (unistd.h / sys/wait.h / spawn.h).
+// 
+// These are declarations only; implementations come from the system libc.
+// Spawning goes through `posix_spawn` rather than raw `fork`+`exec` since it
+// avoids copy-on-write address-space duplication and is safe to call from a
+// multithreaded process. `waitpid`'s status is decoded manually via bit ops
+// (see `pipe`/`waitpid` below) since function-like C macros like
+// `WIFEXITED`/`WEXITSTATUS` can't be bound as Fun signatures.
+
+// Duplicates `oldfd` onto `newfd`, closing the target first if it was
+// already open. Returns newfd on success, -1 on failure (C semantics).
+pub fun dup2(num oldfd, num newfd) num;
+
+// Closes a file descriptor. Returns 0 on success, -1 on failure (C semantics).
+pub fun close(num fd) num;
+
+// Reads up to `count` bytes from `fd` into `buf`. Returns the number of
+// bytes read (0 at end-of-file), or -1 on failure (C semantics).
+pub fun read(num fd, raw* buf, num count) num;
+
+// Writes up to `count` bytes from `buf` to `fd`. Returns the number of bytes
+// written, or -1 on failure (C semantics).
+pub fun write(num fd, raw* buf, num count) num;
+
+// Creates a unidirectional pipe. `fds` is a 2-element i32 buffer (real C
+// `int[2]`, not a 64-bit `num`, since libc only writes the low 4 bytes);
+// fds[0] becomes the read end, fds[1] the write end. Returns 0 on success,
+// -1 on failure (C semantics).
+pub fun pipe(i32* fds) num;
+
+// Forks the calling process. Prefer `posix_spawnp` for actually spawning a
+// program; this is exposed for callers that need the classic fork/exec
+// split directly. Legal to call under its libc name since the `fork`
+// keyword is contextual, reserved only in statement position. Returns 0 in
+// the child, the child's pid in the parent, or -1 on failure (C semantics).
+pub fun fork() num;
+
+// Replaces the current process image, searching PATH for `file` (unless it
+// contains a '/'), passing `argv` (NULL-terminated, argv[0] conventionally
+// repeating the program name; must stay valid until exec succeeds or
+// fails). For use after a manual `fork()` in the child, as an alternative
+// to `posix_spawnp`. Does not return on success; -1 on failure (C semantics).
+pub fun execvp(str file, str[] argv) num;
+
+// Terminates the calling process immediately, without running atexit
+// handlers or flushing stdio buffers. Use in a forked child after `execvp`
+// fails, so a failed exec can't fall through into the parent's own code path.
+pub fun _exit(num code);
+
+// Returns the current process's environment (`char** environ`), for passing
+// straight through to `posix_spawn` so the child inherits it.
+pub fun environ_ptr() str[];
+
+// Opaque set of child-side file actions (dup2/close operations) applied,
+// in order, right after `posix_spawn` forks and before it execs.
+pub fun posix_spawn_file_actions_init(posix_spawn_file_actions_t* actions) num;
+pub fun posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* actions) num;
+pub fun posix_spawn_file_actions_adddup2(
+  posix_spawn_file_actions_t* actions,
+  num fildes,
+  num newfildes
+) num;
+pub fun posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* actions, num fildes) num;
+
+// Spawns a new process running `file`, searching PATH (posix_spawnp
+// variant), applying `file_actions` (may be null) in the child before exec,
+// with `argv`/`envp` NULL-terminated (pass `environ_ptr()` for envp to
+// inherit the parent's environment). On success writes the child's pid to
+// `pid` (real C `pid_t*`, a 32-bit int on Darwin/glibc, not a 64-bit
+// `num*`) and returns 0; on failure returns a nonzero errno-style code and
+// leaves `pid` untouched (C semantics).
+pub fun posix_spawnp(
+  pid_t* pid,
+  str file,
+  posix_spawn_file_actions_t* file_actions,
+  posix_spawnattr_t* attrp,
+  str[] argv,
+  str[] envp
+) num;
+
+// Waits for child `pid` to exit, writing the raw wait status to `status`
+// (real C `int*`, see the `pipe` note above on why this is `i32*` and not
+// `num*`; decode with the bit ops described in this module's header
+// comment). `options` is 0 for a normal blocking wait. Returns the pid of
+// the child whose state changed, or -1 on failure (C semantics).
+pub fun waitpid(num pid, i32* status, num options) num;

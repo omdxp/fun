@@ -4,18 +4,19 @@
 imp std.c.io;
 imp std.fs;
 imp std.result;
+imp std.error;
 
 fun main() num {
   Fs f = fs();
   str path = "_tmp_fs_try.txt";
 
-  Result<bin> w = f.try_write_string(path, "hello from try");
+  Result<bin, Error> w = f.try_write_string(path, "hello from try");
   fit w {
     Result.Ok(done) -> { printf("write ok\n"); }
     Result.Err(e) -> { printf("write failed: %s\n", e.message); }
   }
 
-  Result<str> r = f.try_read_to_string(path);
+  Result<str, Error> r = f.try_read_to_string(path);
   fit r {
     Result.Ok(text) -> { printf("read ok: %s\n", text); }
     Result.Err(e) -> { printf("read failed: %s\n", e.message); }

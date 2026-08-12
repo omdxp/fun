@@ -28,12 +28,12 @@ fun consumer_main(raw* arg) raw* {
   for true {
     num v = 0;
     num rc = input.recv_into(&v);
-    if rc == channel_rc_ok() {
+    if rc == CHANNEL_RC_OK {
       sum = sum + v;
       count = count + 1;
       continue;
     }
-    if rc == channel_rc_closed() {
+    if rc == CHANNEL_RC_CLOSED {
       break;
     }
     break;
@@ -60,18 +60,18 @@ async fun main() {
     num in = 0;
     num rc_recv = await from_producer.recv_timeout_into_async(&in, 20);
 
-    if rc_recv == channel_rc_ok() {
+    if rc_recv == CHANNEL_RC_OK {
       num out = in * in;
       _ = await to_consumer.send_async(out);
       moved = moved + 1;
       continue;
     }
 
-    if rc_recv == channel_rc_closed() {
+    if rc_recv == CHANNEL_RC_CLOSED {
       break;
     }
 
-    if rc_recv == channel_rc_timeout() {
+    if rc_recv == CHANNEL_RC_TIMEOUT {
       timeout_ticks = timeout_ticks + 1;
       continue;
     }

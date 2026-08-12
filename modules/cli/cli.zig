@@ -4,8 +4,10 @@ const process = std.process;
 const codegen = @import("codegen");
 const lexer = @import("lexer");
 const token = lexer.token;
+const parser = @import("parser");
 const utils = @import("utils");
 const builtin = @import("builtin");
+pub const manifest = @import("manifest.zig");
 
 /// Compatibility shim: ArrayList with embedded allocator (old API style).
 fn ArrayList(comptime T: type) type {
@@ -30,6 +32,11 @@ pub const CliError = error{
     ExecutionFailed,
     /// Error indicating that help information should be displayed.
     ShowHelp,
+    /// Error indicating `fun build` could not find a `fun.toml` manifest in
+    /// the current directory.
+    ManifestNotFound,
+    /// Error indicating `-fuzz-target`/`fun fuzz <path>` was given no name.
+    MissingFuzzTarget,
 };
 
 /// `CliOptions` represents the command-line options for the transpiler.
@@ -81,6 +88,24 @@ pub const CliOptions = struct {
 
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
+
+    /// Flag to compile in TEST mode: `test "name" { ... }` blocks are
+    /// type-checked/emitted and a generated runner `main` replaces any
+    /// user-defined `main`. Set by `-test` or the `fun test <path>`
+    /// subcommand form (see `cmd/fun/main.zig`).
+    test_mode: bool,
+
+    /// Flag to compile in FUZZ mode: exactly one `fuzz "name" (data, len)
+    /// { ... }` block (selected by `fuzz_target`) is type-checked/emitted
+    /// as a harness function, replacing any user-defined `main`. Set by
+    /// `-fuzz` or the `fun fuzz <path> [target]` subcommand form.
+    fuzz_mode: bool,
+
+    /// The specific fuzz target's name to build (see `fuzz_mode`). Set by
+    /// `-fuzz-target <name>` or the `fun fuzz <path> <target>` subcommand
+    /// form. Required when the file declares more than one `fuzz` block;
+    /// auto-selected when there's exactly one.
+    fuzz_target: ?[]const u8,
 };
 
 pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
@@ -88,6 +113,7 @@ pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
     allocator.free(options.output_file);
     for (options.program_args) |arg| allocator.free(arg);
     allocator.free(options.program_args);
+    if (options.fuzz_target) |t| allocator.free(t);
 }
 
 /// Prints the usage information for the transpiler command-line interface.
@@ -103,7 +129,10 @@ pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-- <program args...>]
+        \\  fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+        \\  fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
+        \\  fun build               (reads ./fun.toml, installs binaries under fun-out/bin/)
         \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
         \\
@@ -119,6 +148,9 @@ fn print_usage(io: std.Io) void {
         \\  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
         \\  -warn-unused      Emit unused import/variable/function/compound warnings (optional)
         \\  -warn-unused-lenient  Like -warn-unused but still emits unused warnings when the file has an unrelated type error (used by fls) (optional)
+        \\  -test             Compile `test "name" { ... }` blocks into a runner binary instead of the normal program (optional)
+        \\  -fuzz             Compile one `fuzz "name" (data, len) { ... }` block into a fuzzing harness instead of the normal program (optional)
+        \\  -fuzz-target <name>  Select which fuzz block to build, when the file declares more than one (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -163,6 +195,10 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var debug_info = false;
     var warn_unused = false;
     var warn_unused_lenient = false;
+    var test_mode = false;
+    var fuzz_mode = false;
+    var fuzz_target: ?[]const u8 = null;
+    errdefer if (fuzz_target) |t| allocator.free(t);
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -221,6 +257,16 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         } else if (std.mem.eql(u8, arg, "-warn-unused-lenient")) {
             warn_unused = true;
             warn_unused_lenient = true;
+        } else if (std.mem.eql(u8, arg, "-test")) {
+            test_mode = true;
+        } else if (std.mem.eql(u8, arg, "-fuzz")) {
+            fuzz_mode = true;
+        } else if (std.mem.eql(u8, arg, "-fuzz-target")) {
+            if (i >= argv.len) return CliError.MissingFuzzTarget;
+            const name = argv[i];
+            i += 1;
+            if (fuzz_target) |old| allocator.free(old);
+            fuzz_target = try allocator.dupe(u8, name);
         }
     }
 
@@ -260,6 +306,9 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .warn_unused = warn_unused,
         .warn_unused_lenient = warn_unused_lenient,
         .program_args = try program_args.toOwnedSlice(),
+        .test_mode = test_mode,
+        .fuzz_mode = fuzz_mode,
+        .fuzz_target = fuzz_target,
     };
 }
 
@@ -634,6 +683,45 @@ pub fn format_file_and_imports_in_place(allocator: mem.Allocator, io: std.Io, in
     try format_file_and_imports_recursive(allocator, io, input_file, &visiting, &visited);
 }
 
+/// Re-indents a multi-line raw string's own CONTINUATION lines (every
+/// backtick-prefixed line after the first) to `target_indent` spaces,
+/// discarding whatever leading whitespace each one had verbatim from
+/// source. Safe: the lexer strips a continuation line's leading
+/// whitespace/tabs before its own backtick when RE-reading the string
+/// (see `token_make_raw_string`'s multi-line loop), so that whitespace
+/// was never part of the string's actual value -- only ever a visual
+/// artifact of wherever the line happened to be typed. Leaving it as
+/// verbatim-reproduced (the previous behavior) meant a raw string's
+/// FIRST line -- freshly positioned by whatever wrapping/indent
+/// decision this formatting pass just made for it -- could end up at
+/// a totally different column than its own continuation lines, which
+/// just kept whatever indentation they'd had in the ORIGINAL source.
+/// A single-line (or already-consistently-indented multi-line, e.g.
+/// nothing to change) raw string's `text` is returned unchanged
+/// (dupe'd, so the caller can always `free` the result uniformly).
+fn reindentRawStringContinuations(allocator: mem.Allocator, text: []const u8, target_indent: usize) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '\n') == null) {
+        return allocator.dupe(u8, text);
+    }
+    var out = ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (it.next()) |line| {
+        if (!first) {
+            try out.append('\n');
+            try out.appendNTimes(' ', target_indent);
+            var k: usize = 0;
+            while (k < line.len and (line[k] == ' ' or line[k] == '\t')) k += 1;
+            try out.appendSlice(line[k..]);
+        } else {
+            try out.appendSlice(line);
+        }
+        first = false;
+    }
+    return out.toOwnedSlice();
+}
+
 fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line_starts: []const usize) ![]const u8 {
     return switch (t.type) {
         .Identifier, .Keyword, .Operator => allocator.dupe(u8, t.data.sval.items),
@@ -703,7 +791,24 @@ fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line
                 else => base,
             };
         },
-        .String => std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items}),
+        .String => blk: {
+            if (t.is_raw_string) {
+                // Reproduce the original backtick spelling verbatim (source
+                // slice, like Number's literal lexeme above) -- `t.data.sval`
+                // holds the LITERAL, already-decoded bytes, not something
+                // that can be safely requoted as `"..."` the way a regular
+                // string's escape-preserving buffer can (a raw string may
+                // contain an unescaped `"` or a real newline, either of
+                // which would corrupt or fail to re-lex as a regular
+                // string).
+                const start = pos_to_index(line_starts, t.pos, false);
+                const end_excl = pos_to_index(line_starts, t.pos, true);
+                if (start <= end_excl and end_excl <= source.len and end_excl > start) {
+                    break :blk allocator.dupe(u8, source[start..end_excl]);
+                }
+            }
+            break :blk std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items});
+        },
         .Boolean => allocator.dupe(u8, if (t.data.bval) "true" else "false"),
         .Comment => blk: {
             // Always emit exactly one space after //
@@ -832,6 +937,29 @@ fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.T
 
     // Return type pointers: `...) Type* {` or `...) Type*;`
     if (next.type == .Symbol and (next.data.cval == '{' or next.data.cval == ';')) return true;
+
+    // Generic argument pointer as the LAST type argument: `Vec<Type*>`
+    // (closing `>`, no name follows the star).
+    if (next.type == .Operator and std.mem.eql(u8, next.data.sval.items, ">")) return true;
+    if (next.type == .Symbol and next.data.cval == '>') return true;
+
+    // Generic argument pointer followed by ANOTHER type argument:
+    // `Result<Type*, Error>`. A following `,` here would be ambiguous
+    // with real multiplication followed by a call argument (`foo(a * b,
+    // c)`) in general -- but `in_decl_only_ctx` already means we're
+    // somewhere a value expression can't appear at all (a function's
+    // return-type position, a field/param type, ...), so there's no
+    // ambiguity to guard against. Without this, `Result<Expr *, Error>`
+    // formatted with a stray space before the star and never converged
+    // even under repeated `-fmt` passes (not idempotent).
+    if (in_decl_only_ctx and next.type == .Operator and std.mem.eql(u8, next.data.sval.items, ",")) return true;
+
+    // Unnamed pointer type immediately closing a parenthesized list, e.g. an
+    // enum data-carrying variant's payload (`StatementFork(Node*)`) or a
+    // function-type parameter (`fun(Node*) R`). Unambiguous: a real
+    // multiplication can never be immediately followed by `)` (it always
+    // needs a right operand first), so this can only be a bare pointer type.
+    if (next.type == .Symbol and next.data.cval == ')') return true;
 
     // Declaration/field/param pointers: `Type* name` (name then delimiter)
     if (next.type == .Identifier) {
@@ -1593,7 +1721,8 @@ fn is_top_level_construct_keyword(kw: []const u8) bool {
         std.mem.eql(u8, kw, "compound") or
         std.mem.eql(u8, kw, "quirk") or
         std.mem.eql(u8, kw, "enum") or
-        std.mem.eql(u8, kw, "impl");
+        std.mem.eql(u8, kw, "impl") or
+        std.mem.eql(u8, kw, "test");
 }
 
 fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, line_starts: []const usize) !void {
@@ -1605,6 +1734,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var wrap_cond_close_before: ?usize = null;
     var prev_unary_prefix: bool = false;
     var in_fun_signature: bool = false;
+    // A `test "name" { ... }` block's body is ordinary executable statement
+    // code, exactly like a `fun`'s body -- NOT a declaration block like
+    // compound/quirk/impl (which `test` used to be grouped with for
+    // `pending_decl_block_open`). Tracked the same way `in_fun_signature`
+    // is, so the block's `{` sets `function_body_depth` directly instead
+    // of `decl_block_depth`. See `in_decl_only_ctx`'s own use of these two
+    // depths for why this distinction matters: getting it wrong made every
+    // statement inside a `test` block get formatted as if it were a
+    // declaration-context type annotation (e.g. `*p = f();` mangled to
+    // `* p =f();`, confirmed directly).
+    var in_test_signature: bool = false;
     var pending_decl_block_open: bool = false;
     var decl_block_depth: isize = 0;
     var pending_enum_block_open: bool = false;
@@ -1617,7 +1757,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var function_body_depth: isize = 0;
     var generic_angle_depth: usize = 0;
     var asm_raw: ?AsmRawRange = null;
-    var brace_stack = ArrayList(bool).init(state.allocator);
+    // What an opening `{` actually incremented, so the matching `}` decrements
+    // EXACTLY that counter back -- not a blind "decrement everything that's
+    // nonzero" (see the bug this fixes: a bare impl method's body closing was
+    // ALSO decrementing `decl_block_depth`, the ENCLOSING `impl`/`compound`
+    // block's own counter, one step too many. After the first such method in
+    // an `impl` block, `decl_block_depth` prematurely hit 0, so every method
+    // after it lost `in_decl_only_ctx` for its own signature -- e.g. a
+    // generic argument's pointer star, or its final closing `>`, silently
+    // reverted to non-declaration spacing).
+    const BraceKind = enum { not_a_block, plain_block, decl_block, enum_block, function_body };
+    var brace_stack = ArrayList(BraceKind).init(state.allocator);
     defer brace_stack.deinit();
     // Stack of close-token indices for comma groups currently being wrapped one
     // item per line (width-based wrapping). When the current token's index matches
@@ -1835,6 +1985,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (std.mem.eql(u8, kw2, "fun")) {
                 in_fun_signature = true;
             }
+            if (std.mem.eql(u8, kw2, "test")) {
+                in_test_signature = true;
+            }
             if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl")) {
                 pending_decl_block_open = true;
             }
@@ -1850,6 +2003,30 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 while (jcond < toks.len and (toks[jcond].type == .NewLine or toks[jcond].type == .Comment)) : (jcond += 1) {}
                 if (jcond < toks.len) {
                     const cond_has_parens = toks[jcond].type == .Operator and std.mem.eql(u8, toks[jcond].data.sval.items, "(");
+
+                    // A leading `(` only wraps the WHOLE condition (safe to
+                    // strip, `if (a) {` -> `if a {`) when its MATCHING `)` is
+                    // immediately followed by `{`. If more operators follow
+                    // the `)` (`if (status & 127) == 0 {`), the parens only
+                    // group a SUB-expression -- stripping them would silently
+                    // change the parsed expression tree (Fun, like C, binds
+                    // `==` tighter than `&`/`|`/`^`, so `status & 127 == 0`
+                    // means `status & (127 == 0)`, not `(status & 127) == 0`).
+                    var parens_wrap_whole_cond = false;
+                    if (cond_has_parens) {
+                        var pdepth: isize = 1;
+                        var k = jcond + 1;
+                        while (k < toks.len and pdepth > 0) : (k += 1) {
+                            const tk = toks[k];
+                            if (tk.type == .Operator and std.mem.eql(u8, tk.data.sval.items, "(")) pdepth += 1;
+                            if (tk.type == .Symbol and tk.data.cval == ')') pdepth -= 1;
+                        }
+                        var k2 = k;
+                        while (k2 < toks.len and (toks[k2].type == .NewLine or toks[k2].type == .Comment)) : (k2 += 1) {}
+                        if (k2 < toks.len and toks[k2].type == .Symbol and toks[k2].data.cval == '{') {
+                            parens_wrap_whole_cond = true;
+                        }
+                    }
 
                     // Scan forward to determine if this `if` uses a `{` block before the next `;`.
                     var depth_paren: isize = 0;
@@ -1881,7 +2058,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         }
                     }
 
-                    if (is_block and cond_has_parens) {
+                    if (is_block and parens_wrap_whole_cond) {
                         skipping_cond_outer_parens = true;
                         cond_paren_depth = 0;
                         pending_control_block_open = true;
@@ -1959,7 +2136,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (idx == close_i) {
                     inline_arm_close = null;
                     const last = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
-                    if (last != ' ') try state.out.append(' ');
+                    // An EMPTY inline body (`{}`) stays compact -- only pad with a
+                    // space before `}` when there's actual content between the
+                    // braces (`{ ret x; }`), matching the `{}` convention used
+                    // for empty bodies elsewhere.
+                    if (last != ' ' and last != '{') try state.out.append(' ');
                     try state.out.append('}');
                     // A fit-branch separator comma must stay glued to THIS arm's close
                     // (`... },`) rather than leading the next line (`, next -> ...`).
@@ -1985,8 +2166,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     continue;
                 }
             }
-            const is_block_close = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else true;
+            const popped_brace_kind = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else .plain_block;
             if (brace_stack.items.len > 0) _ = brace_stack.pop();
+            const is_block_close = popped_brace_kind != .not_a_block;
 
             if (!is_block_close) {
                 try state.out.append('}');
@@ -1994,9 +2176,18 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 continue;
             }
 
-            if (decl_block_depth > 0) decl_block_depth -= 1;
-            if (enum_block_depth > 0) enum_block_depth -= 1;
-            if (function_body_depth > 0) function_body_depth -= 1;
+            switch (popped_brace_kind) {
+                .decl_block => if (decl_block_depth > 0) {
+                    decl_block_depth -= 1;
+                },
+                .enum_block => if (enum_block_depth > 0) {
+                    enum_block_depth -= 1;
+                },
+                .function_body => if (function_body_depth > 0) {
+                    function_body_depth -= 1;
+                },
+                .plain_block, .not_a_block => {},
+            }
             if (!state.at_line_start.*) try state.out.append('\n');
             if (state.indent.* > 0) state.indent.* -= 1;
             try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
@@ -2053,7 +2244,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             state.at_line_start.* = false;
         }
 
-        const in_decl_only_ctx = in_fun_signature or (decl_block_depth > 0 and function_body_depth == 0);
+        // An enum body (`enum E { Variant(Type*, ...), ... }`) is ALSO a
+        // declaration-only context -- variant payload lists are type lists,
+        // never executable code -- but tracks its own `enum_block_depth`
+        // rather than `decl_block_depth` (an enum isn't an `impl`/`compound`/
+        // `quirk`). Without this, a pointer-typed payload followed by
+        // another payload (`Bin(chr, Type*, Type*)`, star followed by `,`)
+        // fell through to non-declaration spacing and gained a stray space,
+        // even on ALREADY-correctly-spaced input.
+        const in_decl_only_ctx = in_fun_signature or (decl_block_depth > 0 and function_body_depth == 0) or (enum_block_depth > 0 and function_body_depth == 0);
         const generic_open = is_generic_angle_open(toks, idx, in_decl_only_ctx);
         const prev_sig_idx = prev_significant_index(toks, idx);
         const prev_sig = if (prev_sig_idx) |pi| toks[pi] else null;
@@ -2068,7 +2267,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         const prev_sig_is_lbrace = prev_sig != null and prev_sig.?.type == .Symbol and prev_sig.?.data.cval == '{';
         const paren_before_brace = has_paren_before_brace(toks, idx);
         const is_block_brace = t2.type == .Symbol and t2.data.cval == '{' and
-            (pending_decl_block_open or pending_enum_block_open or in_fun_signature or pending_control_block_open or prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace or prev_sig_is_arrow or prev_sig_is_comma or prev_sig_is_semicolon or prev_sig_is_lbrace);
+            (pending_decl_block_open or pending_enum_block_open or in_fun_signature or in_test_signature or pending_control_block_open or prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace or prev_sig_is_arrow or prev_sig_is_comma or prev_sig_is_semicolon or prev_sig_is_lbrace);
 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
@@ -2156,7 +2355,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         const unary_ctx = blk_unary: {
                             if (pt2.type == .Keyword) {
                                 const kw = pt2.data.sval.items;
-                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary true;
+                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk_unary true;
                             }
                             if (is_word_like(pt2)) break :blk_unary false;
                             if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary false;
@@ -2182,7 +2381,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     const unary_ctx = blk_unary_sym: {
                         if (pt2.type == .Keyword) {
                             const kw = pt2.data.sval.items;
-                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary_sym true;
+                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk_unary_sym true;
                         }
                         if (is_word_like(pt2)) break :blk_unary_sym false;
                         if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary_sym false;
@@ -2272,6 +2471,22 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
                     if (pt2.type == .Symbol and pt2.data.cval == '>') break :blk false;
                     if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, ">")) break :blk false;
+                    // A string literal is never a callee/index target -- unlike an
+                    // identifier, `"name"(` isn't a call. The only place this shape
+                    // occurs is `fuzz "name" (data, len) { ... }`, whose parameter
+                    // list must not glue to the description string.
+                    if (pt2.type == .String) break :blk true;
+                    // A statement keyword taking a parenthesized OPERAND (`ret (x) & y;`,
+                    // `if (a) {`, `fit (x) {`) is not a call/index -- unlike a real
+                    // callee name, it must not glue to the paren (`ret(x)` reads as a
+                    // function call). `fun`/type-name-like keywords are NOT included
+                    // here since those legitimately precede a real parameter list.
+                    if (pt2.type == .Keyword) {
+                        const kw = pt2.data.sval.items;
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert") or std.mem.eql(u8, kw, "await")) {
+                            break :blk true;
+                        }
+                    }
                     // Distinguish grouping after spaced operators (e.g. `|| (`) from calls/indexing (e.g. `foo(`).
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;
@@ -2334,31 +2549,47 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (fitArmInlineClose(toks, idx, source, line_starts, state.allocator, currentColumn(state.out))) |close_i| {
                         inline_arm_close = close_i;
                         try state.out.append('{');
-                        try state.out.append(' ');
+                        // An EMPTY inline body (`{}`, close immediately follows
+                        // open) stays compact -- don't pre-emptively add the
+                        // "{ content }" padding space when there's no content.
+                        // The matching close-brace handler has its own guard
+                        // for this, but that only prevents a SECOND space; the
+                        // one written here happens first and unconditionally.
+                        if (close_i != idx + 1) try state.out.append(' ');
                         state.at_line_start.* = false;
                         state.prev_token.* = null;
                         continue;
                     }
                 }
                 if (is_block_brace) {
+                    var brace_kind: BraceKind = .plain_block;
                     if (pending_decl_block_open) {
                         decl_block_depth += 1;
                         pending_decl_block_open = false;
+                        brace_kind = .decl_block;
                     }
                     if (pending_enum_block_open) {
                         enum_block_depth += 1;
                         pending_enum_block_open = false;
+                        brace_kind = .enum_block;
                     }
                     if (pending_control_block_open) pending_control_block_open = false;
                     if (in_fun_signature) {
                         in_fun_signature = false;
                         function_body_depth += 1;
+                        brace_kind = .function_body;
+                    } else if (in_test_signature) {
+                        in_test_signature = false;
+                        function_body_depth += 1;
+                        brace_kind = .function_body;
                     } else if (function_body_depth == 0 and decl_block_depth > 0 and !pending_decl_block_open and !pending_enum_block_open and !pending_control_block_open and (prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace)) {
                         function_body_depth = 1;
+                        brace_kind = .function_body;
                     } else if (function_body_depth > 0) {
                         function_body_depth += 1;
+                        brace_kind = .function_body;
                     }
-                    try brace_stack.append(true);
+                    try brace_stack.append(brace_kind);
                     try state.out.append('{');
                     try state.out.append('\n');
                     state.indent.* += 1;
@@ -2366,7 +2597,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     state.prev_token.* = null;
                     continue;
                 }
-                try brace_stack.append(false);
+                try brace_stack.append(.not_a_block);
                 try state.out.append('{');
                 state.prev_token.* = t2;
                 continue;
@@ -2468,14 +2699,19 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             continue;
         }
 
-        const s2 = try token_text(state.allocator, t2, source, line_starts);
-        defer state.allocator.free(s2);
+        const s2_raw = try token_text(state.allocator, t2, source, line_starts);
+        const s2 = if (t2.type == .String and t2.is_raw_string)
+            try reindentRawStringContinuations(state.allocator, s2_raw, state.indent.* * fmt_indent_width)
+        else
+            s2_raw;
+        defer state.allocator.free(s2_raw);
+        defer if (s2.ptr != s2_raw.ptr) state.allocator.free(s2);
         try state.out.appendSlice(s2);
 
         // Track unary prefix ops so we don't insert a space after them.
         if (t2.type == .Operator) {
             const op2 = t2.data.sval.items;
-            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*"))) {
+            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*") or std.mem.eql(u8, op2, "!"))) {
                 const is_pointer_decl_star = std.mem.eql(u8, op2, "*") and blk_ptr: {
                     const prev = state.prev_token.*;
                     if (prev == null) break :blk_ptr false;
@@ -2493,7 +2729,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (pt.type == .Keyword) {
                         const kw = pt.data.sval.items;
                         // Keywords that are followed by an expression.
-                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk true;
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk true;
                     }
                     if (is_word_like(pt)) break :blk false;
                     if (pt.type == .Symbol and is_closing_symbol(pt.data.cval)) break :blk false;
@@ -3011,7 +3247,308 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
-pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool) !void {
+/// Compiles `c_path` (a `fuzz`-mode harness, see `emit_fuzz_mode_harness`
+/// in the transpiler) with the fixed flag a coverage-guided fuzzing
+/// engine's own runtime needs, into `exe_file`.
+///
+/// Deliberately narrower than `invoke_c_compiler_to_exe`'s multi-candidate
+/// fallback: only a compiler whose toolchain bundles that engine's
+/// runtime can produce a WORKING binary here (a compiler that doesn't
+/// support the flag at all would either reject it outright or silently
+/// produce a binary that never actually calls into the fuzz target).
+///
+/// When `$FUN_FUZZ_CC` is set, it's trusted as-is (no fallback search) --
+/// same "explicit override wins outright" convention as `FUN_CC` for
+/// `invoke_c_compiler_to_exe`, but under its OWN name: a user's ordinary
+/// `FUN_CC` (their normal build compiler -- gcc, cl, whatever) has
+/// nothing to do with whether it can ALSO do coverage-guided fuzzing,
+/// so reusing it here would silently skip the fallback search below in
+/// favor of a compiler picked for an unrelated reason. Otherwise this
+/// tries a short list of candidates most likely to actually have the
+/// runtime:
+/// plain `clang` first (works out of the box on many Linux distros'
+/// packaged clang), then a couple of common non-default install
+/// locations (Homebrew's LLVM on macOS, where the platform default --
+/// Xcode's bundled clang -- does NOT include this runtime; versioned
+/// `clang-N` binaries on Linux, where the unversioned `clang` symlink
+/// isn't always installed even when a versioned one is; the official
+/// LLVM installer's default path on Windows). Fails with a clear,
+/// actionable message (not a silent no-op) when nothing in the list
+/// works.
+///
+/// Windows note: this has NOT been tested on Windows at all (no Windows
+/// machine available while building it) -- plain LLVM `clang.exe`
+/// SHOULD accept the same flags used here unmodified (it's the same
+/// GNU-style driver as macOS/Linux clang, distinct from `clang-cl.exe`'s
+/// MSVC-flag-compatible one, which isn't tried), but whether the
+/// coverage-guided runtime itself is reliably bundled with Windows LLVM
+/// builds, and whether the resulting binary actually runs correctly,
+/// is genuinely unverified. Treat Windows fuzzing as "might work," not
+/// a confirmed-working platform, until someone actually tries it.
+fn fuzz_compiler_candidates(allocator: mem.Allocator) ![][]const u8 {
+    var list = ArrayList([]const u8).init(allocator);
+    errdefer free_arg_list(allocator, list.items);
+    try list.append(try allocator.dupe(u8, "clang"));
+    if (builtin.target.os.tag == .macos) {
+        try list.append(try allocator.dupe(u8, "/opt/homebrew/opt/llvm/bin/clang"));
+        try list.append(try allocator.dupe(u8, "/usr/local/opt/llvm/bin/clang"));
+    } else if (builtin.target.os.tag == .linux) {
+        const versions = [_][]const u8{ "clang-20", "clang-19", "clang-18", "clang-17", "clang-16", "clang-15", "clang-14" };
+        for (versions) |v| try list.append(try allocator.dupe(u8, v));
+    } else if (builtin.target.os.tag == .windows) {
+        // The official LLVM Windows installer's default install path, in
+        // case `clang.exe` (plain LLVM clang, NOT `clang-cl.exe` -- the
+        // MSVC-flag-compatible driver, which this doesn't try at all,
+        // see the doc comment above) isn't already on PATH.
+        try list.append(try allocator.dupe(u8, "C:\\Program Files\\LLVM\\bin\\clang.exe"));
+    }
+    return list.toOwnedSlice();
+}
+
+fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
+    // Deliberately `FUN_FUZZ_CC`, NOT the general `FUN_CC` -- a user may
+    // already have `FUN_CC` set globally for their ORDINARY builds (gcc,
+    // cl, whatever they normally use), which has nothing to do with
+    // whether it can do coverage-guided fuzzing at all. Reusing `FUN_CC`
+    // here would silently skip the whole fallback candidate search
+    // (below) in favor of a compiler picked for an unrelated reason,
+    // exactly the trap this hit during development: `FUN_CC=gcc` set in
+    // the shell for normal use caused `fun fuzz` to try gcc specifically
+    // and fail, even though the fallback list would have found a working
+    // compiler immediately.
+    var owned_cc: ?[]const u8 = null;
+    defer if (owned_cc) |v| allocator.free(v);
+    if (std.c.getenv("FUN_FUZZ_CC")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) owned_cc = try allocator.dupe(u8, s);
+    }
+
+    // Coverage-guided-only by default (`-fsanitize=fuzzer`) plus memory-error
+    // detection (`,address`) for stronger bug-finding -- but AddressSanitizer's
+    // own startup (its shadow-memory mmap setup) has been observed to hang
+    // indefinitely under some restricted/sandboxed/containerized environments
+    // even when the compiler and fuzzing engine both work fine otherwise.
+    // `FUN_FUZZ_NO_ASAN=1` drops just the `,address` half for exactly that
+    // case -- fuzzing still runs and finds crashes/failed asserts, just
+    // without ASan's additional memory-safety detection.
+    const sanitize_flag = blk: {
+        if (std.c.getenv("FUN_FUZZ_NO_ASAN")) |z| {
+            const s = std.mem.sliceTo(z, 0);
+            if (s.len > 0 and !std.mem.eql(u8, s, "0")) break :blk "-fsanitize=fuzzer";
+        }
+        break :blk "-fsanitize=fuzzer,address";
+    };
+
+    const candidates: [][]const u8 = if (owned_cc) |cc|
+        try allocator.dupe([]const u8, &.{cc})
+    else
+        try fuzz_compiler_candidates(allocator);
+    defer if (owned_cc == null) free_arg_list(allocator, candidates) else allocator.free(candidates);
+
+    var last_stderr: []const u8 = "";
+    defer if (last_stderr.len > 0) allocator.free(last_stderr);
+    var any_compiler_found = false;
+
+    for (candidates) |cc| {
+        var argv_list = ArrayList([]const u8).init(allocator);
+        defer argv_list.deinit();
+        defer free_arg_list(allocator, argv_list.items);
+
+        try argv_list.append(try allocator.dupe(u8, cc));
+        try argv_list.append(try allocator.dupe(u8, sanitize_flag));
+        try argv_list.append(try allocator.dupe(u8, if (debug_info) "-g" else "-g0"));
+        try argv_list.append(try allocator.dupe(u8, c_path));
+        try argv_list.append(try allocator.dupe(u8, "-o"));
+        try argv_list.append(try allocator.dupe(u8, exe_file));
+        if (builtin.target.os.tag != .windows) {
+            try argv_list.append(try allocator.dupe(u8, "-pthread"));
+            try argv_list.append(try allocator.dupe(u8, "-lm"));
+        }
+
+        const result = std.process.run(allocator, io, .{
+            .argv = argv_list.items,
+        }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        any_compiler_found = true;
+
+        if (result.term.exited == 0) {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+            return;
+        }
+
+        allocator.free(result.stdout);
+        if (last_stderr.len > 0) allocator.free(last_stderr);
+        last_stderr = result.stderr;
+        // Try the next candidate (an explicit $FUN_FUZZ_CC never falls
+        // through -- `candidates` only ever has one entry in that case).
+    }
+
+    if (!any_compiler_found) return CliError.MissingCCompiler;
+
+    // Deliberately-broken-C tests (exercising the CompilationFailed path
+    // itself) would otherwise dump a real-looking "Compilation error:"
+    // block into every test run/CI log even though the test is passing --
+    // real CLI usage still needs to see this, so only test mode is muted.
+    if (!builtin.is_test) {
+        std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(io, last_stderr) catch {};
+        std.Io.File.stderr().writeStreamingAll(io,
+            \\
+            \\Note: fuzzing needs a compiler whose toolchain bundles a
+            \\coverage-guided fuzzing runtime (commonly available with a
+            \\mainline install; not always bundled with a platform's default
+            \\one). Set FUN_FUZZ_CC to point at a compiler that has it if none
+            \\of the ones tried automatically worked -- this is separate from
+            \\FUN_CC (your ordinary build compiler), since they may need to be
+            \\different compilers entirely. If it compiles but then hangs
+            \\immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
+            \\restricted/sandboxed environments hang during AddressSanitizer's
+            \\own startup.
+            \\
+        ) catch {};
+        if (builtin.target.os.tag == .windows) {
+            std.Io.File.stderr().writeStreamingAll(io,
+                \\
+                \\Windows note: fuzzing is unverified on Windows -- try
+                \\installing plain LLVM `clang.exe` (not clang-cl) and pointing
+                \\FUN_FUZZ_CC at it if it isn't already found automatically.
+                \\
+            ) catch {};
+        }
+    }
+    return CliError.CompilationFailed;
+}
+
+/// Invokes a C compiler on `c_path`, producing `exe_file`. Honors
+/// `FUN_CC`/`FUN_CC_ARGS` env var overrides, falling back to a list of
+/// default compiler candidates (see `get_default_compiler_candidates`).
+/// Shared by `compile_and_run` (compile + run + delete) and `compile_to_exe`
+/// (compile + keep, used by `fun build`) -- callers decide what happens to
+/// the resulting binary; this only handles getting it built.
+fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
+    var fun_cc: ?[]const u8 = null;
+    var fun_cc_args: ?[]const u8 = null;
+    if (std.c.getenv("FUN_CC")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) fun_cc = try allocator.dupe(u8, s);
+    }
+    defer if (fun_cc) |v| allocator.free(v);
+
+    if (std.c.getenv("FUN_CC_ARGS")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) fun_cc_args = try allocator.dupe(u8, s);
+    }
+    defer if (fun_cc_args) |v| allocator.free(v);
+
+    if (fun_cc != null and fun_cc.?.len > 0) {
+        var argv_list = ArrayList([]const u8).init(allocator);
+        defer argv_list.deinit();
+        defer free_arg_list(allocator, argv_list.items);
+        var used_template = false;
+        var non_template_base_argc: usize = 0;
+
+        var base = try parse_command_line(allocator, fun_cc.?);
+        defer base.deinit();
+        defer free_arg_list(allocator, base.items);
+
+        const uses_template = std.mem.indexOf(u8, fun_cc.?, "{src}") != null or std.mem.indexOf(u8, fun_cc.?, "{out}") != null;
+        used_template = uses_template;
+        if (uses_template) {
+            for (base.items) |a| {
+                const replaced = try replace_placeholders(allocator, a, c_path, exe_file);
+                try argv_list.append(replaced);
+            }
+        } else {
+            for (base.items) |a| {
+                try argv_list.append(try allocator.dupe(u8, a));
+            }
+            non_template_base_argc = base.items.len;
+            const flavor = if (argv_list.items.len >= 1) detect_compiler_flavor(argv_list.items[0]) else .unknown;
+            try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file, debug_info);
+        }
+
+        var using_zig = false;
+        if (argv_list.items.len >= 1) {
+            const cc_base = std.fs.path.basename(argv_list.items[0]);
+            if (std.mem.eql(u8, cc_base, "zig") or std.mem.eql(u8, cc_base, "zig.exe")) {
+                using_zig = true;
+            }
+        }
+
+        if (fun_cc_args != null and fun_cc_args.?.len > 0) {
+            var extra = try parse_command_line(allocator, fun_cc_args.?);
+            defer extra.deinit();
+            defer free_arg_list(allocator, extra.items);
+            try append_fun_cc_extra_args(allocator, &argv_list, extra.items, using_zig, used_template, non_template_base_argc);
+        }
+
+        const result = std.process.run(allocator, io, .{
+            .argv = argv_list.items,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return CliError.MissingCCompiler,
+            else => return err,
+        };
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+
+        if (result.term.exited != 0) {
+            // See the matching comment in the fuzz-compiler fallback below --
+            // muted in test mode so a deliberately-broken-C negative test
+            // doesn't dump a real-looking compiler error into CI logs.
+            if (!builtin.is_test) {
+                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+            }
+            return CliError.CompilationFailed;
+        }
+    } else {
+        const candidates = get_default_compiler_candidates();
+        var any_compiler_found = false;
+
+        for (candidates) |candidate| {
+            var argv_list = ArrayList([]const u8).init(allocator);
+            defer argv_list.deinit();
+            defer free_arg_list(allocator, argv_list.items);
+
+            try argv_list.append(try allocator.dupe(u8, candidate.cmd));
+            for (candidate.extra) |a| {
+                try argv_list.append(try allocator.dupe(u8, a));
+            }
+            try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file, debug_info);
+
+            const result = std.process.run(allocator, io, .{
+                .argv = argv_list.items,
+            }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            defer {
+                allocator.free(result.stdout);
+                allocator.free(result.stderr);
+            }
+
+            any_compiler_found = true;
+            if (result.term.exited != 0) {
+                if (!builtin.is_test) {
+                    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                    std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+                }
+                return CliError.CompilationFailed;
+            }
+
+            break;
+        }
+
+        if (!any_compiler_found) return CliError.MissingCCompiler;
+    }
+}
+
+pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool, fuzz_mode: bool) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -3073,118 +3610,10 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
         allocator.free(temp_name.?);
     };
 
-    // Compile the C file
-    {
-        var fun_cc: ?[]const u8 = null;
-        var fun_cc_args: ?[]const u8 = null;
-        if (std.c.getenv("FUN_CC")) |z| {
-            const s = std.mem.sliceTo(z, 0);
-            if (s.len > 0) fun_cc = try allocator.dupe(u8, s);
-        }
-        defer if (fun_cc) |v| allocator.free(v);
-
-        if (std.c.getenv("FUN_CC_ARGS")) |z| {
-            const s = std.mem.sliceTo(z, 0);
-            if (s.len > 0) fun_cc_args = try allocator.dupe(u8, s);
-        }
-        defer if (fun_cc_args) |v| allocator.free(v);
-
-        if (fun_cc != null and fun_cc.?.len > 0) {
-            var argv_list = ArrayList([]const u8).init(allocator);
-            defer argv_list.deinit();
-            defer free_arg_list(allocator, argv_list.items);
-            var used_template = false;
-            var non_template_base_argc: usize = 0;
-
-            var base = try parse_command_line(allocator, fun_cc.?);
-            defer base.deinit();
-            defer free_arg_list(allocator, base.items);
-
-            const uses_template = std.mem.indexOf(u8, fun_cc.?, "{src}") != null or std.mem.indexOf(u8, fun_cc.?, "{out}") != null;
-            used_template = uses_template;
-            if (uses_template) {
-                for (base.items) |a| {
-                    const replaced = try replace_placeholders(allocator, a, c_path, exe_file);
-                    try argv_list.append(replaced);
-                }
-            } else {
-                for (base.items) |a| {
-                    try argv_list.append(try allocator.dupe(u8, a));
-                }
-                non_template_base_argc = base.items.len;
-                const flavor = if (argv_list.items.len >= 1) detect_compiler_flavor(argv_list.items[0]) else .unknown;
-                try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file, debug_info);
-            }
-
-            var using_zig = false;
-            if (argv_list.items.len >= 1) {
-                const cc_base = std.fs.path.basename(argv_list.items[0]);
-                if (std.mem.eql(u8, cc_base, "zig") or std.mem.eql(u8, cc_base, "zig.exe")) {
-                    using_zig = true;
-                }
-            }
-
-            if (fun_cc_args != null and fun_cc_args.?.len > 0) {
-                var extra = try parse_command_line(allocator, fun_cc_args.?);
-                defer extra.deinit();
-                defer free_arg_list(allocator, extra.items);
-                try append_fun_cc_extra_args(allocator, &argv_list, extra.items, using_zig, used_template, non_template_base_argc);
-            }
-
-            const result = std.process.run(allocator, io, .{
-                .argv = argv_list.items,
-            }) catch |err| switch (err) {
-                error.FileNotFound => return CliError.MissingCCompiler,
-                else => return err,
-            };
-            defer {
-                allocator.free(result.stdout);
-                allocator.free(result.stderr);
-            }
-
-            if (result.term.exited != 0) {
-                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
-                return CliError.CompilationFailed;
-            }
-        } else {
-            const candidates = get_default_compiler_candidates();
-            var any_compiler_found = false;
-
-            for (candidates) |candidate| {
-                var argv_list = ArrayList([]const u8).init(allocator);
-                defer argv_list.deinit();
-                defer free_arg_list(allocator, argv_list.items);
-
-                try argv_list.append(try allocator.dupe(u8, candidate.cmd));
-                for (candidate.extra) |a| {
-                    try argv_list.append(try allocator.dupe(u8, a));
-                }
-                try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file, debug_info);
-
-                const result = std.process.run(allocator, io, .{
-                    .argv = argv_list.items,
-                }) catch |err| switch (err) {
-                    error.FileNotFound => continue,
-                    else => return err,
-                };
-                defer {
-                    allocator.free(result.stdout);
-                    allocator.free(result.stderr);
-                }
-
-                any_compiler_found = true;
-                if (result.term.exited != 0) {
-                    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-                    std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
-                    return CliError.CompilationFailed;
-                }
-
-                break;
-            }
-
-            if (!any_compiler_found) return CliError.MissingCCompiler;
-        }
+    if (fuzz_mode) {
+        try invoke_fuzz_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
+    } else {
+        try invoke_c_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
     }
 
     // Run the compiled program
@@ -3243,4 +3672,75 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
     }
 
     // Executable cleanup handled via defer above.
+}
+
+/// Compiles a `.c` file to a binary at `exe_output_path` and KEEPS it (does
+/// not run it, does not delete it) -- used by `fun build`, unlike
+/// `compile_and_run` (which always runs the binary once and deletes it
+/// afterward). `exe_output_path` is used verbatim as the compiler's `-o`
+/// target, so the caller decides the final name/location (already resolved,
+/// including the platform's `.exe` suffix on Windows).
+pub fn compile_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_output_path: []const u8, debug_info: bool) !void {
+    try invoke_c_compiler_to_exe(allocator, io, c_path, exe_output_path, debug_info);
+}
+
+/// `fun build`: reads `./fun.toml`, compiles each declared `[[bin]]` target,
+/// and installs the resulting binaries under `fun-out/bin/`. Unlike a plain
+/// `fun -in file.fn`, nothing is run afterward -- matching `zig build`
+/// (compile only; `zig build run`/`fun -in ... ` are the "compile and run"
+/// paths). Fun's own `imp` already does path-based module resolution, so
+/// the manifest only needs to declare build TARGETS, not an import graph.
+pub fn run_build(allocator: mem.Allocator, io: std.Io, debug_info: bool) !void {
+    const manifest_path = "fun.toml";
+    const text = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return CliError.ManifestNotFound,
+        else => return err,
+    };
+    defer allocator.free(text);
+
+    var m = try manifest.parse(allocator, text);
+    defer m.deinit();
+
+    try std.Io.Dir.cwd().createDirPath(io, "fun-out/bin");
+
+    for (m.bins) |b| {
+        const out_c_path = try std.fmt.allocPrint(allocator, "{s}.fun-build.c", .{b.name});
+        defer allocator.free(out_c_path);
+        defer std.Io.Dir.cwd().deleteFile(io, out_c_path) catch {};
+
+        var tp = try codegen.TranspileProcess.init(allocator, b.path, out_c_path, .{
+            .exec = false,
+            .outf = true,
+            .debug_info = debug_info,
+        });
+        var lp = lexer.LexProcess.init(&tp);
+        var pp = parser.ParseProcess.init(&tp);
+        defer {
+            lp.deinit();
+            tp.deinit();
+        }
+        try lp.lex();
+        try pp.parse();
+        try tp.transpile();
+
+        const exe_name = if (builtin.target.os.tag == .windows)
+            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}.exe", .{b.name})
+        else
+            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}", .{b.name});
+        defer allocator.free(exe_name);
+
+        try compile_to_exe(allocator, io, out_c_path, exe_name, debug_info);
+
+        // Only print progress OUTSIDE of tests: under `zig build test`, this
+        // process's real stdout carries the `--listen=-` build-protocol
+        // stream, not plain text -- writing raw text into it stalls the
+        // build runner waiting on a well-formed protocol frame that never
+        // arrives (same reason `compile_and_run`'s "run the program" step
+        // branches on `builtin.is_test` instead of inheriting stdio there).
+        if (!builtin.is_test) {
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "built {s} -> {s}\n", .{ b.name, exe_name }) catch "built\n";
+            std.Io.File.stdout().writeStreamingAll(io, msg) catch {};
+        }
+    }
 }

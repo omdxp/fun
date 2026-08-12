@@ -1,0 +1,3 @@
+pub fun ident<T>(T x) T {
+  ret x;
+}

@@ -1,0 +1,17 @@
+// Explicit generic call-site syntax (`ok<T, E>(value)`): supplies type
+// arguments directly at the call, needed whenever they can't be inferred
+// from the arguments alone. `std.result`'s own `ok<T, E>(T value) Result<T,
+// E>` is exactly that case -- `E` never appears in the parameter list, so
+// nothing about the call `ok(42)` alone tells the compiler what `E` is.
+
+imp std.c.io;
+imp std.result;
+imp std.error;
+
+fun main() {
+  Result<num, Error> r = ok<num, Error>(42);
+  printf("r ok=%d val=%lld\n", r.is_ok(), r.unwrap_or(0));
+
+  Result<str, Error> s = ok<str, Error>("hi");
+  printf("s ok=%d val=%s\n", s.is_ok(), s.unwrap_or("none"));
+}

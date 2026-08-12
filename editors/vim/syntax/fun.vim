@@ -2,7 +2,7 @@ if exists("b:current_syntax")
   finish
 endif
 
-syn keyword funKeyword imp as pub fun compound quirk impl enum let asm volatile arch defer ret if elif else for fit async await fork break continue assert allow expect
+syn keyword funKeyword imp as pub fun compound quirk impl enum let const asm volatile arch defer ret if elif else for fit async await fork break continue assert panic test fuzz allow expect
 syn keyword funType void raw num dec f32 f64 str bin chr
 syn match funType "\v\<(i|u)[1-9][0-9]*\>"
 syn match funCustomType "\v\<(compound|quirk|enum|impl)\s+\zs[A-Za-z_][A-Za-z0-9_]*\>"
@@ -18,7 +18,12 @@ syn keyword funConstant nil
 syn match funNumber "\v\d+(\.\d+)?"
 syn region funString start=+"+ skip=+\\"+ end=+"+
 syn region funChar start=+'+ skip=+\\'+ end=+'+
+" Raw (backtick) string: no escape processing at all -- the closing
+" backtick, whenever it's found (possibly several lines later for a
+" multi-line block), ends the literal.
+syn region funRawString start=+`+ end=+`+
 syn match funComment "//.*$"
+syn region funComment start=+/\*+ end=+\*/+
 
 hi def link funKeyword Keyword
 hi def link funType Type
@@ -29,6 +34,7 @@ hi def link funConstant Constant
 hi def link funOperator Operator
 hi def link funNumber Number
 hi def link funString String
+hi def link funRawString String
 hi def link funChar Character
 hi def link funComment Comment
 

@@ -1,0 +1,74 @@
+// Compiler entry point: wires the lexer, import-aware parser, and
+// codegen together to turn a `.fn` file into C output.
+// 
+// Takes positional arguments (`<input.fn> [<output.c>]`) and only writes
+// a `.c` file; it doesn't invoke a C compiler or run the result.
+
+imp ..parser.import_resolver;
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp std.cli;
+imp std.fs;
+imp std.io;
+imp std.c.mem;
+
+// Renders a `CodegenErrorKind` as a human-readable word. This is the
+// coarsest possible diagnostic: which of the two failure shapes it was,
+// nothing more.
+fun _codegen_error_kind_name(CodegenErrorKind kind) str {
+  fit kind {
+    .UnsupportedNode -> { ret "unsupported node"; }
+    .InvalidNode -> { ret "invalid node"; }
+  }
+}
+
+fun _fail(str msg) num {
+  writeln_to(Sink.Stderr, format(`[Error]
+  `{str}`, msg));
+  ret 1;
+}
+
+// Lexes, resolves `imp`s, parses, and transpiles `in_path` to C, writing
+// the result to `out_path`. Returns a C-style exit code (0 success).
+fun compile_file(str in_path, str out_path) num {
+  let parsed = parse_program_with_imports(in_path);
+  if parsed.is_err() {
+    ret _fail(parsed.unwrap_err());
+  }
+  let merge_result = parsed.unwrap();
+  let nodes = merge_result.nodes;
+
+  CodegenState state = codegen_state_new();
+  Codegen cg = codegen_new(&state);
+  cg.import_aliases = merge_result.aliases;
+  cg.alias_rename_keys = merge_result.alias_rename_keys;
+  cg.alias_rename_targets = merge_result.alias_rename_targets;
+  let cg_err = cg.transpile(nodes);
+  fit cg_err {
+    .Some(kind) -> {
+      let msg = format("codegen failed: {str}", _codegen_error_kind_name(kind));
+      defer free(msg);
+      ret _fail(msg);
+    }
+    .None -> {}
+  }
+
+  str c_source = state.out.build();
+  if !write_string(out_path, c_source) {
+    let msg = format("failed to write output file: {str}", out_path);
+    defer free(msg);
+    ret _fail(msg);
+  }
+  ret 0;
+}
+
+fun main(str[] args) num {
+  CliArgs cli = cli_parse(args);
+  fit cli.at_positional(0) {
+    .Some(in_path) -> {
+      let out_path = cli.at_positional(1).unwrap_or("a.out.c");
+      ret compile_file(in_path, out_path);
+    }
+    .None -> { ret _fail("usage: selfhost_main <input.fn> [<output.c>]"); }
+  }
+}

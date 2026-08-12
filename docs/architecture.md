@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fun is implemented in Zig and transpiles Fun source code to C. This architecture keeps the compiler implementation compact while allowing generated programs to build against widely available platform toolchains.
+Fun transpiles Fun source code to C. This architecture keeps the compiler implementation compact while allowing generated programs to build against widely available platform toolchains.
 
 The project is organized around a clear front-end and code generation pipeline:
 
@@ -30,6 +30,6 @@ The language model includes default 64-bit numeric types (`num`, `dec`), fixed-w
 
 ## Build System
 
-The repository uses the Zig build system to compile the compiler, language server, examples, and tests. Standard validation is driven through `zig build` and `zig build test --summary all`.
+A single build entrypoint compiles the compiler, language server, examples, and tests, and drives the full validation suite.
 
 For module-level descriptions, see [modules/README.md](../modules/README.md).

@@ -149,6 +149,22 @@ pub const TranspileProcessFlags = packed struct {
     /// map back to Fun source lines.  Also causes the C compiler to be invoked with
     /// `-g` (DWARF symbols) instead of `-g0`.
     debug_info: bool = false,
+
+    /// When true (the `fun test` CLI subcommand), `test "name" { ... }` blocks
+    /// are type-checked and emitted as C functions, and a generated runner
+    /// `main` replaces any user-defined `main`. When false (an ordinary
+    /// compile), `test` blocks are parsed but otherwise completely ignored —
+    /// not type-checked, not emitted — matching `zig build` vs `zig test`.
+    test_mode: bool = false,
+
+    /// When true (the `fun fuzz` CLI subcommand), exactly one `fuzz "name"
+    /// (data, len) { ... }` block (selected by `fuzz_target`) is
+    /// type-checked and emitted as a harness function under the fixed ABI
+    /// name a coverage-guided fuzzing engine expects, replacing any
+    /// user-defined `main` (the fuzzing engine supplies its own). When
+    /// false, `fuzz` blocks are parsed but otherwise completely ignored —
+    /// not type-checked, not emitted — same reasoning as `test_mode`.
+    fuzz_mode: bool = false,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -252,6 +268,13 @@ pub const TranspileProcess = struct {
     /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
 
+    /// The specific fuzz target's name to compile when `flags.fuzz_mode` is
+    /// set (a file may declare several `fuzz` blocks; the harness can only
+    /// ever target one at a time). Required whenever more than one exists;
+    /// auto-selected when there's exactly one. Not part of the packed
+    /// `TranspileProcessFlags` bag since `?[]const u8` isn't bit-packable.
+    fuzz_target: ?[]const u8 = null,
+
     /// I/O handle used for all file system operations.
     io: std.Io,
 
@@ -298,6 +321,13 @@ pub const TranspileProcess = struct {
 
     /// Current indentation level (4 spaces per level).
     indent_level: u32 = 0,
+
+    /// Length of the run of consecutive trailing newlines written so far
+    /// (across possibly many separate `write()` calls -- see `write`'s own
+    /// doc comment). Used to collapse 2+ consecutive blank lines down to
+    /// one wherever several independent emission passes each add their own
+    /// trailing separator at a section boundary.
+    consecutive_newlines: u32 = 0,
 
     /// Generic type substitution during emission.
     type_subst_params: ?*const utils.Vector(ArrayList(u8)) = null,
@@ -424,6 +454,11 @@ pub const TranspileProcess = struct {
     /// Call-site overrides for await lowering (resolved callee + receiver strategy).
     await_call_overrides: std.StringHashMap(AwaitCallOverride),
 
+    /// Per-for-statement overrides for `for item : <iterable>` element typing
+    /// over a Vec (see `ForIterInfo`'s own doc comment), keyed by position
+    /// like the other override maps above.
+    for_iter_overrides: std.StringHashMap(ForIterInfo),
+
     /// Import chain to detect circular dependencies
     import_chain: ArrayList([]const u8),
 
@@ -465,6 +500,12 @@ pub const TranspileProcess = struct {
     /// When set, codegen emits a small Windows compatibility layer that maps
     /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
     requires_thread_compat_layer: bool = false,
+
+    /// True when `std.c.process` is imported anywhere in this module tree.
+    /// On POSIX this just needs the real `spawn.h`/`sys/wait.h`/`unistd.h`
+    /// headers; on Windows there is no `posix_spawn`/`waitpid` equivalent at
+    /// all, so codegen emits a small compat layer built on `CreateProcess`.
+    requires_process_compat_layer: bool = false,
 
     /// True when a `fork` statement appears anywhere in this module tree. Gates the
     /// M:N scheduler runtime in the prelude and the `__fun_sched_wait_idle()` call at
@@ -1625,6 +1666,30 @@ pub const TranspileProcess = struct {
         if (dt.type_str.items.len == 0) return;
         if (@intFromPtr(dt.type_str.items.ptr) == 0) return;
         if (self.dtype_has_unresolved_placeholder(dt)) return;
+        // Reject an instantiation whose OWN generic arg names a generic type
+        // but is missing its own required generic arguments (e.g.
+        // `Result<Option>` instead of `Result<Option<Token>>`) -- see the
+        // matching check/comment in `register_generic_fn_instantiation`.
+        if (self.root_registry()) |reg| {
+            for (dt.generic_args.?.items()) |ga| {
+                if (ga.generic_args != null) continue;
+                if (ga.type_str.items.len == 0) continue;
+                const required: usize = blk: {
+                    if (reg.enums_by_name.get(ga.type_str.items)) |enode| {
+                        if (enode.node_variant) |nv| {
+                            if (nv.enum_decl.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    if (reg.compounds_by_name.get(ga.type_str.items)) |cnode| {
+                        if (cnode.node_variant) |nv| {
+                            if (nv.compound.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    break :blk 0;
+                };
+                if (required > 0) return;
+            }
+        }
         const root = self.get_root();
         const local_key = try self.type_name_mangled(dt);
         if (root.forced_generic_instantiation_keys.contains(local_key)) {
@@ -2178,6 +2243,36 @@ pub const TranspileProcess = struct {
         return self.await_call_overrides.get(key);
     }
 
+    fn record_for_iter_override(self: *Self, node: ast.Node, info: ForIterInfo) TranspileError!void {
+        const p = node.pos orelse return;
+        const key = try self.call_pos_key_alloc(p);
+        // Stored on the ROOT process, same reasoning as generic_call_overrides:
+        // a `for` loop inside an IMPORTED module is typechecked under a child
+        // process but its body may be emitted via a different process (the
+        // parent, when a caller's body is copied/inlined for cross-module
+        // emission) -- reading from the root makes the override visible
+        // regardless of which process ends up emitting it. Confirmed this
+        // matters directly: without it, a `for x : recv.field` loop inside an
+        // imported module's function failed to find its own just-recorded
+        // override at emission time and hit the "no array identifier" error.
+        const root = self.get_root();
+        const gop = root.for_iter_overrides.getOrPut(key) catch {
+            self.allocator.free(key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = info;
+    }
+
+    fn lookup_for_iter_override(self: *Self, node: ast.Node) ?ForIterInfo {
+        const p = node.pos orelse return null;
+        var buf: [512]u8 = undefined;
+        const key = call_pos_key_buf(p, &buf) orelse return null;
+        return self.get_root().for_iter_overrides.get(key);
+    }
+
     const PrintFmtArgKind = enum {
         any,
         str,
@@ -2255,6 +2350,29 @@ pub const TranspileProcess = struct {
                     // A 3rd hex digit would extend the escape — split the literal.
                     try self.write("\" \"");
                 }
+            }
+        }
+    }
+
+    /// Emits a backtick RAW string literal's literal bytes as a C
+    /// string-literal body. Unlike `write_c_string_literal_body` (whose
+    /// input already IS valid C escape syntax, verbatim from the lexer),
+    /// a raw string's bytes are the user's literal, unescaped content --
+    /// this actively encodes the handful of bytes that would otherwise
+    /// break or change the meaning of a C string literal: a backslash
+    /// (else read as the start of an escape), a double-quote (else ends
+    /// the literal early), and a real newline (a multi-line raw string's
+    /// line-joins -- C string literals can't contain one directly).
+    /// Everything else (including tabs and non-ASCII bytes) passes
+    /// through unchanged.
+    fn write_c_string_literal_body_from_raw(self: *Self, s: []const u8) TranspileError!void {
+        for (s) |c| {
+            switch (c) {
+                '\\' => try self.write("\\\\"),
+                '"' => try self.write("\\\""),
+                '\n' => try self.write("\\n"),
+                '\r' => try self.write("\\r"),
+                else => try self.write(&[_]u8{c}),
             }
         }
     }
@@ -2358,6 +2476,11 @@ pub const TranspileProcess = struct {
 
         const fmt_node = args_nodes.items[0].*;
         if (fmt_node.type != .String or fmt_node.data == null) return false;
+        // A raw (backtick) format string's bytes are literal, unescaped
+        // content, not this fast path's assumed "already valid C escape
+        // syntax" shape -- fall back to the general call path instead of
+        // threading raw-escaping through the whole printf-format rewrite.
+        if (fmt_node.is_raw_string) return false;
 
         const fmt = fmt_node.data.?.sval.items;
         var fmt_out = ArrayList(u8).init(self.allocator);
@@ -2533,6 +2656,11 @@ pub const TranspileProcess = struct {
 
         const fmt_node = args_nodes.items[0].*;
         if (fmt_node.type != .String or fmt_node.data == null) return false;
+        // A raw (backtick) format string's bytes are literal, unescaped
+        // content, not this fast path's assumed "already valid C escape
+        // syntax" shape -- fall back to the general call path instead of
+        // threading raw-escaping through the whole printf-format rewrite.
+        if (fmt_node.is_raw_string) return false;
 
         const fmt = fmt_node.data.?.sval.items;
         var fmt_out = ArrayList(u8).init(self.allocator);
@@ -3149,6 +3277,42 @@ pub const TranspileProcess = struct {
             root.allocator.free(key);
             return;
         }
+        // Reject an instantiation whose bound arg NAMES a generic type but is
+        // missing its own required generic arguments (e.g. binding a generic
+        // wrapper's `T` to a bare "Option" instead of "Option<Token>"). Such a
+        // dtype is structurally incomplete and could never be validly
+        // emitted -- one arose from a legitimate call site (`ok(.None)`
+        // inside a function returning `Result<Option<Token>>`), but a
+        // SEPARATE, independent re-inference of that same shorthand `.None`
+        // argument (elsewhere in the typecheck/codegen pipeline) didn't carry
+        // the concrete instantiation through, producing this phantom
+        // duplicate alongside the correct one. Silently dropping it here is
+        // safe: the correct, fully-specified instantiation is registered
+        // separately (under a different mangled key) and is what real
+        // codegen actually emits.
+        if (self.root_registry()) |reg| {
+            for (gargs) |g| {
+                if (g.generic_args != null) continue;
+                if (g.type_str.items.len == 0) continue;
+                const required: usize = blk: {
+                    if (reg.enums_by_name.get(g.type_str.items)) |enode| {
+                        if (enode.node_variant) |nv| {
+                            if (nv.enum_decl.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    if (reg.compounds_by_name.get(g.type_str.items)) |cnode| {
+                        if (cnode.node_variant) |nv| {
+                            if (nv.compound.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    break :blk 0;
+                };
+                if (required > 0) {
+                    root.allocator.free(key);
+                    return;
+                }
+            }
+        }
         root.generic_fn_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
         root.generic_fn_instantiations.append(.{
             .fn_node = fn_node,
@@ -3481,7 +3645,28 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
+        // Inherit ONLY the parent's test/warning-visibility mode (test_mode,
+        // emit_unused_warnings) so e.g. `fun test entry.fn` also type-checks and emits
+        // `test` blocks declared in an IMPORTED module, not just the entry file's own --
+        // `typecheck_module`'s `.Test`-node handling is gated on exactly these two
+        // fields. Without this, a child process always got `test_mode = false`
+        // regardless of the parent, so an imported module's `test` block was parsed but
+        // never type-checked -- yet codegen still tried to emit it, embedding the
+        // unresolved `__let_infer__` placeholder for any `let` binding whose type only
+        // typecheck ever resolves.
+        //
+        // Deliberately NOT a wholesale `self.flags` copy: `preload_imports`/
+        // `preload_std_imports`/`emit_stderr`/etc. are parse-strategy/output flags the
+        // ROOT process sets for its own reasons (e.g. the test harness disables import
+        // preloading to avoid redundant filesystem probing) that must NOT cascade to
+        // children -- doing so broke transitive import processing for std.channel/
+        // std.net (children stopped preloading their OWN nested imports).
+        var child_flags = TranspileProcessFlags{ .outf = false };
+        child_flags.test_mode = self.flags.test_mode;
+        child_flags.fuzz_mode = self.flags.fuzz_mode;
+        child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
+        import_proc.fuzz_target = self.fuzz_target;
         import_proc.parent = self;
         import_proc.is_importing = true;
         if (import_alias) |alias| {
@@ -4103,6 +4288,7 @@ pub const TranspileProcess = struct {
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
             .enum_ctor_overrides = std.StringHashMap([]const u8).init(a),
             .await_call_overrides = std.StringHashMap(AwaitCallOverride).init(a),
+            .for_iter_overrides = std.StringHashMap(ForIterInfo).init(a),
             .input_file_path = input_file_path,
             .input_source = input_source,
             .stdlib_dir = discovered_stdlib_dir,
@@ -4406,6 +4592,10 @@ pub const TranspileProcess = struct {
         pointer_depth: usize = 0,
         /// True when this value is the integer literal 0 (C null pointer constant).
         is_null_literal: bool = false,
+        /// True when this value is a `panic("msg")` expression -- unifies with
+        /// WHATEVER type is expected at its use site (see `can_implicit_coerce`),
+        /// same idea as `is_null_literal` but for any type, not just pointers/str.
+        is_panic_literal: bool = false,
         /// For user-defined types, `base` is `.Unknown` and `name` holds the identifier.
         name: ?[]const u8 = null,
         /// For generic specializations, a mangled name (e.g. Vec__num).
@@ -4564,6 +4754,18 @@ pub const TranspileProcess = struct {
         receiver_pass_by_ref: bool = false,
     };
 
+    /// Resolved element-typing info for a `for item : <iterable>` loop over
+    /// a Vec, recorded once during typecheck (which already infers arbitrary
+    /// expressions fine via `infer_expr_type`) and read back during codegen
+    /// via `lookup_for_iter_override` -- so the emission path isn't limited
+    /// to re-deriving this from a bare identifier's scope entity the way the
+    /// raw-C-array fast path still has to (that path's `sizeof`-based length
+    /// computation is inherently identifier-only; this override is what
+    /// lets the SEPARATE Vec fast path support any expression instead).
+    const ForIterInfo = struct {
+        vec_item_dt: ?*dtype.DataType = null,
+    };
+
     const AwaitCallOverride = struct {
         callee_name: []const u8,
         has_receiver: bool = false,
@@ -4670,6 +4872,22 @@ pub const TranspileProcess = struct {
                         decl_node.flags.?.is_used = true;
                     }
                     return binding.ty;
+                }
+            }
+            return null;
+        }
+
+        /// Looks up `name`'s own DECLARING node (the `.Variable` node this
+        /// binding was registered from — see `put_current_decl`), without
+        /// marking it used (unlike `get`) — used by `check_const_reassignment`
+        /// to read the declaration's own `is_const` flag, a check that
+        /// shouldn't itself count as a "read" of the binding.
+        fn get_decl_node(self: *TypeEnv, name: []const u8) ?*ast.Node {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                var scope_map = &self.scopes.items[i - 1];
+                if (scope_map.getPtr(name)) |binding| {
+                    return binding.decl_node;
                 }
             }
             return null;
@@ -4914,6 +5132,22 @@ pub const TranspileProcess = struct {
         return t;
     }
 
+    /// Builds a `FnSig` (the shape ordinary call-checking already knows how to
+    /// validate arguments/arity against) from a function-TYPE parameter's
+    /// `dtype.FnTypeSig` (params + return type parsed from `fun(T1, T2) R`).
+    fn fn_sig_from_dtype_fn_sig(self: *Self, sig: *const dtype.FnTypeSig) TranspileError!FnSig {
+        var args = ArrayList(CheckedType).initCapacity(self.allocator, sig.params.count) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        for (sig.params.items()) |p| {
+            args.append(type_from_dtype(p)) catch return TranspileError.MemoryAllocationFailed;
+        }
+        return .{
+            .rtype = type_from_dtype(sig.rtype),
+            .args = args.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed,
+        };
+    }
+
     fn ensure_named_type_visible(self: *Self, ref_node: ast.Node, name: []const u8) TranspileError!void {
         const base_name = if (mem.indexOf(u8, name, "__")) |idx| name[0..idx] else name;
         // Builtins are always visible.
@@ -5002,6 +5236,15 @@ pub const TranspileProcess = struct {
     }
 
     fn ensure_dtype_visible(self: *Self, ref_node: ast.Node, dt: *const dtype.DataType, allow: ?[]const []const u8) TranspileError!void {
+        // A function-type parameter (`fun(T1, T2) R`) is not a named type to
+        // look up -- `type_str` is just a synthesized display string. Recurse
+        // into its param/return types instead (so THEIR visibility is still
+        // checked) and skip the named-type lookup below entirely.
+        if (dt.fn_sig) |sig| {
+            for (sig.params.items()) |p| try self.ensure_dtype_visible(ref_node, p, allow);
+            try self.ensure_dtype_visible(ref_node, sig.rtype, allow);
+            return;
+        }
         // A C typedef type name (`size_t`, `time_t`, `FILE`, `va_list`, …) is
         // resolved to a primitive semantic type during parsing, so `dt.type` is
         // often non-Unknown and the visibility check below is skipped. Mark the
@@ -5182,6 +5425,10 @@ pub const TranspileProcess = struct {
             .{ .name = "pthread_mutexattr_t", .module = "std.c.thread" },
             .{ .name = "pthread_cond_t", .module = "std.c.thread" },
             .{ .name = "pthread_condattr_t", .module = "std.c.thread" },
+            // spawn.h / sys/wait.h -> std.c.process
+            .{ .name = "pid_t", .module = "std.c.process" },
+            .{ .name = "posix_spawn_file_actions_t", .module = "std.c.process" },
+            .{ .name = "posix_spawnattr_t", .module = "std.c.process" },
             // NOTE: stdint.h types (int*_t / intptr_t / uintptr_t) intentionally
             // omitted — there is no std.c.stdint Fun module to attribute them to.
         };
@@ -5655,6 +5902,30 @@ pub const TranspileProcess = struct {
             if (self.enum_payload_is_type_param(path.enum_name, ptypes[i]) or
                 self.enum_payload_references_type_param(path.enum_name, ptypes[i]))
             {
+                // If this construction site's concrete instantiation was
+                // already bound (e.g. via `bind_enum_ctor_expected` from an
+                // enclosing `ret`/`let`: `ret .Some(.Cval('a'));` in a
+                // function returning `Option<Data>`), resolve a nested
+                // shorthand payload argument against the bound concrete
+                // type. Without this, a shorthand argument sitting in a
+                // bare-type-param payload slot (T isn't resolvable here on
+                // its own -- that's exactly why this branch exists) was
+                // never resolved and failed later with "method calls
+                // require a named receiver" (a blank dot-path misread as a
+                // method-call receiver).
+                if (self.lookup_enum_ctor_override(node)) |mangled| {
+                    if (self.resolve_fit_payload_dtype(mangled, ptypes[i])) |concrete| {
+                        const concrete_t = try self.type_from_dtype_with_mangled(concrete);
+                        if (self.expected_enum_name(concrete_t)) |enum_name| {
+                            if (dot_shorthand_variant_name(arg)) |_| {
+                                _ = try self.resolve_dot_shorthand_enum_variant(arg, enum_name);
+                            } else {
+                                try self.resolve_shorthand_enum_call(arg, enum_name);
+                            }
+                            try self.bind_enum_ctor_expected(arg, concrete_t);
+                        }
+                    }
+                }
                 _ = try self.infer_expr_type(arg.*, env, fns);
                 continue;
             }
@@ -5664,10 +5935,42 @@ pub const TranspileProcess = struct {
             if (ptypes[i].generic_args != null) {
                 self.register_generic_instantiation(ptypes[i]) catch {};
             }
+            // Enum shorthand payload: `Option.Some(.Cval('a'))` where the
+            // payload field's own type is itself an enum. Without this, a
+            // nested shorthand argument (bare `.Variant` or a data-carrying
+            // `.Variant(...)` call) was never resolved and failed later with
+            // "method calls require a named receiver" (a blank dot-path
+            // misread as a method-call receiver).
+            if (self.expected_enum_name(expected)) |enum_name| {
+                if (dot_shorthand_variant_name(arg)) |_| {
+                    _ = try self.resolve_dot_shorthand_enum_variant(arg, enum_name);
+                } else {
+                    try self.resolve_shorthand_enum_call(arg, enum_name);
+                    try self.resolve_shorthand_args_via_generic_wrapper(arg, expected, fns);
+                }
+                try self.bind_enum_ctor_expected(arg, expected);
+            }
             const actual = try self.infer_expr_type(arg.*, env, fns);
             if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
                 self.report_type_error(node, "enum variant '{s}.{s}' payload field {d} type mismatch", .{ path.enum_name, path.variant, i });
                 return TranspileError.TypeMismatch;
+            }
+        }
+        // If this construction site was already bound to a concrete generic
+        // instantiation (e.g. `Option__Token`, via `bind_enum_ctor_expected`
+        // from an enclosing `ret`/`let`/generic-wrapper-call resolution),
+        // carry that concrete dtype forward instead of the bare
+        // `{name: "Option"}`. Without this, a later INDEPENDENT re-inference
+        // of this same `.Some(x)` construction (e.g. a generic wrapper call's
+        // own T-inference from its argument) saw an incomplete,
+        // dtype_ref-less type and bound T to it, producing a malformed
+        // "Result__Option" (missing its own argument) instance/call-site
+        // override that could never be satisfied -- misreported as a cyclic
+        // dependency at typecheck time, or an undeclared-function error at
+        // codegen time.
+        if (self.lookup_enum_ctor_override(node)) |mangled| {
+            if (try self.dtype_from_mangled_type(mangled)) |synth_dt| {
+                return .{ .base = .Unknown, .name = path.enum_name, .mangled_name = mangled, .dtype_ref = synth_dt };
             }
         }
         return .{ .base = .Unknown, .name = path.enum_name };
@@ -5759,6 +6062,73 @@ pub const TranspileProcess = struct {
         // Reuse the non-call rewrite on the callee path (mutates its blank LHS to
         // the enum name and validates the variant exists).
         _ = try self.resolve_dot_shorthand_enum_variant(callee, enum_name);
+    }
+
+    /// When `node` is a call to a generic function whose declared return type
+    /// is the SAME named container as `expected` (e.g. `ok<T>(T value)
+    /// Result<T>` called where `expected` is `Result<Option<Token>>`),
+    /// resolves any of the call's ARGUMENTS that are themselves enum-variant
+    /// shorthand (`.None`, `.Some(x)`) against `expected`'s own generic
+    /// argument. The callee's abstract template has no concrete `T` to
+    /// resolve the shorthand against on its own -- generic instantiation only
+    /// happens after typecheck -- so without this, `ret ok(.None);` left
+    /// `.None` as an unresolved blank dot-path and failed at codegen with
+    /// "field access requires a compound-typed value".
+    fn resolve_shorthand_args_via_generic_wrapper(self: *Self, node: *ast.Node, expected: CheckedType, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (node.type != .Expression or node.node_variant == null) return;
+        const exp = node.node_variant.?.exp;
+        if (!mem.eql(u8, exp.op, "()")) return;
+        const callee = exp.left orelse return;
+        if (callee.type != .Identifier or callee.data == null) return;
+        const expected_dt = expected.dtype_ref orelse return;
+        const gargs = expected_dt.generic_args orelse return;
+        if (gargs.count == 0) return;
+        const expected_name = self.expected_enum_name(expected) orelse return;
+        const sig = fns.get(callee.data.?.sval.items) orelse return;
+        const callee_rt_name = sig.rtype.name orelse return;
+        if (!mem.eql(u8, callee_rt_name, expected_name)) return;
+        const type_params = sig.type_params orelse return;
+        if (type_params.count == 0) return;
+        // Only the FIRST type param is substituted -- the wrapper functions
+        // this targets (`ok<T>`, `err_kind<T>`, `some<T>`) all have exactly
+        // one, and matching by NAME below is what keeps this from touching
+        // an unrelated concrete-typed argument (see below).
+        const tparam_name = type_params.items()[0].items;
+        const inner_dt = gargs.items()[0];
+        const inner_t = try self.type_from_dtype_with_mangled(inner_dt);
+        const inner_enum = self.expected_enum_name(inner_t) orelse return;
+
+        var args_list = ArrayList(*ast.Node).init(self.allocator);
+        defer args_list.deinit();
+        if (exp.right) |right| {
+            try self.flatten_call_args_ptr(right, &args_list);
+        }
+        for (args_list.items, 0..) |arg, i| {
+            if (i >= sig.args.len) break;
+            // Only resolve arguments whose DECLARED param type is genuinely
+            // the callee's own bare type param -- e.g. `err_kind<T>(ErrorKind
+            // kind, str message, T default)`'s first argument is a REAL,
+            // unrelated `ErrorKind` and must not be resolved against T's
+            // binding too.
+            const param_name = sig.args[i].name orelse continue;
+            if (!mem.eql(u8, param_name, tparam_name)) continue;
+            if (dot_shorthand_variant_name(arg)) |_| {
+                _ = try self.resolve_dot_shorthand_enum_variant(arg, inner_enum);
+            } else {
+                try self.resolve_shorthand_enum_call(arg, inner_enum);
+            }
+            // Record the concrete monomorphized instance (`Option__Token`) for
+            // BOTH shapes -- a bare value (`.None`) and a construction call
+            // (`.Some(x)`). Without this for the bare-value case, a later
+            // independent re-inference of this same arg (e.g. the callee's
+            // OWN generic-function-call machinery inferring `ok<T>`'s T from
+            // its argument) had no concrete dtype to consult, fell back to a
+            // dtype_ref-less bare "Option" CheckedType, and spuriously bound
+            // T to that incomplete type -- producing a malformed "Result__Option"
+            // (missing its own argument) instantiation that could never be
+            // satisfied, intermittently misreported as a cyclic dependency.
+            try self.bind_enum_ctor_expected(arg, inner_t);
+        }
     }
 
     fn infer_let_enum_dot_shorthand(self: *Self, node: *ast.Node) TranspileError!?CheckedType {
@@ -6100,6 +6470,39 @@ pub const TranspileProcess = struct {
         return self.find_any_impl_method_node_proc(root, type_base, method_name);
     }
 
+    /// Like `find_any_impl_method_node`, but collects EVERY matching impl instead of
+    /// just the first — a type can have several impl blocks defining the same method
+    /// name under different constraints (e.g. stdlib's `impl Vec<T: num | dec>` and
+    /// `impl Vec<str>` both define `contains`), and `check_impl_generic_constraint`
+    /// needs to know about all of them, not just whichever one source order happens
+    /// to register first.
+    fn collect_all_impl_method_nodes_proc(self: *Self, proc: *Self, type_base: []const u8, method_name: []const u8, out: *ArrayList(PlainImplMethodHit)) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            if (!mem.eql(u8, base, type_base)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                const base_name = base_method_name_from_generated(full) orelse continue;
+                if (!mem.eql(u8, base_name, method_name)) continue;
+                out.append(.{ .impl_node = n, .method_node = m }) catch return TranspileError.MemoryAllocationFailed;
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.collect_all_impl_method_nodes_proc(child, type_base, method_name, out);
+        }
+    }
+    fn collect_all_impl_method_nodes(self: *Self, type_base: []const u8, method_name: []const u8, out: *ArrayList(PlainImplMethodHit)) TranspileError!void {
+        const root = self.get_root();
+        try self.collect_all_impl_method_nodes_proc(root, type_base, method_name, out);
+    }
+
     /// When a method call resolves to an impl block that constrains its type
     /// parameters (`impl Box<T: num | dec> { ... }`), verify the concrete receiver
     /// type args satisfy the constraint. Emits a Fun TypeError on violation
@@ -6107,15 +6510,28 @@ pub const TranspileProcess = struct {
     /// old behavior turned into an opaque C linker error `undefined Box__str__get`).
     /// Returns error.TypeMismatch on violation; no-op when unconstrained or the
     /// receiver args aren't statically concrete.
+    ///
+    /// A type can have SEVERAL impl blocks defining the same method name under
+    /// different constraints — e.g. stdlib's `impl Vec<T: num | dec>` and
+    /// `impl Vec<str>` both define `contains`. Checking only the FIRST matching
+    /// impl (by source-registration order) was wrong: `Vec<str>.contains(...)`
+    /// picked up the numeric-constrained impl first and rejected `str` outright,
+    /// even though the str-specific impl right below it plainly accepts it and is
+    /// what actually gets dispatched to. Fixed by checking EVERY matching impl and
+    /// only erroring when ALL of them reject the args (or are otherwise
+    /// constrained against them) — an accepting or unconstrained match anywhere
+    /// in the set is enough.
     fn check_impl_generic_constraint(self: *Self, node: ast.Node, recv_dt: ?*const dtype.DataType, recv_base: []const u8, method_name: []const u8) TranspileError!void {
         const dt = recv_dt orelse return;
         const gargs_vec = dt.generic_args orelse return;
         const gargs = gargs_vec.items();
         if (gargs.len == 0) return;
         const base = if (mem.indexOf(u8, recv_base, "__")) |idx| recv_base[0..idx] else recv_base;
-        const hit = self.find_any_impl_method_node(base, method_name) orelse return;
-        const im = hit.impl_node.node_variant.?.impl;
-        const forced = im.type_param_forced_insts orelse return;
+        var hits = ArrayList(PlainImplMethodHit).init(self.allocator);
+        defer hits.deinit();
+        try self.collect_all_impl_method_nodes(base, method_name, &hits);
+        if (hits.items.len == 0) return;
+        const hit = hits.items[0];
         // Only check when every generic arg is CONCRETE — not a still-symbolic type
         // parameter. A call made inside a generic body (e.g. stdlib `impl Vec<T>`
         // calling a constrained sibling with receiver `Vec__T`) has `T` as the arg;
@@ -6154,11 +6570,14 @@ pub const TranspileProcess = struct {
                 }
             }
         }
-        if (!impl_allows_generic_args(forced, gargs)) {
-            const mangled = self.type_name_mangled(dt) catch dt.type_str.items;
-            self.report_type_error(node, "'{s}' does not satisfy the constraint on 'impl {s}' for method '{s}'", .{ mangled, base, method_name });
-            return TranspileError.TypeMismatch;
+        for (hits.items) |candidate| {
+            const cim = candidate.impl_node.node_variant.?.impl;
+            const cforced = cim.type_param_forced_insts orelse return; // unconstrained match accepts anything
+            if (impl_allows_generic_args(cforced, gargs)) return; // an accepting match is enough
         }
+        const mangled = self.type_name_mangled(dt) catch dt.type_str.items;
+        self.report_type_error(node, "'{s}' does not satisfy the constraint on 'impl {s}' for method '{s}'", .{ mangled, base, method_name });
+        return TranspileError.TypeMismatch;
     }
 
     fn synthesize_generic_plain_method_sig(self: *Self, recv_dt: *const dtype.DataType, recv_name: []const u8, method_name: []const u8) ?FnSig {
@@ -6337,6 +6756,32 @@ pub const TranspileProcess = struct {
             if (self.find_function_node_proc(child, name)) |found| return found;
         }
         return null;
+    }
+
+    fn find_global_variable_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Variable or n.node_variant == null) continue;
+            if (mem.eql(u8, n.node_variant.?.variable.name.items, name)) return n;
+        }
+        for (proc.children.items) |child| {
+            if (self.find_global_variable_node_proc(child, name)) |found| return found;
+        }
+        return null;
+    }
+
+    /// Finds a top-level (module-scope) `.Variable` declaration node by name
+    /// — the GLOBAL-scope counterpart of `find_function_node`, same "current
+    /// module first, then whole-program" search order. Needed by
+    /// `check_const_reassignment` because a global's OWN `TypeEnv` binding
+    /// (`global_env` in `typecheck_module`) is scoped to the MODULE-level
+    /// pass only — every function body typechecks under its own completely
+    /// fresh `TypeEnv` that never inherits it, so a global referenced from
+    /// inside a function body has no `env`-visible declaration node to
+    /// check `is_const` against without this fallback.
+    fn find_global_variable_node(self: *Self, name: []const u8) ?*ast.Node {
+        if (self.find_global_variable_node_proc(self, name)) |found| return found;
+        const root = self.get_root();
+        return self.find_global_variable_node_proc(root, name);
     }
 
     fn find_function_node(self: *Self, name: []const u8) ?*ast.Node {
@@ -6824,6 +7269,60 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // A plain field access (`self.gender`, e.g. a Display impl's own
+        // body formatting one of its fields whose OWN type also implements
+        // Display, `format("... {} ...", self.gender)` inside `impl User as
+        // Display`) — resolves the receiver's OWN declared type, then that
+        // type's compound field registry, to find the field's declared
+        // type. Previously unhandled, so a field of a Display-implementing
+        // type printed its raw underlying representation (an enum's bare
+        // ordinal, e.g.) instead of dispatching to Display — confirmed via
+        // a real minimal repro, not previously exercised by the existing
+        // test/example corpus. Narrower than the general case: only a
+        // bare-identifier receiver (`self`, `recv`), matching this
+        // function's own existing scope for every other case above.
+        if (expr.type == .Expression and expr.node_variant != null and mem.eql(u8, expr.node_variant.?.exp.op, ".")) {
+            const dot = expr.node_variant.?.exp;
+            const left = dot.left orelse return null;
+            const right = dot.right orelse return null;
+            if (left.*.type != .Identifier or left.*.data == null) return null;
+            if (right.*.type != .Identifier or right.*.data == null) return null;
+            const recv_name = left.*.data.?.sval.items;
+            const field_name = right.*.data.?.sval.items;
+
+            const recv_dt = self.identifier_declared_dtype(recv_name) orelse return null;
+            if (recv_dt.type != .Unknown) return null;
+
+            var recv_type_name: []const u8 = recv_dt.type_str.items;
+            var recv_type_owned = false;
+            if (recv_dt.generic_args != null) {
+                recv_type_name = self.type_name_mangled_for_emit(recv_dt) catch return null;
+                recv_type_owned = true;
+            }
+            defer if (recv_type_owned) self.allocator.free(@constCast(recv_type_name));
+            const recv_type_canon = self.canonical_compound_name(recv_type_name);
+
+            const field_dt = self.lookup_compound_field(recv_type_canon, field_name) orelse return null;
+
+            var field_type_name: []const u8 = field_dt.type_str.items;
+            var field_type_owned = false;
+            if (field_dt.generic_args != null) {
+                field_type_name = self.type_name_mangled_for_emit(field_dt) catch return null;
+                field_type_owned = true;
+            }
+            defer if (field_type_owned) self.allocator.free(@constCast(field_type_name));
+            const field_type_canon = self.canonical_compound_name(field_type_name);
+
+            const res = self.resolve_quirk_impl_method_for_concrete(ref_node, field_type_canon, "to_string");
+            if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
+            if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
+
+            return .{
+                .fn_name = res.fn_name.?,
+                .pass_by_ref = field_dt.pointer_depth == 0,
+            };
+        }
+
         return null;
     }
 
@@ -6959,6 +7458,25 @@ pub const TranspileProcess = struct {
 
         if (CheckedType.eql(expected_n, actual_n)) return true;
 
+        // `panic("msg")` unifies with WHATEVER type is expected -- it never
+        // actually produces a value (prints the message and aborts), so it's
+        // compatible with any type at all, not just pointers/str like `nil`.
+        if (actual_n.is_panic_literal) return true;
+
+        // A bare function name used as a value (e.g. passing `add` where a
+        // `fun(num, num) num` parameter is expected, as in `sort_by(cmp)`)
+        // infers as an opaque `raw*` (see `infer_expr_type`'s `.Identifier`
+        // case) -- accept it wherever a function-type parameter is expected.
+        // Not signature-checked against the declared `fn_sig` yet (matches
+        // the existing `raw* start_routine`-style callback bindings, which
+        // are similarly unchecked); a real mismatch still fails at the C
+        // level, same as those.
+        if (expected_n.dtype_ref != null and expected_n.dtype_ref.?.fn_sig != null and
+            actual_n.base == .Raw and actual_n.pointer_depth == 1 and !actual_n.is_array)
+        {
+            return true;
+        }
+
         // Allow equivalent enum types referenced through different visible names
         // (e.g. `ErrorCode` and `err__ErrorCode`).
         if (self.are_same_enum_type(expected_n, actual_n)) return true;
@@ -7068,6 +7586,20 @@ pub const TranspileProcess = struct {
 
         // Allow widening conversions.
         if (expected_n.base == .Dec and actual_n.base == .Num and !expected_n.is_array and expected_n.pointer_depth == 0) return true;
+
+        // `chr`/`num` already interoperate freely in arithmetic and comparisons
+        // (see `can_compare_or_match` below, and `is_numeric_type` treating
+        // `.Chr` as numeric) -- C itself allows implicit int<->char conversion
+        // both ways, so extend that same bidirectional interop to assignment/
+        // argument-passing instead of only letting it through via a `c + 0`
+        // arithmetic-promotion workaround. Needed for e.g. `std.ctype`'s
+        // `chr`-typed wrappers to call the underlying `num`-typed `std.c.ctype`
+        // bindings directly.
+        if (!expected_n.is_array and expected_n.pointer_depth == 0 and !actual_n.is_array and actual_n.pointer_depth == 0) {
+            if ((expected_n.base == .Num and actual_n.base == .Chr) or (expected_n.base == .Chr and actual_n.base == .Num)) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -7414,6 +7946,32 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Reports a type error when `left` (an assignment's own target) is a
+    /// bare identifier resolving to a `const`-declared binding — `const`'s
+    /// whole point is that its own binding is never reassignable after its
+    /// one (required) initializer. Looked up via `env` (the SAME `TypeEnv`
+    /// walk `infer_expr_type` itself uses for a plain identifier, see
+    /// `TypeEnv.get_decl_node`) rather than `self.get_scope_entity` — the
+    /// latter reflects PARSE-time scope, not the typecheck-time scope this
+    /// runs under, and a local's own parse-time scope entity is long gone by
+    /// the time a function body is typechecked. `node` is the whole
+    /// assignment expression, used only for the diagnostic's own position.
+    /// Deliberately narrow: only a DIRECT `name = ...` target is checked
+    /// here, not a field/index/dereference through one (`p.x = 5;` where `p`
+    /// is const, e.g.) — enforcing const-ness through an arbitrary chain
+    /// would need tracking it on every intermediate type, not just the leaf
+    /// binding.
+    fn check_const_reassignment(self: *Self, node: ast.Node, left: *ast.Node, env: *TypeEnv) TranspileError!void {
+        if (left.*.type != .Identifier or left.*.data == null) return;
+        const name = left.*.data.?.sval.items;
+        const decl = env.get_decl_node(name) orelse self.find_global_variable_node(name) orelse return;
+        if (decl.type != .Variable or decl.node_variant == null) return;
+        if (decl.node_variant.?.variable.is_const) {
+            self.report_type_error(node, "cannot assign to const '{s}'", .{name});
+            return TranspileError.TypeMismatch;
+        }
+    }
+
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         if (self.recursion_depth >= max_expr_recursion_depth) {
             self.report_type_error(node, "expression nests too deeply for the compiler to analyze (limit {d})", .{max_expr_recursion_depth});
@@ -7478,6 +8036,22 @@ pub const TranspileProcess = struct {
             // sentinel. The is_null_literal flag drives the existing coercions to
             // pointer and str (and == comparisons against them).
             .Nil => return .{ .base = .Num, .is_null_literal = true },
+            // `panic("msg")` never actually produces a value (prints the message
+            // and aborts); the is_panic_literal flag makes `can_implicit_coerce`
+            // accept it in place of ANY expected type, so it composes with a
+            // `ret`/`let`/fit-arm/argument position regardless of that position's
+            // real type. `.Unknown` base is a placeholder -- callers must check
+            // `is_panic_literal` before relying on `base` for a panic value.
+            .Panic => {
+                if (node.node_variant) |nv| {
+                    const mt = try self.infer_expr_type(nv.panic_expr.message.*, env, fns);
+                    if (mt.base != .Str) {
+                        self.report_type_error(node, "panic message must be str", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                }
+                return .{ .base = .Unknown, .is_panic_literal = true };
+            },
             .Character => return .{ .base = .Chr },
             .Identifier => {
                 if (node.data == null) return .{ .base = .Unknown };
@@ -7803,7 +8377,19 @@ pub const TranspileProcess = struct {
                                 return TranspileError.InvalidSizeof;
                             }
 
-                            if (is_declared and !is_scope_value) {
+                            // A bound generic type parameter (`sizeof(E)` inside
+                            // `impl Result<T, E> { ... }`) must NEVER go through the
+                            // global-visibility check below, even when `is_declared`
+                            // also happens to be true -- `is_declared` only means
+                            // SOME enum/compound/quirk ANYWHERE in the whole compiled
+                            // program shares this bare name (e.g. an unrelated file's
+                            // own top-level `enum E { ... }`), which has nothing to do
+                            // with the CURRENT generic parameter. Without this
+                            // exclusion, `ensure_named_type_visible` checked
+                            // visibility against that unrelated global symbol and
+                            // could spuriously fail with "type 'E' is private" even
+                            // though nothing private was actually being referenced.
+                            if (is_declared and !is_scope_value and !is_type_param) {
                                 try self.ensure_named_type_visible(node, base_name);
                                 // Register the generic instantiation so its struct is emitted.
                                 if (mem.indexOf(u8, type_name, "__") != null) {
@@ -7816,7 +8402,20 @@ pub const TranspileProcess = struct {
                             return .{ .base = .Num };
                         }
 
-                        if (fns.get(fname)) |sig| {
+                        // Calling a function-TYPED local/parameter (`fun(T1, T2) R
+                        // cb`), e.g. inside `sort_by`'s comparator body. A local of
+                        // this shape shadows any same-named top-level function,
+                        // matching ordinary scoping.
+                        const fn_param_sig: ?FnSig = blk_fn_param_call: {
+                            const vt = env.get(fname) orelse break :blk_fn_param_call null;
+                            const dref = vt.dtype_ref orelse break :blk_fn_param_call null;
+                            const fsig = dref.fn_sig orelse break :blk_fn_param_call null;
+                            break :blk_fn_param_call try self.fn_sig_from_dtype_fn_sig(fsig);
+                        };
+                        if (fn_param_sig) |sig| {
+                            maybe_sig = sig;
+                            call_rtype = sig.rtype;
+                        } else if (fns.get(fname)) |sig| {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
                             callee_is_async = sig.is_async;
@@ -8143,7 +8742,24 @@ pub const TranspileProcess = struct {
                                     self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_name, mname });
                                     return TranspileError.NotCallable;
                                 };
-                                call_rtype = type_from_dtype(&method_sig.?.rtype);
+                                // `lookup_quirk_method` returns a VALUE copy (its
+                                // `for (methods) |m| return m;` loop copies the AST's
+                                // QuirkMethodSig out), so `method_sig` -- and its
+                                // embedded `.rtype: DataType` -- live on THIS call's own
+                                // stack frame. `type_from_dtype` stores whatever pointer
+                                // it's given straight into the returned CheckedType's
+                                // `dtype_ref`; passing `&method_sig.?.rtype` directly
+                                // would leak a pointer that dangles the moment this call
+                                // returns -- any later field access on the call's result
+                                // (e.g. `c.now().epoch`) then reads freed stack memory.
+                                // Copy `.rtype` into a heap slot with the compile's own
+                                // lifetime instead (same allocator/pattern as
+                                // `dtype_from_mangled_type`'s persistent DataType nodes).
+                                const rtype_copy = self.allocator.create(dtype.DataType) catch {
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                                rtype_copy.* = method_sig.?.rtype;
+                                call_rtype = type_from_dtype(rtype_copy);
                                 callee_is_async = method_sig.?.is_async;
                                 callee_async_known = true;
                                 await_lowering_dynamic_quirk_dispatch = method_sig.?.is_async;
@@ -8323,8 +8939,13 @@ pub const TranspileProcess = struct {
                         return call_rtype;
                     }
 
-                    // Generic function call inference.
-                    if (callee_name != null) {
+                    // Generic function call inference. Only applies to a bare/aliased
+                    // function-name call -- a call already resolved as a method
+                    // (`plain_method_sig`/`method_sig`) must not be re-resolved against
+                    // an unrelated generic free function that happens to share the
+                    // method's bare name (`callee_name` is set to the method name too,
+                    // purely for diagnostics/async-validation further down).
+                    if (callee_name != null and method_sig == null and plain_method_sig == null) {
                         const fn_node = self.find_function_node(callee_name.?) orelse null;
                         if (fn_node != null and fn_node.?.node_variant != null and fn_node.?.node_variant.?.function.type_params != null) {
                             const fnv = &fn_node.?.node_variant.?.function;
@@ -8337,6 +8958,23 @@ pub const TranspileProcess = struct {
                             // Infer type arguments from call arguments.
                             var bindings = std.StringHashMap(*dtype.DataType).init(self.allocator);
                             defer bindings.deinit();
+
+                            // Explicit generic type arguments (`ok<num, MyErrorKind>(42)`)
+                            // pre-seed the bindings map -- needed for a param like `E`
+                            // that appears only in the return type, with no argument
+                            // value to infer it from. The argument-inference loop below
+                            // still runs and, via `bind_generic_param`'s "already bound"
+                            // branch, VALIDATES each inferred arg type against these
+                            // rather than silently trusting them.
+                            if (exp.generic_args) |explicit_gargs| {
+                                if (explicit_gargs.count != params_ptr.count) {
+                                    self.report_type_error(node, "call to '{s}' provides {d} explicit generic argument(s), expected {d}", .{ callee_name.?, explicit_gargs.count, params_ptr.count });
+                                    return TranspileError.TypeMismatch;
+                                }
+                                for (params_ptr.items(), 0..) |p, gi| {
+                                    bindings.put(p.items, explicit_gargs.items()[gi]) catch return TranspileError.MemoryAllocationFailed;
+                                }
+                            }
 
                             const expected_items = if (fnv.args) |args| args.items() else &[_]*ast.Node{};
                             const fixed_len = expected_items.len;
@@ -8615,6 +9253,26 @@ pub const TranspileProcess = struct {
                         const enum_name = left.*.data.?.sval.items;
                         const variant_name = right.*.data.?.sval.items;
                         if (try self.resolve_enum_variant_constant_type(node, enum_name, variant_name)) |t| {
+                            // If this specific site was already bound to a concrete
+                            // generic instantiation (e.g. `Option__Token`, recorded
+                            // when a shorthand `.None`/`.Some(x)` was resolved
+                            // against an outer expected type), carry that concrete
+                            // dtype forward instead of the bare `{name: "Option"}`.
+                            // Without this, a later INDEPENDENT re-inference of this
+                            // same node (e.g. a generic wrapper call's own T-inference
+                            // from its argument) saw an incomplete, dtype_ref-less
+                            // type and bound T to it, producing a malformed
+                            // "Result__Option" (missing its own argument) instance
+                            // that could never be satisfied -- misreported as a
+                            // cyclic dependency.
+                            if (self.lookup_enum_ctor_override(node)) |mangled| {
+                                if (try self.dtype_from_mangled_type(mangled)) |synth_dt| {
+                                    var t2 = t;
+                                    t2.mangled_name = mangled;
+                                    t2.dtype_ref = synth_dt;
+                                    return t2;
+                                }
+                            }
                             return t;
                         }
                     }
@@ -8783,12 +9441,25 @@ pub const TranspileProcess = struct {
                 if (is_assign) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
+                    try self.check_const_reassignment(node, left, env);
                     const lt = try self.infer_expr_type(left.*, env, fns);
                     // Enum shorthand assignment: `c = .Blue`.
                     // Resolve the shorthand before inferring RHS type.
                     if (self.expected_enum_name(lt)) |enum_name| {
                         if (dot_shorthand_variant_name(right)) |_| {
                             _ = try self.resolve_dot_shorthand_enum_variant(right, enum_name);
+                        } else {
+                            // Shorthand data-variant construction in assignment
+                            // position: `d = .Cval('a');` or `f.data = .Cval('a');`.
+                            // Without this, only the plain-variant shorthand
+                            // (`c = .Blue`) was resolved here -- a data-carrying
+                            // variant's shorthand CALL (`.Cval(...)`) fell through
+                            // with no enum context and was misdiagnosed as an
+                            // ordinary (nonexistent) function call.
+                            try self.resolve_shorthand_enum_call(right, enum_name);
+                            // Or nested one level inside a generic wrapper call
+                            // (`d = ok(.None);`) -- see the function doc.
+                            try self.resolve_shorthand_args_via_generic_wrapper(right, lt, fns);
                         }
                         // For a GENERIC enum (`List<dec>`), record the monomorphized
                         // name at this construction site (mirrors the `.Variable`
@@ -9011,6 +9682,9 @@ pub const TranspileProcess = struct {
                             } else {
                                 // Shorthand data-variant construction: `.Variant(args)`.
                                 try self.resolve_shorthand_enum_call(val, enum_name);
+                                // Or nested one level inside a generic wrapper call
+                                // (`let t = ok(.Some(x));`) -- see the function doc.
+                                try self.resolve_shorthand_args_via_generic_wrapper(val, vtype, fns);
                             }
                             // For a GENERIC enum (`Option<num>`), record the
                             // monomorphized name at the construction site so codegen
@@ -9048,6 +9722,9 @@ pub const TranspileProcess = struct {
                             } else {
                                 // Shorthand data-variant construction in return position.
                                 try self.resolve_shorthand_enum_call(rv, enum_name);
+                                // Or nested one level inside a generic wrapper call
+                                // (`ret ok(.None);`) -- see the function doc.
+                                try self.resolve_shorthand_args_via_generic_wrapper(rv, fn_rtype, fns);
                             }
                             // Generic enum returned (`ret Option.Some(x)` in a fn whose
                             // return type is `Option<num>`): record the monomorphized
@@ -9247,6 +9924,17 @@ pub const TranspileProcess = struct {
                                 self.report_type_error(stmt, "for-iter with an index ('i, item') requires an array, a Vec, or a Map", .{});
                                 return TranspileError.TypeMismatch;
                             }
+                            // Record the resolved Vec item type for codegen's fast path
+                            // (see ForIterInfo's doc comment) -- resolved here from the
+                            // iterable's inferred type, which `infer_expr_type` already
+                            // handles for any expression (an identifier, a field access,
+                            // a call, ...), not just a bare identifier. Codegen no longer
+                            // has to re-derive this via a name-only scope-entity lookup,
+                            // which is what previously limited the Vec fast path to
+                            // identifier iterables only.
+                            if (vec_item_dt) |item_dt| {
+                                try self.record_for_iter_override(stmt, .{ .vec_item_dt = item_dt });
+                            }
                             try env.push();
                             defer env.pop();
                             if (map_kv) |kv| {
@@ -9423,7 +10111,7 @@ pub const TranspileProcess = struct {
     }
 
     fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *ArrayList([]CheckedType)) TranspileError!void {
-        for (proc.nodes.items()) |node| {
+        for (proc.nodes.items(), 0..) |node, node_i| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
             if (fnv.name == null) continue;
@@ -9470,12 +10158,20 @@ pub const TranspileProcess = struct {
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             const fn_min_args = count_required_args_from_node(args_vec);
+            // A pointer into `fnv.type_params` itself would dangle: `fnv` is a
+            // by-value copy of this loop iteration's node, reused (and thus
+            // overwritten) by the NEXT iteration's `fnv` at the same stack
+            // slot. Any `FnSig` stored with such a pointer would have it
+            // silently corrupted by the time something dereferences it later
+            // (e.g. `type_params.items()[0].items` reading garbage) -- point
+            // into the STABLE backing array (`proc.nodes`) instead.
+            const stable_type_params = if (fnv.type_params != null) &proc.nodes.items()[node_i].node_variant.?.function.type_params.? else null;
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
-                .type_params = if (fnv.type_params) |*params| params else null,
+                .type_params = stable_type_params,
                 .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -9489,7 +10185,7 @@ pub const TranspileProcess = struct {
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
-                        .type_params = if (fnv.type_params) |*params| params else null,
+                        .type_params = stable_type_params,
                         .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
@@ -9545,12 +10241,17 @@ pub const TranspileProcess = struct {
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             const fn_min_args = count_required_args_from_node(args_vec);
+            // See the matching comment in the `proc.nodes` loop above: point
+            // into `node_ptr` (already a stable pointer) instead of the
+            // by-value `fnv`/`node` copies, which don't survive past this
+            // loop iteration.
+            const stable_type_params = if (fnv.type_params != null) &node_ptr.node_variant.?.function.type_params.? else null;
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
-                .type_params = if (fnv.type_params) |*params| params else null,
+                .type_params = stable_type_params,
                 .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -9564,7 +10265,7 @@ pub const TranspileProcess = struct {
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
-                        .type_params = if (fnv.type_params) |*params| params else null,
+                        .type_params = stable_type_params,
                         .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
@@ -10296,6 +10997,70 @@ pub const TranspileProcess = struct {
 
             for (comp.fields.items()) |f| {
                 try proc.ensure_dtype_visible(node.*, f.dtype, allow_params);
+            }
+        }
+
+        // `test "name" { ... }` blocks: only type-checked in `fun test` mode
+        // (an ordinary compile ignores them entirely, not even type-checking
+        // their bodies, so a program doesn't need its test dependencies to
+        // compile just to run normally) -- OR when `emit_unused_warnings` is
+        // set (fls's lenient diagnostic pass, `-warn-unused-lenient`, which
+        // shells out WITHOUT `-test`). Without this, a private helper used
+        // only from a test block (e.g. a small `_lex` wrapper around
+        // `tokenize` for test fixtures) was always reported as "unused" by
+        // fls, since its only call site was never even visited.
+        if (proc.flags.test_mode or proc.flags.emit_unused_warnings) {
+            for (proc.nodes.items()) |node| {
+                if (node.type != .Test or node.node_variant == null) continue;
+                const tv = node.node_variant.?.test_decl;
+
+                var test_env = TypeEnv.init(proc.allocator);
+                defer test_env.deinit();
+                try test_env.push();
+
+                for (proc.nodes.items()) |*gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        try test_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
+                    }
+                }
+
+                try proc.check_body(tv.body, &test_env, fns, CheckedType{ .base = .Void });
+                proc.warn_unused_bindings_in_current_scope(&test_env);
+            }
+        }
+
+        // `fuzz "name" (data, len) { ... }` blocks: same reasoning as
+        // `test` above (only type-checked in `fun fuzz` mode, or fls's
+        // lenient pass), but ALSO seeds the two fixed-type synthetic
+        // parameters into the body's own env first, exactly the way a
+        // real function's own `args` get seeded (see `typecheck_module`'s
+        // function-body loop above) -- `data_param`/`len_param` are
+        // themselves `Variable` nodes (see `parse_fuzz`), not bare names,
+        // for exactly this reason.
+        if (proc.flags.fuzz_mode or proc.flags.emit_unused_warnings) {
+            for (proc.nodes.items()) |node| {
+                if (node.type != .Fuzz or node.node_variant == null) continue;
+                const fv = node.node_variant.?.fuzz_decl;
+
+                var fuzz_env = TypeEnv.init(proc.allocator);
+                defer fuzz_env.deinit();
+                try fuzz_env.push();
+
+                for (proc.nodes.items()) |*gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        try fuzz_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
+                    }
+                }
+
+                inline for (.{ fv.data_param, fv.len_param }) |param_node| {
+                    const v = param_node.node_variant.?.variable;
+                    try fuzz_env.put_current_decl(v.name.items, try proc.type_from_dtype_with_mangled(v.type), param_node);
+                }
+
+                try proc.check_body(fv.body, &fuzz_env, fns, CheckedType{ .base = .Void });
+                proc.warn_unused_bindings_in_current_scope(&fuzz_env);
             }
         }
 
@@ -11674,6 +12439,10 @@ pub const TranspileProcess = struct {
                     self.deinit_node(paren.exp.*);
                     allocator.destroy(paren.exp);
                 },
+                .panic_expr => |p| {
+                    self.deinit_node(p.message.*);
+                    allocator.destroy(p.message);
+                },
                 .variable => |variable| {
                     if (variable.val) |val| {
                         self.deinit_node(val.*);
@@ -11702,6 +12471,16 @@ pub const TranspileProcess = struct {
                             }
                         }
                         array.brackets.deinit();
+                    }
+                    if (variable.type.fn_sig) |sig| {
+                        for (sig.params.items()) |p| {
+                            p.type_str.deinit();
+                            allocator.destroy(p);
+                        }
+                        sig.params.deinit();
+                        sig.rtype.type_str.deinit();
+                        allocator.destroy(sig.rtype);
+                        allocator.destroy(sig);
                     }
                     allocator.destroy(variable.type);
                     variable.name.deinit();
@@ -12150,6 +12929,10 @@ pub const TranspileProcess = struct {
         // Same ownership model as generic_call_overrides.
         self.await_call_overrides.deinit();
 
+        // Values are plain optional pointers (no owned strings); keys follow
+        // the same arena-allocated ownership model as generic_call_overrides.
+        self.for_iter_overrides.deinit();
+
         // Release all arena allocations back to the backing allocator.
         self.arena.deinit();
         self.backing_allocator.destroy(self.arena);
@@ -12178,10 +12961,23 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Emits the shared `fprintf(...); abort();` pair a `panic(msg)` lowers to,
+    /// as bare C STATEMENTS (no wrapping expression, no trailing dummy value).
+    /// Used directly in return-statement position (where `abort()` never
+    /// returning means no value is needed at all) and wrapped in a `({ ...
+    /// 0; })` GNU statement expression everywhere else `.Panic` is emitted as
+    /// a general expression (see the `.Panic` case in the main transpile
+    /// switch).
+    fn write_panic_message_and_abort(self: *Self, message: ast.Node) TranspileError!void {
+        try self.write("fprintf(stderr_stream(), \"panic: %s\\n\", ");
+        try self.transpile_node(message);
+        try self.write("); abort();");
+    }
+
     fn node_needs_trailing_semicolon(self: *Self, node: ast.Node) bool {
         _ = self;
         return switch (node.type) {
-            .Expression, .ExpressionParenthesis, .Unary => true,
+            .Expression, .ExpressionParenthesis, .Unary, .Panic => true,
             else => false,
         };
     }
@@ -12325,6 +13121,12 @@ pub const TranspileProcess = struct {
     fn node_is_scope_terminator(node: *ast.Node) bool {
         return switch (node.type) {
             .StatementReturn, .StatementBreak, .StatementContinue => true,
+            // A bare `panic("msg");` statement ALWAYS aborts (unlike `assert`,
+            // whose condition might not fire) -- treat it as a terminator too,
+            // so it doesn't trigger a false-positive `missing_return` when
+            // it's a function's last statement, and so codegen doesn't emit
+            // dead defer/fork-wait-idle cleanup after it.
+            .Panic => true,
             else => false,
         };
     }
@@ -12402,7 +13204,10 @@ pub const TranspileProcess = struct {
         while (i < stmts.len) : (i += 1) {
             const s = stmts[i];
             switch (s.type) {
-                .StatementReturn, .StatementBreak, .StatementContinue => return true,
+                // A bare `panic("msg");` ALWAYS aborts (unlike `assert`, whose
+                // condition might not fire), so it terminates the scope just
+                // like `ret`/`break`/`continue`.
+                .StatementReturn, .StatementBreak, .StatementContinue, .Panic => return true,
                 .StatementIf => {
                     // Gather the if + following elif* + optional else (siblings).
                     const if_v = s.node_variant.?.statement.if_stmt;
@@ -12532,6 +13337,38 @@ pub const TranspileProcess = struct {
 
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) TranspileError!void {
+        // Fast path: no newline in this chunk (the overwhelming majority of
+        // calls -- identifiers, punctuation, single tokens) -- just update
+        // the trailing-newline-run counter and pass through unmodified.
+        if (mem.indexOfScalar(u8, bytes, '\n') == null) {
+            if (bytes.len > 0) self.consecutive_newlines = 0;
+            return self.write_raw(bytes);
+        }
+
+        // Slow path: this chunk contains at least one newline. Collapse any
+        // run of 3+ consecutive newlines (2+ blank lines) down to exactly 2
+        // (one blank line), with the run tracked in `consecutive_newlines`
+        // so it collapses correctly even when split across separate
+        // write() calls (one ending "...\n", the next starting "\n\n...").
+        // Purely cosmetic -- C ignores blank lines -- but keeps generated
+        // output readable instead of accumulating long blank-line runs at
+        // section boundaries where several independent emission passes
+        // each add their own trailing separator.
+        var buf = ArrayList(u8).init(self.backing_allocator);
+        defer buf.deinit();
+        for (bytes) |c| {
+            if (c == '\n') {
+                self.consecutive_newlines += 1;
+                if (self.consecutive_newlines > 2) continue;
+            } else {
+                self.consecutive_newlines = 0;
+            }
+            buf.append(c) catch return TranspileError.MemoryAllocationFailed;
+        }
+        return self.write_raw(buf.items);
+    }
+
+    fn write_raw(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
             self.ofile.?.writeStreamingAll(self.io, bytes) catch {
                 return TranspileError.FileWriteError;
@@ -12990,6 +13827,26 @@ pub const TranspileProcess = struct {
             }
         }
         return self.write_type_no_subst(data_type);
+    }
+
+    /// Writes a function/method's C return type, INCLUDING the extra pointer
+    /// level(s) a `T[]` return type needs. Unlike a parameter or local
+    /// variable -- which express an array via C's postfix `T name[]`
+    /// declarator or an explicit `array_as_pointer` prefix star, both handled
+    /// separately from `write_type` at their own call sites -- a C function
+    /// return type has no such postfix form (you can't write `T f()[]`), so
+    /// the array-ness has to become an ordinary leading `*` here instead, one
+    /// per array dimension. Shared by every call site that emits a return
+    /// type as part of a real C function/method signature (prototypes,
+    /// definitions, quirk vtables/wrappers, generic instantiations, async
+    /// support scaffolding) so none of them silently drop this again.
+    fn write_return_type(self: *Self, rt: dtype.DataType) TranspileError!void {
+        try self.write_type(rt);
+        if (rt.flags != null and rt.flags.?.is_array) {
+            const depth: usize = if (rt.array_depth > 0) rt.array_depth else 1;
+            var i: usize = 0;
+            while (i < depth) : (i += 1) try self.write("*");
+        }
     }
 
     fn c_ident_sanitize(self: *Self, raw: []const u8) TranspileError![]const u8 {
@@ -14136,6 +14993,51 @@ pub const TranspileProcess = struct {
             .Expression => {
                 if (node.node_variant == null) return 0;
                 const exp = node.node_variant.?.exp;
+                // A method-call RESULT used as the base of a further `.` access
+                // (`vec.get(i).field` where `get` returns `T*`, e.g. any
+                // `Vec<T*>.get`): resolve the callee method's declared return
+                // pointer depth so the outer field access picks `->` correctly.
+                // Only handles a plain `recv.method(...)` callee shape (not a
+                // bare function call or a further-chained call), matching the
+                // narrowest case actually needed today; anything else falls
+                // through to the `.`-op case below (or returns 0).
+                if (mem.eql(u8, exp.op, "()")) {
+                    const callee = exp.left orelse return 0;
+                    if (callee.type != .Expression or callee.node_variant == null or !mem.eql(u8, callee.node_variant.?.exp.op, ".")) return 0;
+                    const dot = callee.node_variant.?.exp;
+                    const recv = dot.left orelse return 0;
+                    const member = dot.right orelse return 0;
+                    if (member.type != .Identifier or member.data == null) return 0;
+                    const recv_type = self.expr_resolved_compound_type_name(recv.*) orelse return 0;
+                    const recv_canon = self.canonical_compound_name(recv_type);
+                    const base = if (mem.indexOf(u8, recv_canon, "__")) |idx| recv_canon[0..idx] else recv_canon;
+                    const hit = self.find_any_impl_method_node(base, member.data.?.sval.items) orelse return 0;
+                    if (hit.method_node.node_variant == null) return 0;
+                    const rt = hit.method_node.node_variant.?.function.rtype orelse return 0;
+
+                    // The method's return type may be (or embed) the impl's own
+                    // type param written bare (`pub get(num i) T` on `impl Vec<T>`):
+                    // its REAL pointer depth on a concrete receiver (`Vec<DataType*>`)
+                    // is the template's own depth plus whatever depth the matching
+                    // generic arg itself carries (e.g. `T` at depth 0 substituted
+                    // with `DataType*` at depth 1 -> depth 1 overall).
+                    if (self.impl_type_params(hit.impl_node)) |params| {
+                        if ((self.dtype_from_mangled_type(recv_canon) catch null)) |recv_dt| {
+                            if (recv_dt.generic_args) |gargs_vec| {
+                                const gargs = gargs_vec.items();
+                                if (gargs.len == params.count) {
+                                    for (params.items(), 0..) |p, i| {
+                                        if (mem.eql(u8, p.items, rt.type_str.items)) {
+                                            return rt.pointer_depth + gargs[i].pointer_depth;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return rt.pointer_depth;
+                }
                 // Indexing `arr[i]`. The element's pointer depth depends on whether
                 // the base is a true array or a pointer used as an array:
                 //   - `T*[]` (is_array, pointer_depth=1): the `[]` consumes the array
@@ -15488,7 +16390,7 @@ pub const TranspileProcess = struct {
             try self.write(" {\n");
             for (q.methods.items()) |m| {
                 try self.write("  ");
-                try self.write_type(m.rtype);
+                try self.write_return_type(m.rtype);
                 try self.write(" (*");
                 try self.write(m.name.items);
                 try self.write(")(void* self");
@@ -15580,7 +16482,7 @@ pub const TranspileProcess = struct {
             defer if (impl_fn_owned) self.allocator.free(impl_fn_name);
 
             if (fnv.rtype) |rt| {
-                try self.write_type(rt);
+                try self.write_return_type(rt);
             } else {
                 try self.write("void");
             }
@@ -15694,7 +16596,7 @@ pub const TranspileProcess = struct {
                 defer self.backing_allocator.free(wrap_name);
 
                 try self.write("static ");
-                try self.write_type(m.rtype);
+                try self.write_return_type(m.rtype);
                 try self.write(" ");
                 try self.write(wrap_name);
                 try self.write("(void* self");
@@ -15973,7 +16875,26 @@ pub const TranspileProcess = struct {
     fn emit_plain_impl_method_prototypes_from_node(self: *Self, n: *ast.Node, emitted: *std.StringHashMap(bool)) TranspileError!void {
         if (n.type != .Impl or n.node_variant == null) return;
         const im = n.node_variant.?.impl;
-        if (im.quirk_name != null) return;
+        // A GENERIC quirk impl (`impl Box<T> as Iterator<T>`) still skips this
+        // pass entirely -- the branch below (gated on `self.impl_type_params`)
+        // mangles each instantiation as `mangled__base`, with no quirk-name
+        // segment at all, which would be WRONG for a quirk impl (the real
+        // symbol is `mangled__QuirkName__base`, see `emit_quirk_impl_instance`'s
+        // own identical naming a few hundred lines up). A NON-generic quirk
+        // impl (`impl Gender as Display`, e.g.) falls through instead: its
+        // own `fnv.name` is ALREADY the fully-mangled `Type__Quirk__method`
+        // string (see the near-identical forward-declare loop just above this
+        // function, which only re-mangles when `type_name` differs from
+        // `im.type_name` -- the common case already matches), so the plain
+        // per-method loop below emits a correct prototype unchanged. Without
+        // this, a quirk impl's own method body calling ANOTHER quirk impl's
+        // method declared LATER in the same file/module (`impl User as
+        // Display`'s `to_string()` calling `self.gender.to_string()`, where
+        // `Gender`'s own `as Display` impl comes after `User`'s in source
+        // order) hit "implicit function declaration" followed by "conflicting
+        // types" -- confirmed via a real minimal repro, not previously
+        // exercised by the existing test/example corpus.
+        if (im.quirk_name != null and self.impl_type_params(n) != null) return;
         if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) return;
 
         if (self.impl_type_params(n)) |params| {
@@ -16033,7 +16954,7 @@ pub const TranspileProcess = struct {
                         }
 
                         if (fnv.rtype) |rt| {
-                            try self.write_type(rt);
+                            try self.write_return_type(rt);
                         } else {
                             try self.write("void");
                         }
@@ -16101,7 +17022,7 @@ pub const TranspileProcess = struct {
                         }
 
                         if (fnv.rtype) |rt| {
-                            try self.write_type(rt);
+                            try self.write_return_type(rt);
                         } else {
                             try self.write("void");
                         }
@@ -16145,7 +17066,7 @@ pub const TranspileProcess = struct {
             emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
 
             if (fnv.rtype) |rt| {
-                try self.write_type(rt);
+                try self.write_return_type(rt);
             } else {
                 try self.write("void");
             }
@@ -16162,7 +17083,16 @@ pub const TranspileProcess = struct {
             self.in_function_params = false;
             try self.write(");\n");
 
-            if (fnv.is_async) {
+            // An ASYNC quirk method's own payload-struct/helper prototypes
+            // are already emitted by a separate, quirk-specific mechanism
+            // (see `emit_quirk_impl_instance`) -- this whole loop only
+            // started reaching quirk impls at all for the plain prototype
+            // LINE just above (see this function's own doc comment on
+            // exactly this branch), and duplicating the async support
+            // prototypes here too produced a real "redefinition of
+            // __fun_async_payload_..." C error, confirmed via the existing
+            // test suite.
+            if (fnv.is_async and im.quirk_name == null) {
                 const prev_override = self.override_fn_name;
                 self.override_fn_name = fname;
                 defer self.override_fn_name = prev_override;
@@ -17268,6 +18198,24 @@ pub const TranspileProcess = struct {
             try self.process_import(self.nodes.items()[i]);
         }
 
+        // Test-compile mode (`fun test file.fn`) implicitly needs the
+        // concurrent test-runner module -- its `run_discovered_tests` is
+        // called directly by `emit_test_mode_functions_and_runner` later,
+        // so it must go through the SAME early import/typecheck/generic-
+        // instantiation pipeline every other import does (rather than being
+        // synthesized only at emission time, which would skip typechecking
+        // it entirely). `!self.is_importing` keeps this to the root module
+        // only -- test_mode is copied onto every child process too (see
+        // `child_flags.test_mode` above), so without this guard every
+        // ordinary import would ALSO try to pull this in.
+        if (self.flags.test_mode and !self.is_importing) {
+            const synthetic_testing_import = ast.Node{
+                .type = .Import,
+                .node_variant = .{ .import = .{ .path = "std.testing" } },
+            };
+            try self.process_import(synthetic_testing_import);
+        }
+
         // Allow running entrypoint scripts that reference workspace-defined types
         // without explicitly importing their defining modules.
         // This is intentionally conservative: only auto-imports when a single
@@ -17354,6 +18302,18 @@ pub const TranspileProcess = struct {
             try self.emit_function_prototypes_all();
         }
 
+        // Emit forward declarations (`extern ...;`) for all top-level global
+        // variables/constants, mirroring the function-prototype pass above --
+        // unlike functions, a global's C definition previously had no
+        // forward-declared form at all, so any earlier-emitted code (e.g. an
+        // async function's lowered body, which is written out ahead of the
+        // module's ordinary top-level declarations) referencing a global/const
+        // declared later in program order hit a raw "undeclared identifier"
+        // from the C compiler.
+        if (!self.is_importing) {
+            try self.emit_global_variable_prototypes_all();
+        }
+
         // Emit impl method bodies/vtables/coercions after the prototype block.
         if (!self.is_importing) {
             try self.emit_impls_and_vtables();
@@ -17375,12 +18335,26 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             if (node.type != .Import) { // Skip import nodes as they've been processed
                 if (node.type == .Compound or node.type == .Quirk) continue;
+                // `test`/`fuzz` blocks are handled separately below (only in
+                // their own respective compile modes, via
+                // `emit_test_mode_functions_and_runner`/
+                // `emit_fuzz_mode_harness`) -- an ordinary compile ignores
+                // both entirely.
+                if (node.type == .Test) continue;
+                if (node.type == .Fuzz) continue;
                 if (node.type == .Function and node.node_variant != null) {
                     const function = node.node_variant.?.function;
                     if (function.type_params != null) continue;
                     if (self.function_has_unresolved_placeholder(node)) continue;
                     if (function.name) |fname| {
                         if (self.mangled_contains_unresolved_placeholder(fname.items)) continue;
+                        // The generated test-runner `main` (below) replaces any
+                        // user-defined `main` in test mode.
+                        if (self.flags.test_mode and mem.eql(u8, fname.items, "main")) continue;
+                        // Same reasoning in fuzz mode: the fuzzing engine's own
+                        // driver supplies `main`, so a user-defined one would
+                        // collide with it at link time.
+                        if (self.flags.fuzz_mode and mem.eql(u8, fname.items, "main")) continue;
                     }
                 }
                 try self.transpile_node(node);
@@ -17388,7 +18362,229 @@ pub const TranspileProcess = struct {
             }
         }
 
+        if (self.flags.test_mode and !self.is_importing) {
+            try self.emit_test_mode_functions_and_runner();
+        }
+
+        if (self.flags.fuzz_mode and !self.is_importing) {
+            try self.emit_fuzz_mode_harness();
+        }
+
         try self.finalize_warning_expectations();
+    }
+
+    /// Emits each `test "name" { ... }` block (from this module and any
+    /// imported/child modules) as its own C function, plus two small
+    /// bridge functions (`__fun_test_name`/`__fun_run_test`) that the
+    /// concurrent runner (`std.testing`'s `run_discovered_tests`, force-
+    /// imported for every test-mode compile -- see `transpile`) calls
+    /// back into by index. `main` itself only resolves `argv[1]` (an
+    /// optional per-test name filter, see below) into the matching
+    /// subset, then hands off to the runner, which dispatches each
+    /// matched test onto its own virtual task (`fork`) and reports
+    /// results as they complete -- see std/testing.fn.
+    ///
+    /// A failing `assert` is recovered (not aborted) via a per-thread
+    /// jump back into `__fun_run_test` instead (see
+    /// `transpile_prelude`'s `__fun_test_jmp` doc comment and the
+    /// `.assert_stmt` transpile case), so one failing test no longer
+    /// prevents the rest of the suite from running.
+    ///
+    /// `argv[1]`, when present, filters to just the test(s) whose name
+    /// matches EXACTLY -- lets an editor's per-test "Run"/"Debug" CodeLens
+    /// (see editors/vscode/src/extension.ts's FunCodeLensProvider) execute
+    /// one test instead of the whole file's suite, via the ordinary
+    /// `fun test file.fn -- "name"` program-argument passthrough -- no
+    /// separate CLI flag needed.
+    fn emit_test_mode_functions_and_runner(self: *Self) TranspileError!void {
+        const TestRef = struct { name: []const u8, body: *ast.Node };
+        var tests = ArrayList(TestRef).init(self.allocator);
+        defer tests.deinit();
+
+        const Collector = struct {
+            fn collect(proc: *Self, out: *ArrayList(TestRef)) TranspileError!void {
+                for (proc.nodes.items()) |node| {
+                    if (node.type != .Test or node.node_variant == null) continue;
+                    const tv = node.node_variant.?.test_decl;
+                    out.append(.{ .name = tv.name, .body = tv.body }) catch return TranspileError.MemoryAllocationFailed;
+                }
+                for (proc.children.items) |child| {
+                    try collect(child, out);
+                }
+            }
+        };
+        try Collector.collect(self, &tests);
+
+        if (tests.items.len == 0) {
+            try self.write("int main(void) {\n  printf(\"no tests found\\n\");\n  return 0;\n}\n");
+            return;
+        }
+
+        for (tests.items, 0..) |t, i| {
+            self.reset_function_defer_state();
+            const prev_in_fn_body = self.in_function_body;
+            const prev_body_depth = self.function_body_depth;
+            const prev_var = self.current_fn_is_variadic;
+            const prev_fn_return = self.current_fn_return;
+            self.in_function_body = true;
+            self.function_body_depth = 0;
+            self.current_fn_is_variadic = false;
+            self.current_fn_return = .{ .base = .Void };
+            defer {
+                self.in_function_body = prev_in_fn_body;
+                self.function_body_depth = prev_body_depth;
+                self.current_fn_is_variadic = prev_var;
+                self.current_fn_return = prev_fn_return;
+            }
+
+            try self.print("static void __fun_test_{d}(void) {{\n", .{i});
+            try self.transpile_node(t.body.*);
+            try self.write("\n}\n\n");
+        }
+
+        // Maps a MATCHED index (0..__fun_test_map_count, what the runner
+        // sees) back to the REAL test index (what the switch statements
+        // below dispatch on) -- built once in main() from the optional
+        // name filter, then read (never written) concurrently by every
+        // forked test task, so no synchronization is needed here.
+        try self.print("static int __fun_test_map[{d}];\n", .{tests.items.len});
+        try self.write("static int __fun_test_map_count = 0;\n\n");
+
+        try self.write("static bool __fun_run_test(int64_t __i) {\n");
+        try self.write("  if (setjmp(__fun_test_jmp)) { return false; }\n");
+        try self.write("  switch (__fun_test_map[__i]) {\n");
+        for (tests.items, 0..) |_, i| {
+            try self.print("    case {d}: __fun_test_{d}(); break;\n", .{ i, i });
+        }
+        try self.write("  }\n");
+        try self.write("  return true;\n");
+        try self.write("}\n\n");
+
+        try self.write("static char* __fun_test_name(int64_t __i) {\n");
+        try self.write("  switch (__fun_test_map[__i]) {\n");
+        for (tests.items, 0..) |t, i| {
+            try self.print("    case {d}: return \"", .{i});
+            try self.write_c_string_literal_body(t.name);
+            try self.write("\";\n");
+        }
+        try self.write("  }\n");
+        try self.write("  return \"\";\n");
+        try self.write("}\n\n");
+
+        try self.write("int main(int argc, char** argv) {\n");
+        try self.write("  const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
+        for (tests.items, 0..) |t, i| {
+            try self.write("  if (!filter || strcmp(filter, \"");
+            try self.write_c_string_literal_body(t.name);
+            try self.print("\") == 0) {{ __fun_test_map[__fun_test_map_count] = {d}; __fun_test_map_count++; }}\n", .{i});
+        }
+        try self.write("  if (filter && __fun_test_map_count == 0) {\n");
+        try self.write("    printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
+        try self.write("    return 1;\n");
+        try self.write("  }\n");
+        try self.write("  return (int)run_discovered_tests((int64_t)__fun_test_map_count, __fun_test_name, __fun_run_test);\n");
+        try self.write("}\n");
+    }
+
+    /// Emits exactly one `fuzz "name" (data, len) { ... }` block (selected
+    /// by `fuzz_target`, or auto-selected when there's exactly one
+    /// declared across this module and any imported/child modules) as a
+    /// single harness function under the fixed ABI name a coverage-guided
+    /// fuzzing engine's own driver looks for, replacing any user-defined
+    /// `main` (see `transpile`'s own `.Fuzz`/main-skip logic -- the
+    /// engine's driver supplies `main` itself). The two Fun-level
+    /// parameter names (whatever the source chose) are locally aliased to
+    /// the engine's own data-pointer/length arguments right at the top of
+    /// the function body.
+    ///
+    /// Unlike `emit_test_mode_functions_and_runner`'s recovered-assert
+    /// mechanism, a failing `assert` inside a fuzz body still aborts the
+    /// process outright (`fuzz_mode` leaves `flags.test_mode` false, so
+    /// the `.assert_stmt` transpile case takes its ordinary abort() path)
+    /// -- that IS the point of fuzzing: the engine detects the crash and
+    /// keeps the input that triggered it.
+    fn emit_fuzz_mode_harness(self: *Self) TranspileError!void {
+        const FuzzRef = struct { name: []const u8, data_param: *ast.Node, len_param: *ast.Node, body: *ast.Node };
+        var targets = ArrayList(FuzzRef).init(self.allocator);
+        defer targets.deinit();
+
+        const Collector = struct {
+            fn collect(proc: *Self, out: *ArrayList(FuzzRef)) TranspileError!void {
+                for (proc.nodes.items()) |node| {
+                    if (node.type != .Fuzz or node.node_variant == null) continue;
+                    const fv = node.node_variant.?.fuzz_decl;
+                    out.append(.{ .name = fv.name, .data_param = fv.data_param, .len_param = fv.len_param, .body = fv.body }) catch return TranspileError.MemoryAllocationFailed;
+                }
+                for (proc.children.items) |child| {
+                    try collect(child, out);
+                }
+            }
+        };
+        try Collector.collect(self, &targets);
+
+        if (targets.items.len == 0) {
+            self.report_type_error(null, "no 'fuzz' target declared -- fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        var chosen: ?FuzzRef = null;
+        if (self.fuzz_target) |target_name| {
+            for (targets.items) |t| {
+                if (mem.eql(u8, t.name, target_name)) {
+                    chosen = t;
+                    break;
+                }
+            }
+            if (chosen == null) {
+                self.report_type_error(null, "no fuzz target named '{s}' found", .{target_name});
+                return TranspileError.TypeMismatch;
+            }
+        } else if (targets.items.len == 1) {
+            chosen = targets.items[0];
+        } else {
+            self.report_type_error(null, "multiple fuzz targets declared -- specify which one to build", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        const target = chosen.?;
+
+        self.reset_function_defer_state();
+        const prev_in_fn_body = self.in_function_body;
+        const prev_body_depth = self.function_body_depth;
+        const prev_var = self.current_fn_is_variadic;
+        const prev_fn_return = self.current_fn_return;
+        const prev_in_main = self.in_main;
+        self.in_function_body = true;
+        self.function_body_depth = 0;
+        self.current_fn_is_variadic = false;
+        self.current_fn_return = .{ .base = .Void };
+        // Reuses the SAME mechanism a Fun-level `void main() { ... ret; }`
+        // already needs for its own C `int main(void)` wrapper: a bare
+        // `ret;` (no value -- the only form typecheck allows here, since
+        // this body's context is void) must become C `return 0;`, not a
+        // bare `return;`, or the emitted `int LLVMFuzzerTestOneInput(...)`
+        // fails to compile ("non-void function should return a value").
+        // `in_main` also happens to drain any forked tasks before
+        // returning (`emit_fork_wait_idle_if_main`), which is exactly
+        // right here too -- a fuzz body using `fork` shouldn't leave tasks
+        // still running into the next input.
+        self.in_main = true;
+        defer {
+            self.in_function_body = prev_in_fn_body;
+            self.function_body_depth = prev_body_depth;
+            self.current_fn_is_variadic = prev_var;
+            self.current_fn_return = prev_fn_return;
+            self.in_main = prev_in_main;
+        }
+
+        const data_name = target.data_param.node_variant.?.variable.name.items;
+        const len_name = target.len_param.node_variant.?.variable.name.items;
+
+        try self.write("int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n");
+        try self.print("  void* {s} = (void*)__fun_fuzz_data;\n", .{data_name});
+        try self.print("  int64_t {s} = (int64_t)__fun_fuzz_size;\n", .{len_name});
+        try self.transpile_node(target.body.*);
+        try self.write("\n  return 0;\n}\n");
     }
 
     fn emit_function_prototypes_all(self: *Self) TranspileError!void {
@@ -17443,6 +18639,117 @@ pub const TranspileProcess = struct {
         for (proc.children.items) |child| {
             try self.emit_function_prototypes_module(child, emitted);
         }
+    }
+
+    fn emit_global_variable_prototypes_all(self: *Self) TranspileError!void {
+        // Only the root module emits this block.
+        if (self.is_importing) return;
+        try self.write("\n// Global variable/constant forward declarations (allow out-of-order references)\n");
+        var emitted = std.StringHashMap(bool).init(self.backing_allocator);
+        defer {
+            var it = emitted.iterator();
+            while (it.next()) |e| {
+                self.backing_allocator.free(e.key_ptr.*);
+            }
+            emitted.deinit();
+        }
+        try self.emit_global_variable_prototypes_module(self, &emitted);
+        try self.write("\n");
+    }
+
+    fn emit_global_variable_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            if (node.type != .Variable or node.node_variant == null) continue;
+            const variable = node.node_variant.?.variable;
+            const name = variable.name.items;
+
+            if (emitted.contains(name)) continue;
+            const emitted_key = self.backing_allocator.dupe(u8, name) catch return TranspileError.MemoryAllocationFailed;
+            emitted.put(emitted_key, true) catch return TranspileError.MemoryAllocationFailed;
+
+            try self.write_global_variable_prototype(node);
+        }
+
+        for (proc.children.items) |child| {
+            try self.emit_global_variable_prototypes_module(child, emitted);
+        }
+    }
+
+    /// Forward-declares a top-level global variable/constant (`extern ...;`),
+    /// mirroring the const/pointer-placement and array-declarator logic in the
+    /// `.Variable` case of `transpile_node` (see the comment there for why
+    /// `const` lands after the pointer stars for a pointer-typed binding).
+    fn write_global_variable_prototype(self: *Self, node: ast.Node) TranspileError!void {
+        if (node.type != .Variable or node.node_variant == null) return;
+        const variable = node.node_variant.?.variable;
+
+        if (variable.type.fn_sig) |sig| {
+            try self.write("extern ");
+            try self.write_type(sig.rtype.*);
+            try self.write(" (*");
+            try self.write(variable.name.items);
+            try self.write(")(");
+            for (sig.params.items(), 0..) |p, i| {
+                if (i > 0) try self.write(", ");
+                try self.write_type(p.*);
+            }
+            try self.write(");\n");
+            return;
+        }
+
+        const array_as_pointer = blk: {
+            if (variable.type.flags == null or !variable.type.flags.?.is_array) break :blk false;
+            const unsized = (variable.type.array == null or variable.type.array.?.brackets.is_empty()) and variable.type.array_depth <= 1;
+            if (!unsized) break :blk false;
+            const val = variable.val orelse break :blk false;
+            break :blk val.type != .Bracket;
+        };
+
+        const is_ptr_binding = variable.type.pointer_depth > 0 or
+            (variable.type.flags != null and variable.type.flags.?.is_pointer) or
+            array_as_pointer;
+
+        try self.write("extern ");
+        if (variable.is_const and !is_ptr_binding) try self.write("const ");
+        try self.write_type(variable.type.*);
+        if (array_as_pointer) try self.write("*");
+        if (variable.is_const and is_ptr_binding) try self.write(" const");
+        try self.write(" ");
+        try self.write(variable.name.items);
+
+        if (!array_as_pointer and variable.type.flags != null and variable.type.flags.?.is_array) {
+            if (variable.type.array) |array| {
+                if (!array.brackets.is_empty()) {
+                    for (array.brackets.items()) |bracket_node| {
+                        try self.write("[");
+                        if (bracket_node.type == .Bracket) {
+                            try self.transpile_node(bracket_node.node_variant.?.bracket.inner.*);
+                        } else {
+                            try self.transpile_node(bracket_node);
+                        }
+                        try self.write("]");
+                    }
+                } else {
+                    try self.write("[]");
+                }
+            } else if (variable.type.array_depth > 1) {
+                try self.write("[]");
+                if (variable.val) |val| {
+                    if (val.type == .Bracket) {
+                        try self.emit_multidim_inner_declarators(val, variable.type.array_depth - 1);
+                    } else {
+                        var d: usize = 1;
+                        while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                    }
+                } else {
+                    var d: usize = 1;
+                    while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                }
+            } else {
+                try self.write("[]");
+            }
+        }
+        try self.write(";\n");
     }
 
     fn emit_generic_function_prototypes(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
@@ -17503,6 +18810,29 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    /// True if there is a REAL (body-having, non-`std.c.*`) Fun function
+    /// definition named `name` anywhere in `proc`'s subtree. Unlike
+    /// `find_function_node` (used for ordinary call-site resolution, where
+    /// "first match in scope/search order" is the intentionally correct
+    /// behavior), this is scoped to exactly the question
+    /// `fun_fn_name_needs_c_shadow_rename` needs answered — so it can't be
+    /// short-circuited by an UNRELATED bodyless `std.c.*` binding of the
+    /// same name being reached first in the tree (see that function's own
+    /// doc comment for a worked example of exactly that happening).
+    fn find_real_fn_definition_in(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Function or n.node_variant == null) continue;
+            const fnv = n.node_variant.?.function;
+            if (fnv.name == null or !mem.eql(u8, fnv.name.?.items, name)) continue;
+            if (fnv.body == null) continue; // a bodyless std.c.* binding stub, not this
+            return n;
+        }
+        for (proc.children.items) |child| {
+            if (self.find_real_fn_definition_in(child, name)) |found| return found;
+        }
+        return null;
+    }
+
     /// A Fun-defined free function whose name collides with a libc symbol pulled in
     /// by an imported `std.c.*` binding (e.g. `std.log`'s `pub fun log(LogLevel, str)`
     /// vs libc `log` from `<math.h>` via std.math) must be emitted under a
@@ -17511,19 +18841,29 @@ pub const TranspileProcess = struct {
     /// The `std.c.*` binding calls themselves resolve to the RAW libc name and are not
     /// affected (they never route through this — they carry a module alias and go
     /// through `resolve_alias_qualified_symbol_name`).
+    ///
+    /// Uses `find_real_fn_definition_in` (not `find_function_node`) specifically
+    /// because a bare-name search can otherwise resolve to the WRONG same-named
+    /// node: e.g. `imp std.json; imp std.log;` (in that order) transitively
+    /// imports `std.c.math`'s bodyless `log` binding (via std.json -> std.math)
+    /// BEFORE std.log's own real `log` function is ever reached in the import
+    /// tree's depth-first search order. `find_function_node` (first match wins,
+    /// correct for its OTHER callers — genuine call-site resolution) would find
+    /// that bodyless stub first and this function would wrongly conclude "log"
+    /// has no real Fun definition to rename, silently leaving the collision in
+    /// place (confirmed directly: this is exactly how `std.log`'s `log` reached
+    /// codegen unrenamed and collided with libc's `<math.h>` `log(double)`).
     fn fun_fn_name_needs_c_shadow_rename(self: *Self, name: []const u8) bool {
         if (mem.eql(u8, name, "main")) return false;
-        const fn_node = self.find_function_node(name) orelse return false;
-        if (fn_node.node_variant == null) return false;
-        const fnv = fn_node.node_variant.?.function;
-        if (fnv.body == null) return false; // the Fun function must be a real definition
+        const root = self.get_root();
+        const fn_node = self.find_real_fn_definition_in(root, name) orelse return false;
         // If the resolved definition itself lives in a std.c.* module it IS the binding;
         // don't rename it.
         if (fn_node.pos) |pos| {
             if (std.mem.indexOf(u8, pos.filename, "/std/c/") != null) return false;
             if (std.mem.indexOf(u8, pos.filename, "\\std\\c\\") != null) return false;
         }
-        return self.c_binding_symbol_exists_in(self.get_root(), name);
+        return self.c_binding_symbol_exists_in(root, name);
     }
 
     fn write_effective_function_name(self: *Self, node: ast.Node, name: []const u8) TranspileError!void {
@@ -17595,6 +18935,27 @@ pub const TranspileProcess = struct {
                 if (arg.type != .Variable or arg.node_variant == null) continue;
                 const v = arg.node_variant.?.variable;
                 try self.write("  ");
+                // A function-TYPE argument (`fun(T1, T2) R name`) needs C's
+                // function-pointer declarator shape, which wraps the field
+                // NAME (`R (*__argN)(T1, T2)`) instead of following a plain
+                // type name — the same special case an ordinary parameter's
+                // `.Variable` transpile_node handling already has (see
+                // there). Calling `write_type` directly here (as this payload
+                // struct used to) can't express that shape at all and wrote
+                // out the fn_sig's own raw, un-lowered type text instead —
+                // invalid as a struct field declaration.
+                if (v.type.fn_sig) |sig| {
+                    try self.write_type(sig.rtype.*);
+                    try self.write(" (*__arg");
+                    try self.print("{d}", .{i});
+                    try self.write(")(");
+                    for (sig.params.items(), 0..) |p, pi| {
+                        if (pi > 0) try self.write(", ");
+                        try self.write_type(p.*);
+                    }
+                    try self.write(");\n");
+                    continue;
+                }
                 try self.write_type(v.type.*);
                 try self.write(" __arg");
                 try self.print("{d}", .{i});
@@ -17605,7 +18966,7 @@ pub const TranspileProcess = struct {
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("  ");
-                try self.write_type(rt);
+                try self.write_return_type(rt);
                 try self.write(" __result;\n");
             }
         }
@@ -17626,7 +18987,7 @@ pub const TranspileProcess = struct {
 
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17638,7 +18999,7 @@ pub const TranspileProcess = struct {
 
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17741,7 +19102,7 @@ pub const TranspileProcess = struct {
         if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17756,7 +19117,7 @@ pub const TranspileProcess = struct {
             if (rt.type != .Void) {
                 if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  ");
-                try self.write_type(rt);
+                try self.write_return_type(rt);
                 try self.write(" __result = __payload->__result;\n");
                 if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  free(__payload);\n");
@@ -17777,7 +19138,7 @@ pub const TranspileProcess = struct {
         if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17989,7 +19350,7 @@ pub const TranspileProcess = struct {
         }
 
         if (function.rtype) |rtype| {
-            try self.write_type(rtype);
+            try self.write_return_type(rtype);
         } else {
             try self.write("void");
         }
@@ -18235,8 +19596,23 @@ pub const TranspileProcess = struct {
         try self.write("\n");
 
         if (!self.is_importing) {
-            try self.write("#include <stdlib.h>\n");
-            try self.write("#include <stdio.h>\n");
+            // stdio.h/stdlib.h are already unconditionally included by
+            // write_std_imports's "core headers" above -- don't re-include
+            // them here (this used to emit a literal duplicate
+            // `#include <stdlib.h>#include <stdio.h>` pair every time).
+            if (self.flags.test_mode) {
+                // Recoverable assertion failure: a failing `assert` inside a
+                // test-mode compile jumps back to whichever test dispatched
+                // it (via the runner's own setjmp, see
+                // emit_test_mode_functions_and_runner) instead of aborting
+                // the whole process -- see the `.assert_stmt` transpile
+                // case. `_Thread_local` because tests run concurrently, one
+                // per virtual task, potentially on different worker
+                // threads; a single shared jmp_buf would be a data race if
+                // two tests failed at once.
+                try self.write("#include <setjmp.h>\n");
+                try self.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
+            }
             // Standard-stream accessors. `stdout`/`stderr`/`stdin` are macros/globals
             // (not callable), and differ per libc (glibc/musl/macOS/MSVCRT resolve
             // them differently — MSVCRT via a function call). Wrapping them in tiny
@@ -18246,6 +19622,76 @@ pub const TranspileProcess = struct {
             try self.write("static FILE* stdout_stream(void){ return stdout; }\n");
             try self.write("static FILE* stderr_stream(void){ return stderr; }\n");
             try self.write("static FILE* stdin_stream(void){ return stdin; }\n");
+            // MSVCRT's default text-mode stdio silently translates every `\n`
+            // byte written to stdout/stderr into `\r\n`, unlike glibc/macOS's
+            // libc. Fun's own string literals treat `\n` as a single LF byte
+            // (see `write_c_string_literal_body`), so left alone, a compiled
+            // program's actual output would only match that on POSIX. Force
+            // both streams to binary (untranslated) mode before `main` runs,
+            // via a constructor, so process output is consistent everywhere.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
+            try self.write("#include <io.h>\n");
+            try self.write("#include <fcntl.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("__attribute__((constructor)) static void __fun_win_stdio_binary(void) {\n");
+            try self.write("  _setmode(_fileno(stdout), _O_BINARY);\n");
+            try self.write("  _setmode(_fileno(stderr), _O_BINARY);\n");
+            try self.write("}\n");
+            try self.write("#endif\n");
+            // `environ` (the process environment, needed by std.c.process's
+            // posix_spawn binding to inherit the parent's env) is a global, not a
+            // callable symbol -- same reasoning as the stdout/stderr/stdin
+            // wrappers above: a bare `extern char** environ;` declaration is not
+            // portable (MinGW/MSVC spell it `_environ`), so wrap it.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("static char** environ_ptr(void){ return _environ; }\n");
+            try self.write("#else\n");
+            try self.write("extern char** environ;\n");
+            try self.write("static char** environ_ptr(void){ return environ; }\n");
+            try self.write("#endif\n");
+            // Directory iteration/creation/kind-check helpers for `std.c.dirent`
+            // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
+            // libc directory APIs differ enough across platforms (POSIX
+            // opendir/readdir/DIR* vs. Win32 FindFirstFile/FindNextFile, and
+            // `struct dirent`'s layout isn't something Fun can safely mirror as a
+            // compound) that hand-written wrappers -- same approach as
+            // `environ_ptr` above -- are the portable option: each wrapper's C
+            // signature is written to match a Fun type EXACTLY (`void*` <->
+            // `raw*`, `long long` <-> `num`, `char*`/`const char*` <-> `str`),
+            // sidestepping the ABI-width mismatches a raw libc binding risks.
+            try self.write("#ifdef _WIN32\n");
+            // `std.c.net` (if imported) redefines `close` to `closesocket` via a
+            // plain `#define` before this point (see the net-compat block in
+            // `write_std_imports`). If that's already active, textually
+            // including <windows.h>/<direct.h>/<sys/stat.h> here would rename
+            // THEIR OWN `close()` declarations too (they transitively pull in
+            // MinGW's io.h), conflicting with winsock2's real `closesocket`
+            // signature. Shield these includes from whatever `close` currently
+            // means and restore it after, regardless of whether the net
+            // compat layer was active.
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
+            try self.write("#include <windows.h>\n");
+            try self.write("#include <direct.h>\n");
+            try self.write("#include <sys/stat.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
+            try self.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), \"%s\\\\*\", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }\n");
+            try self.write("static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }\n");
+            try self.write("static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }\n");
+            try self.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }\n");
+            try self.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }\n");
+            try self.write("#else\n");
+            try self.write("#include <dirent.h>\n");
+            try self.write("#include <sys/stat.h>\n");
+            try self.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }\n");
+            try self.write("static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }\n");
+            try self.write("static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }\n");
+            try self.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }\n");
+            try self.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }\n");
+            try self.write("#endif\n");
             try self.write("#ifdef _WIN32\n");
             try self.write("#include <windows.h>\n");
             try self.write("typedef HANDLE __fun_thread_t;\n");
@@ -18530,6 +19976,74 @@ pub const TranspileProcess = struct {
         if (remaining > 1) {
             try self.emit_multidim_inner_declarators(first_elem, remaining - 1);
         }
+    }
+
+    /// Emits the indexed-loop body for `for item : <arr_name>` over a Vec
+    /// (`arr_name.len`/`arr_name.data[idx]`), given the already-resolved item
+    /// type `vec_item_dt`. `arr_name` may name the iterable directly (the
+    /// common case) or a temp variable a caller bound it to first (for an
+    /// iterable that isn't a bare identifier -- see the `.iter` call site's
+    /// own comment for why that's needed). Assumes the caller has already
+    /// positioned the cursor at the start of a fresh, indented line.
+    fn emit_vec_iter_fast_path(self: *Self, fi: anytype, arr_name: []const u8, vec_item_dt: *dtype.DataType) TranspileError!void {
+        const idx_name = fi.index_name orelse "__fun_i";
+
+        try self.write("for (int64_t ");
+        try self.write(idx_name);
+        try self.write(" = 0; ");
+        try self.write(idx_name);
+        try self.write(" < ");
+        try self.write(arr_name);
+        try self.write(".len; ");
+        try self.write(idx_name);
+        try self.write("++) {");
+        self.indent();
+
+        try self.push_defer_scope(.loop);
+        defer self.pop_defer_scope();
+
+        _ = try self.new_scope();
+        defer self.finish_scope();
+
+        try self.write_indent();
+        try self.write("__auto_type ");
+        try self.write(fi.item_name);
+        try self.write(" = ");
+        try self.write(arr_name);
+        try self.write(".data[");
+        try self.write(idx_name);
+        try self.write("];\n");
+
+        const item_dt = try self.clone_dtype(vec_item_dt);
+        const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+        var item_name_buf = ArrayList(u8).init(self.allocator);
+        item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
+        item_node.* = .{
+            .type = .Variable,
+            .node_variant = .{ .variable = .{
+                .type = item_dt,
+                .name = item_name_buf,
+                .val = null,
+            } },
+        };
+
+        const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+        item_ent.* = .{
+            .flags = .{ .on_stack = false },
+            .node = item_node,
+            .name = fi.item_name,
+        };
+        try self.push_scope_entity(item_ent);
+        self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
+
+        try self.transpile_block_contents(fi.body);
+        if (!self.block_ends_with_scope_terminator(fi.body)) {
+            try self.emit_current_scope_defers();
+        }
+
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
     }
 
     fn transpile_node(self: *Self, node: ast.Node) TranspileError!void {
@@ -18914,16 +20428,34 @@ pub const TranspileProcess = struct {
                                 }
 
                                 // Plain impl method call on compounds: `x.method(...)`.
+                                // `fbase` is usually a plain identifier (`x.field.method()`),
+                                // but a receiver reached through a longer chain of field
+                                // accesses (`a.b.field.method()`, e.g. `self.active_table.symbols.push(s)`)
+                                // has `fbase` itself be a `.`-Expression. Resolve its owner
+                                // type name via `expr_named_type_from_scope`, which already
+                                // recurses through arbitrary-depth `.` chains (used elsewhere
+                                // for chained-method return-type resolution) -- without this,
+                                // only a SINGLE field hop before the method call was ever
+                                // recognized as a method call at all; anything deeper fell
+                                // through every case below and got emitted as a literal,
+                                // uncompilable `.method(...)` (C has no member functions).
                                 if (recv.?.type == .Expression and recv.?.node_variant != null and mem.eql(u8, recv.?.node_variant.?.exp.op, ".")) {
                                     const fexp = recv.?.node_variant.?.exp;
                                     const fbase = fexp.left orelse null;
                                     const fmember = fexp.right orelse null;
-                                    if (fbase != null and fmember != null and fbase.?.type == .Identifier and fbase.?.data != null and fmember.?.type == .Identifier and fmember.?.data != null) {
-                                        const base_name = fbase.?.data.?.sval.items;
+                                    const base_owner_type_name: ?[]const u8 = blk: {
+                                        const fb = fbase orelse break :blk null;
+                                        if (fb.type == .Identifier and fb.data != null) {
+                                            const base_dt = self.identifier_declared_dtype(fb.data.?.sval.items) orelse break :blk null;
+                                            if (base_dt.type != .Unknown or self.is_quirk_name(base_dt.type_str.items) or (base_dt.pointer_depth != 0 and base_dt.pointer_depth != 1)) break :blk null;
+                                            break :blk base_dt.type_str.items;
+                                        }
+                                        break :blk self.expr_named_type_from_scope(fb.*);
+                                    };
+                                    if (fmember != null and fmember.?.type == .Identifier and fmember.?.data != null and base_owner_type_name != null) {
                                         const field_name = fmember.?.data.?.sval.items;
-                                        const base_dt = self.identifier_declared_dtype(base_name) orelse null;
-                                        if (base_dt != null and base_dt.?.type == .Unknown and !self.is_quirk_name(base_dt.?.type_str.items) and (base_dt.?.pointer_depth == 0 or base_dt.?.pointer_depth == 1)) {
-                                            if (self.lookup_compound_field(base_dt.?.type_str.items, field_name)) |fdt| {
+                                        {
+                                            if (self.lookup_compound_field(base_owner_type_name.?, field_name)) |fdt| {
                                                 const field_type = type_from_dtype(fdt);
                                                 if (field_type.name != null and !self.is_quirk_name(field_type.name.?)) {
                                                     var type_name = field_type.name.?;
@@ -19767,7 +21299,11 @@ pub const TranspileProcess = struct {
             .String => {
                 const str = node.data.?.sval.items;
                 try self.write("\"");
-                try self.write_c_string_literal_body(str);
+                if (node.is_raw_string) {
+                    try self.write_c_string_literal_body_from_raw(str);
+                } else {
+                    try self.write_c_string_literal_body(str);
+                }
                 try self.write("\"");
             },
             .Identifier => {
@@ -19821,6 +21357,25 @@ pub const TranspileProcess = struct {
             .Variable => {
                 const variable = node.node_variant.?.variable;
 
+                // A function-TYPE parameter (`fun(T1, T2) R name`) needs C's
+                // function-pointer declarator shape, which wraps the NAME
+                // (`R (*name)(T1, T2)`) instead of following it like an
+                // ordinary `Type name` declaration -- write it directly and
+                // skip the rest of this case (no array/initializer handling
+                // applies to a function-type parameter).
+                if (variable.type.fn_sig) |sig| {
+                    try self.write_type(sig.rtype.*);
+                    try self.write(" (*");
+                    try self.write(variable.name.items);
+                    try self.write(")(");
+                    for (sig.params.items(), 0..) |p, i| {
+                        if (i > 0) try self.write(", ");
+                        try self.write_type(p.*);
+                    }
+                    try self.write(")");
+                    return;
+                }
+
                 // A local `T[]` variable initialized from a NON-array-literal rvalue
                 // (a pointer/identifier/call, e.g. `num[] a = malloc(...)` — the
                 // idiom for viewing heap memory as an array) must be emitted as a C
@@ -19836,8 +21391,22 @@ pub const TranspileProcess = struct {
                     break :blk val.type != .Bracket;
                 };
 
+                // `const` on a POINTER-typed binding must land AFTER the
+                // pointer star(s) (`Type* const name`, "the pointer itself
+                // can't be reassigned") rather than before the base type
+                // (`const Type* name`, "what it points to can't be mutated"
+                // — a C pointer-to-const, a DIFFERENT and stricter guarantee
+                // than what `const`'s own reassignment check enforces —
+                // would wrongly reject legitimate writes through the
+                // pointee). A non-pointer binding has no such ambiguity:
+                // `const Type name` already means the whole value.
+                const is_ptr_binding = variable.type.pointer_depth > 0 or
+                    (variable.type.flags != null and variable.type.flags.?.is_pointer) or
+                    array_as_pointer;
+                if (variable.is_const and !is_ptr_binding) try self.write("const ");
                 try self.write_type(variable.type.*);
                 if (array_as_pointer) try self.write("*");
+                if (variable.is_const and is_ptr_binding) try self.write(" const");
                 try self.write(" ");
                 try self.write(variable.name.items);
 
@@ -19935,7 +21504,11 @@ pub const TranspileProcess = struct {
 
                     if (val.type == .String) {
                         try self.write("\"");
-                        try self.write_c_string_literal_body(val.data.?.sval.items);
+                        if (val.is_raw_string) {
+                            try self.write_c_string_literal_body_from_raw(val.data.?.sval.items);
+                        } else {
+                            try self.write_c_string_literal_body(val.data.?.sval.items);
+                        }
                         try self.write("\"");
                     } else if (val.type == .Boolean) {
                         const bval = val.data.?.bval;
@@ -20129,7 +21702,7 @@ pub const TranspileProcess = struct {
                         }
                     }
                     if (function.rtype) |rtype| {
-                        try self.write_type(rtype);
+                        try self.write_return_type(rtype);
                     } else {
                         try self.write("void");
                     }
@@ -20424,6 +21997,15 @@ pub const TranspileProcess = struct {
                         try self.transpile_scoped_block(else_s.body, .normal);
                     },
                     .return_stmt => |rn| {
+                        // `ret panic("msg");` never actually returns a value (it prints
+                        // the message and aborts), so bypass the whole return-value
+                        // machinery below (defers/main/fork/quirk-coercion) entirely --
+                        // same "abort now, no cleanup" semantics as `assert`'s codegen.
+                        if (rn.*.type == .Panic) {
+                            try self.write_indent();
+                            try self.write_panic_message_and_abort(rn.*.node_variant.?.panic_expr.message.*);
+                            return;
+                        }
                         // A `ret <expr>` must compute its value BEFORE the defers run,
                         // because a defer may mutate a variable the expression reads
                         // (`num x = 5; defer x = 999; ret x + 1;` must return 6, not
@@ -20560,7 +22142,19 @@ pub const TranspileProcess = struct {
                             try self.transpile_node(msg.*);
                             try self.write("); ");
                         }
-                        try self.write("abort(); }");
+                        // In test mode, a failing assertion must not take down
+                        // the whole runner -- it jumps back to the currently
+                        // running test's own dispatch point instead (see
+                        // transpile_prelude's `__fun_test_jmp` doc comment),
+                        // so tests after this one still run. Outside test
+                        // mode, an assertion failure is a real program bug;
+                        // abort() (the original behavior) is still correct
+                        // there.
+                        if (self.flags.test_mode) {
+                            try self.write("longjmp(__fun_test_jmp, 1); }");
+                        } else {
+                            try self.write("abort(); }");
+                        }
                     },
                     .warning_ctrl => |ctrl| {
                         // Warning control was already queued during the typecheck pass;
@@ -20614,10 +22208,36 @@ pub const TranspileProcess = struct {
                                 if (try self.emit_iter_protocol_for(fi)) {
                                     break :iter_blk;
                                 }
-                                // We only support iterating array identifiers for now.
+                                // A Vec-typed iterable that ISN'T a bare identifier (a
+                                // field access, a call, ...): the raw-array fast path
+                                // below needs a real identifier (its length comes from
+                                // a `sizeof`-based trick that only works on a genuine
+                                // C array variable), but the Vec fast path only needs
+                                // `.len`/`.data[idx]`, which work identically on any
+                                // Vec-typed value. Resolved via typecheck's override
+                                // (see `ForIterInfo`'s doc comment) instead of a scope-
+                                // entity lookup by name, since there's no name here.
+                                // The iterable is evaluated ONCE into a temp so a
+                                // side-effecting expression (a call) isn't re-evaluated
+                                // for both the length check and the element access.
                                 if (fi.iterable.type != .Identifier) {
-                                    self.err("for-each loops currently require an array identifier", .{});
-                                    return TranspileError.UnsupportedNodeType;
+                                    const over = self.lookup_for_iter_override(node) orelse {
+                                        self.err("for-each loops currently require an array identifier (a Vec-typed expression is also supported)", .{});
+                                        return TranspileError.UnsupportedNodeType;
+                                    };
+                                    const vec_item_dt = over.vec_item_dt orelse {
+                                        self.err("for-each loops over a raw array currently require an array identifier", .{});
+                                        return TranspileError.UnsupportedNodeType;
+                                    };
+                                    const tmp_name = try self.next_tmp_name("iter");
+                                    try self.write("__auto_type ");
+                                    try self.write(tmp_name);
+                                    try self.write(" = ");
+                                    try self.transpile_node(fi.iterable.*);
+                                    try self.write(";\n");
+                                    try self.write_indent();
+                                    try self.emit_vec_iter_fast_path(fi, tmp_name, vec_item_dt);
+                                    break :iter_blk;
                                 }
                                 const arr_name = fi.iterable.data.?.sval.items;
 
@@ -20648,62 +22268,7 @@ pub const TranspileProcess = struct {
                                 }
 
                                 if (vec_item_dt != null) {
-                                    try self.write("for (int64_t ");
-                                    try self.write(idx_name);
-                                    try self.write(" = 0; ");
-                                    try self.write(idx_name);
-                                    try self.write(" < ");
-                                    try self.write(arr_name);
-                                    try self.write(".len; ");
-                                    try self.write(idx_name);
-                                    try self.write("++) {");
-                                    self.indent();
-
-                                    try self.push_defer_scope(.loop);
-                                    defer self.pop_defer_scope();
-
-                                    _ = try self.new_scope();
-                                    defer self.finish_scope();
-
-                                    try self.write_indent();
-                                    try self.write("__auto_type ");
-                                    try self.write(fi.item_name);
-                                    try self.write(" = ");
-                                    try self.write(arr_name);
-                                    try self.write(".data[");
-                                    try self.write(idx_name);
-                                    try self.write("];\n");
-
-                                    const item_dt = try self.clone_dtype(vec_item_dt.?);
-                                    const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
-                                    var item_name_buf = ArrayList(u8).init(self.allocator);
-                                    item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
-                                    item_node.* = .{
-                                        .type = .Variable,
-                                        .node_variant = .{ .variable = .{
-                                            .type = item_dt,
-                                            .name = item_name_buf,
-                                            .val = null,
-                                        } },
-                                    };
-
-                                    const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
-                                    item_ent.* = .{
-                                        .flags = .{ .on_stack = false },
-                                        .node = item_node,
-                                        .name = fi.item_name,
-                                    };
-                                    try self.push_scope_entity(item_ent);
-                                    self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
-
-                                    try self.transpile_block_contents(fi.body);
-                                    if (!self.block_ends_with_scope_terminator(fi.body)) {
-                                        try self.emit_current_scope_defers();
-                                    }
-
-                                    self.dedent();
-                                    try self.write_indent();
-                                    try self.write("}");
+                                    try self.emit_vec_iter_fast_path(fi, arr_name, vec_item_dt.?);
                                 } else {
                                     // The length expression root and offset:
                                     // - For regular arrays: root=arr_name, offset=0
@@ -21148,6 +22713,24 @@ pub const TranspileProcess = struct {
             },
             // The `nil` literal lowers to the C null-pointer constant `NULL`.
             .Nil => try self.write("NULL"),
+            // `panic("msg")` used as a RETURN value is special-cased at the
+            // `.return_stmt` site above (no dummy value needed there, since
+            // `abort()` never returns). Everywhere ELSE (a `let` initializer,
+            // fit-arm body, function argument, ...) still needs a single C
+            // EXPRESSION of SOME concrete type, so this lowers to a GNU C
+            // statement expression that prints the message, aborts, and
+            // trails off with a plain `0` -- C's very permissive implicit
+            // conversions accept that as almost any scalar/pointer type
+            // (though NOT a struct/union return type; that combination isn't
+            // supported yet). `stderr_stream()`/`abort()` are always present
+            // (see `transpile_prelude`), so no import is required for this.
+            .Panic => {
+                if (node.node_variant) |nv| {
+                    try self.write("({ ");
+                    try self.write_panic_message_and_abort(nv.panic_expr.message.*);
+                    try self.write(" 0; })");
+                }
+            },
             else => {},
         }
     }
@@ -21298,6 +22881,15 @@ pub const TranspileProcess = struct {
             // - otherwise, include `<pthread.h>`
             try self.process_std_module_import(import_node, import_path);
             return;
+        } else if (mem.eql(u8, import_path, "std.c.process")) {
+            self.requires_process_compat_layer = true;
+            // `std.c.process` is handled specially in `write_std_imports`:
+            // - on POSIX, include spawn.h/sys/wait.h/unistd.h (the real
+            //   posix_spawn/waitpid/pipe declarations)
+            // - on Windows, emit a CreateProcess-backed compat layer (no
+            //   posix_spawn/waitpid equivalent exists there at all)
+            try self.process_std_module_import(import_node, import_path);
+            return;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {
             header_name = self.allocator.dupe(u8, "limits.h") catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -21318,6 +22910,16 @@ pub const TranspileProcess = struct {
             // Deadlock-watchdog hooks: no libc header — the symbols
             // (`__fun_wd_enter_wait`/`__fun_wd_leave_wait`/`__fun_wd_warn`) are
             // emitted directly into the prelude by the compiler. Nothing to include.
+            return;
+        } else if (mem.eql(u8, import_path, "std.c.dirent")) {
+            // Directory iteration/creation/kind-check helpers
+            // (`__fun_dir_open`/`__fun_dir_read_name`/`__fun_dir_close`/
+            // `__fun_path_is_dir`/`__fun_make_dir`) are emitted directly into
+            // the prelude by the compiler (see `transpile_prelude`) — no
+            // libc header to pull in here, unlike the rest of this chain.
+            // Still load the signature module so type-checking sees these
+            // functions' signatures.
+            try self.process_std_module_import(import_node, import_path);
             return;
         } else {
             self.report_error(import_node, "Unsupported standard library import: {s}", .{import_path});
@@ -21523,7 +23125,28 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
+        // Inherit ONLY the parent's test/warning-visibility mode (test_mode,
+        // emit_unused_warnings) so e.g. `fun test entry.fn` also type-checks and emits
+        // `test` blocks declared in an IMPORTED module, not just the entry file's own --
+        // `typecheck_module`'s `.Test`-node handling is gated on exactly these two
+        // fields. Without this, a child process always got `test_mode = false`
+        // regardless of the parent, so an imported module's `test` block was parsed but
+        // never type-checked -- yet codegen still tried to emit it, embedding the
+        // unresolved `__let_infer__` placeholder for any `let` binding whose type only
+        // typecheck ever resolves.
+        //
+        // Deliberately NOT a wholesale `self.flags` copy: `preload_imports`/
+        // `preload_std_imports`/`emit_stderr`/etc. are parse-strategy/output flags the
+        // ROOT process sets for its own reasons (e.g. the test harness disables import
+        // preloading to avoid redundant filesystem probing) that must NOT cascade to
+        // children -- doing so broke transitive import processing for std.channel/
+        // std.net (children stopped preloading their OWN nested imports).
+        var child_flags = TranspileProcessFlags{ .outf = false };
+        child_flags.test_mode = self.flags.test_mode;
+        child_flags.fuzz_mode = self.flags.fuzz_mode;
+        child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
+        import_proc.fuzz_target = self.fuzz_target;
 
         if (import_alias) |alias| {
             import_proc.import_alias = import_proc.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;
@@ -21961,6 +23584,184 @@ pub const TranspileProcess = struct {
             try self.write("#include <pthread.h>\n");
             try self.write("#endif\n");
         }
+
+        if (requires_process_compat_recursive(self)) {
+            try self.write("\n");
+            try self.write("#if defined(_WIN32)\n");
+            // Shield these first-time header inclusions from a `close`
+            // macro an earlier `std.c.net` import may have already defined
+            // (`close` -> `closesocket`; see the net-compat block above) --
+            // same reasoning as the dir-iteration prelude block's own guard.
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
+            try self.write("#include <windows.h>\n");
+            try self.write("#include <io.h>\n");
+            try self.write("#include <fcntl.h>\n");
+            try self.write("#include <process.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("\n");
+            // `pid_t` is ALREADY typedef'd by <sys/types.h> (transitively
+            // pulled in above) as a plain integer -- unlike POSIX, real
+            // Win32 process handles (HANDLE) and process IDs (DWORD) are
+            // different things, so this compat layer stores the numeric PID
+            // in `*pid` (matching real POSIX semantics exactly) and has
+            // `waitpid` re-open a HANDLE from it via OpenProcess, rather
+            // than repurposing `pid_t` to mean HANDLE.
+            try self.write("#include <sys/types.h>\n");
+            try self.write("typedef void* posix_spawnattr_t;\n");
+            try self.write("typedef struct {\n");
+            try self.write("    int has_dup2_1; int dup2_1_fd;\n");
+            try self.write("    int has_dup2_2; int dup2_2_fd;\n");
+            try self.write("} posix_spawn_file_actions_t;\n");
+            try self.write("\n");
+            try self.write("long long posix_spawn_file_actions_init(posix_spawn_file_actions_t* fa) {\n");
+            try self.write("    if (fa == NULL) return -1;\n");
+            try self.write("    fa->has_dup2_1 = 0;\n");
+            try self.write("    fa->has_dup2_2 = 0;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* fa) {\n");
+            try self.write("    (void)fa;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Only stdout(1)/stderr(2) redirection is supported -- the only
+            // shape `std/process.fn`'s `run()` actually uses.
+            try self.write("long long posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t* fa, long long fildes, long long newfildes) {\n");
+            try self.write("    if (fa == NULL) return -1;\n");
+            try self.write("    if (newfildes == 1) { fa->has_dup2_1 = 1; fa->dup2_1_fd = (int)fildes; return 0; }\n");
+            try self.write("    if (newfildes == 2) { fa->has_dup2_2 = 1; fa->dup2_2_fd = (int)fildes; return 0; }\n");
+            try self.write("    return -1;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // A no-op: with STARTF_USESTDHANDLES, unlisted std handles are
+            // simply left as the parent's own, so nothing needs closing in
+            // the (nonexistent) child before CreateProcess -- unlike POSIX,
+            // there is no fork'd child address space to prune fds in first.
+            try self.write("long long posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* fa, long long fildes) {\n");
+            try self.write("    (void)fa; (void)fildes;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Builds a Windows command-line string from argv, following the
+            // standard MSVCRT argument-quoting rules: quote an argument if
+            // it's empty or contains space/tab/quote, and backslash-escape
+            // runs of backslashes that immediately precede a quote (or end
+            // a quoted argument).
+            try self.write("static char* __fun_win_build_cmdline(char** argv) {\n");
+            try self.write("    size_t cap = 256, len = 0;\n");
+            try self.write("    char* out = (char*)malloc(cap);\n");
+            try self.write("    if (out == NULL) return NULL;\n");
+            try self.write("    for (int i = 0; argv[i] != NULL; i++) {\n");
+            try self.write("        const char* a = argv[i];\n");
+            try self.write("        size_t alen = strlen(a);\n");
+            try self.write("        int needs_quotes = (alen == 0);\n");
+            try self.write("        for (size_t j = 0; j < alen && !needs_quotes; j++) {\n");
+            try self.write("            if (a[j] == ' ' || a[j] == '\\t' || a[j] == '\"') needs_quotes = 1;\n");
+            try self.write("        }\n");
+            try self.write("        size_t need = alen * 2 + 3;\n");
+            try self.write("        while (len + need + 2 > cap) {\n");
+            try self.write("            cap *= 2;\n");
+            try self.write("            char* n = (char*)realloc(out, cap);\n");
+            try self.write("            if (n == NULL) { free(out); return NULL; }\n");
+            try self.write("            out = n;\n");
+            try self.write("        }\n");
+            try self.write("        if (i > 0) out[len++] = ' ';\n");
+            try self.write("        if (needs_quotes) out[len++] = '\"';\n");
+            try self.write("        size_t backslashes = 0;\n");
+            try self.write("        for (size_t j = 0; j < alen; j++) {\n");
+            try self.write("            char c = a[j];\n");
+            try self.write("            if (c == '\\\\') { backslashes++; out[len++] = c; continue; }\n");
+            try self.write("            if (c == '\"') {\n");
+            try self.write("                for (size_t k = 0; k <= backslashes; k++) out[len++] = '\\\\';\n");
+            try self.write("                out[len++] = '\"';\n");
+            try self.write("                backslashes = 0;\n");
+            try self.write("                continue;\n");
+            try self.write("            }\n");
+            try self.write("            backslashes = 0;\n");
+            try self.write("            out[len++] = c;\n");
+            try self.write("        }\n");
+            try self.write("        if (needs_quotes) {\n");
+            try self.write("            for (size_t k = 0; k < backslashes; k++) out[len++] = '\\\\';\n");
+            try self.write("            out[len++] = '\"';\n");
+            try self.write("        }\n");
+            try self.write("    }\n");
+            try self.write("    out[len] = '\\0';\n");
+            try self.write("    return out;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long posix_spawnp(pid_t* pid, const char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {\n");
+            try self.write("    (void)file; (void)attrp; (void)envp;\n");
+            try self.write("    if (pid == NULL || argv == NULL) return -1;\n");
+            try self.write("\n");
+            try self.write("    STARTUPINFOA si;\n");
+            try self.write("    PROCESS_INFORMATION pi;\n");
+            try self.write("    memset(&si, 0, sizeof(si));\n");
+            try self.write("    memset(&pi, 0, sizeof(pi));\n");
+            try self.write("    si.cb = sizeof(si);\n");
+            try self.write("\n");
+            try self.write("    BOOL inherit = FALSE;\n");
+            try self.write("    if (file_actions != NULL && (file_actions->has_dup2_1 || file_actions->has_dup2_2)) {\n");
+            try self.write("        si.dwFlags |= STARTF_USESTDHANDLES;\n");
+            try self.write("        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);\n");
+            try self.write("        si.hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);\n");
+            try self.write("        si.hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);\n");
+            try self.write("        if (file_actions->has_dup2_1) SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);\n");
+            try self.write("        if (file_actions->has_dup2_2) SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);\n");
+            try self.write("        inherit = TRUE;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    char* cmdline = __fun_win_build_cmdline(argv);\n");
+            try self.write("    if (cmdline == NULL) return -1;\n");
+            try self.write("    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, 0, NULL, NULL, &si, &pi);\n");
+            try self.write("    free(cmdline);\n");
+            try self.write("    if (!ok) return -1;\n");
+            try self.write("\n");
+            try self.write("    CloseHandle(pi.hThread);\n");
+            try self.write("    CloseHandle(pi.hProcess);\n");
+            try self.write("    *pid = (pid_t)pi.dwProcessId;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Decoded into the SAME bit layout `_decode_wait_status`
+            // (std/process.fn) expects on POSIX: bits 0-6 the terminating
+            // signal (always 0 here -- Windows reports no such thing the
+            // same way), bits 8-15 the exit code.
+            try self.write("long long waitpid(pid_t pid, int32_t* status, long long options) {\n");
+            try self.write("    (void)options;\n");
+            try self.write("    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);\n");
+            try self.write("    if (h == NULL) return -1;\n");
+            try self.write("    WaitForSingleObject(h, INFINITE);\n");
+            try self.write("    DWORD code = 0;\n");
+            try self.write("    GetExitCodeProcess(h, &code);\n");
+            try self.write("    CloseHandle(h);\n");
+            try self.write("    if (status != NULL) *status = (int32_t)((code & 0xFF) << 8);\n");
+            try self.write("    return (long long)pid;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // `_pipe` needs a buffer size + text/binary mode that POSIX's
+            // 1-arg `pipe(fds)` has no room for -- arity mismatch, so unlike
+            // close/read/write/dup2 (which MinGW's io.h already aliases to
+            // their real msvcrt names with compatible signatures) this one
+            // needs an actual wrapper, not just relying on io.h.
+            try self.write("long long pipe(int32_t* fds) {\n");
+            try self.write("    return (long long)_pipe(fds, 4096, _O_BINARY);\n");
+            try self.write("}\n");
+            try self.write("#else\n");
+            try self.write("#include <spawn.h>\n");
+            try self.write("#include <sys/wait.h>\n");
+            try self.write("#include <unistd.h>\n");
+            try self.write("#endif\n");
+        }
+    }
+
+    fn requires_process_compat_recursive(proc: *Self) bool {
+        if (proc.requires_process_compat_layer) return true;
+        for (proc.children.items) |child| {
+            if (requires_process_compat_recursive(child)) return true;
+        }
+        return false;
     }
 
     fn requires_thread_compat_recursive(proc: *Self) bool {

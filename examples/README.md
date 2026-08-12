@@ -89,6 +89,11 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/unreachable_code_warning.fn
 - advanced/assert_constant_warning.fn
 - advanced/quirks.fn
+- advanced/const_bindings.fn
+- advanced/explicit_generic_call.fn
+- advanced/raw_string_literal.fn
+- advanced/method_own_type_param.fn
+- advanced/test_blocks_demo.fn
 
 ## Imports
 - imports/main.fn

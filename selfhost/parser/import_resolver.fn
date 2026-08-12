@@ -1,0 +1,680 @@
+// Resolves and merges a whole `imp`-connected program into one flat
+// `Vec<Node>`, so `codegen.transpile` (which only ever sees a single
+// file's worth of top-level declarations at a time) can be handed a
+// multi-file program's declarations all at once, in one pass, with no
+// changes to codegen itself.
+
+imp parse_state;
+imp parser;
+imp ..ast.ast;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp std.string;
+imp std.path;
+imp std.fs;
+imp std.vec;
+imp std.set;
+imp std.map;
+imp std.option;
+imp std.result;
+
+// Converts one `imp`-statement's dotted `path` into an actual `.fn` file
+// path under `root`: segments join with `/`, and a run of N consecutive
+// `.` characters becomes `N / 2` `../` parent segments plus one extra
+// `/` when N is odd (a single `.` between segments, e.g. `lexer.token`,
+// is the odd case; a leading `..`/`....` run is always even). Shared by
+// `resolve_import_path` for both a local and a `std.*` import; only
+// `root` differs.
+fun _convert_dotted_path(str root, str import_path) str {
+  StringBuilder sb = string_builder_init(64);
+  sb.append(root);
+  sb.append("/");
+  num n = len(import_path);
+  num i = 0;
+  for i < n {
+    if import_path[i] != '.' {
+      sb.append_char(import_path[i]);
+      i = i + 1;
+      continue;
+    }
+    num j = i;
+    for j < n && import_path[j] == '.' {
+      j = j + 1;
+    }
+    num run_len = j - i;
+    num parents = run_len / 2;
+    bin sep = run_len % 2 == 1;
+    num p = 0;
+    for p < parents {
+      sb.append("../");
+      p = p + 1;
+    }
+    if sep {
+      sb.append("/");
+    }
+    i = j;
+  }
+  sb.append(".fn");
+  ret sb.build();
+}
+
+// Collapses every `seg/../` pair in `path` (and drops bare `.`/empty
+// segments), e.g. `"selfhost/parser/../ast/ast.fn"` -> `"selfhost/ast/
+// ast.fn"`. Needed because the same file reached via two different
+// importing directories would otherwise dedup as two distinct raw
+// strings in `_preload_and_collect`/`_parse_and_merge`'s visited sets.
+// Backslashes are normalized to `/` first so a Windows-style path
+// collapses into the same dedup key.
+fun _normalize_path(str path) str {
+  Vec<str> segs = split(replace_char(path, '\\', '/'), '/');
+  Vec<str> parts;
+  parts.init(8);
+  for seg : segs {
+    if equals(seg, "..") {
+      if parts.len > 0 && !equals(parts.get(parts.len - 1), "..") {
+        parts.pop();
+      } else {
+        parts.push(seg);
+      }
+    } elif equals(seg, ".") || equals(seg, "") {
+      continue;
+    } else {
+      parts.push(seg);
+    }
+  }
+  StringBuilder sb = string_builder_init(64);
+  bin first = true;
+  for p : parts {
+    if !first {
+      sb.append("/");
+    }
+    first = false;
+    sb.append(p);
+  }
+  ret sb.build();
+}
+
+// Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
+// path. A `std.`-prefixed path resolves against a fixed stdlib root
+// (`"stdlib"`), not relative to the importing file, so it's the same
+// regardless of who imports it. Everything else resolves relative to
+// `input_file_path`'s own directory (see `_convert_dotted_path` for the
+// dot-to-path conversion shared by both).
+pub fun resolve_import_path(str input_file_path, str import_path) str {
+  if starts_with(import_path, "std.") {
+    ret _convert_dotted_path("stdlib", import_path);
+  }
+  str dir = dirname(input_file_path);
+  if equals(dir, input_file_path) {
+    dir = ".";
+  }
+  ret _convert_dotted_path(dir, import_path);
+}
+
+// Recursively resolves, parses, and merges `entry_path` and every file it
+// (transitively) `imp`s into one `Vec<Node>`. An aliased import is
+// traversed like an unaliased one; each file is parsed at most once
+// (tracked by resolved path in a `Set<str>`), so a diamond or cyclic
+// import terminates instead of looping or duplicating declarations.
+// Internally, each file's own alias threads through so
+// `_rename_colliding_functions` can disambiguate a plain function name
+// that collides with one already merged from a differently-aliased
+// import, before that file's own nodes are pushed. The first real
+// failure anywhere (file not found, lex, or parse error) short-circuits
+// the whole merge as `.Err`, rather than returning a partial program.
+pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
+  Map<str, GlobalSymbolInfo> global_symbols;
+  global_symbols.init(8);
+  Set<str> preload_visited = set_init("", 8);
+  let preload_err = _preload_and_collect(entry_path, &global_symbols, &preload_visited);
+  if preload_err.is_some() {
+    ret .Err(preload_err.unwrap());
+  }
+
+  Vec<Node> merged;
+  merged.init(0);
+  Vec<str> aliases;
+  aliases.init(0);
+  Vec<str> rename_keys;
+  rename_keys.init(0);
+  Vec<str> rename_targets;
+  rename_targets.init(0);
+  Set<str> visited = set_init("", 8);
+  let err = _parse_and_merge(
+    entry_path,
+    &merged,
+    &aliases,
+    &visited,
+    &global_symbols,
+    "",
+    &rename_keys,
+    &rename_targets
+  );
+  if err.is_some() {
+    ret .Err(err.unwrap());
+  }
+  ProgramMergeResult r;
+  r.nodes = merged;
+  r.aliases = aliases;
+  r.alias_rename_keys = rename_keys;
+  r.alias_rename_targets = rename_targets;
+  ret .Ok(r);
+}
+
+// `parse_program_with_imports`'s result: the flattened, merged program
+// (`nodes`) alongside every import alias seen across the whole
+// transitive import graph (`aliases`), so codegen can recognize a
+// `y.symbol` qualified reference as "strip the alias, resolve `symbol`
+// unqualified". `alias_rename_keys`/`alias_rename_targets` (parallel
+// Vecs, `"<alias>::<bare_name>"` -> real mangled name) hold the
+// exception: a bare name renamed due to a cross-alias collision (see
+// `_rename_colliding_functions`), checked first before falling back to
+// the unqualified name.
+pub compound ProgramMergeResult {
+  Vec<Node> nodes;
+  Vec<str> aliases;
+  Vec<str> alias_rename_keys;
+  Vec<str> alias_rename_targets;
+}
+
+// Recursively discovers `path`'s (transitive) import graph and collects
+// just the name of each public top-level `compound` declared anywhere in
+// it (into `out`, keyed by name): a lightweight first pass so
+// `is_known_compound_symbol` can recognize a compound from another file
+// before that file's own real parse starts. Doesn't reuse a full
+// `Parser.parse()`, since that needs `is_known_compound_symbol` to
+// already know about not-yet-visited files; the circularity this pass
+// exists to avoid. Instead, `imp` statements are parsed via the real
+// `Parser.parse_import` to discover the import graph accurately, and a
+// top-level `pub compound name` is found via a raw, depth-tracked token
+// scan that never needs to understand expressions.
+fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
+  path = _normalize_path(path);
+  if visited.has(path) {
+    ret .None;
+  }
+  visited.add(path);
+
+  if !exists(path) {
+    ret .Some(format("import not found: {str}", path));
+  }
+  str src = read_to_string(path);
+
+  let tok_result = tokenize(src, path);
+  if tok_result.is_err() {
+    ret .Some(format("lex error in {str}", path));
+  }
+
+  ParseState state = parse_state_new(path, src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+
+  for state.next_token_is_keyword("imp") {
+    let ierr = p.parse_import();
+    if ierr.is_some() {
+      ret .Some(format("parse error in {str}", path));
+    }
+  }
+
+  for n : state.nodes {
+    fit n.kind {
+      .Import(imp_node) -> {
+        str resolved = resolve_import_path(path, imp_node.path);
+        let rerr = _preload_and_collect(resolved, out, visited);
+        if rerr.is_some() {
+          ret rerr;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  _scan_compound_names(state.tokens, state.pindex, path, out);
+  ret .None;
+}
+
+// Raw token scan (see `_preload_and_collect` for why this doesn't reuse
+// the real parser) for every top-level `pub compound name` sequence from
+// `start_idx` to the end of `tokens`, recording each into `out`. Tracks
+// `{`/`}` depth so only a depth-0 (top-level) sequence ever matches.
+fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, GlobalSymbolInfo>* out) {
+  num i = start_idx;
+  num depth = 0;
+  bin prev_was_pub = false;
+  for i < tokens.len {
+    let t = tokens.get(i);
+    if token_is_nl_or_comment_or_newline_separator(t) {
+      i = i + 1;
+      continue;
+    }
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+      prev_was_pub = false;
+      i = i + 1;
+      continue;
+    }
+    if token_is_symbol(t, '}') {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      prev_was_pub = false;
+      i = i + 1;
+      continue;
+    }
+    if depth == 0 && prev_was_pub && token_is_keyword(t, "compound") {
+      num j = i + 1;
+      for j < tokens.len && token_is_nl_or_comment_or_newline_separator(tokens.get(j)) {
+        j = j + 1;
+      }
+      if j < tokens.len && tokens.get(j).type == TokenType.Identifier {
+        str name = "";
+        fit tokens.get(j).data {
+          .Sval(s) -> { name = s; }
+          _ -> {}
+        }
+        let info = global_symbol_info_new(name, path);
+        info.is_compound = true;
+        out.put(name, info);
+      }
+    }
+    prev_was_pub = token_is_keyword(t, "pub");
+    i = i + 1;
+  }
+}
+
+fun _parse_and_merge(
+  str path,
+  Vec<Node>* merged,
+  Vec<str>* aliases,
+  Set<str>* visited,
+  Map<str,
+  GlobalSymbolInfo>* global_symbols,
+  str current_alias,
+  Vec<str>* rename_keys,
+  Vec<str>* rename_targets
+) Option<str> {
+  path = _normalize_path(path);
+  if visited.has(path) {
+    ret .None;
+  }
+  visited.add(path);
+
+  if !exists(path) {
+    ret .Some(format("import not found: {str}", path));
+  }
+  str src = read_to_string(path);
+
+  let tok_result = tokenize(src, path);
+  if tok_result.is_err() {
+    ret .Some(format("lex error in {str}", path));
+  }
+
+  ParseState state = parse_state_new(path, src);
+  state.tokens = tok_result.unwrap();
+  state.global_symbols = *global_symbols;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Some(format("parse error in {str}", path));
+  }
+
+  // Pass 1: recurse into this file's own imports first (always grouped
+  // at the top of a file, before any other declaration), so every one of
+  // them is fully merged before `_rename_colliding_functions` below
+  // checks this file's own declarations against `merged`.
+  for n : state.nodes {
+    fit n.kind {
+      .Import(imp_node) -> {
+        str next_alias = "";
+        if imp_node.has_alias {
+          aliases.push(imp_node.alias);
+          next_alias = imp_node.alias;
+        }
+        str resolved = resolve_import_path(path, imp_node.path);
+        let ierr = _parse_and_merge(
+          resolved,
+          merged,
+          aliases,
+          visited,
+          global_symbols,
+          next_alias,
+          rename_keys,
+          rename_targets
+        );
+        if ierr.is_some() {
+          ret ierr;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Pass 2: rename any colliding plain function before pushing anything.
+  // See `_rename_colliding_functions`.
+  if !equals(current_alias, "") {
+    _rename_colliding_functions(&state.nodes, merged, current_alias, rename_keys, rename_targets);
+  }
+
+  // Pass 3: push every non-import node, now settled.
+  for n : state.nodes {
+    fit n.kind {
+      .Import(_) -> {}
+      _ -> { merged.push(n); }
+    }
+  }
+  ret .None;
+}
+
+// Renames any of `nodes`' own top-level plain (non-generic) functions
+// whose bare name already collides with one in `merged` (from a
+// differently-aliased import) to `<alias>__<name>`, and rewrites every
+// unqualified call to the old name within `nodes` to match. An
+// alias-qualified cross-file reference (`one.pick()`) is unaffected --
+// resolved separately at emission time by codegen's alias handling.
+// Only applies to plain functions (a generic's call sites resolve by
+// mangled instantiation name) and only when `alias` is non-empty.
+fun _rename_colliding_functions(
+  Vec<Node>* nodes,
+  Vec<Node>* merged,
+  str alias,
+  Vec<str>* rename_keys,
+  Vec<str>* rename_targets
+) {
+  Vec<str> old_names;
+  old_names.init(0);
+  Vec<str> new_names;
+  new_names.init(0);
+  num ci = 0;
+  for ci < nodes.len {
+    let n = nodes.get(ci);
+    fit n.kind {
+      .Function(fnv) -> {
+        // A bodyless function declares an existing C symbol under that
+        // exact name, so renaming it would break the linkage. Codegen
+        // renames the colliding Fun-defined side instead; see
+        // `Codegen.c_shadow_names`.
+        if !fnv.has_type_params && fnv.has_name && fnv.has_body && _merged_has_function_name(
+          merged,
+          fnv.name
+        ) {
+          old_names.push(fnv.name);
+          new_names.push(format("{str}__{str}", alias, fnv.name));
+        }
+      }
+      _ -> {}
+    }
+    ci = ci + 1;
+  }
+  num ri = 0;
+  for ri < old_names.len {
+    let old_name = old_names.get(ri);
+    let new_name = new_names.get(ri);
+    _rewrite_toplevel_calls(nodes, old_name, new_name);
+    // Recorded for codegen's alias-qualified call sites (`two.pick()`) --
+    // see `ProgramMergeResult.alias_rename_keys`.
+    rename_keys.push(format("{str}::{str}", alias, old_name));
+    rename_targets.push(new_name);
+    ri = ri + 1;
+  }
+}
+
+// True when `merged` already contains a top-level plain function named
+// `name`, see `_rename_colliding_functions`.
+fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
+  num mi = 0;
+  for mi < merged.len {
+    let n = merged.get(mi);
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, name) {
+          ret true;
+        }
+      }
+      _ -> {}
+    }
+    mi = mi + 1;
+  }
+  ret false;
+}
+
+// Applies `_rewrite_calls_in_node` to every top-level node in `nodes` --
+// split out separately because a top-level entry is a plain `Node` (by
+// value), not a `Node*` the way every nested child field already is, so
+// it needs its own get/mutate-locally/set roundtrip through the
+// `Vec<Node>` rather than a direct through-pointer mutation.
+fun _rewrite_toplevel_calls(Vec<Node>* nodes, str old_name, str new_name) {
+  num idx = 0;
+  for idx < nodes.len {
+    Node cur = nodes.get(idx);
+    _rewrite_calls_in_node(&cur, old_name, new_name);
+    nodes.set(idx, cur);
+    idx = idx + 1;
+  }
+}
+
+// Recursively rewrites every unqualified call site (`old_name(...)`) to
+// `new_name(...)` anywhere within `n`, and renames `n` itself when it's
+// the matching function's own declaration (see `_rename_colliding_
+// functions`: a same-file caller of a just-renamed colliding function
+// must keep compiling). Covers every statement/expression shape that can
+// contain a nested call.
+fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
+  fit n.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left {
+        fit e.left.kind {
+          .Identifier(callee_name) -> {
+            if equals(callee_name, old_name) {
+              *e.left = node_new(NodeKind.Identifier(new_name));
+            }
+          }
+          _ -> { _rewrite_calls_in_node(e.left, old_name, new_name); }
+        }
+      } elif e.has_left {
+        _rewrite_calls_in_node(e.left, old_name, new_name);
+      }
+      if e.has_right {
+        _rewrite_calls_in_node(e.right, old_name, new_name);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .Panic(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .Unary(u) -> { _rewrite_calls_in_node(u.operand, old_name, new_name); }
+    .Tenary(t) -> {
+      _rewrite_calls_in_node(t.cond, old_name, new_name);
+      _rewrite_calls_in_node(t.then_val, old_name, new_name);
+      _rewrite_calls_in_node(t.else_val, old_name, new_name);
+    }
+    .Bracket(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
+    .CompoundInit(ci) -> {
+      for f : ci.fields {
+        _rewrite_calls_in_node(f.value, old_name, new_name);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _rewrite_calls_in_node(v.val, old_name, new_name);
+      }
+    }
+    .Function(fnv) -> {
+      if equals(fnv.name, old_name) {
+        fnv.name = new_name;
+        n.kind = NodeKind.Function(fnv);
+      }
+      if fnv.has_body {
+        _rewrite_calls_in_node(fnv.body, old_name, new_name);
+      }
+    }
+    .Body(b) -> {
+      for s : b.statements {
+        _rewrite_calls_in_node(s, old_name, new_name);
+      }
+    }
+    .StatementReturn(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementDefer(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementFork(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementIf(ifn) -> {
+      _rewrite_calls_in_node(ifn.condition, old_name, new_name);
+      _rewrite_calls_in_node(ifn.body, old_name, new_name);
+    }
+    .StatementElseIf(ifn2) -> {
+      _rewrite_calls_in_node(ifn2.condition, old_name, new_name);
+      _rewrite_calls_in_node(ifn2.body, old_name, new_name);
+    }
+    .StatementElse(inner) -> {
+      if inner != nil {
+        _rewrite_calls_in_node(inner, old_name, new_name);
+      }
+    }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> {
+          if fc.has_condition {
+            _rewrite_calls_in_node(fc.condition, old_name, new_name);
+          }
+          _rewrite_calls_in_node(fc.body, old_name, new_name);
+        }
+        .Range(fr) -> {
+          _rewrite_calls_in_node(fr.range_expr, old_name, new_name);
+          _rewrite_calls_in_node(fr.body, old_name, new_name);
+        }
+        .Iter(fi) -> {
+          _rewrite_calls_in_node(fi.iterable, old_name, new_name);
+          _rewrite_calls_in_node(fi.body, old_name, new_name);
+        }
+      }
+    }
+    .StatementAssert(an) -> {
+      _rewrite_calls_in_node(an.condition, old_name, new_name);
+      if an.has_message {
+        _rewrite_calls_in_node(an.message, old_name, new_name);
+      }
+    }
+    .StatementFit(fs) -> {
+      _rewrite_calls_in_node(fs.exp, old_name, new_name);
+      for br : fs.branches {
+        if br.has_condition {
+          _rewrite_calls_in_node(br.condition, old_name, new_name);
+        }
+        _rewrite_calls_in_node(br.body, old_name, new_name);
+      }
+    }
+    .Impl(i) -> {
+      for m : i.methods {
+        _rewrite_calls_in_node(m, old_name, new_name);
+      }
+    }
+    _ -> {}
+  }
+}
+
+test "resolve_import_path converts a same-directory dotted path" {
+  let resolved = resolve_import_path("selfhost/codegen/codegen.fn", "codegen_state");
+  assert equals(resolved, "selfhost/codegen/codegen_state.fn"), "expected the sibling file resolved relative to the importing file's own directory";
+}
+
+test "resolve_import_path converts a nested dotted path (single '.' as separator)" {
+  let resolved = resolve_import_path("selfhost/parser/parser.fn", "datatype_defs");
+  assert equals(resolved, "selfhost/parser/datatype_defs.fn"), "expected a bare sibling name to resolve with no extra traversal";
+}
+
+test "resolve_import_path handles one leading '..' parent-traversal segment" {
+  let resolved = resolve_import_path("selfhost/parser/parser.fn", "..ast.ast");
+  assert equals(resolved, "selfhost/parser/../ast/ast.fn"), "expected '..' (2 dots) to become one '../' parent step, then '.' between 'ast' and 'ast' to become '/'";
+}
+
+test "resolve_import_path handles an input file with no directory component" {
+  let resolved = resolve_import_path("main.fn", "helper");
+  assert equals(resolved, "./helper.fn"), "expected './' as the directory when the input path has no slash of its own";
+}
+
+test "resolve_import_path resolves a 'std.' import against the stdlib root, not the importing file's own directory" {
+  let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.string");
+  assert equals(resolved, "stdlib/std/string.fn"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
+}
+
+test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib root" {
+  let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.c.io");
+  assert equals(resolved, "stdlib/std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
+}
+
+test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/two_file_main.fn");
+  assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
+  let nodes = result.unwrap().nodes;
+  bin saw_main = false;
+  bin saw_helper = false;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "main") {
+          saw_main = true;
+        }
+        if equals(fnv.name, "helper_add_one") {
+          saw_helper = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
+  assert saw_helper, "expected the imported file's 'helper_add_one' function in the merged nodes too";
+}
+
+test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/diamond_a.fn");
+  assert result.is_ok(), "expected the diamond import graph to resolve cleanly";
+  let nodes = result.unwrap().nodes;
+  num shared_count = 0;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "shared_fn") {
+          shared_count = shared_count + 1;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert shared_count == 1, "expected the shared file (imported by both a and b) parsed and merged exactly once";
+}
+
+test "parse_program_with_imports reports an error for a missing import rather than guessing" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/missing_import.fn");
+  assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
+}
+
+test "parse_program_with_imports resolves a compound-literal expression whose type is declared in another file" {
+  // `_preload_and_collect` seeds every file's `ParseState.global_symbols`
+  // before its real parse begins, so `is_known_compound_symbol` can
+  // recognize a compound-literal's type even when it's declared in an
+  // imported file rather than the current one.
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/cross_file_compound_main.fn");
+  assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
+  let nodes = result.unwrap().nodes;
+  bin saw_main = false;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "main") {
+          saw_main = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
+}

@@ -1,24 +1,15 @@
-// Runtime backend selector helpers.
-// 
-// Notes:
-// - Selector order:
-// 1) FUN_RUNTIME_BACKEND override
-// 2) FUN_RUNTIME_OS override
-// 3) host environment hints (OS / OSTYPE)
-// 4) fallback to POSIX
+// Runtime backend selector helpers. Selection order: FUN_RUNTIME_BACKEND
+// override, then FUN_RUNTIME_OS override, then host environment hints
+// (OS / OSTYPE), then fallback to POSIX.
 
 imp std.sys;
 imp std.c.string;
 
 // Runtime backend id for POSIX platforms.
-pub fun runtime_backend_posix_id() num {
-  ret 1;
-}
+pub const num RUNTIME_BACKEND_POSIX_ID = 1;
 
 // Runtime backend id for Windows platforms.
-pub fun runtime_backend_windows_id() num {
-  ret 2;
-}
+pub const num RUNTIME_BACKEND_WINDOWS_ID = 2;
 
 fun runtime_backend_id_from_name(str name) num {
   if name == nil {
@@ -26,14 +17,14 @@ fun runtime_backend_id_from_name(str name) num {
   }
 
   if strcmp(name, "1") == 0 || strcmp(name, "posix") == 0 || strcmp(name, "POSIX") == 0 {
-    ret runtime_backend_posix_id();
+    ret RUNTIME_BACKEND_POSIX_ID;
   }
 
   if strcmp(name, "2") == 0 || strcmp(name, "windows") == 0 || strcmp(name, "Windows") == 0 || strcmp(
     name,
     "WINDOWS"
   ) == 0 {
-    ret runtime_backend_windows_id();
+    ret RUNTIME_BACKEND_WINDOWS_ID;
   }
 
   ret 0;
@@ -48,11 +39,11 @@ fun runtime_backend_id_from_os_name(str os_name) num {
     os_name,
     "UNIX"
   ) == 0 {
-    ret runtime_backend_posix_id();
+    ret RUNTIME_BACKEND_POSIX_ID;
   }
 
   if strcmp(os_name, "windows") == 0 || strcmp(os_name, "win") == 0 || strcmp(os_name, "Windows") == 0 {
-    ret runtime_backend_windows_id();
+    ret RUNTIME_BACKEND_WINDOWS_ID;
   }
 
   ret 0;
@@ -82,11 +73,9 @@ fun runtime_backend_detect_windows_hint() bin {
   ret false;
 }
 
-// Return the selected runtime backend id.
-// 
-// Environment overrides:
-// - FUN_RUNTIME_BACKEND: posix/windows (or 1/2)
-// - FUN_RUNTIME_OS: posix/unix/windows
+// Selected runtime backend id. Honors the FUN_RUNTIME_BACKEND
+// (posix/windows or 1/2) and FUN_RUNTIME_OS (posix/unix/windows)
+// environment overrides.
 pub fun runtime_backend_id() num {
   let override_backend = runtime_backend_id_from_name(env("FUN_RUNTIME_BACKEND"));
   if override_backend != 0 {
@@ -99,15 +88,15 @@ pub fun runtime_backend_id() num {
   }
 
   if runtime_backend_detect_windows_hint() == true {
-    ret runtime_backend_windows_id();
+    ret RUNTIME_BACKEND_WINDOWS_ID;
   }
 
-  ret runtime_backend_posix_id();
+  ret RUNTIME_BACKEND_POSIX_ID;
 }
 
 // Return the selected runtime backend name.
 pub fun runtime_backend_name() str {
-  if runtime_backend_id() == runtime_backend_windows_id() {
+  if runtime_backend_id() == RUNTIME_BACKEND_WINDOWS_ID {
     ret "windows";
   }
   ret "posix";
@@ -115,10 +104,10 @@ pub fun runtime_backend_name() str {
 
 // True when the selected backend is POSIX.
 pub fun runtime_backend_is_posix() bin {
-  ret runtime_backend_id() == runtime_backend_posix_id();
+  ret runtime_backend_id() == RUNTIME_BACKEND_POSIX_ID;
 }
 
 // True when the selected backend is Windows.
 pub fun runtime_backend_is_windows() bin {
-  ret runtime_backend_id() == runtime_backend_windows_id();
+  ret runtime_backend_id() == RUNTIME_BACKEND_WINDOWS_ID;
 }

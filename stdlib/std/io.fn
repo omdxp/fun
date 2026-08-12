@@ -1,53 +1,33 @@
 // File and buffer IO utilities.
-// 
-// Usage:
-// ```
-// print("hi");
-// println("bye");
-// ```
 
 imp std.c.io;
 imp std.c.mem;
 imp std.string;
 imp std.vec;
 imp std.result;
+imp std.error;
 
 // Print a string to stdout (no newline).
-// 
-// Params:
-// - s: string to print
 pub fun print(str s) {
   printf("%s", s);
 }
 
 // Print a string to stdout with newline.
-// 
-// Params:
-// - s: string to print
 pub fun println(str s) {
   puts(s);
 }
 
 // Print a number to stdout (no newline).
-// 
-// Params:
-// - n: number to print
 pub fun print_num(num n) {
   printf("%lld", n);
 }
 
 // Print a decimal to stdout (no newline).
-// 
-// Params:
-// - d: decimal to print
 pub fun print_dec(dec d) {
   printf("%f", d);
 }
 
 // Print a boolean to stdout (no newline).
-// 
-// Params:
-// - b: boolean to print
 pub fun print_bin(bin b) {
   if b {
     printf("true");
@@ -126,14 +106,7 @@ pub fun fmt_raw(raw* p) str {
   ret buf;
 }
 
-// Format using a pre-built Vec<str>.
-// 
-// Params:
-// - fmt: format string
-// - args: string arguments
-// 
-// Returns:
-// - formatted string
+// Formats `fmt` using a pre-built Vec<str> of arguments; used by format() and its variants.
 pub fun format_impl(str fmt, Vec<str>* args) str {
   let b = string_builder_init(8);
   num i = 0;
@@ -161,10 +134,8 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
         continue;
       }
       if i + 4 < n && fmt[i + 4] == '}' {
-        // A `{xyz}` is a typed placeholder ONLY when `xyz` is a recognized type
-        // name (str/num/dec/bin/chr/ptr/raw) — matching the compile-time
-        // `build_printf_format` rule. Any other `{xyz}` (e.g. `{foo}`) is literal
-        // text, so the two format paths agree instead of one silently eating it.
+        // `{xyz}` is a typed placeholder only when `xyz` names a recognized
+        // type (str/num/dec/bin/chr/ptr/raw); any other `{xyz}` is literal text.
         let a = fmt[i + 1];
         let b2 = fmt[i + 2];
         let d = fmt[i + 3];
@@ -196,17 +167,8 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
   b.free();
   ret out;
 }
-// Format a string using "{}" placeholders.
-// 
-// Placeholder forms:
-// - {} or {str} : string
-// - {num}       : number
-// - {dec}       : decimal
-// - {bin}       : boolean
-// - {chr}       : character
-// - {ptr}       : raw pointer
-// 
-// Use "{{" and "}}" to emit literal braces.
+// Format a string using "{}" placeholders: {} or {str} for a string, {num},
+// {dec}, {bin}, {chr}, {ptr} for other types. Use "{{" and "}}" for literal braces.
 pub fun format(str fmt, ...) str {
   ret format_impl(fmt, &vargs);
 }
@@ -237,13 +199,7 @@ pub compound File {
   FILE* handle;
 }
 
-// Open file for reading (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for reading (binary); returned File has a null handle on failure.
 pub fun open_read(str path) File {
   File f;
   f.handle = fopen(path, "rb");
@@ -251,21 +207,15 @@ pub fun open_read(str path) File {
 }
 
 // Open file for reading (binary) with Result.
-pub fun try_open_read(str path) Result<File> {
+pub fun try_open_read(str path) Result<File, Error> {
   let f = open_read(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_read failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
-// Open file for writing (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for writing (binary); returned File has a null handle on failure.
 pub fun open_write(str path) File {
   File f;
   f.handle = fopen(path, "wb");
@@ -273,21 +223,15 @@ pub fun open_write(str path) File {
 }
 
 // Open file for writing (binary) with Result.
-pub fun try_open_write(str path) Result<File> {
+pub fun try_open_write(str path) Result<File, Error> {
   let f = open_write(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_write failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
-// Open file for appending (binary).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - File with handle set (null on failure)
+// Opens a file for appending (binary); returned File has a null handle on failure.
 pub fun open_append(str path) File {
   File f;
   f.handle = fopen(path, "ab");
@@ -295,12 +239,12 @@ pub fun open_append(str path) File {
 }
 
 // Open file for appending (binary) with Result.
-pub fun try_open_append(str path) Result<File> {
+pub fun try_open_append(str path) Result<File, Error> {
   let f = open_append(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_append failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
 impl File {
@@ -337,7 +281,7 @@ impl File {
   }
 
   // Read entire file into a new string with Result.
-  pub try_read_all() Result<str> {
+  pub try_read_all() Result<str, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "read_all on closed file", "");
     }
@@ -345,7 +289,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_all failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
@@ -363,7 +307,7 @@ impl File {
   }
 
   // Read up to max_len bytes with Result.
-  pub try_read_bytes(num max_len) Result<str> {
+  pub try_read_bytes(num max_len) Result<str, Error> {
     if self.handle == nil || max_len <= 0 {
       ret err_kind(.Invalid, "read_bytes invalid", "");
     }
@@ -371,7 +315,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_bytes failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read a line up to max_len (including newline if present).
@@ -392,7 +336,7 @@ impl File {
   }
 
   // Read a line up to max_len with Result.
-  pub try_read_line_max(num max_len) Result<str> {
+  pub try_read_line_max(num max_len) Result<str, Error> {
     if self.handle == nil || max_len <= 1 {
       ret err_kind(.Invalid, "read_line_max invalid", "");
     }
@@ -400,7 +344,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_line_max failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read all lines (up to max_len per line).
@@ -422,7 +366,7 @@ impl File {
   }
 
   // Read all lines (up to max_len per line) with Result.
-  pub try_read_lines(num max_len) Result<Vec<str>> {
+  pub try_read_lines(num max_len) Result<Vec<str>, Error> {
     if self.handle == nil {
       Vec<str> empty;
       empty.len = 0;
@@ -430,7 +374,7 @@ impl File {
       ret err_kind(.Invalid, "read_lines on closed file", empty);
     }
     let out = self.read_lines(max_len);
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Write raw bytes to the file.
@@ -443,7 +387,7 @@ impl File {
   }
 
   // Write raw bytes to the file with Result.
-  pub try_write_bytes(raw* data, num len) Result<bin> {
+  pub try_write_bytes(raw* data, num len) Result<bin, Error> {
     if self.handle == nil || data == nil {
       ret err_kind(.Invalid, "write_bytes invalid", false);
     }
@@ -451,7 +395,7 @@ impl File {
     if ok_write == false {
       ret err_kind(.Io, "write_bytes failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Read raw bytes into a buffer; returns bytes read.
@@ -463,12 +407,12 @@ impl File {
   }
 
   // Read raw bytes into a buffer with Result.
-  pub try_read_into(raw* dst, num len) Result<num> {
+  pub try_read_into(raw* dst, num len) Result<num, Error> {
     if self.handle == nil || dst == nil {
       ret err_kind(.Invalid, "read_into invalid", 0);
     }
     let n = self.read_into(dst, len);
-    ret ok(n);
+    ret .Ok(n);
   }
 
   // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
@@ -480,7 +424,7 @@ impl File {
   }
 
   // Seek within the file with Result.
-  pub try_seek(num offset, num whence) Result<bin> {
+  pub try_seek(num offset, num whence) Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "seek on closed file", false);
     }
@@ -488,7 +432,7 @@ impl File {
     if ok_seek == false {
       ret err_kind(.Io, "seek failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Tell current file position.
@@ -500,7 +444,7 @@ impl File {
   }
 
   // Tell current file position with Result.
-  pub try_tell() Result<num> {
+  pub try_tell() Result<num, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "tell on closed file", -1);
     }
@@ -508,7 +452,7 @@ impl File {
     if pos < 0 {
       ret err_kind(.Io, "tell failed", -1);
     }
-    ret ok(pos);
+    ret .Ok(pos);
   }
 
   // Rewind to start of file.
@@ -528,7 +472,7 @@ impl File {
   }
 
   // Flush buffered output with Result.
-  pub try_flush() Result<bin> {
+  pub try_flush() Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "flush on closed file", false);
     }
@@ -536,7 +480,7 @@ impl File {
     if ok_flush == false {
       ret err_kind(.Io, "flush failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Get file size (best-effort; returns -1 on failure).
@@ -567,7 +511,7 @@ impl File {
   }
 
   // Write a string to the file with Result.
-  pub try_write(str data) Result<bin> {
+  pub try_write(str data) Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "write on closed file", false);
     }
@@ -575,28 +519,21 @@ impl File {
     if ok_write == false {
       ret err_kind(.Io, "write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 }
 
 // --- Sinks: a unified write destination -----------------------------------------------
 
-// A `Sink` names where bytes go: one of the three standard streams, or an open
-// `File`. It gives std.io (and std.log) a single `write` path that works for
-// stdout, stderr, and files alike. Dispatch is a `fit` over the enum (no vtable),
-// so it stays zero-cost.
-// 
-// The set is intentionally limited to byte-stream destinations that map to a
-// `FILE*` today. Pipe/Socket/Unix-socket/SharedMemory/Semaphore sinks are a
-// roadmap item that depends on std.net / std.sync handles and per-OS syscalls;
-// the enum can grow additively (one new variant + one `fit` arm) without
-// changing any caller.
+// A `Sink` names a write destination: a standard stream, an open `File`, or
+// a rotating file sink. Dispatch is a `fit` match over the enum, so it stays
+// zero-cost with no vtable.
 pub enum Sink {
   Stdout,
   Stderr,
   Stdin,
   File(File),
-  Rotating(RotatingSink *),
+  Rotating(RotatingSink*),
 }
 
 impl Sink {
@@ -618,7 +555,7 @@ impl Sink {
     // RotatingSink.write() instead of the plain handle()+fputs path below.
     fit *self {
       .Rotating(r) -> { ret r.write(s); }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -629,15 +566,15 @@ impl Sink {
   }
 
   // Write a string to the sink with a Result.
-  pub try_write(str s) Result<bin> {
+  pub try_write(str s) Result<bin, Error> {
     fit *self {
       .Rotating(r) -> {
         if r.write(s) {
-          ret ok(true);
+          ret .Ok(true);
         }
         ret err_kind(.Io, "sink write failed", false);
       }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -647,14 +584,14 @@ impl Sink {
     if rc < 0 {
       ret err_kind(.Io, "sink write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Flush any buffered bytes to the underlying stream.
   pub flush() bin {
     fit *self {
       .Rotating(r) -> { ret r.flush(); }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -664,9 +601,9 @@ impl Sink {
   }
 
   // Flush any buffered bytes to the underlying stream, with a Result.
-  pub try_flush() Result<bin> {
+  pub try_flush() Result<bin, Error> {
     if self.flush() {
-      ret ok(true);
+      ret .Ok(true);
     }
     ret err_kind(.Io, "sink flush failed", false);
   }
@@ -756,13 +693,7 @@ impl RotatingSink {
   }
 }
 
-// Read a file into a string.
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - file contents or null
+// Reads a file into a new string, or null on failure.
 pub fun read_all(str path) str {
   let f = open_read(path);
   if f.handle == nil {
@@ -773,14 +704,7 @@ pub fun read_all(str path) str {
   ret out;
 }
 
-// Write a string to a file.
-// 
-// Params:
-// - path: file path
-// - data: contents
-// 
-// Returns:
-// - true on success
+// Writes `data` to a file, returning true on success.
 pub fun write_all(str path, str data) bin {
   let f = open_write(path);
   if f.handle == nil {

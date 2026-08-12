@@ -17,6 +17,7 @@ const EnvOverride = struct {
 };
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
         defer file.close(std.testing.io);
@@ -50,13 +51,92 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
     return allocator.dupe(u8, out);
 }
 
+/// Like `runTranspile`, but with `test_mode` on: `test "name" { ... }` blocks
+/// are type-checked/emitted and a generated runner `main` replaces any
+/// user-defined `main` -- mirrors the `fun test <path>` CLI subcommand.
+fn runTranspileTestMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
+    defer allocator.free(out_path);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+        .test_mode = true,
+    });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try transpile_proc.transpile();
+
+    const out = transpile_proc.get_output() orelse return error.NoOutput;
+    return allocator.dupe(u8, out);
+}
+
+/// Like `runTranspile`, but with `fuzz_mode` on: exactly one `fuzz "name"
+/// (data, len) { ... }` block (selected by `fuzz_target`, or auto-selected
+/// when there's exactly one and `fuzz_target` is null) is type-checked and
+/// emitted as a harness function -- mirrors the `fun fuzz <path> [target]`
+/// CLI subcommand.
+fn runTranspileFuzzMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8, fuzz_target: ?[]const u8) ![]const u8 {
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
+    defer allocator.free(out_path);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+        .fuzz_mode = true,
+    });
+    transpile_proc.fuzz_target = fuzz_target;
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try transpile_proc.transpile();
+
+    const out = transpile_proc.get_output() orelse return error.NoOutput;
+    return allocator.dupe(u8, out);
+}
+
 fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
+    // `runTranspile` itself now cleans up `input_path` on every path
+    // (success or error) via its own `defer`.
     const out_owned = runTranspile(allocator, input_path, input) catch {
-        std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
         return;
     };
     defer allocator.free(out_owned);
-    std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     return error.ExpectedFailure;
 }
 
@@ -261,7 +341,7 @@ test "if/elif/else transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else if (x == 2)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else {") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "defer inside false if branch does not run" {
@@ -479,7 +559,7 @@ test "array indexing expression transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t arr[] = {1, 2, 3};") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[1]") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "compound assignment transpiles" {
@@ -497,7 +577,7 @@ test "compound assignment transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "x += 2") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "raw pointer maps to void*" {
@@ -513,7 +593,7 @@ test "raw pointer maps to void*" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "void* id(void* p)") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "async and await surface transpiles and runs" {
@@ -548,6 +628,47 @@ test "async and await surface transpiles and runs" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "an async fn with a function-typed parameter compiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_fn_typed_param.fn";
+    const c_path = "codegen_async_fn_typed_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_fn_typed_param.exe" else "codegen_async_fn_typed_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the async payload struct generator declared each argument's
+    // field via a plain `write_type(...) __argN;`, which has no way to
+    // express a function-TYPE argument's C function-pointer declarator shape
+    // (`R (*__argN)(T1, T2);`) -- unlike an ORDINARY (non-async) function's
+    // parameter list, which already special-cases this. Any async fn taking
+    // a callback (needed e.g. for a fork-based dispatcher that calls back
+    // into caller-supplied functions) failed to compile at all.
+    const input =
+        "imp std.c.io;\n" ++
+        "async fun combine(fun(num) num f, fun(num) num g, num arg) num {\n" ++
+        "  ret f(arg) + g(arg);\n" ++
+        "}\n" ++
+        "fun double_it(num x) num { ret x * 2; }\n" ++
+        "fun triple_it(num x) num { ret x * 3; }\n" ++
+        "async fun main() {\n" ++
+        "  num out = await combine(double_it, triple_it, 10);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("50", stdout);
 }
 
 test "async and await let surface transpiles and runs" {
@@ -1337,7 +1458,7 @@ test "function definitions can be out of order (prototypes emitted)" {
     const main_idx = std.mem.indexOf(u8, out_owned, "int main") orelse return error.TestExpectedMain;
     try std.testing.expect(proto_idx < main_idx);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "declaration-only function emits semicolon prototype" {
@@ -1355,7 +1476,7 @@ test "declaration-only function emits semicolon prototype" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc() ;") == null);
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "aliased import calls transpile to qualified symbols" {
@@ -1483,7 +1604,7 @@ test "aliased io.format with bare placeholder renders values" {
         try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
-    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false, false);
 
     const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
@@ -1539,7 +1660,7 @@ test "aliased math rand option program compiles and runs" {
         try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
-    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false, false);
 
     const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
@@ -1556,13 +1677,14 @@ test "aliased sys try_env and log program compiles and runs" {
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
 
     const input =
+        "imp std.error;\n" ++
         "imp std.io as io;\n" ++
         "imp std.log as l;\n" ++
         "imp std.result;\n" ++
         "imp std.sys as sys;\n\n" ++
         "fun main() {\n" ++
         "  let env = sys.try_env(\"PATH\");\n" ++
-        "  Result<str> copy = env;\n" ++
+        "  Result<str, Error> copy = env;\n" ++
         "  str status = \"err\";\n" ++
         "  if copy.is_ok() {\n" ++
         "    status = \"ok\";\n" ++
@@ -1582,7 +1704,7 @@ test "aliased sys try_env and log program compiles and runs" {
         try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
-    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false, false);
 
     const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
@@ -1625,7 +1747,7 @@ test "defer emits in LIFO order before return" {
     try std.testing.expect(b_pos < a_pos); // LIFO: b (last deferred) runs first
     try std.testing.expect(a_pos < ret_pos); // defers before the actual return
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "defer block emits before function end" {
@@ -1648,7 +1770,7 @@ test "defer block emits before function end" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b();") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "enum types can be referenced before declaration" {
@@ -1679,7 +1801,7 @@ test "enum types can be referenced before declaration" {
     // Ensure the enum variant constant made it through lowering/codegen.
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Color_Blue") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.time import adds time.h include" {
@@ -1695,7 +1817,7 @@ test "std.time import adds time.h include" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <time.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread import emits portable thread include layer" {
@@ -1713,7 +1835,7 @@ test "std.c.thread import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_create(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread symbols are callable after import" {
@@ -1731,7 +1853,7 @@ test "std.c.thread symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread_windows import emits portable thread include layer" {
@@ -1749,7 +1871,7 @@ test "std.c.thread_windows import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_cond_timedwait(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.c.thread_windows symbols are callable after import" {
@@ -1767,7 +1889,7 @@ test "std.c.thread_windows symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.thread import emits pthread headers" {
@@ -1783,7 +1905,7 @@ test "transitive std.thread import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread helper lifecycle APIs transpile" {
@@ -1806,7 +1928,7 @@ test "std.thread helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread accepts named function callbacks" {
@@ -1829,7 +1951,7 @@ test "std.thread accepts named function callbacks" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_start(&t, worker, NULL)") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync helper lifecycle APIs transpile" {
@@ -1869,7 +1991,7 @@ test "std.sync helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.sync_runtime import emits pthread headers" {
@@ -1885,7 +2007,7 @@ test "transitive std.sync_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_runtime lifecycle APIs transpile" {
@@ -1927,7 +2049,7 @@ test "std.sync_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_runtime backend selector APIs transpile" {
@@ -1955,7 +2077,7 @@ test "std.sync_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_windows(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.runtime_backend selector APIs transpile" {
@@ -1969,8 +2091,8 @@ test "std.runtime_backend selector APIs transpile" {
         "  str name = runtime_backend_name();\n" ++
         "  bin p = runtime_backend_is_posix();\n" ++
         "  bin w = runtime_backend_is_windows();\n" ++
-        "  _ = runtime_backend_posix_id();\n" ++
-        "  _ = runtime_backend_windows_id();\n" ++
+        "  _ = RUNTIME_BACKEND_POSIX_ID;\n" ++
+        "  _ = RUNTIME_BACKEND_WINDOWS_ID;\n" ++
         "  _ = id;\n" ++
         "  _ = name;\n" ++
         "  _ = p;\n" ++
@@ -1984,10 +2106,10 @@ test "std.runtime_backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_name(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_windows(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_posix_id(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_windows_id(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_POSIX_ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_WINDOWS_ID") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_backend_windows native APIs transpile" {
@@ -2033,7 +2155,7 @@ test "std.sync_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_mutex_init(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_init(") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.sync_backend_posix lifecycle APIs transpile" {
@@ -2075,7 +2197,7 @@ test "std.sync_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_backend_windows native APIs transpile" {
@@ -2103,7 +2225,7 @@ test "std.thread_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_create(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_start(") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_backend_posix lifecycle APIs transpile" {
@@ -2127,7 +2249,7 @@ test "std.thread_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "runtime backend honors FUN_RUNTIME_BACKEND override" {
@@ -2397,7 +2519,7 @@ test "transitive std.thread_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime lifecycle APIs transpile" {
@@ -2421,7 +2543,7 @@ test "std.thread_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime async task handle APIs transpile" {
@@ -2448,7 +2570,7 @@ test "std.thread_runtime async task handle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__detach(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_runtime async task handle behavior is stable across backend selectors" {
@@ -2573,7 +2695,7 @@ test "std.thread_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_windows(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel runtime conformance matrix is stable across backend selectors" {
@@ -2624,13 +2746,13 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
         "\n" ++
         "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
         "  printf(\"sync_backend=%s\\n\", sync_runtime_backend_name());\n" ++
-        "  printf(\"const_rc_ok=%lld\\n\", channel_rc_ok());\n" ++
-        "  printf(\"const_rc_timeout=%lld\\n\", channel_rc_timeout());\n" ++
-        "  printf(\"const_rc_full=%lld\\n\", channel_rc_full());\n" ++
-        "  printf(\"const_rc_empty=%lld\\n\", channel_rc_empty());\n" ++
-        "  printf(\"const_rc_default=%lld\\n\", channel_rc_default());\n" ++
-        "  printf(\"const_rc_cancelled=%lld\\n\", channel_rc_cancelled());\n" ++
-        "  printf(\"const_select_default=%lld\\n\", channel_select_index_default());\n" ++
+        "  printf(\"const_rc_ok=%lld\\n\", CHANNEL_RC_OK);\n" ++
+        "  printf(\"const_rc_timeout=%lld\\n\", CHANNEL_RC_TIMEOUT);\n" ++
+        "  printf(\"const_rc_full=%lld\\n\", CHANNEL_RC_FULL);\n" ++
+        "  printf(\"const_rc_empty=%lld\\n\", CHANNEL_RC_EMPTY);\n" ++
+        "  printf(\"const_rc_default=%lld\\n\", CHANNEL_RC_DEFAULT);\n" ++
+        "  printf(\"const_rc_cancelled=%lld\\n\", CHANNEL_RC_CANCELLED);\n" ++
+        "  printf(\"const_select_default=%lld\\n\", CHANNEL_SELECT_INDEX_DEFAULT);\n" ++
         "  printf(\"rc_try_recv_empty=%lld\\n\", rc_try_recv_empty);\n" ++
         "  printf(\"rc_send_ok=%lld\\n\", rc_send_ok);\n" ++
         "  printf(\"rc_try_send_full=%lld\\n\", rc_try_send_full);\n" ++
@@ -2738,22 +2860,22 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  num count_a = 0;\n" ++
         "  num count_b = 0;\n" ++
         "  num count_c = 0;\n" ++
-        "  num fairness_rc = channel_rc_ok();\n" ++
+        "  num fairness_rc = CHANNEL_RC_OK;\n" ++
         "\n" ++
         "  i = 0;\n" ++
         "  for i < total_rounds {\n" ++
         "    num out = 0;\n" ++
         "    num which = -1;\n" ++
         "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 50, 5, 0);\n" ++
-        "    if rc != channel_rc_ok() {\n" ++
+        "    if rc != CHANNEL_RC_OK {\n" ++
         "      fairness_rc = rc;\n" ++
         "      i = total_rounds;\n" ++
         "    } else {\n" ++
-        "      if which == channel_select_index_self() {\n" ++
+        "      if which == CHANNEL_SELECT_INDEX_SELF {\n" ++
         "        count_a = count_a + 1;\n" ++
-        "      } elif which == channel_select_index_other() {\n" ++
+        "      } elif which == CHANNEL_SELECT_INDEX_OTHER {\n" ++
         "        count_b = count_b + 1;\n" ++
-        "      } elif which == channel_select_index_other_b() {\n" ++
+        "      } elif which == CHANNEL_SELECT_INDEX_OTHER_B {\n" ++
         "        count_c = count_c + 1;\n" ++
         "      }\n" ++
         "      i = i + 1;\n" ++
@@ -2787,7 +2909,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  i = 0;\n" ++
         "  for i < timeout_rounds {\n" ++
         "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning_cancel(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 5, 0);\n" ++
-        "    if timeout_rc != channel_rc_timeout() {\n" ++
+        "    if timeout_rc != CHANNEL_RC_TIMEOUT {\n" ++
         "      timeout_failures = timeout_failures + 1;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -2876,7 +2998,7 @@ test "transitive std.channel import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.thread_pool import emits pthread headers" {
@@ -2892,7 +3014,7 @@ test "transitive std.thread_pool import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.thread_pool lifecycle APIs transpile" {
@@ -2922,7 +3044,7 @@ test "std.thread_pool lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__is_ready(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__destroy(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel send and recv transpile for num" {
@@ -2944,7 +3066,7 @@ test "std.channel send and recv transpile for num" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel buffered constructor and try_send transpile" {
@@ -2968,7 +3090,7 @@ test "std.channel buffered constructor and try_send transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_new_cap__num") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__try_send(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel timeout send and recv transpile" {
@@ -2994,7 +3116,7 @@ test "std.channel timeout send and recv transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel async wrapper APIs await and run" {
@@ -3151,7 +3273,7 @@ test "std.io APIs usable in async function transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_bytes(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_all(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.net async APIs transpile" {
@@ -3176,7 +3298,7 @@ test "std.net async APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_async") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.net offload async edge return codes are stable across backend selectors" {
@@ -3288,7 +3410,7 @@ test "std.channel cancel-aware send and recv APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel cancel token APIs transpile" {
@@ -3337,7 +3459,7 @@ test "std.channel cancel token APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_token(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select recv2 timeout transpile" {
@@ -3362,7 +3484,7 @@ test "std.channel select recv2 timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select recv3 fair timeout transpile" {
@@ -3389,7 +3511,7 @@ test "std.channel select recv3 fair timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv3_rr_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select default branch APIs transpile" {
@@ -3415,7 +3537,7 @@ test "std.channel select default branch APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_default_with(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_default_with(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select cancel-aware APIs transpile" {
@@ -3446,7 +3568,7 @@ test "std.channel select cancel-aware APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select wait-slice tuning transpile" {
@@ -3468,7 +3590,7 @@ test "std.channel select wait-slice tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_slice_ms(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_slice_ms(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select explicit wait-slice override transpile" {
@@ -3494,7 +3616,7 @@ test "std.channel select explicit wait-slice override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select explicit wait-slice and backoff override transpile" {
@@ -3520,7 +3642,7 @@ test "std.channel select explicit wait-slice and backoff override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select blocking tuning overrides transpile" {
@@ -3546,7 +3668,7 @@ test "std.channel select blocking tuning overrides transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select adaptive wait backoff transpile" {
@@ -3568,7 +3690,7 @@ test "std.channel select adaptive wait backoff transpile" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_compute_wait_slice_ms(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "std.channel select backoff-step tuning transpile" {
@@ -3590,7 +3712,7 @@ test "std.channel select backoff-step tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_backoff_steps(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_backoff_steps(") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "channel select default returns default branch when empty" {
@@ -3621,13 +3743,13 @@ test "channel select default returns default branch when empty" {
         "  num rc3 = a.select_recv3_rr_default_with(&b, &c, &next, &out, &idx);\n" ++
         "  num idx3 = idx;\n" ++
         "  num ok_rc2 = 0;\n" ++
-        "  if rc2 == channel_rc_default() { ok_rc2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_DEFAULT { ok_rc2 = 1; }\n" ++
         "  num ok_idx2 = 0;\n" ++
-        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  if idx2 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx2 = 1; }\n" ++
         "  num ok_rc3 = 0;\n" ++
-        "  if rc3 == channel_rc_default() { ok_rc3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_DEFAULT { ok_rc3 = 1; }\n" ++
         "  num ok_idx3 = 0;\n" ++
-        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  if idx3 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx3 = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -3680,13 +3802,13 @@ test "channel select cancel returns cancelled status" {
         "  num rc3 = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, -1, -1, &cancel);\n" ++
         "  num idx3 = idx;\n" ++
         "  num ok_rc2 = 0;\n" ++
-        "  if rc2 == channel_rc_cancelled() { ok_rc2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_CANCELLED { ok_rc2 = 1; }\n" ++
         "  num ok_idx2 = 0;\n" ++
-        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  if idx2 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx2 = 1; }\n" ++
         "  num ok_rc3 = 0;\n" ++
-        "  if rc3 == channel_rc_cancelled() { ok_rc3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_CANCELLED { ok_rc3 = 1; }\n" ++
         "  num ok_idx3 = 0;\n" ++
-        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  if idx3 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx3 = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -3735,9 +3857,9 @@ test "channel cancel-aware send and recv return cancelled status" {
         "  _ = ch.recv_into(&out);\n" ++
         "  num rc_recv = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
         "  num ok_send = 0;\n" ++
-        "  if rc_send == channel_rc_cancelled() { ok_send = 1; }\n" ++
+        "  if rc_send == CHANNEL_RC_CANCELLED { ok_send = 1; }\n" ++
         "  num ok_recv = 0;\n" ++
-        "  if rc_recv == channel_rc_cancelled() { ok_recv = 1; }\n" ++
+        "  if rc_recv == CHANNEL_RC_CANCELLED { ok_recv = 1; }\n" ++
         "  printf(\"%lld|%lld\", ok_send, ok_recv);\n" ++
         "  _ = ch.destroy();\n" ++
         "}\n";
@@ -3784,13 +3906,13 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
         "  num rc3 = ch.send_timeout_with_cancel(6, 10, &cancel);\n" ++
         "  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
         "  num ok1 = 0;\n" ++
-        "  if rc1 == channel_rc_ok() { ok1 = 1; }\n" ++
+        "  if rc1 == CHANNEL_RC_OK { ok1 = 1; }\n" ++
         "  num ok2 = 0;\n" ++
-        "  if rc2 == channel_rc_ok() { ok2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_OK { ok2 = 1; }\n" ++
         "  num ok3 = 0;\n" ++
-        "  if rc3 == channel_rc_ok() { ok3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_OK { ok3 = 1; }\n" ++
         "  num ok4 = 0;\n" ++
-        "  if rc4 == channel_rc_ok() { ok4 = 1; }\n" ++
+        "  if rc4 == CHANNEL_RC_OK { ok4 = 1; }\n" ++
         "  num ok_out = 0;\n" ++
         "  if out == 6 { ok_out = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok1, ok2, ok3, ok4, ok_out);\n" ++
@@ -3842,11 +3964,11 @@ test "channel cancel token controls cancel and reset behavior" {
         "  num rc_send = ch.send_with_token(3, &token);\n" ++
         "  num rc_recv = ch.recv_into_with_token(&out, &token);\n" ++
         "  num ok_cancel = 0;\n" ++
-        "  if rc_cancel == channel_rc_cancelled() { ok_cancel = 1; }\n" ++
+        "  if rc_cancel == CHANNEL_RC_CANCELLED { ok_cancel = 1; }\n" ++
         "  num ok_send = 0;\n" ++
-        "  if rc_send == channel_rc_ok() { ok_send = 1; }\n" ++
+        "  if rc_send == CHANNEL_RC_OK { ok_send = 1; }\n" ++
         "  num ok_recv = 0;\n" ++
-        "  if rc_recv == channel_rc_ok() { ok_recv = 1; }\n" ++
+        "  if rc_recv == CHANNEL_RC_OK { ok_recv = 1; }\n" ++
         "  num ok_out = 0;\n" ++
         "  if out == 3 { ok_out = 1; }\n" ++
         "  num ok_state = 0;\n" ++
@@ -3901,7 +4023,7 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  }\n" ++
         "  num next = 0;\n" ++
         "  num out = 0;\n" ++
-        "  num idx = channel_select_index_default();\n" ++
+        "  num idx = CHANNEL_SELECT_INDEX_DEFAULT;\n" ++
         "  num got_a = 0;\n" ++
         "  num got_b = 0;\n" ++
         "  num got_c = 0;\n" ++
@@ -3909,16 +4031,16 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  i = 0;\n" ++
         "  for i < 600 {\n" ++
         "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, -1);\n" ++
-        "    if rc != channel_rc_ok() {\n" ++
+        "    if rc != CHANNEL_RC_OK {\n" ++
         "      printf(\"0|0|0|0|0\");\n" ++
         "      _ = a.destroy();\n" ++
         "      _ = b.destroy();\n" ++
         "      _ = c.destroy();\n" ++
         "      ret;\n" ++
         "    }\n" ++
-        "    if idx == channel_select_index_self() {\n" ++
+        "    if idx == CHANNEL_SELECT_INDEX_SELF {\n" ++
         "      got_a = got_a + 1;\n" ++
-        "    } elif idx == channel_select_index_other() {\n" ++
+        "    } elif idx == CHANNEL_SELECT_INDEX_OTHER {\n" ++
         "      got_b = got_b + 1;\n" ++
         "    } else {\n" ++
         "      got_c = got_c + 1;\n" ++
@@ -3940,7 +4062,7 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  num ok_sum = 0;\n" ++
         "  if sum == 659700 { ok_sum = 1; }\n" ++
         "  num ok_done = 0;\n" ++
-        "  if rc_done == channel_rc_closed() { ok_done = 1; }\n" ++
+        "  if rc_done == CHANNEL_RC_CLOSED { ok_done = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok_a, ok_b, ok_c, ok_sum, ok_done);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -3984,14 +4106,14 @@ test "channel default and cancel select stress stays stable" {
         "  Channel<num> a = channel_new(0);\n" ++
         "  Channel<num> b = channel_new(0);\n" ++
         "  num out = 0;\n" ++
-        "  num idx = channel_select_index_default();\n" ++
+        "  num idx = CHANNEL_SELECT_INDEX_DEFAULT;\n" ++
         "  num i = 0;\n" ++
         "  num ok_default = 1;\n" ++
         "  for i < 300 {\n" ++
         "    num rc = a.select_recv_default_with(&b, &out, &idx);\n" ++
-        "    if rc != channel_rc_default() {\n" ++
+        "    if rc != CHANNEL_RC_DEFAULT {\n" ++
         "      ok_default = 0;\n" ++
-        "    } elif idx != channel_select_index_default() {\n" ++
+        "    } elif idx != CHANNEL_SELECT_INDEX_DEFAULT {\n" ++
         "      ok_default = 0;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -4001,9 +4123,9 @@ test "channel default and cancel select stress stays stable" {
         "  num ok_cancel = 1;\n" ++
         "  for i < 300 {\n" ++
         "    num rc = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 5, -1, -1, &cancel);\n" ++
-        "    if rc != channel_rc_cancelled() {\n" ++
+        "    if rc != CHANNEL_RC_CANCELLED {\n" ++
         "      ok_cancel = 0;\n" ++
-        "    } elif idx != channel_select_index_default() {\n" ++
+        "    } elif idx != CHANNEL_SELECT_INDEX_DEFAULT {\n" ++
         "      ok_cancel = 0;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -4093,15 +4215,15 @@ test "channel pthread close race under contention" {
         "  SenderCtx* ctx = (SenderCtx*)arg;\n" ++
         "  for (long long i = 0; i < 10000; ++i) {\n" ++
         "    long long rc = Channel__num__try_send(ctx->ch, i);\n" ++
-        "    if (rc == channel_rc_ok()) {\n" ++
+        "    if (rc == CHANNEL_RC_OK) {\n" ++
         "      atomic_fetch_add(ctx->sends_ok, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_full()) {\n" ++
+        "    if (rc == CHANNEL_RC_FULL) {\n" ++
         "      spin_pause();\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_closed()) {\n" ++
+        "    if (rc == CHANNEL_RC_CLOSED) {\n" ++
         "      break;\n" ++
         "    }\n" ++
         "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
@@ -4115,15 +4237,15 @@ test "channel pthread close race under contention" {
         "  for (long long i = 0; i < 10000; ++i) {\n" ++
         "    long long out = 0;\n" ++
         "    long long rc = Channel__num__try_recv(ctx->ch, &out);\n" ++
-        "    if (rc == channel_rc_ok()) {\n" ++
+        "    if (rc == CHANNEL_RC_OK) {\n" ++
         "      atomic_fetch_add(ctx->recvs_ok, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_empty()) {\n" ++
+        "    if (rc == CHANNEL_RC_EMPTY) {\n" ++
         "      spin_pause();\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_closed()) {\n" ++
+        "    if (rc == CHANNEL_RC_CLOSED) {\n" ++
         "      break;\n" ++
         "    }\n" ++
         "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
@@ -4202,7 +4324,7 @@ test "channel pthread close race under contention" {
         "  long long len = Channel__num__len(&ch);\n" ++
         "\n" ++
         "  long long ok_close = 0;\n" ++
-        "  if (close_code == channel_rc_ok()) {\n" ++
+        "  if (close_code == CHANNEL_RC_OK) {\n" ++
         "    ok_close = 1;\n" ++
         "  }\n" ++
         "\n" ++
@@ -4298,7 +4420,7 @@ test "channel pthread cancelled-token contention is stable" {
         "  TokenSenderCtx* ctx = (TokenSenderCtx*)arg;\n" ++
         "  for (long long i = 0; i < 1000; ++i) {\n" ++
         "    long long rc = Channel__num__send_timeout_with_token(&ctx->ch, i, 0, &ctx->token);\n" ++
-        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "    if (rc == CHANNEL_RC_CANCELLED) {\n" ++
         "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
@@ -4313,7 +4435,7 @@ test "channel pthread cancelled-token contention is stable" {
         "  for (long long i = 0; i < 1000; ++i) {\n" ++
         "    long long out = 0;\n" ++
         "    long long rc = Channel__num__recv_timeout_into_with_token(&ctx->ch, &out, 0, &ctx->token);\n" ++
-        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "    if (rc == CHANNEL_RC_CANCELLED) {\n" ++
         "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
@@ -4451,7 +4573,7 @@ test "generic function specialization emits concrete names" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__str") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__T") == null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "generic inference after init transpiles with concrete specializations and runs" {
@@ -4550,7 +4672,7 @@ test "assert emits abort and message" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr, \"Assertion failed at ") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "abort()") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "compounds + quirks + impl vtables transpile" {
@@ -4588,7 +4710,7 @@ test "compounds + quirks + impl vtables transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.self") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "pointer field access uses arrow" {
@@ -4608,7 +4730,7 @@ test "pointer field access uses arrow" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pp->x") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 fn extractFirstQuirkBaseName(out: []const u8) ?[]const u8 {
@@ -4657,7 +4779,7 @@ test "structural quirks share canonical C type" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b.vtable->getX") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "asm statement transpiles" {
@@ -4678,7 +4800,7 @@ test "asm statement transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"=r\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"memory\"") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "asm block preserves newlines" {
@@ -4701,7 +4823,7 @@ test "asm block preserves newlines" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x8, 93\\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "svc 0\\n") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "transitive std.net import emits socket headers" {
@@ -4743,7 +4865,7 @@ test "main num return emits exit status" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "return (int)(7);") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "map compound key specialization symbols emit" {
@@ -4778,7 +4900,7 @@ test "map compound key specialization symbols emit" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__remove") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "stdlib hot path stress transpiles" {
@@ -4816,7 +4938,7 @@ test "stdlib hot path stress transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__remove") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "generic specialization plus net offload async regression stays stable" {
@@ -4860,7 +4982,7 @@ test "generic specialization plus net offload async regression stays stable" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__get") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "nested import generic impl specialization prototypes emit and run" {
@@ -5148,6 +5270,76 @@ test "escaped double-quote inside a string literal compiles and prints" {
     try std.testing.expectEqualStrings("she said \"hi\" ok\n", stdout);
 }
 
+test "raw string literal: backslashes and quotes need no escaping and print literally" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_raw_string_inline.fn";
+    const c_path = "codegen_raw_string_inline.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_raw_string_inline.exe" else "codegen_raw_string_inline";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  str path = `C:\\Users\\name\\file.txt`;\n" ++
+        "  str msg = `she said \"hi\" and left`;\n" ++
+        "  printf(\"%s\\n\", path);\n" ++
+        "  printf(\"%s\\n\", msg);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The emitted C must contain a properly-escaped literal, not the raw
+    // (invalid-as-C) bytes.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"C:\\\\Users\\\\name\\\\file.txt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"she said \\\"hi\\\" and left\"") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("C:\\Users\\name\\file.txt\nshe said \"hi\" and left\n", stdout);
+}
+
+test "raw string literal: multi-line block joins lines with a real newline" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_raw_string_multiline.fn";
+    const c_path = "codegen_raw_string_multiline.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_raw_string_multiline.exe" else "codegen_raw_string_multiline";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  let block =\n" ++
+        "    `line one\n" ++
+        "    `line two\n" ++
+        "  ;\n" ++
+        "  printf(\"%s\\n\", block);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"line one\\nline two\"") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("line one\nline two\n", stdout);
+}
+
 test "single-letter quirk name emits impl method bodies (links)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_single_letter_quirk.fn";
@@ -5388,6 +5580,96 @@ test "local array of compound stays in function body (not hoisted to file scope)
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("sum=6\n", stdout);
+}
+
+test "for-each over a non-identifier Vec expression (field access, call, imported module)" {
+    const allocator = std.testing.allocator;
+    const mod_path = "codegen_for_iter_vec_expr_mod.fn";
+    const main_path = "codegen_for_iter_vec_expr_main.fn";
+    const c_path = "codegen_for_iter_vec_expr_main.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_for_iter_vec_expr_main.exe" else "codegen_for_iter_vec_expr_main";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mod_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `for item : <expr>` only supported a bare identifier
+    // iterable ("for-each loops currently require an array identifier"),
+    // even when <expr> is Vec-typed (Vec's `.len`/`.data[idx]` fast path
+    // works identically on any Vec-typed value, unlike the raw-array
+    // fast path, which genuinely needs an identifier for its
+    // sizeof-based length trick). Also regresses the cross-module case
+    // specifically: the fix's resolved-type override must be stored on
+    // the ROOT TranspileProcess (matching generic_call_overrides), since
+    // a for-loop inside an IMPORTED module's function is typechecked
+    // under a child process but its body is emitted through a different
+    // one -- storing on `self` instead loses the override entirely.
+    {
+        const mod_file = try std.Io.Dir.cwd().createFile(std.testing.io, mod_path, .{ .read = true });
+        defer mod_file.close(std.testing.io);
+        try mod_file.writeStreamingAll(
+            std.testing.io,
+            "imp std.vec;\n" ++
+                "pub compound Holder {\n" ++
+                "  Vec<num> items;\n" ++
+                "}\n" ++
+                "pub fun make_holder() Holder {\n" ++
+                "  Holder h;\n" ++
+                "  h.items.init(0);\n" ++
+                "  h.items.push(1);\n" ++
+                "  h.items.push(2);\n" ++
+                "  h.items.push(3);\n" ++
+                "  ret h;\n" ++
+                "}\n" ++
+                "pub fun sum_items(Holder* h) num {\n" ++
+                "  num total = 0;\n" ++
+                // Field access -- not a bare identifier.
+                "  for x : h.items {\n" ++
+                "    total = total + x;\n" ++
+                "  }\n" ++
+                "  ret total;\n" ++
+                "}\n" ++
+                "pub fun make_items() Vec<num> {\n" ++
+                "  Vec<num> v;\n" ++
+                "  v.init(0);\n" ++
+                "  v.push(10);\n" ++
+                "  v.push(20);\n" ++
+                "  v.push(30);\n" ++
+                "  ret v;\n" ++
+                "}\n" ++
+                "pub fun sum_call_result() num {\n" ++
+                "  num total = 0;\n" ++
+                // Call result -- not a bare identifier, evaluated once.
+                "  for x : make_items() {\n" ++
+                "    total = total + x;\n" ++
+                "  }\n" ++
+                "  ret total;\n" ++
+                "}\n",
+        );
+    }
+
+    const input =
+        "imp codegen_for_iter_vec_expr_mod as m;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  m.Holder h = m.make_holder();\n" ++
+        "  num a = m.sum_items(&h);\n" ++
+        "  num b = m.sum_call_result();\n" ++
+        "  printf(\"a=%lld b=%lld\\n\", a, b);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("a=6 b=60\n", stdout);
 }
 
 test "local T[] initialized from a pointer emits a C pointer, not an array" {
@@ -6057,6 +6339,57 @@ test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" 
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("7 woof hi\n5\n", stdout);
+}
+
+test "std.mock_time: MockClock lets a Clock-parameterized function be tested without real waiting" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_mock_time_basic.fn";
+    const c_path = "codegen_mock_time_basic.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_mock_time_basic.exe" else "codegen_mock_time_basic";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A function accepting a `Clock`-typed parameter (rather than calling
+    // std.time's now() directly) can be exercised deterministically with a
+    // MockClock: no expiry until 60s elapse, immediate expiry once advanced
+    // past that -- no real sleeping. A concrete value coerces to a
+    // quirk-typed parameter by its address (`&clk`), same as any other
+    // quirk coercion.
+    const input =
+        "imp std.mock_time;\n" ++
+        "imp std.time;\n" ++
+        "imp std.c.io;\n\n" ++
+        "fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {\n" ++
+        "  ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  MockClock clk = mock_clock_at(0);\n" ++
+        "  Timestamp issued = clk.now();\n" ++
+        "  if is_expired(&clk, issued, 60) {\n" ++
+        "    printf(\"FAIL: expired too early\\n\");\n" ++
+        "    ret 1;\n" ++
+        "  }\n" ++
+        "  clk.advance(61);\n" ++
+        "  if !is_expired(&clk, issued, 60) {\n" ++
+        "    printf(\"FAIL: did not expire\\n\");\n" ++
+        "    ret 1;\n" ++
+        "  }\n" ++
+        "  printf(\"ok\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("ok\n", stdout);
 }
 
 test "generic compound coerces to a quirk at a call site and via var-init" {
@@ -8304,6 +8637,55 @@ test "an enum variant payload of a generic-compound type matches its own declare
     try std.testing.expectEqualStrings("42\n", stdout);
 }
 
+test "sizeof(generic type param) is not resolved against an unrelated global type of the same bare name" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_sizeof_type_param_name_collision.fn";
+    const c_path = "codegen_sizeof_type_param_name_collision.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_sizeof_type_param_name_collision.exe" else "codegen_sizeof_type_param_name_collision";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `sizeof(X)`'s visibility check ran whenever `X` was
+    // `is_declared` (SOME enum/compound/quirk ANYWHERE in the compiled
+    // program has that bare name) and not a scope value -- but forgot to
+    // ALSO exclude `is_type_param`, unlike the sibling checks just above
+    // it in the same function. `std.result`'s `Result<T, E>.zero_e()`
+    // does `sizeof(E)` on its own bound type parameter `E`; a completely
+    // unrelated top-level type in THIS file that also happens to be
+    // named `E` (a local `enum E { ... }`) made that spuriously fail
+    // visibility against the unrelated global symbol ("type 'E' is
+    // private"), even though nothing private was ever referenced --
+    // reproduced with `imp std.result;` since the failure specifically
+    // needs `E` to be a generic parameter belonging to an IMPORTED
+    // (different-file) generic type, not one declared in this same file.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.error;\n" ++
+        "imp std.result;\n" ++
+        "enum E { Variant }\n" ++
+        "fun mk() Result<num, Error> {\n" ++
+        "  ret .Ok(7);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  let r = mk();\n" ++
+        "  printf(\"%lld\\n\", r.unwrap_err().code);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("0\n", stdout);
+}
+
 test "a generic container instantiated with a pointer type argument mangles distinctly (Vec<T*>)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_pointer_arg_mangling.fn";
@@ -9475,4 +9857,1133 @@ test "constructing a generic enum from a method's own type param does not cross-
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("hi\n99\nnone\n", stdout);
+}
+
+test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fork_contextual_keyword.fn";
+    const c_path = "codegen_fork_contextual_keyword.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fork_contextual_keyword.exe" else "codegen_fork_contextual_keyword";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding a std.c.process module (self-hosting Phase 0):
+    // `fork` was an UNCONDITIONAL lexer keyword, so a raw libc `fork()`
+    // binding couldn't be declared under its real name at all ("expected
+    // identifier, got 'Keyword'"). Fixed by making `fork` CONTEXTUAL:
+    // `is_keyword` no longer reserves it at the lexer level, and
+    // `parse_statement` recognizes the fork STATEMENT by peeking one token
+    // ahead -- a `(` immediately after "fork" means it's being used/declared
+    // as an ordinary function (`fork()`, `pub fun fork() num { ... }`);
+    // anything else (the spawned call's own callee name) means the fork
+    // STATEMENT (`fork worker(...)`).
+    //
+    // Deliberately does NOT ALSO use the fork STATEMENT in this same file:
+    // that pulls in `#include <unistd.h>` (for the M:N scheduler's CPU-count
+    // check), which declares the REAL libc `fork()` -- a user-defined `fork`
+    // symbol of ANY signature would then conflict with it at the C level
+    // ("conflicting types for 'fork'"), regardless of this parser fix. The
+    // fork STATEMENT itself already has enormous existing coverage
+    // (WaitGroup/channel tests throughout this file) that continues to pass
+    // unmodified, confirming this fix doesn't regress it.
+    const input =
+        "imp std.c.io;\n" ++
+        "pub fun fork() num {\n" ++
+        "  ret 42;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  let pid = fork();\n" ++
+        "  printf(\"%lld\\n\", pid);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "array return types: T[] is a valid function return type, with a body and signature-only" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_array_return_type.fn";
+    const c_path = "codegen_array_return_type.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_array_return_type.exe" else "codegen_array_return_type";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding `std.process`'s `argv_from`/`environ_ptr` helpers
+    // (self-hosting Phase 0): `T[]` was accepted as a PARAMETER type but not
+    // as a function RETURN type ("expected symbol ';'") -- the return-type
+    // parse sites (plain functions, quirk method signatures, impl methods)
+    // called `parse_datatype` but never `parse_array_brackets` afterward.
+    // Fixed by adding the same `if (next_token_is_operator("["))
+    // parse_array_brackets(...)` step used for parameters to each return-type
+    // site, and making `parse_array_brackets` initialize `dt.flags` itself
+    // (`orelse .{}`) instead of assuming a caller already set it, since the
+    // return-type call sites start from a bare `.{ .type_str = ... }` with
+    // `flags == null`. Also covers a signature-only (no body) declaration,
+    // which exercises the same "expected symbol ';'" failure mode directly.
+    //
+    // A SECOND, separate bug surfaced right behind the first: `write_type`
+    // (shared by the C prototype AND the definition) only ever added a `*`
+    // for `pointer_depth`/`is_pointer`, never for `is_array` -- so `str[]`
+    // emitted as plain `char*` instead of `char**`. Assigning the call result
+    // to a `str[]`-typed local (as above) happened to still "work" because
+    // the raw pointer VALUE is unaffected by the C-side type being one
+    // pointer level too shallow. Indexing the call result DIRECTLY
+    // (`make_names()[1]`, no intermediate variable) does NOT survive that:
+    // with the wrong return type, `[1]` indexes into individual bytes of
+    // whatever `out[0]` points to instead of into `out`'s own elements --
+    // this is the case that must stay covered, since the intermediate-
+    // variable form alone would NOT have caught a regression here. Fixed via
+    // a shared `write_return_type` helper (adds one `*` per `array_depth` on
+    // top of `write_type`) used at every place a return type is emitted as
+    // part of a real C function/method signature.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n\n" ++
+        "pub fun unused_signature_only() str[];\n\n" ++
+        "fun make_names() str[] {\n" ++
+        "  str[] out = malloc(sizeof(str) * 3);\n" ++
+        "  out[0] = \"a\";\n" ++
+        "  out[1] = \"b\";\n" ++
+        "  out[2] = nil;\n" ++
+        "  ret out;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  str[] names = make_names();\n" ++
+        "  printf(\"%s %s\\n\", names[0], make_names()[1]);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("a b\n", stdout);
+}
+
+test "std.process: run() captures stdout/exit code, spawn_inherited() returns exit code" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_process.fn";
+    const c_path = "codegen_std_process.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_process.exe" else "codegen_std_process";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // End-to-end coverage for the new `std.process` module (Phase 0 of the
+    // self-hosting rewrite): `argv_from` (Vec<str> -> NULL-terminated argv,
+    // needed since a Fun array literal can't mix `str` elements with a
+    // trailing `nil`), `run()` (posix_spawn + captured stdout/stderr via
+    // Channel/fork, matching the stdlib's existing concurrency idioms rather
+    // than raw threads), and `spawn_inherited()` (inherited stdio, exit code
+    // only). `Vec<T>` needs an explicit `.init()` before use -- a bare
+    // declaration is uninitialized, not zero-valued -- easy to miss since it
+    // does not surface as a compile-time error, only a garbage `len`/`cap` at
+    // runtime.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.process;\n" ++
+        "imp std.vec;\n\n" ++
+        "fun main() num {\n" ++
+        "  Vec<str> args;\n" ++
+        "  args.init(0);\n" ++
+        "  args.push(\"echo\");\n" ++
+        "  args.push(\"hello from child\");\n" ++
+        "  let child_argv = argv_from(&args);\n\n" ++
+        "  let res = run(child_argv);\n" ++
+        "  if res.is_ok() {\n" ++
+        "    let out = res.unwrap();\n" ++
+        "    printf(\"exit=%lld out=[%s] err=[%s]\\n\", out.exit_code, out.stdout_text, out.stderr_text);\n" ++
+        "  } else {\n" ++
+        "    printf(\"spawn failed\\n\");\n" ++
+        "  }\n" ++
+        "  free_argv(child_argv);\n\n" ++
+        "  Vec<str> args2;\n" ++
+        "  args2.init(0);\n" ++
+        "  args2.push(\"false\");\n" ++
+        "  let child_argv2 = argv_from(&args2);\n" ++
+        "  let code = spawn_inherited(child_argv2);\n" ++
+        "  printf(\"spawn_inherited exit=%lld\\n\", code);\n" ++
+        "  free_argv(child_argv2);\n\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("exit=0 out=[hello from child\n] err=[]\nspawn_inherited exit=1\n", stdout);
+}
+
+test "std.fs: is_dir/make_dir/list_dir/walk_dir" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_fs_dirs.fn";
+    const c_path = "codegen_std_fs_dirs.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_fs_dirs.exe" else "codegen_std_fs_dirs";
+    const scratch_dir = "codegen_std_fs_dirs_scratch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, scratch_dir) catch {};
+
+    // Directory ops (Phase 0 of the self-hosting rewrite): `walk_dir` in
+    // particular needs to exist for `fun build` to discover a project's
+    // `.fn` sources without listing them one by one. Layout:
+    //   scratch/a.fn
+    //   scratch/b.txt
+    //   scratch/sub/c.fn
+    std.Io.Dir.cwd().deleteTree(std.testing.io, scratch_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, scratch_dir ++ "/sub");
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/a.fn", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "// a\n");
+    }
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/b.txt", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "not fun source\n");
+    }
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/sub/c.fn", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "// c\n");
+    }
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.fs;\n" ++
+        "imp std.vec;\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"is_dir=%lld\\n\", is_dir(\"" ++ scratch_dir ++ "\"));\n" ++
+        "  printf(\"is_dir_file=%lld\\n\", is_dir(\"" ++ scratch_dir ++ "/a.fn\"));\n\n" ++
+        "  let mk = make_dir(\"" ++ scratch_dir ++ "/newdir\");\n" ++
+        "  printf(\"make_dir_ok=%lld\\n\", mk.is_ok());\n\n" ++
+        "  let listed = list_dir(\"" ++ scratch_dir ++ "\");\n" ++
+        "  if listed.is_ok() {\n" ++
+        "    printf(\"list_dir_count=%lld\\n\", listed.unwrap().len);\n" ++
+        "  }\n\n" ++
+        "  let files = walk_dir(\"" ++ scratch_dir ++ "\");\n" ++
+        "  printf(\"walk_dir_count=%lld\\n\", files.len);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // list_dir sees the 4 immediate entries (a.fn, b.txt, sub, newdir --
+    // newdir was just created above); walk_dir finds exactly the 2 `.fn`
+    // files, recursing into `sub`.
+    try std.testing.expectEqualStrings(
+        "is_dir=1\nis_dir_file=0\nmake_dir_ok=1\nlist_dir_count=4\nwalk_dir_count=2\n",
+        stdout,
+    );
+}
+
+test "panic(msg) in return position lowers to a bare fprintf+abort (no return-value machinery)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_ret.fn";
+
+    // No type-checking gymnastics needed here: `panic(...)` unifies with
+    // whatever the function's real return type is (`num`), so `ret
+    // panic(...)` must NOT synthesize any dummy return value -- `abort()`
+    // (C11 `_Noreturn`) never returns, so there's nothing left to return.
+    const input =
+        "fun foo(num x) num {\n" ++
+        "  if x < 0 {\n" ++
+        "    ret panic(\"x must be non-negative\");\n" ++
+        "  }\n" ++
+        "  ret x * 2;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr_stream(), \"panic: %s\\n\", \"x must be non-negative\"); abort();") != null);
+    // No dummy `return`/value should follow the abort on this path.
+    const abort_idx = std.mem.indexOf(u8, out_owned, "abort();").?;
+    const after_abort = out_owned[abort_idx + "abort();".len ..];
+    const next_brace = std.mem.indexOfScalar(u8, after_abort, '}').?;
+    try std.testing.expect(std.mem.indexOf(u8, after_abort[0..next_brace], "return") == null);
+}
+
+test "panic(msg) in a general expression position lowers to a GNU statement expression" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_expr.fn";
+
+    // Used as a `let` initializer (not the special-cased return position),
+    // `panic(...)` still needs to be ONE C expression, so it lowers to a `({
+    // ...; 0; })` statement expression instead.
+    const input =
+        "fun main() num {\n" ++
+        "  num x = panic(\"cannot happen\");\n" ++
+        "  ret x;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"cannot happen\"); abort(); 0; })") != null);
+}
+
+test "panic(msg): unreached branch does not affect the normal return path" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_e2e.fn";
+    const c_path = "codegen_panic_e2e.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_panic_e2e.exe" else "codegen_panic_e2e";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // End-to-end proof that a function using `ret panic(...)` in an
+    // unreachable branch still compiles AND runs correctly on the normal
+    // path -- the panic-handling codegen must not corrupt the ordinary
+    // `ret x * 2;` return.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun foo(num x) num {\n" ++
+        "  if x < 0 {\n" ++
+        "    ret panic(\"x must be non-negative\");\n" ++
+        "  }\n" ++
+        "  ret x * 2;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", foo(5));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("10\n", stdout);
+}
+
+test "chr and num implicitly coerce both ways (assignment and call arguments)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_chr_num_coerce.fn";
+    const c_path = "codegen_chr_num_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_chr_num_coerce.exe" else "codegen_chr_num_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding `std.ctype` (Phase 0 of the self-hosting rewrite):
+    // `chr` and `num` already interoperated freely in arithmetic
+    // (`is_numeric_type` treats `.Chr` as numeric) and comparisons
+    // (`can_compare_or_match` explicitly allows both directions), but NOT in
+    // plain assignment or function-argument passing -- `isalnum(chr_val)`
+    // and `num n = chr_val;` both failed to typecheck, forcing an awkward
+    // `chr_val + 0` arithmetic-promotion workaround to call any
+    // `num`-parameter C binding with a `chr` value. Fixed by extending
+    // `can_implicit_coerce` to allow the same bidirectional interop
+    // assignment/arguments already got via comparison.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun main() num {\n" ++
+        "  chr c = 'a';\n" ++
+        "  num n = c;\n" ++
+        "  chr back = n + 1;\n" ++
+        "  printf(\"%lld %c\\n\", n, back);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("97 b\n", stdout);
+}
+
+test "std.ctype: chr/bin wrappers over std.c.ctype" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_ctype.fn";
+    const c_path = "codegen_std_ctype.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_ctype.exe" else "codegen_std_ctype";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.ctype;\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%d %d %d %d\\n\", is_digit('5'), is_digit('x'), is_alpha('x'), is_alpha('5'));\n" ++
+        "  printf(\"%d %d\\n\", is_space(' '), is_space('x'));\n" ++
+        "  printf(\"%c%c\\n\", to_upper_chr('a'), to_lower_chr('A'));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("1 0 1 0\n1 0\nAa\n", stdout);
+}
+
+test "function-type parameter: passing a function by name and calling it through a param" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fn_type_param.fn";
+    const c_path = "codegen_fn_type_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fn_type_param.exe" else "codegen_fn_type_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // First-class function parameters (Phase 0 of the self-hosting rewrite):
+    // `fun(T1, T2) R` reuses the `fun` keyword as a TYPE (rather than
+    // inventing new syntax) for a parameter that accepts a function by name
+    // and can be called through it (`cb(a, b)` inside `apply`). Needed for
+    // `Vec<T>.sort_by(cmp)`; also generally useful for map/filter/for_each-
+    // style patterns the self-hosted compiler will likely want. A bare
+    // function name used as a value infers as an opaque `raw*` (not
+    // signature-checked against `fn_sig` at the CALL-SITE that passes it,
+    // matching the existing `raw* start_routine`-style callback bindings),
+    // but calls THROUGH the parameter (`cb(a, b)`) ARE checked against the
+    // declared `fun(T1, T2) R` signature (arg count + types).
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "fun mul(num a, num b) num {\n" ++
+        "  ret a * b;\n" ++
+        "}\n\n" ++
+        "fun apply(num a, num b, fun(num, num) num cb) num {\n" ++
+        "  ret cb(a, b);\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", apply(2, 3, add));\n" ++
+        "  printf(\"%lld\\n\", apply(2, 3, mul));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5\n6\n", stdout);
+}
+
+test "function-type parameter: wrong arg count/type calling through the param is a type error" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fn_type_param_argcheck.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expectError(error.WrongArgCount, runTranspile(allocator, ifilepath,
+        \\fun apply(num a, num b, fun(num, num) num cb) num {
+        \\  ret cb(a);
+        \\}
+        \\
+    ));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspile(allocator, ifilepath,
+        \\fun apply(num a, str s, fun(num, num) num cb) num {
+        \\  ret cb(a, s);
+        \\}
+        \\
+    ));
+}
+
+test "Vec<T>.sort_by(cmp): num, str, and compound comparators" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_vec_sort_by.fn";
+    const c_path = "codegen_vec_sort_by.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_vec_sort_by.exe" else "codegen_vec_sort_by";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // The motivating Phase-0 use case: sorting compiler diagnostics by
+    // (line, col) needs a comparator, not just ascending/descending numeric
+    // order -- exercises the generic `impl Vec<T>` method correctly
+    // monomorphizing the `fun(T, T) num` comparator parameter's C function-
+    // pointer type per concrete `T` (num/str/a user compound), not just
+    // once for the unbound generic template.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.vec;\n\n" ++
+        "compound Diag {\n" ++
+        "  num line;\n" ++
+        "  num col;\n" ++
+        "}\n\n" ++
+        "fun cmp_num_desc(num a, num b) num {\n" ++
+        "  ret b - a;\n" ++
+        "}\n\n" ++
+        "fun cmp_diag(Diag a, Diag b) num {\n" ++
+        "  if a.line != b.line {\n" ++
+        "    ret a.line - b.line;\n" ++
+        "  }\n" ++
+        "  ret a.col - b.col;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  Vec<num> nums;\n" ++
+        "  nums.init(0);\n" ++
+        "  nums.push(5);\n" ++
+        "  nums.push(1);\n" ++
+        "  nums.push(3);\n" ++
+        "  nums.sort_by(cmp_num_desc);\n" ++
+        "  num i = 0;\n" ++
+        "  for i < nums.len {\n" ++
+        "    printf(\"%lld \", nums.get(i));\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  printf(\"\\n\");\n\n" ++
+        "  Vec<Diag> diags;\n" ++
+        "  diags.init(0);\n" ++
+        "  Diag d1;\n" ++
+        "  d1.line = 5;\n" ++
+        "  d1.col = 2;\n" ++
+        "  Diag d2;\n" ++
+        "  d2.line = 1;\n" ++
+        "  d2.col = 9;\n" ++
+        "  Diag d3;\n" ++
+        "  d3.line = 5;\n" ++
+        "  d3.col = 1;\n" ++
+        "  diags.push(d1);\n" ++
+        "  diags.push(d2);\n" ++
+        "  diags.push(d3);\n" ++
+        "  diags.sort_by(cmp_diag);\n" ++
+        "  i = 0;\n" ++
+        "  for i < diags.len {\n" ++
+        "    let d = diags.get(i);\n" ++
+        "    printf(\"%lld:%lld \", d.line, d.col);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  printf(\"\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 3 1 \n1:9 5:1 5:2 \n", stdout);
+}
+
+test "test blocks: an ordinary (non-test-mode) compile ignores them entirely" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_ignored.fn";
+    const c_path = "codegen_test_block_ignored.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_ignored.exe" else "codegen_test_block_ignored";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `test` blocks are new (Phase 0.5): matching `zig build` vs `zig test`,
+    // an ORDINARY compile must not even type-check a test's body -- a test
+    // block referencing something broken/nonexistent must not stop the
+    // program from compiling and running normally.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "test \"references something broken\" {\n" ++
+        "  assert this_does_not_exist() == 1, \"unreachable in a normal compile\";\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"normal run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_test_") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("normal run\n", stdout);
+}
+
+test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary compile ignores them entirely" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_block_ignored.fn";
+    const c_path = "codegen_fuzz_block_ignored.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_block_ignored.exe" else "codegen_fuzz_block_ignored";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `fuzz "name" (data, len) { ... }` (like `test`) is only meaningful in
+    // its own compile mode (fuzz mode, exercised separately below). An
+    // ordinary compile must ignore it entirely, same as a `test` block:
+    // the two parameter names get fixed raw*/num types with no type
+    // annotation in the source, and referencing them inside the body
+    // (here, comparing `len` -- only valid if it typechecks as `num`)
+    // must not affect or appear in a normal compile's output.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"parses without crashing\" (raw* data, num len) {\n" ++
+        "  if len > 0 {\n" ++
+        "    printf(\"nonempty\\n\");\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"normal run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "nonempty") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("normal run\n", stdout);
+}
+
+test "fuzz mode: a bare 'ret;' inside the body compiles as 'return 0;', not invalid 'return;'" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_bare_ret.fn";
+    const c_path = "codegen_fuzz_bare_ret.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_bare_ret.exe" else "codegen_fuzz_bare_ret";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the fuzz body's own dummy function context is void (a
+    // bare `ret;` is the only return form typecheck allows there), but
+    // the harness it's transpiled into is `int LLVMFuzzerTestOneInput(...)`
+    // -- naively emitting a bare `ret;` as C `return;` produced invalid C
+    // ("non-void function should return a value", a real clang error, not
+    // just a warning). Fixed by reusing the exact mechanism a Fun-level
+    // void `main()` already needs for the same reason against its own C
+    // `int main(void)` wrapper (`self.in_main`, see `emit_fuzz_mode_harness`).
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"early-returns on empty input\" (raw* data, num len) {\n" ++
+        "  if len == 0 {\n" ++
+        "    ret;\n" ++
+        "  }\n" ++
+        "  printf(\"nonempty\\n\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, null);
+    defer allocator.free(out_owned);
+    // Scope the "no bare 'return;'" check to just the harness function's own
+    // body -- the prelude's unrelated watchdog helpers legitimately have
+    // their own bare `return;` in a genuinely void C function, which isn't
+    // what this regression is about.
+    const harness_start = std.mem.indexOf(u8, out_owned, "int LLVMFuzzerTestOneInput").?;
+    const harness_body = out_owned[harness_start..];
+    try std.testing.expect(std.mem.indexOf(u8, harness_body, "return 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness_body, "return;") == null);
+
+    const driver =
+        \\int main(void) {
+        \\  unsigned char empty[1] = {0};
+        \\  LLVMFuzzerTestOneInput(empty, 0);
+        \\  unsigned char one[1] = {'x'};
+        \\  LLVMFuzzerTestOneInput(one, 1);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("nonempty\n", stdout);
+}
+
+test "fuzz mode: single target auto-selected, harness aliases data/len and omits any user main" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_harness_single.fn";
+    const c_path = "codegen_fuzz_harness_single.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_harness_single.exe" else "codegen_fuzz_harness_single";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // With exactly one `fuzz` block declared, no `-fuzz-target` is needed.
+    // The harness aliases the chosen data/len parameter names to the fixed
+    // ABI arguments a coverage-guided fuzzing engine's own driver would
+    // supply, and the user's own `main` (which would collide with the
+    // engine's own driver-supplied `main` at link time) must not appear in
+    // the output at all.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"reports large lengths\" (raw* data, num len) {\n" ++
+        "  if len > 3 {\n" ++
+        "    printf(\"large\\n\");\n" ++
+        "  } else {\n" ++
+        "    printf(\"small\\n\");\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"should never run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, null);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "LLVMFuzzerTestOneInput") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "should never run") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") == null);
+
+    // No real fuzzing engine is wired up in this test environment -- drive
+    // the harness directly with a tiny hand-written `main` that calls
+    // `LLVMFuzzerTestOneInput` twice (an empty input, then a 4-byte one),
+    // the same ABI a real engine would use.
+    const driver =
+        \\int main(void) {
+        \\  unsigned char empty[1] = {0};
+        \\  LLVMFuzzerTestOneInput(empty, 0);
+        \\  unsigned char four[4] = {1,2,3,4};
+        \\  LLVMFuzzerTestOneInput(four, 4);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("small\nlarge\n", stdout);
+}
+
+test "fuzz mode: -fuzz-target selects among multiple declared fuzz blocks" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_harness_multi.fn";
+    const c_path = "codegen_fuzz_harness_multi.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_harness_multi.exe" else "codegen_fuzz_harness_multi";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"target one\" (raw* data, num len) {\n" ++
+        "  printf(\"one\\n\");\n" ++
+        "}\n\n" ++
+        "fuzz \"target two\" (raw* data, num len) {\n" ++
+        "  printf(\"two\\n\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, "target two");
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"two\\n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"one\\n\"") == null);
+
+    const driver =
+        \\int main(void) {
+        \\  unsigned char b[1] = {0};
+        \\  LLVMFuzzerTestOneInput(b, 1);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("two\n", stdout);
+}
+
+test "fuzz mode: no target declared, ambiguous target, and unknown -fuzz-target all fail to compile" {
+    const allocator = std.testing.allocator;
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_none.fn") catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_ambiguous.fn") catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_unknown.fn") catch {};
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_none.fn",
+        \\imp std.c.io;
+        \\fun main() num { ret 0; }
+        \\
+    , null));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_ambiguous.fn",
+        \\imp std.c.io;
+        \\fuzz "a" (raw* data, num len) { printf("a\n"); }
+        \\fuzz "b" (raw* data, num len) { printf("b\n"); }
+        \\
+    , null));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_unknown.fn",
+        \\imp std.c.io;
+        \\fuzz "a" (raw* data, num len) { printf("a\n"); }
+        \\
+    , "nonexistent"));
+}
+
+test "test blocks: fun test mode runs all-passing tests and reports a summary" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_pass.fn";
+    const c_path = "codegen_test_block_pass.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_pass.exe" else "codegen_test_block_pass";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "test \"add works\" {\n" ++
+        "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+        "}\n\n" ++
+        "test \"add handles negatives\" {\n" ++
+        "  assert add(-1, -2) == -3, \"expected -3\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileTestMode(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // Tests run CONCURRENTLY (one virtual task each -- see std/testing.fn),
+    // so PASS lines can appear in either order; check presence, not order.
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "test: add works ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "test: add handles negatives ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "2/2 tests passed") != null);
+}
+
+test "test blocks: a failing assert is isolated, other tests still run" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_fail.fn";
+    const c_path = "codegen_test_block_fail.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_fail.exe" else "codegen_test_block_fail";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A failing assert is recovered (a per-thread jump back to the runner,
+    // see the `.assert_stmt` transpile case) instead of aborting the whole
+    // process -- every OTHER test still runs, and the runner exits nonzero
+    // after reporting a full summary. Tests run CONCURRENTLY (one virtual
+    // task each -- see std/testing.fn), so PASS/FAIL lines can appear in
+    // any order; assert presence, not exact order.
+    const input =
+        "test \"passes\" {\n" ++
+        "  assert true, \"ok\";\n" ++
+        "}\n\n" ++
+        "test \"fails\" {\n" ++
+        "  assert 1 == 2, \"one is not two\";\n" ++
+        "}\n\n" ++
+        "test \"also passes\" {\n" ++
+        "  assert true, \"still runs\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileTestMode(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
+    defer allocator.free(exe_abs);
+    var env_map = try std.testing.environ.createMap(allocator);
+    defer env_map.deinit();
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{exe_abs},
+        .environ_map = &env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Exits CLEANLY (not aborted), just with a nonzero code since not
+    // every test passed.
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code != 0),
+        else => try std.testing.expect(false),
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "one is not two") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: passes ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: fails ... FAIL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: also passes ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2/3 tests passed") != null);
+}
+
+test "const local with type inference emits C const qualifier and runs correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_local_infer.fn";
+    const c_path = "codegen_const_local_infer.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_const_local_infer.exe" else "codegen_const_local_infer";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  const answer = 42;\n" ++
+        "  printf(\"%lld\\n\", answer);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t answer = 42") != null);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "const local with explicit type emits C const qualifier" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_local_explicit.fn";
+    const input =
+        "fun main() num {\n" ++
+        "  const num max = 100;\n" ++
+        "  ret max;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t max = 100") != null);
+}
+
+test "pub const at top level with both syntax forms emits C const qualifier" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_top_level.fn";
+    const input =
+        "pub const MAX = 10;\n" ++
+        "pub const num MIN = 0;\n" ++
+        "fun main() num {\n" ++
+        "  ret MAX - MIN;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t MAX = 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t MIN = 0") != null);
+}
+
+test "const pointer declaration places const after the stars in generated C" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_pointer.fn";
+    const input =
+        "fun main() num {\n" ++
+        "  num n = 5;\n" ++
+        "  const num* p = &n;\n" ++
+        "  ret *p;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // "the pointer binding is immutable" (`T* const`), never "the pointee is
+    // immutable" (`const T*`) -- the latter is a stricter, wrong guarantee.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* const p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t* p") == null);
+}
+
+test "const declaration without initializer is a parse error" {
+    const allocator = std.testing.allocator;
+    const input =
+        "fun main() num {\n" ++
+        "  const num x;\n" ++
+        "  ret x;\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, "codegen_const_no_init.fn", input);
+}
+
+test "explicit generic call args resolve a type param with no argument to infer it from" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_explicit_generic_call.fn";
+    const c_path = "codegen_explicit_generic_call.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_explicit_generic_call.exe" else "codegen_explicit_generic_call";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `E` appears only in the return type -- no argument carries it, so
+    // ordinary inference from call arguments can never bind it. Explicit
+    // generic args (`make<num, MyErrorKind>(42)`) are the only way to call
+    // this without going through the `.Ok(...)` shorthand.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.result;\n" ++
+        "enum MyErrorKind { BadInput, Timeout }\n" ++
+        "pub fun make<T, E>(T value) Result<T, E> {\n" ++
+        "  ret .Ok(value);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Result<num, MyErrorKind> r = make<num, MyErrorKind>(42);\n" ++
+        "  fit r {\n" ++
+        "    Result.Ok(v) -> { printf(\"ok %lld\\n\", v); }\n" ++
+        "    Result.Err(e) -> { printf(\"err\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("ok 42\n", stdout);
+}
+
+test "explicit generic call with wrong argument count is a type error" {
+    const allocator = std.testing.allocator;
+    const input =
+        "fun make<T, E>(T value) T {\n" ++
+        "  ret value;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  ret make<num>(42);\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, "codegen_explicit_generic_call_arity.fn", input);
+}
+
+test "global const referenced from a function defined earlier in the file forward-declares correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_global_const_forward_ref.fn";
+    const c_path = "codegen_global_const_forward_ref.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_global_const_forward_ref.exe" else "codegen_global_const_forward_ref";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A function TEXTUALLY earlier than the global const it references --
+    // regression test for the missing extern-forward-declaration bug: C
+    // requires a global to be declared before use, and only FUNCTIONS got a
+    // forward-declaration pass; a global referenced from code emitted ahead
+    // of its own declaration (this ordering, or an async-lowered function
+    // body) hit a raw "undeclared identifier" from the C compiler.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun uses_const() num { ret MAX; }\n" ++
+        "const num MAX = 7;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", uses_const());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("7\n", stdout);
 }

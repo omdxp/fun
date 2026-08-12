@@ -1,0 +1,7 @@
+fun secret() num {
+  ret 42;
+}
+
+pub fun visible() num {
+  ret 7;
+}

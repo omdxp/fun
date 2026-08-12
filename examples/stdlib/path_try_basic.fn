@@ -4,12 +4,13 @@
 imp std.c.io;
 imp std.path;
 imp std.result;
+imp std.error;
 
 fun main() num {
-  Result<str> j = try_path_join("/tmp", "file.txt");
+  Result<str, Error> j = try_path_join("/tmp", "file.txt");
   printf("join: %s\n", j.unwrap_or("<error>"));
 
-  Result<str> c = try_change_ext("/tmp/file.txt", ".log");
+  Result<str, Error> c = try_change_ext("/tmp/file.txt", ".log");
   fit c {
     Result.Ok(p) -> { printf("changed ext: %s\n", p); }
     Result.Err(e) -> { printf("change ext failed: %s\n", e.message); }

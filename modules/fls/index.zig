@@ -180,7 +180,7 @@ pub fn maybeCleanupFlsTempDir(dir: *std.Io.Dir) void {
 }
 
 pub fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
-    return buildIndexFromTextAt(allocator, text, null, .open_document);
+    return buildIndexFromTextAt(allocator, text, null, .open_document, null);
 }
 
 pub const IndexBuildScope = enum {
@@ -188,7 +188,17 @@ pub const IndexBuildScope = enum {
     background,
 };
 
-pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8, scope: IndexBuildScope) !*Index {
+/// `extra_variant_payloads`: enum-variant-payload types (`Impl` ->
+/// `ImplNode`) gathered from files this one directly imports, merged into
+/// the local scan so a `fit`-arm destructuring binding (`.Impl(i) ->`)
+/// resolves its type even when the enum itself is declared in a different
+/// file -- `rebuildIndex` computes this with a plain text scan (see
+/// `token_index.scanImportSpecsFromText`/`scanEnumVariantPayloadsFromText`)
+/// BEFORE calling this, so the real index only needs to be built once;
+/// `null` from every other caller, which is exactly what the local-only
+/// fallback (this file's own `enum` declarations, always scanned
+/// regardless) needs.
+pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8, scope: IndexBuildScope, extra_variant_payloads: ?*const std.StringHashMap([]const u8)) !*Index {
     // Parsing while typing regularly hits syntax errors.
     // Use an arena for the full compiler pipeline and for all index allocations.
     // This avoids per-token frees (which are brittle if anything is corrupted) and
@@ -258,12 +268,38 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
     defer lp.deinit();
     try lp.lex();
 
+    const all_tokens = tp.tokens.items();
+
+    // `fork` is a CONTEXTUAL keyword at the parser level: reserved only in
+    // statement position (`fork some_call();`), so it can also be called as
+    // an ordinary function elsewhere (`let pid = fork();`, or `pub fun
+    // fork() num;` binding its declaration). Mirrors the parser's own
+    // disambiguation (`parse_statement`): whatever immediately follows is a
+    // `(` means this "fork" is being used/declared as a function -- keep it
+    // an identifier so hover/completion shows the FUNCTION's own doc, not the
+    // keyword's; anything else (the spawned call's own callee name) means
+    // this is the fork STATEMENT keyword.
+    const isForkFollowedByParen = struct {
+        fn call(tokens: []const @TypeOf(all_tokens[0]), fork_idx: usize) bool {
+            var j = fork_idx + 1;
+            while (j < tokens.len) : (j += 1) {
+                const nt = tokens[j];
+                if (nt.type == .NewLine or nt.type == .Comment) continue;
+                return nt.type == .Operator and nt.data == .sval and std.mem.eql(u8, nt.data.sval.items, "(");
+            }
+            return false;
+        }
+    }.call;
+
     var tokens_out = ArrayList(TokenLite).init(tmp_alloc);
-    for (tp.tokens.items()) |t| {
+    for (all_tokens, 0..) |t, tok_idx| {
         if (t.type == .NewLine) continue;
 
         const kind: TokenLiteKind = switch (t.type) {
-            .Identifier => .identifier,
+            .Identifier => if (t.data == .sval and std.mem.eql(u8, t.data.sval.items, "fork") and !isForkFollowedByParen(all_tokens, tok_idx))
+                .keyword
+            else
+                .identifier,
             .Keyword => .keyword,
             .Number => .number,
             .String => .string,
@@ -362,7 +398,7 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
     // Always do lexer-driven indexing first (robust while typing), then optionally
     // overlay/replace globals+locals with AST-backed symbols.
     var symbols_token = ArrayList(SymbolLite).init(tmp_alloc);
-    try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items());
+    try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items(), extra_variant_payloads);
 
     if (parse_ok) {
         // Keep member/field symbols from the lexer scan (AST lacks positions for some of these).
@@ -548,7 +584,11 @@ pub fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
         const length: u32 = @intCast(len_i64);
 
         const token_type: u32 = switch (t.kind) {
-            .keyword => if (utils.keyword_is_datatype(t.text)) 7 else 0,
+            // `panic` is lexed as a keyword (it's reserved, so it can't also
+            // be user-declared as a function name) but is used EXCLUSIVELY
+            // with call syntax (`panic("msg")`) -- style it like the
+            // function it reads as, not like a control keyword (`if`/`ret`).
+            .keyword => if (std.mem.eql(u8, t.text, "panic")) 5 else if (utils.keyword_is_datatype(t.text)) 7 else 0,
             .comment => 1,
             .string => 2,
             .number => 3,
@@ -1001,6 +1041,49 @@ test "fls index: let locals infer types" {
     try std.testing.expect(found_s);
 }
 
+test "fls index: top-level and local const are tagged as constant symbols with types" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "pub const MAX = 10;\n" ++
+        "const num MIN = 0;\n" ++
+        "fun main() {\n" ++
+        "  const local_max = MAX;\n" ++
+        "  num counter = local_max;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_max = false;
+    var found_min = false;
+    var found_local_max = false;
+
+    for (idx.symbols) |s| {
+        if (!types.isVariableLike(s.kind)) continue;
+        if (std.mem.eql(u8, s.name, "MAX") and s.container_fn_range == null) {
+            found_max = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+        }
+        if (std.mem.eql(u8, s.name, "MIN") and s.container_fn_range == null) {
+            found_min = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+        }
+        if (std.mem.eql(u8, s.name, "local_max") and s.container_fn_range != null) {
+            found_local_max = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+        }
+    }
+
+    try std.testing.expect(found_max);
+    try std.testing.expect(found_min);
+    try std.testing.expect(found_local_max);
+}
+
 test "fls index: compound array fields are indexed" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -1029,6 +1112,54 @@ test "fls index: compound array fields are indexed" {
     try std.testing.expect(found_data);
 }
 
+test "fls index: compound field with a nested-generic type is not truncated" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // The lexer fuses `Vec<Vec<str>>`'s trailing closer into one `>>`
+    // operator token. Without counting BOTH `>` characters in that one
+    // token, the generic-depth scan never returns to 0, runs off the end
+    // of the field-type region, and silently drops (or corrupts) every
+    // field indexed after the nested one -- this is what "hovering a
+    // field with generic types doesn't show the full generic type"
+    // reduces to. `flags` (after the nested field) must still be indexed
+    // correctly for this regression to actually be caught.
+    const text =
+        "compound Codegen {\n" ++
+        "  Vec<str> names;\n" ++
+        "  Vec<Vec<str>> nested;\n" ++
+        "  Vec<bin> flags;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_names = false;
+    var found_nested = false;
+    var found_flags = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .field) continue;
+        if (std.mem.eql(u8, s.name, "names")) {
+            found_names = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<str>"));
+        } else if (std.mem.eql(u8, s.name, "nested")) {
+            found_nested = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<Vec<str>>"));
+        } else if (std.mem.eql(u8, s.name, "flags")) {
+            found_flags = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<bin>"));
+        }
+    }
+
+    try std.testing.expect(found_names);
+    try std.testing.expect(found_nested);
+    try std.testing.expect(found_flags);
+}
+
 test "fls index: constrained impl keeps self owner type" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -1052,7 +1183,9 @@ test "fls index: constrained impl keeps self owner type" {
         if (s.container_fn_range == null) continue;
         found_self = true;
         try std.testing.expect(s.value_type != null);
-        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<T:num|dec>"));
+        // `self` is always an implicit pointer to the receiver (codegen emits
+        // `<Type>* self`), so the indexed type must carry the pointer suffix.
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<T:num|dec>*"));
         break;
     }
 
@@ -1330,4 +1463,303 @@ test "fls index: method with nested-generic return type has a bounded signature 
         if (s.value_type) |vt| try std.testing.expectEqualStrings("Option<Vec<JsonValue>>", vt);
     }
     try std.testing.expect(found);
+}
+
+test "fls index: function signature/hover includes an array return type" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `T[]` return types are a new language feature (previously only legal
+    // as a parameter type, "expected symbol ';'" as a return type) -- confirm
+    // FLS's AST-backed signature/hover enrichment (which reads the same
+    // parsed `dtype.DataType` the compiler does) formats it the same way it
+    // already does for array-typed params/fields, not just that the compiler
+    // accepts the syntax.
+    const text =
+        "fun make_names() str[] {\n" ++
+        "  str[] out;\n" ++
+        "  ret out;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "make_names")) continue;
+        found = true;
+        try std.testing.expect(s.detail != null);
+        try std.testing.expectEqualStrings("fun make_names() str[]", s.detail.?);
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expectEqualStrings("str[]", s.value_type.?);
+        break;
+    }
+    try std.testing.expect(found);
+}
+
+test "fls index: function-type parameter (fun(T1, T2) R) does not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // First-class function parameters are new (Phase 0 of the self-hosting
+    // rewrite, added for `Vec<T>.sort_by(cmp)`); this just guards against a
+    // crash/hang in FLS's best-effort AST-backed signature enrichment when it
+    // encounters the new `fun(T1, T2) R` parameter-type shape -- the token
+    // stream still contains the literal `fun(num, num) num` text either way,
+    // so a plain "doesn't crash and finds the function" bar is the right one
+    // here rather than asserting an exact `detail` string.
+    const text =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "fun apply(num a, num b, fun(num, num) num cb) num {\n" ++
+        "  ret cb(a, b);\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "apply")) continue;
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
+test "fls index: an async fn with a function-typed parameter does not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Regression coverage for the specific shape that was broken at the
+    // CODEGEN level (async functions taking a function-typed parameter
+    // generated invalid C -- see `fix(codegen): support function-typed
+    // parameters on async functions`). FLS's indexing is token/AST-based
+    // and never runs C emission, so it was never actually at risk from
+    // that bug, but there was no direct test confirming that -- this pins
+    // it down rather than leaving it as an assumption.
+    const text =
+        "imp std.task;\n\n" ++
+        "async fun run_one(fun(num) num f, num arg, WaitGroup* wg) {\n" ++
+        "  num r = f(arg);\n" ++
+        "  wg.done();\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "run_one")) continue;
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
+test "fls index: test blocks (test \"name\" { ... }) do not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `test` blocks are new (Phase 0.5 of the self-hosting rewrite); this just
+    // guards against a crash/hang in FLS's AST-backed indexing/semantic-token
+    // building when it encounters the new `.Test` node type.
+    const text =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "test \"add works\" {\n" ++
+        "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
+test "fls index: fuzz blocks (fuzz \"name\" (data, len) { ... }) index data/len as typed locals" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `fuzz` blocks are new; guards against a crash/hang in FLS's indexing/
+    // semantic-token building when it encounters the new `.Fuzz` node type
+    // (same bar as the `.Test` regression above -- was NOT covered when
+    // `.Fuzz` was added, unlike `.Test`), AND asserts the stronger bar
+    // `.Test` doesn't need: `fuzz`'s two parameters (unlike `test`, which
+    // has none) must be indexed as typed locals inside the body -- fixed
+    // ABI types (`raw*`/`num`), not parsed from any source annotation --
+    // so hovering over `data`/`len` inside the block shows their real
+    // type instead of nothing.
+    const text =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"parses without crashing\" (data, len) {\n" ++
+        "  if len > 0 {\n" ++
+        "    printf(\"nonempty\\n\");\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_data = false;
+    var found_len = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "data")) {
+            found_data = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expectEqualStrings("raw*", s.value_type.?);
+        }
+        if (std.mem.eql(u8, s.name, "len")) {
+            found_len = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expectEqualStrings("num", s.value_type.?);
+        }
+    }
+    try std.testing.expect(found_data);
+    try std.testing.expect(found_len);
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
+test "fls index: known lowercase C typedef names get type-color semantic tokens, not identifier" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `posix_spawn_file_actions_t` is a lowercase (non-PascalCase) C typedef
+    // name registered in `utils.get_c_typedef_alias_datatype_type`. The
+    // `looks_type_like_ident` shape heuristic in `buildSemanticTokens` only
+    // fires for capitalized names, so this exercises the separate
+    // `get_c_typedef_alias_datatype_type`-driven path that must catch it too
+    // -- both as a pointer-suffixed parameter type and as a bare local
+    // declaration's type (`Type name;`, no initializer).
+    const text =
+        "pub fun posix_spawn_file_actions_init(posix_spawn_file_actions_t* actions) num;\n\n" ++
+        "fun main() num {\n" ++
+        "  posix_spawn_file_actions_t fa;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+
+    try std.testing.expect(data.len % 5 == 0);
+
+    var checked_param_type = false;
+    var checked_local_decl_type = false;
+    for (idx.tokens, 0..) |t, i| {
+        if (t.kind != .identifier) continue;
+        if (!std.mem.eql(u8, t.text, "posix_spawn_file_actions_t")) continue;
+        const token_type = data[i * 5 + 3];
+        try std.testing.expectEqual(@as(u32, 7), token_type);
+        if (!checked_param_type) {
+            checked_param_type = true;
+        } else {
+            checked_local_decl_type = true;
+        }
+    }
+    try std.testing.expect(checked_param_type);
+    try std.testing.expect(checked_local_decl_type);
+}
+
+test "fls index: an enum whose last variant has no trailing comma does not leak variant-scanning into the rest of the file" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Regression: the bare-variant terminator branch jumped straight to
+    // `after_name_i` (the `}`) and then `continue`d, so the loop's own
+    // `:(k += 1)` stepped PAST that `}` without ever running it through the
+    // `depth -= 1` check. With no trailing comma on the last variant (the
+    // common style -- see `Unexpected` below), `depth` never dropped back
+    // to 0 for THIS enum's own body, so the scanner kept running past it and
+    // misread the next `identifier(...)` shape found ANYWHERE later in the
+    // file (here, the plain function `error_new_kind`) as one more
+    // data-carrying variant of `ErrorKind`.
+    const text =
+        "enum ErrorKind {\n" ++
+        "  None,\n" ++
+        "  Io,\n" ++
+        "  System\n" ++ // no trailing comma
+        "}\n" ++
+        "compound Error {\n" ++
+        "  ErrorKind kind;\n" ++
+        "  num code;\n" ++
+        "  str message;\n" ++
+        "}\n" ++
+        "fun error_new_kind(ErrorKind kind, num code, str message) Error {\n" ++
+        "  Error e;\n" ++
+        "  e.kind = kind;\n" ++
+        "  e.code = code;\n" ++
+        "  e.message = message;\n" ++
+        "  ret e;\n" ++
+        "}\n" ++
+        "fun error_new(num code, str message) Error {\n" ++
+        "  ret error_new_kind(.System, code, message);\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_fn = false;
+    for (idx.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "error_new_kind")) continue;
+        found_fn = true;
+        try std.testing.expectEqual(types.SymbolKind.function, s.kind);
+        try std.testing.expect(s.container_type == null);
+    }
+    try std.testing.expect(found_fn);
+}
+
+test "fls index: an enum variant with an explicit value and no trailing comma does not leak either" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "enum Status {\n" ++
+        "  Ok = 0,\n" ++
+        "  Failed = 1\n" ++ // no trailing comma
+        "}\n" ++
+        "fun make_status(num code) num {\n" ++
+        "  ret code;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_fn = false;
+    for (idx.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "make_status")) continue;
+        found_fn = true;
+        try std.testing.expectEqual(types.SymbolKind.function, s.kind);
+        try std.testing.expect(s.container_type == null);
+    }
+    try std.testing.expect(found_fn);
 }

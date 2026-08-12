@@ -93,6 +93,39 @@ test "-fmt formats file in-place" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt preserves an inline raw string's backtick spelling verbatim" {
+    const allocator = std.testing.allocator;
+
+    // A regular string's escaping-sensitive content (backslashes, an
+    // embedded quote) would corrupt or fail to re-lex if the formatter
+    // naively requoted it as `"..."` -- it must reproduce the original
+    // backtick source instead.
+    const ugly =
+        "fun main() {\n" ++
+        "  let path=`C:\\Users\\name\\file.txt`;\n" ++
+        "  let msg=`she said \"hi\" and left`;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_raw_inline", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  let path = `C:\\Users\\name\\file.txt`;\n" ++
+        "  let msg = `she said \"hi\" and left`;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt keeps a blank line between functions" {
     const allocator = std.testing.allocator;
 
@@ -863,6 +896,46 @@ test "-fmt preserves explicit decimal literal spelling broadly" {
     try std.testing.expect(std.mem.indexOf(u8, got, "+ 0.0") != null);
 }
 
+test "-fmt preserves hex and binary literal spelling (does not drop the '0' prefix)" {
+    const allocator = std.testing.allocator;
+
+    // Regression: a `0x`/`0b` literal's leading `0` is lexed as its OWN
+    // token first, then popped and merged into the hex/binary token once
+    // the `x`/`b` is seen. The merged token's position was left pointing at
+    // the `x`/`b` (the position captured when THAT call to the lexer's
+    // token reader started, which has no way to know about the earlier,
+    // already-consumed `0`) instead of the original `0`. The formatter
+    // slices the ORIGINAL SOURCE by token position to preserve numeric
+    // literal notation exactly, so this silently corrupted `0x20`/`0b1010`
+    // into `x20`/`b1010` -- invalid identifiers -- every time `-fmt` ran.
+    const ugly =
+        "fun main() num {\n" ++
+        "\tnum a = 0x20;\n" ++
+        "\tnum b = 0xFF;\n" ++
+        "\tnum c = 0b1010;\n" ++
+        "\tret a + b + c;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_hex_bin_spell", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    try expectFileParses(allocator, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "0x20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "0xFF") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "0b1010") != null);
+    // The bug's exact failure mode: the leading '0' silently dropped.
+    try std.testing.expect(std.mem.indexOf(u8, got, "num a = x20") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "num c = b1010") == null);
+}
+
 test "-fmt-all has cycle protection" {
     const allocator = std.testing.allocator;
 
@@ -973,6 +1046,112 @@ test "-fmt nested generics keep closing brackets tight" {
 
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str>>") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str >>") == null);
+}
+
+test "-fmt glues a pointer type in a non-last generic argument, and stays idempotent" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `isPointerTypeStarContext` only recognized a generic
+    // argument's pointer star as the LAST type argument (`Vec<Type*>`,
+    // followed by `>`) -- a pointer type followed by ANOTHER argument
+    // (`Result<Type*, Error>`, star followed by `,`) fell through to the
+    // default spacing and kept a stray space before the star, even
+    // though `in_decl_only_ctx` (a function's return-type position here)
+    // already rules out any ambiguity with real multiplication.
+    const ugly = "pub fun parse(str src) Result<Expr *, Error> {\n  ret ok(src);\n}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_generic_ptr_midlist", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Expr*, Error>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Expr *,") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
+test "-fmt keeps decl_block_depth correct across multiple impl methods" {
+    const allocator = std.testing.allocator;
+
+    // Regression: a closing `}` decremented decl_block_depth/enum_block_depth/
+    // function_body_depth UNCONDITIONALLY (whichever was nonzero), instead of
+    // only the ONE counter that particular brace had actually incremented. A
+    // bare impl method with no explicit return type (`a() { }`) increments
+    // ONLY function_body_depth on open -- but its closing `}` was ALSO
+    // decrementing decl_block_depth, the ENCLOSING impl block's own counter,
+    // one step too many. After the first such method, decl_block_depth hit 0
+    // prematurely, so every method after it lost in_decl_only_ctx for its OWN
+    // signature (visible here as a stray space before the generic pointer
+    // star, and before the closing `>`, in the SECOND method's return type
+    // only -- the first method in an impl never showed this).
+    const ugly =
+        "compound Lexer{num pos;}\n" ++
+        "impl Lexer{a(){}\n" ++
+        "next() Result<Option<num>, Error>{ret .Err(error_none());}}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_impl_multi_method_depth", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Option<num>, Error>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Error >") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
+test "-fmt keeps a pointer-typed enum variant payload glued when not the last payload" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `in_decl_only_ctx` checked `decl_block_depth` (impl/
+    // compound/quirk) but never `enum_block_depth` -- an enum variant's
+    // payload list is JUST as much a declaration-only, type-list context,
+    // but a pointer-typed payload followed by ANOTHER payload
+    // (`Bin(chr, Expr*, Expr*)`, star followed by `,`) fell through to
+    // non-declaration spacing and gained a stray space, even on input that
+    // was ALREADY correctly spaced going in.
+    const ugly = "enum Expr {\n  Neg(Expr*),\n  Bin(chr, Expr*, Expr*),\n}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_enum_payload_ptr_midlist", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Bin(chr, Expr*, Expr*)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Expr *,") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
 }
 
 test "-fmt constrained generic impl keeps colon tight" {
@@ -1121,4 +1300,184 @@ test "-fmt spaces a leading-dot enum shorthand after ret" {
     // `ret .N(n)` keeps its space (it once glued to `ret.N`).
     try std.testing.expect(std.mem.indexOf(u8, got, "ret .N(n);") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "ret.N") == null);
+}
+
+test "-fmt keeps a space between ret/if/fit and a parenthesized sub-expression" {
+    const allocator = std.testing.allocator;
+
+    // `ret (status >> 8) & 255;` -- the leading paren here groups a
+    // SUB-expression (there's more after the `)`), not a call/whole-condition
+    // grouping. The statement-keyword spacing rule once treated any
+    // keyword-then-`(` the same as an identifier-then-`(` (a call), gluing
+    // `ret(status >> 8)` -- which reads as calling `ret` as a function.
+    const ugly =
+        "fun f(num status) num { ret (status >> 8) & 255; }\n" ++
+        "fun g(num status) num { if (status & 127) == 0 { ret 1; } ret 0; }\n";
+
+    const path = try writeTempFnFile(allocator, "fmtretparen", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret (status >> 8) & 255;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret(status") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "if (status & 127) == 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "if(status") == null);
+}
+
+test "-fmt spaces/indents a test block body and separates it from a preceding function" {
+    const allocator = std.testing.allocator;
+
+    // `test` is new (Phase 0.5): its `{` follows a STRING (the test's name),
+    // not the `)`/identifier shapes `fun`/`compound`/etc. use, and its own
+    // closing `}` wasn't recognized as needing a blank-line separator before
+    // a FOLLOWING `test`/`fun` either -- both fixed in
+    // `is_top_level_construct_keyword` and the block-brace detection.
+    const ugly =
+        "fun add(num a,num b) num {\n" ++
+        "ret a+b;\n" ++
+        "}\n" ++
+        "test \"add works\"    {\n" ++
+        "assert add(2,3)==5,\"expected 5\";\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmttestblock", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "fun add(num a, num b) num {\n" ++
+            "  ret a + b;\n" ++
+            "}\n" ++
+            "\n" ++
+            "test \"add works\" {\n" ++
+            "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+            "}\n",
+        got,
+    );
+}
+
+test "-fmt keeps a pointer-dereference assignment correctly spaced inside a test block" {
+    const allocator = std.testing.allocator;
+
+    // Regression test: a `test { ... }` block's body was wrongly tracked as
+    // a DECLARATION context (grouped with compound/quirk/impl for
+    // `pending_decl_block_open`) rather than an executable-statement
+    // context like a `fun`'s body -- since `test "name" {` has no `fun`
+    // keyword and no `(...)` before its `{`, none of the existing
+    // function-body detection matched it either, so `function_body_depth`
+    // never got incremented inside one. That made `in_decl_only_ctx` true
+    // for every statement in a test body, so a plain dereference-assignment
+    // like `*p = f();` was formatted as if `*p` were a pointer-TYPE
+    // annotation (`Type* name`), mangling it into `* p =f();` -- confirmed
+    // directly: the identical statement inside an ordinary `fun` body
+    // formatted correctly.
+    const ugly =
+        "compound Foo {\n" ++
+        "num x;\n" ++
+        "}\n" ++
+        "fun foo_new() Foo {\n" ++
+        "Foo f;\n" ++
+        "f.x=1;\n" ++
+        "ret f;\n" ++
+        "}\n" ++
+        "test \"repro\" {\n" ++
+        "Foo* p=malloc(sizeof(Foo));\n" ++
+        "*p=foo_new();\n" ++
+        "assert p.x==1,\"expected 1\";\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmttestderefassign", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "compound Foo {\n" ++
+            "  num x;\n" ++
+            "}\n" ++
+            "\n" ++
+            "fun foo_new() Foo {\n" ++
+            "  Foo f;\n" ++
+            "  f.x = 1;\n" ++
+            "  ret f;\n" ++
+            "}\n" ++
+            "\n" ++
+            "test \"repro\" {\n" ++
+            "  Foo* p = malloc(sizeof(Foo));\n" ++
+            "  *p = foo_new();\n" ++
+            "  assert p.x == 1, \"expected 1\";\n" ++
+            "}\n",
+        got,
+    );
+
+    // Idempotent: reformatting the already-formatted output must be a no-op.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
+test "-fmt keeps a space between a fuzz block's name string and its parameter list" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `fuzz "name" (data, len) { ... }`'s `(` follows a STRING
+    // token (the description), not an identifier/keyword -- the general
+    // "no space before a call/index `(`" rule didn't distinguish a string
+    // from a real callee name, so it glued them into `"name"(data, len)`,
+    // which reads as if the string were being called. A string is never a
+    // callee/index target anywhere else in the grammar, so this is a
+    // blanket fix (any string immediately before `(`/`[` now keeps its
+    // space), not a fuzz-specific special case.
+    const ugly =
+        "fuzz \"parses without crashing\"(raw*data,num len) {\n" ++
+        "if len>0 {\n" ++
+        "printf(\"nonempty\\n\");\n" ++
+        "}\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmtfuzzblock", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "fuzz \"parses without crashing\" (raw* data, num len) {\n" ++
+            "  if len > 0 {\n" ++
+            "    printf(\"nonempty\\n\");\n" ++
+            "  }\n" ++
+            "}\n",
+        got,
+    );
+
+    // Idempotent: reformatting the already-formatted output must be a no-op.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
 }

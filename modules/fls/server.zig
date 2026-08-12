@@ -133,7 +133,9 @@ const preferDetailedSymbol = positions_mod.preferDetailedSymbol;
 const hasNonBuiltinValueType = positions_mod.hasNonBuiltinValueType;
 const numericBuiltinRank = positions_mod.numericBuiltinRank;
 const findBestDefinition = positions_mod.findBestDefinition;
+const findBestDefinitionOpts = positions_mod.findBestDefinitionOpts;
 const findAnyGlobalDefinition = positions_mod.findAnyGlobalDefinition;
+const findAnyGlobalDefinitionOpts = positions_mod.findAnyGlobalDefinitionOpts;
 const byteIndexForPosition = positions_mod.byteIndexForPosition;
 const normalizePositionToByteColumns = positions_mod.normalizePositionToByteColumns;
 const guessIdentifierPrefix = positions_mod.guessIdentifierPrefix;
@@ -192,6 +194,16 @@ fn fieldNameIndexAfterTypeLite(tokens: []const TokenLite, type_i: usize) ?usize 
 
     if (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '<')) {
         field_name_i = skipGenericArgsLite(tokens, field_name_i);
+        // `skipGenericArgsLite` returns `tokens.len` itself (not an Option) when
+        // the generic arg list never closes before the token stream ends (an
+        // unclosed `Vec<T` at EOF, or a nested `>>` that a lite/incremental
+        // re-tokenize didn't split correctly) -- every other early-out in this
+        // function treats "ran past the end" as "give up", so this must too.
+        // Without this check, that out-of-bounds index propagated all the way
+        // to `idx.tokens[field_name_i]` in the caller and panicked (observed:
+        // a real crash during workspace-indexing at fls startup, which made fls
+        // crash-loop forever since the client unconditionally restarts it).
+        if (field_name_i >= tokens.len) return null;
     }
 
     while (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '[')) {
@@ -228,13 +240,32 @@ fn buildFieldTypeTextFromTokensLite(allocator: Allocator, tokens: []const TokenL
                 continue;
             }
 
-            if (isLitePunct(t, '>')) {
-                generic_depth -= 1;
-                buf.append('>') catch return null;
-                if (generic_depth == 0) {
-                    cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
-                    break;
+            // An N-deep-nested generic's closing brackets (`Vec<Vec<Vec<T>>
+            // >`) lex as ONE run of `>` characters merged into a single
+            // operator token (maximal munch: `>>`, `>>>`, ...), not N
+            // separate `>` tokens -- see `skipGenericArgsLite`'s identical
+            // handling/comment. Closes one nesting level per '>' CHARACTER
+            // in the token (not per token), generalizing to any depth
+            // rather than special-casing exactly two.
+            const close_run: usize = blk: {
+                if (t.kind != .symbol and t.kind != .operator) break :blk 0;
+                if (t.text.len == 0) break :blk 0;
+                for (t.text) |c| {
+                    if (c != '>') break :blk 0;
                 }
+                break :blk t.text.len;
+            };
+            if (close_run > 0) {
+                var c: usize = 0;
+                while (c < close_run) : (c += 1) {
+                    generic_depth -= 1;
+                    buf.append('>') catch return null;
+                    if (generic_depth == 0) {
+                        cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
+                        break;
+                    }
+                }
+                if (generic_depth <= 0) break;
                 continue;
             }
 
@@ -405,6 +436,15 @@ fn freeDiags(allocator: Allocator, diags: []const DiagnosticWithUri) void {
 pub const LspServer = struct {
     allocator: Allocator,
     docs: std.StringHashMap(Doc),
+    // Whether the full-workspace `.fn` file walk has already run (see
+    // `indexWorkspace`). That walk is expensive (reads+indexes every file in
+    // the workspace, not just the ones actually open or imported), so it's
+    // deferred to the first request that genuinely needs whole-workspace
+    // knowledge (`references`, `workspace/symbol`) instead of running
+    // unconditionally on `initialize`, where it used to block the single
+    // message-processing loop -- starving `didOpen`/hover for the file the
+    // user actually opened -- for as long as the workspace takes to scan.
+    workspace_indexed: bool = false,
     io: std.Io,
     stdin: std.Io.File,
     stdout: std.Io.File,
@@ -417,6 +457,11 @@ pub const LspServer = struct {
     debug_enabled: bool = false,
     debug_imports: bool = false,
     debug_definitions: bool = false,
+    /// Diagnostic aid: the LSP method currently being handled in `run()`'s
+    /// dispatch loop, so import-resolution debug logs can show WHAT actually
+    /// triggered them (e.g. is a burst coming from `textDocument/hover` on
+    /// mouse movement, or something less obviously tied to user action).
+    current_request_method: []const u8 = "",
     did_log_stdlib_root_resolution: bool = false,
     /// Recursion guard for the query-time type engine: `guessVariableType` may
     /// re-infer a binding's initializer expression, which can recurse back into
@@ -823,6 +868,7 @@ pub const LspServer = struct {
             const method_val = obj.get("method") orelse null;
             const id_val = obj.get("id") orelse null;
             const method = if (method_val != null and method_val.? == .string) method_val.?.string else "";
+            self.current_request_method = method;
 
             // Never let a single bad request/notification kill the server.
             // VS Code formatting+save can trigger unusual edit shapes; we prefer to log and keep going.
@@ -1064,9 +1110,11 @@ pub const LspServer = struct {
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
 
-        // Best-effort workspace indexing so completion/definition work across imports and other files.
+        // Cross-file completion/definition for imported files is handled
+        // on-demand elsewhere (`ensureDocIndexedFromDisk` off the current
+        // doc's own import graph); the full-workspace walk is deferred to
+        // `indexWorkspace`'s callers (see its own doc comment).
         self.captureRootFromInitialize(params_val) catch {};
-        self.indexWorkspace() catch {};
     }
 
     fn captureRootFromInitialize(self: *LspServer, params_val: ?std.json.Value) !void {
@@ -1114,7 +1162,16 @@ pub const LspServer = struct {
         }
     }
 
+    // Walks every `.fn` file under the workspace root and indexes it, so
+    // whole-workspace features (`references`, `workspace/symbol`) can see
+    // files the currently open document doesn't itself import. Expensive
+    // (one read+lex+parse per file), so callers must only invoke this when
+    // they actually need whole-workspace results, and it only ever does the
+    // walk once per server lifetime.
     fn indexWorkspace(self: *LspServer) !void {
+        if (self.workspace_indexed) return;
+        self.workspace_indexed = true;
+
         const root_path = self.root_path orelse return;
         var dir = try std.Io.Dir.openDirAbsolute(globalIo(), root_path, .{ .iterate = true });
         defer dir.close(globalIo());
@@ -1423,6 +1480,16 @@ pub const LspServer = struct {
                         "M:N scheduler pool. The target must be an `async fun`; results\n" ++
                         "flow back over channels. `main` drains all forks before exiting.\n",
                 );
+            } else if (std.mem.eql(u8, tok.text, "panic")) {
+                try buf.appendSlice(
+                    "```fun\n" ++
+                        "panic(\"message\")\n" ++
+                        "```\n" ++
+                        "Prints the message and aborts. Unifies with WHATEVER type is\n" ++
+                        "expected at its use site (like `nil` does for pointers), so it\n" ++
+                        "works as a `ret` value, a `let` initializer, a fit-arm body, or\n" ++
+                        "a call argument regardless of that position's real type.\n",
+                );
             } else {
                 try self.sendResponseJson(id_val, "null");
                 return;
@@ -1508,6 +1575,7 @@ pub const LspServer = struct {
                                 if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
                             }
                         }
+                        try self.appendSeeAlsoForSymbol(&buf, uri, h.sym);
                         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
                         const json = try jsonStringifyAlloc(self.allocator, hover);
                         defer self.allocator.free(json);
@@ -1621,8 +1689,17 @@ pub const LspServer = struct {
         }
 
         // Prefer definition in current doc; else search direct imports.
-        var def_local_opt: ?SymbolLite = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
-        const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
+        // Exclude field/property/method matches ONLY when `tok` isn't itself
+        // preceded by a `.` -- a truly bare, unqualified name (`len(...)`)
+        // can never legitimately resolve to one of those (see
+        // `types.requiresReceiver`), but a QUALIFIED reference (`p.translate`)
+        // reaches this fallback only when its dedicated member-chain
+        // resolution above already failed, and historically still found the
+        // right symbol here as a last resort -- excluding receiver-kinds in
+        // that case would turn a working (if imprecise) fallback into nothing.
+        const tok_preceded_by_dot = if (findTokenIndexAt(idx.tokens, pos)) |ti| (ti > 0 and isDotToken(idx.tokens[ti - 1])) else false;
+        var def_local_opt: ?SymbolLite = findBestDefinitionOpts(idx.symbols, tok.text, pos, !tok_preceded_by_dot) orelse null;
+        const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImportsOpts(uri, tok.text, !tok_preceded_by_dot) else null;
         if (def_local_opt == null and def_import == null) {
             if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
         }
@@ -1642,11 +1719,12 @@ pub const LspServer = struct {
 
         const pickBestLocal = struct {
             fn call(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
+                // Pass 1: the positionally-correct candidate -- the most
+                // recent matching declaration at or before `at`, ignoring
+                // type-based preferences entirely.
                 var best: ?SymbolLite = null;
-                var best_non_builtin: ?SymbolLite = null;
-                var best_rank: u8 = 0;
                 for (symbols) |s| {
-                    if (s.kind != .variable) continue;
+                    if (!types.isVariableLike(s.kind)) continue;
                     if (!std.mem.eql(u8, s.name, name)) continue;
                     if (s.container_fn_range) |cr| {
                         if (!posInRange(at, cr)) continue;
@@ -1660,6 +1738,30 @@ pub const LspServer = struct {
                     {
                         best = s;
                     }
+                }
+                const bl = best orelse return null;
+
+                // Pass 2: prefer a more-resolved type (numeric widening, or a
+                // non-builtin type over a placeholder) but ONLY among
+                // candidates at `bl`'s position or later -- these heuristics
+                // exist to pick between two RECORDS OF THE SAME declaration
+                // (e.g. a placeholder vs. its later-resolved type), not to
+                // reach backward past `bl` into an already-exited block's
+                // shadowed sibling (fls only tracks function-wide scope, not
+                // real block scope, so an earlier same-named local is always
+                // still "in range" here even when it's really out of scope).
+                var best_rank: u8 = if (bl.value_type) |vt| numericBuiltinRank(vt) else 0;
+                var best_non_builtin: ?SymbolLite = null;
+                for (symbols) |s| {
+                    if (!types.isVariableLike(s.kind)) continue;
+                    if (!std.mem.eql(u8, s.name, name)) continue;
+                    if (s.container_fn_range) |cr| {
+                        if (!posInRange(at, cr)) continue;
+                    } else {
+                        continue;
+                    }
+                    if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+                    if (rangeStartGreater(bl.selection_range, s.selection_range)) continue;
 
                     if (s.value_type) |vt| {
                         const rank = numericBuiltinRank(vt);
@@ -1682,20 +1784,27 @@ pub const LspServer = struct {
         }.call;
 
         if (def_local_opt) |d| {
-            if (d.kind == .variable) {
+            if (types.isVariableLike(d.kind)) {
                 if (pickBestLocal(idx.symbols, tok.text, pos)) |picked| {
                     def_local_opt = picked;
                 }
 
+                // Same "prefer a more-resolved type" heuristic as
+                // `pickBestLocal`'s pass 2, and the same fix: never let it
+                // reach backward past the CURRENT (already position-correct)
+                // `def_local_opt` into an earlier, shadowed sibling.
+                const bl = def_local_opt.?;
                 var best_non_builtin: ?SymbolLite = null;
                 for (idx.symbols) |cand| {
-                    if (cand.kind != .variable) continue;
+                    if (!types.isVariableLike(cand.kind)) continue;
                     if (!std.mem.eql(u8, cand.name, tok.text)) continue;
                     if (cand.container_fn_range) |cr| {
                         if (!posInRange(pos, cr)) continue;
                     } else {
                         continue;
                     }
+                    if (!rangeStartLessOrEqual(cand.selection_range, pos)) continue;
+                    if (rangeStartGreater(bl.selection_range, cand.selection_range)) continue;
                     if (!hasNonBuiltinValueType(cand)) continue;
                     if (best_non_builtin == null or preferDetailedSymbol(cand, best_non_builtin.?)) {
                         best_non_builtin = cand;
@@ -1707,7 +1816,7 @@ pub const LspServer = struct {
             }
         }
 
-        if (self.debug_definitions and def_local_opt != null and def_local_opt.?.kind == .variable) {
+        if (self.debug_definitions and def_local_opt != null and types.isVariableLike(def_local_opt.?.kind)) {
             const d = def_local_opt.?;
             self.dbg(true, "defs", "hover pick name={s} detail={s} value_type={s} decl=({d},{d}) sel=({d},{d})", .{
                 d.name,
@@ -1721,7 +1830,7 @@ pub const LspServer = struct {
         }
 
         if (def_local_opt) |d| {
-            const let_infer_detail = d.kind == .variable and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
+            const let_infer_detail = types.isVariableLike(d.kind) and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
                 (d.detail != null and std.mem.startsWith(u8, d.detail.?, "__let_infer__")));
             if (d.detail) |det| {
                 if (let_infer_detail) {
@@ -1745,13 +1854,14 @@ pub const LspServer = struct {
                     }
                 }
             }
-            if (d.kind == .variable and (d.detail == null or let_infer_detail)) {
+            if (types.isVariableLike(d.kind) and (d.detail == null or let_infer_detail)) {
                 // `guessVariableType` now also resolves `fit`-arm payload bindings
                 // (incl. imported generic enums), so a single call covers all cases.
-                const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
+                const vt = d.value_type orelse self.guessVariableTypeConcrete(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
-                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
+                        try buf.print("```fun\n{s}{s} {s}\n```\n", .{ const_prefix, vts, tok.text });
                     }
                 } else {
                     try buf.print("_{s}_\n", .{@tagName(d.kind)});
@@ -1786,7 +1896,20 @@ pub const LspServer = struct {
                 // Only show a bare kind label when no signature was rendered above.
                 try buf.print("_{s}_\n", .{@tagName(d.kind)});
             }
-            _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+            // Skip doc-comment attribution when this symbol's own decl
+            // starts on the SAME line as its enclosing function's own
+            // body-open brace -- a parameter (or a local sharing that
+            // line, however unusual) has no comment of its own there;
+            // whatever sits above that line belongs to the ENCLOSING
+            // function, not this inner symbol. Without this, a
+            // single-line signature (`fun add(num a, num b) num {`,
+            // the common case) put the parameter's OWN `decl_range` on
+            // the exact same line as the function's, so hovering the
+            // parameter leaked the function's own doc comment.
+            const same_line_as_container = if (d.container_fn_range) |cr| d.decl_range.start.line == cr.start.line else false;
+            if (!same_line_as_container) {
+                _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+            }
             try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else if (def_import) |hit| {
             const d = hit.sym;
@@ -1808,10 +1931,11 @@ pub const LspServer = struct {
                 }
             }
             if (!printed_detail) {
-                if (d.kind == .variable) {
-                    const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
+                if (types.isVariableLike(d.kind)) {
+                    const vt = d.value_type orelse self.guessVariableTypeConcrete(idx, uri, tok.text, pos);
                     if (vt) |vts| {
-                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
+                        try buf.print("```fun\n{s}{s} {s}\n```\n", .{ const_prefix, vts, tok.text });
                     } else {
                         try buf.print("_{s}_\n", .{@tagName(d.kind)});
                     }
@@ -1847,7 +1971,7 @@ pub const LspServer = struct {
             }
             try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else {
-            if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
+            if (self.guessVariableTypeConcrete(idx, uri, tok.text, pos)) |vt| {
                 try buf.print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
             }
         }
@@ -3885,8 +4009,11 @@ pub const LspServer = struct {
             return;
         }
 
-        // Prefer definition in the current document.
-        if (findBestDefinition(idx.symbols, tok.text, pos)) |def| {
+        // Prefer definition in the current document. Same "only exclude
+        // receiver-kinds for a truly bare, unqualified name" reasoning as
+        // the hover dispatch above (see the comment there).
+        const def_tok_preceded_by_dot = tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]);
+        if (findBestDefinitionOpts(idx.symbols, tok.text, pos, !def_tok_preceded_by_dot)) |def| {
             const locs = [_]Location{.{ .uri = uri, .range = def.selection_range }};
             const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
@@ -3895,7 +4022,7 @@ pub const LspServer = struct {
         }
 
         // Fall back to global definition in direct imports.
-        if (self.findAnyGlobalDefinitionInDirectImports(uri, tok.text)) |hit| {
+        if (self.findAnyGlobalDefinitionInDirectImportsOpts(uri, tok.text, !def_tok_preceded_by_dot)) |hit| {
             const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
             const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
@@ -4018,9 +4145,9 @@ pub const LspServer = struct {
                     if (std.fs.path.isAbsolute(readme_path_fast)) {
                         var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path_fast, .{}) catch return false;
                         defer f.close(globalIo());
-                        break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                        break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                     }
-                    break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path_fast, self.allocator, .limited(128 * 1024)) catch return false;
+                    break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path_fast, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
                 };
                 defer self.allocator.free(readme_text);
 
@@ -4353,9 +4480,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -4375,9 +4502,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(module_file)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
@@ -4639,7 +4766,7 @@ pub const LspServer = struct {
             .kind = kind,
             .detail = blk: {
                 if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                if (s.kind == .variable) {
+                if (types.isVariableLike(s.kind)) {
                     if (s.value_type) |vt| {
                         if (!isLetInferTypeName(vt)) break :blk try self.allocator.dupe(u8, vt);
                     }
@@ -4790,10 +4917,63 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// If the candidate return-type token at `rt_i` is immediately preceded
+    /// by a `)` that closes a `fun(...)` parameter-type-list, reconstructs
+    /// the whole `fun(T1, T2) RetType` signature text (arena-owned, lives
+    /// with `idx`); otherwise returns null (the ordinary, non-function-typed
+    /// case). Used by `guessVariableType`'s best-effort token scanner, whose
+    /// simple `Type name` pairing otherwise mistakes a function-type
+    /// parameter's OWN return type for its whole declared type.
+    fn reconstructFnTypeSignatureIfPresent(self: *LspServer, idx: *const Index, rt_i: usize) ?[]const u8 {
+        _ = self;
+        if (rt_i == 0) return null;
+        const closing = idx.tokens[rt_i - 1];
+        if (!((closing.kind == .symbol or closing.kind == .operator) and std.mem.eql(u8, closing.text, ")"))) return null;
+
+        var depth: i64 = 1;
+        var k: isize = @as(isize, @intCast(rt_i)) - 2;
+        var open_i: ?usize = null;
+        while (k >= 0) : (k -= 1) {
+            const tk = idx.tokens[@intCast(k)];
+            if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, ")")) depth += 1;
+            if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, "(")) {
+                depth -= 1;
+                if (depth == 0) {
+                    open_i = @intCast(k);
+                    break;
+                }
+            }
+        }
+        const lp_i = open_i orelse return null;
+        if (lp_i == 0) return null;
+        const fun_tok = idx.tokens[lp_i - 1];
+        if (!(fun_tok.kind == .keyword and std.mem.eql(u8, fun_tok.text, "fun"))) return null;
+
+        const arena = @constCast(&idx.arena).allocator();
+        var buf = ArrayList(u8).init(arena);
+        buf.appendSlice("fun(") catch return null;
+        var wrote_arg = false;
+        var fk = lp_i + 1;
+        while (fk < rt_i - 1) : (fk += 1) {
+            const ftk = idx.tokens[fk];
+            if (ftk.kind == .comment) continue;
+            if ((ftk.kind == .symbol or ftk.kind == .operator) and std.mem.eql(u8, ftk.text, ",")) {
+                buf.appendSlice(", ") catch return null;
+                continue;
+            }
+            if (wrote_arg) buf.append(' ') catch return null;
+            buf.appendSlice(ftk.text) catch return null;
+            wrote_arg = true;
+        }
+        buf.appendSlice(") ") catch return null;
+        buf.appendSlice(idx.tokens[rt_i].text) catch return null;
+        return buf.toOwnedSlice() catch null;
+    }
+
     fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
-            if (d.kind == .variable) {
+            if (types.isVariableLike(d.kind)) {
                 if (d.value_type) |vt| {
                     if (!isLetInferTypeName(vt)) return vt;
                 }
@@ -4891,9 +5071,101 @@ pub const LspServer = struct {
 
             // Ensure the name token is also before position.
             if (!rangeStartLessOrEqual(t_name.range, at)) continue;
-            best = if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text;
+
+            // A function-TYPE parameter (`fun(T1, T2) RetType name`) has its
+            // OWN return-type token immediately before `name` too -- e.g.
+            // `run_at` in `fun(num) bin run_at` looks EXACTLY like an
+            // ordinary `bin run_at` declaration to this scanner, which only
+            // understands simple `Type name` pairs, and previously matched
+            // just the bare return type, losing the callable shape entirely.
+            // Detect it by walking back from a `)`-preceded candidate to its
+            // matching `(` and checking for a `fun` keyword just before that.
+            best = self.reconstructFnTypeSignatureIfPresent(idx, i) orelse
+                (if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text);
         }
         return best;
+    }
+
+    /// Like `guessVariableType`, but for HOVER DISPLAY specifically: keeps a
+    /// matched declaration's own concrete generic-arg suffix (`Vec<Vec<num>>`)
+    /// instead of collapsing it to the bare base name (`Vec`). A separate
+    /// function rather than a parameter on `guessVariableType` itself --
+    /// that one is called from 15+ sites that rely on its EXISTING "always
+    /// returns the bare base name" contract for member/method lookups
+    /// (matching against `impl TypeName { ... }`, indexed by base name, not
+    /// a concrete instantiation string); changing its return value broadly
+    /// would break those. This duplicates the same fallback token-scan
+    /// (`guessVariableType`'s own comment explains why it deliberately
+    /// returns the base name there) but reconstructs the full type text via
+    /// `buildFieldTypeTextFromTokensLite` for its own "best" result instead.
+    /// Falls back to `guessVariableType` itself when no match is found here
+    /// (e.g. the symbol-table path above it, which already carries a full,
+    /// correctly-substituted `value_type` for non-field/property kinds).
+    fn guessVariableTypeConcrete(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
+        var best: ?[]const u8 = null;
+
+        var i: usize = 0;
+        while (i + 1 < idx.tokens.len) : (i += 1) {
+            const t_type = idx.tokens[i];
+            if (!rangeStartLessOrEqual(t_type.range, at)) break;
+
+            const is_type_tok = (t_type.kind == .keyword and utils.keyword_is_datatype(t_type.text)) or t_type.kind == .identifier;
+            if (!is_type_tok) continue;
+
+            if (i > 0 and idx.tokens[i - 1].kind == .keyword) {
+                const kw = idx.tokens[i - 1].text;
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
+                    continue;
+                }
+            }
+
+            var name_i: usize = i + 1;
+            while (name_i < idx.tokens.len) {
+                const tt = idx.tokens[name_i];
+                if (tt.kind == .comment) {
+                    name_i += 1;
+                    continue;
+                }
+                if ((tt.kind == .symbol or tt.kind == .operator) and std.mem.eql(u8, tt.text, "<")) {
+                    name_i = skipGenericArgsLite(idx.tokens, name_i);
+                    continue;
+                }
+                if ((tt.kind == .operator or tt.kind == .symbol) and (std.mem.eql(u8, tt.text, "*") or std.mem.eql(u8, tt.text, "&"))) {
+                    name_i += 1;
+                    continue;
+                }
+                break;
+            }
+            if (name_i >= idx.tokens.len) continue;
+
+            // A generic arg (`Vec` inside `Vec<Vec<num>>`) is itself a bare
+            // identifier that would otherwise look EXACTLY like its own
+            // standalone `Type name;` declaration candidate to this scanner
+            // on a LATER loop iteration, once `i` naturally advances into
+            // it -- and `skipGenericArgsLite`, entered fresh at that inner
+            // position (depth 0, expecting to close only ITS OWN one
+            // level), over-closes on the shared `>>` token and can land
+            // `name_i` on the SAME real field name by coincidence. Since
+            // `best` gets overwritten on every match (last one wins), that
+            // spurious inner "declaration" then clobbers the correct outer
+            // one with just its own (incomplete) nested slice (`Vec<num>`
+            // instead of the full `Vec<Vec<num>>`). Skipping straight past
+            // the whole consumed span whenever generic args were present
+            // (`name_i` jumped ahead of `i + 1`) keeps every inner
+            // identifier from ever being independently reconsidered.
+            defer if (name_i > i + 1) {
+                i = name_i - 1;
+            };
+
+            const t_name = idx.tokens[name_i];
+            if (t_name.kind != .identifier) continue;
+            if (!std.mem.eql(u8, t_name.text, var_name)) continue;
+            if (!rangeStartLessOrEqual(t_name.range, at)) continue;
+
+            best = self.reconstructFnTypeSignatureIfPresent(idx, i) orelse
+                (if (t_type.kind == .identifier) buildFieldTypeTextFromTokensLite(self.allocator, idx.tokens, i) orelse t_type.text else t_type.text);
+        }
+        return best orelse self.guessVariableType(idx, preferred_uri, var_name, at);
     }
 
     fn parseTypeNameFromParamLabel(self: *LspServer, label: []const u8) ?[]const u8 {
@@ -4959,7 +5231,145 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// Whether `t` looks like the anchor token for a `.Variant` dot-shorthand
+    /// (either a bare `.` symbol, or a single identifier token whose text
+    /// starts with `.` -- some tokenizer states emit `.Variant` as one token).
+    fn isDotShorthandAnchorToken(t: TokenLite) bool {
+        if (isDotToken(t)) return true;
+        return t.kind == .identifier and t.text.len > 1 and t.text[0] == '.';
+    }
+
+    /// Resolves the expected enum type for a `.Variant` dot-shorthand whose
+    /// anchor token is at or near `tok_i`. Callers locate `tok_i` via generic
+    /// token-position helpers (`findTokenIndexAt` / `findLastTokenIndexBeforeOrAt`),
+    /// which resolve a cursor sitting exactly on a token boundary to the NEXT
+    /// token (ranges are start-inclusive/end-exclusive) -- e.g. for `takes(.)`
+    /// with the cursor between `.` and `)`, those helpers return the `)` token,
+    /// not the `.` the user just typed after. When the token at `tok_i` isn't a
+    /// plausible dot-shorthand anchor, retry against the PRECEDING token before
+    /// giving up, since that's almost always the actual anchor in that boundary
+    /// case. Without this retry, expected-type resolution silently fails and
+    /// completion falls back to dumping every enum in scope (see the "Fallback:
+    /// offer members of all enums in scope" branch in handleCompletion).
     fn guessEnumTypeForDotShorthand(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
+        if (self.guessEnumTypeForDotShorthandAt(uri, idx, tok_i)) |r| return r;
+        if (tok_i > 0 and !isDotShorthandAnchorToken(idx.tokens[tok_i]) and isDotShorthandAnchorToken(idx.tokens[tok_i - 1])) {
+            return self.guessEnumTypeForDotShorthandAt(uri, idx, tok_i - 1);
+        }
+        return null;
+    }
+
+    /// Resolves the enum a NESTED dot-shorthand argument belongs to, when it sits
+    /// directly inside an enclosing enum-variant constructor CALL's argument list
+    /// (`.Ok(.None)`'s `.None`, or the qualified `Result.Ok(.None)`). Returns null
+    /// when `dot_i` isn't inside such a call (including: not inside any call at
+    /// all, or inside a plain named function call -- that's case 1's job).
+    ///
+    /// Walks back to find the enclosing `(` and this argument's position, resolves
+    /// the callee's enum + variant, looks up that variant's payload type at this
+    /// position, and -- when the payload is a bare type parameter of the enum
+    /// (`Ok(T)` of `Result<T, E>`) -- unifies it with the enclosing FUNCTION's
+    /// declared return type's own generic args, when this construction is
+    /// directly `ret`'d as (or within) that return expression. That's the
+    /// concrete, common real case (`ret .Ok(.None);` inside a function returning
+    /// `Result<Option<Token>, Error>`); other contexts (a `let`-declared type,
+    /// an assignment) aren't unified and just fall through to null.
+    fn resolveNestedDotShorthandConstructorArgEnum(self: *LspServer, idx: *const Index, uri: []const u8, dot_i: usize) ?[]const u8 {
+        const toks = idx.tokens;
+
+        var depth: i64 = 0;
+        var arg_index: usize = 0;
+        var open_i: ?usize = null;
+        var k: isize = @as(isize, @intCast(dot_i)) - 1;
+        while (k >= 0) : (k -= 1) {
+            const t = toks[@intCast(k)];
+            if (isCloseParen(t)) {
+                depth += 1;
+                continue;
+            }
+            if (isOpenParen(t)) {
+                if (depth == 0) {
+                    open_i = @intCast(k);
+                    break;
+                }
+                depth -= 1;
+                continue;
+            }
+            if (depth == 0 and isCommaToken(t)) arg_index += 1;
+            if (depth == 0 and (t.kind == .symbol or t.kind == .operator)) {
+                const s = t.text;
+                if (std.mem.eql(u8, s, ";") or std.mem.eql(u8, s, "{") or std.mem.eql(u8, s, "}")) return null;
+            }
+        }
+        const oi = open_i orelse return null;
+
+        const callee_i = prevNonTrivialTokenLite(toks, oi) orelse return null;
+        if (toks[callee_i].kind != .identifier) return null;
+
+        var variant_name = toks[callee_i].text;
+        var enum_name: []const u8 = undefined;
+        if (variant_name.len > 1 and variant_name[0] == '.') {
+            // Combined `.Variant` token.
+            variant_name = variant_name[1..];
+            enum_name = self.guessEnumTypeForDotShorthand(uri, idx, callee_i) orelse return null;
+        } else {
+            const before_callee = prevNonTrivialTokenLite(toks, callee_i) orelse return null;
+            if (!((toks[before_callee].kind == .operator or toks[before_callee].kind == .symbol) and std.mem.eql(u8, toks[before_callee].text, "."))) {
+                return null; // plain named function call, not an enum-variant constructor.
+            }
+            const enum_tok = prevNonTrivialTokenLite(toks, before_callee);
+            if (enum_tok != null and toks[enum_tok.?].kind == .identifier) {
+                enum_name = toks[enum_tok.?].text; // qualified `Result.Ok(...)`.
+            } else {
+                enum_name = self.guessEnumTypeForDotShorthand(uri, idx, callee_i) orelse return null;
+            }
+        }
+
+        const enum_base = baseTypeNameForLookup(enum_name);
+
+        {
+            var import_uris = ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+            for (import_uris.items) |iu| self.ensureDocIndexedFromDisk(iu) catch {};
+        }
+
+        const ehit = self.findEnumDefinitionAnyDoc(uri, enum_base) orelse return null;
+        const edoc = self.docs.get(ehit.uri) orelse return null;
+        const eidx = edoc.index orelse return null;
+        const payload_type = enumVariantPayloadFromDoc(self.allocator, eidx, enum_base, variant_name, arg_index) orelse return null;
+        defer self.allocator.free(payload_type);
+
+        const eparams = enumTypeParamsFromDoc(eidx, enum_base);
+        var pidx: ?usize = null;
+        for (eparams, 0..) |p, i| {
+            if (std.mem.eql(u8, p, payload_type)) {
+                pidx = i;
+                break;
+            }
+        }
+        if (pidx == null) {
+            if (self.isEnumTypeName(uri, payload_type)) return payload_type;
+            return null;
+        }
+
+        if (self.enclosingFunctionReturnTypeName(idx, oi)) |enc_base| {
+            if (std.mem.eql(u8, enc_base, enum_base)) {
+                if (self.enclosingFunctionReturnTypeGenericArgs(idx, oi)) |args| {
+                    if (pidx.? < args.len) {
+                        const arg_base = baseTypeNameForLookup(args[pidx.?]);
+                        if (self.isEnumTypeName(uri, arg_base)) return arg_base;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn guessEnumTypeForDotShorthandAt(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
         var dot_i_opt: ?usize = null;
         if (idx.tokens[tok_i].kind == .identifier) {
             // Some tokenizers may emit `.Variant` as a single identifier token (text starts with '.')
@@ -4980,6 +5390,18 @@ pub const LspServer = struct {
         const dot_i = dot_i_opt.?;
         const dot_pos = idx.tokens[dot_i].range.start;
 
+        // 0) Nested-argument context: this dot-shorthand sits inside the argument
+        // list of an ENCLOSING enum-variant CONSTRUCTOR call (`.Ok(.None)`,
+        // `Result.Ok(.None)`) -- as opposed to a plain named function call
+        // (handled by case 1 below, via signature help) or a `fit`-arm PATTERN
+        // (handled by resolveFitBindingType/resolveFitVariantConcreteSig, which
+        // require a following `->`). Without this, hovering the nested shorthand
+        // argument found no enum at all (case 1's signature lookup fails since
+        // the outer callee isn't a real function once it's an enum-shorthand
+        // constructor), or case 4 below could misattribute it to the enclosing
+        // FUNCTION's own return type by walking past the unmatched `(` blindly.
+        if (self.resolveNestedDotShorthandConstructorArgEnum(idx, uri, dot_i)) |r| return r;
+
         // 1) Function-call context: use signature help to infer expected enum type.
         if (self.guessCallSignatureAt(uri, idx, dot_pos)) |sig| {
             const parsed = self.parseParamsFromSignatureLabel(sig.label) catch null;
@@ -4996,6 +5418,41 @@ pub const LspServer = struct {
                     const p = params.items[@intCast(active)];
                     if (self.parseTypeNameFromParamLabel(p.label)) |tname| {
                         if (self.findEnumDefinitionAnyDoc(uri, tname)) |hit| return hit.sym.name;
+                        // `tname` isn't a real type -- it's the callee's OWN unresolved
+                        // generic type param (e.g. `ok<T>(T value) Result<T>`, `tname`
+                        // = "T"). If this call is the direct `ret` expression of a
+                        // function whose declared return type is the SAME generic
+                        // container the callee returns (`Result<Option<Token>>` for a
+                        // callee returning `Result<T>`), unify T with the enclosing
+                        // return type's own generic argument instead of giving up --
+                        // without this, `ret ok(.Some(x));` never resolved `.Some`'s
+                        // enum (Option) at all, since "T" isn't findable as an enum.
+                        if (returnTypeNameFromSignatureLabel(sig.label)) |callee_ret_base| {
+                            var r: isize = @as(isize, @intCast(dot_i)) - 1;
+                            var in_ret = false;
+                            while (r >= 0) : (r -= 1) {
+                                const t = idx.tokens[@intCast(r)];
+                                if (t.kind == .comment) continue;
+                                if ((t.kind == .symbol or t.kind == .operator) and
+                                    (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}"))) break;
+                                if (t.kind == .keyword and std.mem.eql(u8, t.text, "ret")) {
+                                    in_ret = true;
+                                    break;
+                                }
+                            }
+                            if (in_ret) {
+                                if (self.enclosingFunctionReturnTypeName(idx, dot_i)) |enc_base| {
+                                    if (std.mem.eql(u8, enc_base, callee_ret_base)) {
+                                        if (self.enclosingFunctionReturnTypeGenericArgs(idx, dot_i)) |args| {
+                                            if (args.len != 0) {
+                                                const arg_base = baseTypeNameForLookup(args[0]);
+                                                if (self.isEnumTypeName(uri, arg_base)) return arg_base;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -5013,6 +5470,24 @@ pub const LspServer = struct {
                         const lt = idx.tokens[@intCast(j)];
                         if (lt.kind == .comment) continue;
                         if (lt.kind == .identifier) {
+                            // `recv.field = .Variant`: `lt` is a field name, not a bare
+                            // variable -- resolve the receiver's type and look up the
+                            // field's declared type instead of treating `lt.text` as a
+                            // variable name (which would silently fail to resolve, since
+                            // no variable named e.g. `type` exists for `t.type = .Number`).
+                            if (j >= 2 and isDotToken(idx.tokens[@intCast(j - 1)])) {
+                                if (self.resolveTypeOfExprEndingAtToken(idx, uri, dot_pos, @intCast(j - 2))) |recv_type| {
+                                    const hit = self.findMemberByContainerFresh(uri, recv_type, lt.text, .field) orelse
+                                        self.findMemberByContainerFresh(uri, recv_type, lt.text, .property);
+                                    if (hit) |h| {
+                                        if (h.sym.value_type) |vt| {
+                                            const base = baseTypeNameForLookup(vt);
+                                            if (self.isEnumTypeName(uri, base)) return base;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
                             if (std.mem.eql(u8, t.text, "=")) {
                                 if (self.inferDeclTypeBeforeName(idx, @intCast(j))) |tn| {
                                     if (self.isEnumTypeName(uri, tn)) return tn;
@@ -5021,6 +5496,31 @@ pub const LspServer = struct {
                             if (self.isEnumTypeName(uri, lt.text)) return lt.text;
                             if (self.guessVariableType(idx, uri, lt.text, dot_pos)) |vt| {
                                 if (self.isEnumTypeName(uri, vt)) return vt;
+                            }
+                            // `lt.text` isn't a plain variable or enum name -- try
+                            // treating it as a COMPOUND-INIT FIELD name instead
+                            // (`User{name = "Omar", gender = .Male}` / `.{name =
+                            // "Omar", gender = .Male}`, `gender`'s own declared
+                            // type is `Gender`). Reuses `detectCompoundInitTypeAtCursor`
+                            // (already solves "what compound type does this `{...}`/
+                            // `.{...}` belong to", including the bare `.{...}` case
+                            // via its own declared-variable inference) rather than
+                            // re-deriving that resolution here. Without this, a
+                            // bare enum-variant shorthand as a compound-init field's
+                            // OWN value never resolved an expected type at all, so
+                            // completion fell back to dumping every enum in scope.
+                            if (self.docs.get(uri)) |doc| {
+                                if (self.detectCompoundInitTypeAtCursor(uri, idx, doc.text, dot_pos)) |container_type| {
+                                    const base = baseTypeNameForLookup(container_type);
+                                    const hit = self.findMemberByContainerFresh(uri, base, lt.text, .field) orelse
+                                        self.findMemberByContainerFresh(uri, base, lt.text, .property);
+                                    if (hit) |h| {
+                                        if (h.sym.value_type) |vt2| {
+                                            const base2 = baseTypeNameForLookup(vt2);
+                                            if (self.isEnumTypeName(uri, base2)) return base2;
+                                        }
+                                    }
+                                }
                             }
                             break;
                         }
@@ -5100,12 +5600,27 @@ pub const LspServer = struct {
         // Confirm a `ret` precedes the dot in the same statement, then read the
         // enclosing function's return-type base name.
         var r: isize = @as(isize, @intCast(dot_i)) - 1;
+        var ret_ctx_pdepth: i64 = 0;
         while (r >= 0) : (r -= 1) {
             const t = idx.tokens[@intCast(r)];
             if (t.kind == .comment) continue;
             // Stop at a statement/block boundary that means we're not in a `ret` expr.
             if ((t.kind == .symbol or t.kind == .operator) and
                 (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}"))) break;
+            if (isCloseParen(t)) {
+                ret_ctx_pdepth += 1;
+                continue;
+            }
+            if (isOpenParen(t)) {
+                // An unmatched `(` means the dot is an ARGUMENT of some call, not
+                // the direct `ret`'d expression itself -- the enclosing function's
+                // own return type doesn't govern it (case 0 above handles the
+                // enum-constructor-argument case; a plain function call is case 1's
+                // job). Don't misattribute it here.
+                if (ret_ctx_pdepth == 0) break;
+                ret_ctx_pdepth -= 1;
+                continue;
+            }
             if (t.kind == .keyword and std.mem.eql(u8, t.text, "ret")) {
                 const rt_opt = self.enclosingFunctionReturnTypeName(idx, dot_i);
                 if (self.debug_definitions) self.dbg(true, "defs", "shorthand ret-ctx: enclosing_return={s} is_enum={}", .{ rt_opt orelse "<none>", if (rt_opt) |rt| self.isEnumTypeName(uri, rt) else false });
@@ -5125,8 +5640,14 @@ pub const LspServer = struct {
     /// function-header `) RetType {`; the first such header found is the enclosing
     /// function (e.g. `... ) Option<num> {` -> "Option"). Returns null if not inside a
     /// typed function body, or the nearest enclosing function has no named return type.
-    fn enclosingFunctionReturnTypeName(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const u8 {
-        _ = self;
+    /// Finds the token range `(rp, oi)` of the nearest enclosing function's
+    /// return type -- `rp` is its param list's closing `)`, `oi` is the `{`
+    /// opening its body, with the return-type tokens in between (possibly
+    /// none, for a void function). Shared by `enclosingFunctionReturnTypeName`
+    /// (base name only) and `enclosingFunctionReturnTypeGenericArgs` (full
+    /// generic-arg text, needed to unify a generic wrapper call's type param
+    /// against the enclosing function's actual declared instantiation).
+    fn findEnclosingFunctionReturnTypeRange(idx: *const Index, tok_i: usize) ?struct { rp: usize, oi: usize } {
         const toks = idx.tokens;
         var search_from: isize = @as(isize, @intCast(tok_i)) - 1;
 
@@ -5181,22 +5702,45 @@ pub const LspServer = struct {
                 search_from = @as(isize, @intCast(oi)) - 1;
                 continue;
             }
-            const rp = rparen_i.?;
-            // Return-type base name = first identifier token after `)` (before `{`).
-            var m: usize = rp + 1;
-            while (m < oi) : (m += 1) {
-                const t = toks[m];
-                if (t.kind == .comment) continue;
-                if (t.kind == .identifier) return baseTypeNameForLookup(t.text);
-                if (t.kind == .symbol or t.kind == .operator) {
-                    // `) {` with nothing between -> a void function (or a non-fn header like
-                    // `if (...) {`). No named return type here; stop (don't misclimb).
-                    if (std.mem.eql(u8, t.text, "{")) return null;
-                }
-            }
-            return null;
+            return .{ .rp = rparen_i.?, .oi = oi };
         }
         return null;
+    }
+
+    fn enclosingFunctionReturnTypeName(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const u8 {
+        _ = self;
+        const range = findEnclosingFunctionReturnTypeRange(idx, tok_i) orelse return null;
+        const toks = idx.tokens;
+        // Return-type base name = first identifier token after `)` (before `{`).
+        var m: usize = range.rp + 1;
+        while (m < range.oi) : (m += 1) {
+            const t = toks[m];
+            if (t.kind == .comment) continue;
+            if (t.kind == .identifier) return baseTypeNameForLookup(t.text);
+            if (t.kind == .symbol or t.kind == .operator) {
+                // `) {` with nothing between -> a void function (or a non-fn header like
+                // `if (...) {`). No named return type here; stop (don't misclimb).
+                if (std.mem.eql(u8, t.text, "{")) return null;
+            }
+        }
+        return null;
+    }
+
+    /// Like `enclosingFunctionReturnTypeName`, but returns the generic argument
+    /// SPELLINGS of the enclosing function's return type (e.g. `["Option<Token>"]`
+    /// for a `Result<Option<Token>>` return type), or null if it isn't generic.
+    fn enclosingFunctionReturnTypeGenericArgs(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const []const u8 {
+        _ = self;
+        const range = findEnclosingFunctionReturnTypeRange(idx, tok_i) orelse return null;
+        const toks = idx.tokens;
+        var buf = ArrayList(u8).init(@constCast(&idx.arena).allocator());
+        var m: usize = range.rp + 1;
+        while (m < range.oi) : (m += 1) {
+            const t = toks[m];
+            if (t.kind == .comment) continue;
+            buf.appendSlice(t.text) catch return null;
+        }
+        return genericArgSpellingsArena(idx, buf.items);
     }
 
     /// Extract the base type name from a function signature label's return type, e.g.
@@ -5943,6 +6487,7 @@ pub const LspServer = struct {
     }
 
     fn handleReferences(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        self.indexWorkspace() catch {};
         const parsed = try parseTextDocPosition(params_val);
         if (parsed == null) {
             try self.sendResponseJson(id_val, "[]");
@@ -6373,7 +6918,7 @@ pub const LspServer = struct {
             const keywords = [_][]const u8{
                 "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
                 "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
-                "fork", "allow", "expect",
+                "fork", "allow", "expect", "panic",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -6385,6 +6930,8 @@ pub const LspServer = struct {
                         try self.allocator.dupe(u8, "keyword: the null literal (transpiles to NULL)")
                     else if (std.mem.eql(u8, kw, "fork"))
                         try self.allocator.dupe(u8, "keyword: spawn a fire-and-forget virtual thread")
+                    else if (std.mem.eql(u8, kw, "panic"))
+                        try self.allocator.dupe(u8, "keyword: print a message and abort; unifies with any expected type")
                     else
                         null;
                     try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });
@@ -6418,8 +6965,21 @@ pub const LspServer = struct {
             items.deinit();
         }
 
-        // Compound init field completion (e.g. `User{ na| }` / `.{ ag| }`).
-        if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
+        // Compound init field completion (e.g. `User{ na| }` / `.{ ag| }`) --
+        // but NOT when the cursor sits right after a bare `.` (`User{gender =
+        // .|}`), which is a field VALUE'S OWN enum-variant dot-shorthand, not
+        // a field NAME -- a field name is never itself preceded by a bare
+        // `.`. Without this exclusion, this ran (and won, via its own early
+        // `return`) before the dot-shorthand completion logic further below
+        // ever got a chance to see this position at all, always offering
+        // remaining field names instead of the expected enum's own variants.
+        const cursor_b_for_field_check = byteIndexForPosition(doc.text, pos);
+        const prefix_start_for_field_check = cursor_b_for_field_check - prefix.len;
+        const compound_init_field_pos_is_dot_shorthand =
+            prefix_start_for_field_check > 0 and doc.text[prefix_start_for_field_check - 1] == '.';
+        if (!compound_init_field_pos_is_dot_shorthand) {
+            if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
+        }
 
         // Robust text-based member completion for `receiver.` before other fallbacks.
         const recv_info_opt: ?ReceiverGuess = guessReceiverAtCursorWithIndex(doc.text, pos) orelse blk: {
@@ -6770,9 +7330,9 @@ pub const LspServer = struct {
         const keywords_all = [_][]const u8{
             "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
             "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
-            "fork", "allow", "expect",
+            "fork", "allow", "expect", "panic",
         };
-        const keywords_call_arg = [_][]const u8{ "true", "false", "nil" };
+        const keywords_call_arg = [_][]const u8{ "true", "false", "nil", "panic" };
         const keywords: []const []const u8 = if (at_call_arg_start) &keywords_call_arg else &keywords_all;
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -6780,6 +7340,8 @@ pub const LspServer = struct {
                     try self.allocator.dupe(u8, "keyword: declare async function or method")
                 else if (std.mem.eql(u8, kw, "await"))
                     try self.allocator.dupe(u8, "keyword: await async call result (inside async functions)")
+                else if (std.mem.eql(u8, kw, "panic"))
+                    try self.allocator.dupe(u8, "keyword: print a message and abort; unifies with any expected type")
                 else
                     null;
                 try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });
@@ -8415,9 +8977,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -8460,7 +9022,7 @@ pub const LspServer = struct {
 
             if (sym.detail) |det| {
                 try buf.print("```fun\n{s}\n```\n", .{det});
-            } else if (sym.kind == .variable) {
+            } else if (types.isVariableLike(sym.kind)) {
                 if (sym.value_type) |vt| {
                     try buf.print("```fun\n{s} {s}\n```\n", .{ vt, symbol_name });
                 } else {
@@ -8493,9 +9055,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -8516,9 +9078,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(module_file)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
@@ -8655,6 +9217,15 @@ pub const LspServer = struct {
     const GlobalDefHit = struct { uri: []const u8, sym: SymbolLite };
 
     fn findAnyGlobalDefinitionInDirectImports(self: *LspServer, current_uri: []const u8, name: []const u8) ?GlobalDefHit {
+        return self.findAnyGlobalDefinitionInDirectImportsOpts(current_uri, name, true);
+    }
+
+    /// Like `findAnyGlobalDefinitionInDirectImports`, but threads
+    /// `exclude_receiver_kinds` through to `findAnyGlobalDefinitionOpts` (see
+    /// its doc comment) so a caller that knows the identifier is dot-preceded
+    /// (a bare enum-variant shorthand, `.InvalidNode`) can still find it when
+    /// it's declared in an imported file.
+    fn findAnyGlobalDefinitionInDirectImportsOpts(self: *LspServer, current_uri: []const u8, name: []const u8, exclude_receiver_kinds: bool) ?GlobalDefHit {
         const doc = self.docs.get(current_uri) orelse return null;
         const idx = doc.index orelse return null;
 
@@ -8665,13 +9236,30 @@ pub const LspServer = struct {
         }
         self.collectDirectImportUris(&import_uris, current_uri, idx) catch return null;
 
-        for (import_uris.items) |iu| {
+        return self.findAnyGlobalDefinitionInGivenImportsOpts(current_uri, name, import_uris.items, exclude_receiver_kinds);
+    }
+
+    /// Same search as `findAnyGlobalDefinitionInDirectImports`, but against an
+    /// ALREADY-RESOLVED import URI list instead of re-resolving `current_uri`'s
+    /// `imp` statements from scratch. Exists so a caller that needs this lookup
+    /// repeatedly for the SAME file within one request (e.g. `handleInlayHint`,
+    /// once per call-site token) can resolve the import list once up front via
+    /// `collectDirectImportUris` and reuse it, instead of re-walking every `imp`
+    /// statement's path resolution on every lookup -- that re-resolution (real
+    /// filesystem candidate-path work, not just a lookup) was previously the
+    /// dominant source of `[fls:imports]` log volume during inlay-hint requests
+    /// on a file with many call sites.
+    fn findAnyGlobalDefinitionInGivenImports(self: *LspServer, current_uri: []const u8, name: []const u8, import_uris: []const []const u8) ?GlobalDefHit {
+        return self.findAnyGlobalDefinitionInGivenImportsOpts(current_uri, name, import_uris, true);
+    }
+
+    fn findAnyGlobalDefinitionInGivenImportsOpts(self: *LspServer, current_uri: []const u8, name: []const u8, import_uris: []const []const u8, exclude_receiver_kinds: bool) ?GlobalDefHit {
+        for (import_uris) |iu| {
             self.ensureDocIndexedFromDisk(iu) catch {};
             const imported = self.docs.get(iu) orelse continue;
             const didx = imported.index orelse continue;
-            if (findAnyGlobalDefinition(didx.symbols, name)) |s| {
+            if (findAnyGlobalDefinitionOpts(didx.symbols, name, exclude_receiver_kinds)) |s| {
                 if (!self.isSymbolVisibleFromUri(current_uri, imported.uri, s)) continue;
-                // Note: `iu` is freed by our defer; return the stable doc-owned URI.
                 return .{ .uri = imported.uri, .sym = s };
             }
         }
@@ -8976,9 +9564,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(readme_path)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(readme_text);
 
@@ -9968,6 +10556,77 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// Same as `calleeSignatureDetail`, but takes an already-resolved import URI
+    /// list (see `findAnyGlobalDefinitionInGivenImports`) instead of re-resolving
+    /// `uri`'s imports on every call. `handleInlayHint` resolves the list once
+    /// per request and calls this in its per-call-site loop instead.
+    /// Per-request memo for `calleeSignatureDetailCached`: a call site's
+    /// resolved signature detail, keyed by `"RecvType.name"` for a method
+    /// call or bare `"name"` for a plain call. Owned by the caller
+    /// (`handleInlayHint`), which frees every key on the way out.
+    const CalleeSigCache = std.StringHashMap(?[]const u8);
+
+    /// Resolves the signature `detail` string for a call-site callee,
+    /// memoized in `cache` for the lifetime of one `handleInlayHint`
+    /// request. Without this, a file that calls the SAME function/method
+    /// many times (routine in this codebase -- e.g. `self.state.write(...)`
+    /// dozens of times in one file) re-ran this whole resolution --
+    /// `resolveTypeOfChainUpTo`/`findMemberByContainer` for a method call,
+    /// or a full scan of the current file's symbols plus every direct
+    /// import's symbols for a plain call -- from scratch at EVERY
+    /// occurrence, on EVERY inlay-hint request VS Code sends (on basically
+    /// every keystroke/scroll). On a large, import-heavy workspace this was
+    /// a major contributor to the server sitting at ~100% CPU for extended
+    /// stretches.
+    ///
+    /// Correctness note: a plain (non-method) call is cached by name alone,
+    /// which is sound because this language enforces globally-unique
+    /// top-level function names (no nested/locally-scoped function
+    /// declarations exist), so `findBestDefinition`'s position-dependent
+    /// local-shadowing preference can never actually change which
+    /// definition wins for a `.function`/`.method`-kind symbol. A method
+    /// call is cached by `recv_type ++ "." ++ name` instead, since the
+    /// same method name can validly resolve differently per receiver type.
+    fn calleeSignatureDetailCached(self: *LspServer, uri: []const u8, idx: *const Index, callee_i: usize, import_uris: []const []const u8, cache: *CalleeSigCache) ?[]const u8 {
+        const callee = idx.tokens[callee_i];
+        if (callee.kind != .identifier) return null;
+        const name = callee.text;
+        const at = callee.range.start;
+
+        if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+            if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
+                const key = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ recv_type, name }) catch
+                    return self.calleeSignatureDetailUncached(uri, idx, import_uris, name, at);
+                if (cache.get(key)) |cached| {
+                    self.allocator.free(key);
+                    return cached;
+                }
+                const result = if (self.findMemberByContainer(uri, recv_type, name, .method)) |hit| hit.sym.detail else null;
+                cache.put(key, result) catch self.allocator.free(key);
+                return result;
+            }
+        }
+
+        if (cache.get(name)) |cached| return cached;
+        const result = self.calleeSignatureDetailUncached(uri, idx, import_uris, name, at);
+        const owned_name = self.allocator.dupe(u8, name) catch return result;
+        cache.put(owned_name, result) catch self.allocator.free(owned_name);
+        return result;
+    }
+
+    /// The actual (uncached) plain-call resolution `calleeSignatureDetailCached`
+    /// memoizes -- also the fallback when the method-call branch's cache-key
+    /// allocation itself fails.
+    fn calleeSignatureDetailUncached(self: *LspServer, uri: []const u8, idx: *const Index, import_uris: []const []const u8, name: []const u8, at: Position) ?[]const u8 {
+        if (findBestDefinition(idx.symbols, name, at)) |d| {
+            if (d.kind == .function or d.kind == .method) return d.detail;
+        }
+        if (self.findAnyGlobalDefinitionInGivenImports(uri, name, import_uris)) |hit| {
+            if (hit.sym.kind == .function or hit.sym.kind == .method) return hit.sym.detail;
+        }
+        return null;
+    }
+
     /// Parameter-name inlay hints (gopls/rust-analyzer style): renders the
     /// parameter name before each argument at a call site, e.g. `f(x: 1, y: 2)`.
     /// Only emits hints within the client-requested range and only when the
@@ -10007,6 +10666,29 @@ pub const LspServer = struct {
         var hints = ArrayList(InlayHint).init(self.allocator);
         defer hints.deinit();
 
+        // Resolve the direct-import URI list ONCE for the whole request, instead
+        // of once per call-site token below (`calleeSignatureDetail` used to
+        // re-walk and re-resolve every `imp` statement's path for EACH unresolved
+        // callee it hit -- on a file with many call sites, that meant re-doing
+        // the same filesystem candidate-path work dozens of times per keystroke).
+        var import_uris = ArrayList([]u8).init(self.allocator);
+        defer {
+            for (import_uris.items) |u| self.allocator.free(u);
+            import_uris.deinit();
+        }
+        self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+
+        // See `calleeSignatureDetailCached`'s doc comment: memoizes each
+        // resolved callee signature for the rest of THIS request, so a
+        // function/method called many times in one file only pays the
+        // resolution cost once.
+        var callee_sig_cache = CalleeSigCache.init(self.allocator);
+        defer {
+            var kit = callee_sig_cache.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            callee_sig_cache.deinit();
+        }
+
         const toks = idx.tokens;
         var i: usize = 0;
         while (i + 1 < toks.len) : (i += 1) {
@@ -10018,7 +10700,7 @@ pub const LspServer = struct {
             // already written, so inlay hints there are noise.
             if (callParenIsDeclaration(toks, i, i + 1)) continue;
 
-            const detail = self.calleeSignatureDetail(uri, idx, i) orelse continue;
+            const detail = self.calleeSignatureDetailCached(uri, idx, i, import_uris.items, &callee_sig_cache) orelse continue;
             var params_list = self.parseParamsFromSignatureLabel(detail) catch continue;
             defer {
                 for (params_list.items) |p| self.allocator.free(p.label);
@@ -10116,6 +10798,7 @@ pub const LspServer = struct {
     }
 
     fn handleWorkspaceSymbols(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        self.indexWorkspace() catch {};
         const query = (try parseWorkspaceSymbolQuery(self.allocator, params_val)) orelse "";
         defer if (query.len != 0) self.allocator.free(query);
 
@@ -10202,16 +10885,100 @@ pub const LspServer = struct {
         if (self.docs.getPtr(uri)) |dp| dp.last_diag_ms = nowMs();
     }
 
-    fn rebuildIndex(self: *LspServer, uri: []const u8) !void {
-        const doc_ptr = self.docs.getPtr(uri) orelse return;
-        const scope: IndexBuildScope = if (doc_ptr.version > 0) .open_document else .background;
+    fn rebuildIndex(self: *LspServer, uri: []const u8) anyerror!void {
+        const scope: IndexBuildScope = blk: {
+            const doc_ptr = self.docs.getPtr(uri) orelse return;
+            break :blk if (doc_ptr.version > 0) .open_document else .background;
+        };
 
-        // Build the new index first; if it fails, keep the old one so completion doesn't "die" mid-edit.
-        const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null, scope) catch |err| {
+        // A `fit`-arm destructuring binding (`.Impl(i) ->`) only resolves its
+        // type when the enum's OWN declaration is in THIS file's own tokens
+        // (see `token_index.prescanEnumVariantPayloads`'s per-file scan) --
+        // when the enum lives in a directly-imported file instead (the
+        // common shape for a large enum living in its own module), the
+        // binding's type, and anything inferred FROM it (e.g. a `for` loop's
+        // own item type, guessed from an `i.field`-shaped iterable), falls
+        // through to unknown. Discover direct imports via a plain TEXT scan
+        // (no real index needed yet) and pull in their own enum
+        // declarations BEFORE the one real index build below, so this only
+        // ever builds the index once per call.
+        //
+        // IMPORTANT: `self.docs.getPtr(uri)` returns a pointer into
+        // `self.docs`' own backing array. `ensureDocIndexedFromDisk` below
+        // inserts new entries (one per not-yet-seen import) via `upsertDoc`
+        // -> `self.docs.put(...)`, which can trigger a hashmap grow/rehash
+        // that FREES the old backing array -- invalidating any `*Doc`
+        // obtained before it. An earlier version of this fix held such a
+        // pointer across this exact loop and read its `.text` field
+        // afterward, which after a rehash reads freed memory: a corrupted
+        // slice (garbage ptr/len) silently flows into the DOWNSTREAM
+        // buildIndexFromTextAt's temp-file write, which then fails the
+        // write syscall with EINVAL -- a real crash, not a hang, and it
+        // only reproduced with enough transitively-imported files to
+        // actually force a rehash (small test fixtures never triggered it).
+        // Fix: never hold a `*Doc`/`.text` slice across a mutating call;
+        // re-fetch fresh immediately before each use instead (matching how
+        // the rest of this function already treats `uri`, not a cached
+        // pointer, as the source of truth after `ensureImportsIndexed`).
+        // NOTE: a compound-field cross-file lookup (so `for m : i.methods`
+        // resolves `m`'s type even when `i`'s compound's `methods` field is
+        // declared in a different file) was tried here too, by ALSO
+        // threading the imported file's own already-built `Index.symbols`
+        // through to `findMemberFieldType`/`findMemberReturnType`. That
+        // caused 4 real regressions: those symbols are the imported
+        // TEMPLATE's raw, unsubstituted form, and matching against them
+        // preempts the separate query-time engine that correctly
+        // substitutes a generic type param (`Result<T>`'s `T` ->
+        // `JsonValue`) with the CALLER's own concrete instantiation --
+        // hover started showing the bare `T` again instead of falling
+        // through to null so that better mechanism still ran. Left as a
+        // known, deliberately deferred follow-up; needs a design that only
+        // consults the imported symbols when the receiver definitely isn't
+        // a generic instantiation, not a blanket merge.
+        var extra_payloads = std.StringHashMap([]const u8).init(self.allocator);
+        defer extra_payloads.deinit();
+        {
+            const scan_text = (self.docs.getPtr(uri) orelse return).text;
+            const specs = token_idx.scanImportSpecsFromText(self.allocator, scan_text) catch &.{};
+            defer {
+                for (specs) |s| self.allocator.free(s);
+                self.allocator.free(specs);
+            }
+            for (specs) |spec| {
+                const target_uri = self.resolveImportUri(uri, spec) catch continue;
+                if (target_uri) |tu| {
+                    defer self.allocator.free(tu);
+                    self.ensureDocIndexedFromDisk(tu) catch continue;
+                    // Re-fetched: `ensureDocIndexedFromDisk` may have just
+                    // rehashed `self.docs`, so `scan_text`'s own `doc_ptr`
+                    // (captured above, before any of this loop's inserts)
+                    // must never be read again -- only `tu`'s freshly
+                    // looked-up entry, obtained AFTER that insert, is safe.
+                    const idoc = self.docs.get(tu) orelse continue;
+                    token_idx.scanEnumVariantPayloadsFromText(self.allocator, idoc.text, &extra_payloads) catch {};
+                }
+            }
+        }
+
+        // Build the new index; if it fails, keep the old one so completion doesn't "die" mid-edit.
+        // Fresh lookup (see the big comment above -- the loop just above this
+        // may have rehashed `self.docs`, so the `scope`-computing lookup at
+        // the top of this function is no longer safe to reuse here).
+        const build_text = (self.docs.getPtr(uri) orelse return).text;
+        const extra_ptr: ?*const std.StringHashMap([]const u8) = if (extra_payloads.count() > 0) &extra_payloads else null;
+        const new_idx = buildIndexFromTextAt(self.allocator, build_text, null, scope, extra_ptr) catch |err| {
             self.log("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
             return;
         };
 
+        // Fresh lookup again: `buildIndexFromTextAt` itself does no mutation
+        // of `self.docs`, but re-fetching here costs nothing and keeps this
+        // function's discipline uniform (never hold a `*Doc` across ANY
+        // call that could plausibly grow to touch `self.docs` later).
+        const doc_ptr = self.docs.getPtr(uri) orelse {
+            new_idx.deinit();
+            return;
+        };
         if (doc_ptr.index) |idx| idx.deinit();
         doc_ptr.index = new_idx;
         self.ensureImportsIndexed(uri);
@@ -10269,7 +11036,7 @@ pub const LspServer = struct {
             var changed = false;
 
             for (idx.symbols) |*s| {
-                if (s.kind != .variable) continue;
+                if (!types.isVariableLike(s.kind)) continue;
 
                 const existing_vt_opt = s.value_type;
                 if (existing_vt_opt) |existing_vt| {
@@ -10710,7 +11477,7 @@ pub const LspServer = struct {
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
         if (spec.len == 0) return null;
 
-        if (self.debug_imports) self.dbg(true, "imports", "resolveImportUri current_uri={s} raw='{s}' spec='{s}'", .{ current_uri, raw_import, spec });
+        if (self.debug_imports) self.dbg(true, "imports", "resolveImportUri via='{s}' current_uri={s} raw='{s}' spec='{s}'", .{ self.current_request_method, current_uri, raw_import, spec });
 
         const current_path = uriToPath(self.allocator, current_uri) catch return null;
         defer self.allocator.free(current_path);

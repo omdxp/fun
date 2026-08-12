@@ -1,0 +1,115 @@
+// Source-to-C helpers for the ported compiler test corpus. Each helper
+// runs the whole pipeline (lex, parse, transpile) over an in-memory
+// source string, so a test states its input as source text rather than
+// hand-built AST nodes.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..parser.import_resolver;
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp std.string;
+imp std.result;
+imp std.error;
+imp std.io;
+imp std.fs;
+
+// Transpiles `src` and returns the emitted C, or an error describing the
+// stage that rejected it. Imports are not resolved: `src` is compiled on
+// its own, so a test may name `imp` targets it never calls into.
+pub fun transpile_source(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(cst.out.build());
+}
+
+// Transpiles `src`, aborting with `label` when any stage rejects it.
+pub fun emit_c(str src, str label) str {
+  let r = transpile_source(src);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the source";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
+// Asserts the emitted C for `src` contains `needle`.
+pub fun assert_emits(str src, str needle, str label) {
+  let out = emit_c(src, label);
+  assert contains(out, needle), format("{str}: expected C to contain `{str}`", label, needle);
+}
+
+// Asserts the emitted C for `src` does not contain `needle`.
+pub fun assert_not_emits(str src, str needle, str label) {
+  let out = emit_c(src, label);
+  assert !contains(out, needle), format("{str}: expected C not to contain `{str}`", label, needle);
+}
+
+// Resolves `path`'s import graph and transpiles the merged program.
+pub fun transpile_file(str path) Result<str, str> {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  CodegenState st = codegen_state_new();
+  Codegen cg = codegen_new(&st);
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+  if cg.transpile(merged.nodes).is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(st.out.build());
+}
+
+// Transpiles the entry file at `path`, aborting with `label` when any
+// stage rejects it.
+pub fun emit_file(str path, str label) str {
+  let r = transpile_file(path);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the file";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
+// Transpiles `src` with its imports resolved, by staging it as a real
+// file next to the other fixtures. `name` must be unique across tests,
+// since the file is removed again once the C is in hand.
+pub fun emit_c_with_imports(str src, str name, str label) str {
+  StringBuilder pb = string_builder_init(32);
+  pb.append("selfhost/tests/fixtures/");
+  pb.append(name);
+  pb.append(".fn");
+  str path = pb.build();
+
+  assert write_string(path, src), format("{str}: could not stage {str}", label, path);
+  let r = transpile_file(path);
+  remove_file(path);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the staged source";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}

@@ -1,0 +1,5 @@
+imp std.io;
+
+fun main() {
+  print_fmt("n={num}", 1);
+}

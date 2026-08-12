@@ -97,7 +97,7 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "as", str) or
         mem.eql(u8, "enum", str) or
         mem.eql(u8, "compound", str) or mem.eql(u8, "quirk", str) or mem.eql(u8, "impl", str) or
-        mem.eql(u8, "let", str) or
+        mem.eql(u8, "let", str) or mem.eql(u8, "const", str) or
         mem.eql(u8, "defer", str) or mem.eql(u8, "asm", str) or mem.eql(u8, "volatile", str) or mem.eql(u8, "arch", str) or
         mem.eql(u8, "void", str) or
         mem.eql(u8, "raw", str) or
@@ -107,7 +107,6 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "else", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "nil", str) or
-        mem.eql(u8, "fork", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
         mem.eql(u8, "for", str) or
         mem.eql(u8, "async", str) or
@@ -116,7 +115,10 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "continue", str) or
         mem.eql(u8, "allow", str) or
         mem.eql(u8, "expect", str) or
-        mem.eql(u8, "assert", str);
+        mem.eql(u8, "assert", str) or
+        mem.eql(u8, "panic", str) or
+        mem.eql(u8, "test", str) or
+        mem.eql(u8, "fuzz", str);
 }
 
 /// Checks if the given character is a boolean keyword.
@@ -302,6 +304,10 @@ pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
     if (mem.eql(u8, "pthread_mutexattr_t", dt)) return .Unknown;
     if (mem.eql(u8, "pthread_cond_t", dt)) return .Unknown;
     if (mem.eql(u8, "pthread_condattr_t", dt)) return .Unknown;
+    // `spawn.h` / `sys/wait.h`
+    if (mem.eql(u8, "pid_t", dt)) return .Num;
+    if (mem.eql(u8, "posix_spawn_file_actions_t", dt)) return .Unknown;
+    if (mem.eql(u8, "posix_spawnattr_t", dt)) return .Unknown;
     return null;
 }
 
@@ -914,11 +920,40 @@ pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
             try print_indent(writer, depth + 1);
             try writer.print("nil\n", .{});
         },
+        .Panic => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Message:\n", .{});
+                try print_node(node.node_variant.?.panic_expr.message.*, writer, depth + 2);
+            }
+        },
         .StatementFork => {
             if (node.node_variant != null) {
                 try print_indent(writer, depth + 1);
                 try writer.print("Spawn:\n", .{});
                 try print_node(node.node_variant.?.statement.fork_stmt.expr.*, writer, depth + 2);
+            }
+        },
+        .Test => {
+            if (node.node_variant) |nv| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{nv.test_decl.name});
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(nv.test_decl.body.*, writer, depth + 2);
+            }
+        },
+        .Fuzz => {
+            if (node.node_variant) |nv| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{nv.fuzz_decl.name});
+                try print_indent(writer, depth + 1);
+                try writer.print("Data param: {s}\n", .{nv.fuzz_decl.data_param.node_variant.?.variable.name.items});
+                try print_indent(writer, depth + 1);
+                try writer.print("Len param: {s}\n", .{nv.fuzz_decl.len_param.node_variant.?.variable.name.items});
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(nv.fuzz_decl.body.*, writer, depth + 2);
             }
         },
         .Blank => {

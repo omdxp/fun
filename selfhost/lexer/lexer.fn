@@ -1,0 +1,1150 @@
+// Turns source text into a `Vec<Token>`.
+// 
+// Reads the whole source into a `str` up front (via `std.fs`) and lexes
+// with an index cursor. `asm { ... }` bodies lex as ordinary
+// keywords/statements; the raw-body-capture special case for inline
+// assembly is not implemented.
+
+imp std.string;
+imp std.vec;
+imp std.ctype;
+imp std.result;
+imp std.error;
+imp std.c.mem;
+imp std.c.string;
+imp token;
+imp lexdefs;
+
+// Lexing state for one source file: a cursor into `src` plus the running
+// line/col position and every token emitted so far.
+pub compound Lexer {
+  str src;
+  num len;
+  num pos;
+  num line;
+  num col;
+  str filename;
+  // Every token emitted so far. Kept on the lexer itself (rather than only
+  // handed back up to a driver loop) because the hex/binary special-number
+  // check below needs to inspect, and pop, the preceding emitted token.
+  Vec<Token> tokens;
+}
+
+// Creates a Lexer positioned at the start of `src` (a whole file's
+// contents, already read into memory).
+pub fun lexer_new(str src, str filename) Lexer {
+  Lexer l;
+  l.src = src;
+  l.len = len(src);
+  l.pos = 0;
+  l.line = 1;
+  l.col = 1;
+  l.filename = filename;
+  l.tokens.init(64);
+  ret l;
+}
+
+// True if `c` can start an identifier (a letter or underscore).
+fun _is_ident_start(chr c) bin {
+  ret is_alpha(c) || c == '_';
+}
+
+// True if `c` can continue an identifier after its first character.
+fun _is_ident_char(chr c) bin {
+  ret is_alnum(c) || c == '_';
+}
+
+// Value of a single hex/decimal digit character, or -1 if not one.
+fun _digit_value(chr c) num {
+  fit c {
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' -> { ret c - '0'; }
+    'a', 'b', 'c', 'd', 'e', 'f' -> { ret c - 'a' + 10; }
+    'A', 'B', 'C', 'D', 'E', 'F' -> { ret c - 'A' + 10; }
+    _ -> { ret -1; }
+  }
+}
+
+// Parses `digits` (already validated to contain only valid digits for
+// `base`) as an unsigned integer in the given base. No stdlib radix-parse
+// function exists yet, so this is a small local helper rather than a
+// speculative stdlib addition.
+fun _parse_radix(str digits, num base) num {
+  num value = 0;
+  num i = 0;
+  num n = len(digits);
+  for i < n {
+    value = value * base + _digit_value(digits[i]);
+    i = i + 1;
+  }
+  ret value;
+}
+
+// A zero-valued Token, used as the (unused) error-path payload for
+// `Result<Token, Error>`; callers check `is_err()` before ever reading it.
+fun token_zero() Token {
+  Token t;
+  t.type = .NewLine;
+  t.data = .Cval(0);
+  Pos p;
+  p.line = 0;
+  p.col = 0;
+  p.start_col = 0;
+  p.end_col = 0;
+  p.end_line = 0;
+  p.filename = "";
+  t.pos = p;
+  t.whitespace = false;
+  t.is_raw_string = false;
+  ret t;
+}
+
+// True for any character except a newline/carriage-return/NUL, used to
+// read a line comment up to (not including) its terminator.
+fun _not_newline(chr c) bin {
+  ret c != '\n' && c != '\r' && c != 0;
+}
+
+// The result of scanning one line's worth of a raw (backtick) string --
+// see `Lexer._scan_raw_string_line`.
+enum RawLineResult {
+  // Hit a closing backtick: the whole raw string ends here, even if more
+  // text follows on the same line (`` `line two`; ``).
+  Closed,
+  // Hit the line's newline with no closing backtick: either the start of
+  // a multi-line block, or (on a later line) another contributed line --
+  // the caller decides which, based on whether the following line also
+  // starts with a backtick.
+  Continues,
+  // Hit end-of-file with no closing backtick.
+  Eof,
+}
+
+impl Lexer {
+  // Snapshot the current line/col as a `Pos` (used for a token's start
+  // position; `_finish_pos` fills in the end/span once the token is read).
+  _start_pos() Pos {
+    Pos p;
+    p.line = self.line;
+    p.col = self.col;
+    p.start_col = self.col;
+    p.end_col = self.col;
+    p.end_line = self.line;
+    p.filename = self.filename;
+    ret p;
+  }
+
+  // Fills in the end of a token's span (the start was already captured by
+  // `_start_pos`) using the lexer's current position, once the token's text
+  // has been fully consumed.
+  _finish_pos(Pos* p) {
+    p.end_line = self.line;
+    p.end_col = self.col;
+  }
+
+  // Peek the current/next character without advancing. Returns NUL at EOF
+  // (an internal sentinel; Option<Token>/Result<Token, Error> is used at the
+  // public token-stream boundary instead of threading EOF through every
+  // single-character read).
+  _peek() chr {
+    if self.pos >= self.len {
+      ret 0;
+    }
+    ret self.src[self.pos];
+  }
+
+  // Peek one character past the current position (for two-character
+  // lookahead, e.g. distinguishing `//` from a single `/`). Returns NUL at
+  // or past EOF.
+  _peek2() chr {
+    if self.pos + 1 >= self.len {
+      ret 0;
+    }
+    ret self.src[self.pos + 1];
+  }
+
+  // Consumes and returns the current character, advancing the cursor and
+  // updating line/col.
+  _advance() chr {
+    let c = self._peek();
+    self.pos = self.pos + 1;
+    if c == '\n' {
+      self.line = self.line + 1;
+      self.col = 1;
+    } else {
+      self.col = self.col + 1;
+    }
+    ret c;
+  }
+
+  // Un-consume the most recently advanced-over character `c`. The lexer
+  // never pushes back a newline.
+  _push_back(chr c) {
+    if c == '\n' {
+      panic("internal lexer error: attempted to push back newline");
+    }
+    if self.pos > 0 {
+      self.pos = self.pos - 1;
+    }
+    if self.col > 1 {
+      self.col = self.col - 1;
+    }
+  }
+
+  // Reads characters while `pred` holds, appending them to a fresh string.
+  // Does not consume the character that fails `pred`.
+  _read_while(fun(chr) bin pred) str {
+    let b = string_builder_init(16);
+    for pred(self._peek()) && self.pos < self.len {
+      b.append_char(self._advance());
+    }
+    ret b.build();
+  }
+
+  // Reads a `// ...` line comment, from just after the `//` to (not
+  // including) the newline.
+  _read_comment_line() Token {
+    let start = self._start_pos();
+    let text = self._read_while(_not_newline);
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Comment;
+    t.data = .Sval(text);
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret t;
+  }
+
+  // Reads a `/* ... */` block comment, from just after the opening `/*` to
+  // (not including) the closing `*/`. Errors if EOF is reached first.
+  _read_comment_block() Result<Token, Error> {
+    let start = self._start_pos();
+    let b = string_builder_init(16);
+    for {
+      if self.pos >= self.len {
+        ret err_kind(.Parse, "unterminated block comment (missing '*/')", token_zero());
+      }
+      let c = self._advance();
+      if c == '*' && self._peek() == '/' {
+        self._advance();
+        break;
+      }
+      b.append_char(c);
+    }
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Comment;
+    t.data = .Sval(b.build());
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret .Ok(t);
+  }
+
+  // Reads an identifier and classifies it as a boolean literal, a reserved
+  // keyword, or a plain identifier.
+  _read_identifier_or_keyword() Token {
+    let start = self._start_pos();
+    let text = self._read_while(_is_ident_char);
+    Pos p = start;
+    self._finish_pos(&p);
+
+    Token t;
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    if is_boolean_keyword(text) {
+      t.type = .Boolean;
+      t.data = .Bval(equals(text, "true"));
+    } elif is_keyword(text) {
+      t.type = .Keyword;
+      t.data = .Sval(text);
+    } else {
+      t.type = .Identifier;
+      t.data = .Sval(text);
+    }
+    ret t;
+  }
+
+  // Reads a run of digits (and `_` digit separators, stripped here so every
+  // downstream consumer sees a clean digit string), without consuming a
+  // trailing non-digit.
+  _read_digits() str {
+    let b = string_builder_init(16);
+    for {
+      let c = self._peek();
+      if is_digit(c) {
+        b.append_char(self._advance());
+      } elif c == '_' {
+        self._advance();
+      } else {
+        break;
+      }
+    }
+    ret b.build();
+  }
+
+  // Like `_read_digits`, but for hexadecimal digits (`0`-`9`, `a`-`f`,
+  // `A`-`F`, and `_` separators).
+  _read_hex_digits() str {
+    let b = string_builder_init(16);
+    for {
+      let c = self._peek();
+      if is_xdigit(c) {
+        b.append_char(self._advance());
+      } elif c == '_' {
+        self._advance();
+      } else {
+        break;
+      }
+    }
+    ret b.build();
+  }
+
+  // Consumes a floating-point exponent (`e`/`E`, optional `+`/`-`, digits)
+  // onto `buf` when the lookahead forms a valid exponent; otherwise leaves
+  // the cursor untouched (nothing consumed) so 'e'/'E' lexes normally
+  // afterward (e.g. an identifier immediately after a number literal).
+  _read_exponent(StringBuilder* buf) {
+    let e = self._peek();
+    if e != 'e' && e != 'E' {
+      ret;
+    }
+    let save_pos = self.pos;
+    let save_line = self.line;
+    let save_col = self.col;
+    self._advance();
+
+    bin has_sign = false;
+    let sign = self._peek();
+    if sign == '+' || sign == '-' {
+      self._advance();
+      has_sign = true;
+    }
+
+    if !is_digit(self._peek()) {
+      // Not a real exponent; restore the cursor exactly.
+      self.pos = save_pos;
+      self.line = save_line;
+      self.col = save_col;
+      ret;
+    }
+
+    buf.append_char(e);
+    if has_sign {
+      buf.append_char(sign);
+    }
+    buf.append(self._read_digits());
+  }
+
+  // Parses the fully-assembled digit text of an ordinary (non-hex,
+  // non-binary) number literal into a Number token, routing to a decimal or
+  // integer parse depending on whether a `.`/exponent is present, and
+  // consuming an optional `L`/`f` suffix (accepted but not tracked).
+  _finish_number_from_string(str number_str) Result<Token, Error> {
+    let has_dot = contains(number_str, ".");
+    let has_exp = contains(number_str, "e") || contains(number_str, "E");
+    Token t;
+    if has_dot || has_exp {
+      let v = try_parse_dec(number_str);
+      if v.is_err() {
+        ret err_kind(.Parse, "failed to parse number", token_zero());
+      }
+      t.type = .Number;
+      t.data = .Dec(v.unwrap());
+      ret .Ok(t);
+    }
+
+    let iv = try_parse_int(number_str);
+    if iv.is_err() {
+      ret err_kind(.Parse, "failed to parse number", token_zero());
+    }
+    num v = iv.unwrap();
+
+    // Support (and discard) suffixes like `10L`/`10f`: accepted but not
+    // otherwise tracked, since nothing downstream reads the distinction.
+    fit self._peek() {
+      'L' -> {
+        self._advance();
+        t.type = .Number;
+        t.data = .Num(v);
+      }
+      'f' -> {
+        self._advance();
+        t.type = .Number;
+        t.data = .Dec(v + 0.0);
+      }
+      _ -> {
+        t.type = .Number;
+        t.data = .Num(v);
+      }
+    }
+    ret .Ok(t);
+  }
+
+  // Reads an ordinary (non-hex, non-binary) numeric literal: an integer, or
+  // a decimal with an optional fractional part and/or exponent. Called only
+  // when the current/next character has already been confirmed to start a
+  // number (a digit, or `.` immediately followed by a digit).
+  _read_number() Result<Token, Error> {
+    let start = self._start_pos();
+    let b = string_builder_init(16);
+    b.append(self._read_digits());
+
+    if self._peek() == '.' {
+      let after = self._peek2();
+      if is_digit(after) {
+        b.append_char(self._advance()); // '.'
+        b.append(self._read_digits());
+      } elif !(_is_ident_start(after) || after == '.') {
+        // Trailing dot with no fraction (`1.`), not followed by an
+        // identifier-start or another dot: a decimal literal "1.0". A
+        // following letter/underscore (`1.foo`) stays integer + '.'
+        // (member access); a following dot (`0..3`) is the range operator,
+        // so its first dot must not be swallowed into a float.
+        self._advance(); // '.'
+        b.append(".0");
+      }
+      // Else: identifier or another dot follows; leave the '.' unconsumed
+      // so it lexes as member-access/range afterward.
+    }
+
+    self._read_exponent(&b);
+
+    let res = self._finish_number_from_string(b.build());
+    if res.is_err() {
+      ret res;
+    }
+    let out = res.unwrap();
+    Pos p = start;
+    self._finish_pos(&p);
+    out.pos = p;
+    out.whitespace = false;
+    out.is_raw_string = false;
+    ret .Ok(out);
+  }
+
+  // Reads a `0x...` hex literal's digits (called right after popping the
+  // preceding bare `0` token and consuming the `x`) and returns the parsed
+  // Number token.
+  _read_number_hex() Token {
+    let start = self._start_pos();
+    self._advance(); // 'x'
+    let digits = self._read_hex_digits();
+    let v = _parse_radix(digits, 16);
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Number;
+    t.data = .Num(v);
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret t;
+  }
+
+  // Like `_read_number_hex`, but for a `0b...` binary literal.
+  _read_number_binary() Token {
+    let start = self._start_pos();
+    self._advance(); // 'b'
+    let digits = self._read_digits();
+    let v = _parse_radix(digits, 2);
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Number;
+    t.data = .Num(v);
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret t;
+  }
+
+  // Decodes a single escape character (the byte after the backslash) to
+  // its actual value, or returns an error for an unrecognized escape.
+  _decode_escape_char(chr c) Result<chr, Error> {
+    fit c {
+      'n' -> { ret .Ok('\n'); }
+      't' -> { ret .Ok('\t'); }
+      'r' -> { ret .Ok('\r'); }
+      '0' -> { ret .Ok('\0'); }
+      '\\' -> { ret .Ok('\\'); }
+      '\'' -> { ret .Ok('\''); }
+      '"' -> { ret .Ok('"'); }
+      _ -> { ret err_kind(.Parse, "unknown escape sequence", '\0'); }
+    }
+  }
+
+  // Reads a `"..."` string literal. Escapes are passed through verbatim
+  // into the buffer (kept as a literal `\` + the escape char); codegen
+  // emits the text straight into a C string literal, which interprets `\n`
+  // /`\t`/etc. itself. This also means an escaped quote `\"` does not
+  // prematurely end the Fun string literal.
+  _read_string() Result<Token, Error> {
+    let start = self._start_pos();
+    self._advance(); // opening '"'
+    let b = string_builder_init(16);
+    for {
+      if self.pos >= self.len {
+        ret err_kind(.Parse, "unexpected end of file while reading string", token_zero());
+      }
+      let c = self._advance();
+      if c == '"' {
+        break;
+      }
+      if c == '\\' {
+        if self.pos >= self.len {
+          ret err_kind(.Parse, "unexpected end of file while reading string", token_zero());
+        }
+        b.append_char(c);
+        b.append_char(self._advance());
+        continue;
+      }
+      b.append_char(c);
+    }
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .String;
+    t.data = .Sval(b.build());
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret .Ok(t);
+  }
+
+  // Scans one line's worth of raw-string content (from right after an
+  // opening backtick) into `b`, stopping at whichever comes first: a
+  // closing backtick (consumed, `.Closed`), the line's own newline (not
+  // consumed, `.Continues`), or EOF (`.Eof`). Shared by `_read_raw_string`
+  // for the first line and every continuation line, since both need the
+  // same "close, or hand off to the caller at the newline" behavior.
+  _scan_raw_string_line(StringBuilder* b) RawLineResult {
+    for {
+      if self.pos >= self.len {
+        ret .Eof;
+      }
+      let c = self._peek();
+      if c == '`' {
+        self._advance();
+        ret .Closed;
+      }
+      if c == '\n' {
+        ret .Continues;
+      }
+      b.append_char(self._advance());
+    }
+    ret .Eof;
+  }
+
+  // Reads a raw string token from a backtick-delimited literal.
+  // 
+  // Two forms, both starting with a backtick:
+  // - Inline (or explicitly-closed-multi-line): closed by another
+  // backtick, e.g. `` `content` ``, or on the last line of a multi-line
+  // block (`` `line two`; ``) when trailing code needs to sit on that
+  // same line. Content is taken completely literally: no escape
+  // processing at all (a backslash is just a backslash, a double-quote
+  // is just a double-quote).
+  // - Multi-line, implicitly closed: a backtick left unclosed before the
+  // line's newline starts a block. Each subsequent line that begins
+  // (after leading spaces/tabs) with its own backtick contributes its
+  // own content, joined to the previous lines with a real newline byte.
+  // The block ends at the first line that doesn't start with a backtick,
+  // without consuming that line (any trailing code, like the statement's
+  // `;`, goes on its own following line).
+  // 
+  // The buffer holds the literal bytes (unlike `_read_string`, whose
+  // buffer keeps escape sequences verbatim for direct re-embedding in C).
+  // `t.is_raw_string = true` tells codegen to escape this content when
+  // emitting the C string literal, and tells the formatter to reproduce
+  // the backtick spelling verbatim rather than requoting the buffer.
+  _read_raw_string() Result<Token, Error> {
+    let start = self._start_pos();
+    self._advance(); // opening '`'
+    let b = string_builder_init(16);
+
+    let result = self._scan_raw_string_line(&b);
+    if result == .Eof {
+      ret err_kind(.Parse, "unexpected end of file while reading raw string", token_zero());
+    }
+
+    for result == .Continues {
+      self._advance(); // consume the newline ending the previous segment
+
+      num lookahead = self.pos;
+      for lookahead < self.len && (self.src[lookahead] == ' ' || self.src[lookahead] == '\t') {
+        lookahead = lookahead + 1;
+      }
+      if lookahead >= self.len || self.src[lookahead] != '`' {
+        break;
+      }
+
+      b.append_char('\n');
+      for self._peek() == ' ' || self._peek() == '\t' {
+        self._advance();
+      }
+      self._advance(); // consume this line's opening backtick
+
+      result = self._scan_raw_string_line(&b);
+    }
+
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .String;
+    t.data = .Sval(b.build());
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = true;
+    ret .Ok(t);
+  }
+
+  // Reads a `'c'` character literal. Unlike string escapes, these are
+  // decoded to their actual byte value here (the token carries a real
+  // `chr`, not source text for a C compiler to reinterpret).
+  _read_character() Result<Token, Error> {
+    let start = self._start_pos();
+    self._advance(); // opening '\''
+    if self.pos >= self.len {
+      ret err_kind(.Parse, "unexpected end of file while reading character", token_zero());
+    }
+    let c = self._advance();
+    chr value = c;
+    if c == '\\' {
+      if self.pos >= self.len {
+        ret err_kind(.Parse, "unexpected end of file while reading character escape", token_zero());
+      }
+      let esc = self._advance();
+      let decoded = self._decode_escape_char(esc);
+      if decoded.is_err() {
+        ret err_kind(.Parse, "unknown escape sequence in character literal", token_zero());
+      }
+      value = decoded.unwrap();
+    }
+    if self.pos >= self.len {
+      ret err_kind(.Parse, "unexpected end of file while reading character", token_zero());
+    }
+    let closing = self._advance();
+    if closing != '\'' {
+      ret err_kind(.Parse, "expected closing ' in character literal", token_zero());
+    }
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Number;
+    t.data = .Cval(value);
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret .Ok(t);
+  }
+
+  // Reads a single structural symbol character (`{`, `}`, `;`, `)`, `]`) as
+  // its own token.
+  _read_symbol() Token {
+    let start = self._start_pos();
+    let c = self._advance();
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Symbol;
+    t.data = .Cval(c);
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret t;
+  }
+
+  // Reads an operator, applying maximal munch (greedily consuming up to 3
+  // characters) then backing off to the longest prefix that's actually a
+  // valid operator: e.g. `a >=-1` must lex as `>=` then `-1`, not
+  // over-consume into an invalid `>=-`.
+  _read_operator() Result<Token, Error> {
+    let start = self._start_pos();
+    let b = string_builder_init(4);
+    let op0 = self._advance();
+    b.append_char(op0);
+
+    if op0 == '=' {
+      // Always treat `==` as one token, even with whitespace in between.
+      for self._peek() == ' ' || self._peek() == '\t' {
+        self._advance();
+      }
+      if self._peek() == '=' {
+        b.append_char(self._advance());
+      }
+    } elif (op0 == '!' || op0 == '*') && self._peek() == '=' {
+      b.append_char(self._advance());
+    } elif !op_treated_as_one(op0) {
+      num extra = 0;
+      for extra < 2 {
+        let nc = self._peek();
+        if nc == 0 || nc == '(' || nc == '[' || nc == ',' {
+          break;
+        }
+        if !is_single_operator(nc) {
+          break;
+        }
+        b.append_char(self._advance());
+        extra = extra + 1;
+      }
+    }
+
+    let text = b.build();
+    if op_valid(text) {
+      Pos p = start;
+      self._finish_pos(&p);
+      Token t;
+      t.type = .Operator;
+      t.data = .Sval(text);
+      t.pos = p;
+      t.whitespace = false;
+      t.is_raw_string = false;
+      ret .Ok(t);
+    }
+
+    // Back off to the longest valid prefix, pushing back the rest.
+    num keep = 1;
+    num k = len(text);
+    for k >= 1 {
+      if op_valid(substr(text, 0, k)) {
+        keep = k;
+        break;
+      }
+      k = k - 1;
+    }
+    num bi = len(text);
+    for bi > keep {
+      bi = bi - 1;
+      self._push_back(text[bi]);
+    }
+    if keep == 0 {
+      ret err_kind(.Parse, "invalid operator", token_zero());
+    }
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .Operator;
+    t.data = .Sval(substr(text, 0, keep));
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = false;
+    ret .Ok(t);
+  }
+
+  // True if the most recently emitted token was a bare integer literal `0`,
+  // the only context in which a following `b`/`x` starts a special
+  // binary/hex number rather than an ordinary identifier.
+  _prev_token_is_bare_zero() bin {
+    let last = self.tokens.last();
+    fit last {
+      .Some(t) -> {
+        fit t.data {
+          .Num(n) -> { ret t.type == .Number && n == 0; }
+          _ -> { ret false; }
+        }
+      }
+      .None -> { ret false; }
+    }
+  }
+
+  // Removes the just-checked bare-zero token from `self.tokens` before
+  // replacing it with the real hex/binary literal (see the hex/binary
+  // dispatch in `_next_inner`).
+  _pop_last_token() {
+    self.tokens.pop();
+  }
+
+  // Reads the next token, or `None` at end of input, and records it onto
+  // `self.tokens` (see the field doc comment for why).
+  next() Result<Option<Token>, Error> {
+    let r = self._next_inner();
+    if r.is_err() {
+      ret r;
+    }
+    let opt = r.unwrap();
+    fit opt {
+      .Some(t) -> { self.tokens.push(t); }
+      .None -> {}
+    }
+    ret .Ok(opt);
+  }
+
+  // Does the actual dispatch work for `next()`: inspects the current
+  // character and routes to the matching reader. Split out from `next()`
+  // so the whitespace-skip branch can recurse without double-recording the
+  // eventual token onto `self.tokens`.
+  _next_inner() Result<Option<Token>, Error> {
+    if self.pos >= self.len {
+      ret .Ok(.None);
+    }
+
+    let c = self._peek();
+
+    if c == ' ' || c == '\t' || c == '\r' {
+      self._advance();
+      ret self._next_inner();
+    }
+
+    if c == '\n' {
+      let start = self._start_pos();
+      self._advance();
+      Pos p = start;
+      self._finish_pos(&p);
+      Token t;
+      t.type = .NewLine;
+      t.data = .Cval('\n');
+      t.pos = p;
+      t.whitespace = false;
+      t.is_raw_string = false;
+      ret .Ok(.Some(t));
+    }
+
+    if c == '/' {
+      let nxt = self._peek2();
+      if nxt == '/' {
+        self._advance();
+        self._advance();
+        ret .Ok(.Some(self._read_comment_line()));
+      }
+      if nxt == '*' {
+        self._advance();
+        self._advance();
+        let r = self._read_comment_block();
+        if r.is_err() {
+          ret err_kind(.Parse, "unterminated block comment", .None);
+        }
+        ret .Ok(.Some(r.unwrap()));
+      }
+      let r = self._read_operator();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid operator", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    if c == '"' {
+      let r = self._read_string();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid string literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    if c == '`' {
+      let r = self._read_raw_string();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid raw string literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    if c == '\'' {
+      let r = self._read_character();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid character literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    // Leading-dot float literal (`.5`): a '.' immediately followed by a
+    // digit starts a number, not a member-access/range operator.
+    if c == '.' && is_digit(self._peek2()) {
+      let r = self._read_number();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid number literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    if is_digit(c) {
+      let r = self._read_number();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid number literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    // `b`/`x` prefix special numbers (`0b0101`, `0xFF`) only apply right
+    // after a bare `0` (the digit-reading path above already consumed it as
+    // an ordinary Number token); otherwise `b`/`x` are ordinary identifier
+    // starts (`x`, `box`, ...).
+    if (c == 'b' || c == 'x') && self._prev_token_is_bare_zero() {
+      self._pop_last_token();
+      if c == 'b' {
+        ret .Ok(.Some(self._read_number_binary()));
+      }
+      ret .Ok(.Some(self._read_number_hex()));
+    }
+
+    if _is_ident_start(c) {
+      ret .Ok(.Some(self._read_identifier_or_keyword()));
+    }
+
+    if c == '{' || c == '}' || c == ';' || c == ')' || c == ']' {
+      ret .Ok(.Some(self._read_symbol()));
+    }
+
+    fit c {
+      '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.', ':', '#', '$' -> {
+        let r = self._read_operator();
+        if r.is_err() {
+          ret err_kind(.Parse, "invalid operator", .None);
+        }
+        ret .Ok(.Some(r.unwrap()));
+      }
+      _ -> { ret err_kind(.Parse, "unexpected character", .None); }
+    }
+  }
+}
+
+// Tokenizes `src` (a whole file's contents) into a flat Vec<Token>.
+pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
+  Lexer lex = lexer_new(src, filename);
+
+  for {
+    let r = lex.next();
+    if r.is_err() {
+      ret err_kind(.Parse, "lex error", lex.tokens);
+    }
+    let opt = r.unwrap();
+    fit opt {
+      .Some(t) -> {}
+      .None -> { break; }
+    }
+  }
+  ret .Ok(lex.tokens);
+}
+
+// Test-only helper: tokenize `src` and unwrap, aborting the test with a clear
+// message if lexing itself fails (rather than every test re-checking is_err()).
+fun _lex(str src) Vec<Token> {
+  let r = tokenize(src, "test.fn");
+  assert !r.is_err(), "tokenize() returned an error";
+  ret r.unwrap();
+}
+
+test "lexes identifiers and keywords" {
+  let toks = _lex("let x fun_name");
+  assert toks.len == 3, "expected 3 tokens";
+  assert token_is_keyword(toks.get(0), "let"), "token 0 should be keyword 'let'";
+  fit toks.get(1).data {
+    .Sval(s) -> { assert equals(s, "x"), "token 1 should be identifier 'x'"; }
+    _ -> { panic("token 1 should carry Sval"); }
+  }
+  assert toks.get(1).type == .Identifier, "token 1 should be Identifier";
+  fit toks.get(2).data {
+    .Sval(s) -> { assert equals(s, "fun_name"), "token 2 should be identifier 'fun_name'"; }
+    _ -> { panic("token 2 should carry Sval"); }
+  }
+}
+
+test "lexes integer and decimal numbers" {
+  let ints = _lex("42");
+  assert ints.len == 1, "expected 1 token";
+  fit ints.get(0).data {
+    .Num(n) -> { assert n == 42, "expected 42"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let decs = _lex("3.14");
+  assert decs.len == 1, "expected 1 token";
+  fit decs.get(0).data {
+    .Dec(d) -> { assert d == 3.14, "expected 3.14"; }
+    _ -> { panic("expected Dec"); }
+  }
+
+  // Trailing dot with no fraction: `1.` is a decimal `1.0`.
+  let trailing = _lex("1.");
+  assert trailing.len == 1, "expected 1 token";
+  fit trailing.get(0).data {
+    .Dec(d) -> { assert d == 1.0, "expected 1.0"; }
+    _ -> { panic("expected Dec"); }
+  }
+
+  // Leading dot immediately followed by a digit: `.5` starts a number.
+  let leading = _lex(".5");
+  assert leading.len == 1, "expected 1 token";
+  fit leading.get(0).data {
+    .Dec(d) -> { assert d == 0.5, "expected 0.5"; }
+    _ -> { panic("expected Dec"); }
+  }
+}
+
+test "range operator is not swallowed by number lexing" {
+  let toks = _lex("0..3");
+  assert toks.len == 3, "expected 3 tokens (0, .., 3)";
+  fit toks.get(0).data {
+    .Num(n) -> { assert n == 0, "expected 0"; }
+    _ -> { panic("expected Num"); }
+  }
+  assert token_is_operator(toks.get(1), ".."), "expected '..' operator";
+  fit toks.get(2).data {
+    .Num(n) -> { assert n == 3, "expected 3"; }
+    _ -> { panic("expected Num"); }
+  }
+}
+
+test "lexes hex and binary special numbers" {
+  let hex = _lex("0xFF");
+  assert hex.len == 1, "expected 1 token";
+  fit hex.get(0).data {
+    .Num(n) -> { assert n == 255, "expected 255"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let binlit = _lex("0b1010");
+  assert binlit.len == 1, "expected 1 token";
+  fit binlit.get(0).data {
+    .Num(n) -> { assert n == 10, "expected 10"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  // A non-zero leading digit never triggers hex/binary special-number lexing.
+  let ident_like = _lex("10x");
+  assert ident_like.len == 2, "expected 2 tokens (10, x)";
+  fit ident_like.get(1).data {
+    .Sval(s) -> { assert equals(s, "x"), "expected identifier 'x'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes number suffixes without tracking their distinction" {
+  let long_suffix = _lex("10L");
+  assert long_suffix.len == 1, "expected 1 token";
+  fit long_suffix.get(0).data {
+    .Num(n) -> { assert n == 10, "expected 10"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let float_suffix = _lex("10f");
+  assert float_suffix.len == 1, "expected 1 token";
+  fit float_suffix.get(0).data {
+    .Dec(d) -> { assert d == 10.0, "expected 10.0"; }
+    _ -> { panic("expected Dec"); }
+  }
+}
+
+test "lexes string literals with escapes preserved verbatim" {
+  // Source text (6 chars): "hi\n" is a quoted string containing a literal
+  // backslash-n, not a real newline.
+  let toks = _lex("\"hi\\n\"");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected String token";
+  fit toks.get(0).data {
+    // The token's own text is 4 chars (h, i, backslash, n) verbatim, since
+    // the emitted C string literal reinterprets `\n` itself at compile time.
+    .Sval(s) -> { assert equals(s, "hi\\n"), "expected verbatim 'hi\\n'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes an inline raw string with no escape processing" {
+  let toks = _lex("`C:\\Users\\name`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected String token";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    // The backslashes are literal bytes (one each), not escape-sequence pairs.
+    .Sval(s) -> { assert equals(s, "C:\\Users\\name"), "expected literal backslashes"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes a raw string with an embedded double-quote needing no escaping" {
+  let toks = _lex("`she said \"hi\" and left`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "she said \"hi\" and left"), "expected the quote preserved literally";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes a multi-line raw string block, implicitly closed" {
+  let toks = _lex("`line one\n  `line two\n  `line three\n;");
+  assert toks.len == 2, "expected 2 tokens (the string, then ';')";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "line one\nline two\nline three"), "expected lines joined with real newlines";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+  assert token_is_symbol(toks.get(1), ';'), "expected the trailing ';' as its own token, not swallowed";
+}
+
+test "lexes a multi-line raw string block, explicitly closed on the last line" {
+  let toks = _lex("`line A\n  `line B`;");
+  assert toks.len == 2, "expected 2 tokens (the string, then ';')";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "line A\nline B"), "expected lines joined with a real newline";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+  assert token_is_symbol(toks.get(1), ';'), "expected the trailing ';' as its own token, not swallowed";
+}
+
+test "lexes character literals with escapes decoded" {
+  // Source text (4 chars): '\n' is a quoted character escape.
+  let toks = _lex("'\\n'");
+  assert toks.len == 1, "expected 1 token";
+  fit toks.get(0).data {
+    // Unlike strings, a character escape IS decoded to its real byte value.
+    .Cval(c) -> { assert c == '\n', "expected decoded newline byte"; }
+    _ -> { panic("expected Cval"); }
+  }
+}
+
+test "lexes operators via maximal munch" {
+  let toks = _lex("a >= b != c");
+  assert toks.len == 5, "expected 5 tokens";
+  assert token_is_operator(toks.get(1), ">="), "expected '>=' as one token";
+  assert token_is_operator(toks.get(3), "!="), "expected '!=' as one token";
+}
+
+test "lexes line and block comments" {
+  let toks = _lex("// hi\n/* bye */");
+  assert toks.len == 3, "expected 3 tokens (comment, newline, comment)";
+  assert toks.get(0).type == .Comment, "expected line Comment token";
+  assert toks.get(1).type == .NewLine, "expected NewLine token";
+  assert toks.get(2).type == .Comment, "expected block Comment token";
+}
+
+test "lexes symbols and newlines" {
+  let toks = _lex("{}\n");
+  assert toks.len == 3, "expected 3 tokens";
+  assert token_is_symbol(toks.get(0), '{'), "expected '{' symbol";
+  assert token_is_symbol(toks.get(1), '}'), "expected '}' symbol";
+  assert toks.get(2).type == .NewLine, "expected NewLine token";
+}
+
+// Fuzzes the lexer against malformed UTF-8, truncated escapes/comments/
+// strings, and other byte sequences no human would type. This targets
+// crashes (an off-the-end read, an infinite loop), not the expected
+// `Result` error case that `tokenize` already returns for bad input.
+// 
+// `data`/`len` are a raw byte buffer with no guaranteed NUL-termination,
+// so this copies into a freshly NUL-terminated buffer before calling
+// `tokenize`, which takes a `str`.
+fuzz "tokenize never crashes on arbitrary input" (raw* data, num len) {
+  str src = malloc(len + 1);
+  if src == nil {
+    ret;
+  }
+  defer free(src);
+  memcpy(src, data, len);
+  src[len] = 0;
+
+  let result = tokenize(src, "fuzz_input");
+  if result.is_ok() {
+    let toks = result.unwrap();
+    defer toks.free();
+  }
+}

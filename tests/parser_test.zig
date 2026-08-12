@@ -12,7 +12,7 @@ test "ParseProcess parse_function" {
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
         defer file.close(std.testing.io);
-        const input = "fun test() { ret; }";
+        const input = "fun sample() { ret; }";
         try file.writeStreamingAll(std.testing.io, input);
     }
 
@@ -31,7 +31,7 @@ test "ParseProcess parse_function" {
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
     try std.testing.expectEqual(nodes[0].type, .Function);
-    try std.testing.expectEqualStrings("test", nodes[0].node_variant.?.function.name.?.items);
+    try std.testing.expectEqualStrings("sample", nodes[0].node_variant.?.function.name.?.items);
 
     // Delete test files
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
@@ -44,7 +44,7 @@ test "ParseProcess parse_async_function" {
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
         defer file.close(std.testing.io);
-        const input = "async fun test() { ret; }";
+        const input = "async fun sample() { ret; }";
         try file.writeStreamingAll(std.testing.io, input);
     }
 

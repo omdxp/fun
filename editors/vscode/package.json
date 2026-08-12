@@ -25,7 +25,10 @@
     "onCommand:fun.restartLanguageServer",
     "onCommand:fun.showLanguageServerOutput",
     "onCommand:fun.runFile",
-    "onCommand:fun.debugFile"
+    "onCommand:fun.debugFile",
+    "onCommand:fun.runTest",
+    "onCommand:fun.debugTest",
+    "onCommand:fun.fuzzTarget"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -46,6 +49,21 @@
       {
         "command": "fun.debugFile",
         "title": "⚙ Debug",
+        "category": "Fun"
+      },
+      {
+        "command": "fun.runTest",
+        "title": "▶ Run Test",
+        "category": "Fun"
+      },
+      {
+        "command": "fun.debugTest",
+        "title": "⚙ Debug Test",
+        "category": "Fun"
+      },
+      {
+        "command": "fun.fuzzTarget",
+        "title": "▶ Fuzz",
         "category": "Fun"
       }
     ],

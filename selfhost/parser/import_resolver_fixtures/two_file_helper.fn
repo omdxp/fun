@@ -1,0 +1,3 @@
+pub fun helper_add_one(num x) num {
+  ret x + 1;
+}

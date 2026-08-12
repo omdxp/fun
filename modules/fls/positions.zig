@@ -266,6 +266,18 @@ pub fn skipGenericArgsLite(tokens: []const TokenLite, start_index: usize) usize 
             depth -= 1;
             if (depth == 0) return nextNonTrivialTokenLite(tokens, i + 1) orelse (i + 1);
         }
+        // A doubly-nested generic's closing brackets (`Vec<Vec<T>>`) lex as a
+        // single `>>` operator token (maximal munch), not two separate `>`
+        // tokens -- the parser has its own equivalent split for this exact
+        // reason. Without handling it here, `depth` never reaches 0 for a
+        // `>>`-closed type and this function runs off the end of the token
+        // stream, returning `tokens.len` to a caller that (previously) trusted
+        // it as a valid index -- an out-of-bounds crash observed for real
+        // during workspace indexing.
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">>")) {
+            depth -= 2;
+            if (depth <= 0) return nextNonTrivialTokenLite(tokens, i + 1) orelse (i + 1);
+        }
     }
     return i;
 }
@@ -297,12 +309,36 @@ pub fn concreteGenericTypeAtToken(allocator: Allocator, tokens: []const TokenLit
             continue;
         }
 
-        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">")) {
+        // An N-deep-nested generic's closing brackets (`Vec<Vec<Vec<T>>>`)
+        // lex as ONE run of `>` characters merged into a single operator
+        // token (maximal munch: `>>`, `>>>`, ...), not N separate `>`
+        // tokens -- see `skipGenericArgsLite`'s identical handling/comment.
+        // Closes one nesting level per '>' CHARACTER in the token (not per
+        // token), so this generalizes to any depth rather than special-
+        // casing exactly two. Without this, `depth` never reaches 0 for a
+        // multi-`>`-closed type: the loop would fall through to the plain
+        // `out.appendSlice(t.text)` below, appending the run of `>`s as
+        // literal type text, then run off the end of the token stream and
+        // return null -- a real bug (hover on a nested-generic field/local
+        // showed only the outer type name, e.g. "Vec" instead of
+        // "Vec<Vec<num>>").
+        const close_run: usize = blk: {
+            if (t.kind != .symbol and t.kind != .operator) break :blk 0;
+            if (t.text.len == 0) break :blk 0;
+            for (t.text) |c| {
+                if (c != '>') break :blk 0;
+            }
+            break :blk t.text.len;
+        };
+        if (close_run > 0) {
             if (depth <= 0) break;
-            depth -= 1;
-            try out.append('>');
-            if (depth == 0) {
-                return try out.toOwnedSlice();
+            var c: usize = 0;
+            while (c < close_run) : (c += 1) {
+                depth -= 1;
+                try out.append('>');
+                if (depth == 0) {
+                    return try out.toOwnedSlice();
+                }
             }
             continue;
         }
@@ -640,11 +676,34 @@ pub fn numericBuiltinRank(name: []const u8) u8 {
 }
 
 pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
+    return findBestDefinitionOpts(symbols, name, at, false);
+}
+
+/// Same as `findBestDefinition`, but when `exclude_receiver_kinds` is true,
+/// a field/property/method/enum variant can never match -- those all
+/// require a receiver, so a BARE identifier (no preceding `.`) reference can
+/// never legitimately resolve to one. Without this, e.g. a compound field
+/// could shadow an unrelated free function/global of the same name (`Lexer.len`
+/// vs. the free function `len()`). Only bare-identifier callers should pass
+/// `true`: other callers (e.g. resolving an already-qualified `a.b` receiver,
+/// or a `.Variant` dot-shorthand) legitimately need `.enumMember`/`.field`
+/// results.
+pub fn findBestDefinitionOpts(symbols: []const SymbolLite, name: []const u8, at: Position, exclude_receiver_kinds: bool) ?SymbolLite {
     var best_local: ?SymbolLite = null;
     var best_global: ?SymbolLite = null;
 
     for (symbols) |s| {
         if (!std.mem.eql(u8, s.name, name)) continue;
+        // The receiver-kind exclusion above exists to stop a BARE identifier
+        // from resolving to a field/method/enumMember it can't legitimately
+        // reach without a receiver -- but it wrongly also excludes hovering
+        // the symbol's OWN declaration site (`num count;` inside its
+        // compound, `Red,` inside its enum), which is unambiguously "this
+        // token IS its own declaration," not a shadowing risk. Bypassing
+        // the exclusion there lets that hover resolve normally instead of
+        // falling through to the generic guessed-type fallback, which never
+        // looks up a doc comment.
+        if (exclude_receiver_kinds and types.requiresReceiver(s.kind) and !posInRange(at, s.selection_range)) continue;
 
         if (s.container_fn_range) |cr| {
             if (!posInRange(at, cr)) continue;
@@ -665,12 +724,21 @@ pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Pos
 
         for (symbols) |s| {
             if (!std.mem.eql(u8, s.name, name)) continue;
+            if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
             if (s.container_fn_range) |cr| {
                 if (!posInRange(at, cr)) continue;
             } else {
                 continue;
             }
             if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+            // Never let a declaration EARLIER than the positionally-correct
+            // `bl` (a shadowed sibling from an already-exited block -- fls
+            // only tracks function-wide scope, not real block scope) win via
+            // the "prefer a more resolved type" heuristics below. Those exist
+            // to pick between two records of the SAME declaration (e.g. a
+            // placeholder vs. a later-resolved type), not to reach backward
+            // past a real, more recent shadowing declaration.
+            if (rangeStartGreater(bl.selection_range, s.selection_range)) continue;
 
             if (preferDetailedSymbol(s, best)) {
                 best = s;
@@ -694,9 +762,25 @@ pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Pos
 }
 
 pub fn findAnyGlobalDefinition(symbols: []const SymbolLite, name: []const u8) ?SymbolLite {
+    return findAnyGlobalDefinitionOpts(symbols, name, true);
+}
+
+/// Like `findAnyGlobalDefinition`, but only excludes a receiver-only symbol
+/// (field/property/method/enumMember -- see `types.requiresReceiver`) when
+/// `exclude_receiver_kinds` is true. Without this, a bare DOT-SHORTHAND enum
+/// variant (`.InvalidNode` in a `fit` arm) defined in an IMPORTED file could
+/// never be found by this cross-file lookup at all -- `container_type != null`
+/// (the original, blunter check this replaces) unconditionally excluded every
+/// enum variant regardless of context, unlike the same-file lookup
+/// (`findBestDefinitionOpts`), which already conditions this exclusion on
+/// whether the identifier is actually preceded by a `.` (see that function's
+/// own doc comment for why a bare, unqualified name can never legitimately
+/// resolve to one of these, but a dot-shorthand/qualified reference must
+/// still be allowed to, as a last resort).
+pub fn findAnyGlobalDefinitionOpts(symbols: []const SymbolLite, name: []const u8, exclude_receiver_kinds: bool) ?SymbolLite {
     for (symbols) |s| {
         if (s.container_fn_range != null) continue;
-        if (s.container_type != null) continue;
+        if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
         if (!std.mem.eql(u8, s.name, name)) continue;
         return s;
     }

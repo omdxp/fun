@@ -36,8 +36,11 @@ cleanup_leftovers() {
 trap cleanup_leftovers EXIT
 
 # Prefer Windows build output if present (WSL can execute .exe), otherwise use native binary.
-FUN_EXE=""
-if [[ -f "$REPO_ROOT/zig-out/bin/fun.exe" ]]; then
+# Honor a pre-set FUN_EXE (e.g. to run the corpus against a self-hosted binary).
+FUN_EXE="${FUN_EXE:-}"
+if [[ -n "$FUN_EXE" ]]; then
+  :
+elif [[ -f "$REPO_ROOT/zig-out/bin/fun.exe" ]]; then
   FUN_EXE="$REPO_ROOT/zig-out/bin/fun.exe"
 elif [[ -f "$REPO_ROOT/zig-out/bin/fun" ]]; then
   FUN_EXE="$REPO_ROOT/zig-out/bin/fun"

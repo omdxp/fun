@@ -14,6 +14,7 @@
 imp std.map;
 imp std.option;
 imp std.result;
+imp std.error;
 imp std.string;
 imp std.quirks;
 
@@ -171,12 +172,12 @@ impl TomlDoc {
   }
 
   // Render with Result (for the fallible serde surface).
-  pub try_stringify() Result<str> {
+  pub try_stringify() Result<str, Error> {
     let out = self.stringify();
     if out == nil {
       ret err_kind(.OutOfMemory, "toml stringify failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 }
 
@@ -269,9 +270,9 @@ pub fun parse_document(str s) TomlDoc {
 }
 
 // Parse a flat TOML document with Result.
-pub fun try_parse_document(str s) Result<TomlDoc> {
+pub fun try_parse_document(str s) Result<TomlDoc, Error> {
   let out = parse_document(s);
-  ret ok(out);
+  ret .Ok(out);
 }
 
 impl TomlDoc as To<str> {

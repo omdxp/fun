@@ -219,6 +219,72 @@ pub fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usi
     return null;
 }
 
+/// If `all_tokens[start_i]` opens a generic argument list (`<`), appends the
+/// whole `<...>` suffix (recursively, comma-separated) to `out_buf` and
+/// returns the index just past its closing `>`. A no-op (returns `start_i`
+/// unchanged) when there's no `<` there at all.
+///
+/// The lexer's maximal-munch tokenizing fuses adjacent closing angle
+/// brackets into ONE multi-char `Operator` token (`Vec<Vec<str>>`'s trailing
+/// closer lexes as a single `>>`, not two `>` tokens) — `close_count` counts
+/// the `>` characters actually present in that one token so nested generics
+/// close at the right depth. Without this, `generic_depth` never returns to
+/// 0 and the scan runs past the declaration into whatever follows (a method
+/// body, or the next field/declaration), corrupting everything after it.
+/// This exact failure mode was originally found (and fixed) only for
+/// function signatures; every other caller below reproduces it independently
+/// on any 2+-level-nested generic type, hence this shared helper.
+pub fn appendGenericSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
+    if (start_i >= all_tokens.len) return start_i;
+    if (!isPunctChar(all_tokens[start_i], '<')) return start_i;
+
+    var generic_depth: i64 = 0;
+    var i = start_i;
+    while (i < all_tokens.len) : (i += 1) {
+        const tk = all_tokens[i];
+        if (tk.type == .NewLine or tk.type == .Comment) continue;
+
+        if (isPunctChar(tk, '<')) {
+            generic_depth += 1;
+            try out_buf.append('<');
+            continue;
+        }
+
+        const close_count = blk: {
+            const ts = tokenString(tk);
+            if (ts.len == 0) break :blk @as(usize, 0);
+            for (ts) |c| {
+                if (c != '>') break :blk @as(usize, 0);
+            }
+            break :blk ts.len;
+        };
+        if (close_count > 0) {
+            var c: usize = 0;
+            while (c < close_count) : (c += 1) {
+                generic_depth -= 1;
+                try out_buf.append('>');
+                if (generic_depth == 0) {
+                    return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
+                }
+            }
+            continue;
+        }
+
+        if (generic_depth <= 0) break;
+
+        if (isPunctChar(tk, ',')) {
+            try out_buf.appendSlice(", ");
+            continue;
+        }
+
+        const ts = tokenString(tk);
+        if (ts.len == 0) continue;
+        try out_buf.appendSlice(ts);
+    }
+
+    return i;
+}
+
 /// Return the cleaned text of a trailing comment that sits on the SAME source line
 /// as the token at `from_i` (e.g. the `,` after an enum variant), or null. Used to
 /// surface `Variant(num), // primitive payload` as the variant's hover doc. The
@@ -530,62 +596,6 @@ pub fn buildSignatureFromTokens(
             return false;
         }
 
-        fn appendGenericSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
-            if (start_i >= all_tokens.len) return start_i;
-            if (!isPunctChar(all_tokens[start_i], '<')) return start_i;
-
-            var generic_depth: i64 = 0;
-            var i = start_i;
-            while (i < all_tokens.len) : (i += 1) {
-                const tk = all_tokens[i];
-                if (tk.type == .NewLine or tk.type == .Comment) continue;
-
-                if (isPunctChar(tk, '<')) {
-                    generic_depth += 1;
-                    try out_buf.append('<');
-                    continue;
-                }
-
-                // A closing `>` — but the lexer may fuse adjacent closers into one
-                // `>>`/`>>>` operator token (e.g. `Option<Vec<JsonValue>>`). Count the
-                // `>` chars so nested generics close correctly; otherwise the depth
-                // never returns to 0 and the scan runs into the method body (EOF),
-                // dumping the whole declaration into the signature `detail`.
-                const close_count = blk: {
-                    const ts = tokenString(tk);
-                    if (ts.len == 0) break :blk @as(usize, 0);
-                    for (ts) |c| {
-                        if (c != '>') break :blk @as(usize, 0);
-                    }
-                    break :blk ts.len;
-                };
-                if (close_count > 0) {
-                    var c: usize = 0;
-                    while (c < close_count) : (c += 1) {
-                        generic_depth -= 1;
-                        try out_buf.append('>');
-                        if (generic_depth == 0) {
-                            return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
-                        }
-                    }
-                    continue;
-                }
-
-                if (generic_depth <= 0) break;
-
-                if (isPunctChar(tk, ',')) {
-                    try out_buf.appendSlice(", ");
-                    continue;
-                }
-
-                const ts = tokenString(tk);
-                if (ts.len == 0) continue;
-                try out_buf.appendSlice(ts);
-            }
-
-            return i;
-        }
-
         fn appendPointerSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
             var i = start_i;
             while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {
@@ -617,6 +627,89 @@ pub fn buildSignatureFromTokens(
                             break;
                         }
                     }
+                }
+            }
+            return i;
+        }
+
+        // Renders a parameter default's expression tokens (from just after the `=`
+        // up to but not including the terminating top-level comma/`)`) the way the
+        // original source spells it, e.g. `1`, `"hi"`, `true`, or `min(a, b)`. A
+        // depth counter over `(`/`[` (mirroring the parser's own `stop_at_comma`
+        // rule — see parser.zig's `parse_variable`) keeps a nested call's/array's
+        // own commas from being mistaken for the next parameter's separator.
+        // Number/String/Boolean tokens don't retain their source spelling (the
+        // lexer stores a parsed value instead), so those are re-spelled from their
+        // literal value rather than copied verbatim.
+        fn appendDefaultValueSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize, limit_i: usize) !usize {
+            var default_depth: i64 = 0;
+            var need_space_before_ident = false;
+            var i = start_i;
+            while (i < limit_i) : (i += 1) {
+                const t = all_tokens[i];
+                if (t.type == .NewLine or t.type == .Comment) continue;
+
+                if (default_depth == 0 and (isPunctChar(t, ',') or isSymbolChar(t, ','))) break;
+
+                if (isPunctChar(t, '(') or isSymbolChar(t, '(') or isPunctChar(t, '[') or isSymbolChar(t, '[')) {
+                    default_depth += 1;
+                }
+                if (isPunctChar(t, ')') or isSymbolChar(t, ')') or isPunctChar(t, ']') or isSymbolChar(t, ']')) {
+                    if (default_depth > 0) default_depth -= 1;
+                }
+
+                if (isPunctChar(t, ',') or isSymbolChar(t, ',')) {
+                    // A nested comma inside the default's own call/array.
+                    try out_buf.appendSlice(", ");
+                    need_space_before_ident = false;
+                    continue;
+                }
+
+                switch (t.type) {
+                    .String => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        try out_buf.append('"');
+                        try out_buf.appendSlice(tokenString(t));
+                        try out_buf.append('"');
+                        need_space_before_ident = true;
+                    },
+                    .Boolean => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        try out_buf.appendSlice(if (t.data.bval) "true" else "false");
+                        need_space_before_ident = true;
+                    },
+                    .Number => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        switch (t.data) {
+                            .cval => |c| {
+                                try out_buf.append('\'');
+                                try out_buf.append(c);
+                                try out_buf.append('\'');
+                            },
+                            .llnum => |v| try out_buf.print("{d}", .{v}),
+                            .inum => |v| try out_buf.print("{d}", .{v}),
+                            .lnum => |v| try out_buf.print("{d}", .{v}),
+                            .dnum => |v| try out_buf.print("{d}", .{v}),
+                            else => {},
+                        }
+                        need_space_before_ident = true;
+                    },
+                    .Symbol => {
+                        if (t.data == .cval) try out_buf.append(t.data.cval);
+                        need_space_before_ident = false;
+                    },
+                    .Operator => {
+                        try out_buf.appendSlice(tokenString(t));
+                        need_space_before_ident = false;
+                    },
+                    else => { // Identifier, Keyword
+                        const s = tokenString(t);
+                        if (s.len != 0) {
+                            if (need_space_before_ident) try out_buf.append(' ');
+                            try out_buf.appendSlice(s);
+                            need_space_before_ident = true;
+                        }
+                    },
                 }
             }
             return i;
@@ -654,7 +747,7 @@ pub fn buildSignatureFromTokens(
         defer ptype_buf.deinit();
         try ptype_buf.appendSlice(ptype);
         var after_type_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
-        after_type_i = try parsed.appendGenericSuffix(&ptype_buf, tokens, after_type_i);
+        after_type_i = try appendGenericSuffix(&ptype_buf, tokens, after_type_i);
         const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, after_type_i);
         const after_array_i = try parsed.appendArraySuffix(&ptype_buf, tokens, after_ptr_i);
 
@@ -669,6 +762,17 @@ pub fn buildSignatureFromTokens(
         first = false;
         try buf.print("{s} {s}", .{ ptype_buf.items, pname });
         pi = pname_i + 1;
+
+        // A defaulted parameter (`num times = 1`): render `= <expr>` after the
+        // name, the way the original source declares it, instead of silently
+        // dropping the default (the loop above would otherwise just skip over
+        // its tokens looking for the next `Type name` pair).
+        if (nextNonTrivialToken(tokens, pi)) |eq_i| {
+            if (eq_i < rparen_i.? and isPunctChar(tokens[eq_i], '=')) {
+                try buf.appendSlice(" = ");
+                pi = try parsed.appendDefaultValueSuffix(&buf, tokens, eq_i + 1, rparen_i.?);
+            }
+        }
     }
 
     try buf.append(')');
@@ -687,7 +791,7 @@ pub fn buildSignatureFromTokens(
             try rt_buf.appendSlice(rts);
 
             var after_type_i = nextNonTrivialToken(tokens, ri + 1) orelse (ri + 1);
-            after_type_i = try parsed.appendGenericSuffix(&rt_buf, tokens, after_type_i);
+            after_type_i = try appendGenericSuffix(&rt_buf, tokens, after_type_i);
 
             const after_ptr_i = try parsed.appendPointerSuffix(&rt_buf, tokens, after_type_i);
             _ = try parsed.appendArraySuffix(&rt_buf, tokens, after_ptr_i);
@@ -902,7 +1006,243 @@ fn genericArgSpellings(allocator: Allocator, type_str: []const u8) ?[]const []co
     return out.toOwnedSlice() catch null;
 }
 
-pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token) !void {
+/// A raw-TEXT scan for `imp path.to.module;` / `imp ..relative.path;` specs
+/// (the text between `imp` and the terminating `;`, with any internal
+/// whitespace stripped), for a file that hasn't been lexed yet -- used by
+/// `rebuildIndex` to discover direct imports BEFORE the real index exists,
+/// so their own enum declarations (see `scanEnumVariantPayloadsFromText`)
+/// can be merged in and the real index only needs to be built ONCE, not
+/// once normally and once more after learning about cross-file enums.
+/// Best-effort like its sibling: doesn't understand string literals or
+/// comments containing something that looks like `imp ...;`.
+pub fn scanImportSpecsFromText(allocator: Allocator, text: []const u8) ![][]const u8 {
+    var out = ArrayList([]const u8).init(allocator);
+    errdefer out.deinit();
+
+    const isIdentStart = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphabetic(c) or c == '_';
+        }
+    }.call;
+    const isIdentCont = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.call;
+    const isSpecChar = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
+        }
+    }.call;
+
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+            i += 1;
+            continue;
+        }
+        if (!isIdentStart(c)) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < text.len and isIdentCont(text[i])) i += 1;
+        const word = text[start..i];
+        if (!std.mem.eql(u8, word, "imp")) continue;
+        // Must be followed by whitespace, not e.g. an identifier like
+        // `impl` or `important` (already excluded by isIdentCont above,
+        // but a following '.'/other spec char right after "imp" with NO
+        // separating whitespace would also be wrong -- require at least
+        // one space/tab before the spec).
+        if (i >= text.len or !(text[i] == ' ' or text[i] == '\t')) continue;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
+        const spec_start = i;
+        while (i < text.len and isSpecChar(text[i])) i += 1;
+        if (i > spec_start) {
+            try out.append(try allocator.dupe(u8, text[spec_start..i]));
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// A raw-TEXT equivalent of `prescanEnumVariantPayloads`, for a file that
+/// hasn't (and won't) be run through the real lexer for this purpose --
+/// `rebuildIndex` uses this to pull a directly-imported file's own enum
+/// declarations (via its already-loaded `Doc.text`) into a merged map, so a
+/// `fit`-arm destructuring binding (`.Impl(i) ->`) resolves its type even
+/// when the enum itself lives in a different file (the common shape for a
+/// large enum living in its own module) -- see `buildIndexFromTextAt`'s
+/// `extra_variant_payloads` parameter. Best-effort, matching the rest of
+/// this file's philosophy: skips `//` and `/* */` comments, but doesn't
+/// understand string literals containing `{`/`(`/`//`-like sequences (rare
+/// inside a plain enum declaration's own body in practice).
+pub fn scanEnumVariantPayloadsFromText(allocator: Allocator, text: []const u8, map: *std.StringHashMap([]const u8)) !void {
+    var ambiguous = std.StringHashMap(void).init(allocator);
+    defer ambiguous.deinit();
+
+    const isIdentStart = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphabetic(c) or c == '_';
+        }
+    }.call;
+    const isIdentCont = struct {
+        fn call(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.call;
+
+    // Advances past whitespace and comments starting at `i`; returns the
+    // index of the next real content byte (or `text.len`).
+    const skipTrivia = struct {
+        fn call(s: []const u8, start: usize) usize {
+            var j = start;
+            while (j < s.len) {
+                const c = s[j];
+                if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                    j += 1;
+                    continue;
+                }
+                if (c == '/' and j + 1 < s.len and s[j + 1] == '/') {
+                    j += 2;
+                    while (j < s.len and s[j] != '\n') j += 1;
+                    continue;
+                }
+                if (c == '/' and j + 1 < s.len and s[j + 1] == '*') {
+                    j += 2;
+                    while (j + 1 < s.len and !(s[j] == '*' and s[j + 1] == '/')) j += 1;
+                    j = if (j + 1 < s.len) j + 2 else s.len;
+                    continue;
+                }
+                break;
+            }
+            return j;
+        }
+    }.call;
+
+    const readIdent = struct {
+        fn call(s: []const u8, start: usize) ?struct { name: []const u8, end: usize } {
+            if (start >= s.len or !isIdentStart(s[start])) return null;
+            var j = start + 1;
+            while (j < s.len and isIdentCont(s[j])) j += 1;
+            return .{ .name = s[start..j], .end = j };
+        }
+    }.call;
+
+    var i: usize = 0;
+    while (i < text.len) {
+        i = skipTrivia(text, i);
+        if (i >= text.len) break;
+        const kw = readIdent(text, i) orelse {
+            i += 1;
+            continue;
+        };
+        if (!std.mem.eql(u8, kw.name, "enum")) {
+            i = kw.end;
+            continue;
+        }
+        var j = skipTrivia(text, kw.end);
+        const name_id = readIdent(text, j) orelse {
+            i = j;
+            continue;
+        };
+        const enum_name = name_id.name;
+        j = skipTrivia(text, name_id.end);
+
+        // Skip an optional `<...>` generic type-parameter list.
+        if (j < text.len and text[j] == '<') {
+            var angle: i64 = 0;
+            while (j < text.len) : (j += 1) {
+                if (text[j] == '<') angle += 1;
+                if (text[j] == '>') {
+                    angle -= 1;
+                    if (angle <= 0) {
+                        j += 1;
+                        break;
+                    }
+                }
+            }
+            j = skipTrivia(text, j);
+        }
+        if (j >= text.len or text[j] != '{') {
+            i = j;
+            continue;
+        }
+        j += 1;
+
+        var depth: i64 = 1;
+        while (j < text.len and depth > 0) {
+            j = skipTrivia(text, j);
+            if (j >= text.len) break;
+            if (text[j] == '{') {
+                depth += 1;
+                j += 1;
+                continue;
+            }
+            if (text[j] == '}') {
+                depth -= 1;
+                j += 1;
+                continue;
+            }
+            if (depth != 1) {
+                j += 1;
+                continue;
+            }
+            const vid = readIdent(text, j) orelse {
+                j += 1;
+                continue;
+            };
+            const vname = vid.name;
+            const after_v = skipTrivia(text, vid.end);
+            if (after_v >= text.len or text[after_v] != '(') {
+                j = vid.end;
+                continue;
+            }
+            // First payload type spelling: from right after `(` up to the
+            // first top-level `,` or `)`, trimmed.
+            var k = after_v + 1;
+            const type_start = skipTrivia(text, k);
+            var pdepth: i64 = 1;
+            var type_end = type_start;
+            k = type_start;
+            while (k < text.len and pdepth > 0) : (k += 1) {
+                const c = text[k];
+                if (c == '(') pdepth += 1;
+                if (c == ')') {
+                    pdepth -= 1;
+                    if (pdepth == 0) break;
+                }
+                if (c == ',' and pdepth == 1) break;
+                if (!(c == ' ' or c == '\t' or c == '\r' or c == '\n')) type_end = k + 1;
+            }
+            if (type_end > type_start) {
+                const ptype = text[type_start..type_end];
+                const qkey = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ enum_name, vname });
+                try map.put(qkey, try allocator.dupe(u8, ptype));
+                if (map.contains(vname)) {
+                    try ambiguous.put(try allocator.dupe(u8, vname), {});
+                } else {
+                    try map.put(try allocator.dupe(u8, vname), try allocator.dupe(u8, ptype));
+                }
+            }
+            // Skip to the matching `)` of this variant's own parens.
+            var pd: i64 = 1;
+            var m = after_v + 1;
+            while (m < text.len and pd > 0) : (m += 1) {
+                if (text[m] == '(') pd += 1;
+                if (text[m] == ')') pd -= 1;
+            }
+            j = m;
+        }
+        i = j;
+    }
+
+    var ait = ambiguous.keyIterator();
+    while (ait.next()) |key| _ = map.remove(key.*);
+}
+
+pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token, extra_variant_payloads: ?*const std.StringHashMap([]const u8)) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
 
@@ -910,13 +1250,24 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         name: []const u8,
         dtype_base: []const u8,
         dtype_display: []const u8,
+        // The parameter's OWN name token position -- used for its
+        // `decl_range`/`selection_range` instead of the enclosing
+        // function's own body-brace position (see the call site below
+        // that builds `SymbolLite` entries for params). Without this,
+        // hovering a parameter showed the ENCLOSING FUNCTION's own doc
+        // comment: the placeholder range shared the function's own decl
+        // line (most signatures here are single-line), and doc-comment
+        // lookup is purely line-number-driven.
+        pos: token.Pos,
     };
 
     // Track when we're inside any function-ish body so we can index locals.
     // This includes:
     // - `fun name(...) { ... }`
     // - `impl Type { method(...) { ... } }`
-    const PendingBodyKind = enum { none, fun_decl, impl_method };
+    // - `test "name" { ... }`
+    // - `fuzz "name" (data, len) { ... }`
+    const PendingBodyKind = enum { none, fun_decl, impl_method, test_decl, fuzz_decl };
 
     var pending_body: PendingBodyKind = .none;
     var pending_params = ArrayList(ParamLite).init(allocator);
@@ -949,6 +1300,34 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     var variant_payload_map = std.StringHashMap([]const u8).init(allocator);
     defer variant_payload_map.deinit();
     try prescanEnumVariantPayloads(allocator, tokens, &variant_payload_map);
+    // Directly-imported files' own enum declarations (an enum living in its
+    // own module is the common case for a large one) -- merged in AFTER
+    // this file's own scan so a local declaration always wins on a name
+    // collision. See `buildIndexFromTextAt`'s doc comment for how the
+    // caller computes this.
+    //
+    // Skip a payload that's a bare, unbound generic type param (`T`, `E`,
+    // a lone uppercase letter that isn't a builtin type name) -- that's
+    // the imported enum's own UNSUBSTITUTED template spelling (e.g.
+    // `Result<T, E>`'s `Ok(T)`), and inserting it here would make this
+    // binding's type look "already resolved" (non-null) to everything
+    // downstream, when it actually still needs the separate query-time
+    // engine's substitution (mapping `T` to the fit SUBJECT's own concrete
+    // arg, e.g. `JsonValue`) to be correct. That engine already handles
+    // the cross-file generic case correctly on its own; merging here was
+    // observed to regress it (hover showed the bare `T`/`E` again) by
+    // preempting it with a wrong-but-non-null answer. Fine to merge a
+    // CONCRETE payload type (`Impl(ImplNode)`) -- there's no better
+    // mechanism for that case, cross-file or not.
+    if (extra_variant_payloads) |extra| {
+        var eit = extra.iterator();
+        while (eit.next()) |entry| {
+            const v = entry.value_ptr.*;
+            if (v.len == 1 and std.ascii.isUpper(v[0]) and !isBuiltinTypeName(v)) continue;
+            if (variant_payload_map.contains(entry.key_ptr.*)) continue;
+            try variant_payload_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
 
     // Generic enum type params (`Result` -> ["T"]), so a bare type-param payload
     // (`Ok(T)`) can be substituted with the fit subject's concrete arg.
@@ -990,6 +1369,12 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     const isLetToken = struct {
         fn call(t: token.Token) bool {
             return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "let");
+        }
+    }.call;
+
+    const isConstToken = struct {
+        fn call(t: token.Token) bool {
+            return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "const");
         }
     }.call;
 
@@ -2671,6 +3056,69 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     pi += 1;
                     continue;
                 }
+
+                // A function-TYPE parameter: `fun(T1, T2) R name` (see
+                // `parse_fn_type_datatype` in the real parser). This doesn't
+                // start with a type token at all (`fun` is a keyword, and
+                // its own `(T1, T2)` looks like a nested parameter list), so
+                // without this branch the scan below skips straight past
+                // `fun(chr)` and finds the NEXT type-token-then-identifier
+                // pair instead -- misreading `fun(chr) bin pred` as a plain
+                // `bin pred` parameter (the return type standing in for the
+                // whole signature, losing the callable shape entirely).
+                if (isKeyword(pt, "fun")) {
+                    const lp_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
+                    if (!isPunctChar(tokens_[lp_i], '(')) {
+                        pi += 1;
+                        continue;
+                    }
+                    var sig_buf = ArrayList(u8).init(allocator_);
+                    defer sig_buf.deinit();
+                    sig_buf.appendSlice("fun(") catch {};
+
+                    var fpd: i64 = 1;
+                    var fk: usize = lp_i + 1;
+                    var wrote_arg = false;
+                    while (fk < rparen_i.? and fpd > 0) : (fk += 1) {
+                        const ftk = tokens_[fk];
+                        if (isPunctChar(ftk, '(')) fpd += 1;
+                        if (isPunctChar(ftk, ')')) {
+                            fpd -= 1;
+                            if (fpd == 0) break;
+                        }
+                        if (ftk.type == .NewLine or ftk.type == .Comment) continue;
+                        if (isPunctChar(ftk, ',')) {
+                            sig_buf.appendSlice(", ") catch {};
+                            continue;
+                        }
+                        if (wrote_arg) sig_buf.appendSlice(" ") catch {};
+                        sig_buf.appendSlice(tokenString(ftk)) catch {};
+                        wrote_arg = true;
+                    }
+                    sig_buf.appendSlice(")") catch {};
+
+                    const rt_i = nextNonTrivialToken(tokens_, fk + 1) orelse break;
+                    if (!isTypeToken(tokens_[rt_i])) {
+                        pi = rt_i;
+                        continue;
+                    }
+                    sig_buf.appendSlice(" ") catch {};
+                    sig_buf.appendSlice(tokenString(tokens_[rt_i])) catch {};
+
+                    const fname_i = nextNonTrivialToken(tokens_, rt_i + 1) orelse break;
+                    if (!isIdent(tokens_[fname_i])) {
+                        pi = fname_i;
+                        continue;
+                    }
+
+                    const sig_owned = allocator_.dupe(u8, sig_buf.items) catch continue;
+                    const fpname = tokenString(tokens_[fname_i]);
+                    const fpname_owned = allocator_.dupe(u8, fpname) catch fpname;
+                    params.append(.{ .name = fpname_owned, .dtype_base = sig_owned, .dtype_display = sig_owned, .pos = tokens_[fname_i].pos }) catch {};
+                    pi = fname_i + 1;
+                    continue;
+                }
+
                 if (!isTypeToken(pt)) {
                     pi += 1;
                     continue;
@@ -2683,35 +3131,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
                 // Preserve generic suffix in parameter types (e.g. `Box<T>`).
                 var name_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
-                if (name_i < tokens_.len and isPunctChar(tokens_[name_i], '<')) {
-                    var gdepth: i64 = 0;
-                    var gi = name_i;
-                    while (gi < tokens_.len) : (gi += 1) {
-                        const gtok = tokens_[gi];
-                        if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                        if (isPunctChar(gtok, '<')) {
-                            gdepth += 1;
-                            ptype_buf.append('<') catch {};
-                            continue;
-                        }
-                        if (isPunctChar(gtok, '>')) {
-                            gdepth -= 1;
-                            ptype_buf.append('>') catch {};
-                            if (gdepth == 0) {
-                                name_i = nextNonTrivialToken(tokens_, gi + 1) orelse break;
-                                break;
-                            }
-                            continue;
-                        }
-                        if (gdepth <= 0) break;
-                        if (isPunctChar(gtok, ',')) {
-                            ptype_buf.appendSlice(", ") catch {};
-                            continue;
-                        }
-                        const ts = tokenString(gtok);
-                        if (ts.len != 0) ptype_buf.appendSlice(ts) catch {};
-                    }
-                }
+                name_i = appendGenericSuffix(&ptype_buf, tokens_, name_i) catch name_i;
 
                 while (name_i < tokens_.len and isPunctChar(tokens_[name_i], '[')) {
                     ptype_buf.appendSlice("[]") catch {};
@@ -2757,7 +3177,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 else
                     (std.mem.concat(allocator_, u8, &[_][]const u8{ ptype_core, markers.items }) catch ptype_core);
 
-                params.append(.{ .name = pname_owned, .dtype_base = dtype_display, .dtype_display = dtype_display }) catch {};
+                params.append(.{ .name = pname_owned, .dtype_base = dtype_display, .dtype_display = dtype_display, .pos = tokens_[name_i].pos }) catch {};
                 pi = name_i + 1;
             }
         }
@@ -2799,9 +3219,14 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             body_symbol_start = out.items.len;
             locals_type_map.clearRetainingCapacity();
 
-            // Add implicit `self` inside impl method bodies.
+            // Add implicit `self` inside impl method bodies. `self` is always a
+            // pointer to the receiver compound (codegen emits `<Type>* self` as
+            // the implicit first argument), so its hover type must carry the
+            // `*` suffix just like any other pointer-typed parameter.
             if (pending_body == .impl_method) {
                 if (pending_impl_owner) |owner| {
+                    const self_type = try std.fmt.allocPrint(allocator, "{s}*", .{owner});
+                    const self_detail = try std.fmt.allocPrint(allocator, "{s}* self", .{owner});
                     try out.append(.{
                         .name = try allocator.dupe(u8, "self"),
                         .kind = .variable,
@@ -2809,10 +3234,10 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         .selection_range = br,
                         .container_fn_range = body_range.?,
                         .container_type = null,
-                        .value_type = try allocator.dupe(u8, owner),
-                        .detail = try allocator.dupe(u8, owner),
+                        .value_type = self_type,
+                        .detail = self_detail,
                     });
-                    putType(&locals_type_map, "self", owner, allocator);
+                    putType(&locals_type_map, "self", self_type, allocator);
                 }
             }
 
@@ -2831,13 +3256,21 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 putType(&locals_type_map, "vargs", "Vec<str>", allocator);
             }
 
-            // Add params as locals within the body.
+            // Add params as locals within the body. Each param's OWN
+            // `decl_range`/`selection_range` -- NOT the enclosing
+            // function's own `br` (its body-opening brace) -- so
+            // hovering a parameter resolves to its own declaration
+            // instead of leaking the enclosing function's doc comment
+            // (line-number-driven doc lookup used to match on `br`'s
+            // line, which is the function's own decl line for a
+            // single-line signature).
             for (pending_params.items) |pinfo| {
+                const pbr = rangeFromTokenPos(pinfo.pos);
                 try out.append(.{
                     .name = try allocator.dupe(u8, pinfo.name),
                     .kind = .variable,
-                    .decl_range = br,
-                    .selection_range = br,
+                    .decl_range = pbr,
+                    .selection_range = pbr,
                     .container_fn_range = body_range.?,
                     .container_type = null,
                     .value_type = try allocator.dupe(u8, pinfo.dtype_display),
@@ -2876,7 +3309,78 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             locals_type_map.clearRetainingCapacity();
         }
 
+        if (isKeyword(t, "test")) {
+            // `test "name" { ... }` has no params/return type to capture --
+            // just mark the upcoming `{` as starting a function-ish body so
+            // its locals get indexed the same way a function body's would.
+            // Without this, EVERY declaration inside a test block (locals,
+            // fit-arm bindings, etc.) was invisible to hover/completion,
+            // since this token-based scanner (not the AST-based one, which
+            // is off by default) is what actually builds the symbol table
+            // in the common case.
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
+            pending_body = .test_decl;
+            continue;
+        }
+
+        if (isKeyword(t, "fuzz")) {
+            // `fuzz "name" (data, len) { ... }` -- same reasoning as `test`
+            // above, but ALSO has two parameters (unlike `test`) whose
+            // TYPES are always fixed (`raw* data, num len` -- see
+            // `parse_fuzz` in the parser) rather than parsed from the
+            // token stream the way `fun`'s params are: there's no type
+            // annotation in the source to read, just the two bare names,
+            // so they're synthesized directly here instead of going
+            // through `parseParamsAfterLParen`.
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
+            pending_body = .fuzz_decl;
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (tokens[name_i].type != .String) continue;
+            const lparen_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!isPunctChar(tokens[lparen_i], '(')) continue;
+            const data_i = nextNonTrivialToken(tokens, lparen_i + 1) orelse continue;
+            if (isIdent(tokens[data_i])) {
+                const pname = tokenString(tokens[data_i]);
+                const pname_owned = allocator.dupe(u8, pname) catch pname;
+                pending_params.append(.{
+                    .name = pname_owned,
+                    .dtype_base = "raw",
+                    .dtype_display = "raw*",
+                    .pos = tokens[data_i].pos,
+                }) catch {};
+            }
+            const comma_i = nextNonTrivialToken(tokens, data_i + 1) orelse continue;
+            if (!isPunctChar(tokens[comma_i], ',')) continue;
+            const len_i = nextNonTrivialToken(tokens, comma_i + 1) orelse continue;
+            if (isIdent(tokens[len_i])) {
+                const pname = tokenString(tokens[len_i]);
+                const pname_owned = allocator.dupe(u8, pname) catch pname;
+                pending_params.append(.{
+                    .name = pname_owned,
+                    .dtype_base = "num",
+                    .dtype_display = "num",
+                    .pos = tokens[len_i].pos,
+                }) catch {};
+            }
+            continue;
+        }
+
         if (isKeyword(t, "fun")) {
+            // A function-TYPE annotation used as a PARAMETER's type
+            // (`read_while(fun(chr) bin pred)`) is not a real declaration --
+            // it's `fun` directly followed by `(` with no name in between.
+            // `parseParamsAfterLParen`'s own dedicated branch already parses
+            // this correctly when called from the enclosing declaration's
+            // param list; unconditionally resetting pending state here wiped
+            // out whatever method/function declaration was still waiting for
+            // its own `{` (e.g. clobbering `read_while`'s `pending_params`/
+            // `pending_impl_owner` before they were ever flushed), so its
+            // real params -- and the implicit `self` for impl methods --
+            // silently vanished.
+            const peek_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (isPunctChar(tokens[peek_i], '(')) {
+                continue;
+            }
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
             pending_body = .fun_decl;
             const is_public = hasPubModifierBefore(tokens, i);
@@ -2946,35 +3450,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             owner_name_buf.appendSlice(name) catch {};
 
             var after_compound_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse tokens.len;
-            if (after_compound_name_i < tokens.len and isPunctChar(tokens[after_compound_name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = after_compound_name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        owner_name_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        owner_name_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            after_compound_name_i = nextNonTrivialToken(tokens, gi + 1) orelse tokens.len;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        owner_name_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) owner_name_buf.appendSlice(ts) catch {};
-                }
-            }
+            after_compound_name_i = appendGenericSuffix(&owner_name_buf, tokens, after_compound_name_i) catch after_compound_name_i;
 
             const owner_name = allocator.dupe(u8, owner_name_buf.items) catch name;
             // Find opening '{'
@@ -2997,35 +3473,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         ftype_buf.appendSlice(ftype_raw) catch {};
 
                         var field_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
-                        if (field_name_i < tokens.len and isPunctChar(tokens[field_name_i], '<')) {
-                            var gdepth: i64 = 0;
-                            var gi = field_name_i;
-                            while (gi < tokens.len) : (gi += 1) {
-                                const gtok = tokens[gi];
-                                if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                                if (isPunctChar(gtok, '<')) {
-                                    gdepth += 1;
-                                    ftype_buf.append('<') catch {};
-                                    continue;
-                                }
-                                if (isPunctChar(gtok, '>')) {
-                                    gdepth -= 1;
-                                    ftype_buf.append('>') catch {};
-                                    if (gdepth == 0) {
-                                        field_name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                if (gdepth <= 0) break;
-                                if (isPunctChar(gtok, ',')) {
-                                    ftype_buf.appendSlice(", ") catch {};
-                                    continue;
-                                }
-                                const ts = tokenString(gtok);
-                                if (ts.len != 0) ftype_buf.appendSlice(ts) catch {};
-                            }
-                        }
+                        field_name_i = appendGenericSuffix(&ftype_buf, tokens, field_name_i) catch field_name_i;
 
                         // Consume array dimension brackets that are part of the field type,
                         // e.g. `T[] data;` or `num[][] grid;`.
@@ -3045,7 +3493,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                             field_name_i = nextNonTrivialToken(tokens, field_name_i + 1) orelse break;
                         }
 
-                        if (!isIdent(tokens[field_name_i])) continue;
+                        if (field_name_i >= tokens.len or !isIdent(tokens[field_name_i])) continue;
 
                         const after_name_i = nextNonTrivialToken(tokens, field_name_i + 1) orelse continue;
                         if (!isSymbolChar(tokens[after_name_i], ';')) continue;
@@ -3127,7 +3575,18 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                 .value_type = try allocator.dupe(u8, owner_name),
                                 .detail = trailingCommentTextOnLine(allocator, tokens, after_name_i),
                             });
-                            k = after_name_i;
+                            // When the terminator IS the enum's own closing `}` (the
+                            // last variant, no trailing comma -- the common style),
+                            // land k one token BEFORE it so the loop's `:(k += 1)`
+                            // brings k back onto the `}` itself next iteration.
+                            // Jumping straight to `after_name_i` (as the comma/`;`
+                            // cases correctly do) skipped that `}` entirely, so
+                            // `depth` never dropped back to 0 for THIS enum's own
+                            // body -- the scanner kept running past it, silently
+                            // misreading the next `identifier(...)` it found ANYWHERE
+                            // later in the file (e.g. an ordinary function call/decl)
+                            // as one more data-carrying variant of this enum.
+                            k = if (isSymbolChar(tokens[after_name_i], '}')) after_name_i - 1 else after_name_i;
                             continue;
                         }
 
@@ -3196,7 +3655,9 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                     .value_type = try allocator.dupe(u8, owner_name),
                                     .detail = trailingCommentTextOnLine(allocator, tokens, m),
                                 });
-                                k = m;
+                                // Same "don't skip the enum's own closing `}`" fix as
+                                // the bare-variant case above.
+                                k = if (isSymbolChar(tokens[m], '}')) m - 1 else m;
                             }
                         }
                     }
@@ -3285,35 +3746,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             owner_buf.appendSlice(owner_base) catch {};
 
             var after_type_i = nextNonTrivialToken(tokens, type_i + 1) orelse tokens.len;
-            if (after_type_i < tokens.len and isPunctChar(tokens[after_type_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = after_type_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        owner_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        owner_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            after_type_i = nextNonTrivialToken(tokens, gi + 1) orelse tokens.len;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        owner_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) owner_buf.appendSlice(ts) catch {};
-                }
-            }
+            after_type_i = appendGenericSuffix(&owner_buf, tokens, after_type_i) catch after_type_i;
 
             const owner_name = allocator.dupe(u8, owner_buf.items) catch owner_base;
             impl_owner_name = owner_name;
@@ -3614,7 +4047,8 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         // - `Type* name;` / `Type * name = ...;`
         // - `Type& name;` / `Type & name = ...;`
         // Attach locals to the enclosing `fun { ... }` body.
-        if (in_body and isLetToken(t)) {
+        if (in_body and (isLetToken(t) or isConstToken(t))) {
+            const is_const_decl = isConstToken(t);
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
 
@@ -3644,13 +4078,13 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             const detail = if (inferred) |tname| blk: {
                 var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.print("{s} {s}", .{ tname, vname });
+                try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", tname, vname });
                 break :blk try allocator.dupe(u8, det_buf.items);
             } else null;
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
-                .kind = .variable,
+                .kind = if (is_const_decl) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .container_fn_range = body_range.?,
@@ -3662,12 +4096,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             continue;
         }
         if (in_body and isTypeToken(t)) {
-            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
+            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`. `const <Type>
+            // name = ...` is a real (explicitly-typed) declaration, not excluded
+            // here -- it's detected below via `is_const_decl` instead.
+            var is_const_decl = false;
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
                 if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
+                is_const_decl = std.mem.eql(u8, kw, "const");
             }
 
             const vtype_base_raw = tokenString(t);
@@ -3676,35 +4114,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             vtype_buf.appendSlice(vtype_base_raw) catch {};
 
             var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
-            if (name_i < tokens.len and isPunctChar(tokens[name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        vtype_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        vtype_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        vtype_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
-                }
-            }
+            name_i = appendGenericSuffix(&vtype_buf, tokens, name_i) catch name_i;
             // Consume array dimension brackets `[][]...` that are part of the type.
             while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
                 const rbr_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
@@ -3745,11 +4155,11 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
                 var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.print("{s} {s}", .{ vtype_display, vname });
+                try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", vtype_display, vname });
 
                 try out.append(.{
                     .name = try allocator.dupe(u8, vname),
-                    .kind = .variable,
+                    .kind = if (is_const_decl) .constant else .variable,
                     .decl_range = r,
                     .selection_range = r,
                     .container_fn_range = body_range.?,
@@ -3777,12 +4187,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         // Best-effort top-level global variable indexing: `Type name;` or `Type name = ...;`
         // Only at top-level (brace_depth==0) and not in parameter lists (paren_depth==0).
         if (brace_depth == 0 and paren_depth == 0 and isTypeToken(t)) {
-            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
+            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`. `const <Type>
+            // name = ...` is a real (explicitly-typed) declaration, not excluded
+            // here -- it's detected below via `is_const_decl` instead.
+            var is_const_decl = false;
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
                 if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
+                is_const_decl = std.mem.eql(u8, kw, "const");
             }
 
             const vtype_raw = tokenString(t);
@@ -3791,35 +4205,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             vtype_buf.appendSlice(vtype_raw) catch {};
 
             var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
-            if (name_i < tokens.len and isPunctChar(tokens[name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        vtype_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        vtype_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        vtype_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
-                }
-            }
+            name_i = appendGenericSuffix(&vtype_buf, tokens, name_i) catch name_i;
 
             // Consume array dimension brackets `[][]...` that follow the base type (or generic).
             while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
@@ -3837,7 +4223,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 if (isPunctChar(tokens[name_i], '&')) try markers.append('&');
                 name_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
             }
-            if (!isIdent(tokens[name_i])) continue;
+            if (name_i >= tokens.len or !isIdent(tokens[name_i])) continue;
             const after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             const after = tokens[after_i];
             if (!(isPunctChar(after, ';') or isPunctChar(after, '=') or isPunctChar(after, ','))) continue;
@@ -3852,22 +4238,80 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
             var det_buf = ArrayList(u8).init(allocator);
             defer det_buf.deinit();
-            try det_buf.print("{s} {s}", .{ vtype, vname });
+            try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", vtype, vname });
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
-                .kind = .variable,
+                .kind = if (is_const_decl) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .container_type = null,
                 .value_type = try allocator.dupe(u8, vtype),
                 .detail = try allocator.dupe(u8, det_buf.items),
                 .is_public = blk: {
-                    const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    var prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    // Skip back over `const` (`pub const num MIN = 0;`) to find `pub`.
+                    if (is_const_decl and isConstToken(tokens[prev])) {
+                        prev = prevNonTrivialToken(tokens, prev) orelse break :blk false;
+                    }
                     break :blk isPubToken(tokens[prev]);
                 },
             });
             putType(&globals_type_map, vname, vtype, allocator);
+            continue;
+        }
+
+        // Best-effort top-level INFERRED-type const indexing: `const NAME =
+        // <expr>;` / `pub const NAME = <expr>;`. Mirrors the local `let`/`const`
+        // inference scan above, but for globals (there is no top-level `let` --
+        // only `const` can introduce an inferred-type global).
+        if (brace_depth == 0 and paren_depth == 0 and isConstToken(t)) {
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[name_i])) continue;
+
+            const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!isPunctChar(tokens[after_name_i], '=')) continue;
+
+            var end_i = after_name_i + 1;
+            var depth: i64 = 0;
+            var generic_depth: i64 = 0;
+            while (end_i < tokens.len) : (end_i += 1) {
+                const tk = tokens[end_i];
+                if (tk.type == .NewLine or tk.type == .Comment) continue;
+                if (isPunctChar(tk, '(') or isPunctChar(tk, '[') or isSymbolChar(tk, '{')) depth += 1;
+                if (isPunctChar(tk, ')') or isPunctChar(tk, ']') or isSymbolChar(tk, '}')) depth -= 1;
+                if (isPunctChar(tk, '<')) generic_depth += 1;
+                if (isPunctChar(tk, '>') and generic_depth > 0) generic_depth -= 1;
+                if (depth <= 0 and isPunctChar(tk, ';')) break;
+            }
+
+            const vname_raw = tokenString(tokens[name_i]);
+            const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
+            const r = rangeFromTokenPos(tokens[name_i].pos);
+
+            const inferred = inferExprTypeFromTokens(allocator, tokens, after_name_i + 1, end_i, &locals_type_map, &globals_type_map, out.items);
+            const value_type = if (inferred) |tname| (allocator.dupe(u8, tname) catch tname) else null;
+            const detail = if (inferred) |tname| blk: {
+                var det_buf = ArrayList(u8).init(allocator);
+                defer det_buf.deinit();
+                try det_buf.print("const {s} {s}", .{ tname, vname });
+                break :blk try allocator.dupe(u8, det_buf.items);
+            } else null;
+
+            try out.append(.{
+                .name = try allocator.dupe(u8, vname),
+                .kind = .constant,
+                .decl_range = r,
+                .selection_range = r,
+                .container_type = null,
+                .value_type = value_type,
+                .detail = detail,
+                .is_public = blk: {
+                    const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    break :blk isPubToken(tokens[prev]);
+                },
+            });
+            putType(&globals_type_map, vname, value_type, allocator);
             continue;
         }
     }

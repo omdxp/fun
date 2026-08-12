@@ -179,6 +179,123 @@ test "LexProcess string" {
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
+test "LexProcess raw string: inline, no escape processing" {
+    const ifilepath = "LexProcess_raw_string_inline.fn";
+    const ofilepath = "LexProcess_raw_string_inline.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        const input = "`C:\\Users\\name\\file.txt`";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    // The backslashes are LITERAL bytes (one each), not escape-sequence pairs.
+    try std.testing.expectEqualStrings("C:\\Users\\name\\file.txt", t.data.sval.items);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
+test "LexProcess raw string: embedded double-quote needs no escaping" {
+    const ifilepath = "LexProcess_raw_string_quote.fn";
+    const ofilepath = "LexProcess_raw_string_quote.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        const input = "`she said \"hi\" and left`";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    try std.testing.expectEqualStrings("she said \"hi\" and left", t.data.sval.items);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
+test "LexProcess raw string: multi-line block, implicitly closed" {
+    const ifilepath = "LexProcess_raw_string_multiline_implicit.fn";
+    const ofilepath = "LexProcess_raw_string_multiline_implicit.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        const input = "`line one\n  `line two\n  `line three\n;";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    try std.testing.expectEqualStrings("line one\nline two\nline three", t.data.sval.items);
+    // The trailing ';' (on its own line, not part of any backtick line) must
+    // remain a separate token, not get swallowed into the string.
+    const t2 = transpile_proc.tokens.items()[1];
+    try std.testing.expectEqual(t2.type, .Symbol);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
+test "LexProcess raw string: multi-line block, explicitly closed on the last line" {
+    const ifilepath = "LexProcess_raw_string_multiline_explicit.fn";
+    const ofilepath = "LexProcess_raw_string_multiline_explicit.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        const input = "`line A\n  `line B`;";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    try std.testing.expectEqualStrings("line A\nline B", t.data.sval.items);
+    // The trailing ';' (closed inline on the same line as "line B") must
+    // remain a separate token right after the string.
+    const t2 = transpile_proc.tokens.items()[1];
+    try std.testing.expectEqual(t2.type, .Symbol);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
 test "LexProcess number" {
     const ifilepath = "LexProcess_number.fn";
     const ofilepath = "LexProcess_number.c";

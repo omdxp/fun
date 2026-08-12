@@ -44,6 +44,18 @@ pub const LexProcess = struct {
     /// Optional queued token used by raw asm block lexing (typically the closing `}`).
     queued_token: ?token.Token = null,
 
+    /// Set by `token_make_special_number` when it pops and merges a
+    /// preceding bare `0` token into a `0x`/`0b` literal (`read_next_token`
+    /// already consumed and pushed that `0` as its OWN token in an EARLIER
+    /// call, so ITS start position is the only place the literal's true
+    /// start survives). `read_next_token`'s post-dispatch position fixup
+    /// reads this instead of the current call's own (too-late) `start_col`/
+    /// `start_line`, which would otherwise point at the `x`/`b`, not the
+    /// `0` -- confirmed directly: without this, the formatter (which slices
+    /// the ORIGINAL SOURCE by token position to preserve hex/binary
+    /// notation) re-emitted `0x20` as `x20`, an invalid identifier.
+    merged_number_start: ?token.Pos = null,
+
     const Self = @This();
 
     /// Initializes a new instance of `LexProcess`.
@@ -1063,6 +1075,12 @@ pub const LexProcess = struct {
             },
         }
 
+        // The merged literal's TRUE start is the popped `0` token's own start
+        // (this call's own `start_col`/`start_line`, captured by the caller
+        // AFTER that `0` was already consumed, points at `b`/`x` instead).
+        // See `merged_number_start`'s own doc comment.
+        self.merged_number_start = last_token.?.pos;
+
         return t;
     }
 
@@ -1173,6 +1191,117 @@ pub const LexProcess = struct {
         };
     }
 
+    const RawLineResult = enum {
+        /// Hit a closing backtick: the whole raw string ends HERE, even if
+        /// more text follows on the same line (`` `line two`; ``).
+        closed,
+        /// Hit the line's newline with no closing backtick: either the
+        /// start of a multi-line block, or (on a later line) another
+        /// contributed line -- the caller decides which, based on
+        /// whether the FOLLOWING line also starts with a backtick.
+        continues,
+        /// Hit end-of-file with no closing backtick.
+        eof,
+    };
+
+    /// Scans one line's worth of raw-string content (from right after an
+    /// opening backtick) into `buffer`, stopping at whichever comes
+    /// first: a closing backtick (consumed, `.closed`), the line's own
+    /// newline (NOT consumed, `.continues`), or EOF (`.eof`). Shared by
+    /// `token_make_raw_string` for the first line and every continuation
+    /// line, since both need the exact same "close, or hand off to the
+    /// caller at the newline" behavior.
+    fn scan_raw_string_line(self: *Self, buffer: *ArrayList(u8)) LexError!RawLineResult {
+        while (true) {
+            const c = try self.peek_char();
+            if (c == null) return .eof;
+            if (c.? == '`') {
+                _ = try self.next_char(); // consume the closing backtick
+                return .closed;
+            }
+            if (c.? == '\n') return .continues;
+            _ = try self.next_char();
+            buffer.append(c.?) catch return LexError.MemoryAllocationFailed;
+        }
+    }
+
+    /// Creates a raw string token from a backtick-delimited literal.
+    ///
+    /// Two forms, both starting with a backtick:
+    /// - Inline (or explicitly-closed-multi-line): closed by another
+    ///   backtick, e.g. `` `content` ``, or on the LAST line of a
+    ///   multi-line block (`` `line two`; ``) when trailing code needs to
+    ///   sit on that same line. Content is taken completely literally: no
+    ///   escape processing at all (a backslash is just a backslash, a
+    ///   double-quote is just a double-quote).
+    /// - Multi-line, implicitly closed: a backtick left unclosed before
+    ///   the line's newline starts a block. Each SUBSEQUENT line that
+    ///   begins (after leading spaces/tabs) with its own backtick
+    ///   contributes its own content, joined to the previous lines with a
+    ///   real newline byte. The block ends at the first line that doesn't
+    ///   start with a backtick, WITHOUT consuming that line -- exactly
+    ///   like Zig's `\\` multi-line strings (any trailing code, like the
+    ///   statement's `;`, goes on its own following line), just
+    ///   per-line-marked with backtick instead.
+    ///
+    /// The buffer holds the LITERAL bytes (unlike `token_make_string`,
+    /// whose buffer keeps escape sequences verbatim for direct
+    /// re-embedding in C) -- `is_raw_string = true` tells codegen to
+    /// escape this content when emitting the C string literal, and tells
+    /// the formatter to reproduce the original backtick spelling verbatim
+    /// rather than requoting the buffer.
+    fn token_make_raw_string(self: *Self) LexError!?token.Token {
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
+        _ = try self.next_char(); // skip opening '`'
+
+        var result = try self.scan_raw_string_line(&buffer);
+        if (result == .eof) {
+            self.transpile_proc.err("unexpected end of file while reading raw string", .{});
+            return LexError.FileReadError;
+        }
+
+        while (result == .continues) {
+            _ = try self.next_char(); // consume the newline ending the previous segment
+
+            // Peek (without consuming) past leading spaces/tabs for the next
+            // line's first real character.
+            var lookahead = self.transpile_proc.file_pos;
+            var next_nonws: ?u8 = null;
+            while (true) {
+                var buf1: [1]u8 = undefined;
+                const n = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buf1, lookahead) catch {
+                    return LexError.FileReadError;
+                };
+                if (n == 0) break;
+                if (buf1[0] == ' ' or buf1[0] == '\t') {
+                    lookahead += 1;
+                    continue;
+                }
+                next_nonws = buf1[0];
+                break;
+            }
+            if (next_nonws != '`') break; // not a continuation line -- string is complete.
+
+            buffer.append('\n') catch return LexError.MemoryAllocationFailed;
+            // Consume this line's leading whitespace, then its opening backtick.
+            while (true) {
+                const wc = try self.peek_char();
+                if (wc == null or (wc.? != ' ' and wc.? != '\t')) break;
+                _ = try self.next_char();
+            }
+            _ = try self.next_char(); // consume this line's opening backtick
+
+            result = try self.scan_raw_string_line(&buffer);
+        }
+
+        return token.Token{
+            .type = .String,
+            .data = .{ .sval = buffer },
+            .pos = self.transpile_proc.pos,
+            .is_raw_string = true,
+        };
+    }
+
     /// Creates a character token from the input file.
     ///
     /// This function reads characters from the input file to form a character token.
@@ -1280,15 +1409,39 @@ pub const LexProcess = struct {
             }
         }
 
+        // Whitespace recurses into `read_next_token` for the REAL next
+        // token, which -- via its own copy of the post-switch block
+        // below -- already computes that token's own correct `.pos`
+        // (start_line/start_col captured at ITS OWN dispatch point,
+        // after the whitespace was consumed). Returning directly here,
+        // bypassing this call's OWN post-switch block, is what makes
+        // that stick: falling through to `t = try self.handle_
+        // whitespace()` in the switch below (the previous shape) let
+        // the OUTER call's post-switch code unconditionally over
+        // write the already-correct nested `.pos` with ITS OWN
+        // `start_col`/`start_line` -- captured BEFORE dispatch, i.e.
+        // still pointing at the whitespace itself, not the real
+        // token. Invisible for every other token type (nothing else
+        // reproduces source text by SLICING between two `.pos`
+        // values), but a raw string does exactly that (see
+        // `token_make_raw_string`'s own caller in the formatter) --
+        // found via a real formatter bug: a raw string immediately
+        // preceded by whitespace got double-spaced, since its
+        // "verbatim" reproduction started one column too early, right
+        // at the whitespace, not the opening backtick.
+        if (c.? == ' ' or c.? == '\t' or c.? == '\r') {
+            return self.handle_whitespace();
+        }
+
         switch (c.?) {
             '"' => t = try self.token_make_string(),
+            '`' => t = try self.token_make_raw_string(),
             '\'' => t = try self.token_make_character(),
             '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.', ':', '#', '$' => t = try self.token_make_operator(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),
             '\n' => t = try self.token_make_newline(),
-            ' ', '\t', '\r' => t = try self.handle_whitespace(),
             else => {
                 t = try self.read_special_token();
                 if (t == null) {
@@ -1299,9 +1452,20 @@ pub const LexProcess = struct {
         }
 
         if (t != null) {
-            t.?.pos.line = start_line;
-            t.?.pos.col = start_col;
-            t.?.pos.start_col = start_col;
+            if (self.merged_number_start) |mstart| {
+                // A `0x`/`0b` literal whose leading `0` was already consumed
+                // (and pushed as its own token) by an EARLIER call to this
+                // function, then popped and merged here -- use ITS start,
+                // not this call's (which only knows about the `x`/`b`).
+                t.?.pos.line = mstart.line;
+                t.?.pos.col = mstart.col;
+                t.?.pos.start_col = mstart.start_col;
+                self.merged_number_start = null;
+            } else {
+                t.?.pos.line = start_line;
+                t.?.pos.col = start_col;
+                t.?.pos.start_col = start_col;
+            }
             t.?.pos.end_line = self.transpile_proc.pos.line;
             t.?.pos.end_col = self.transpile_proc.pos.col;
             self.update_asm_state(t.?);

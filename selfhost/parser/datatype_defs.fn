@@ -1,0 +1,152 @@
+// Keyword/identifier-to-DataType lookup tables the parser depends on when
+// reading a type annotation. Pure, self-contained lookup tables kept in
+// their own module rather than inside parser.fn.
+
+imp ..ast.ast;
+imp std.string;
+imp std.ctype;
+imp std.option;
+
+// A sized integer type name (`i8`..`i64`, `u8`..`u64`, arbitrary bit
+// widths are accepted syntactically): its signedness and bit width.
+pub compound DynamicIntType {
+  bin is_signed;
+  num bits;
+}
+
+// Parses `s` as a `iN`/`uN` sized-integer type name (e.g. `i32`, `u8`), or
+// `.None` if it isn't one. A bare `i`/`u` with no digits, or any non-digit
+// after the prefix, is rejected.
+pub fun parse_dynamic_int_datatype(str s) Option<DynamicIntType> {
+  if len(s) < 2 {
+    ret .None;
+  }
+  bin is_signed = false;
+  if s[0] == 'i' {
+    is_signed = true;
+  } elif s[0] == 'u' {
+    is_signed = false;
+  } else {
+    ret .None;
+  }
+  num i = 1;
+  for i < len(s) {
+    if !is_digit(s[i]) {
+      ret .None;
+    }
+    i = i + 1;
+  }
+  num bits = parse_int(substr(s, 1, len(s) - 1));
+  if bits == 0 {
+    ret .None;
+  }
+  ret .Some(DynamicIntType{is_signed = is_signed, bits = bits});
+}
+
+// True if `s` is a `iN`/`uN` sized-integer type name.
+pub fun is_dynamic_int_datatype(str s) bin {
+  ret parse_dynamic_int_datatype(s).is_some();
+}
+
+// True if `s` is a reserved builtin datatype keyword (as opposed to a
+// user-defined/identifier-based type name like a compound or C typedef).
+pub fun keyword_is_datatype(str s) bin {
+  fit s {
+    "void", "raw", "num", "dec", "str", "bin", "chr", "f32", "f64" -> { ret true; }
+    _ -> { ret is_dynamic_int_datatype(s); }
+  }
+}
+
+// Maps a builtin datatype keyword (or a `iN`/`uN` sized-integer name) to
+// its `DataTypeType`. Returns `.Unknown` for anything else (a
+// user-defined/identifier-based type name).
+pub fun get_datatype_type(str s) DataTypeType {
+  fit s {
+    "void" -> { ret .Void; }
+    "raw" -> { ret .Raw; }
+    "chr" -> { ret .Chr; }
+    "str" -> { ret .Str; }
+    "dec", "f32", "f64" -> { ret .Dec; }
+    "num" -> { ret .Num; }
+    "bin" -> { ret .Bin; }
+    _ -> {
+      if is_dynamic_int_datatype(s) {
+        ret .Num;
+      }
+      ret .Unknown;
+    }
+  }
+}
+
+// Best-effort semantic typing for common C typedef names.
+// 
+// These identifiers are emitted verbatim in C (`type_str`), but are tagged
+// with a Fun base type so the typechecker can treat them as numeric where
+// appropriate. `.None` when the name is not recognized.
+pub fun get_c_typedef_alias_datatype_type(str s) Option<DataTypeType> {
+  fit s {
+    // stddef.h
+    "size_t", "ptrdiff_t", "wchar_t", 
+    // C11 Annex K, if provided by the platform headers
+    "rsize_t", 
+    // common POSIX/C extensions
+    "ssize_t", 
+    // stdint.h
+    "intptr_t", "uintptr_t", "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t", 
+    // time.h
+    "time_t", "clock_t", 
+    // spawn.h / sys/wait.h
+    "pid_t" -> { ret .Some(DataTypeType.Num); }
+    // stdio.h / stdarg.h / pthread.h / spawn.h: opaque handle typedefs
+    "FILE", "va_list", "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t", "pthread_condattr_t", "posix_spawn_file_actions_t", "posix_spawnattr_t" -> {
+      ret .Some(DataTypeType.Unknown);
+    }
+    _ -> { ret .None; }
+  }
+}
+
+test "parse_dynamic_int_datatype accepts iN/uN, rejects everything else" {
+  fit parse_dynamic_int_datatype("i32") {
+    .Some(d) -> {
+      assert d.is_signed, "i32 should be signed";
+      assert d.bits == 32, "i32 should have 32 bits";
+    }
+    .None -> { panic("i32 should parse"); }
+  }
+  fit parse_dynamic_int_datatype("u8") {
+    .Some(d) -> {
+      assert !d.is_signed, "u8 should be unsigned";
+      assert d.bits == 8, "u8 should have 8 bits";
+    }
+    .None -> { panic("u8 should parse"); }
+  }
+  assert parse_dynamic_int_datatype("i").is_none(), "bare 'i' should not parse";
+  assert parse_dynamic_int_datatype("x32").is_none(), "non i/u prefix should not parse";
+  assert parse_dynamic_int_datatype("i3x").is_none(), "non-digit suffix should not parse";
+}
+
+test "keyword_is_datatype recognizes builtins and sized ints, not identifiers" {
+  assert keyword_is_datatype("num"), "num is a datatype keyword";
+  assert keyword_is_datatype("str"), "str is a datatype keyword";
+  assert keyword_is_datatype("i64"), "i64 is a datatype keyword";
+  assert !keyword_is_datatype("MyCompound"), "identifiers are not datatype keywords";
+}
+
+test "get_datatype_type maps builtins and sized ints, else Unknown" {
+  assert get_datatype_type("num") == DataTypeType.Num, "num maps to Num";
+  assert get_datatype_type("f32") == DataTypeType.Dec, "f32 maps to Dec";
+  assert get_datatype_type("u16") == DataTypeType.Num, "u16 maps to Num";
+  assert get_datatype_type("MyCompound") == DataTypeType.Unknown, "unknown name maps to Unknown";
+}
+
+test "get_c_typedef_alias_datatype_type recognizes common C typedefs" {
+  fit get_c_typedef_alias_datatype_type("size_t") {
+    .Some(t) -> { assert t == DataTypeType.Num, "size_t is numeric"; }
+    .None -> { panic("size_t should be recognized"); }
+  }
+  fit get_c_typedef_alias_datatype_type("FILE") {
+    .Some(t) -> { assert t == DataTypeType.Unknown, "FILE is an opaque handle"; }
+    .None -> { panic("FILE should be recognized"); }
+  }
+  assert get_c_typedef_alias_datatype_type("not_a_typedef").is_none(), "unrecognized name returns None";
+}

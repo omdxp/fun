@@ -1,10 +1,8 @@
 // Synchronization helpers built on POSIX pthread APIs.
 // 
-// Provides mutex and condition variable wrappers with lazy init.
-// 
-// Notes:
-// - lock/wait helpers auto-initialize wrappers on first use.
-// - unlock/signal/destroy on uninitialized wrappers are treated as no-ops.
+// Provides mutex and condition variable wrappers with lazy init. Lock/wait
+// helpers auto-initialize wrappers on first use; unlock/signal/destroy on
+// uninitialized wrappers are no-ops.
 
 imp std.c.thread;
 
@@ -24,20 +22,14 @@ pub compound CondVar {
   bin initialized;
 }
 
-// Create an uninitialized mutex wrapper.
-// 
-// Returns:
-// - new Mutex value
+// Creates an uninitialized mutex wrapper.
 pub fun mutex_new() Mutex {
   Mutex m;
   m.initialized = false;
   ret m;
 }
 
-// Create an uninitialized condition variable wrapper.
-// 
-// Returns:
-// - new CondVar value
+// Creates an uninitialized condition variable wrapper.
 pub fun condvar_new() CondVar {
   CondVar c;
   c.initialized = false;
@@ -45,10 +37,7 @@ pub fun condvar_new() CondVar {
 }
 
 impl Mutex {
-  // Initialize the mutex.
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Initializes the mutex. Returns the pthread return code (0 on success).
   pub init() num {
     if self.initialized == true {
       ret 0;
@@ -65,13 +54,7 @@ impl Mutex {
     ret self.initialized;
   }
 
-  // Lock the mutex.
-  // 
-  // Note:
-  // - Auto-initializes on first use.
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Locks the mutex, auto-initializing on first use.
   pub lock() num {
     if self.initialized == false {
       let init_rc = self.init();
@@ -82,13 +65,7 @@ impl Mutex {
     ret pthread_mutex_lock(&self.inner);
   }
 
-  // Try locking the mutex without blocking.
-  // 
-  // Note:
-  // - Auto-initializes on first use.
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Tries locking the mutex without blocking, auto-initializing on first use.
   pub try_lock() num {
     if self.initialized == false {
       let init_rc = self.init();
@@ -99,13 +76,7 @@ impl Mutex {
     ret pthread_mutex_trylock(&self.inner);
   }
 
-  // Unlock the mutex.
-  // 
-  // Note:
-  // - Returns 0 when called before initialization (no-op).
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Unlocks the mutex. No-op (returns 0) if called before initialization.
   pub unlock() num {
     if self.initialized == false {
       ret 0;
@@ -113,13 +84,7 @@ impl Mutex {
     ret pthread_mutex_unlock(&self.inner);
   }
 
-  // Destroy the mutex.
-  // 
-  // Note:
-  // - Returns 0 when called before initialization (no-op).
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Destroys the mutex. No-op (returns 0) if called before initialization.
   pub destroy() num {
     if self.initialized == false {
       ret 0;
@@ -133,10 +98,8 @@ impl Mutex {
 }
 
 impl CondVar {
-  // Initialize the condition variable.
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Initializes the condition variable. Returns the pthread return code (0
+  // on success).
   pub init() num {
     if self.initialized == true {
       ret 0;
@@ -153,15 +116,8 @@ impl CondVar {
     ret self.initialized;
   }
 
-  // Wait on the condition variable.
-  // 
-  // Params:
-  // - mutex: associated mutex wrapper
-  // 
-  // Returns:
-  // - 0 on success
-  // - -1 when mutex is null
-  // - nonzero pthread error code on failure
+  // Waits on the condition variable, auto-initializing both it and `mutex`
+  // on first use. Returns -1 when `mutex` is null.
   pub wait(Mutex* mutex) num {
     if self.initialized == false {
       let init_rc = self.init();
@@ -181,17 +137,9 @@ impl CondVar {
     ret pthread_cond_wait(&self.inner, &mutex.inner);
   }
 
-  // Wait on the condition variable until an absolute timeout.
-  // 
-  // Params:
-  // - mutex: associated mutex wrapper
-  // - abs_time: absolute timeout pointer (`struct timespec*`, C semantics)
-  // 
-  // Returns:
-  // - 0 on success
-  // - -1 when mutex is null
-  // - -2 when abs_time is null
-  // - nonzero pthread error code on timeout/failure
+  // Waits on the condition variable until the absolute timeout `abs_time`
+  // (a `struct timespec*`, C semantics). Returns -1 when `mutex` is null,
+  // -2 when `abs_time` is null.
   pub timed_wait(Mutex* mutex, raw* abs_time) num {
     if self.initialized == false {
       let init_rc = self.init();
@@ -214,13 +162,7 @@ impl CondVar {
     ret pthread_cond_timedwait(&self.inner, &mutex.inner, abs_time);
   }
 
-  // Wake one waiter.
-  // 
-  // Note:
-  // - Returns 0 when called before initialization (no-op).
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Wakes one waiter. No-op (returns 0) if called before initialization.
   pub signal() num {
     if self.initialized == false {
       ret 0;
@@ -228,13 +170,7 @@ impl CondVar {
     ret pthread_cond_signal(&self.inner);
   }
 
-  // Wake all waiters.
-  // 
-  // Note:
-  // - Returns 0 when called before initialization (no-op).
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Wakes all waiters. No-op (returns 0) if called before initialization.
   pub broadcast() num {
     if self.initialized == false {
       ret 0;
@@ -242,13 +178,8 @@ impl CondVar {
     ret pthread_cond_broadcast(&self.inner);
   }
 
-  // Destroy the condition variable.
-  // 
-  // Note:
-  // - Returns 0 when called before initialization (no-op).
-  // 
-  // Returns:
-  // - pthread return code (0 on success)
+  // Destroys the condition variable. No-op (returns 0) if called before
+  // initialization.
   pub destroy() num {
     if self.initialized == false {
       ret 0;
@@ -261,12 +192,8 @@ impl CondVar {
   }
 }
 
-// Initialize a mutex via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - pthread return code on failure
+// Initializes a mutex via pointer helper. Returns -1 when `mutex` is null,
+// otherwise the pthread return code.
 pub fun mutex_init(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -283,12 +210,8 @@ pub fun mutex_init(Mutex* mutex) num {
   ret rc;
 }
 
-// Lock a mutex via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - pthread return code on failure
+// Locks a mutex via pointer helper. Returns -1 when `mutex` is null,
+// otherwise the pthread return code.
 pub fun mutex_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -305,12 +228,8 @@ pub fun mutex_lock(Mutex* mutex) num {
   ret rc;
 }
 
-// Try lock a mutex via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - pthread return code on failure
+// Tries to lock a mutex via pointer helper. Returns -1 when `mutex` is
+// null, otherwise the pthread return code.
 pub fun mutex_try_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -327,12 +246,8 @@ pub fun mutex_try_lock(Mutex* mutex) num {
   ret rc;
 }
 
-// Unlock a mutex via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - pthread return code on failure
+// Unlocks a mutex via pointer helper. Returns -1 when `mutex` is null,
+// otherwise the pthread return code.
 pub fun mutex_unlock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -346,12 +261,8 @@ pub fun mutex_unlock(Mutex* mutex) num {
   ret rc;
 }
 
-// Destroy a mutex via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when mutex is null
-// - pthread return code on failure
+// Destroys a mutex via pointer helper. Returns -1 when `mutex` is null,
+// otherwise the pthread return code.
 pub fun mutex_destroy(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
@@ -368,12 +279,8 @@ pub fun mutex_destroy(Mutex* mutex) num {
   ret rc;
 }
 
-// Initialize a condition variable via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond is null
-// - pthread return code on failure
+// Initializes a condition variable via pointer helper. Returns -1 when
+// `cond` is null, otherwise the pthread return code.
 pub fun condvar_init(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -390,12 +297,8 @@ pub fun condvar_init(CondVar* cond) num {
   ret rc;
 }
 
-// Wait on a condition variable via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond or mutex is null
-// - pthread return code on failure
+// Waits on a condition variable via pointer helper. Returns -1 when `cond`
+// or `mutex` is null, otherwise the pthread return code.
 pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
   if cond == nil || mutex == nil {
     ret -1;
@@ -419,13 +322,9 @@ pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
   ret rc;
 }
 
-// Timed wait on a condition variable via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond or mutex is null
-// - -2 when abs_time is null
-// - pthread return code on timeout/failure
+// Timed wait on a condition variable via pointer helper. Returns -1 when
+// `cond` or `mutex` is null, -2 when `abs_time` is null, otherwise the
+// pthread return code.
 pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   if cond == nil || mutex == nil {
     ret -1;
@@ -453,12 +352,8 @@ pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   ret rc;
 }
 
-// Wake one waiter via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond is null
-// - pthread return code on failure
+// Wakes one waiter via pointer helper. Returns -1 when `cond` is null,
+// otherwise the pthread return code.
 pub fun condvar_signal(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -472,12 +367,8 @@ pub fun condvar_signal(CondVar* cond) num {
   ret rc;
 }
 
-// Wake all waiters via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond is null
-// - pthread return code on failure
+// Wakes all waiters via pointer helper. Returns -1 when `cond` is null,
+// otherwise the pthread return code.
 pub fun condvar_broadcast(CondVar* cond) num {
   if cond == nil {
     ret -1;
@@ -491,12 +382,8 @@ pub fun condvar_broadcast(CondVar* cond) num {
   ret rc;
 }
 
-// Destroy a condition variable via pointer helper.
-// 
-// Returns:
-// - 0 on success
-// - -1 when cond is null
-// - pthread return code on failure
+// Destroys a condition variable via pointer helper. Returns -1 when `cond`
+// is null, otherwise the pthread return code.
 pub fun condvar_destroy(CondVar* cond) num {
   if cond == nil {
     ret -1;

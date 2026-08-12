@@ -1,12 +1,4 @@
 // Helper utilities for fixed arrays.
-// 
-// Usage:
-// ```
-// Array<num> a;
-// a.data = [1, 2, 3];
-// a.len = 3;
-// num v = a.get(1);
-// ```
 
 imp std.option;
 imp std.quirks;
@@ -20,29 +12,13 @@ pub compound Array<T> {
 }
 
 impl Array<T> {
-  // Return the element at index without bounds checking.
-  // 
-  // Params:
-  // - i: element index
-  // 
-  // Notes:
-  // - The caller must ensure `0 <= i < len`.
-  // - Use `at()` for bounds-checked access.
-  // 
-  // Returns:
-  // - element at index `i`
+  // Element at index `i`, without bounds checking. The caller must ensure
+  // `0 <= i < len`; use `at()` for bounds-checked access.
   pub get(num i) T {
     ret self.data[i];
   }
 
-  // Return the element at index when it is in range.
-  // 
-  // Params:
-  // - i: element index
-  // 
-  // Returns:
-  // - `Some(value)` when `i` is in range
-  // - `None` otherwise
+  // Element at index `i`, or `None` when out of range.
   pub at(num i) Option<T> {
     if i < 0 || i >= self.len {
       ret Option.None;
@@ -50,22 +26,13 @@ impl Array<T> {
     ret Option.Some(self.data[i]);
   }
 
-  // Set the element at index without bounds checking.
-  // 
-  // Params:
-  // - i: element index
-  // - value: value to write
-  // 
-  // Notes:
-  // - The caller must ensure `0 <= i < len`.
+  // Sets the element at index `i`, without bounds checking. The caller
+  // must ensure `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;
   }
 
-  // Fill every element with the same value.
-  // 
-  // Params:
-  // - value: value assigned to each element
+  // Fills every element with `value`.
   pub fill(T value) {
     num i = 0;
     for i < self.len {
@@ -74,14 +41,8 @@ impl Array<T> {
     }
   }
 
-  // Copy values from a source slice into the array.
-  // 
-  // Params:
-  // - src: source slice
-  // - len: number of elements to copy
-  // 
-  // Notes:
-  // - The caller must ensure `len <= self.len`.
+  // Copies `len` values from `src` into the array. The caller must ensure
+  // `len <= self.len`.
   pub copy_from(T[] src, num len) {
     num i = 0;
     for i < len {
@@ -90,18 +51,14 @@ impl Array<T> {
     }
   }
 
-  // Swap two elements in place.
-  // 
-  // Params:
-  // - i: first element index
-  // - j: second element index
+  // Swaps two elements in place.
   pub swap(num i, num j) {
     let tmp = self.data[i];
     self.data[i] = self.data[j];
     self.data[j] = tmp;
   }
 
-  // Reverse the elements in place.
+  // Reverses the elements in place.
   pub reverse() {
     if self.len <= 1 {
       ret;
@@ -115,10 +72,7 @@ impl Array<T> {
     }
   }
 
-  // Return a forward iterator over the elements.
-  // 
-  // Returns:
-  // - iterator yielding each value once, in order
+  // Forward iterator over the elements, in order.
   pub iter() ArrayIter<T> {
     ArrayIter<T> it;
     it.src = self;
@@ -128,28 +82,20 @@ impl Array<T> {
 }
 
 impl Array<T> as Sized {
-  // Return the number of elements.
-  // 
-  // Returns:
-  // - element count
+  // Number of elements in the array.
   pub len() num {
     ret self.len;
   }
 
-  // Return true when the array holds no elements.
-  // 
-  // Returns:
-  // - true when the array is empty
+  // True when the array holds no elements.
   pub is_empty() bin {
     ret self.len == 0;
   }
 }
 
 impl Array<T> as Clearable {
-  // Mark the view as empty without freeing the backing storage.
-  // 
-  // Notes:
-  // - The backing storage remains owned by the caller.
+  // Marks the view as empty without freeing the backing storage, which
+  // remains owned by the caller.
   pub clear() {
     self.len = 0;
   }
@@ -164,11 +110,7 @@ pub compound ArrayIter<T> {
 }
 
 impl ArrayIter<T> as Iterator<T> {
-  // Return the next element from the iterator.
-  // 
-  // Returns:
-  // - `Some(value)` while elements remain
-  // - `None` once the iterator reaches the end
+  // Next element, or `None` once the iterator reaches the end.
   pub next() Option<T> {
     if self.idx >= self.src.len {
       ret Option.None;
@@ -179,14 +121,7 @@ impl ArrayIter<T> as Iterator<T> {
   }
 }
 
-// Sum a numeric array slice.
-// 
-// Params:
-// - arr: array pointer
-// - len: element count
-// 
-// Returns:
-// - total sum
+// Sum of a numeric array slice.
 pub fun sum_num(num[] arr, num len) num {
   num total = 0;
   num i = 0;
@@ -197,14 +132,7 @@ pub fun sum_num(num[] arr, num len) num {
   ret total;
 }
 
-// Minimum value in a numeric array slice.
-// 
-// Params:
-// - arr: array pointer
-// - len: element count
-// 
-// Returns:
-// - minimum value (0 if empty)
+// Minimum value in a numeric array slice (0 if empty).
 pub fun min_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
@@ -220,14 +148,7 @@ pub fun min_num(num[] arr, num len) num {
   ret min;
 }
 
-// Maximum value in a numeric array slice.
-// 
-// Params:
-// - arr: array pointer
-// - len: element count
-// 
-// Returns:
-// - maximum value (0 if empty)
+// Maximum value in a numeric array slice (0 if empty).
 pub fun max_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
@@ -243,12 +164,7 @@ pub fun max_num(num[] arr, num len) num {
   ret max;
 }
 
-// Fill a numeric array slice with a value.
-// 
-// Params:
-// - arr: array pointer
-// - len: element count
-// - value: fill value
+// Fills a numeric array slice with `value`.
 pub fun fill_num(num[] arr, num len, num value) {
   num i = 0;
   for i < len {
@@ -257,12 +173,7 @@ pub fun fill_num(num[] arr, num len, num value) {
   }
 }
 
-// Copy between numeric array slices.
-// 
-// Params:
-// - dst: destination array
-// - src: source array
-// - len: element count
+// Copies `len` elements from `src` into `dst`.
 pub fun copy_num(num[] dst, num[] src, num len) {
   num i = 0;
   for i < len {

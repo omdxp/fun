@@ -5,9 +5,10 @@ imp std.c.io;
 imp std.json;
 imp std.toml;
 imp std.result;
+imp std.error;
 
 fun main() num {
-  // JSON parse returns Result<JsonValue>.
+  // JSON parse returns Result<JsonValue, Error>.
   fit parse("{\"ok\": true}") {
     Result.Ok(doc) -> { printf("json ok, len=%lld\n", doc.len()); }
     Result.Err(e) -> { printf("json err\n"); }

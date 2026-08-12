@@ -23,7 +23,7 @@ const rangeFromTokenPos = positions_mod.rangeFromTokenPos;
 
 pub fn fixAstVariableRanges(tokens: []const TokenLite, symbols: *ArrayList(SymbolLite)) void {
     for (symbols.items) |*s| {
-        if (s.kind != .variable) continue;
+        if (!types.isVariableLike(s.kind)) continue;
 
         var best: ?Range = null;
         for (tokens) |t| {
@@ -447,7 +447,7 @@ pub fn collectSymbolsFromTopLevel(allocator: Allocator, out: *ArrayList(SymbolLi
 
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
-                .kind = .variable,
+                .kind = if (v.is_const) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .is_public = if (n.flags) |f| f.is_public else false,
@@ -588,7 +588,7 @@ pub fn collectLocalVars(allocator: Allocator, out: *ArrayList(SymbolLite), n: *a
             const det = try detail_buf.toOwnedSlice();
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
-                .kind = .variable,
+                .kind = if (v.is_const) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .container_fn_range = container_fn_range,

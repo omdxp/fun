@@ -8,6 +8,7 @@ imp std.c.mem;
 imp std.io;
 imp std.map;
 imp std.result;
+imp std.error;
 imp ast;
 imp parser;
 imp eval;
@@ -42,7 +43,7 @@ fun main() num {
   env.init();
 
   // Parsed by the real lexer + recursive-descent parser: 2 + 3 * 4 - 1
-  Result<Expr *> parsed_r = parse("2 + 3 * 4 - 1");
+  Result<Expr *, Error> parsed_r = parse("2 + 3 * 4 - 1");
   fit parsed_r {
     Result.Ok(parsed) -> {
       Expr* p = parsed;
@@ -53,7 +54,7 @@ fun main() num {
   }
 
   // A variable-arity function call, parsed for real: max(2 + 3, min(10, 20), abs(0 - 9))
-  Result<Expr *> call_r = parse("max(2 + 3, min(10, 20), abs(0 - 9))");
+  Result<Expr *, Error> call_r = parse("max(2 + 3, min(10, 20), abs(0 - 9))");
   fit call_r {
     Result.Ok(call_expr) -> {
       Expr* c = call_expr;
@@ -65,7 +66,7 @@ fun main() num {
 
   // Trailing garbage after a complete expression: the parser must reject
   // this instead of silently ignoring the leftover tokens.
-  Result<Expr *> bad_r = parse("2 + 3 4");
+  Result<Expr *, Error> bad_r = parse("2 + 3 4");
   fit bad_r {
     Result.Ok(v) -> { printf("bad parse (unexpected success)\n"); }
     Result.Err(e) -> { println_fmt("rejected      = {}", e.message); }

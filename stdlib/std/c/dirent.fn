@@ -1,0 +1,28 @@
+// Directory iteration/creation/kind-check helpers.
+// 
+// Unlike the rest of `std.c.*`, these aren't thin bindings to a single libc
+// function: POSIX and Win32 directory APIs differ too much to bind directly.
+// The compiler emits a small wrapper for each of these into every program's
+// prelude, with a POSIX body and a Win32 body sharing one name; these
+// declarations just describe that wrapper's signature.
+
+// Opens a directory for iteration, returning an opaque handle or `nil` on failure.
+pub fun __fun_dir_open(str path) raw*;
+
+// Reads the next entry's name from a directory handle, or `nil` once entries
+// are exhausted. Includes `.`/`..` and the platform's usual ordering
+// guarantees (i.e. none); callers that want a filtered/sorted listing do
+// that themselves.
+pub fun __fun_dir_read_name(raw* dirp) str;
+
+// Closes a directory handle opened by `__fun_dir_open`. Returns 0 on success,
+// -1 on failure or a null handle.
+pub fun __fun_dir_close(raw* dirp) num;
+
+// Checks whether `path` names a directory. Returns 1 if so, 0 otherwise
+// (including on a null/missing path).
+pub fun __fun_path_is_dir(str path) num;
+
+// Creates a single directory (not recursive; the parent must already
+// exist). Returns 0 on success, -1 on failure (including if it already exists).
+pub fun __fun_make_dir(str path) num;

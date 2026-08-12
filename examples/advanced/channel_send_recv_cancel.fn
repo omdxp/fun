@@ -17,19 +17,19 @@ fun main() {
   num rc4 = ch.recv_timeout_into_with_token(&out, 10, &token);
 
   num ok_send = 0;
-  if rc1 == channel_rc_ok() {
+  if rc1 == CHANNEL_RC_OK {
     ok_send = 1;
   }
   num ok_recv = 0;
-  if rc2 == channel_rc_ok() {
+  if rc2 == CHANNEL_RC_OK {
     ok_recv = 1;
   }
   num ok_cancel_send = 0;
-  if rc3 == channel_rc_cancelled() {
+  if rc3 == CHANNEL_RC_CANCELLED {
     ok_cancel_send = 1;
   }
   num ok_cancel_recv = 0;
-  if rc4 == channel_rc_cancelled() {
+  if rc4 == CHANNEL_RC_CANCELLED {
     ok_cancel_recv = 1;
   }
 

@@ -1,0 +1,5 @@
+imp this_file_does_not_exist;
+
+fun main() num {
+  ret 0;
+}

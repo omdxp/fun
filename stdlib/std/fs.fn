@@ -1,39 +1,73 @@
 // File system helpers built on std.io.
-// 
-// Usage:
-// ```
-// Fs f = fs();
-// if f.exists("file.txt") { ... }
-// ```
 
 imp std.io;
 imp std.channel;
 imp std.c.io;
 imp std.c.mem;
+imp std.c.dirent;
 imp std.vec;
 imp std.result;
+imp std.error;
+imp std.string;
 
 // File system helper container.
 pub compound Fs {
 }
 
-// Create an Fs helper instance.
-// 
-// Returns:
-// - Fs helper
+// Creates an Fs helper instance.
 pub fun fs() Fs {
   Fs f;
   ret f;
 }
 
+// Copy a directory-entry name into a Fun-owned buffer. `__fun_dir_read_name`
+// returns a pointer into an OS-owned buffer that gets reused on the next
+// call, so a name that needs to outlive the current loop iteration must be
+// duplicated first.
+fun _dup_cstr(str s) str {
+  let b = string_builder_init(len(s));
+  b.append(s);
+  let out = b.build();
+  b.free();
+  ret out;
+}
+
+// Recursively collect `.fn` file paths under `path` into `out`.
+fun _walk_dir_collect(str path, Vec<str>* out) {
+  raw* d = __fun_dir_open(path);
+  if d == nil {
+    ret;
+  }
+  for true {
+    str name = __fun_dir_read_name(d);
+    if name == nil {
+      break;
+    }
+    if equals(name, ".") || equals(name, "..") {
+      continue;
+    }
+
+    let b = string_builder_init(len(path) + len(name) + 1);
+    b.append(path);
+    b.append("/");
+    b.append(name);
+    let full = b.build();
+    b.free();
+
+    if __fun_path_is_dir(full) != 0 {
+      _walk_dir_collect(full, out);
+      free(full);
+    } elif ends_with(full, ".fn") {
+      out.push(full);
+    } else {
+      free(full);
+    }
+  }
+  __fun_dir_close(d);
+}
+
 impl Fs {
-  // Check whether a file exists.
-  // 
-  // Params:
-  // - path: file path
-  // 
-  // Returns:
-  // - true if the file can be opened
+  // Returns true if the file at `path` can be opened.
   pub exists(str path) bin {
     FILE* f = fopen(path, "rb");
     if f == nil {
@@ -43,40 +77,21 @@ impl Fs {
     ret true;
   }
 
-  // Read an entire file into a string.
-  // 
-  // Params:
-  // - path: file path
-  // 
-  // Returns:
-  // - file contents or null
+  // Reads an entire file into a new string, or null on failure.
   pub read_to_string(str path) str {
     ret read_all(path);
   }
 
-  // Read an entire file into a string with Result.
-  // 
-  // Params:
-  // - path: file path
-  // 
-  // Returns:
-  // - Result<str> with contents or error
-  pub try_read_to_string(str path) Result<str> {
+  // Reads an entire file into a string, with Result.
+  pub try_read_to_string(str path) Result<str, Error> {
     let out = read_all(path);
     if out == nil {
       ret err_kind(.Io, "read_to_string failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
-  // Read up to max_len bytes into a string.
-  // 
-  // Params:
-  // - path: file path
-  // - max_len: maximum bytes to read
-  // 
-  // Returns:
-  // - bytes string or null
+  // Reads up to max_len bytes into a new string, or null on failure.
   pub read_bytes(str path, num max_len) str {
     if max_len <= 0 {
       ret nil;
@@ -95,58 +110,35 @@ impl Fs {
     ret buf;
   }
 
-  // Read up to max_len bytes into a string with Result.
-  // 
-  // Params:
-  // - path: file path
-  // - max_len: maximum bytes to read
-  // 
-  // Returns:
-  // - Result<str> with bytes or error
-  pub try_read_bytes(str path, num max_len) Result<str> {
+  // Reads up to max_len bytes into a string, with Result.
+  pub try_read_bytes(str path, num max_len) Result<str, Error> {
     let out = self.read_bytes(path, max_len);
     if out == nil {
       ret err_kind(.Io, "read_bytes failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
-  // Write a string to a file.
-  // 
-  // Params:
-  // - path: file path
-  // - data: contents
-  // 
-  // Returns:
-  // - true on success
+  // Writes `data` to a file, returning true on success.
   pub write_string(str path, str data) bin {
     ret write_all(path, data);
   }
 
-  // Write a string to a file with Result.
-  // 
-  // Params:
-  // - path: file path
-  // - data: contents
-  // 
-  // Returns:
-  // - Result<bin> with success flag or error
-  pub try_write_string(str path, str data) Result<bin> {
+  // Deletes the file at `path`, returning true on success.
+  pub remove_file(str path) bin {
+    ret remove(path) == 0;
+  }
+
+  // Writes `data` to a file, with Result.
+  pub try_write_string(str path, str data) Result<bin, Error> {
     let ok_write = write_all(path, data);
     if ok_write == false {
       ret err_kind(.Io, "write_string failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
-  // Append a string to a file.
-  // 
-  // Params:
-  // - path: file path
-  // - data: contents
-  // 
-  // Returns:
-  // - true on success
+  // Appends `data` to a file, returning true on success.
   pub append_string(str path, str data) bin {
     FILE* h = fopen(path, "ab");
     if h == nil {
@@ -158,30 +150,16 @@ impl Fs {
     ret wrote == n;
   }
 
-  // Append a string to a file with Result.
-  // 
-  // Params:
-  // - path: file path
-  // - data: contents
-  // 
-  // Returns:
-  // - Result<bin> with success flag or error
-  pub try_append_string(str path, str data) Result<bin> {
+  // Appends `data` to a file, with Result.
+  pub try_append_string(str path, str data) Result<bin, Error> {
     let ok_append = self.append_string(path, data);
     if ok_append == false {
       ret err_kind(.Io, "append_string failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
-  // Copy a file by reading into memory and writing out.
-  // 
-  // Params:
-  // - src: source path
-  // - dst: destination path
-  // 
-  // Returns:
-  // - true on success
+  // Copies a file by reading it fully into memory and writing it back out.
   pub copy_file(str src, str dst) bin {
     let data = read_all(src);
     if data == nil {
@@ -190,15 +168,8 @@ impl Fs {
     ret write_all(dst, data);
   }
 
-  // Copy a file by reading into memory and writing out with Result.
-  // 
-  // Params:
-  // - src: source path
-  // - dst: destination path
-  // 
-  // Returns:
-  // - Result<bin> with success flag or error
-  pub try_copy_file(str src, str dst) Result<bin> {
+  // Copies a file by reading it fully into memory and writing it back out, with Result.
+  pub try_copy_file(str src, str dst) Result<bin, Error> {
     let data = read_all(src);
     if data == nil {
       ret err_kind(.Io, "copy_file read failed", false);
@@ -206,16 +177,10 @@ impl Fs {
     if write_all(dst, data) == false {
       ret err_kind(.Io, "copy_file write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
-  // Get file size (bytes), or -1.
-  // 
-  // Params:
-  // - path: file path
-  // 
-  // Returns:
-  // - size in bytes or -1
+  // Returns the file size in bytes, or -1 on failure.
   pub size(str path) num {
     FILE* h = fopen(path, "rb");
     if h == nil {
@@ -232,29 +197,16 @@ impl Fs {
     ret end;
   }
 
-  // Get file size with Result.
-  // 
-  // Params:
-  // - path: file path
-  // 
-  // Returns:
-  // - Result<num> with size or error
-  pub try_size(str path) Result<num> {
+  // Gets the file size, with Result.
+  pub try_size(str path) Result<num, Error> {
     let out = self.size(path);
     if out < 0 {
       ret err_kind(.Io, "size failed", -1);
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
-  // Read all lines into a Vec<str>.
-  // 
-  // Params:
-  // - path: file path
-  // - max_len: maximum line length
-  // 
-  // Returns:
-  // - Vec<str> of lines (may be empty)
+  // Reads all lines of a file into a Vec<str> (empty if unreadable), capping each line at max_len.
   pub read_lines(str path, num max_len) Vec<str> {
     Vec<str> out;
     out.init(8);
@@ -281,15 +233,8 @@ impl Fs {
     ret out;
   }
 
-  // Read all lines into a Vec<str> with Result.
-  // 
-  // Params:
-  // - path: file path
-  // - max_len: maximum line length
-  // 
-  // Returns:
-  // - Result<Vec<str>> with lines or error
-  pub try_read_lines(str path, num max_len) Result<Vec<str>> {
+  // Reads all lines of a file into a Vec<str>, with Result.
+  pub try_read_lines(str path, num max_len) Result<Vec<str>, Error> {
     let out = self.read_lines(path, max_len);
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.
@@ -297,93 +242,105 @@ impl Fs {
         ret err_kind(.NotFound, "read_lines failed", out);
       }
     }
-    ret ok(out);
+    ret .Ok(out);
+  }
+
+  // Returns true if `path` is an existing directory.
+  pub is_dir(str path) bin {
+    ret __fun_path_is_dir(path) != 0;
+  }
+
+  // Creates a single directory. The parent must already exist; this is not
+  // recursive (see `walk_dir` for recursive traversal of existing
+  // directories; a recursive `mkdir -p` is not provided here). Errs on
+  // failure, including if the directory already exists.
+  pub make_dir(str path) Result<bin, Error> {
+    if __fun_make_dir(path) != 0 {
+      ret err_kind(.Io, "make_dir failed", false);
+    }
+    ret .Ok(true);
+  }
+
+  // Lists the immediate entries of a directory (excludes `.`/`..`; includes
+  // both files and subdirectories, unfiltered by name). Errs if the
+  // directory can't be opened.
+  pub list_dir(str path) Result<Vec<str>, Error> {
+    raw* d = __fun_dir_open(path);
+    if d == nil {
+      Vec<str> empty;
+      empty.init(0);
+      ret err_kind(.Io, "list_dir: could not open directory", empty);
+    }
+    Vec<str> out;
+    out.init(8);
+    for true {
+      str name = __fun_dir_read_name(d);
+      if name == nil {
+        break;
+      }
+      if equals(name, ".") || equals(name, "..") {
+        continue;
+      }
+      out.push(_dup_cstr(name));
+    }
+    __fun_dir_close(d);
+    ret .Ok(out);
+  }
+
+  // Recursively discovers every `.fn` file under a directory (empty if
+  // `path` isn't a readable directory). Used by the build tooling to find a
+  // project's source files without an explicit per-file manifest entry.
+  pub walk_dir(str path) Vec<str> {
+    Vec<str> out;
+    out.init(16);
+    _walk_dir_collect(path, &out);
+    ret out;
   }
 }
 
-// Check file existence.
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - true if file can be opened
+// Returns true if the file at `path` can be opened.
 pub fun exists(str path) bin {
   let f = fs();
   ret f.exists(path);
 }
 
-// Read an entire file into a string.
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - file contents or null
+// Reads an entire file into a new string, or null on failure.
 pub fun read_to_string(str path) str {
   let f = fs();
   ret f.read_to_string(path);
 }
 
-// Read up to max_len bytes into a string.
-// 
-// Params:
-// - path: file path
-// - max_len: maximum bytes to read
-// 
-// Returns:
-// - bytes string or null
+// Reads up to max_len bytes into a new string, or null on failure.
 pub fun read_bytes(str path, num max_len) str {
   let f = fs();
   ret f.read_bytes(path, max_len);
 }
 
-// Write a string to a file.
-// 
-// Params:
-// - path: file path
-// - data: contents
-// 
-// Returns:
-// - true on success
+// Writes `data` to a file, returning true on success.
 pub fun write_string(str path, str data) bin {
   let f = fs();
   ret f.write_string(path, data);
 }
 
-// Append a string to a file.
-// 
-// Params:
-// - path: file path
-// - data: contents
-// 
-// Returns:
-// - true on success
+// Deletes the file at `path`, returning true on success.
+pub fun remove_file(str path) bin {
+  let f = fs();
+  ret f.remove_file(path);
+}
+
+// Appends `data` to a file, returning true on success.
 pub fun append_string(str path, str data) bin {
   let f = fs();
   ret f.append_string(path, data);
 }
 
-// Copy a file by reading into memory and writing out.
-// 
-// Params:
-// - src: source path
-// - dst: destination path
-// 
-// Returns:
-// - true on success
+// Copies a file by reading it fully into memory and writing it back out.
 pub fun copy_file(str src, str dst) bin {
   let f = fs();
   ret f.copy_file(src, dst);
 }
 
-// Get file size in bytes (or -1 on failure).
-// 
-// Params:
-// - path: file path
-// 
-// Returns:
-// - size in bytes
+// Returns the file size in bytes (or -1 on failure).
 pub fun size(str path) num {
   let f = fs();
   ret f.size(path);
@@ -391,41 +348,49 @@ pub fun size(str path) num {
 
 // File size with Result. `Ok(bytes)` on success, `Err` when the file can't be
 // sized — clearer than checking `size(path) < 0` for the -1 sentinel.
-pub fun try_size(str path) Result<num> {
+pub fun try_size(str path) Result<num, Error> {
   let n = size(path);
   if n < 0 {
     ret err_kind(.Io, "size failed", -1);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
-// Read all lines into a Vec<str>.
-// 
-// Params:
-// - path: file path
-// - max_len: maximum line length
-// 
-// Returns:
-// - Vec<str> of lines (may be empty)
+// Reads all lines of a file into a Vec<str> (empty if unreadable), capping each line at max_len.
 pub fun read_lines(str path, num max_len) Vec<str> {
   let f = fs();
   ret f.read_lines(path, max_len);
 }
 
-// Copy a file in chunks with optional cancellation and non-blocking progress updates.
-// 
-// Params:
-// - src: source path
-// - dst: destination path
-// - chunk_size: bytes per copy chunk (<= 0 defaults to 4096)
-// - progress_updates: optional channel receiving cumulative copied byte counts
-// - cancel_token: optional cancellation token
-// 
-// Returns:
-// - >= 0 total copied bytes on success
-// - -1 on open/read/write/flush failure or null src/dst
-// - -2 when buffer allocation fails
-// - -3 when cancelled
+// Returns true if `path` is an existing directory.
+pub fun is_dir(str path) bin {
+  let f = fs();
+  ret f.is_dir(path);
+}
+
+// Creates a single directory (parent must already exist; not recursive).
+pub fun make_dir(str path) Result<bin, Error> {
+  let f = fs();
+  ret f.make_dir(path);
+}
+
+// Lists the immediate entries of a directory (excludes `.`/`..`).
+pub fun list_dir(str path) Result<Vec<str>, Error> {
+  let f = fs();
+  ret f.list_dir(path);
+}
+
+// Recursively discovers every `.fn` file under a directory (empty if `path` isn't a readable directory).
+pub fun walk_dir(str path) Vec<str> {
+  let f = fs();
+  ret f.walk_dir(path);
+}
+
+// Copies a file in chunks, sending cumulative copied-byte counts to the
+// optional `progress_updates` channel and checking `cancel_token` between
+// chunks. `chunk_size <= 0` defaults to 4096. Returns the total bytes copied
+// on success, -1 on an open/read/write/flush failure or null src/dst, -2 if
+// the copy buffer can't be allocated, and -3 if cancelled.
 pub async fun copy_file_progress_async(
   str src,
   str dst,
@@ -489,7 +454,7 @@ pub async fun copy_file_progress_async(
         .Cancelled -> { ret -3; }
         .Closed -> { ret -1; }
         .Error(e) -> { ret -1; }
-        _ -> { }
+        _ -> {}
       }
     }
   }
@@ -500,15 +465,10 @@ pub async fun copy_file_progress_async(
   ret total;
 }
 
-// Stream lines from a file into a channel using async send operations.
-// 
-// Ownership:
-// - each pushed line is heap-allocated; the receiver should free it.
-// 
-// Returns:
-// - >= 0 number of lines sent on success
-// - -1 on invalid args or file open/read failure
-// - -3 when cancelled
+// Streams lines from a file into `out_lines` (each pushed line is
+// heap-allocated; the receiver must free it), checking `cancel_token`
+// between lines. Returns the number of lines sent on success, -1 on invalid
+// args or a file open/read failure, and -3 if cancelled.
 pub async fun read_lines_into_channel_async(
   str path,
   num max_len,
@@ -541,7 +501,7 @@ pub async fun read_lines_into_channel_async(
     }
 
     fit await out_lines.send_result_with_token_async(line, cancel_token) {
-      .Ok -> { }
+      .Ok -> {}
       .Cancelled -> {
         free(line);
         ret -3;

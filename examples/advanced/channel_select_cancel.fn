@@ -8,15 +8,15 @@ fun main() {
   _ = channel_cancel_token_cancel(&token);
 
   num out = 0;
-  num idx = channel_select_index_default();
+  num idx = CHANNEL_SELECT_INDEX_DEFAULT;
   num rc = a.select_recv_timeout_with_tuning_token(&b, &out, &idx, 100, -1, -1, &token);
 
   num ok_rc = 0;
-  if rc == channel_rc_cancelled() {
+  if rc == CHANNEL_RC_CANCELLED {
     ok_rc = 1;
   }
   num ok_idx = 0;
-  if idx == channel_select_index_default() {
+  if idx == CHANNEL_SELECT_INDEX_DEFAULT {
     ok_idx = 1;
   }
 

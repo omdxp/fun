@@ -25,6 +25,7 @@
 
 imp std.result;
 imp std.error;
+imp std.c.string;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
@@ -74,6 +75,7 @@ impl Option<T> {
   // A zero-initialized T, used as the empty fallback for `unwrap`.
   zero() T {
     T out;
+    memset(&out, 0, sizeof(T));
     ret out;
   }
 
@@ -120,9 +122,9 @@ pub fun some<T>(T value) Option<T> {
 // Convert an Option to a Result: Some(v) -> Ok(v); None -> Err tagged with `kind`.
 // Provided as a free function (rather than a method) so the Result type parameter
 // resolves from the call site.
-pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T> {
+pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T, Error> {
   fit o {
-    .Some(v) -> { ret ok(v); }
+    .Some(v) -> { ret .Ok(v); }
     .None -> {
       T zero;
       ret err_kind(kind, message, zero);

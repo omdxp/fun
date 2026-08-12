@@ -1,43 +1,13 @@
 // Virtual threads (lightweight tasks) built on the `fork` scheduler.
 // 
-// `fork f(args)` spawns a fire-and-forget virtual thread: a cheap task
-// multiplexed (M:N) onto a small pool of OS worker threads by the runtime
-// scheduler. Many `fork`s run on a few real threads, and `main` automatically
-// drains all spawned tasks before it returns. This is distinct from `std.thread`,
-// which gives you explicit 1:1 OS threads with manual join — use `std.thread`
-// when you need real OS threads (CPU affinity, deterministic join); use `fork` +
-// this module for cheap concurrency coordinated through channels.
+// `fork f(args)` spawns a fire-and-forget virtual thread, multiplexed onto a
+// small pool of OS worker threads; `main` drains all spawned tasks before it
+// returns. Use `std.thread` instead when you need real 1:1 OS threads with
+// manual join.
 // 
-// `fork` is fire-and-forget and has no native join handle, so to wait for a batch
-// of tasks to finish you use a `WaitGroup`: a completion barrier built on a
-// buffered channel that tracks a known number of task completions.
-// 
-// Usage:
-// ```
-// imp std.task;
-// imp std.channel;
-//
-// // A virtual-thread body. Takes the shared WaitGroup so it can signal done.
-// async fun worker(Channel<num>* out, WaitGroup* wg, num v) {
-//   out <- v * v;
-//   wg.done();
-// }
-//
-// fun main() num {
-//   Channel<num> results = channel_new_cap(0, 8);
-//   WaitGroup wg = wait_group_new(3);
-//
-//   // You write the `fork` yourself — fork needs a literal call to a named
-//   // `async fun`, so it cannot be hidden behind a generic spawn() helper.
-//   fork worker(&results, &wg, 2);
-//   fork worker(&results, &wg, 3);
-//   fork worker(&results, &wg, 4);
-//
-//   wg.wait();        // blocks until all 3 tasks call wg.done()
-//   wg.destroy();
-//   ret 0;
-// }
-// ```
+// `fork` has no native join handle, so waiting for a batch of tasks to
+// finish uses a `WaitGroup`: a completion barrier backed by a buffered
+// channel that tracks a known number of task completions.
 
 imp std.channel;
 
@@ -54,20 +24,11 @@ pub compound WaitGroup {
   num expected;
 }
 
-// Create a WaitGroup expecting `n` tasks to complete.
-//
-// The signalling channel is buffered to `n` so `done()` never blocks before
-// `wait()` starts draining. Passing the full count up front avoids the buffer
-// growth `add()` would otherwise need to do later, but growing via
-// `wait_group_new(0)` + `add()` in a loop is also safe: `add()` grows the
-// signalling buffer to match, so `done()` still never blocks before `wait()`
-// drains it.
-//
-// Params:
-// - n: number of virtual tasks that will each call `done()` once
-//
-// Returns:
-// - a WaitGroup whose `wait()` blocks until `n` completions arrive
+// Creates a WaitGroup expecting `n` tasks to each call `done()` once;
+// `wait()` blocks until all `n` completions arrive. The signalling channel
+// is buffered to `n` so `done()` never blocks before `wait()` starts
+// draining. Starting at `wait_group_new(0)` and growing via `add()` later
+// is also safe, since `add()` grows the buffer to match.
 pub fun wait_group_new(num n) WaitGroup {
   WaitGroup wg;
   wg.expected = n;
@@ -81,10 +42,8 @@ pub fun wait_group_new(num n) WaitGroup {
 }
 
 impl WaitGroup {
-  // Add `n` to the expected count. Call before `wait()` to add more tasks to
-  // wait for. Also grows the signalling buffer to match, so `done()` still
-  // never blocks before `wait()` drains it — safe to use repeatedly (e.g.
-  // `wait_group_new(0)` + `add(1)` in a fork loop), not just up front.
+  // Add `n` to the expected count. Grows the signalling buffer to match, so
+  // `done()` never blocks before `wait()` drains it; safe to call repeatedly.
   pub add(num n) {
     self.expected = self.expected + n;
     let _rc = self.signals.grow_capacity(self.expected);

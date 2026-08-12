@@ -1,14 +1,8 @@
 // Math helpers beyond C bindings.
-// 
-// Usage:
-// ```
-// Vec2 a; a.x = 0; a.y = 0;
-// Vec2 b; b.x = 3; b.y = 4;
-// dec d = a.distance(b);
-// ```
 
 imp std.c.math as cmath;
 imp std.result;
+imp std.error;
 
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
 // `sign()`. Match it with `fit`:
@@ -35,43 +29,25 @@ pub compound Vec2 {
 }
 
 impl Vec2 {
-  // Return the Euclidean distance to another vector.
-  // 
-  // Params:
-  // - other: vector to measure against
-  // 
-  // Returns:
-  // - Euclidean distance between the two vectors
+  // Euclidean distance to another vector.
   pub distance(Vec2 other) dec {
     let dx = self.x - other.x;
     let dy = self.y - other.y;
     ret cmath.sqrt(dx * dx + dy * dy);
   }
 
-  // Return the vector length.
-  // 
-  // Returns:
-  // - Euclidean length of the vector
+  // Euclidean length of the vector.
   pub length() dec {
     ret cmath.sqrt(self.x * self.x + self.y * self.y);
   }
 
-  // Return the dot product with another vector.
-  // 
-  // Params:
-  // - other: vector to multiply against
-  // 
-  // Returns:
-  // - dot product of the two vectors
+  // Dot product with another vector.
   pub dot(Vec2 other) dec {
     ret self.x * other.x + self.y * other.y;
   }
 
-  // Return a normalized copy of the vector.
-  // 
-  // Returns:
-  // - unit-length vector in the same direction
-  // - zero vector when the input length is zero
+  // Returns a unit-length copy of the vector, or the zero vector when the
+  // length is zero.
   pub normalize() Vec2 {
     Vec2 out;
     let len = self.length();
@@ -87,250 +63,113 @@ impl Vec2 {
 }
 
 // Trigonometry and core math helpers (decimal).
-// 
-// Compute sine of an angle.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - sine of x
+
+// Sine of an angle in radians.
 pub fun sin_dec(dec x) dec {
   ret cmath.sin(x);
 }
 
-// Compute cosine of an angle.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - cosine of x
+// Cosine of an angle in radians.
 pub fun cos_dec(dec x) dec {
   ret cmath.cos(x);
 }
 
-// Compute tangent of an angle.
-// 
-// Params:
-// - x: angle in radians
-// 
-// Returns:
-// - tangent of x
+// Tangent of an angle in radians.
 pub fun tan_dec(dec x) dec {
   ret cmath.tan(x);
 }
 
-// Compute arcsine.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arcsine of x
+// Arcsine of `x`.
 pub fun asin_dec(dec x) dec {
   ret cmath.asin(x);
 }
 
-// Compute arccosine.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arccosine of x
+// Arccosine of `x`.
 pub fun acos_dec(dec x) dec {
   ret cmath.acos(x);
 }
 
-// Compute arctangent.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - arctangent of x
+// Arctangent of `x`.
 pub fun atan_dec(dec x) dec {
   ret cmath.atan(x);
 }
 
-// Compute arctangent with quadrant correction.
-// 
-// Params:
-// - y: y component
-// - x: x component
-// 
-// Returns:
-// - arctangent in correct quadrant
+// Arctangent of `y / x`, using the sign of both to pick the right quadrant.
 pub fun atan2_dec(dec y, dec x) dec {
   ret cmath.atan2(y, x);
 }
 
-// Compute square root.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - square root of x
+// Square root of `x`.
 pub fun sqrt_dec(dec x) dec {
   ret cmath.sqrt(x);
 }
 
-// Compute cube root.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - cube root of x
+// Cube root of `x`.
 pub fun cbrt_dec(dec x) dec {
   ret cmath.cbrt(x);
 }
 
 // Raise `x` to the power `y`.
-// 
-// Params:
-// - x: base
-// - y: exponent
-// 
-// Returns:
-// - x raised to y
 pub fun pow_dec(dec x, dec y) dec {
   ret cmath.pow(x, y);
 }
 
-// Compute `e` raised to `x`.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - e raised to x
+// `e` raised to `x`.
 pub fun exp_dec(dec x) dec {
   ret cmath.exp(x);
 }
 
-// Compute the natural logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - natural log of x
+// Natural logarithm of `x`.
 pub fun log_dec(dec x) dec {
   ret cmath.log(x);
 }
 
-// Compute the base-10 logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - log10 of x
+// Base-10 logarithm of `x`.
 pub fun log10_dec(dec x) dec {
   ret cmath.log10(x);
 }
 
-// Compute the base-2 logarithm.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - log2 of x
+// Base-2 logarithm of `x`.
 pub fun log2_dec(dec x) dec {
   ret cmath.log2(x);
 }
 
-// Round down to the nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - floor of x
+// Round `x` down to the nearest integer value.
 pub fun floor_dec(dec x) dec {
   ret cmath.floor(x);
 }
 
-// Round up to the nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - ceil of x
+// Round `x` up to the nearest integer value.
 pub fun ceil_dec(dec x) dec {
   ret cmath.ceil(x);
 }
 
-// Round to the nearest integer value.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - rounded value
+// Round `x` to the nearest integer value.
 pub fun round_dec(dec x) dec {
   ret cmath.round(x);
 }
 
-// Truncate toward zero.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - truncated value
+// Truncate `x` toward zero.
 pub fun trunc_dec(dec x) dec {
   ret cmath.trunc(x);
 }
 
-// Compute the floating-point remainder of `x / y`.
-// 
-// Params:
-// - x: value
-// - y: divisor
-// 
-// Returns:
-// - remainder of x/y
+// Floating-point remainder of `x / y`.
 pub fun fmod_dec(dec x, dec y) dec {
   ret cmath.fmod(x, y);
 }
 
-// Compute hypotenuse length.
-// 
-// Params:
-// - x: x component
-// - y: y component
-// 
-// Returns:
-// - hypotenuse length
+// Hypotenuse length of a right triangle with legs `x` and `y`.
 pub fun hypot_dec(dec x, dec y) dec {
   ret cmath.hypot(x, y);
 }
 
-// Copy the sign from `y` to `x`.
-// 
-// Params:
-// - x: magnitude source
-// - y: sign source
-// 
-// Returns:
-// - value with magnitude of x and sign of y
+// Value with the magnitude of `x` and the sign of `y`.
 pub fun copysign_dec(dec x, dec y) dec {
   ret cmath.copysign(x, y);
 }
 
-// Compute the absolute value of a number or decimal.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - |x|
+// Absolute value of a number or decimal.
 pub fun abs<T: num | dec>(T x) T {
   if x < 0 {
     ret -x;
@@ -338,13 +177,7 @@ pub fun abs<T: num | dec>(T x) T {
   ret x;
 }
 
-// Compute the sign of a number or decimal as `-1`, `0`, or `1`.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - -1, 0, or 1
+// Sign of a number or decimal as `-1`, `0`, or `1`.
 pub fun sign<T: num | dec>(T x) T {
   if x < 0 {
     ret -1;
@@ -355,10 +188,8 @@ pub fun sign<T: num | dec>(T x) T {
   ret 0;
 }
 
-// Compute the sign of a number or decimal as a type-safe `Sign`.
-// 
-// Notes:
-// - Prefer this over `sign()` when you want to `fit`-match the cases.
+// Sign of a number or decimal as a type-safe `Sign`. Prefer this over
+// `sign()` when you want to `fit`-match the cases.
 pub fun sign_of<T: num | dec>(T x) Sign {
   if x < 0 {
     ret Sign.Negative;
@@ -369,21 +200,10 @@ pub fun sign_of<T: num | dec>(T x) Sign {
   ret Sign.Zero;
 }
 
-// Return the minimum of two numbers.
-// 
-// Params:
-// - a: first value
-// - b: second value
-// 
-// Returns:
-// - smaller value
-// 
-// Notes:
-// - Kept as separate `_num`/`_dec` overloads rather than a constrained
-// generic `min<T>`: `Vec<T: num | dec>` already declares its own instance
-// method named `min()` (a reduction over the vector), and a same-named
-// free function collides with that method's resolution when both
-// `std.vec` and `std.math` are imported together.
+// Smaller of two numbers. Kept as a separate `_num`/`_dec` overload rather
+// than a generic `min<T>` because `Vec<T: num | dec>` already has an
+// instance method named `min()`, and a same-named free function would
+// collide with it when both `std.vec` and `std.math` are imported together.
 pub fun min_num(num a, num b) num {
   if a < b {
     ret a;
@@ -391,14 +211,7 @@ pub fun min_num(num a, num b) num {
   ret b;
 }
 
-// Return the maximum of two numbers.
-// 
-// Params:
-// - a: first value
-// - b: second value
-// 
-// Returns:
-// - larger value
+// Larger of two numbers.
 pub fun max_num(num a, num b) num {
   if a > b {
     ret a;
@@ -406,14 +219,7 @@ pub fun max_num(num a, num b) num {
   ret b;
 }
 
-// Return the minimum of two decimals.
-// 
-// Params:
-// - a: first value
-// - b: second value
-// 
-// Returns:
-// - smaller value
+// Smaller of two decimals.
 pub fun min_dec(dec a, dec b) dec {
   if a < b {
     ret a;
@@ -421,14 +227,7 @@ pub fun min_dec(dec a, dec b) dec {
   ret b;
 }
 
-// Return the maximum of two decimals.
-// 
-// Params:
-// - a: first value
-// - b: second value
-// 
-// Returns:
-// - larger value
+// Larger of two decimals.
 pub fun max_dec(dec a, dec b) dec {
   if a > b {
     ret a;
@@ -437,14 +236,6 @@ pub fun max_dec(dec a, dec b) dec {
 }
 
 // Clamp a number or decimal to `[lo, hi]`.
-// 
-// Params:
-// - x: value
-// - lo: lower bound
-// - hi: upper bound
-// 
-// Returns:
-// - clamped value
 pub fun clamp<T: num | dec>(T x, T lo, T hi) T {
   if x < lo {
     ret lo;
@@ -455,50 +246,24 @@ pub fun clamp<T: num | dec>(T x, T lo, T hi) T {
   ret x;
 }
 
-// Linearly interpolate between `a` and `b`.
-// 
-// Params:
-// - a: start
-// - b: end
-// - t: interpolation factor
-// 
-// Returns:
-// - interpolated value
+// Linearly interpolate between `a` and `b` by factor `t`.
 pub fun lerp_dec(dec a, dec b, dec t) dec {
   ret a + (b - a) * t;
 }
 
 // Convert degrees to radians.
-// 
-// Params:
-// - degrees: angle in degrees
-// 
-// Returns:
-// - angle in radians
 pub fun deg_to_rad(dec degrees) dec {
   ret degrees * (3.141592653589793 / 180);
 }
 
 // Convert radians to degrees.
-// 
-// Params:
-// - radians: angle in radians
-// 
-// Returns:
-// - angle in degrees
 pub fun rad_to_deg(dec radians) dec {
   ret radians * (180 / 3.141592653589793);
 }
 
-// Raise an integer base to a non-negative integer exponent.
-// 
-// Params:
-// - base: base value
-// - exp: exponent (a NEGATIVE exponent yields 1, since integer powers can't
-// represent fractions; use `try_pow_int` to reject negative exponents)
-// 
-// Returns:
-// - base^exp
+// Raise an integer base to a non-negative integer exponent. A negative
+// exponent yields 1, since integer powers can't represent fractions; use
+// `try_pow_int` to reject negative exponents.
 pub fun pow_int(num base, num exp) num {
   num result = 1;
   num i = 0;
@@ -509,49 +274,26 @@ pub fun pow_int(num base, num exp) num {
   ret result;
 }
 
-// Raise an integer base to an exponent with validation.
-// 
-// Returns:
-// - `Ok(base^exp)` when `exp >= 0`
-// - `Err` when `exp` is negative
-pub fun try_pow_int(num base, num exp) Result<num> {
+// Raise an integer base to an exponent, returning `Err` when `exp` is
+// negative instead of the `pow_int` fallback of 1.
+pub fun try_pow_int(num base, num exp) Result<num, Error> {
   if exp < 0 {
     ret err_kind(.Invalid, "pow_int: negative exponent", 1);
   }
-  ret ok(pow_int(base, exp));
+  ret .Ok(pow_int(base, exp));
 }
 
-// Return the distance between two vectors.
-// 
-// Params:
-// - a: vector
-// - b: vector
-// 
-// Returns:
-// - distance between a and b
+// Distance between two vectors.
 pub fun distance(Vec2 a, Vec2 b) dec {
   ret a.distance(b);
 }
 
-// Return the length of a vector.
-// 
-// Params:
-// - v: vector
-// 
-// Returns:
-// - vector length
+// Length of a vector.
 pub fun length(Vec2 v) dec {
   ret v.length();
 }
 
-// Return the dot product of two vectors.
-// 
-// Params:
-// - a: first vector
-// - b: second vector
-// 
-// Returns:
-// - dot product
+// Dot product of two vectors.
 pub fun dot(Vec2 a, Vec2 b) dec {
   ret a.dot(b);
 }
