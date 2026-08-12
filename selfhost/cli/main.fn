@@ -6,6 +6,7 @@ imp manifest;
 imp std.string;
 imp std.io;
 imp std.fs;
+imp std.vec;
 
 fun _fail(str msg) num {
   writeln_to(Sink.Stderr, format(`[Error]
@@ -51,12 +52,50 @@ fun main(str[] args) num {
     }
     ret run_tests(opts.input, &opts.program_args);
   }
+  // Scanning a tree needs no input file: the working directory is the
+  // root when none is named.
+  if opts.fmt_check_all {
+    Vec<str> offenders = collect_unformatted(opts.input);
+    defer offenders.free();
+    num i = 0;
+    for i < offenders.len {
+      writeln_to(Sink.Stderr, offenders.get(i));
+      i = i + 1;
+    }
+    if offenders.len > 0 {
+      ret 1;
+    }
+    ret 0;
+  }
+
   if equals(opts.input, "") {
     println(help_text());
     ret 1;
   }
   if !exists(opts.input) {
     ret _fail(format("no such file: {str}", opts.input));
+  }
+
+  if opts.fmt_check {
+    if format_file_is_clean(opts.input) {
+      ret 0;
+    }
+    writeln_to(Sink.Stderr, opts.input);
+    ret 1;
+  }
+  if opts.fmt_all {
+    let done = format_file_and_imports(opts.input);
+    if done.is_err() {
+      ret _fail(done.unwrap_err());
+    }
+    ret 0;
+  }
+  if opts.fmt {
+    let done = format_file(opts.input);
+    if done.is_err() {
+      ret _fail(done.unwrap_err());
+    }
+    ret 0;
   }
 
   // `-out` names the generated C file, defaulting to the input's own

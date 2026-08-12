@@ -7,6 +7,9 @@
 // produces.
 
 imp ..parser.import_resolver;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp fmt;
 imp ..ast.ast;
 imp manifest;
 imp ..codegen.codegen;
@@ -21,6 +24,7 @@ imp std.sys;
 imp std.cli;
 imp std.process;
 imp std.path;
+imp std.set;
 imp std.runtime_backend;
 imp std.c.mem;
 
@@ -44,6 +48,13 @@ pub compound Options {
   bin debug_info;
   bin show_help;
   bin show_version;
+  // Rewrite the input in place, and with `fmt_all` its local imports too.
+  bin fmt;
+  bin fmt_all;
+  // Report whether the input, or everything under it, is formatted,
+  // without rewriting anything.
+  bin fmt_check;
+  bin fmt_check_all;
   // Arguments after `--`, passed to the compiled program.
   Vec<str> program_args;
   // Constants injected into the program, from `-D name=value`.
@@ -63,6 +74,10 @@ fun _options_new() Options {
   o.debug_info = false;
   o.show_help = false;
   o.show_version = false;
+  o.fmt = false;
+  o.fmt_all = false;
+  o.fmt_check = false;
+  o.fmt_check_all = false;
   o.program_args.init(0);
   o.defines.init(0);
   o.has_error = false;
@@ -112,6 +127,10 @@ pub fun parse_args(str[] argv) Options {
   o.no_exec = parsed.has("no-exec");
   o.keep_c = parsed.has("outf");
   o.debug_info = parsed.has("g");
+  o.fmt = parsed.has("fmt");
+  o.fmt_all = parsed.has("fmt-all");
+  o.fmt_check = parsed.has("fmt-check");
+  o.fmt_check_all = parsed.has("fmt-check-all");
   o.input = parsed.get_or("in", "");
   o.output = parsed.get_or("out", "");
 
@@ -389,14 +408,20 @@ pub fun run_exe(str exe_path, Vec<str>* args) num {
 pub fun help_text() str {
   ret `usage:
   `  fun -in <input.fn> [-out <output>] [-no-exec] [-outf] [-g] [-- <program args>]
+  `  fun -in <input.fn> [-fmt | -fmt-all | -fmt-check]
+  `  fun -fmt-check-all [-in <file_or_dir>]
   `  fun -version
   `
-  `  -in <file>    Input file to compile.
-  `  -out <file>   Write the generated C here.
-  `  -no-exec      Compile only, without running the result.
-  `  -outf         Keep the generated C file.
-  `  -g            Build with debug information.
-  `  --            Pass every following argument to the compiled program.`;
+  `  -in <file>        Input file to compile.
+  `  -out <file>       Write the generated C here.
+  `  -no-exec          Compile only, without running the result.
+  `  -outf             Keep the generated C file.
+  `  -g                Build with debug information.
+  `  -fmt              Format the input file in place.
+  `  -fmt-all          Format the input file and the modules it imports.
+  `  -fmt-check        Report the input if it is unformatted, and exit 1.
+  `  -fmt-check-all    Report every unformatted file under the input, and exit 1.
+  `  --                Pass every following argument to the compiled program.`;
 }
 
 fun _argv(Vec<str>* parts) str[] {
@@ -650,4 +675,241 @@ pub fun run_tests(str input, Vec<str>* args) num {
   let code = run_exe(exe, args);
   remove_file(exe);
   ret code;
+}
+
+// Formats `path` in place, reporting whether the file changed. A file
+// that is already formatted is left untouched, so its timestamp only
+// moves when its contents do.
+pub fun format_file(str path) Result<bin, str> {
+  if !exists(path) {
+    ret .Err(format("no such file: {str}", path));
+  }
+  str src = read_to_string(path);
+  let formatted = format_source(src, path);
+  if formatted.is_err() {
+    ret .Err(formatted.unwrap_err());
+  }
+  str out = formatted.unwrap();
+  if equals(out, src) {
+    ret .Ok(false);
+  }
+  if !write_string(path, out) {
+    ret .Err(format("could not write {str}", path));
+  }
+  ret .Ok(true);
+}
+
+// True when `path` is already formatted.
+pub fun format_file_is_clean(str path) bin {
+  if !exists(path) {
+    ret false;
+  }
+  str src = read_to_string(path);
+  let formatted = format_source(src, path);
+  if formatted.is_err() {
+    ret false;
+  }
+  ret equals(formatted.unwrap(), src);
+}
+
+// The dotted paths that `src` imports, in the order they are written.
+fun _imported_paths(str src, str filename) Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  let lexed = tokenize(src, filename);
+  if lexed.is_err() {
+    ret out;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != TokenType.Keyword || !equals(token_text(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    StringBuilder b = string_builder_init(32);
+    num j = i + 1;
+    for j < tokens.len {
+      Token it = tokens.get(j);
+      if it.type == TokenType.NewLine || it.type == TokenType.Comment {
+        j = j + 1;
+        continue;
+      }
+      str text = token_text(it);
+      if equals(text, ";") {
+        break;
+      }
+      // An alias renames the import; the path is what precedes it.
+      if it.type == TokenType.Keyword && equals(text, "as") {
+        break;
+      }
+      b.append(text);
+      j = j + 1;
+    }
+    str path = b.build();
+    if !equals(path, "") {
+      out.push(path);
+    }
+    i = j + 1;
+  }
+  ret out;
+}
+
+// Formats `path` and every module it imports, directly or not, leaving
+// the stdlib alone. Reports how many files changed.
+pub fun format_file_and_imports(str path) Result<num, str> {
+  Vec<str> queue;
+  queue.init(4);
+  defer queue.free();
+  queue.push(path);
+
+  Set<str> seen = set_init("", 8);
+  defer seen.free();
+
+  num changed = 0;
+  num i = 0;
+  for i < queue.len {
+    str current = queue.get(i);
+    i = i + 1;
+    if seen.has(current) {
+      continue;
+    }
+    seen.add(current);
+
+    let done = format_file(current);
+    if done.is_err() {
+      ret .Err(done.unwrap_err());
+    }
+    if done.unwrap() {
+      changed = changed + 1;
+    }
+
+    Vec<str> imports = _imported_paths(read_to_string(current), current);
+    defer imports.free();
+    num k = 0;
+    for k < imports.len {
+      str dotted = imports.get(k);
+      k = k + 1;
+      // The stdlib ships formatted and is not the caller's to rewrite.
+      if starts_with(dotted, "std.") {
+        continue;
+      }
+      str resolved = resolve_import_path(current, dotted);
+      if exists(resolved) {
+        queue.push(resolved);
+      }
+    }
+  }
+  ret .Ok(changed);
+}
+
+// Directories that hold generated or vendored files, which are not the
+// project's own source.
+fun _skip_scan_dir(str name) bin {
+  fit name {
+    ".git", ".funsand", "fun-out", "build", "node_modules" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+fun _collect_fun_files(str dir, Vec<str>* out) {
+  let listed = list_dir(dir);
+  if listed.is_err() {
+    ret;
+  }
+  Vec<str> entries = listed.unwrap();
+  defer entries.free();
+  entries.sort();
+
+  num i = 0;
+  for i < entries.len {
+    str name = entries.get(i);
+    i = i + 1;
+    str full = path_join(dir, name);
+    if is_dir(full) {
+      if !_skip_scan_dir(name) {
+        _collect_fun_files(full, out);
+      }
+      continue;
+    }
+    if ends_with(name, ".fn") {
+      out.push(full);
+    }
+  }
+}
+
+// The unformatted `.fn` files under `root`, which may name a directory
+// or a file whose directory is scanned instead.
+pub fun collect_unformatted(str root) Vec<str> {
+  str dir = root;
+  if equals(dir, "") {
+    dir = ".";
+  } elif !is_dir(dir) {
+    dir = dirname(dir);
+    if equals(dir, "") {
+      dir = ".";
+    }
+  }
+
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  _collect_fun_files(dir, &files);
+
+  Vec<str> out;
+  out.init(0);
+  num i = 0;
+  for i < files.len {
+    str path = files.get(i);
+    i = i + 1;
+    if !format_file_is_clean(path) {
+      out.push(path);
+    }
+  }
+  ret out;
+}
+
+test "lists the modules a file imports, aliases and stdlib included" {
+  str src = `imp sub.helper;
+  `imp std.io as out;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  Vec<str> found = _imported_paths(src, "main.fn");
+  defer found.free();
+  assert found.len == 2, "expected both imports to be listed";
+  assert equals(found.get(0), "sub.helper"), "expected the local import first";
+  assert equals(found.get(1), "std.io"), "expected the alias dropped from the path";
+}
+
+test "formatting reports a change only when the file is rewritten" {
+  make_dir_all("fun-out");
+  str path = "fun-out/_fmt_probe.fn";
+  write_string(path, "fun probe() num{ret 1;}\n");
+  defer remove_file(path);
+
+  let first = format_file(path);
+  assert first.is_ok(), "expected the file to format";
+  assert first.unwrap(), "expected the unformatted file to change";
+  assert format_file_is_clean(path), "expected the file to be formatted now";
+
+  let second = format_file(path);
+  assert second.is_ok(), "expected the formatted file to format again";
+  assert !second.unwrap(), "expected no second rewrite";
+}
+
+test "an unformatted file is reported by a scan of its directory" {
+  make_dir_all("fun-out/_fmt_scan");
+  str path = "fun-out/_fmt_scan/dirty.fn";
+  write_string(path, "fun dirty() num{ret 1;}\n");
+  defer remove_file(path);
+
+  Vec<str> offenders = collect_unformatted("fun-out/_fmt_scan");
+  defer offenders.free();
+  assert offenders.len == 1, "expected the unformatted file to be reported";
+  assert ends_with(offenders.get(0), "dirty.fn"), "expected the offender's path";
 }
