@@ -264,3 +264,109 @@ test "a method call is checked against what the method declares" {
     "expected the extra argument to a method to be reported"
   );
 }
+
+test "a method body reads fields from the type it belongs to" {
+  rejects(
+    `compound User {
+    `  num age;
+    `}
+    `impl User {
+    `  greet() {
+    `    num x = self.missing;
+    `    ret;
+    `  }
+    `}`,
+    "expected the unknown field on self to be reported"
+  );
+  accepts(
+    `compound User {
+    `  num age;
+    `}
+    `impl User {
+    `  greet() num {
+    `    ret self.age;
+    `  }
+    `}`,
+    "expected the declared field on self to be read"
+  );
+}
+
+test "an impl supplies every method its quirk requires" {
+  rejects(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk Q {
+    `  a() num;
+    `  b(num x) num;
+    `}
+    `impl Point as Q {
+    `  a() num { ret 1; }
+    `}`,
+    "expected the missing quirk method to be reported"
+  );
+  accepts(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk Q {
+    `  a() num;
+    `}
+    `impl Point as Q {
+    `  a() num { ret self.x; }
+    `}`,
+    "expected the complete impl to check out"
+  );
+}
+
+test "a quirk is not what a let infers" {
+  rejects(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk HasX {
+    `  get_x() num;
+    `}
+    `impl Point as HasX {
+    `  get_x() num { ret self.x; }
+    `}
+    `fun as_hasx(Point* p) HasX { ret p; }
+    `fun main() {
+    `  Point p;
+    `  let inferred = as_hasx(&p);
+    `}`,
+    "expected a quirk not to be inferred"
+  );
+}
+
+test "an enum with no payloads reads as a number" {
+  accepts(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  num n = Color.Green;
+    `  c = n;
+    `}`,
+    "expected a payload-free enum to stand for a number"
+  );
+}
+
+test "an array stands for a pointer to what it holds" {
+  accepts(
+    `imp std.c.mem;
+    `compound Item {
+    `  num v;
+    `}
+    `compound Holder {
+    `  Item[] items;
+    `}
+    `fun main() {
+    `  Holder h;
+    `  free(h.items);
+    `}`,
+    "expected an array of compounds to stand for a raw pointer"
+  );
+}

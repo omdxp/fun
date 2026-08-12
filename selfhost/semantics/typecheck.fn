@@ -58,6 +58,11 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   t.base = dt.kind;
   t.is_array = dt.is_array;
   t.array_depth = dt.array_depth;
+  // An array written without a size carries no depth of its own, but it
+  // is still one deep.
+  if t.is_array && t.array_depth == 0 {
+    t.array_depth = 1;
+  }
   t.pointer_depth = dt.pointer_depth;
   if dt.flags.is_pointer && t.pointer_depth == 0 {
     t.pointer_depth = 1;
@@ -134,18 +139,22 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   if from.base == DataTypeType.Raw && (to.pointer_depth > 0 || to.base == DataTypeType.Str) {
     ret true;
   }
-  if to.pointer_depth != from.pointer_depth {
-    ret false;
-  }
   // An array stands for a pointer to what it holds, as it does in C,
   // and an array of characters is what a string is.
   if from.is_array && !to.is_array {
     if to.base == DataTypeType.Str && from.base == DataTypeType.Chr {
       ret true;
     }
-    if to.pointer_depth + 1 == from.array_depth + from.pointer_depth {
-      ret to.base == from.base || to.base == DataTypeType.Raw;
+    // An array of depth N stands for a pointer of depth N.
+    if to.pointer_depth == from.array_depth + from.pointer_depth {
+      if to.base == DataTypeType.Raw {
+        ret true;
+      }
+      ret to.base == from.base && equals(to.name, from.name);
     }
+  }
+  if to.pointer_depth != from.pointer_depth {
+    ret false;
   }
   if to.array_depth != from.array_depth {
     ret false;
@@ -338,14 +347,22 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
 }
 
 fun _method_leaf_name(str declared, str type_name) str {
-  StringBuilder b = string_builder_init(len(type_name) + 2);
-  b.append(type_name);
-  b.append("__");
-  str prefix = b.build();
-  if starts_with(declared, prefix) {
-    ret substr(declared, len(prefix), len(declared) - len(prefix));
+  _ = type_name;
+  // The declared name carries the type, and a quirk impl's carries the
+  // quirk as well, so the call's own name is what follows the last
+  // separator.
+  num cut = -1;
+  num i = 0;
+  for i + 1 < len(declared) {
+    if declared[i] == '_' && declared[i + 1] == '_' {
+      cut = i + 2;
+    }
+    i = i + 1;
   }
-  ret declared;
+  if cut < 0 || cut >= len(declared) {
+    ret declared;
+  }
+  ret substr(declared, cut, len(declared) - cut);
 }
 
 // The signature a quirk's method declaration promises.
@@ -373,6 +390,9 @@ compound Checker {
   // The quirks a program declares. A pointer to a compound that
   // implements one stands where the quirk is expected.
   Set<str> quirks;
+  // Enums whose variants carry no payload, which stand for the numbers
+  // they are written as.
+  Set<str> plain_enums;
   // What each declared compound holds, and what each type and quirk
   // declares as methods.
   Map<str, CompoundInfo> compounds;
@@ -389,6 +409,7 @@ fun _checker_new() Checker {
   Checker c;
   c.fns.init(32);
   c.quirks = set_init("", 16);
+  c.plain_enums = set_init("", 16);
   c.compounds.init(16);
   c.methods.init(16);
   c.rtype = checked_unknown();
@@ -434,10 +455,26 @@ impl Checker {
     if can_assign(to, from) {
       ret true;
     }
+    // An enum with no payloads is written as, and reads as, a number.
+    if self.reads_as_number(to) && self.reads_as_number(from) {
+      ret true;
+    }
     if self.quirks.has(to.name) {
       ret from.pointer_depth > 0 || self.quirks.has(from.name);
     }
     ret false;
+  }
+
+  // True for a value that stands in a numeric position: a number, or an
+  // enum whose variants carry no payload.
+  reads_as_number(CheckedType t) bin {
+    if t.pointer_depth > 0 || t.is_array {
+      ret false;
+    }
+    if t.base != DataTypeType.Unknown {
+      ret t.base == DataTypeType.Num || t.base == DataTypeType.Chr;
+    }
+    ret self.plain_enums.has(t.name);
   }
 
   // Records the first failure; later ones are consequences of it.
@@ -1154,6 +1191,15 @@ impl Checker {
       CheckedType value = self.infer(v.val, env);
       // A `let` takes the type of its value rather than checking one.
       if is_unknown(declared) {
+        // A quirk names a contract rather than a type a value can be
+        // stored as, so it cannot be what a `let` infers.
+        if self.quirks.has(value.name) {
+          self.fail(
+            format("cannot infer a type for '{str}': '{str}' is a quirk", v.name, value.name),
+            stmt
+          );
+          ret;
+        }
         declared = value;
       } elif !self.assignable(declared, value) {
         self.fail(
@@ -1189,7 +1235,62 @@ impl Checker {
   }
 
   // Walks one function with the globals and its parameters in scope.
+  // Walks the methods an impl block supplies, with the receiver bound to
+  // the type they belong to.
+  check_impl(ImplNode block, Vec<Node>* nodes) {
+    // A generic impl's methods are written in terms of type parameters
+    // the checker does not substitute, so their bodies are left alone.
+    if block.has_type_params && block.type_params.len > 0 {
+      ret;
+    }
+    for m : block.methods {
+      fit m.kind {
+        .Function(f) -> { self.check_function_with_self(f, nodes, block.type_name); }
+        _ -> {}
+      }
+      if self.failed {
+        ret;
+      }
+    }
+  }
+
+  // Reports a method a quirk requires that the impl block does not
+  // supply.
+  check_quirk_conformance(ImplNode block) {
+    if !block.has_quirk_name {
+      ret;
+    }
+    let declared = self.methods.at(block.quirk_name);
+    if declared.is_none() {
+      ret;
+    }
+    MethodTable required = declared.unwrap();
+    Vec<str> names = required.methods.keys();
+    defer names.free();
+    num i = 0;
+    for i < names.len {
+      str name = names.get(i);
+      i = i + 1;
+      if !self.has_method(block.type_name, name) {
+        self.fail(
+          format(
+            "'{str}' does not supply '{str}', which '{str}' requires",
+            block.type_name,
+            name,
+            block.quirk_name
+          ),
+          nil
+        );
+        ret;
+      }
+    }
+  }
+
   check_function(FunctionNode f, Vec<Node>* nodes) {
+    self.check_function_with_self(f, nodes, "");
+  }
+
+  check_function_with_self(FunctionNode f, Vec<Node>* nodes, str self_type) {
     if !f.has_body {
       ret;
     }
@@ -1208,6 +1309,11 @@ impl Checker {
       }
     }
     env.push();
+    if !equals(self_type, "") {
+      CheckedType receiver = checked_unknown();
+      receiver.name = self_type;
+      env.define("self", receiver);
+    }
     for a : f.args {
       fit a.kind {
         .Variable(v) -> {
@@ -1236,6 +1342,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
   Checker checker = _checker_new();
   defer checker.fns.free();
   defer checker.quirks.free();
+  defer checker.plain_enums.free();
   defer checker.compounds.free();
   defer checker.methods.free();
 
@@ -1270,6 +1377,17 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         }
         checker.methods.put(q.name, table);
       }
+      .Enum(e) -> {
+        bin carries_data = false;
+        for v : e.variants {
+          if v.has_payload && v.payload.len > 0 {
+            carries_data = true;
+          }
+        }
+        if !carries_data {
+          checker.plain_enums.add(e.name);
+        }
+      }
       .Compound(c) -> {
         CompoundInfo info;
         info.fields.init(c.fields.len + 1);
@@ -1290,6 +1408,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
     i = i + 1;
     fit node.kind {
       .Function(f) -> { checker.check_function(f, nodes); }
+      .Impl(block) -> {
+        checker.check_quirk_conformance(block);
+        checker.check_impl(block, nodes);
+      }
       _ -> {}
     }
     if checker.failed {
