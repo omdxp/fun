@@ -14307,7 +14307,11 @@ pub const TranspileProcess = struct {
         const opt_tmp = try self.next_tmp_name("opt");
         defer self.allocator.free(opt_tmp);
 
-        const opt_name = self.type_name_mangled(ie.elem) catch return false;
+        // The element is a generic ARGUMENT of the `Option__<Elem>` name built
+        // below, so its own pointer depth belongs in the mangled segment
+        // (`Node_ptr1`). The depth-0 helper drops it, which named a type that
+        // was never emitted (`Option__Node` for a `Vec<Node*>`).
+        const opt_name = self.type_name_mangled_as_arg(ie.elem) catch return false;
         defer self.allocator.free(opt_name);
         // The iterator's next() returns Option<ElemT>; mangle that instance name.
         const opt_inst = std.fmt.allocPrint(self.allocator, "Option__{s}", .{opt_name}) catch return TranspileError.MemoryAllocationFailed;
