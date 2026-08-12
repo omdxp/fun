@@ -1,0 +1,347 @@
+// Source formatting.
+// 
+// Formatting works from the token stream rather than the parse tree, so
+// comments and blank lines survive: the lexer keeps both, and the
+// emitter decides spacing, indentation, and where lines break.
+
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.result;
+
+// What the emitter carries between tokens.
+pub compound FmtState {
+  StringBuilder out;
+  num indent;
+  bin at_line_start;
+  // How many newlines have been seen since the last emitted token, so a
+  // blank line in the source survives as a blank line.
+  num pending_newlines;
+  bin has_prev;
+  Token prev;
+}
+
+pub fun fmt_state_new() FmtState {
+  FmtState s;
+  s.out = string_builder_init(1024);
+  s.indent = 0;
+  s.at_line_start = true;
+  s.pending_newlines = 0;
+  s.has_prev = false;
+  ret s;
+}
+
+// The text a token occupies in formatted output.
+pub fun token_text(Token t) str {
+  fit t.type {
+    .Identifier -> { ret _sval_of(t); }
+    .Keyword -> { ret _sval_of(t); }
+    .Operator -> { ret _sval_of(t); }
+    .Comment -> { ret _comment_text(t); }
+    .Number -> { ret _number_text(t); }
+    .Boolean -> { ret _boolean_text(t); }
+    .String -> { ret _string_text(t); }
+    .Symbol -> {
+      StringBuilder b = string_builder_init(2);
+      b.append_char(_cval_of(t));
+      ret b.build();
+    }
+    .NewLine -> { ret "\n"; }
+  }
+  ret "";
+}
+
+fun _sval_of(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> { ret ""; }
+  }
+}
+
+fun _cval_of(Token t) chr {
+  fit t.data {
+    .Cval(c) -> { ret c; }
+    _ -> { ret ' '; }
+  }
+}
+
+// The lexer keeps only a comment's body, so the marker is written back
+// with exactly one space after it. An empty comment stays bare.
+fun _comment_text(Token t) str {
+  str body = trim(_sval_of(t));
+  StringBuilder b = string_builder_init(len(body) + 4);
+  b.append("// ");
+  b.append(body);
+  ret b.build();
+}
+
+fun _boolean_text(Token t) str {
+  fit t.data {
+    .Bval(b) -> {
+      if b {
+        ret "true";
+      }
+      ret "false";
+    }
+    _ -> { ret ""; }
+  }
+}
+
+fun _number_text(Token t) str {
+  fit t.data {
+    .Num(n) -> { ret format_num(n); }
+    .Dec(d) -> { ret format_dec(d, 6); }
+    _ -> { ret ""; }
+  }
+}
+
+// A string literal is re-emitted with the delimiters it was written
+// with, since a raw string's body is kept verbatim.
+fun _string_text(Token t) str {
+  str body = _sval_of(t);
+  StringBuilder b = string_builder_init(len(body) + 2);
+  if t.is_raw_string {
+    b.append_char('`');
+    b.append(body);
+    b.append_char('`');
+    ret b.build();
+  }
+  b.append_char('"');
+  b.append(body);
+  b.append_char('"');
+  ret b.build();
+}
+
+impl FmtState {
+  // Writes `text`, indenting first when it starts a line.
+  pub write(str text) {
+    if self.at_line_start {
+      num i = 0;
+      for i < self.indent {
+        self.out.append("  ");
+        i = i + 1;
+      }
+      self.at_line_start = false;
+    }
+    self.out.append(text);
+  }
+
+  pub newline() {
+    self.out.append_char('\n');
+    self.at_line_start = true;
+  }
+
+  // Ends the current line, keeping at most one blank line between
+  // statements.
+  pub flush_newlines() {
+    if self.pending_newlines == 0 {
+      ret;
+    }
+    if !self.at_line_start {
+      self.newline();
+    }
+    if self.pending_newlines > 1 {
+      self.newline();
+    }
+    self.pending_newlines = 0;
+  }
+}
+
+// True when `text` names a keyword that a space must follow, as in
+// `ret x` or `let y`, rather than one that takes a delimiter next.
+fun _keyword_takes_space(str text) bin {
+  ret !equals(text, "true") && !equals(text, "false") && !equals(text, "nil");
+}
+
+// Whether a space belongs between `prev` and the token now being
+// written.
+fun _needs_space(Token prev, Token cur) bin {
+  str p = token_text(prev);
+  str c = token_text(cur);
+
+  // Nothing sits before a closing delimiter or a separator.
+  if equals(c, ")") || equals(c, "]") || equals(c, ",") || equals(c, ";") {
+    ret false;
+  }
+  // A member access binds tight, but a leading `.` that starts a bare
+  // enum shorthand follows whatever preceded it, as in `= .Some(x)`.
+  if equals(p, ".") {
+    ret false;
+  }
+  if equals(c, ".") {
+    if prev.type == TokenType.Identifier || equals(p, ")") || equals(p, "]") {
+      ret false;
+    }
+    ret true;
+  }
+  // The relative-import prefix and the range operator bind to what
+  // follows them, while a keyword before one keeps its space.
+  if equals(p, "..") {
+    ret false;
+  }
+  if equals(c, "..") {
+    ret prev.type == TokenType.Keyword;
+  }
+  // A pointer star binds to the type it belongs to, unlike
+  // multiplication. Whether the source wrote it adjacent tells the two
+  // apart. A run of stars stays together for a deeper pointer.
+  if equals(c, "*") && !cur.whitespace {
+    ret false;
+  }
+  if equals(p, "*") {
+    ret !equals(c, "*");
+  }
+  // A call's or index's opening delimiter binds to the name before it.
+  if equals(c, "(") || equals(c, "[") {
+    if prev.type == TokenType.Identifier {
+      ret false;
+    }
+    if equals(p, ")") || equals(p, "]") {
+      ret false;
+    }
+  }
+  if equals(p, "(") || equals(p, "[") {
+    ret false;
+  }
+  if equals(p, ",") || equals(p, ";") {
+    ret true;
+  }
+  if prev.type == TokenType.Keyword {
+    ret _keyword_takes_space(p);
+  }
+  ret true;
+}
+
+// Formats `src`, or reports the stage that rejected it.
+pub fun format_source(str src, str filename) Result<str, str> {
+  let lexed = tokenize(src, filename);
+  if lexed.is_err() {
+    ret .Err("lex error");
+  }
+  let tokens = lexed.unwrap();
+
+  FmtState s = fmt_state_new();
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+
+    if t.type == TokenType.NewLine {
+      s.pending_newlines = s.pending_newlines + 1;
+      i = i + 1;
+      continue;
+    }
+
+    str text = token_text(t);
+
+    // A closing brace dedents before it is written, and always starts
+    // its own line.
+    if equals(text, "}") {
+      if s.indent > 0 {
+        s.indent = s.indent - 1;
+      }
+      if !s.at_line_start {
+        s.newline();
+      }
+      s.pending_newlines = 0;
+      s.write(text);
+      s.has_prev = true;
+      s.prev = t;
+      i = i + 1;
+      continue;
+    }
+
+    s.flush_newlines();
+
+    if !s.at_line_start && s.has_prev {
+      if _needs_space(s.prev, t) {
+        s.out.append(" ");
+      }
+    }
+    s.write(text);
+
+    if equals(text, "{") {
+      s.indent = s.indent + 1;
+      s.newline();
+      s.pending_newlines = 0;
+    }
+    if equals(text, ";") {
+      s.newline();
+      s.pending_newlines = 0;
+    }
+    if t.type == TokenType.Comment {
+      s.newline();
+      s.pending_newlines = 0;
+    }
+
+    s.has_prev = true;
+    s.prev = t;
+    i = i + 1;
+  }
+
+  if !s.at_line_start {
+    s.newline();
+  }
+  ret .Ok(s.out.build());
+}
+
+test "formats a function body with one statement per line" {
+  str src = `fun main() num { ret 0; }`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "fun main() num {"), "expected the signature on its own line";
+  assert contains(out, "  ret 0;"), "expected the body indented by two spaces";
+  assert contains(out, "\n}"), "expected the closing brace on its own line";
+}
+
+test "keeps a blank line between declarations" {
+  str src = `fun a() num {
+  `  ret 1;
+  `}
+  `
+  `
+  `fun b() num {
+  `  ret 2;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "}\n\nfun b()"), "expected exactly one blank line to survive";
+}
+
+test "keeps a comment on its own line" {
+  str src = `// a note
+  `fun a() num {
+  `  ret 1;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert starts_with(out, "// a note\n"), "expected the comment kept above the function";
+}
+
+test "binds a call's parenthesis to its name" {
+  str src = `fun a() num {
+  `  ret f(1, 2);
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "f(1, 2)"), "expected no space before the call's parenthesis";
+}
+
+test "does not space a member access" {
+  str src = `fun a() num {
+  `  ret p.x;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "p.x"), "expected a member access to bind tight";
+}
+
+test "a raw string keeps a // in its body verbatim" {
+  str src = "fun a() num {\n  str url = `see https://example.com/a`;\n  ret 1;\n}\n";
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "https://example.com/a"), "expected the raw string untouched";
+  assert !contains(out, "https: //"), "expected no space inserted into the raw string";
+}
+
+test "ends the output with a single newline" {
+  str src = `fun a() num {
+  `  ret 1;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert ends_with(out, "}\n"), "expected exactly one trailing newline";
+}
