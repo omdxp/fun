@@ -6,7 +6,7 @@ imp std.io;
 
 fun main() num {
   // A client writes its messages to this program's standard input.
-  File input = stdin_file();
+  Sink input = Sink.Stdin;
   Server s = server_new();
   ret s.serve(&input);
 }

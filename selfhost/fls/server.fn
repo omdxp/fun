@@ -29,12 +29,11 @@ pub fun server_new() Server {
 
 // The codes the protocol reserves for what a server can refuse.
 const num METHOD_NOT_FOUND = -32601;
-const num INVALID_REQUEST = -32600;
 
 impl Server {
   // Reads messages until the client asks the server to exit, or until
   // there is nothing left to read.
-  pub serve(File* input) num {
+  pub serve(Sink* input) num {
     for self.running {
       let message = read_message(input);
       if message.is_none() {

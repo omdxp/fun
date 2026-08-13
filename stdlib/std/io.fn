@@ -588,6 +588,42 @@ impl Sink {
   }
 
   // Flush any buffered bytes to the underlying stream.
+  // Reads one line, up to `max_len` bytes including the terminator, or
+  // nil at the end of the stream. A sink names a stream, which is read
+  // from as readily as it is written to.
+  pub read_line_max(num max_len) str {
+    let h = self.handle();
+    if h == nil || max_len <= 0 {
+      ret nil;
+    }
+    str buf = malloc(max_len + 1);
+    if buf == nil {
+      ret nil;
+    }
+    str res = fgets(buf, max_len, h);
+    if res == nil {
+      free(buf);
+      ret nil;
+    }
+    ret buf;
+  }
+
+  // Reads exactly `len` bytes, or nil when the stream ends first. Used
+  // where a protocol says how many bytes follow.
+  pub read_bytes(num length) str {
+    let h = self.handle();
+    if h == nil || length < 0 {
+      ret nil;
+    }
+    str buf = malloc(length + 1);
+    if buf == nil {
+      ret nil;
+    }
+    let read = fread(buf, 1, length, h);
+    buf[read] = '\0';
+    ret buf;
+  }
+
   pub flush() bin {
     fit *self {
       .Rotating(r) -> { ret r.flush(); }
@@ -713,12 +749,4 @@ pub fun write_all(str path, str data) bin {
   defer f.close();
   let ok = f.write(data);
   ret ok;
-}
-
-// Standard input as a file, for reading what another program wrote to
-// it. `Sink` names where to write; this names where to read from.
-pub fun stdin_file() File {
-  File f;
-  f.handle = stdin_stream();
-  ret f;
 }

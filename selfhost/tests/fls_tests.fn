@@ -2,6 +2,8 @@
 
 imp ..fls.protocol;
 imp std.string;
+imp std.io;
+imp std.fs;
 
 test "a string is written with what JSON reserves escaped" {
   assert equals(json_quote("plain"), `"plain"`), "expected a plain string to be quoted";
@@ -33,4 +35,22 @@ test "a notification carries no id" {
   str note = notification("textDocument/publishDiagnostics", `{"uri":"file:///a.fn"}`);
   assert contains(note, `"method":"textDocument/publishDiagnostics"`), "expected the method";
   assert !contains(note, `"id"`), "expected no id on a notification";
+}
+
+test "a sink reads a line and then the bytes that follow it" {
+  make_dir_all("fun-out");
+  str path = "fun-out/_sink_read.txt";
+  write_string(path, "Content-Length: 5\r\n\r\nhello");
+  defer remove_file(path);
+
+  File f = open_read(path);
+  Sink source = Sink.File(f);
+  defer f.close();
+
+  str header = source.read_line_max(64);
+  assert equals(trim(header), "Content-Length: 5"), "expected the header line";
+  str blank = source.read_line_max(64);
+  assert equals(trim(blank), ""), "expected the blank line ending the headers";
+  str body = source.read_bytes(5);
+  assert equals(body, "hello"), "expected exactly the bytes the header named";
 }

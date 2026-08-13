@@ -20,7 +20,7 @@ pub compound Message {
 
 // Reads the next message from `input`, or reports why it stopped. The
 // end of input is an ordinary outcome, not a failure.
-pub fun read_message(File* input) Option<Message> {
+pub fun read_message(Sink* input) Option<Message> {
   num length = -1;
   for true {
     str line = input.read_line_max(MAX_HEADER_LINE);
