@@ -5,7 +5,6 @@
 imp ..codegen.codegen;
 imp ..codegen.codegen_state;
 imp ..parser.import_resolver;
-imp ..ast.ast;
 imp std.string;
 imp std.result;
 
@@ -32,6 +31,7 @@ fun transpile_file(str path) Result<str, str> {
 fun emit_file(str path, str label) str {
   let r = transpile_file(path);
   if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the file";
     assert false, format("{str}: {str}", label, r.unwrap_err());
   }
   ret r.unwrap();

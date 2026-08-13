@@ -7,10 +7,8 @@
 
 imp uri;
 imp std.string;
-imp std.vec;
 imp std.map;
 imp std.option;
-imp std.io;
 
 // One document a client has open.
 pub compound Document {

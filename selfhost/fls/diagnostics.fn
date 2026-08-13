@@ -18,7 +18,6 @@ imp std.string;
 imp std.vec;
 imp std.option;
 imp std.result;
-imp std.fs;
 imp std.io;
 
 // How seriously a client should take one finding.

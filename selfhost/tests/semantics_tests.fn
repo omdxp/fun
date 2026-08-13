@@ -2,7 +2,6 @@
 // `semantics` suites. These build nodes and scopes directly.
 
 imp ..ast.ast;
-imp ..lexer.token;
 imp ..semantics.scope;
 imp ..semantics.symbol;
 imp std.string;

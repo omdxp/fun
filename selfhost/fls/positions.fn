@@ -8,7 +8,6 @@
 imp ..lexer.token;
 imp std.vec;
 imp std.option;
-imp std.string;
 
 // A span in the terms a client understands: a line and the characters
 // it covers, all counted from zero.

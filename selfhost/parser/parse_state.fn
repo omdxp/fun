@@ -8,7 +8,6 @@ imp ..semantics.scope;
 imp ..semantics.symbol;
 imp std.vec;
 imp std.map;
-imp std.string;
 imp std.c.mem;
 
 // Tracks a public symbol's declaring file, to detect cross-module name

@@ -9,7 +9,6 @@ imp documents;
 imp positions;
 imp symbols;
 imp uri;
-imp ..ast.ast;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.import_resolver;
