@@ -1,0 +1,185 @@
+// Document symbols.
+// 
+// What a file declares, in the order it declares it, so a client can
+// show an outline and jump around by name.
+// 
+// The list is sent as the flat form the protocol allows, each entry
+// carrying its own location. The nested form omits locations, and a
+// client that reads the reply as the flat one then has nothing to jump
+// to.
+
+imp documents;
+imp positions;
+imp protocol;
+imp uri;
+imp ..ast.ast;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.result;
+imp std.io;
+
+// What a client is told a symbol is. The values are the protocol's own
+// numbering, which is why they are written out rather than counted from
+// zero; only the kinds this file reports are listed.
+enum OutlineKind {
+  Method = 6,
+  Field = 8,
+  Enumeration = 10,
+  Interface = 11,
+  Function = 12,
+  Variable = 13,
+  Constant = 14,
+  EnumMember = 22,
+  Struct = 23,
+}
+
+// One entry in the outline. A field and a variant are reported at the
+// line their declaration starts on, since neither carries a position of
+// its own in the tree.
+compound OutlineEntry {
+  str name;
+  OutlineKind kind;
+  // The type a method or field belongs to, which a client shows beside
+  // the name; empty for a declaration that stands on its own.
+  str container;
+  Pos pos;
+}
+
+// Everything `doc` declares, as the result a client is sent.
+pub fun document_symbols(Document doc) str {
+  let merged = parse_program_with_source(doc.path, doc.text);
+  if merged.is_err() {
+    ret "[]";
+  }
+  ProgramMergeResult program = merged.unwrap();
+
+  Vec<OutlineEntry> found;
+  found.init(16);
+  defer found.free();
+  _collect(&program.entry_nodes, doc.path, &found);
+
+  str document_uri = path_to_uri(doc.path);
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    OutlineEntry s = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    Span span = span_of_pos(s.pos, len(s.name));
+    b.append(format(
+      `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
+      json_quote(s.name),
+      s.kind,
+      json_quote(s.container),
+      json_quote(document_uri),
+      span.line,
+      span.start,
+      span.line,
+      span.end
+    ));
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// What `nodes` declares in `file`, in source order. Only the file's own
+// declarations are listed: what it imports belongs to the outline of the
+// file that declares it.
+fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_name && !equals(f.name, "") {
+          out.push(_entry(f.name, .Function, n.pos));
+        }
+      }
+      .Compound(c) -> {
+        out.push(_entry(c.name, .Struct, n.pos));
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          out.push(_entry_in(cf.name, .Field, c.name, n.pos));
+        }
+      }
+      .Enum(e) -> {
+        out.push(_entry(e.name, .Enumeration, n.pos));
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          out.push(_entry_in(variant.name, .EnumMember, e.name, n.pos));
+        }
+      }
+      .Quirk(q) -> { out.push(_entry(q.name, .Interface, n.pos)); }
+      .Impl(block) -> {
+        num m = 0;
+        for m < block.methods.len {
+          Node* method = block.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              if f.has_name && !equals(f.name, "") {
+                // A method is stored under the name it is emitted as,
+                // `Type__method`; a reader wants the name they wrote.
+                out.push(_entry_in(
+                  _method_name(f.name, block.type_name),
+                  .Method,
+                  block.type_name,
+                  method.pos
+                ));
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Variable(v) -> {
+        OutlineKind kind = .Variable;
+        if v.is_const {
+          kind = .Constant;
+        }
+        out.push(_entry(v.name, kind, n.pos));
+      }
+      _ -> {}
+    }
+  }
+}
+
+// The method's own name, with the type it is mangled with removed.
+fun _method_name(str mangled, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(mangled, prefix) {
+    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+  }
+  ret mangled;
+}
+
+fun _entry(str name, OutlineKind kind, Pos pos) OutlineEntry {
+  ret _entry_in(name, kind, "", pos);
+}
+
+fun _entry_in(str name, OutlineKind kind, str container, Pos pos) OutlineEntry {
+  OutlineEntry s;
+  s.name = name;
+  s.kind = kind;
+  s.container = container;
+  s.pos = pos;
+  ret s;
+}

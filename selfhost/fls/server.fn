@@ -9,6 +9,7 @@ imp protocol;
 imp documents;
 imp diagnostics;
 imp navigation;
+imp outline;
 imp std.string;
 imp std.option;
 imp std.result;
@@ -107,6 +108,10 @@ impl Server {
       "textDocument/typeDefinition"
     ) || equals(method, "textDocument/implementation") {
       self.answer_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/documentSymbol") {
+      self.answer_document_symbols(id, message);
       ret;
     }
     if equals(method, "shutdown") {
@@ -232,6 +237,23 @@ impl Server {
     write_message(response(id, definition(r.doc, r.line, r.character)));
   }
 
+  // Lists what the document declares, for an outline.
+  answer_document_symbols(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    write_message(response(id, document_symbols(doc.unwrap())));
+  }
+
   // The document and position a request names, or nothing when it names
   // a document this server does not hold.
   document_at(JsonValue message) Option<Request> {
@@ -289,7 +311,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.

@@ -4,6 +4,8 @@ imp ..fls.protocol;
 imp ..fls.positions;
 imp ..fls.symbols;
 imp ..fls.navigation;
+imp ..fls.outline;
+imp ..fls.documents;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.import_resolver;
@@ -142,4 +144,68 @@ test "a keyword carries documentation, and an ordinary word does not" {
   assert !equals(keyword_doc("fit"), ""), "expected fit to be documented";
   assert contains(keyword_doc("fit"), "```fun"), "expected a fenced example";
   assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
+}
+
+test "an outline lists what a file declares, by kind" {
+  str src = `pub const num LIMIT = 8;
+  `pub compound Buffer {
+  `  num len;
+  `}
+  `pub enum Mode {
+  `  Fast,
+  `}
+  `impl Buffer {
+  `  pub clear() { self.len = 0; }
+  `}
+  `fun helper() num { ret 1; }`;
+  Document doc;
+  doc.uri = "file:///outline.fn";
+  doc.path = "outline.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(doc);
+  // The protocol's own numbering: 14 constant, 23 struct, 10 enum,
+  // 22 enum member, 6 method, 12 function.
+  assert contains(out, `"name":"LIMIT","kind":14`), "expected the constant";
+  assert contains(out, `"name":"Buffer","kind":23`), "expected the compound";
+  assert contains(out, `"name":"Mode","kind":10`), "expected the enum";
+  assert contains(out, `"name":"Fast","kind":22`), "expected the variant";
+  assert contains(out, `"name":"helper","kind":12`), "expected the function";
+}
+
+test "a method is listed under the name it was written as" {
+  str src = `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer {
+  `  pub clear() { self.len = 0; }
+  `}`;
+  Document doc;
+  doc.uri = "file:///method.fn";
+  doc.path = "method.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(doc);
+  // A method is stored mangled, as `Buffer__clear`; an outline shows the
+  // name in the source, with the type beside it.
+  assert contains(out, `"name":"clear","kind":6`), "expected the written name";
+  assert !contains(out, "Buffer__clear"), "expected the mangling not to reach the client";
+  assert contains(out, `"containerName":"Buffer"`), "expected the type it belongs to";
+}
+
+test "an outline carries a location a client can jump to" {
+  str src = `fun helper() num { ret 1; }`;
+  Document doc;
+  doc.uri = "file:///loc.fn";
+  doc.path = "loc.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // The flat form of the reply is what the protocol reads by default,
+  // and every entry in it carries its own location.
+  str out = document_symbols(doc);
+  assert contains(out, `"location"`), "expected a location on the entry";
+  assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
 }
