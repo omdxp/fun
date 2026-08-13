@@ -5,8 +5,7 @@ imp server;
 imp std.io;
 
 fun main() num {
-  // A client writes its messages to this program's standard input.
-  Sink input = Sink.Stdin;
   Server s = server_new();
-  ret s.serve(&input);
+  // A client writes its messages to this program's standard input.
+  ret s.serve(&Sink.Stdin);
 }
