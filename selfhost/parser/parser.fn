@@ -2589,6 +2589,7 @@ impl Parser {
     VariableNode v;
     v.var_type = dt;
     v.name = name;
+    v.val = nil;
     v.has_val = false;
     v.is_const = is_const;
 
@@ -3233,6 +3234,7 @@ impl Parser {
       VariableNode vv;
       vv.var_type = vdt;
       vv.name = "vargs";
+      vv.val = nil;
       vv.has_val = false;
       vv.is_const = false;
 
@@ -3848,6 +3850,7 @@ impl Parser {
         VariableNode bv;
         bv.var_type = bdt;
         bv.name = bname;
+        bv.val = nil;
         bv.has_val = false;
         bv.is_const = false;
 
@@ -5533,6 +5536,7 @@ impl Parser {
     VariableNode selfv;
     selfv.var_type = self_dt;
     selfv.name = "self";
+    selfv.val = nil;
     selfv.has_val = false;
     selfv.is_const = false;
 
