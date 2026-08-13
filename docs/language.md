@@ -24,7 +24,7 @@
     `WHERE id = ?
   ;
   ```
-  Whether you close the backtick on the same line is itself the inline-vs-multi-line signal, so trailing code (like the `;` above) that needs to sit right after the last line can close it explicitly instead: `` `WHERE id = ?`; ``.
+  Whether you close the backtick on the same line is itself the inline-vs-multi-line signal, so trailing code (like the `;` above) that needs to sit right after the last line can close it explicitly instead: `` `WHERE id = ?`; ``. A literal backtick is written as two, the one escape a raw string has: `` `a``b` `` is `` a`b ``.
 
 ### Types
 - **Primitive Types**:

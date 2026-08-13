@@ -93,6 +93,35 @@ test "-fmt formats file in-place" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt keeps an escaped backtick escaped" {
+    const allocator = std.testing.allocator;
+
+    // The formatter reproduces a raw string from its source slice, so a
+    // doubled backtick has to survive as written -- collapsing it to one
+    // would close the string on the next pass.
+    const ugly =
+        "fun main() {\n" ++
+        "  let fence=```````fun`;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_raw_escape", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  let fence = ```````fun`;\n" ++
+        "}\n";
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt preserves an inline raw string's backtick spelling verbatim" {
     const allocator = std.testing.allocator;
 
