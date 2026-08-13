@@ -1,0 +1,311 @@
+// Completion.
+// 
+// What a reader could reasonably type next. After a dot that is the
+// fields and methods of whatever the receiver is; anywhere else it is
+// the reserved words, what the program declares, and what is in scope
+// where the cursor sits.
+
+imp documents;
+imp symbols;
+imp protocol;
+imp ..ast.ast;
+imp ..lexer.lexer;
+imp ..lexer.lexdefs;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.result;
+imp std.io;
+
+// What a client is told an item is. The values are the protocol's own
+// numbering; only the kinds this file offers are listed.
+enum ItemKind {
+  Method = 2,
+  Function = 3,
+  Field = 5,
+  Variable = 6,
+  Interface = 8,
+  Enumeration = 13,
+  Keyword = 14,
+  Struct = 22,
+}
+
+// One thing a reader could type here.
+compound Item {
+  str label;
+  ItemKind kind;
+  // What the item is, shown beside the label: a signature for a
+  // function, a type for anything that has one.
+  str detail;
+}
+
+// Everything worth offering at `line`/`character` in `doc`, as the
+// result a client is sent.
+pub fun completion(Document doc, num line, num character) str {
+  Vec<Item> items;
+  items.init(64);
+  defer items.free();
+
+  let lexed = tokenize(doc.text, doc.path);
+  if lexed.is_err() {
+    ret "[]";
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  num source_line = line + 1;
+  str receiver = _receiver_before(&tokens, line, character);
+
+  // A reader asks for completion while the text is half-written, which
+  // is exactly when it does not parse. What the tree would have told us
+  // is offered when there is a tree, and the words already in the file
+  // are offered when there is not, rather than answering with nothing.
+  let merged = parse_program_with_source(doc.path, doc.text);
+  if merged.is_err() {
+    if equals(receiver, "") {
+      _reserved(&items);
+    }
+    _written_names(&tokens, receiver, &items);
+    ret _reply(&items);
+  }
+  ProgramMergeResult program = merged.unwrap();
+
+  if !equals(receiver, "") {
+    // After a dot, only what the receiver actually has is worth
+    // offering; the reserved words are not.
+    str type_name = type_name_of_local(&program.nodes, receiver, doc.path, source_line);
+    if !equals(type_name, "") {
+      _members_of(&program.nodes, type_name, &items);
+    }
+    if items.len == 0 {
+      _written_names(&tokens, receiver, &items);
+    }
+    ret _reply(&items);
+  }
+
+  _declared(&program.nodes, doc.path, source_line, &items);
+  _reserved(&items);
+  ret _reply(&items);
+}
+
+// Every distinct name already written in the file. What a reader is
+// reaching for is usually a word they have written before, so this is
+// worth offering when the text cannot be read as a program. `skip` is
+// the receiver being completed against, which is not a member of
+// itself.
+fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
+  Vec<str> seen;
+  seen.init(32);
+  defer seen.free();
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    fit t.type {
+      .Identifier -> {
+        str name = token_text(t);
+        if equals(name, "") || equals(name, skip) || seen.contains(name) {
+          continue;
+        }
+        seen.push(name);
+        items.push(_item(name, .Variable, "in this file"));
+      }
+      _ -> {}
+    }
+  }
+}
+
+// The name a dot immediately before the cursor is reached through, or
+// empty when the cursor does not follow a dot.
+fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  str receiver = "";
+  bin saw_dot = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    if token_is_operator(t, ".") {
+      saw_dot = true;
+      continue;
+    }
+    fit t.type {
+      .Identifier -> {
+        if saw_dot {
+          // A name already being typed after the dot, which does not
+          // change what the dot is reached through.
+          continue;
+        }
+        receiver = token_text(t);
+        saw_dot = false;
+      }
+      _ -> {
+        if !saw_dot {
+          receiver = "";
+        }
+      }
+    }
+  }
+  if !saw_dot {
+    ret "";
+  }
+  ret receiver;
+}
+
+// The fields of `type_name`, and the methods declared on it.
+fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if !equals(c.name, type_name) {
+          continue;
+        }
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          items.push(_item(cf.name, .Field, render_type(cf.dtype)));
+        }
+      }
+      .Impl(block) -> {
+        if !equals(block.type_name, type_name) {
+          continue;
+        }
+        num m = 0;
+        for m < block.methods.len {
+          Node* method = block.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              if !f.has_name || equals(f.name, "") {
+                continue;
+              }
+              items.push(_item(_method_label(f.name, type_name), .Method, render_function(f)));
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+// What the program declares, plus the parameters and locals of the
+// function the cursor sits in.
+fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !f.has_name || equals(f.name, "") {
+          continue;
+        }
+        items.push(_item(f.name, .Function, render_function(f)));
+        if !_covers_line(n, f, file, line) {
+          continue;
+        }
+        num a = 0;
+        for a < f.args.len {
+          Node* arg = f.args.get(a);
+          a = a + 1;
+          if arg == nil {
+            continue;
+          }
+          fit arg.kind {
+            .Variable(v) -> {
+              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
+      .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
+      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .Variable(v) -> {
+        items.push(_item(v.name, .Variable, render_type(v.var_type)));
+      }
+      _ -> {}
+    }
+  }
+}
+
+// True when `line` falls within the function `f` declared by `n`.
+fun _covers_line(Node n, FunctionNode f, str file, num line) bin {
+  if !n.has_pos || !equals(n.pos.filename, file) || line < n.pos.line {
+    ret false;
+  }
+  if !f.has_body || f.body == nil {
+    ret false;
+  }
+  num last = f.body.pos.end_line;
+  if last == 0 {
+    last = f.body.pos.line;
+  }
+  ret line <= last;
+}
+
+fun _reserved(Vec<Item>* items) {
+  Vec<str> words = keywords();
+  defer words.free();
+  num i = 0;
+  for i < words.len {
+    items.push(_item(words.get(i), .Keyword, "keyword"));
+    i = i + 1;
+  }
+}
+
+// The method's own name, with the type it is mangled with removed.
+fun _method_label(str mangled, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(mangled, prefix) {
+    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+  }
+  ret mangled;
+}
+
+fun _item(str label, ItemKind kind, str detail) Item {
+  Item it;
+  it.label = label;
+  it.kind = kind;
+  it.detail = detail;
+  ret it;
+}
+
+fun _reply(Vec<Item>* items) str {
+  StringBuilder b = string_builder_init(512);
+  b.append("[");
+  num i = 0;
+  for i < items.len {
+    Item it = items.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(format(
+      `{"label":{str},"kind":{num},"detail":{str}}`,
+      json_quote(it.label),
+      it.kind,
+      json_quote(it.detail)
+    ));
+  }
+  b.append("]");
+  ret b.build();
+}

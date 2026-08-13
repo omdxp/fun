@@ -5,6 +5,8 @@ imp ..fls.positions;
 imp ..fls.symbols;
 imp ..fls.navigation;
 imp ..fls.outline;
+imp ..fls.references;
+imp ..fls.completion;
 imp ..fls.documents;
 imp ..lexer.lexer;
 imp ..lexer.token;
@@ -208,4 +210,78 @@ test "an outline carries a location a client can jump to" {
   str out = document_symbols(doc);
   assert contains(out, `"location"`), "expected a location on the entry";
   assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
+}
+
+test "a rename is refused when the new name is not one" {
+  assert is_identifier("total"), "expected an ordinary name";
+  assert is_identifier("_private"), "expected a leading underscore to be allowed";
+  assert is_identifier("v2"), "expected digits after the first character";
+  assert !is_identifier(""), "expected nothing to be rejected";
+  assert !is_identifier("9bad"), "expected a leading digit to be rejected";
+  assert !is_identifier("has space"), "expected a space to be rejected";
+  assert !is_identifier("has-dash"), "expected punctuation to be rejected";
+}
+
+test "every place a name is written is found, and renamed together" {
+  str src = `fun helper(num total) num {
+  `  ret total + total;
+  `}`;
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///ref.fn", src, 1);
+  let held = docs.at("file:///ref.fn");
+  assert held.is_some(), "expected the document to be held";
+  Document doc = held.unwrap();
+
+  // `total` is written three times: the parameter and its two uses.
+  str found = references(&docs, doc, 1, 6);
+  assert count(found, `"uri"`) == 3, "expected every occurrence";
+
+  str edit = rename_symbol(&docs, doc, 1, 6, "count");
+  assert count(edit, `"newText":"count"`) == 3, "expected every occurrence renamed";
+  assert contains(edit, `"changes"`), "expected the edit grouped by document";
+
+  // A name a reader could not have written is refused outright.
+  assert equals(rename_symbol(&docs, doc, 1, 6, "9bad"), "null"), "expected the rename refused";
+}
+
+test "completion after a dot offers what the receiver has" {
+  str src = `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer {
+  `  pub clear() { self.len = 0; }
+  `}
+  `fun helper(Buffer b) num {
+  `  num x = b.len;
+  `  ret x;
+  `}`;
+  Document doc;
+  doc.uri = "file:///cmp.fn";
+  doc.path = "cmp.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after `b.` on the line that reads it.
+  str out = completion(doc, 7, 12);
+  assert contains(out, `"label":"len","kind":5`), "expected the field";
+  assert contains(out, `"label":"clear","kind":2`), "expected the method, unmangled";
+  assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
+}
+
+test "completion still answers while the text does not parse" {
+  // What a reader is typing is half-written by definition, so a failed
+  // parse must not turn into an empty reply.
+  str src = `fun helper(num total) num {
+  `  tot
+  `}`;
+  Document doc;
+  doc.uri = "file:///half.fn";
+  doc.path = "half.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = completion(doc, 1, 5);
+  assert contains(out, `"label":"ret"`), "expected the reserved words";
+  assert contains(out, `"label":"total"`), "expected a name already written in the file";
 }

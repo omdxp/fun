@@ -10,6 +10,8 @@ imp documents;
 imp diagnostics;
 imp navigation;
 imp outline;
+imp references;
+imp completion;
 imp std.string;
 imp std.option;
 imp std.result;
@@ -108,6 +110,18 @@ impl Server {
       "textDocument/typeDefinition"
     ) || equals(method, "textDocument/implementation") {
       self.answer_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/completion") {
+      self.answer_completion(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/references") {
+      self.answer_references(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/rename") {
+      self.answer_rename(id, message);
       ret;
     }
     if equals(method, "textDocument/documentSymbol") {
@@ -237,6 +251,41 @@ impl Server {
     write_message(response(id, definition(r.doc, r.line, r.character)));
   }
 
+  // Offers what a reader could type where the cursor sits.
+  answer_completion(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, completion(r.doc, r.line, r.character)));
+  }
+
+  // Lists every place the name under the cursor is written.
+  answer_references(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, references(&self.docs, r.doc, r.line, r.character)));
+  }
+
+  // Renames the name under the cursor everywhere it is written.
+  answer_rename(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    JsonValue params = _field(message, "params");
+    str new_name = _string_field(params, "newName");
+    write_message(response(id, rename_symbol(&self.docs, r.doc, r.line, r.character, new_name)));
+  }
+
   // Lists what the document declares, for an outline.
   answer_document_symbols(str id, JsonValue message) {
     JsonValue params = _field(message, "params");
@@ -311,7 +360,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]}}}`;
 }
 
 // The value of a string field, or empty when the message has none.

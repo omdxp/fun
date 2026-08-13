@@ -1,0 +1,215 @@
+// References and rename.
+// 
+// Both start from the same list: every place a name is written. That
+// list is built by matching the word itself across the documents a
+// client has open, which is what the outgoing server does too. It finds
+// every real occurrence, and it can also find a different declaration
+// that happens to share the name; resolving each occurrence would need
+// an index of the whole workspace rather than the open files.
+
+imp documents;
+imp positions;
+imp symbols;
+imp protocol;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+
+// One place a name is written.
+compound Occurrence {
+  str document_uri;
+  Span span;
+}
+
+// Every place the name at `line`/`character` is written, as the result a
+// client is sent.
+pub fun references(Documents* docs, Document doc, num line, num character) str {
+  str name = name_at(doc, line, character);
+  if equals(name, "") {
+    ret "[]";
+  }
+
+  Vec<Occurrence> found;
+  found.init(16);
+  defer found.free();
+  _collect_occurrences(docs, name, &found);
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    Occurrence o = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(_occurrence_location(o));
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The edit that renames what sits at `line`/`character` to `new_name`,
+// as the result a client is sent. A name a reader could not have written
+// is refused rather than applied.
+pub fun rename_symbol(Documents* docs, Document doc, num line, num character, str new_name) str {
+  if !is_identifier(new_name) {
+    ret "null";
+  }
+  str name = name_at(doc, line, character);
+  if equals(name, "") || equals(name, new_name) {
+    ret "null";
+  }
+
+  Vec<Occurrence> found;
+  found.init(16);
+  defer found.free();
+  _collect_occurrences(docs, name, &found);
+  if found.len == 0 {
+    ret "null";
+  }
+
+  // The edits are grouped by document, which is the shape the protocol
+  // asks for: one list of edits per URI.
+  StringBuilder b = string_builder_init(256);
+  b.append(`{"changes":{`);
+  Vec<str> written;
+  written.init(4);
+  defer written.free();
+  num i = 0;
+  for i < found.len {
+    str document_uri = found.get(i).document_uri;
+    i = i + 1;
+    if written.contains(document_uri) {
+      continue;
+    }
+    if written.len > 0 {
+      b.append(",");
+    }
+    written.push(document_uri);
+    b.append(format("{str}:[", json_quote(document_uri)));
+    num j = 0;
+    num emitted = 0;
+    for j < found.len {
+      Occurrence o = found.get(j);
+      j = j + 1;
+      if !equals(o.document_uri, document_uri) {
+        continue;
+      }
+      if emitted > 0 {
+        b.append(",");
+      }
+      emitted = emitted + 1;
+      b.append(format(
+        `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"newText":{str}}`,
+        o.span.line,
+        o.span.start,
+        o.span.line,
+        o.span.end,
+        json_quote(new_name)
+      ));
+    }
+    b.append("]");
+  }
+  b.append("}}");
+  ret b.build();
+}
+
+// The name written at `line`/`character`, or empty when what sits there
+// is not a name.
+pub fun name_at(Document doc, num line, num character) str {
+  let lexed = tokenize(doc.text, doc.path);
+  if lexed.is_err() {
+    ret "";
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret "";
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> { ret token_text(t); }
+    _ -> {}
+  }
+  ret "";
+}
+
+// True for text a reader could have written as a name: a letter or an
+// underscore, then letters, digits, or underscores.
+pub fun is_identifier(str s) bin {
+  num n = len(s);
+  if n == 0 {
+    ret false;
+  }
+  let first = s[0];
+  bin starts = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_';
+  if !starts {
+    ret false;
+  }
+  num i = 1;
+  for i < n {
+    let c = s[i];
+    i = i + 1;
+    bin ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    if !ok {
+      ret false;
+    }
+  }
+  ret true;
+}
+
+// Every place `name` is written, across the documents a client holds.
+fun _collect_occurrences(Documents* docs, str name, Vec<Occurrence>* out) {
+  Vec<str> uris = docs.open.keys();
+  defer uris.free();
+  num i = 0;
+  for i < uris.len {
+    str document_uri = uris.get(i);
+    i = i + 1;
+    let held = docs.at(document_uri);
+    if held.is_none() {
+      continue;
+    }
+    Document d = held.unwrap();
+    let lexed = tokenize(d.text, d.path);
+    if lexed.is_err() {
+      continue;
+    }
+    Vec<Token> tokens = lexed.unwrap();
+    defer tokens.free();
+    num t = 0;
+    for t < tokens.len {
+      Token tok = tokens.get(t);
+      t = t + 1;
+      fit tok.type {
+        .Identifier -> {
+          if equals(token_text(tok), name) {
+            Occurrence o;
+            o.document_uri = document_uri;
+            o.span = span_of(tok);
+            out.push(o);
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+}
+
+fun _occurrence_location(Occurrence o) str {
+  ret format(
+    `{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
+    json_quote(o.document_uri),
+    o.span.line,
+    o.span.start,
+    o.span.line,
+    o.span.end
+  );
+}

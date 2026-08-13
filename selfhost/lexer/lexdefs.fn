@@ -7,6 +7,8 @@
 // `keyword_is_datatype` table, used by the parser for type-position
 // disambiguation, is where those get recognized.
 
+imp std.vec;
+
 // True if `s` is a reserved word.
 pub fun is_keyword(str s) bin {
   fit s {
@@ -15,6 +17,55 @@ pub fun is_keyword(str s) bin {
     }
     _ -> { ret false; }
   }
+}
+
+// Every reserved word, for the places that need to list them rather
+// than test one. Kept beside `is_keyword` so the two are read and
+// changed together.
+pub fun keywords() Vec<str> {
+  Vec<str> out;
+  out.init(40);
+  out.push("imp");
+  out.push("pub");
+  out.push("fun");
+  out.push("as");
+  out.push("enum");
+  out.push("compound");
+  out.push("quirk");
+  out.push("impl");
+  out.push("let");
+  out.push("const");
+  out.push("defer");
+  out.push("asm");
+  out.push("volatile");
+  out.push("arch");
+  out.push("void");
+  out.push("raw");
+  out.push("num");
+  out.push("dec");
+  out.push("str");
+  out.push("bin");
+  out.push("chr");
+  out.push("if");
+  out.push("elif");
+  out.push("else");
+  out.push("true");
+  out.push("false");
+  out.push("nil");
+  out.push("fit");
+  out.push("ret");
+  out.push("for");
+  out.push("async");
+  out.push("await");
+  out.push("break");
+  out.push("continue");
+  out.push("allow");
+  out.push("expect");
+  out.push("assert");
+  out.push("panic");
+  out.push("test");
+  out.push("fuzz");
+  ret out;
 }
 
 // True if `s` is `true` or `false`.
