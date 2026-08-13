@@ -1,0 +1,87 @@
+// Reading a document once.
+// 
+// Every question a client asks about a document is answered from the
+// same two things: its tokens, and the program its imports resolve to.
+// Reading those is what costs, and the text does not change between the
+// questions asked about one revision, so it is read once per revision
+// and kept.
+// 
+// The revision a client sends is what says whether what is kept is
+// still current. An edit raises it, and the next question re-reads.
+
+imp documents;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.map;
+imp std.vec;
+imp std.option;
+imp std.result;
+
+// One document as it was last read.
+pub compound Analyzed {
+  // False when the text could not be lexed or its imports could not be
+  // resolved, which is ordinary while a reader is typing.
+  bin lexed;
+  bin parsed;
+  num version;
+  Vec<Token> tokens;
+  ProgramMergeResult program;
+}
+
+// What has been read, by document URI.
+pub compound AnalysisCache {
+  Map<str, Analyzed> entries;
+}
+
+pub fun analysis_cache_new() AnalysisCache {
+  AnalysisCache c;
+  c.entries.init(8);
+  ret c;
+}
+
+impl AnalysisCache {
+  // What `doc` reads as, from what was kept when the revision matches
+  // and by reading it again when it does not.
+  pub of(Document doc) Analyzed {
+    let kept = self.entries.at(doc.uri);
+    if kept.is_some() {
+      Analyzed found = kept.unwrap();
+      if found.version == doc.version {
+        ret found;
+      }
+    }
+
+    Analyzed fresh;
+    fresh.version = doc.version;
+    fresh.lexed = false;
+    fresh.parsed = false;
+    fresh.tokens.init(0);
+
+    let lexed = tokenize(doc.text, doc.path);
+    if lexed.is_ok() {
+      fresh.tokens = lexed.unwrap();
+      fresh.lexed = true;
+    }
+
+    // The text a client holds is what to read, not what is on disk;
+    // everything it imports is still read from disk.
+    let merged = parse_program_with_source(doc.path, doc.text);
+    if merged.is_ok() {
+      fresh.program = merged.unwrap();
+      fresh.parsed = true;
+    }
+
+    self.entries.put(doc.uri, fresh);
+    ret fresh;
+  }
+
+  // Drops what was kept for a document a client closed.
+  pub forget(str document_uri) {
+    self.entries.remove(document_uri);
+  }
+
+  pub free() {
+    self.entries.free();
+  }
+}

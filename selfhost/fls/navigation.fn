@@ -6,16 +6,15 @@
 
 imp protocol;
 imp documents;
+imp analysis;
 imp positions;
 imp symbols;
 imp uri;
-imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
 imp std.option;
-imp std.result;
 imp std.io;
 
 // What a client is told when there is nothing to say.
@@ -24,13 +23,12 @@ const str NO_LOCATION = "[]";
 
 // The hover for the position `line`/`character` in `doc`, as the result
 // a client is sent.
-pub fun hover(Document doc, num line, num character) str {
-  let lexed = tokenize(doc.text, doc.path);
-  if lexed.is_err() {
+pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
     ret NO_HOVER;
   }
-  Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  Vec<Token> tokens = read.tokens;
 
   let found = token_at(&tokens, line, character);
   if found.is_none() {
@@ -50,7 +48,7 @@ pub fun hover(Document doc, num line, num character) str {
     _ -> { ret NO_HOVER; }
   }
 
-  let declared = _resolve(doc, &tokens, t, line);
+  let declared = _resolve(cache, doc, &tokens, t, line);
   if declared.is_none() {
     ret NO_HOVER;
   }
@@ -65,13 +63,12 @@ pub fun hover(Document doc, num line, num character) str {
 // Where the name at `line`/`character` in `doc` was declared, as the
 // result a client is sent. A declaration in another file is named by its
 // own URI, which is how a jump leaves the document.
-pub fun definition(Document doc, num line, num character) str {
-  let lexed = tokenize(doc.text, doc.path);
-  if lexed.is_err() {
+pub fun definition(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
     ret NO_LOCATION;
   }
-  Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  Vec<Token> tokens = read.tokens;
 
   let found = token_at(&tokens, line, character);
   if found.is_none() {
@@ -83,7 +80,7 @@ pub fun definition(Document doc, num line, num character) str {
     _ -> { ret NO_LOCATION; }
   }
 
-  let declared = _resolve(doc, &tokens, t, line);
+  let declared = _resolve(cache, doc, &tokens, t, line);
   if declared.is_none() {
     ret NO_LOCATION;
   }
@@ -110,17 +107,17 @@ pub fun definition(Document doc, num line, num character) str {
 // What the name `t` refers to, judged from where it sits: a field when
 // it is reached through a dot, and otherwise a local, a parameter, or
 // something the program declares.
-fun _resolve(Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
+fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
   str name = token_word(t);
   if equals(name, "") {
     ret .None;
   }
 
-  let merged = parse_program_with_source(doc.path, doc.text);
-  if merged.is_err() {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
     ret .None;
   }
-  ProgramMergeResult program = merged.unwrap();
+  ProgramMergeResult program = read.program;
   num source_line = line + 1;
 
   str receiver = _receiver_of(tokens, t);

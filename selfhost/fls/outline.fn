@@ -9,6 +9,7 @@
 // to.
 
 imp documents;
+imp analysis;
 imp positions;
 imp protocol;
 imp uri;
@@ -16,7 +17,6 @@ imp ..ast.ast;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
-imp std.result;
 imp std.io;
 
 // What a client is told a symbol is. The values are the protocol's own
@@ -47,12 +47,12 @@ compound OutlineEntry {
 }
 
 // Everything `doc` declares, as the result a client is sent.
-pub fun document_symbols(Document doc) str {
-  let merged = parse_program_with_source(doc.path, doc.text);
-  if merged.is_err() {
+pub fun document_symbols(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
     ret "[]";
   }
-  ProgramMergeResult program = merged.unwrap();
+  ProgramMergeResult program = read.program;
 
   Vec<OutlineEntry> found;
   found.init(16);

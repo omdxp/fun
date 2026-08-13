@@ -8,15 +8,14 @@
 // an index of the whole workspace rather than the open files.
 
 imp documents;
+imp analysis;
 imp positions;
 imp symbols;
 imp protocol;
-imp ..lexer.lexer;
 imp ..lexer.token;
 imp std.string;
 imp std.vec;
 imp std.option;
-imp std.result;
 imp std.io;
 
 // One place a name is written.
@@ -27,8 +26,8 @@ compound Occurrence {
 
 // Every place the name at `line`/`character` is written, as the result a
 // client is sent.
-pub fun references(Documents* docs, Document doc, num line, num character) str {
-  str name = name_at(doc, line, character);
+pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line, num character) str {
+  str name = name_at(cache, doc, line, character);
   if equals(name, "") {
     ret "[]";
   }
@@ -36,7 +35,7 @@ pub fun references(Documents* docs, Document doc, num line, num character) str {
   Vec<Occurrence> found;
   found.init(16);
   defer found.free();
-  _collect_occurrences(docs, name, &found);
+  _collect_occurrences(cache, docs, name, &found);
 
   StringBuilder b = string_builder_init(256);
   b.append("[");
@@ -56,11 +55,18 @@ pub fun references(Documents* docs, Document doc, num line, num character) str {
 // The edit that renames what sits at `line`/`character` to `new_name`,
 // as the result a client is sent. A name a reader could not have written
 // is refused rather than applied.
-pub fun rename_symbol(Documents* docs, Document doc, num line, num character, str new_name) str {
+pub fun rename_symbol(
+  AnalysisCache* cache,
+  Documents* docs,
+  Document doc,
+  num line,
+  num character,
+  str new_name
+) str {
   if !is_identifier(new_name) {
     ret "null";
   }
-  str name = name_at(doc, line, character);
+  str name = name_at(cache, doc, line, character);
   if equals(name, "") || equals(name, new_name) {
     ret "null";
   }
@@ -68,7 +74,7 @@ pub fun rename_symbol(Documents* docs, Document doc, num line, num character, st
   Vec<Occurrence> found;
   found.init(16);
   defer found.free();
-  _collect_occurrences(docs, name, &found);
+  _collect_occurrences(cache, docs, name, &found);
   if found.len == 0 {
     ret "null";
   }
@@ -121,13 +127,12 @@ pub fun rename_symbol(Documents* docs, Document doc, num line, num character, st
 
 // The name written at `line`/`character`, or empty when what sits there
 // is not a name.
-pub fun name_at(Document doc, num line, num character) str {
-  let lexed = tokenize(doc.text, doc.path);
-  if lexed.is_err() {
+pub fun name_at(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
     ret "";
   }
-  Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  Vec<Token> tokens = read.tokens;
 
   let found = token_at(&tokens, line, character);
   if found.is_none() {
@@ -166,7 +171,7 @@ pub fun is_identifier(str s) bin {
 }
 
 // Every place `name` is written, across the documents a client holds.
-fun _collect_occurrences(Documents* docs, str name, Vec<Occurrence>* out) {
+fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
   Vec<str> uris = docs.open.keys();
   defer uris.free();
   num i = 0;
@@ -178,12 +183,11 @@ fun _collect_occurrences(Documents* docs, str name, Vec<Occurrence>* out) {
       continue;
     }
     Document d = held.unwrap();
-    let lexed = tokenize(d.text, d.path);
-    if lexed.is_err() {
+    Analyzed read = cache.of(d);
+    if !read.lexed {
       continue;
     }
-    Vec<Token> tokens = lexed.unwrap();
-    defer tokens.free();
+    Vec<Token> tokens = read.tokens;
     num t = 0;
     for t < tokens.len {
       Token tok = tokens.get(t);

@@ -8,7 +8,7 @@
 
 imp protocol;
 imp documents;
-imp ..lexer.lexer;
+imp analysis;
 imp ..parser.parse_state;
 imp ..parser.parser;
 imp ..parser.import_resolver;
@@ -35,7 +35,7 @@ pub compound Diagnostic {
 }
 
 // Everything wrong with `doc`, in the order a reader meets it.
-pub fun diagnose(Document doc) Vec<Diagnostic> {
+pub fun diagnose(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   Vec<Diagnostic> out;
   out.init(0);
 
@@ -46,14 +46,14 @@ pub fun diagnose(Document doc) Vec<Diagnostic> {
     ret out;
   }
 
-  let lexed = tokenize(doc.text, path);
-  if lexed.is_err() {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
     out.push(_at_start(SEVERITY_ERROR, "could not read this file"));
     ret out;
   }
 
   ParseState state = parse_state_new(path, doc.text);
-  state.tokens = lexed.unwrap();
+  state.tokens = read.tokens;
   state.emit_stderr = false;
   Parser p = parser_new(&state);
   let parse_failed = p.parse();
@@ -76,12 +76,11 @@ pub fun diagnose(Document doc) Vec<Diagnostic> {
   // Checking needs what the file imports, which is read from disk. The
   // file being edited is not: its text is what the client holds, which
   // may not be what is saved.
-  let merged = parse_program_with_source(path, doc.text);
-  if merged.is_err() {
-    out.push(_at_start(SEVERITY_ERROR, merged.unwrap_err()));
+  if !read.parsed {
+    out.push(_at_start(SEVERITY_ERROR, "this file's imports could not be resolved"));
     ret out;
   }
-  ProgramMergeResult program = merged.unwrap();
+  ProgramMergeResult program = read.program;
 
   let checked = typecheck_program(&program.nodes);
   if checked.is_err() {

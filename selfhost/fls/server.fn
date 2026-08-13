@@ -7,6 +7,7 @@
 
 imp protocol;
 imp documents;
+imp analysis;
 imp diagnostics;
 imp navigation;
 imp outline;
@@ -29,6 +30,9 @@ pub compound Server {
   // What the client has open, which is the text to work from: an editor
   // holds edits the compiler would not read from disk.
   Documents docs;
+  // What each open document last read as, so one revision is read
+  // once rather than once per question asked about it.
+  AnalysisCache reads;
   // Whether the client said it understands a completion written as a
   // skeleton. One that does not would insert the marks as text, so it
   // is told only plain words.
@@ -40,6 +44,7 @@ pub fun server_new() Server {
   s.shutting_down = false;
   s.running = true;
   s.docs = documents_new();
+  s.reads = analysis_cache_new();
   s.snippets = false;
   ret s;
 }
@@ -226,7 +231,7 @@ impl Server {
     if doc.is_none() {
       ret;
     }
-    Vec<Diagnostic> found = diagnose(doc.unwrap());
+    Vec<Diagnostic> found = diagnose(&self.reads, doc.unwrap());
     defer found.free();
     write_message(publish(document_uri, &found));
   }
@@ -237,6 +242,7 @@ impl Server {
     str document_uri = _string_field(document, "uri");
     if !equals(document_uri, "") {
       self.docs.closed(document_uri);
+      self.reads.forget(document_uri);
     }
   }
 
@@ -248,7 +254,7 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, hover(r.doc, r.line, r.character)));
+    write_message(response(id, hover(&self.reads, r.doc, r.line, r.character)));
   }
 
   // Says where the name under the cursor was declared.
@@ -259,7 +265,7 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, definition(r.doc, r.line, r.character)));
+    write_message(response(id, definition(&self.reads, r.doc, r.line, r.character)));
   }
 
   // Formats the whole document.
@@ -287,7 +293,7 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, completion(r.doc, r.line, r.character, self.snippets)));
+    write_message(response(id, completion(&self.reads, r.doc, r.line, r.character, self.snippets)));
   }
 
   // Lists every place the name under the cursor is written.
@@ -298,7 +304,7 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, references(&self.docs, r.doc, r.line, r.character)));
+    write_message(response(id, references(&self.reads, &self.docs, r.doc, r.line, r.character)));
   }
 
   // Renames the name under the cursor everywhere it is written.
@@ -311,7 +317,10 @@ impl Server {
     Request r = asked.unwrap();
     JsonValue params = _field(message, "params");
     str new_name = _string_field(params, "newName");
-    write_message(response(id, rename_symbol(&self.docs, r.doc, r.line, r.character, new_name)));
+    write_message(response(
+      id,
+      rename_symbol(&self.reads, &self.docs, r.doc, r.line, r.character, new_name)
+    ));
   }
 
   // Lists what the document declares, for an outline.
@@ -328,7 +337,7 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, document_symbols(doc.unwrap())));
+    write_message(response(id, document_symbols(&self.reads, doc.unwrap())));
   }
 
   // The document and position a request names, or nothing when it names

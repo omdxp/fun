@@ -8,6 +8,7 @@ imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
 imp ..fls.formatting;
+imp ..fls.analysis;
 imp ..fls.documents;
 imp ..lexer.lexer;
 imp ..lexer.token;
@@ -161,13 +162,15 @@ test "an outline lists what a file declares, by kind" {
   `  pub clear() { self.len = 0; }
   `}
   `fun helper() num { ret 1; }`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///outline.fn";
   doc.path = "outline.fn";
   doc.text = src;
   doc.version = 1;
 
-  str out = document_symbols(doc);
+  str out = document_symbols(&reads, doc);
   // The protocol's own numbering: 14 constant, 23 struct, 10 enum,
   // 22 enum member, 6 method, 12 function.
   assert contains(out, `"name":"LIMIT","kind":14`), "expected the constant";
@@ -184,13 +187,15 @@ test "a method is listed under the name it was written as" {
   `impl Buffer {
   `  pub clear() { self.len = 0; }
   `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///method.fn";
   doc.path = "method.fn";
   doc.text = src;
   doc.version = 1;
 
-  str out = document_symbols(doc);
+  str out = document_symbols(&reads, doc);
   // A method is stored mangled, as `Buffer__clear`; an outline shows the
   // name in the source, with the type beside it.
   assert contains(out, `"name":"clear","kind":6`), "expected the written name";
@@ -200,6 +205,8 @@ test "a method is listed under the name it was written as" {
 
 test "an outline carries a location a client can jump to" {
   str src = `fun helper() num { ret 1; }`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///loc.fn";
   doc.path = "loc.fn";
@@ -208,7 +215,7 @@ test "an outline carries a location a client can jump to" {
 
   // The flat form of the reply is what the protocol reads by default,
   // and every entry in it carries its own location.
-  str out = document_symbols(doc);
+  str out = document_symbols(&reads, doc);
   assert contains(out, `"location"`), "expected a location on the entry";
   assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
 }
@@ -227,6 +234,8 @@ test "every place a name is written is found, and renamed together" {
   str src = `fun helper(num total) num {
   `  ret total + total;
   `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
   docs.opened("file:///ref.fn", src, 1);
@@ -235,15 +244,15 @@ test "every place a name is written is found, and renamed together" {
   Document doc = held.unwrap();
 
   // `total` is written three times: the parameter and its two uses.
-  str found = references(&docs, doc, 1, 6);
+  str found = references(&reads, &docs, doc, 1, 6);
   assert count(found, `"uri"`) == 3, "expected every occurrence";
 
-  str edit = rename_symbol(&docs, doc, 1, 6, "count");
+  str edit = rename_symbol(&reads, &docs, doc, 1, 6, "count");
   assert count(edit, `"newText":"count"`) == 3, "expected every occurrence renamed";
   assert contains(edit, `"changes"`), "expected the edit grouped by document";
 
   // A name a reader could not have written is refused outright.
-  assert equals(rename_symbol(&docs, doc, 1, 6, "9bad"), "null"), "expected the rename refused";
+  assert equals(rename_symbol(&reads, &docs, doc, 1, 6, "9bad"), "null"), "expected the rename refused";
 }
 
 test "completion after a dot offers what the receiver has" {
@@ -257,6 +266,8 @@ test "completion after a dot offers what the receiver has" {
   `  num x = b.len;
   `  ret x;
   `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///cmp.fn";
   doc.path = "cmp.fn";
@@ -264,7 +275,7 @@ test "completion after a dot offers what the receiver has" {
   doc.version = 1;
 
   // Right after `b.` on the line that reads it.
-  str out = completion(doc, 7, 12, false);
+  str out = completion(&reads, doc, 7, 12, false);
   assert contains(out, `"label":"len","kind":5`), "expected the field";
   assert contains(out, `"label":"clear","kind":2`), "expected the method, unmangled";
   assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
@@ -276,18 +287,22 @@ test "completion still answers while the text does not parse" {
   str src = `fun helper(num total) num {
   `  tot
   `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///half.fn";
   doc.path = "half.fn";
   doc.text = src;
   doc.version = 1;
 
-  str out = completion(doc, 1, 5, false);
+  str out = completion(&reads, doc, 1, 5, false);
   assert contains(out, `"label":"ret"`), "expected the reserved words";
   assert contains(out, `"label":"total"`), "expected a name already written in the file";
 }
 
 test "formatting replaces the document with what the formatter produces" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///fmt.fn";
   doc.path = "fmt.fn";
@@ -304,6 +319,8 @@ test "formatting replaces the document with what the formatter produces" {
 }
 
 test "formatting a document already formatted asks for no edit" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///tidy.fn";
   doc.path = "tidy.fn";
@@ -315,6 +332,8 @@ test "formatting a document already formatted asks for no edit" {
 }
 
 test "formatting leaves text it cannot read alone" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///broken.fn";
   doc.path = "broken.fn";
@@ -327,6 +346,8 @@ test "formatting leaves text it cannot read alone" {
 }
 
 test "a keyword completes to the shape it introduces" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///snip.fn";
   doc.path = "snip.fn";
@@ -335,13 +356,15 @@ test "a keyword completes to the shape it introduces" {
 
   // Format 2 is the protocol's snippet format: accepting `fun` writes
   // the declaration and leaves the cursor on its name.
-  str out = completion(doc, 1, 2, true);
+  str out = completion(&reads, doc, 1, 2, true);
   assert contains(out, `"label":"fun"`), "expected the keyword";
   assert contains(out, `fun ${1:name}`), "expected the skeleton to name the first stop";
   assert contains(out, `"insertTextFormat":2`), "expected the snippet format";
 }
 
 test "a short trigger writes a whole shape" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///abbrev.fn";
   doc.path = "abbrev.fn";
@@ -350,7 +373,7 @@ test "a short trigger writes a whole shape" {
 
   // The point of a trigger is what it expands to, the way `psvm` writes
   // an entry point elsewhere.
-  str out = completion(doc, 1, 2, true);
+  str out = completion(&reads, doc, 1, 2, true);
   assert contains(out, `"label":"main"`), "expected the entry-point trigger";
   assert contains(out, `"label":"iferr"`), "expected the early-return trigger";
   assert contains(out, `"label":"vecnew"`), "expected the vector trigger";
@@ -358,6 +381,8 @@ test "a short trigger writes a whole shape" {
 }
 
 test "a client that does not understand a skeleton is sent none" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
   Document doc;
   doc.uri = "file:///plain.fn";
   doc.path = "plain.fn";
@@ -365,7 +390,7 @@ test "a client that does not understand a skeleton is sent none" {
   doc.version = 1;
 
   // Sent a skeleton, such a client would insert the marks as text.
-  str out = completion(doc, 1, 2, false);
+  str out = completion(&reads, doc, 1, 2, false);
   assert contains(out, `"label":"fun"`), "expected the keyword itself";
   assert !contains(out, `"insertTextFormat"`), "expected no snippet";
   assert !contains(out, `"label":"iferr"`), "expected no trigger, which is only its expansion";

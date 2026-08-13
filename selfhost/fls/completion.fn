@@ -6,16 +6,15 @@
 // where the cursor sits.
 
 imp documents;
+imp analysis;
 imp symbols;
 imp protocol;
 imp ..ast.ast;
-imp ..lexer.lexer;
 imp ..lexer.lexdefs;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
-imp std.result;
 imp std.io;
 
 // What a client is told an item is. The values are the protocol's own
@@ -48,17 +47,16 @@ compound Item {
 
 // Everything worth offering at `line`/`character` in `doc`, as the
 // result a client is sent.
-pub fun completion(Document doc, num line, num character, bin snippets) str {
+pub fun completion(AnalysisCache* cache, Document doc, num line, num character, bin snippets) str {
   Vec<Item> items;
   items.init(64);
   defer items.free();
 
-  let lexed = tokenize(doc.text, doc.path);
-  if lexed.is_err() {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
     ret "[]";
   }
-  Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  Vec<Token> tokens = read.tokens;
 
   num source_line = line + 1;
   str receiver = _receiver_before(&tokens, line, character);
@@ -67,15 +65,14 @@ pub fun completion(Document doc, num line, num character, bin snippets) str {
   // is exactly when it does not parse. What the tree would have told us
   // is offered when there is a tree, and the words already in the file
   // are offered when there is not, rather than answering with nothing.
-  let merged = parse_program_with_source(doc.path, doc.text);
-  if merged.is_err() {
+  if !read.parsed {
     if equals(receiver, "") {
       _reserved(&items, snippets);
     }
     _written_names(&tokens, receiver, &items);
     ret _reply(&items);
   }
-  ProgramMergeResult program = merged.unwrap();
+  ProgramMergeResult program = read.program;
 
   if !equals(receiver, "") {
     // After a dot, only what the receiver actually has is worth
