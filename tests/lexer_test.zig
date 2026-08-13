@@ -207,6 +207,67 @@ test "LexProcess raw string: inline, no escape processing" {
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
+test "LexProcess raw string: a doubled backtick is a literal backtick" {
+    const ifilepath = "LexProcess_raw_string_escape.fn";
+    const ofilepath = "LexProcess_raw_string_escape.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        // A markdown fence is the case this exists for: three backticks
+        // cannot otherwise be written in a raw string at all, since the
+        // first one would end it.
+        const input = "```````fun`";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    // One token, not several: each doubled backtick collapsed into one
+    // literal backtick rather than closing the string.
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    try std.testing.expectEqualStrings("```fun", t.data.sval.items);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
+test "LexProcess raw string: a single backtick still closes the string" {
+    const ifilepath = "LexProcess_raw_string_close.fn";
+    const ofilepath = "LexProcess_raw_string_close.c";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
+        // An empty raw string is still two backticks, not an escape: the
+        // second one closes what the first opened.
+        const input = "``";
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = transpile_proc.tokens.items()[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expect(t.is_raw_string);
+    try std.testing.expectEqualStrings("", t.data.sval.items);
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
+}
+
 test "LexProcess raw string: embedded double-quote needs no escaping" {
     const ifilepath = "LexProcess_raw_string_quote.fn";
     const ofilepath = "LexProcess_raw_string_quote.c";

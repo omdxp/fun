@@ -83,8 +83,14 @@ close it on the same line:
   Trailing code that needs to sit on the same line as the last content line
   can close the block explicitly instead: `` `WHERE id = ?`; ``.
 
-A literal backtick inside a raw string still needs to be avoided (there's no
-escape for it) -- use a regular `"..."` string for that rare case instead.
+A literal backtick is written as two (` `` `), the one escape a raw string has.
+A single backtick still closes the string, so `` `` `` on its own is the empty
+raw string, and content that is itself made of backticks (a markdown fence, for
+one) is written by doubling each:
+```fun
+let quoted = `a``b`;          // a`b
+let fence = ```````fun`;      // ```fun
+```
 
 ### Arrays
 - Syntax: `num[] arr = [1, 2, 3];`

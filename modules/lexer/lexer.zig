@@ -1216,6 +1216,17 @@ pub const LexProcess = struct {
             const c = try self.peek_char();
             if (c == null) return .eof;
             if (c.? == '`') {
+                // A doubled backtick is the one escape a raw string has:
+                // it stands for a literal backtick, so content made of
+                // backticks (a markdown fence, for one) can be written
+                // at all. A single backtick still ends the string.
+                const after = try self.peek_char2();
+                if (after != null and after.? == '`') {
+                    _ = try self.next_char();
+                    _ = try self.next_char();
+                    buffer.append('`') catch return LexError.MemoryAllocationFailed;
+                    continue;
+                }
                 _ = try self.next_char(); // consume the closing backtick
                 return .closed;
             }
