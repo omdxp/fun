@@ -798,3 +798,45 @@ pub fun try_parse_dec(str s) Result<dec, Error> {
   }
   ret .Ok(parse_dec(s));
 }
+
+// Formats `value` as hexadecimal, padded with leading zeros to `width`
+// digits, in lower case. A value wider than `width` keeps its digits
+// rather than being cut short.
+pub fun to_hex(num value, num width) str {
+  ret _to_hex_with(value, width, "0123456789abcdef");
+}
+
+// The same, in upper case, for the places that spell hexadecimal that
+// way: a percent-escape in a URI, for one.
+pub fun to_hex_upper(num value, num width) str {
+  ret _to_hex_with(value, width, "0123456789ABCDEF");
+}
+
+fun _to_hex_with(num value, num width, str digits) str {
+  if value < 0 {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(16);
+  if value == 0 {
+    b.append_char(digits[0]);
+  }
+  num remaining = value;
+  for remaining > 0 {
+    b.append_char(digits[remaining % 16]);
+    remaining = remaining / 16;
+  }
+  str reversed = b.build();
+  StringBuilder out = string_builder_init(16);
+  num pad = width - len(reversed);
+  num i = 0;
+  for i < pad {
+    out.append_char(digits[0]);
+    i = i + 1;
+  }
+  i = len(reversed);
+  for i > 0 {
+    i = i - 1;
+    out.append_char(reversed[i]);
+  }
+  ret out.build();
+}

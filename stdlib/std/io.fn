@@ -153,12 +153,6 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
       }
     }
 
-    if c == '}' && i + 1 < n && fmt[i + 1] == '}' {
-      b.append_char('}');
-      i = i + 2;
-      continue;
-    }
-
     b.append_char(c);
     i = i + 1;
   }
@@ -168,7 +162,10 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
   ret out;
 }
 // Format a string using "{}" placeholders: {} or {str} for a string, {num},
-// {dec}, {bin}, {chr}, {ptr} for other types. Use "{{" and "}}" for literal braces.
+// {dec}, {bin}, {chr}, {ptr} for other types. A `{` that starts none of
+// those is written as it stands; write "{{" where one would otherwise be
+// read as a placeholder. A `}` is always written as it stands, so text
+// made of braces, such as JSON, survives being formatted.
 pub fun format(str fmt, ...) str {
   ret format_impl(fmt, &vargs);
 }
@@ -585,6 +582,46 @@ impl Sink {
       ret err_kind(.Io, "sink write failed", false);
     }
     ret .Ok(true);
+  }
+
+  // Reads one line, up to `max_len` bytes including the terminator, or
+  // nil at the end of the stream. A sink names a stream, which is read
+  // from as readily as it is written to.
+  pub read_line_max(num max_len) str {
+    let h = self.handle();
+    if h == nil || max_len <= 0 {
+      ret nil;
+    }
+    str buf = malloc(max_len + 1);
+    if buf == nil {
+      ret nil;
+    }
+    str res = fgets(buf, max_len, h);
+    if res == nil {
+      free(buf);
+      ret nil;
+    }
+    ret buf;
+  }
+
+  // Reads exactly `length` bytes, or nil when the stream ends first.
+  // Used where a protocol says how many bytes follow.
+  pub read_bytes(num length) str {
+    let h = self.handle();
+    if h == nil || length < 0 {
+      ret nil;
+    }
+    str buf = malloc(length + 1);
+    if buf == nil {
+      ret nil;
+    }
+    let read = fread(buf, 1, length, h);
+    if read < length {
+      free(buf);
+      ret nil;
+    }
+    buf[read] = '\0';
+    ret buf;
   }
 
   // Flush any buffered bytes to the underlying stream.

@@ -11106,3 +11106,128 @@ test "global const referenced from a function defined earlier in the file forwar
 
     try std.testing.expectEqualStrings("7\n", stdout);
 }
+
+test "stdlib format writes a closing brace as it stands" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "stdlib_format_braces.fn";
+    const c_path = "stdlib_format_braces.c";
+    const exe_path = if (builtin.os.tag == .windows) "stdlib_format_braces.exe" else "stdlib_format_braces";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: "}}" collapsed to a single "}", which silently ate one
+    // brace from any text made of braces -- JSON built with format() came
+    // out unbalanced. A closing brace is now always literal, while "{{"
+    // still escapes an opening one that would otherwise read as a
+    // placeholder.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.io;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%s\\n\", format(\"C{num}} {{x}\", 7));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("C7} {x}\n", stdout);
+}
+
+test "stdlib hex formatting, decimal narrowing, and trimming a carriage return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "stdlib_hex_dec_trim.fn";
+    const c_path = "stdlib_hex_dec_trim.c";
+    const exe_path = if (builtin.os.tag == .windows) "stdlib_hex_dec_trim.exe" else "stdlib_hex_dec_trim";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // to_hex/to_hex_upper pad to a width, dec_to_num drops what follows
+    // the point while dec_round_to_num rounds halves away from zero, and
+    // trim now counts a carriage return as space so Windows line endings
+    // do not survive it.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.math;\n" ++
+        "imp std.string;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%s %s %lld %lld [%s]\\n\", to_hex(255, 4), to_hex_upper(47, 2), dec_to_num(3.9), dec_round_to_num(2.5), trim(\"a\\r\\n\"));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("00ff 2F 3 3 [a]\n", stdout);
+}
+
+test "stdlib make_dir_all creates parents and a Sink reads a file back" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "stdlib_dirs_and_reads.fn";
+    const c_path = "stdlib_dirs_and_reads.c";
+    const exe_path = if (builtin.os.tag == .windows) "stdlib_dirs_and_reads.exe" else "stdlib_dirs_and_reads";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, "stdlib_dirs_and_reads_out") catch {};
+
+    // make_dir_all creates every missing parent, and a Sink over a file
+    // reads a line and then an exact count of bytes -- what a protocol
+    // with a length header needs.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.io;\n" ++
+        "imp std.fs;\n" ++
+        "imp std.string;\n" ++
+        "fun main() num {\n" ++
+        "  let made = make_dir_all(\"stdlib_dirs_and_reads_out/a/b\");\n" ++
+        "  if made.is_err() { ret 1; }\n" ++
+        "  File w = open_write(\"stdlib_dirs_and_reads_out/a/b/f.txt\");\n" ++
+        "  w.write(\"one\\ntwo\");\n" ++
+        "  w.close();\n" ++
+        "  Sink s = .File(open_read(\"stdlib_dirs_and_reads_out/a/b/f.txt\"));\n" ++
+        "  str line = s.read_line_max(64);\n" ++
+        "  str rest = s.read_bytes(3);\n" ++
+        "  str nested = \"no\";\n" ++
+        "  if is_dir(\"stdlib_dirs_and_reads_out/a/b\") { nested = \"yes\"; }\n" ++
+        "  printf(\"%s [%s] [%s]\\n\", nested, trim(line), rest);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("yes [one] [two]\n", stdout);
+}

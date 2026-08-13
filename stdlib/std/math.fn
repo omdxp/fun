@@ -154,6 +154,18 @@ pub fun trunc_dec(dec x) dec {
   ret cmath.trunc(x);
 }
 
+// The whole part of `value`, with anything after the point dropped. A
+// decimal does not narrow into a whole number on its own, so this is
+// how one is asked for.
+pub fun dec_to_num(dec value) num {
+  ret cmath.llround(cmath.trunc(value));
+}
+
+// `value` rounded to the nearest whole number, halves away from zero.
+pub fun dec_round_to_num(dec value) num {
+  ret cmath.llround(value);
+}
+
 // Floating-point remainder of `x / y`.
 pub fun fmod_dec(dec x, dec y) dec {
   ret cmath.fmod(x, y);
