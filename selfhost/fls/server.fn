@@ -12,6 +12,7 @@ imp navigation;
 imp outline;
 imp references;
 imp completion;
+imp formatting;
 imp std.string;
 imp std.option;
 imp std.result;
@@ -28,6 +29,10 @@ pub compound Server {
   // What the client has open, which is the text to work from: an editor
   // holds edits the compiler would not read from disk.
   Documents docs;
+  // Whether the client said it understands a completion written as a
+  // skeleton. One that does not would insert the marks as text, so it
+  // is told only plain words.
+  bin snippets;
 }
 
 pub fun server_new() Server {
@@ -35,6 +40,7 @@ pub fun server_new() Server {
   s.shutting_down = false;
   s.running = true;
   s.docs = documents_new();
+  s.snippets = false;
   ret s;
 }
 
@@ -75,6 +81,7 @@ impl Server {
     bin is_request = !equals(id, "");
 
     if equals(method, "initialize") {
+      self.snippets = _snippets_supported(message);
       write_message(response(id, _initialize_result()));
       ret;
     }
@@ -110,6 +117,10 @@ impl Server {
       "textDocument/typeDefinition"
     ) || equals(method, "textDocument/implementation") {
       self.answer_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/formatting") {
+      self.answer_formatting(id, message);
       ret;
     }
     if equals(method, "textDocument/completion") {
@@ -251,6 +262,23 @@ impl Server {
     write_message(response(id, definition(r.doc, r.line, r.character)));
   }
 
+  // Formats the whole document.
+  answer_formatting(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    write_message(response(id, formatting(doc.unwrap())));
+  }
+
   // Offers what a reader could type where the cursor sits.
   answer_completion(str id, JsonValue message) {
     let asked = self.document_at(message);
@@ -259,7 +287,7 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, completion(r.doc, r.line, r.character)));
+    write_message(response(id, completion(r.doc, r.line, r.character, self.snippets)));
   }
 
   // Lists every place the name under the cursor is written.
@@ -332,6 +360,22 @@ pub compound Request {
   num character;
 }
 
+// True when the client said it understands a completion written as a
+// skeleton, which lives deep in what `initialize` carries.
+fun _snippets_supported(JsonValue message) bin {
+  JsonValue params = _field(message, "params");
+  JsonValue capabilities = _field(params, "capabilities");
+  JsonValue document = _field(capabilities, "textDocument");
+  JsonValue completion_caps = _field(document, "completion");
+  JsonValue item = _field(completion_caps, "completionItem");
+  JsonValue supported = _field(item, "snippetSupport");
+  fit supported {
+    .Bool(yes) -> { ret yes; }
+    _ -> {}
+  }
+  ret false;
+}
+
 // A nested value, or null when the message has no such field.
 fun _field(JsonValue message, str name) JsonValue {
   fit message {
@@ -360,7 +404,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]}}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"documentFormattingProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.

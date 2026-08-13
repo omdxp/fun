@@ -37,7 +37,8 @@ pub compound Declaration {
 }
 
 // The word a client's cursor sits on, given the token it landed on.
-pub fun token_text(Token t) str {
+// The word a token spells, for the tokens that carry one.
+pub fun token_word(Token t) str {
   fit t.data {
     .Sval(s) -> { ret s; }
     _ -> {}

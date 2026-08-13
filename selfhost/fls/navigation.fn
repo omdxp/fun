@@ -40,7 +40,7 @@ pub fun hover(Document doc, num line, num character) str {
 
   fit t.type {
     .Keyword -> {
-      str doc_text = keyword_doc(token_text(t));
+      str doc_text = keyword_doc(token_word(t));
       if equals(doc_text, "") {
         ret NO_HOVER;
       }
@@ -111,7 +111,7 @@ pub fun definition(Document doc, num line, num character) str {
 // it is reached through a dot, and otherwise a local, a parameter, or
 // something the program declares.
 fun _resolve(Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
-  str name = token_text(t);
+  str name = token_word(t);
   if equals(name, "") {
     ret .None;
   }
@@ -167,7 +167,7 @@ fun _receiver_of(Vec<Token>* tokens, Token t) str {
   }
   Token b = before.unwrap();
   fit b.type {
-    .Identifier -> { ret token_text(b); }
+    .Identifier -> { ret token_word(b); }
     _ -> {}
   }
   ret "";

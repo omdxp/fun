@@ -135,7 +135,7 @@ pub fun name_at(Document doc, num line, num character) str {
   }
   Token t = found.unwrap();
   fit t.type {
-    .Identifier -> { ret token_text(t); }
+    .Identifier -> { ret token_word(t); }
     _ -> {}
   }
   ret "";
@@ -190,7 +190,7 @@ fun _collect_occurrences(Documents* docs, str name, Vec<Occurrence>* out) {
       t = t + 1;
       fit tok.type {
         .Identifier -> {
-          if equals(token_text(tok), name) {
+          if equals(token_word(tok), name) {
             Occurrence o;
             o.document_uri = document_uri;
             o.span = span_of(tok);

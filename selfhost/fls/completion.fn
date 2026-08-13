@@ -22,6 +22,7 @@ imp std.io;
 // numbering; only the kinds this file offers are listed.
 enum ItemKind {
   Method = 2,
+  Snippet = 15,
   Function = 3,
   Field = 5,
   Variable = 6,
@@ -38,11 +39,16 @@ compound Item {
   // What the item is, shown beside the label: a signature for a
   // function, a type for anything that has one.
   str detail;
+  // The text to insert, when it differs from the label: a skeleton with
+  // the places to fill marked, so accepting `fun` writes the whole
+  // declaration and leaves the cursor on its name. Empty when the label
+  // is what gets written.
+  str snippet;
 }
 
 // Everything worth offering at `line`/`character` in `doc`, as the
 // result a client is sent.
-pub fun completion(Document doc, num line, num character) str {
+pub fun completion(Document doc, num line, num character, bin snippets) str {
   Vec<Item> items;
   items.init(64);
   defer items.free();
@@ -64,7 +70,7 @@ pub fun completion(Document doc, num line, num character) str {
   let merged = parse_program_with_source(doc.path, doc.text);
   if merged.is_err() {
     if equals(receiver, "") {
-      _reserved(&items);
+      _reserved(&items, snippets);
     }
     _written_names(&tokens, receiver, &items);
     ret _reply(&items);
@@ -85,8 +91,79 @@ pub fun completion(Document doc, num line, num character) str {
   }
 
   _declared(&program.nodes, doc.path, source_line, &items);
-  _reserved(&items);
+  _reserved(&items, snippets);
+  _abbreviations(&items, snippets);
   ret _reply(&items);
+}
+
+// Short triggers that write a whole shape, the way `psvm` writes a main
+// method elsewhere. A trigger is only offered to a client that
+// understands a skeleton, since the point of it is the text it expands
+// to rather than the letters typed.
+fun _abbreviations(Vec<Item>* items, bin snippets) {
+  if !snippets {
+    ret;
+  }
+  items.push(_snippet_item(
+    "main",
+    .Snippet,
+    "a program's entry point",
+    "fun main() num {\n  $0\n  ret 0;\n}"
+  ));
+  items.push(_snippet_item(
+    "mainio",
+    .Snippet,
+    "an entry point that prints",
+    "imp std.c.io;\n\nfun main() num {\n  printf(\"${1:hello}\\n\");\n  ret 0;\n}"
+  ));
+  items.push(_snippet_item(
+    "fore",
+    .Snippet,
+    "for each item",
+    "for ${1:item} : ${2:items} {\n  $0\n}"
+  ));
+  items.push(_snippet_item(
+    "fori",
+    .Snippet,
+    "for each item, with its index",
+    "for ${1:i}, ${2:item} :: ${3:items} {\n  $0\n}"
+  ));
+  items.push(_snippet_item(
+    "forw",
+    .Snippet,
+    "for while a condition holds",
+    "for ${1:i} < ${2:n} {\n  $0\n  ${1:i} = ${1:i} + 1;\n}"
+  ));
+  items.push(_snippet_item(
+    "implq",
+    .Snippet,
+    "implement a quirk for a type",
+    "impl ${1:Type} as ${2:Quirk} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
+  ));
+  items.push(_snippet_item(
+    "iferr",
+    .Snippet,
+    "return early when a result failed",
+    "if ${1:r}.is_err() {\n  ret .Err(${1:r}.unwrap_err());\n}\n$0"
+  ));
+  items.push(_snippet_item(
+    "ifnone",
+    .Snippet,
+    "return early when an option is empty",
+    "if ${1:found}.is_none() {\n  ret ${2:.None};\n}\n$0"
+  ));
+  items.push(_snippet_item(
+    "fitr",
+    .Snippet,
+    "match a result",
+    "fit ${1:r} {\n  .Ok(${2:value}) -> { $0 }\n  .Err(${3:e}) -> {}\n}"
+  ));
+  items.push(_snippet_item(
+    "vecnew",
+    .Snippet,
+    "a vector, initialized and freed",
+    "Vec<${1:num}> ${2:items};\n${2:items}.init(${3:0});\ndefer ${2:items}.free();\n$0"
+  ));
 }
 
 // Every distinct name already written in the file. What a reader is
@@ -104,7 +181,7 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
     i = i + 1;
     fit t.type {
       .Identifier -> {
-        str name = token_text(t);
+        str name = token_word(t);
         if equals(name, "") || equals(name, skip) || seen.contains(name) {
           continue;
         }
@@ -141,7 +218,7 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
           // change what the dot is reached through.
           continue;
         }
-        receiver = token_text(t);
+        receiver = token_word(t);
         saw_dot = false;
       }
       _ -> {
@@ -259,14 +336,96 @@ fun _covers_line(Node n, FunctionNode f, str file, num line) bin {
   ret line <= last;
 }
 
-fun _reserved(Vec<Item>* items) {
+fun _reserved(Vec<Item>* items, bin snippets) {
   Vec<str> words = keywords();
   defer words.free();
   num i = 0;
   for i < words.len {
-    items.push(_item(words.get(i), .Keyword, "keyword"));
+    str word = words.get(i);
     i = i + 1;
+    str skeleton = "";
+    if snippets {
+      skeleton = _skeleton(word);
+    }
+    if equals(skeleton, "") {
+      items.push(_item(word, .Keyword, "keyword"));
+      continue;
+    }
+    items.push(_snippet_item(word, .Keyword, "declaration", skeleton));
   }
+}
+
+// The declaration a keyword introduces, written out with the places to
+// fill marked, so accepting the word writes the shape rather than the
+// word. A keyword that introduces nothing has no skeleton.
+fun _skeleton(str word) str {
+  if equals(word, "fun") {
+    ret "fun ${1:name}(${2}) ${3:num} {\n  $0\n}";
+  }
+  if equals(word, "compound") {
+    ret "compound ${1:Name} {\n  $0\n}";
+  }
+  if equals(word, "enum") {
+    ret "enum ${1:Name} {\n  $0\n}";
+  }
+  if equals(word, "quirk") {
+    ret "quirk ${1:Name} {\n  ${0:method}() ${2:num};\n}";
+  }
+  if equals(word, "impl") {
+    ret "impl ${1:Type} {\n  $0\n}";
+  }
+  if equals(word, "fit") {
+    ret "fit ${1:value} {\n  ${2:.Variant(x)} -> { $0 }\n  _ -> {}\n}";
+  }
+  if equals(word, "if") {
+    ret "if ${1:condition} {\n  $0\n}";
+  }
+  if equals(word, "elif") {
+    ret "elif ${1:condition} {\n  $0\n}";
+  }
+  if equals(word, "else") {
+    ret "else {\n  $0\n}";
+  }
+  if equals(word, "for") {
+    ret "for ${1:i} : ${2:0}..${3:n} {\n  $0\n}";
+  }
+  if equals(word, "test") {
+    ret "test \"${1:what it does}\" {\n  $0\n}";
+  }
+  if equals(word, "imp") {
+    ret "imp ${1:std.io};";
+  }
+  if equals(word, "let") {
+    ret "let ${1:name} = ${0:value};";
+  }
+  if equals(word, "const") {
+    ret "const ${1:num} ${2:NAME} = ${0:value};";
+  }
+  if equals(word, "ret") {
+    ret "ret ${0:value};";
+  }
+  if equals(word, "defer") {
+    ret "defer ${0:cleanup()};";
+  }
+  if equals(word, "assert") {
+    ret "assert ${1:condition}, \"${0:message}\";";
+  }
+  if equals(word, "panic") {
+    ret "panic(\"${0:message}\")";
+  }
+  if equals(word, "allow") {
+    ret "allow ${1:warning}, \"${0:why}\";";
+  }
+  if equals(word, "expect") {
+    ret "expect ${1:warning}, \"${0:why}\";";
+  }
+  if equals(word, "async") {
+    ret "async fun ${1:name}(${2}) ${3:num} {\n  $0\n}";
+  }
+  if equals(word, "await") {
+    ret "await ${0:call()}";
+  }
+  ret "";
 }
 
 // The method's own name, with the type it is mangled with removed.
@@ -282,10 +441,15 @@ fun _method_label(str mangled, str type_name) str {
 }
 
 fun _item(str label, ItemKind kind, str detail) Item {
+  ret _snippet_item(label, kind, detail, "");
+}
+
+fun _snippet_item(str label, ItemKind kind, str detail, str snippet) Item {
   Item it;
   it.label = label;
   it.kind = kind;
   it.detail = detail;
+  it.snippet = snippet;
   ret it;
 }
 
@@ -299,11 +463,23 @@ fun _reply(Vec<Item>* items) str {
       b.append(",");
     }
     i = i + 1;
+    if equals(it.snippet, "") {
+      b.append(format(
+        `{"label":{str},"kind":{num},"detail":{str}}`,
+        json_quote(it.label),
+        it.kind,
+        json_quote(it.detail)
+      ));
+      continue;
+    }
+    // Format 2 is the protocol's snippet format: `$1` and the rest are
+    // where the cursor stops, `$0` where it ends up.
     b.append(format(
-      `{"label":{str},"kind":{num},"detail":{str}}`,
+      `{"label":{str},"kind":{num},"detail":{str},"insertText":{str},"insertTextFormat":2}`,
       json_quote(it.label),
       it.kind,
-      json_quote(it.detail)
+      json_quote(it.detail),
+      json_quote(it.snippet)
     ));
   }
   b.append("]");

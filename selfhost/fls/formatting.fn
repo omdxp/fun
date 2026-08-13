@@ -1,0 +1,58 @@
+// Formatting.
+// 
+// A client asks for a document to be formatted and expects edits back,
+// not text. The whole document is replaced by one edit: the formatter
+// works on a file at a time, and an edit spanning everything is what
+// says so honestly, rather than a diff that claims more precision than
+// was computed.
+
+imp documents;
+imp protocol;
+imp ..cli.fmt;
+imp std.string;
+imp std.result;
+imp std.io;
+
+// The edits that format `doc`, as the result a client is sent. Text that
+// cannot be read is left alone: refusing to format is better than
+// rewriting a file whose meaning is not yet clear.
+pub fun formatting(Document doc) str {
+  let formatted = format_source(doc.text, doc.path);
+  if formatted.is_err() {
+    ret "[]";
+  }
+  str out = formatted.unwrap();
+  if equals(out, doc.text) {
+    // Nothing to do, and an empty list says exactly that without
+    // touching the client's undo history.
+    ret "[]";
+  }
+
+  // The end of the replaced range is one past the last line, at column
+  // zero, which is how the protocol spells "to the end of the document"
+  // without needing to know the last line's length.
+  num lines = _line_count(doc.text);
+  ret format(
+    `[{"range":{"start":{"line":0,"character":0},"end":{"line":{num},"character":0}},"newText":{str}}]`,
+    lines,
+    json_quote(out)
+  );
+}
+
+// How many lines `text` holds, counting a trailing newline as ending the
+// last one rather than starting another.
+fun _line_count(str text) num {
+  num lines = 0;
+  num i = 0;
+  num n = len(text);
+  for i < n {
+    if text[i] == '\n' {
+      lines = lines + 1;
+    }
+    i = i + 1;
+  }
+  if n > 0 && text[n - 1] != '\n' {
+    lines = lines + 1;
+  }
+  ret lines;
+}

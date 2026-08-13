@@ -7,6 +7,7 @@ imp ..fls.navigation;
 imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
+imp ..fls.formatting;
 imp ..fls.documents;
 imp ..lexer.lexer;
 imp ..lexer.token;
@@ -86,13 +87,13 @@ test "a position lands on the token the cursor is in" {
   // Line and character are both counted from zero on the wire.
   let on_name = token_at(&tokens, 1, 6);
   assert on_name.is_some(), "expected a token under the cursor";
-  assert equals(token_text(on_name.unwrap()), "total"), "expected the name being declared";
+  assert equals(token_word(on_name.unwrap()), "total"), "expected the name being declared";
 
   // The last character of a token still counts as being on it, which is
   // where a cursor rests inside a word.
   let at_end = token_at(&tokens, 1, 10);
   assert at_end.is_some(), "expected the cursor at a token's last character to land on it";
-  assert equals(token_text(at_end.unwrap()), "total"), "expected the same name";
+  assert equals(token_word(at_end.unwrap()), "total"), "expected the same name";
 
   // Whitespace belongs to no token.
   assert token_at(&tokens, 1, 11).is_none(), "expected nothing under a space";
@@ -263,7 +264,7 @@ test "completion after a dot offers what the receiver has" {
   doc.version = 1;
 
   // Right after `b.` on the line that reads it.
-  str out = completion(doc, 7, 12);
+  str out = completion(doc, 7, 12, false);
   assert contains(out, `"label":"len","kind":5`), "expected the field";
   assert contains(out, `"label":"clear","kind":2`), "expected the method, unmangled";
   assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
@@ -281,7 +282,91 @@ test "completion still answers while the text does not parse" {
   doc.text = src;
   doc.version = 1;
 
-  str out = completion(doc, 1, 5);
+  str out = completion(doc, 1, 5, false);
   assert contains(out, `"label":"ret"`), "expected the reserved words";
   assert contains(out, `"label":"total"`), "expected a name already written in the file";
+}
+
+test "formatting replaces the document with what the formatter produces" {
+  Document doc;
+  doc.uri = "file:///fmt.fn";
+  doc.path = "fmt.fn";
+  doc.text = "fun main() num {\n  num x=1;\n  ret x;\n}\n";
+  doc.version = 1;
+
+  str out = formatting(doc);
+  assert contains(out, `"newText"`), "expected an edit";
+  assert contains(out, "num x = 1;"), "expected the formatted text";
+  // The range ends one past the last line, which is how the whole
+  // document is named without measuring the last line.
+  assert contains(out, `"start":{"line":0,"character":0}`), "expected the range to start at the top";
+  assert contains(out, `"character":0}}`), "expected the range to end at a line start";
+}
+
+test "formatting a document already formatted asks for no edit" {
+  Document doc;
+  doc.uri = "file:///tidy.fn";
+  doc.path = "tidy.fn";
+  doc.text = "fun main() num {\n  num x = 1;\n  ret x;\n}\n";
+  doc.version = 1;
+
+  // An empty list leaves the client's undo history alone.
+  assert equals(formatting(doc), "[]"), "expected no edit for text already formatted";
+}
+
+test "formatting leaves text it cannot read alone" {
+  Document doc;
+  doc.uri = "file:///broken.fn";
+  doc.path = "broken.fn";
+  doc.text = "fun main() num {\n  ret 0\n}\n";
+  doc.version = 1;
+
+  // Refusing to format is better than rewriting a file whose meaning is
+  // not yet clear.
+  assert equals(formatting(doc), "[]"), "expected no edit for text that does not parse";
+}
+
+test "a keyword completes to the shape it introduces" {
+  Document doc;
+  doc.uri = "file:///snip.fn";
+  doc.path = "snip.fn";
+  doc.text = "fun helper() num {\n  ret 0;\n}\n";
+  doc.version = 1;
+
+  // Format 2 is the protocol's snippet format: accepting `fun` writes
+  // the declaration and leaves the cursor on its name.
+  str out = completion(doc, 1, 2, true);
+  assert contains(out, `"label":"fun"`), "expected the keyword";
+  assert contains(out, `fun ${1:name}`), "expected the skeleton to name the first stop";
+  assert contains(out, `"insertTextFormat":2`), "expected the snippet format";
+}
+
+test "a short trigger writes a whole shape" {
+  Document doc;
+  doc.uri = "file:///abbrev.fn";
+  doc.path = "abbrev.fn";
+  doc.text = "fun helper() num {\n  ret 0;\n}\n";
+  doc.version = 1;
+
+  // The point of a trigger is what it expands to, the way `psvm` writes
+  // an entry point elsewhere.
+  str out = completion(doc, 1, 2, true);
+  assert contains(out, `"label":"main"`), "expected the entry-point trigger";
+  assert contains(out, `"label":"iferr"`), "expected the early-return trigger";
+  assert contains(out, `"label":"vecnew"`), "expected the vector trigger";
+  assert contains(out, `"kind":15`), "expected them offered as snippets";
+}
+
+test "a client that does not understand a skeleton is sent none" {
+  Document doc;
+  doc.uri = "file:///plain.fn";
+  doc.path = "plain.fn";
+  doc.text = "fun helper() num {\n  ret 0;\n}\n";
+  doc.version = 1;
+
+  // Sent a skeleton, such a client would insert the marks as text.
+  str out = completion(doc, 1, 2, false);
+  assert contains(out, `"label":"fun"`), "expected the keyword itself";
+  assert !contains(out, `"insertTextFormat"`), "expected no snippet";
+  assert !contains(out, `"label":"iferr"`), "expected no trigger, which is only its expansion";
 }
