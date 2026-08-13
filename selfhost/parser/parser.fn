@@ -45,6 +45,18 @@ impl ParseState {
   // Fun's varargs sugar is for `{placeholder}` formatting, not a
   // passthrough to `fprintf`.
   pub err(str msg) {
+    // Recorded before anything is printed, so a caller reading errors
+    // as data sees them whether or not they are also written out. The
+    // message is copied, since a caller frees what it formatted; only a
+    // message this function copied is freed here.
+    if self.has_error {
+      free(self.error_message);
+    }
+    self.error_message = substr(msg, 0, len(msg));
+    self.has_error = true;
+    if self.has_current_token {
+      self.error_pos = self.current_token.pos;
+    }
     if !self.emit_stderr {
       ret;
     }

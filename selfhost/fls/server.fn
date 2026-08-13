@@ -6,10 +6,14 @@
 // silence, which is what keeps a client from waiting forever.
 
 imp protocol;
+imp documents;
+imp diagnostics;
+imp navigation;
 imp std.string;
 imp std.option;
 imp std.result;
 imp std.json;
+imp std.math;
 imp std.io;
 
 // What the server carries between messages.
@@ -18,12 +22,16 @@ pub compound Server {
   // `exit` leaves quietly rather than as a failure.
   bin shutting_down;
   bin running;
+  // What the client has open, which is the text to work from: an editor
+  // holds edits the compiler would not read from disk.
+  Documents docs;
 }
 
 pub fun server_new() Server {
   Server s;
   s.shutting_down = false;
   s.running = true;
+  s.docs = documents_new();
   ret s;
 }
 
@@ -70,6 +78,37 @@ impl Server {
     if equals(method, "initialized") {
       ret;
     }
+    if equals(method, "textDocument/didOpen") {
+      self.opened(message);
+      ret;
+    }
+    if equals(method, "textDocument/didChange") {
+      self.changed(message);
+      ret;
+    }
+    if equals(method, "textDocument/didClose") {
+      self.closed(message);
+      ret;
+    }
+    if equals(method, "textDocument/didSave") {
+      JsonValue params = _field(message, "params");
+      JsonValue document = _field(params, "textDocument");
+      self.report(_string_field(document, "uri"));
+      ret;
+    }
+    if equals(method, "textDocument/hover") {
+      self.answer_hover(id, message);
+      ret;
+    }
+    // A client asks for a declaration under four names; what it wants
+    // back is the same place.
+    if equals(method, "textDocument/definition") || equals(method, "textDocument/declaration") || equals(
+      method,
+      "textDocument/typeDefinition"
+    ) || equals(method, "textDocument/implementation") {
+      self.answer_definition(id, message);
+      ret;
+    }
     if equals(method, "shutdown") {
       self.shutting_down = true;
       write_message(response(id, "null"));
@@ -89,10 +128,168 @@ impl Server {
   }
 }
 
+impl Server {
+  // Records a document the client opened, with the text it holds.
+  opened(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret;
+    }
+    self.docs.opened(
+      document_uri,
+      _string_field(document, "text"),
+      _number_field(document, "version")
+    );
+    self.report(document_uri);
+  }
+
+  // Applies what the client changed. A change either replaces the whole
+  // document or a range of it, which is what an ordinary keystroke
+  // sends.
+  changed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret;
+    }
+    num version = _number_field(document, "version");
+    JsonValue changes = _field(params, "contentChanges");
+    fit changes {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue change = items.get(i);
+          i = i + 1;
+          str text = _string_field(change, "text");
+          JsonValue range = _field(change, "range");
+          fit range {
+            .Object(_) -> {
+              JsonValue start = _field(range, "start");
+              JsonValue end = _field(range, "end");
+              self.docs.edited(
+                document_uri,
+                _number_field(start, "line"),
+                _number_field(start, "character"),
+                _number_field(end, "line"),
+                _number_field(end, "character"),
+                text,
+                version
+              );
+            }
+            // No range means the whole document was sent.
+            _ -> { self.docs.replaced(document_uri, text, version); }
+          }
+        }
+      }
+      _ -> {}
+    }
+    self.report(document_uri);
+  }
+
+  // Tells the client what is wrong with a document, which is also how
+  // the margin is cleared once nothing is.
+  report(str document_uri) {
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      ret;
+    }
+    Vec<Diagnostic> found = diagnose(doc.unwrap());
+    defer found.free();
+    write_message(publish(document_uri, &found));
+  }
+
+  closed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if !equals(document_uri, "") {
+      self.docs.closed(document_uri);
+    }
+  }
+
+  // Spells the declaration under the cursor back to the reader.
+  answer_hover(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, hover(r.doc, r.line, r.character)));
+  }
+
+  // Says where the name under the cursor was declared.
+  answer_definition(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, definition(r.doc, r.line, r.character)));
+  }
+
+  // The document and position a request names, or nothing when it names
+  // a document this server does not hold.
+  document_at(JsonValue message) Option<Request> {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret .None;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      ret .None;
+    }
+    JsonValue position = _field(params, "position");
+    Request r;
+    r.doc = doc.unwrap();
+    r.line = _number_field(position, "line");
+    r.character = _number_field(position, "character");
+    ret .Some(r);
+  }
+}
+
+// A request about one place in one document.
+pub compound Request {
+  Document doc;
+  num line;
+  num character;
+}
+
+// A nested value, or null when the message has no such field.
+fun _field(JsonValue message, str name) JsonValue {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret JsonValue.Null;
+      }
+      ret found.unwrap();
+    }
+    _ -> { ret JsonValue.Null; }
+  }
+  ret JsonValue.Null;
+}
+
+// The value of a numeric field, or zero when the message has none.
+fun _number_field(JsonValue message, str name) num {
+  JsonValue value = _field(message, name);
+  fit value {
+    .Num(n) -> { ret dec_to_num(n); }
+    _ -> { ret 0; }
+  }
+  ret 0;
+}
+
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}}}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.
@@ -128,9 +325,8 @@ fun _raw_field(JsonValue message, str name) str {
       fit value {
         .Str(text) -> { ret json_quote(text); }
         .Num(n) -> {
-          // An id written as a number is echoed as one, written with no
-          // fractional part rather than narrowed into a whole number.
-          ret format_dec(n, 0);
+          // An id written as a number is echoed as one.
+          ret format_num(dec_to_num(n));
         }
         _ -> { ret ""; }
       }

@@ -120,35 +120,11 @@ pub fun json_quote(str s) str {
       b.append("\\t");
     } elif c < ' ' {
       num code = c;
-      b.append(format("\\u{str}", _hex4(code)));
+      b.append(format("\\u{str}", to_hex(code, 4)));
     } else {
       b.append_char(c);
     }
   }
   b.append_char('"');
   ret b.build();
-}
-
-// A number as four hexadecimal digits, which is how JSON spells a
-// character it has no escape for.
-fun _hex4(num value) str {
-  str digits = "0123456789abcdef";
-  StringBuilder b = string_builder_init(4);
-  num shift = 12;
-  for shift >= 0 {
-    num nibble = (value / _pow16(shift / 4)) % 16;
-    b.append_char(digits[nibble]);
-    shift = shift - 4;
-  }
-  ret b.build();
-}
-
-fun _pow16(num exponent) num {
-  num out = 1;
-  num i = 0;
-  for i < exponent {
-    out = out * 16;
-    i = i + 1;
-  }
-  ret out;
 }

@@ -1,6 +1,15 @@
 // Language server cases: what a message on the wire is turned into.
 
 imp ..fls.protocol;
+imp ..fls.positions;
+imp ..fls.symbols;
+imp ..fls.navigation;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.vec;
+imp std.option;
+imp std.result;
 imp std.string;
 imp std.io;
 imp std.fs;
@@ -53,4 +62,84 @@ test "a sink reads a line and then the bytes that follow it" {
   assert equals(trim(blank), ""), "expected the blank line ending the headers";
   str body = source.read_bytes(5);
   assert equals(body, "hello"), "expected exactly the bytes the header named";
+}
+
+test "a number is written as hexadecimal, padded to a width" {
+  assert equals(to_hex(0, 4), "0000"), "expected zero padded to the width";
+  assert equals(to_hex(255, 2), "ff"), "expected the lower-case digits";
+  assert equals(to_hex_upper(255, 2), "FF"), "expected the upper-case digits";
+  assert equals(to_hex(10, 4), "000a"), "expected the padding to fill";
+  assert equals(to_hex(4096, 4), "1000"), "expected a value filling the width";
+  assert equals(to_hex(65536, 4), "10000"), "expected a wider value to keep its digits";
+}
+
+test "a position lands on the token the cursor is in" {
+  let lexed = tokenize("fun main() num {\n  num total = 1;\n  ret total;\n}\n", "pos.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  // Line and character are both counted from zero on the wire.
+  let on_name = token_at(&tokens, 1, 6);
+  assert on_name.is_some(), "expected a token under the cursor";
+  assert equals(token_text(on_name.unwrap()), "total"), "expected the name being declared";
+
+  // The last character of a token still counts as being on it, which is
+  // where a cursor rests inside a word.
+  let at_end = token_at(&tokens, 1, 10);
+  assert at_end.is_some(), "expected the cursor at a token's last character to land on it";
+  assert equals(token_text(at_end.unwrap()), "total"), "expected the same name";
+
+  // Whitespace belongs to no token.
+  assert token_at(&tokens, 1, 11).is_none(), "expected nothing under a space";
+}
+
+test "a pointer type keeps its star when spelled back" {
+  str src = `compound Holder {
+  `  Vec<str>* data;
+  `  num len;
+  `}
+  `fun probe(Holder* h, num len) num { ret len; }`;
+  let merged = parse_program_with_source("hover.fn", src);
+  assert merged.is_ok(), "expected the program to parse";
+  ProgramMergeResult program = merged.unwrap();
+
+  // A field declared as a pointer is reported as one: the old server
+  // dropped the star here.
+  let field = lookup_field(&program.nodes, "Holder", "data");
+  assert field.is_some(), "expected the field to resolve";
+  assert equals(field.unwrap().detail, "Vec<str>* data"), "expected the pointer spelling kept";
+}
+
+test "a local name wins over a function of the same name" {
+  str src = `compound Holder {
+  `  num len;
+  `}
+  `fun probe(Holder* h, num len) num { ret len; }`;
+  let merged = parse_program_with_source("hover.fn", src);
+  assert merged.is_ok(), "expected the program to parse";
+  ProgramMergeResult program = merged.unwrap();
+
+  // `len` is a parameter here, not the standard library's function, and
+  // resolving from the inside out is what tells them apart.
+  let found = lookup(&program.nodes, "len", "hover.fn", 4);
+  assert found.is_some(), "expected the name to resolve";
+  assert equals(found.unwrap().detail, "num len"), "expected the parameter, not a function";
+}
+
+test "a function is spelled back as its signature" {
+  str src = `fun probe(str name, num count) bin { ret true; }`;
+  let merged = parse_program_with_source("sig.fn", src);
+  assert merged.is_ok(), "expected the program to parse";
+  ProgramMergeResult program = merged.unwrap();
+
+  let found = lookup_top_level(&program.nodes, "probe");
+  assert found.is_some(), "expected the function to resolve";
+  assert equals(found.unwrap().detail, "fun probe(str name, num count) bin"), "expected the whole signature";
+}
+
+test "a keyword carries documentation, and an ordinary word does not" {
+  assert !equals(keyword_doc("fit"), ""), "expected fit to be documented";
+  assert contains(keyword_doc("fit"), "```fun"), "expected a fenced example";
+  assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
 }

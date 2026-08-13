@@ -1,0 +1,297 @@
+// Hover and go to definition.
+// 
+// Both answer the same question first: what does the name under the
+// cursor refer to? Hover then spells that declaration back to the
+// reader, and go to definition says where it was written.
+
+imp protocol;
+imp documents;
+imp positions;
+imp symbols;
+imp uri;
+imp ..ast.ast;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+
+// What a client is told when there is nothing to say.
+const str NO_HOVER = "null";
+const str NO_LOCATION = "[]";
+
+// The hover for the position `line`/`character` in `doc`, as the result
+// a client is sent.
+pub fun hover(Document doc, num line, num character) str {
+  let lexed = tokenize(doc.text, doc.path);
+  if lexed.is_err() {
+    ret NO_HOVER;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_HOVER;
+  }
+  Token t = found.unwrap();
+
+  fit t.type {
+    .Keyword -> {
+      str doc_text = keyword_doc(token_text(t));
+      if equals(doc_text, "") {
+        ret NO_HOVER;
+      }
+      ret _hover_result(doc_text, span_of(t));
+    }
+    .Identifier -> {}
+    _ -> { ret NO_HOVER; }
+  }
+
+  let declared = _resolve(doc, &tokens, t, line);
+  if declared.is_none() {
+    ret NO_HOVER;
+  }
+  Declaration d = declared.unwrap();
+  StringBuilder b = string_builder_init(96);
+  b.append("```fun\n");
+  b.append(d.detail);
+  b.append("\n```");
+  ret _hover_result(b.build(), span_of(t));
+}
+
+// Where the name at `line`/`character` in `doc` was declared, as the
+// result a client is sent. A declaration in another file is named by its
+// own URI, which is how a jump leaves the document.
+pub fun definition(Document doc, num line, num character) str {
+  let lexed = tokenize(doc.text, doc.path);
+  if lexed.is_err() {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+
+  let declared = _resolve(doc, &tokens, t, line);
+  if declared.is_none() {
+    ret NO_LOCATION;
+  }
+  Declaration d = declared.unwrap();
+  if equals(d.pos.filename, "") {
+    ret NO_LOCATION;
+  }
+
+  Span s = span_of_pos(d.pos, len(d.name));
+  StringBuilder b = string_builder_init(160);
+  b.append("[");
+  b.append(format(
+    `{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
+    json_quote(path_to_uri(d.pos.filename)),
+    s.line,
+    s.start,
+    s.line,
+    s.end
+  ));
+  b.append("]");
+  ret b.build();
+}
+
+// What the name `t` refers to, judged from where it sits: a field when
+// it is reached through a dot, and otherwise a local, a parameter, or
+// something the program declares.
+fun _resolve(Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
+  str name = token_text(t);
+  if equals(name, "") {
+    ret .None;
+  }
+
+  let merged = parse_program_with_source(doc.path, doc.text);
+  if merged.is_err() {
+    ret .None;
+  }
+  ProgramMergeResult program = merged.unwrap();
+  num source_line = line + 1;
+
+  str receiver = _receiver_of(tokens, t);
+  if !equals(receiver, "") {
+    str type_name = type_name_of_local(&program.nodes, receiver, doc.path, source_line);
+    if !equals(type_name, "") {
+      let field = lookup_field(&program.nodes, type_name, name);
+      if field.is_some() {
+        ret field;
+      }
+    }
+  }
+
+  let declared_field = lookup_field_at(&program.nodes, doc.path, source_line, name);
+  if declared_field.is_some() {
+    ret declared_field;
+  }
+
+  ret lookup(&program.nodes, name, doc.path, source_line);
+}
+
+// The name `t` is reached through, when it is written as `receiver.name`.
+// Empty when `t` stands on its own.
+fun _receiver_of(Vec<Token>* tokens, Token t) str {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret "";
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() {
+    ret "";
+  }
+  Token d = dot.unwrap();
+  if !token_is_operator(d, ".") {
+    ret "";
+  }
+  num dot_index = index_of_token(tokens, d);
+  if dot_index <= 0 {
+    ret "";
+  }
+  let before = token_before(tokens, dot_index);
+  if before.is_none() {
+    ret "";
+  }
+  Token b = before.unwrap();
+  fit b.type {
+    .Identifier -> { ret token_text(b); }
+    _ -> {}
+  }
+  ret "";
+}
+
+fun _hover_result(str markdown, Span s) str {
+  ret format(
+    `{"contents":{"kind":"markdown","value":{str}},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
+    json_quote(markdown),
+    s.line,
+    s.start,
+    s.line,
+    s.end
+  );
+}
+
+// `code` shown as a Fun snippet, with `prose` under it. A fence is
+// written as doubled backticks, which is how a raw string carries one.
+fun _doc(str code, str prose) str {
+  ret format(```````fun
+  `{str}
+  ```````
+  `{str}`, code, prose);
+}
+
+// What a keyword means, for the keywords whose meaning is not obvious
+// from the word itself.
+pub fun keyword_doc(str word) str {
+  if equals(word, "async") {
+    ret _doc(
+      `async fun name(...) Type { ... }`,
+      `Marks a function as asynchronous. Call it with await to wait for
+      `its result, or with fork to spawn it and carry on.`
+    );
+  }
+  if equals(word, "await") {
+    ret _doc(
+      `await some_async_call();`,
+      `Waits for an async call and yields its result. Only valid inside
+      `an async function.`
+    );
+  }
+  if equals(word, "fork") {
+    ret _doc(
+      `fork worker(args);`,
+      `Spawns a call as a virtual thread and carries on without its
+      `result. The target must be an async fun, and main waits for every
+      `fork before it exits.`
+    );
+  }
+  if equals(word, "nil") {
+    ret _doc(
+      `nil`,
+      `The empty pointer. Stands for any pointer type and for str, and
+      `compares with == and !=.`
+    );
+  }
+  if equals(word, "panic") {
+    ret _doc(
+      `panic("message")`,
+      `Prints the message and stops the program. Stands for whatever type
+      `is expected where it is written, so it can be returned, assigned,
+      `or passed as an argument.`
+    );
+  }
+  if equals(word, "fit") {
+    ret _doc(
+      `fit value {
+      `  .Variant(x) -> { ... }
+      `  _ -> { ... }
+      `}`,
+      `Matches a value against the shapes it can take, binding what a
+      `variant carries. Every variant must be covered, or _ must be.`
+    );
+  }
+  if equals(word, "defer") {
+    ret _doc(
+      `defer cleanup();`,
+      `Runs a statement when the enclosing scope ends, whichever way it
+      `ends.`
+    );
+  }
+  if equals(word, "imp") {
+    ret _doc(
+      `imp std.io;
+      `imp ..lexer.token;`,
+      `Imports another module. A leading run of dots steps up out of the
+      `importing file's own directory.`
+    );
+  }
+  if equals(word, "impl") {
+    ret _doc(
+      `impl Type { ... }
+      `impl Type as Quirk { ... }`,
+      `Declares methods on a type, or implements a quirk for it.`
+    );
+  }
+  if equals(word, "quirk") {
+    ret _doc(
+      `quirk Named {
+      `  name() str;
+      `}`,
+      `A set of methods a type can implement, which a value can then be
+      `used through.`
+    );
+  }
+  if equals(word, "raw") {
+    ret _doc(`raw p;`, `An untyped pointer, for the places a real type cannot be written.`);
+  }
+  if equals(word, "ret") {
+    ret _doc(
+      `ret value;`,
+      `Returns from a function, with a value unless the function returns
+      `nothing.`
+    );
+  }
+  if equals(word, "test") {
+    ret _doc(
+      `test "what it does" {
+      `  assert condition, "message";
+      `}`,
+      `A test, run by fun -test and ignored by an ordinary build.`
+    );
+  }
+  ret "";
+}

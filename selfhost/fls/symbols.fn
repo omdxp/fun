@@ -1,0 +1,471 @@
+// Symbols.
+// 
+// What a name at a position in a document refers to, and where it was
+// declared. A name is looked for from the inside out: a parameter or
+// local of the function it sits in, then a field of the type it is
+// reached through, and only then a declaration the whole program shares.
+// Answering in that order is what keeps a local named `len` from
+// resolving to the standard library's function of the same name.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+
+// What a name turned out to be.
+pub enum DeclarationKind {
+  Function,
+  Compound,
+  Enum,
+  Quirk,
+  Field,
+  Local,
+  Parameter,
+  Global,
+}
+
+// A name's declaration: what it is, how to spell it back to a reader,
+// and where it was written.
+pub compound Declaration {
+  str name;
+  DeclarationKind kind;
+  // The declaration as a reader would write it, e.g. `fun len(str s) num`
+  // or `Vec<str>* data`.
+  str detail;
+  Pos pos;
+}
+
+// The word a client's cursor sits on, given the token it landed on.
+pub fun token_text(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> {}
+  }
+  ret "";
+}
+
+// A type as a reader would write it. A pointer is spelled with its `*`,
+// which the flag records even when the depth does not, so a `Vec<T>*`
+// field is not reported as a `Vec<T>`.
+pub fun render_type(DataType* dt) str {
+  if dt == nil {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(32);
+  b.append(_base_type_name(dt));
+
+  if dt.generic_args.len > 0 {
+    b.append("<");
+    num i = 0;
+    for i < dt.generic_args.len {
+      if i > 0 {
+        b.append(", ");
+      }
+      b.append(render_type(dt.generic_args.get(i)));
+      i = i + 1;
+    }
+    b.append(">");
+  }
+
+  num stars = dt.pointer_depth;
+  if dt.flags.is_pointer && stars == 0 {
+    stars = 1;
+  }
+  num s = 0;
+  for s < stars {
+    b.append("*");
+    s = s + 1;
+  }
+
+  if dt.is_array || dt.flags.is_array {
+    num depth = dt.array_depth;
+    if depth == 0 {
+      depth = 1;
+    }
+    num a = 0;
+    for a < depth {
+      b.append("[]");
+      a = a + 1;
+    }
+  }
+  ret b.build();
+}
+
+fun _base_type_name(DataType* dt) str {
+  fit dt.kind {
+    .Void -> { ret "void"; }
+    .Raw -> { ret "raw"; }
+    .Chr -> { ret "chr"; }
+    .Str -> { ret "str"; }
+    .Dec -> { ret "dec"; }
+    .Num -> { ret "num"; }
+    .Bin -> { ret "bin"; }
+    _ -> {}
+  }
+  ret dt.type_str;
+}
+
+// A function as its signature reads, without its body.
+pub fun render_function(FunctionNode f) str {
+  StringBuilder b = string_builder_init(64);
+  if f.is_async {
+    b.append("async ");
+  }
+  b.append("fun ");
+  b.append(f.name);
+  if f.has_type_params && f.type_params.len > 0 {
+    b.append("<");
+    num t = 0;
+    for t < f.type_params.len {
+      if t > 0 {
+        b.append(", ");
+      }
+      b.append(f.type_params.get(t));
+      t = t + 1;
+    }
+    b.append(">");
+  }
+  b.append("(");
+  num i = 0;
+  for i < f.args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    Node* arg = f.args.get(i);
+    b.append(_render_param(arg));
+    i = i + 1;
+  }
+  if f.is_variadic {
+    if f.args.len > 0 {
+      b.append(", ");
+    }
+    b.append("...");
+  }
+  b.append(")");
+  if f.has_rtype {
+    let rendered = render_type(f.rtype);
+    if !equals(rendered, "") && !equals(rendered, "void") {
+      b.append(" ");
+      b.append(rendered);
+    }
+  }
+  ret b.build();
+}
+
+fun _render_param(Node* arg) str {
+  if arg == nil {
+    ret "";
+  }
+  fit arg.kind {
+    .Variable(v) -> {
+      StringBuilder b = string_builder_init(24);
+      b.append(render_type(v.var_type));
+      b.append(" ");
+      b.append(v.name);
+      ret b.build();
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
+// The declaration of `name` as seen from `file` at `line`: a parameter
+// or local of the function that line sits in, before anything the whole
+// program shares.
+pub fun lookup(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  let local = _lookup_local(program, name, file, line);
+  if local.is_some() {
+    ret local;
+  }
+  ret lookup_top_level(program, name);
+}
+
+// The declaration of `name` among what the whole program declares.
+pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if equals(f.name, name) {
+          ret .Some(_declaration(name, .Function, render_function(f), n.pos));
+        }
+      }
+      .Compound(c) -> {
+        if equals(c.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("compound ");
+          b.append(c.name);
+          ret .Some(_declaration(name, .Compound, b.build(), n.pos));
+        }
+      }
+      .Enum(e) -> {
+        if equals(e.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("enum ");
+          b.append(e.name);
+          ret .Some(_declaration(name, .Enum, b.build(), n.pos));
+        }
+      }
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          StringBuilder b = string_builder_init(32);
+          if v.is_const {
+            b.append("const ");
+          }
+          b.append(render_type(v.var_type));
+          b.append(" ");
+          b.append(v.name);
+          ret .Some(_declaration(name, .Global, b.build(), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The field `field` of the compound named `type_name`.
+pub fun lookup_field(Vec<Node>* program, str type_name, str field) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if !equals(c.name, type_name) {
+          continue;
+        }
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          if !equals(cf.name, field) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(32);
+          b.append(render_type(cf.dtype));
+          b.append(" ");
+          b.append(cf.name);
+          ret .Some(_declaration(field, .Field, b.build(), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The field `name` of whichever compound is being declared at `line`.
+// A name written inside a compound's own body is one of its fields, and
+// is the only place a field is met without a value in front of it.
+pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option<Declaration> {
+  num best_line = -1;
+  Declaration best;
+  bin found = false;
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) || n.pos.line > line {
+      continue;
+    }
+    fit n.kind {
+      .Compound(c) -> {
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          if !equals(cf.name, name) {
+            continue;
+          }
+          // The nearest declaration above the line is the one being
+          // written in.
+          if n.pos.line > best_line {
+            best_line = n.pos.line;
+            StringBuilder b = string_builder_init(32);
+            b.append(render_type(cf.dtype));
+            b.append(" ");
+            b.append(cf.name);
+            best = _declaration(name, .Field, b.build(), n.pos);
+            found = true;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  if !found {
+    ret .None;
+  }
+  ret .Some(best);
+}
+
+// The type a local or parameter named `name` was declared with, as
+// written. Used to resolve what a field is reached through.
+pub fun type_name_of_local(Vec<Node>* program, str name, str file, num line) str {
+  let found = _lookup_local(program, name, file, line);
+  if found.is_none() {
+    ret "";
+  }
+  Declaration d = found.unwrap();
+  // The detail reads `Type name`; the type is what precedes the space,
+  // with any pointer or array spelling removed.
+  num space = index_of_char(d.detail, ' ');
+  if space <= 0 {
+    ret "";
+  }
+  str written = substr(d.detail, 0, space);
+  num cut = index_of_char(written, '<');
+  if cut > 0 {
+    written = substr(written, 0, cut);
+  }
+  str stripped = replace_char(written, '*', ' ');
+  ret trim(stripped);
+}
+
+// A parameter or local of the function containing `line` in `file`.
+fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !_covers(n, f, file, line) {
+          continue;
+        }
+        num a = 0;
+        for a < f.args.len {
+          Node* arg = f.args.get(a);
+          a = a + 1;
+          if arg == nil {
+            continue;
+          }
+          fit arg.kind {
+            .Variable(v) -> {
+              if equals(v.name, name) {
+                ret .Some(_declaration(name, .Parameter, _render_param(arg), arg.pos));
+              }
+            }
+            _ -> {}
+          }
+        }
+        if f.has_body {
+          let found = _lookup_in_body(f.body, name);
+          if found.is_some() {
+            ret found;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// True when `line` falls inside the function `f` declared by `n`, in the
+// file being asked about.
+fun _covers(Node n, FunctionNode f, str file, num line) bin {
+  if !n.has_pos || !equals(n.pos.filename, file) {
+    ret false;
+  }
+  if line < n.pos.line {
+    ret false;
+  }
+  if !f.has_body || f.body == nil {
+    ret false;
+  }
+  num last = _last_line(f.body);
+  ret line <= last;
+}
+
+// The last line any statement of `body` reaches, which stands in for
+// where the function ends.
+fun _last_line(Node* body) num {
+  num last = 0;
+  if body == nil {
+    ret last;
+  }
+  if body.has_pos {
+    last = body.pos.end_line;
+    if last == 0 {
+      last = body.pos.line;
+    }
+  }
+  fit body.kind {
+    .Body(b) -> {
+      num i = 0;
+      for i < b.statements.len {
+        Node* s = b.statements.get(i);
+        i = i + 1;
+        if s == nil || !s.has_pos {
+          continue;
+        }
+        num reach = s.pos.end_line;
+        if reach == 0 {
+          reach = s.pos.line;
+        }
+        if reach > last {
+          last = reach;
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret last;
+}
+
+// A variable declared anywhere in `body`, including inside a nested
+// block, since a name is in scope for everything that follows it.
+fun _lookup_in_body(Node* body, str name) Option<Declaration> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .Variable(v) -> {
+      if equals(v.name, name) {
+        StringBuilder b = string_builder_init(32);
+        b.append(render_type(v.var_type));
+        b.append(" ");
+        b.append(v.name);
+        ret .Some(_declaration(name, .Local, b.build(), body.pos));
+      }
+    }
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _lookup_in_body(block.statements.get(i), name);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    .StatementIf(s) -> {
+      let found = _lookup_in_body(s.body, name);
+      if found.is_some() {
+        ret found;
+      }
+    }
+    .StatementElse(inner) -> {
+      let found = _lookup_in_body(inner, name);
+      if found.is_some() {
+        ret found;
+      }
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
+fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaration {
+  Declaration d;
+  d.name = name;
+  d.kind = kind;
+  d.detail = detail;
+  d.pos = pos;
+  ret d;
+}

@@ -1,0 +1,105 @@
+// Positions.
+// 
+// A client points at a place in a document with a line and a character,
+// both counted from zero; the lexer counts lines and columns from one,
+// and a token's end column is the column just past it. Everything that
+// has to turn one into the other goes through here.
+
+imp ..lexer.token;
+imp std.vec;
+imp std.option;
+imp std.string;
+
+// A span in the terms a client understands: a line and the characters
+// it covers, all counted from zero.
+pub compound Span {
+  num line;
+  num start;
+  num end;
+}
+
+// The token `line`/`character` falls on, or nothing when the position is
+// past the end of a line or inside whitespace. A position sitting at a
+// token's last character still counts as being on it, which is where a
+// cursor rests when a client asks about the word it is in.
+pub fun token_at(Vec<Token>* tokens, num line, num character) Option<Token> {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line != source_line {
+      continue;
+    }
+    if _is_trivia(t) {
+      continue;
+    }
+    if source_col >= t.pos.start_col && source_col < t.pos.end_col {
+      ret .Some(t);
+    }
+  }
+  ret .None;
+}
+
+// The token immediately before the one at `index`, skipping what carries
+// no meaning. Used to tell a bare name from one reached through a dot.
+pub fun token_before(Vec<Token>* tokens, num index) Option<Token> {
+  num i = index - 1;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if !_is_trivia(t) {
+      ret .Some(t);
+    }
+    i = i - 1;
+  }
+  ret .None;
+}
+
+// Where `t` sits, in the terms a client understands.
+pub fun span_of(Token t) Span {
+  Span s;
+  s.line = t.pos.line - 1;
+  s.start = t.pos.start_col - 1;
+  s.end = t.pos.end_col - 1;
+  if s.end < s.start {
+    s.end = s.start;
+  }
+  ret s;
+}
+
+// The span of a declaration's own name, given where the declaration
+// starts. A declaration is reported at its name rather than at the
+// keyword introducing it, which is where a client puts the cursor after
+// jumping.
+pub fun span_of_pos(Pos p, num name_length) Span {
+  Span s;
+  s.line = p.line - 1;
+  s.start = p.col - 1;
+  s.end = s.start + name_length;
+  ret s;
+}
+
+// The index of `t` among `tokens`, or -1. Positions are compared rather
+// than tokens, since a token carries no identity of its own.
+pub fun index_of_token(Vec<Token>* tokens, Token t) num {
+  num i = 0;
+  for i < tokens.len {
+    Token other = tokens.get(i);
+    if other.pos.line == t.pos.line && other.pos.start_col == t.pos.start_col {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// True for a token that is only there for the reader.
+fun _is_trivia(Token t) bin {
+  fit t.type {
+    .Comment -> { ret true; }
+    .NewLine -> { ret true; }
+    _ -> {}
+  }
+  ret false;
+}

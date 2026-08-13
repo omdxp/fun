@@ -77,6 +77,12 @@ pub compound ParseState {
   // Gates `err()`'s stderr output; set false by tests that expect a clean
   // parse failure without polluting test output.
   bin emit_stderr;
+  // The last error reported, kept as data. A caller that is not a
+  // terminal, such as a language server, reads it from here rather than
+  // scraping what was printed.
+  str error_message;
+  Pos error_pos;
+  bin has_error;
 }
 
 pub fun parse_state_new(str input_file_path, str input_source) ParseState {
@@ -110,5 +116,7 @@ pub fun parse_state_new(str input_file_path, str input_source) ParseState {
   p.tables.push(initial_table);
   p.global_symbols.init(8);
   p.emit_stderr = true;
+  p.error_message = "";
+  p.has_error = false;
   ret p;
 }
