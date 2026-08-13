@@ -129,6 +129,49 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // import, before that file's own nodes are pushed. The first real
 // failure anywhere (file not found, lex, or parse error) short-circuits
 // the whole merge as `.Err`, rather than returning a partial program.
+// The nodes the entry file declares, read from the file itself so the
+// import statements survive.
+fun _entry_nodes(str path) Vec<Node> {
+  Vec<Node> out;
+  out.init(0);
+  if !exists(path) {
+    ret out;
+  }
+  str src = read_to_string(path);
+  let lexed = tokenize(src, path);
+  if lexed.is_err() {
+    ret out;
+  }
+  ParseState state = parse_state_new(path, src);
+  state.tokens = lexed.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let failed = p.parse();
+  if failed.is_some() {
+    // A file whose syntax leans on what it imports is read as the merge
+    // read it; only its own import statements are recovered here.
+    ret _import_nodes_only(state.nodes);
+  }
+  ret state.nodes;
+}
+
+// The import statements among `nodes`, which is what survives when the
+// rest could not be read on its own.
+fun _import_nodes_only(Vec<Node> nodes) Vec<Node> {
+  Vec<Node> out;
+  out.init(0);
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Import(_) -> { out.push(n); }
+      _ -> {}
+    }
+  }
+  ret out;
+}
+
 pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
@@ -160,7 +203,10 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
   if err.is_some() {
     ret .Err(err.unwrap());
   }
+  // The entry file is parsed once more here only to keep its own nodes,
+  // which the merge settles and then drops.
   ProgramMergeResult r;
+  r.entry_nodes = _entry_nodes(entry_path);
   r.nodes = merged;
   r.aliases = aliases;
   r.alias_rename_keys = rename_keys;
@@ -179,6 +225,11 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
 // the unqualified name.
 pub compound ProgramMergeResult {
   Vec<Node> nodes;
+  // The entry file's own declarations, import statements included. The
+  // merged program drops those, and reparsing the file alone cannot
+  // stand in: a declaration it imports may be what makes its own
+  // syntax readable.
+  Vec<Node> entry_nodes;
   Vec<str> aliases;
   Vec<str> alias_rename_keys;
   Vec<str> alias_rename_targets;

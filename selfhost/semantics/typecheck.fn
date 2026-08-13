@@ -251,6 +251,10 @@ pub compound FnSig {
   // Set when the name belongs to more than one declaration, where a
   // call cannot be matched to one of them by name alone.
   bin ambiguous;
+  // Where the function was declared, and whether it is offered to other
+  // files.
+  str file;
+  bin is_public;
   // The type parameters the declaration names, the types each one is
   // allowed to stand for (empty where unconstrained), and, per
   // parameter, the type parameter it is written as (empty otherwise).
@@ -358,6 +362,10 @@ impl TypeEnv {
 // What a compound holds, keyed by field name.
 compound CompoundInfo {
   Map<str, CheckedType> fields;
+  // Where the compound was declared, and whether it is offered to other
+  // files.
+  str file;
+  bin is_public;
   // The parameters the fields are written in terms of, which an
   // instantiation supplies arguments for, and the combinations of
   // concrete types those parameters are allowed to stand for.
@@ -462,6 +470,9 @@ compound Checker {
   // declares as methods.
   Map<str, CompoundInfo> compounds;
   Map<str, MethodTable> methods;
+  // The file whose declarations are being checked, so a name declared
+  // elsewhere can be held to what its own file offers.
+  str current_file;
   // The return type of the function being walked, and whether it may
   // await.
   CheckedType rtype;
@@ -477,6 +488,7 @@ fun _checker_new() Checker {
   c.plain_enums = set_init("", 16);
   c.compounds.init(16);
   c.methods.init(16);
+  c.current_file = "";
   c.rtype = checked_unknown();
   c.in_async = false;
   c.failed = false;
@@ -682,6 +694,8 @@ fun _signature_of(FunctionNode f) FnSig {
   sig.is_async = f.is_async;
   sig.is_generic = f.has_type_params && f.type_params.len > 0;
   sig.ambiguous = false;
+  sig.file = "";
+  sig.is_public = false;
   sig.type_params.init(0);
   sig.bounds.init(0);
   sig.arg_params.init(f.args.len);
@@ -1404,6 +1418,10 @@ impl Checker {
     if sig.ambiguous {
       ret checked_unknown();
     }
+    self.check_visibility(name, sig.file, sig.is_public, "function", node);
+    if self.failed {
+      ret checked_unknown();
+    }
     // An async call produces its value only once awaited.
     if sig.is_async && !awaited {
       self.fail(format("call to async function '{str}' needs await", name), node);
@@ -1520,6 +1538,18 @@ impl Checker {
     env.pop();
   }
 
+  // Rejects a name another file declares only for itself. A file offers
+  // what it marks public; the rest is its own business.
+  check_visibility(str name, str declared_in, bin is_public, str what, Node* at) {
+    if is_public || equals(declared_in, "") || equals(self.current_file, "") {
+      ret;
+    }
+    if equals(declared_in, self.current_file) {
+      ret;
+    }
+    self.fail(format("{str} '{str}' is not public in the file that declares it", what, name), at);
+  }
+
   // Rejects an assignment to a name declared const, and checks that the
   // value assigned fits what the name holds.
   check_assignment(Node* node, ExprNode e, TypeEnv* env) {
@@ -1579,6 +1609,16 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    if !equals(declared.name, "") {
+      let info = self.compounds.at(declared.name);
+      if info.is_some() {
+        CompoundInfo holder = info.unwrap();
+        self.check_visibility(declared.name, holder.file, holder.is_public, "compound", stmt);
+        if self.failed {
+          ret;
+        }
+      }
+    }
     self.check_instantiation(declared, stmt);
     if self.failed {
       ret;
@@ -1766,6 +1806,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
       .Function(f) -> {
         if f.has_name {
           FnSig sig = _signature_of(f);
+          sig.is_public = node.flags.is_public;
+          if node.has_pos {
+            sig.file = node.pos.filename;
+          }
           // A name that resolves to more than one declaration cannot be
           // matched to one of them here.
           let existing = checker.fns.at(f.name);
@@ -1802,6 +1846,11 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
       }
       .Compound(c) -> {
         CompoundInfo info;
+        info.is_public = node.flags.is_public;
+        info.file = "";
+        if node.has_pos {
+          info.file = node.pos.filename;
+        }
         info.fields.init(c.fields.len + 1);
         info.type_params.init(0);
         info.bounds.init(0);
@@ -1831,8 +1880,18 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
     Node* node = &nodes.data[i];
     i = i + 1;
     fit node.kind {
-      .Function(f) -> { checker.check_function(f, nodes); }
+      .Function(f) -> {
+        checker.current_file = "";
+        if node.has_pos {
+          checker.current_file = node.pos.filename;
+        }
+        checker.check_function(f, nodes);
+      }
       .Impl(block) -> {
+        checker.current_file = "";
+        if node.has_pos {
+          checker.current_file = node.pos.filename;
+        }
         checker.check_quirk_conformance(block);
         checker.check_impl(block, nodes);
       }

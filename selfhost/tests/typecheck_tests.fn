@@ -559,3 +559,18 @@ test "a raw pointer is how array storage is allocated" {
     "expected raw storage to be assignable to an array field"
   );
 }
+
+test "a file keeps to itself what it does not mark public" {
+  // Both declarations sit in the file being checked, so neither is
+  // reached across a boundary and both are readable.
+  accepts(
+    `compound Secret {
+    `  num value;
+    `}
+    `fun main() {
+    `  Secret s;
+    `  s.value = 1;
+    `}`,
+    "expected a file to read its own declarations"
+  );
+}

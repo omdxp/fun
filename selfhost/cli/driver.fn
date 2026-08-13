@@ -9,8 +9,6 @@
 imp ..parser.import_resolver;
 imp ..semantics.typecheck;
 imp ..semantics.warnings;
-imp ..parser.parse_state;
-imp ..parser.parser;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp fmt;
@@ -261,24 +259,6 @@ pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* define
   ret compile_to_c_mode(input, out_path, defines, false, true);
 }
 
-// Parses one file on its own, without resolving what it imports.
-fun _parse_file(str path) Result<Vec<Node>, str> {
-  str src = read_to_string(path);
-  let lexed = tokenize(src, path);
-  if lexed.is_err() {
-    ret .Err(format("could not read {str}", path));
-  }
-  ParseState state = parse_state_new(path, src);
-  state.tokens = lexed.unwrap();
-  state.emit_stderr = false;
-  Parser p = parser_new(&state);
-  let failed = p.parse();
-  if failed.is_some() {
-    ret .Err(format("could not read {str}", path));
-  }
-  ret .Ok(state.nodes);
-}
-
 // Lowers `input` to C, emitting a test runner in place of the program's
 // own entry point when `test_mode` is set.
 pub fun compile_to_c_mode(
@@ -331,12 +311,7 @@ pub fun compile_to_c_mode(
   // compile is not also told what it might have meant. They are read
   // from the file's own parse: merging drops the import statements, and
   // what another file declares is its own business.
-  let reparsed = _parse_file(input);
-  if reparsed.is_err() {
-    ret .Err(reparsed.unwrap_err());
-  }
-  Vec<Node> own_nodes = reparsed.unwrap();
-  let noticed = analyze(&own_nodes, &merged.nodes, warn_unused, input);
+  let noticed = analyze(&merged.entry_nodes, &merged.nodes, warn_unused, input);
   if noticed.is_err() {
     ret .Err(noticed.unwrap_err());
   }
