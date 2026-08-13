@@ -1,0 +1,154 @@
+// Language server transport.
+// 
+// A client and the server exchange JSON over standard input and output,
+// each message preceded by headers giving its length in bytes. Reading
+// one means reading headers up to a blank line, then exactly that many
+// bytes of body.
+
+imp std.string;
+imp std.option;
+imp std.io;
+
+// The largest header line worth reading. A header far longer than this
+// is a client fault rather than something to grow a buffer for.
+const num MAX_HEADER_LINE = 1024;
+
+// One message as it arrives: the raw body, still to be parsed.
+pub compound Message {
+  str body;
+}
+
+// Reads the next message from `input`, or reports why it stopped. The
+// end of input is an ordinary outcome, not a failure.
+pub fun read_message(File* input) Option<Message> {
+  num length = -1;
+  for true {
+    str line = input.read_line_max(MAX_HEADER_LINE);
+    if line == nil {
+      ret .None;
+    }
+    str trimmed = trim(line);
+    if equals(trimmed, "") {
+      // The blank line ends the headers; the body follows.
+      break;
+    }
+    if starts_with_ignore_case(trimmed, "content-length:") {
+      str value = trim(substr(trimmed, 15, len(trimmed) - 15));
+      length = parse_int(value);
+    }
+  }
+  if length < 0 {
+    ret .None;
+  }
+  Message m;
+  m.body = input.read_bytes(length);
+  if m.body == nil {
+    ret .None;
+  }
+  ret .Some(m);
+}
+
+// True when `s` begins with `prefix`, whatever case each is written in.
+// A header name is not case sensitive.
+pub fun starts_with_ignore_case(str s, str prefix) bin {
+  if len(s) < len(prefix) {
+    ret false;
+  }
+  num i = 0;
+  for i < len(prefix) {
+    if to_lower_char(s[i]) != to_lower_char(prefix[i]) {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+fun to_lower_char(chr c) chr {
+  if c >= 'A' && c <= 'Z' {
+    ret (c - 'A') + 'a';
+  }
+  ret c;
+}
+
+// Writes `json` as one message, headers included. A client reads by
+// length, so the message is flushed rather than left in a buffer.
+pub fun write_message(str json) {
+  Sink out = Sink.Stdout;
+  out.write(format("Content-Length: {num}\r\n\r\n{str}", len(json), json));
+  out.flush();
+}
+
+// The reply to a request that succeeded.
+pub fun response(str id, str result_json) str {
+  ret format(`{"jsonrpc":"2.0","id":{str},"result":{str}}`, id, result_json);
+}
+
+// The reply to a request the server could not carry out.
+pub fun error_response(str id, num code, str message) str {
+  ret format(
+    `{"jsonrpc":"2.0","id":{str},"error":{"code":{num},"message":{str}}}`,
+    id,
+    code,
+    json_quote(message)
+  );
+}
+
+// A message the server sends without being asked, such as diagnostics.
+pub fun notification(str method, str params_json) str {
+  ret format(`{"jsonrpc":"2.0","method":{str},"params":{str}}`, json_quote(method), params_json);
+}
+
+// Writes `s` as a JSON string, with the characters JSON reserves
+// escaped.
+pub fun json_quote(str s) str {
+  StringBuilder b = string_builder_init(len(s) + 2);
+  b.append_char('"');
+  num i = 0;
+  for i < len(s) {
+    let c = s[i];
+    i = i + 1;
+    if c == '"' {
+      b.append("\\\"");
+    } elif c == '\\' {
+      b.append("\\\\");
+    } elif c == '\n' {
+      b.append("\\n");
+    } elif c == '\r' {
+      b.append("\\r");
+    } elif c == '\t' {
+      b.append("\\t");
+    } elif c < ' ' {
+      num code = c;
+      b.append(format("\\u{str}", _hex4(code)));
+    } else {
+      b.append_char(c);
+    }
+  }
+  b.append_char('"');
+  ret b.build();
+}
+
+// A number as four hexadecimal digits, which is how JSON spells a
+// character it has no escape for.
+fun _hex4(num value) str {
+  str digits = "0123456789abcdef";
+  StringBuilder b = string_builder_init(4);
+  num shift = 12;
+  for shift >= 0 {
+    num nibble = (value / _pow16(shift / 4)) % 16;
+    b.append_char(digits[nibble]);
+    shift = shift - 4;
+  }
+  ret b.build();
+}
+
+fun _pow16(num exponent) num {
+  num out = 1;
+  num i = 0;
+  for i < exponent {
+    out = out * 16;
+    i = i + 1;
+  }
+  ret out;
+}

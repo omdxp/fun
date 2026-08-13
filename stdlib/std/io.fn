@@ -714,3 +714,11 @@ pub fun write_all(str path, str data) bin {
   let ok = f.write(data);
   ret ok;
 }
+
+// Standard input as a file, for reading what another program wrote to
+// it. `Sink` names where to write; this names where to read from.
+pub fun stdin_file() File {
+  File f;
+  f.handle = stdin_stream();
+  ret f;
+}

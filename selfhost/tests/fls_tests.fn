@@ -1,0 +1,36 @@
+// Language server cases: what a message on the wire is turned into.
+
+imp ..fls.protocol;
+imp std.string;
+
+test "a string is written with what JSON reserves escaped" {
+  assert equals(json_quote("plain"), `"plain"`), "expected a plain string to be quoted";
+  assert equals(json_quote(`say "hi"`), `"say \"hi\""`), "expected the quotes to be escaped";
+  assert equals(json_quote("a\nb"), `"a\nb"`), "expected the newline to be escaped";
+  assert equals(json_quote("a\\b"), `"a\\b"`), "expected the backslash to be escaped";
+}
+
+test "a header name is read whatever case it is written in" {
+  assert starts_with_ignore_case("Content-Length: 5", "content-length:"), "expected the header to be recognized";
+  assert starts_with_ignore_case("content-length: 5", "Content-Length:"), "expected either case to match";
+  assert !starts_with_ignore_case("Content-Type: x", "content-length:"), "expected a different header not to match";
+}
+
+test "a reply carries the id it answers" {
+  assert contains(response("1", "null"), `"id":1`), "expected a numeric id to be echoed";
+  assert contains(response(`"abc"`, "null"), `"id":"abc"`), "expected a string id to be echoed";
+  assert contains(response("1", `{"ok":true}`), `"result":{"ok":true}`), "expected the result to be carried";
+}
+
+test "a refusal names what could not be done" {
+  str refusal = error_response("2", -32601, "unsupported request 'x'");
+  assert contains(refusal, `"code":-32601`), "expected the code";
+  assert contains(refusal, "unsupported request"), "expected the message";
+  assert contains(refusal, `"id":2`), "expected the id";
+}
+
+test "a notification carries no id" {
+  str note = notification("textDocument/publishDiagnostics", `{"uri":"file:///a.fn"}`);
+  assert contains(note, `"method":"textDocument/publishDiagnostics"`), "expected the method";
+  assert !contains(note, `"id"`), "expected no id on a notification";
+}

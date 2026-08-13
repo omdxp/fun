@@ -1,0 +1,12 @@
+// Language server entry point: serve one client over standard input and
+// output until it asks to stop.
+
+imp server;
+imp std.io;
+
+fun main() num {
+  // A client writes its messages to this program's standard input.
+  File input = stdin_file();
+  Server s = server_new();
+  ret s.serve(&input);
+}

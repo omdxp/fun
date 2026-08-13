@@ -1,0 +1,142 @@
+// Language server.
+// 
+// The server reads one message at a time from its client, answers what
+// it understands, and keeps going until the client asks it to stop. A
+// request it does not recognize is answered with an error rather than
+// silence, which is what keeps a client from waiting forever.
+
+imp protocol;
+imp std.string;
+imp std.option;
+imp std.result;
+imp std.json;
+imp std.io;
+
+// What the server carries between messages.
+pub compound Server {
+  // Set once the client asks the server to shut down, so the next
+  // `exit` leaves quietly rather than as a failure.
+  bin shutting_down;
+  bin running;
+}
+
+pub fun server_new() Server {
+  Server s;
+  s.shutting_down = false;
+  s.running = true;
+  ret s;
+}
+
+// The codes the protocol reserves for what a server can refuse.
+const num METHOD_NOT_FOUND = -32601;
+const num INVALID_REQUEST = -32600;
+
+impl Server {
+  // Reads messages until the client asks the server to exit, or until
+  // there is nothing left to read.
+  pub serve(File* input) num {
+    for self.running {
+      let message = read_message(input);
+      if message.is_none() {
+        break;
+      }
+      self.handle(message.unwrap().body);
+    }
+    if self.shutting_down {
+      ret 0;
+    }
+    // Leaving without being asked to is what a client reads as a crash.
+    ret 1;
+  }
+
+  // Answers one message. A request carries an id and expects a reply; a
+  // notification carries none and expects none.
+  handle(str body) {
+    let parsed = parse(body);
+    if parsed.is_err() {
+      ret;
+    }
+    JsonValue message = parsed.unwrap();
+    str method = _string_field(message, "method");
+    if equals(method, "") {
+      ret;
+    }
+    str id = _raw_field(message, "id");
+    bin is_request = !equals(id, "");
+
+    if equals(method, "initialize") {
+      write_message(response(id, _initialize_result()));
+      ret;
+    }
+    if equals(method, "initialized") {
+      ret;
+    }
+    if equals(method, "shutdown") {
+      self.shutting_down = true;
+      write_message(response(id, "null"));
+      ret;
+    }
+    if equals(method, "exit") {
+      self.running = false;
+      ret;
+    }
+    if is_request {
+      write_message(error_response(
+        id,
+        METHOD_NOT_FOUND,
+        format("unsupported request '{str}'", method)
+      ));
+    }
+  }
+}
+
+// What the server tells a client it can do. Every capability named here
+// is one a request handler answers.
+fun _initialize_result() str {
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}}}}`;
+}
+
+// The value of a string field, or empty when the message has none.
+fun _string_field(JsonValue message, str name) str {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret "";
+      }
+      JsonValue value = found.unwrap();
+      fit value {
+        .Str(text) -> { ret text; }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// A field as it was written, which is how an id is echoed back: the
+// protocol allows either a number or a string, and the reply must use
+// whichever the request did.
+fun _raw_field(JsonValue message, str name) str {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret "";
+      }
+      JsonValue value = found.unwrap();
+      fit value {
+        .Str(text) -> { ret json_quote(text); }
+        .Num(n) -> {
+          // An id written as a number is echoed as one, written with no
+          // fractional part rather than narrowed into a whole number.
+          ret format_dec(n, 0);
+        }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+  ret "";
+}

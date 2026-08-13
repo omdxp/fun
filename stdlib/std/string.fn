@@ -101,7 +101,9 @@ fun _string_len(str s) num {
 }
 
 fun _is_space(chr c) bin {
-  if c == ' ' || c == '\0' || c == '\n' || c == '\t' || c == '\0' {
+  // A carriage return counts: text that arrives with Windows line
+  // endings would otherwise keep one after being trimmed.
+  if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\0' {
     ret true;
   }
   ret false;
