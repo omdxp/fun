@@ -525,6 +525,16 @@ impl Lexer {
       }
       let c = self._peek();
       if c == '`' {
+        // A doubled backtick is the one escape a raw string has: it
+        // stands for a literal backtick, so content made of backticks (a
+        // markdown fence, for one) can be written at all. A single
+        // backtick still ends the string.
+        if self._peek2() == '`' {
+          self._advance();
+          self._advance();
+          b.append_char('`');
+          continue;
+        }
         self._advance();
         ret .Closed;
       }

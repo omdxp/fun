@@ -216,6 +216,22 @@ test "raw string literal: backslashes and quotes need no escaping" {
   assert contains(out, `she said \"hi\" and left`), "expected quotes to be escaped for C";
 }
 
+test "raw string literal: a doubled backtick is a literal backtick" {
+  // Stated as an escaped string because the fixture itself contains the raw
+  // string delimiter.
+  str src = "fun main() num {\n  str fence = ```````fun`;\n  ret 0;\n}\n";
+  let out = emit_c(src, "raw string literal: a doubled backtick is a literal backtick");
+  assert contains(out, "\"```fun\""), "expected three backticks in the C string, from three doubled pairs";
+}
+
+test "raw string literal: a single backtick still closes the string" {
+  // Stated as an escaped string because the fixture itself contains the raw
+  // string delimiter.
+  str src = "fun main() num {\n  str empty = ``;\n  ret 0;\n}\n";
+  let out = emit_c(src, "raw string literal: a single backtick still closes the string");
+  assert contains(out, "\"\""), "expected an empty string, not an escape";
+}
+
 test "raw string literal: multi-line block joins lines with a real newline" {
   // Stated as an escaped string because the fixture itself contains the raw
   // string delimiter.

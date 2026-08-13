@@ -1,0 +1,152 @@
+// Open documents.
+// 
+// A client edits text the compiler never reads from disk, so the server
+// keeps what it was told. An edit arrives either as the whole document
+// or as a range to replace, which means turning line and column
+// positions into offsets in the text held here.
+
+imp uri;
+imp std.string;
+imp std.vec;
+imp std.map;
+imp std.option;
+imp std.io;
+
+// One document a client has open.
+pub compound Document {
+  str uri;
+  str path;
+  str text;
+  // The revision the client last sent, which a stale reply can be
+  // checked against.
+  num version;
+}
+
+// Every document a client has open, by URI.
+pub compound Documents {
+  Map<str, Document> open;
+}
+
+pub fun documents_new() Documents {
+  Documents d;
+  d.open.init(8);
+  ret d;
+}
+
+impl Documents {
+  // Records a document the client opened, or replaces one it reopened.
+  pub opened(str document_uri, str text, num version) {
+    Document doc;
+    doc.uri = document_uri;
+    doc.path = "";
+    let resolved = uri_to_path(document_uri);
+    if resolved.is_some() {
+      doc.path = resolved.unwrap();
+    }
+    doc.text = text;
+    doc.version = version;
+    self.open.put(document_uri, doc);
+  }
+
+  // Replaces the whole text of an open document.
+  pub replaced(str document_uri, str text, num version) {
+    let existing = self.open.at(document_uri);
+    if existing.is_none() {
+      self.opened(document_uri, text, version);
+      ret;
+    }
+    Document doc = existing.unwrap();
+    doc.text = text;
+    doc.version = version;
+    self.open.put(document_uri, doc);
+  }
+
+  // Replaces the text between two positions, which is how an editor
+  // sends an ordinary keystroke.
+  pub edited(
+    str document_uri,
+    num start_line,
+    num start_col,
+    num end_line,
+    num end_col,
+    str replacement,
+    num version
+  ) {
+    let existing = self.open.at(document_uri);
+    if existing.is_none() {
+      ret;
+    }
+    Document doc = existing.unwrap();
+    num from = offset_of(doc.text, start_line, start_col);
+    num to = offset_of(doc.text, end_line, end_col);
+    if from < 0 || to < from {
+      ret;
+    }
+    StringBuilder b = string_builder_init(len(doc.text) + len(replacement));
+    b.append(substr(doc.text, 0, from));
+    b.append(replacement);
+    b.append(substr(doc.text, to, len(doc.text) - to));
+    doc.text = b.build();
+    doc.version = version;
+    self.open.put(document_uri, doc);
+  }
+
+  pub closed(str document_uri) {
+    self.open.remove(document_uri);
+  }
+
+  pub at(str document_uri) Option<Document> {
+    ret self.open.at(document_uri);
+  }
+
+  pub free() {
+    self.open.free();
+  }
+}
+
+// The offset in `text` of a position given as a line and a column, both
+// counted from zero. A position past the end of a line lands at its end,
+// which is what an editor means by a column beyond the text.
+pub fun offset_of(str text, num line, num col) num {
+  num offset = 0;
+  num current_line = 0;
+  num n = len(text);
+  for current_line < line {
+    if offset >= n {
+      ret n;
+    }
+    if text[offset] == '\n' {
+      current_line = current_line + 1;
+    }
+    offset = offset + 1;
+  }
+  num column = 0;
+  for column < col {
+    if offset >= n || text[offset] == '\n' {
+      ret offset;
+    }
+    offset = offset + 1;
+    column = column + 1;
+  }
+  ret offset;
+}
+
+// The line and column an offset falls on, both counted from zero. The
+// reverse of `offset_of`, for reporting a position back to a client.
+pub fun position_of(str text, num offset, num* line, num* col) {
+  num current_line = 0;
+  num current_col = 0;
+  num i = 0;
+  num n = len(text);
+  for i < offset && i < n {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      current_col = 0;
+    } else {
+      current_col = current_col + 1;
+    }
+    i = i + 1;
+  }
+  *line = current_line;
+  *col = current_col;
+}

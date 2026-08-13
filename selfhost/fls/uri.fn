@@ -1,0 +1,125 @@
+// File URIs.
+// 
+// A client names a document by URI; the compiler works in paths. The two
+// differ in more than a prefix: a URI escapes anything outside a small
+// unreserved set, and a Windows path arrives with its drive letter after
+// the leading separator.
+
+imp std.string;
+imp std.option;
+imp std.runtime_backend;
+imp std.io;
+
+// The path a `file://` URI names, or nothing when the URI names
+// something else.
+pub fun uri_to_path(str uri) Option<str> {
+  if !starts_with(uri, "file://") {
+    ret .None;
+  }
+  str rest = substr(uri, 7, len(uri) - 7);
+  // Some clients spell the local host explicitly.
+  if starts_with(rest, "localhost/") {
+    rest = substr(rest, 10, len(rest) - 10);
+  } elif len(rest) > 0 && rest[0] == '/' {
+    rest = substr(rest, 1, len(rest) - 1);
+  } else {
+    ret .None;
+  }
+
+  str decoded = _percent_decode(rest);
+  // A drive letter means the path is already rooted; anything else is
+  // rooted by the separator the URI dropped.
+  if _has_drive_letter(decoded) {
+    ret .Some(decoded);
+  }
+  StringBuilder b = string_builder_init(len(decoded) + 1);
+  b.append("/");
+  b.append(decoded);
+  ret .Some(b.build());
+}
+
+// The URI naming `path`, with everything outside the unreserved set
+// escaped so a client reads back what was meant.
+pub fun path_to_uri(str path) str {
+  StringBuilder b = string_builder_init(len(path) + 16);
+  b.append("file://");
+  str normalized = replace_char(path, '\\', '/');
+  if len(normalized) == 0 || normalized[0] != '/' {
+    b.append("/");
+  }
+  num i = 0;
+  for i < len(normalized) {
+    let c = normalized[i];
+    i = i + 1;
+    if _is_unreserved(c) || c == '/' || c == ':' {
+      b.append_char(c);
+      continue;
+    }
+    num code = c;
+    b.append(format("%{str}", to_hex_upper(code, 2)));
+  }
+  ret b.build();
+}
+
+// True for a path that begins with a drive letter, as `C:/src/a.fn`
+// does.
+fun _has_drive_letter(str path) bin {
+  if len(path) < 3 {
+    ret false;
+  }
+  bin letter = (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z');
+  ret letter && path[1] == ':' && (path[2] == '/' || path[2] == '\\');
+}
+
+// The characters a URI carries as themselves.
+fun _is_unreserved(chr c) bin {
+  if c >= 'a' && c <= 'z' {
+    ret true;
+  }
+  if c >= 'A' && c <= 'Z' {
+    ret true;
+  }
+  if c >= '0' && c <= '9' {
+    ret true;
+  }
+  ret c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+fun _percent_decode(str s) str {
+  StringBuilder b = string_builder_init(len(s));
+  num i = 0;
+  for i < len(s) {
+    let c = s[i];
+    if c == '%' && i + 2 < len(s) {
+      num hi = _hex_value(s[i + 1]);
+      num lo = _hex_value(s[i + 2]);
+      if hi >= 0 && lo >= 0 {
+        num decoded = (hi * 16) + lo;
+        chr out = decoded;
+        // A separator written as an escape still separates.
+        if runtime_backend_is_windows() && out == '/' {
+          out = '\\';
+        }
+        b.append_char(out);
+        i = i + 3;
+        continue;
+      }
+    }
+    b.append_char(c);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+fun _hex_value(chr c) num {
+  if c >= '0' && c <= '9' {
+    ret c - '0';
+  }
+  if c >= 'a' && c <= 'f' {
+    ret (c - 'a') + 10;
+  }
+  if c >= 'A' && c <= 'F' {
+    ret (c - 'A') + 10;
+  }
+  ret -1;
+}

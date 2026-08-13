@@ -1,0 +1,167 @@
+// Diagnostics.
+// 
+// What a client shows in the margin is what the compiler would say
+// about the same text: the errors that stop it compiling, and the
+// warnings about what it probably did not mean. The text comes from
+// what the editor holds rather than from disk, so an unsaved edit is
+// judged as it stands.
+
+imp protocol;
+imp documents;
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..parser.import_resolver;
+imp ..semantics.typecheck;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.fs;
+imp std.io;
+
+// How seriously a client should take one finding.
+pub const num SEVERITY_ERROR = 1;
+pub const num SEVERITY_WARNING = 2;
+
+// One finding, in the terms a client understands.
+pub compound Diagnostic {
+  num line;
+  num col;
+  num end_line;
+  num end_col;
+  num severity;
+  str message;
+}
+
+// Everything wrong with `doc`, in the order a reader meets it.
+pub fun diagnose(Document doc) Vec<Diagnostic> {
+  Vec<Diagnostic> out;
+  out.init(0);
+
+  // The text an editor holds is what to judge, so it is written where
+  // the compiler expects to find it before the imports are resolved.
+  str path = doc.path;
+  if equals(path, "") {
+    ret out;
+  }
+
+  let lexed = tokenize(doc.text, path);
+  if lexed.is_err() {
+    out.push(_at_start(SEVERITY_ERROR, "could not read this file"));
+    ret out;
+  }
+
+  ParseState state = parse_state_new(path, doc.text);
+  state.tokens = lexed.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let parse_failed = p.parse();
+  if parse_failed.is_some() {
+    str message = "this file could not be read";
+    if state.has_error {
+      message = state.error_message;
+    }
+    Diagnostic d = _at_start(SEVERITY_ERROR, message);
+    if state.has_error {
+      d.line = state.error_pos.line - 1;
+      d.col = state.error_pos.col - 1;
+      d.end_line = d.line;
+      d.end_col = d.col + 1;
+    }
+    out.push(d);
+    ret out;
+  }
+
+  // Checking needs what the file imports, which is read from disk. The
+  // file being edited is not: its text is what the client holds, which
+  // may not be what is saved.
+  let merged = parse_program_with_source(path, doc.text);
+  if merged.is_err() {
+    out.push(_at_start(SEVERITY_ERROR, merged.unwrap_err()));
+    ret out;
+  }
+  ProgramMergeResult program = merged.unwrap();
+
+  let checked = typecheck_program(&program.nodes);
+  if checked.is_err() {
+    TypeError e = checked.unwrap_err();
+    Diagnostic d = _at_start(SEVERITY_ERROR, e.message);
+    if e.has_pos && equals(e.pos.filename, path) {
+      d.line = e.pos.line - 1;
+      d.col = e.pos.col - 1;
+      d.end_line = d.line;
+      d.end_col = d.col + 1;
+    }
+    out.push(d);
+    ret out;
+  }
+
+  // Warnings are reported for the file being edited, and asked for in
+  // full: an editor is where noticing an unused declaration helps.
+  let noticed = analyze(&program.entry_nodes, &program.nodes, true, path);
+  if noticed.is_err() {
+    out.push(_at_start(SEVERITY_WARNING, noticed.unwrap_err()));
+    ret out;
+  }
+  Vec<Warning> found = noticed.unwrap();
+  defer found.free();
+  num i = 0;
+  for i < found.len {
+    Warning w = found.get(i);
+    i = i + 1;
+    Diagnostic d = _at_start(
+      SEVERITY_WARNING,
+      format("{str}: {str}", warning_id_name(w.id), w.message)
+    );
+    if w.has_pos {
+      d.line = w.pos.line - 1;
+      d.col = w.pos.col - 1;
+      d.end_line = d.line;
+      d.end_col = d.col + 1;
+    }
+    out.push(d);
+  }
+  ret out;
+}
+
+// A finding with no position of its own, which a client shows against
+// the start of the file.
+fun _at_start(num severity, str message) Diagnostic {
+  Diagnostic d;
+  d.line = 0;
+  d.col = 0;
+  d.end_line = 0;
+  d.end_col = 1;
+  d.severity = severity;
+  d.message = message;
+  ret d;
+}
+
+// The notification telling a client what is wrong with a document. An
+// empty list is what clears the margin, so it is sent as readily as a
+// list of findings.
+pub fun publish(str document_uri, Vec<Diagnostic>* found) str {
+  StringBuilder b = string_builder_init(256);
+  b.append(format(`{"uri":{str},"diagnostics":[`, json_quote(document_uri)));
+  num i = 0;
+  for i < found.len {
+    Diagnostic d = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(format(
+      `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"severity":{num},"source":"fun","message":{str}}`,
+      d.line,
+      d.col,
+      d.end_line,
+      d.end_col,
+      d.severity,
+      json_quote(d.message)
+    ));
+  }
+  b.append("]}");
+  ret notification("textDocument/publishDiagnostics", b.build());
+}
