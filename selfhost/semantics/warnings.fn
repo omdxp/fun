@@ -193,6 +193,21 @@ fun _constant_truth(Node* node) Option<bin> {
   ret .None;
 }
 
+// What a function reads: its body, the types of its arguments, and its
+// return type. Shared so a method inside an `impl` is read exactly as a
+// top-level function is, rather than being skipped for want of a case.
+fun _collect_function_reads(FunctionNode f, Set<str>* out) {
+  if f.has_body {
+    _collect_reads(f.body, out);
+  }
+  for a : f.args {
+    _collect_reads(a, out);
+  }
+  if f.has_rtype && f.rtype != nil {
+    out.add(f.rtype.type_str);
+  }
+}
+
 // Collects the names a body reads, leaving out the names it declares:
 // a declaration's own name is not a read of it, while the value it is
 // given is.
@@ -275,6 +290,22 @@ fun _always_returns(Node* stmt) bin {
         i = i + 1;
       }
       ret false;
+    }
+    // A `fit` hands a value back on every path when every arm does.
+    // Whether every value is matched at all is a separate question, and
+    // one the exhaustiveness check already answers: a `fit` that leaves
+    // a variant out is reported as non-exhaustive, so treating this as a
+    // return cannot hide a real gap, only avoid naming it twice.
+    .StatementFit(f) -> {
+      if f.branches.len == 0 {
+        ret false;
+      }
+      for branch : f.branches {
+        if !_always_returns(branch.body) {
+          ret false;
+        }
+      }
+      ret true;
     }
     // A loop with no condition runs until something inside it leaves the
     // function.
@@ -1230,7 +1261,9 @@ impl Analysis {
         }
       }
       .Variable(v) -> {
-        if !read.has(v.name) && !equals(v.name, "_") {
+        // A name beginning with `_` says the value is being discarded on
+        // purpose, so there is nothing to report.
+        if !read.has(v.name) && !starts_with(v.name, "_") {
           self.report(.UnusedVariable, format("unused variable '{str}'", v.name), stmt);
         }
       }
@@ -1275,24 +1308,22 @@ impl Analysis {
         continue;
       }
       fit node.kind {
-        .Function(f) -> {
-          if f.has_body {
-            _collect_reads(f.body, &read);
-          }
-          for a : f.args {
-            _collect_reads(a, &read);
-          }
-          if f.has_rtype && f.rtype != nil {
-            read.add(f.rtype.type_str);
-          }
-        }
+        .Function(f) -> { _collect_function_reads(f, &read); }
         .Impl(block) -> {
           read.add(block.type_name);
           if block.has_quirk_name {
             read.add(block.quirk_name);
           }
           for m : block.methods {
-            _collect_reads(m, &read);
+            if m == nil {
+              continue;
+            }
+            // A method's own node reads nothing; what it reads is in its
+            // body and signature, the same as any other function.
+            fit m.kind {
+              .Function(f) -> { _collect_function_reads(f, &read); }
+              _ -> {}
+            }
           }
         }
         .Compound(c) -> {
@@ -1339,7 +1370,13 @@ impl Analysis {
           }
         }
         .Function(f) -> {
-          if !node.flags.is_public && f.has_name && !read.has(f.name) && !equals(f.name, "main") {
+          // A function with no body declares something that exists
+          // elsewhere, a C binding among them. Nothing here can be
+          // deleted by not calling it, so there is nothing to report.
+          if !node.flags.is_public && f.has_name && f.has_body && !read.has(f.name) && !equals(
+            f.name,
+            "main"
+          ) {
             self.report(.UnusedFunction, format("unused function '{str}'", f.name), node);
           }
         }
@@ -1480,10 +1517,44 @@ fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) 
           ret true;
         }
       }
+      // A module is just as used when only its type's methods are
+      // called: `r.is_err()` reads `std.result` as surely as naming
+      // `Result` does. A method is stored mangled, so it is the name as
+      // written that is looked for.
+      .Impl(block) -> {
+        if read.has(block.type_name) {
+          ret true;
+        }
+        for m : block.methods {
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(f) -> {
+              if f.has_name && read.has(_unmangled_method_name(f.name, block.type_name)) {
+                ret true;
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
       _ -> {}
     }
   }
   ret false;
+}
+
+// A method's own name, with the type it is mangled with removed.
+fun _unmangled_method_name(str mangled, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(mangled, prefix) {
+    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+  }
+  ret mangled;
 }
 
 // True when anything a module offers is read. An import is written as a
