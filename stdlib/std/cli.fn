@@ -5,6 +5,7 @@ imp std.vec;
 imp std.string;
 imp std.quirks;
 imp std.option;
+imp std.c.mem;
 
 // Parsed command-line arguments.
 pub compound CliArgs {
@@ -122,6 +123,56 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   ret out;
 }
 
+// Parses single-dash flags: `-name value`, `-name=value`, and
+// bare `-name` switches. `value_flags` names the flags that take a
+// separate value, since `-name value` is otherwise indistinguishable
+// from a switch followed by a positional. Everything after `--` is a
+// positional.
+pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
+  CliArgs out;
+  out.opts.init(8);
+  out.positionals.init(8);
+
+  num i = 1;
+  bin rest_are_positional = false;
+  for args[i] != 0 {
+    let arg = args[i];
+
+    if rest_are_positional {
+      out.positionals.push(arg);
+      i = i + 1;
+      continue;
+    }
+    if equals(arg, "--") {
+      rest_are_positional = true;
+      i = i + 1;
+      continue;
+    }
+    if len(arg) < 2 || arg[0] != '-' {
+      out.positionals.push(arg);
+      i = i + 1;
+      continue;
+    }
+
+    let body = substr(arg, 1, len(arg) - 1);
+    let eq = index_of_char(body, '=');
+    if eq != -1 {
+      out.opts.put(substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
+      i = i + 1;
+      continue;
+    }
+
+    if value_flags.contains(body) && args[i + 1] != 0 {
+      out.opts.put(body, args[i + 1]);
+      i = i + 2;
+      continue;
+    }
+    out.opts.put(body, "1");
+    i = i + 1;
+  }
+  ret out;
+}
+
 impl CliArgs as Sized {
   // Number of positional arguments.
   pub len() num {
@@ -189,4 +240,84 @@ pub fun cli_get(CliArgs* args, str key) str {
 // C-style wrapper for cleanup.
 pub fun cli_free(CliArgs* args) {
   args.free();
+}
+
+// Builds a NUL-terminated argv for the tests below.
+fun _test_argv(Vec<str>* parts) str[] {
+  str[] out = malloc(sizeof(str) * (parts.len + 1));
+  num i = 0;
+  for i < parts.len {
+    out[i] = parts.get(i);
+    i = i + 1;
+  }
+  out[parts.len] = nil;
+  ret out;
+}
+
+fun _argv_of2(str a, str b) str[] {
+  Vec<str> parts;
+  parts.init(0);
+  defer parts.free();
+  parts.push(a);
+  parts.push(b);
+  ret _test_argv(&parts);
+}
+
+fun _argv_of3(str a, str b, str c) str[] {
+  Vec<str> parts;
+  parts.init(0);
+  defer parts.free();
+  parts.push(a);
+  parts.push(b);
+  parts.push(c);
+  ret _test_argv(&parts);
+}
+
+test "cli_parse_flags reads a value flag written as two arguments" {
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  value_flags.push("in");
+  let c = cli_parse_flags(_argv_of3("fun", "-in", "main.fn"), &value_flags);
+  defer c.free();
+  assert equals(c.get("in"), "main.fn"), "expected the value to follow the flag";
+}
+
+test "cli_parse_flags reads a value flag written with an equals sign" {
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  value_flags.push("out");
+  let c = cli_parse_flags(_argv_of2("fun", "-out=prog"), &value_flags);
+  defer c.free();
+  assert equals(c.get("out"), "prog"), "expected the inline value";
+}
+
+test "cli_parse_flags treats an unregistered flag as a switch" {
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  let c = cli_parse_flags(_argv_of3("fun", "-no-exec", "main.fn"), &value_flags);
+  defer c.free();
+  assert equals(c.get("no-exec"), "1"), "expected a bare switch";
+  assert equals(c.at_positional(0).unwrap_or(""), "main.fn"), "expected the positional to survive";
+}
+
+test "cli_parse_flags keeps a multi-character flag whole" {
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  let c = cli_parse_flags(_argv_of2("fun", "-outf"), &value_flags);
+  defer c.free();
+  assert c.has("outf"), "expected the flag to stay whole rather than bundling";
+  assert !c.has("o"), "expected no bundled single-character flag";
+}
+
+test "cli_parse_flags sends everything after -- to positionals" {
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  let c = cli_parse_flags(_argv_of3("fun", "--", "-not-a-flag"), &value_flags);
+  defer c.free();
+  assert equals(c.at_positional(0).unwrap_or(""), "-not-a-flag"), "expected the argument verbatim";
 }

@@ -52,6 +52,11 @@ pub fun ceil(dec x) dec;
 // `x` rounded to the nearest integer value.
 pub fun round(dec x) dec;
 
+// `x` rounded to the nearest integer, returned as a whole number rather
+// than a decimal. This is how a decimal becomes a whole number: the
+// conversion happens in C, where the result type already is one.
+pub fun llround(dec x) num;
+
 // `x` truncated toward zero.
 pub fun trunc(dec x) dec;
 
