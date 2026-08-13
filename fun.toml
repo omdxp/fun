@@ -5,3 +5,7 @@ version = "0.46.0"
 [[bin]]
 name = "fun"
 path = "selfhost/cli/main.fn"
+
+[[bin]]
+name = "fls"
+path = "selfhost/fls/main.fn"
