@@ -5987,6 +5987,17 @@ pub const TranspileProcess = struct {
             return TranspileError.SymbolNotDefined;
         }
 
+        // Naming a variant uses the enum, and so uses whatever import brought
+        // it in -- the same marking every other type-name path does. Without
+        // it, a file whose ONLY mention of an imported enum is a variant
+        // constant (`f(Sink.Stdout)` where `f` is declared elsewhere, so the
+        // type name never appears here in a declaration) was reported as not
+        // using that import at all.
+        self.mark_node_used_and_sync_top_level_copy(enode);
+        if (!same_module(&node, enode)) {
+            if (enode.pos) |p| self.mark_import_used_by_origin_file(p.filename);
+        }
+
         if (enode.node_variant != null) {
             var ok = false;
             for (enode.node_variant.?.enum_decl.variants.items()) |v| {
@@ -9218,6 +9229,11 @@ pub const TranspileProcess = struct {
                         if (self.alias_map_for_node(&node).contains(parts.alias_name)) {
                             const qualified_enum = try self.make_alias_qualified_symbol_name(parts.alias_name, parts.enum_name);
                             if (try self.resolve_enum_variant_constant_type(node, qualified_enum, parts.variant_name)) |_| {
+                                // An aliased import is tracked by its alias, so
+                                // reaching a variant through one uses it. Marking by
+                                // origin file (which the resolver above does) does not
+                                // reach the aliased entry.
+                                self.mark_import_used_by_alias(parts.alias_name);
                                 self.allocator.free(qualified_enum);
                                 return .{ .base = .Unknown, .name = parts.enum_name };
                             }

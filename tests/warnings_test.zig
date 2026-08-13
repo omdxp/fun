@@ -739,6 +739,78 @@ test "diagnostic: import used only as a compound field type is not unused" {
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
+test "diagnostic: an enum variant naming an imported type marks that import used" {
+    const allocator = std.testing.allocator;
+    const lib_path = "unused_import_enum_lib.fn";
+    const ifilepath = "unused_import_enum_use.fn";
+
+    // Regression: a file whose only mention of an imported enum is a variant
+    // constant passed to a callee declared elsewhere was reported as not using
+    // the import at all. The type name never appears in this file's own
+    // declarations, so nothing else marked it.
+    const lib_input =
+        "imp std.io;\n" ++
+        "pub fun take(Sink s) num {\n" ++
+        "  _ = s;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    try writeTestFile(lib_path, lib_input);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    const input =
+        "imp unused_import_enum_lib;\n" ++
+        "imp std.io;\n" ++
+        "fun main() num {\n" ++
+        "  ret take(Sink.Stdout);\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.io'") == null);
+    }
+}
+
+test "diagnostic: an enum variant reached through an alias marks that import used" {
+    const allocator = std.testing.allocator;
+    const lib_path = "unused_import_alias_lib.fn";
+    const ifilepath = "unused_import_alias_use.fn";
+
+    // An aliased import is tracked by its alias, so marking the origin file
+    // (which the unaliased path does) never reaches it.
+    const lib_input =
+        "imp std.io;\n" ++
+        "pub fun take(Sink s) num {\n" ++
+        "  _ = s;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    try writeTestFile(lib_path, lib_input);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    const input =
+        "imp unused_import_alias_lib;\n" ++
+        "imp std.io as io;\n" ++
+        "fun main() num {\n" ++
+        "  ret take(io.Sink.Stdout);\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import") == null);
+    }
+}
+
 test "diagnostic: genuinely unused std.map import still warns (false-negative guard)" {
     const allocator = std.testing.allocator;
     const ifilepath = "unused_import_map_unused.fn";
