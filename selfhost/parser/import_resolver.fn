@@ -12,6 +12,7 @@ imp ..lexer.token;
 imp std.string;
 imp std.path;
 imp std.fs;
+imp std.sys;
 imp std.vec;
 imp std.set;
 imp std.map;
@@ -101,15 +102,54 @@ fun _normalize_path(str path) str {
   ret sb.build();
 }
 
+// How far above a file to look for the standard library before giving
+// up. Deep enough for a file nested in a project, short enough that a
+// missing stdlib is reported rather than walked to the root.
+const num max_stdlib_search_depth = 32;
+
+// Where the standard library lives, which is asked for rather than
+// assumed: an editor starts a language server in whatever directory it
+// likes, and a compiler is run from wherever a project happens to sit.
+// An explicit setting wins, then the nearest `stdlib` at or above the
+// file being read, and only then the working directory.
+fun _stdlib_root(str input_file_path) str {
+  str configured = env("FUN_STDLIB_DIR");
+  if configured != nil && !equals(configured, "") {
+    ret configured;
+  }
+
+  str dir = dirname(input_file_path);
+  if equals(dir, input_file_path) {
+    dir = ".";
+  }
+  num depth = 0;
+  for depth < max_stdlib_search_depth {
+    let candidate = path_join(dir, "stdlib");
+    // A directory named `stdlib` is not enough: the repository keeps
+    // one holding examples of using the standard library. What makes a
+    // root is the `std` it would be imported from.
+    if is_dir(path_join(candidate, "std")) {
+      ret candidate;
+    }
+    let parent = dirname(dir);
+    if equals(parent, dir) || equals(parent, "") {
+      break;
+    }
+    dir = parent;
+    depth = depth + 1;
+  }
+  ret "stdlib";
+}
+
 // Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
-// path. A `std.`-prefixed path resolves against a fixed stdlib root
-// (`"stdlib"`), not relative to the importing file, so it's the same
-// regardless of who imports it. Everything else resolves relative to
-// `input_file_path`'s own directory (see `_convert_dotted_path` for the
-// dot-to-path conversion shared by both).
+// path. A `std.`-prefixed path resolves against the stdlib root, not
+// relative to the importing file, so it is the same regardless of who
+// imports it. Everything else resolves relative to `input_file_path`'s
+// own directory (see `_convert_dotted_path` for the dot-to-path
+// conversion shared by both).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
-    ret _convert_dotted_path("stdlib", import_path);
+    ret _convert_dotted_path(_stdlib_root(input_file_path), import_path);
   }
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
@@ -131,13 +171,16 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // the whole merge as `.Err`, rather than returning a partial program.
 // The nodes the entry file declares, read from the file itself so the
 // import statements survive.
-fun _entry_nodes(str path) Vec<Node> {
+fun _entry_nodes(str path, str source) Vec<Node> {
   Vec<Node> out;
   out.init(0);
-  if !exists(path) {
-    ret out;
+  str src = source;
+  if src == nil {
+    if !exists(path) {
+      ret out;
+    }
+    src = read_to_string(path);
   }
-  str src = read_to_string(path);
   let lexed = tokenize(src, path);
   if lexed.is_err() {
     ret out;
@@ -173,10 +216,22 @@ fun _import_nodes_only(Vec<Node> nodes) Vec<Node> {
 }
 
 pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
+  ret parse_program_with_source(entry_path, nil);
+}
+
+// The same, with the entry file's source supplied rather than read from
+// disk. An editor holds text the file does not yet contain, and that is
+// the text to judge; everything it imports is still read from disk.
+pub fun parse_program_with_source(str entry_path, str entry_source) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   Set<str> preload_visited = set_init("", 8);
-  let preload_err = _preload_and_collect(entry_path, &global_symbols, &preload_visited);
+  let preload_err = _preload_and_collect_source(
+    entry_path,
+    entry_source,
+    &global_symbols,
+    &preload_visited
+  );
   if preload_err.is_some() {
     ret .Err(preload_err.unwrap());
   }
@@ -190,8 +245,9 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
   Vec<str> rename_targets;
   rename_targets.init(0);
   Set<str> visited = set_init("", 8);
-  let err = _parse_and_merge(
+  let err = _parse_and_merge_source(
     entry_path,
+    entry_source,
     &merged,
     &aliases,
     &visited,
@@ -206,7 +262,7 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
   // The entry file is parsed once more here only to keep its own nodes,
   // which the merge settles and then drops.
   ProgramMergeResult r;
-  r.entry_nodes = _entry_nodes(entry_path);
+  r.entry_nodes = _entry_nodes(entry_path, entry_source);
   r.nodes = merged;
   r.aliases = aliases;
   r.alias_rename_keys = rename_keys;
@@ -247,16 +303,30 @@ pub compound ProgramMergeResult {
 // top-level `pub compound name` is found via a raw, depth-tracked token
 // scan that never needs to understand expressions.
 fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
+  ret _preload_and_collect_source(path, nil, out, visited);
+}
+
+// The same, with this file's source supplied rather than read.
+fun _preload_and_collect_source(
+  str path,
+  str source,
+  Map<str,
+  GlobalSymbolInfo>* out,
+  Set<str>* visited
+) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
     ret .None;
   }
   visited.add(path);
 
-  if !exists(path) {
-    ret .Some(format("import not found: {str}", path));
+  str src = source;
+  if src == nil {
+    if !exists(path) {
+      ret .Some(format("import not found: {str}", path));
+    }
+    src = read_to_string(path);
   }
-  str src = read_to_string(path);
 
   let tok_result = tokenize(src, path);
   if tok_result.is_err() {
@@ -352,16 +422,44 @@ fun _parse_and_merge(
   Vec<str>* rename_keys,
   Vec<str>* rename_targets
 ) Option<str> {
+  ret _parse_and_merge_source(
+    path,
+    nil,
+    merged,
+    aliases,
+    visited,
+    global_symbols,
+    current_alias,
+    rename_keys,
+    rename_targets
+  );
+}
+
+fun _parse_and_merge_source(
+  str path,
+  str source,
+  Vec<Node>* merged,
+  Vec<str>* aliases,
+  Set<str>* visited,
+  Map<str,
+  GlobalSymbolInfo>* global_symbols,
+  str current_alias,
+  Vec<str>* rename_keys,
+  Vec<str>* rename_targets
+) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
     ret .None;
   }
   visited.add(path);
 
-  if !exists(path) {
-    ret .Some(format("import not found: {str}", path));
+  str src = source;
+  if src == nil {
+    if !exists(path) {
+      ret .Some(format("import not found: {str}", path));
+    }
+    src = read_to_string(path);
   }
-  str src = read_to_string(path);
 
   let tok_result = tokenize(src, path);
   if tok_result.is_err() {
@@ -661,12 +759,13 @@ test "resolve_import_path handles an input file with no directory component" {
 
 test "resolve_import_path resolves a 'std.' import against the stdlib root, not the importing file's own directory" {
   let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.string");
-  assert equals(resolved, "stdlib/std/string.fn"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
+  assert ends_with(resolved, "std/string.fn"), "expected a stdlib import to land under the stdlib root";
+  assert !contains(resolved, "selfhost/lexer"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
 }
 
 test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib root" {
   let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.c.io");
-  assert equals(resolved, "stdlib/std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
+  assert ends_with(resolved, "std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
 }
 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {

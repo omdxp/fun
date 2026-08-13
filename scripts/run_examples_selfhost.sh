@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 # Validates the examples/ corpus against the SELF-HOSTED compiler.
 #
-# selfhost/cli/main.fn is deliberately narrow today (see its own header
-# comment): positional args only, compiles straight to a .c file, and
-# never shells a C compiler or runs the result. So unlike
-# scripts/run_examples.sh (which drives the bootstrap compiler's own
-# -in/-no-exec CLI directly), this harness does the "shell cc, run the
-# binary" steps itself around the self-hosted binary's one compile step --
-# proving codegen-output equivalence without waiting on selfhost's own CLI
-# to grow process-spawning support.
+# The self-hosted compiler is asked for the generated C only (-no-exec),
+# and this harness shells the C compiler and runs the binary itself. That
+# keeps what is being compared to codegen output, rather than to how
+# either driver happens to invoke a C compiler.
 #
 # Also: selfhost's codegen has no type-checker of its own yet (see
 # codegen.fn's own header comment) -- it emits whatever the AST says and
@@ -129,7 +125,7 @@ for full in "${files[@]}"; do
   # from an absolute path, turning it into a relative-looking path that
   # fails to resolve. Not what this harness is validating; work around it.
   set +e
-  compile_out="$(run_with_timeout "$SELFHOST_EXE" "$rel" "$out_c" 2>&1)"
+  compile_out="$(run_with_timeout "$SELFHOST_EXE" -in "$rel" -no-exec -out "$out_c" 2>&1)"
   compile_ec=$?
   set -e
 
