@@ -698,7 +698,7 @@ wait to avoid warning on slow-but-live operations.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.mock_time`: a `Clock` quirk for time-mocked tests — `SystemClock` (the real clock) and `MockClock` (a fully controllable fake one, advanced only via explicit `advance`/`set` calls, never real time)
 - `std.testing`: the concurrent test-mode runner (`run_discovered_tests`) `fun test` auto-imports and calls into — not intended to be used directly from ordinary Fun source
-- `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
+- `std.sys`: environment and process helpers (`env`/`set_env` for environment variables, `sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI

@@ -21692,13 +21692,17 @@ pub const TranspileProcess = struct {
                     };
 
                     if (argcnt == 0) {
-                        try self.write("int argc, char** argv");
+                        // Reserved names: a program may declare its own
+                        // `argc` or `argv`, and naming a variable after what
+                        // the program was given must not collide with the
+                        // entry point's own parameters.
+                        try self.write("int __fun_argc, char** __fun_argv");
                     } else if (is_single_str_array) {
                         // Register the Fun-visible param for later type queries.
                         const arg0 = args_vec_opt.?.items()[0];
                         try self.register_scope_variable(arg0);
                         self.in_function_params = true;
-                        try self.write("int argc, ");
+                        try self.write("int __fun_argc, ");
                         // `str[] args` prints as `char* args[]`, which is OK for argv.
                         try self.transpile_node(arg0.*);
                         self.in_function_params = false;

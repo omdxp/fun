@@ -37,6 +37,11 @@ pub fun system(str command) num;
 // Looks up an environment variable, returning null if missing (C semantics).
 pub fun getenv(str name) str;
 
+// Sets an environment variable for this process and everything it starts
+// afterward. A non-zero `overwrite` replaces a value already there.
+// Returns 0 on success.
+pub fun setenv(str name, str value, num overwrite) num;
+
 // Conversions
 // Parses an integer in base-10 (C semantics).
 pub fun atoi(str s) num;
