@@ -125,23 +125,21 @@ test "async and await surface transpiles" {
   assert contains(out, "int64_t inc(int64_t x)"), "expected the async body to lower to a plain C function";
 }
 
-// gap: an async function taking a function-typed parameter fails codegen with
-// "unsupported node"; the async payload struct has no function-pointer declarator.
-// test "an async fn with a function-typed parameter transpiles" {
-// str src = `imp std.c.io;
-// `async fun combine(fun(num) num f, fun(num) num g, num arg) num {
-// `  ret f(arg) + g(arg);
-// `}
-// `fun double_it(num x) num { ret x * 2; }
-// `fun triple_it(num x) num { ret x * 3; }
-// `async fun main() {
-// `  num out = await combine(double_it, triple_it, 10);
-// `  printf("%lld", out);
-// `}`;
-// let out = emit_c(src, "an async fn with a function-typed parameter transpiles");
-// assert contains(out, "(*f)(int64_t)"), "expected the callback parameter to lower to a C function pointer";
-// assert contains(out, "__fun_async_call_combine"), "expected the async call thunk";
-// }
+test "an async fn with a function-typed parameter transpiles" {
+  str src = `imp std.c.io;
+  `async fun combine(fun(num) num f, fun(num) num g, num arg) num {
+  `  ret f(arg) + g(arg);
+  `}
+  `fun double_it(num x) num { ret x * 2; }
+  `fun triple_it(num x) num { ret x * 3; }
+  `async fun main() {
+  `  num out = await combine(double_it, triple_it, 10);
+  `  printf("%lld", out);
+  `}`;
+  let out = emit_c(src, "an async fn with a function-typed parameter transpiles");
+  assert contains(out, "(*f)(int64_t)"), "expected the callback parameter to lower to a C function pointer";
+  assert contains(out, "__fun_async_call_combine"), "expected the async call thunk";
+}
 
 test "async and await let surface transpiles" {
   str src = `imp std.c.io;

@@ -6898,6 +6898,43 @@ impl Codegen {
   // such a parameter needs nothing special at the call site, its C type
   // already being a function pointer; it is recorded under an empty type
   // name so a later `.field` off it is rejected rather than guessed.
+  // Writes `dtype name`, in whatever order C wants the name written. A
+  // function type puts it inside the declarator, `bin (*name)(num)`, so
+  // a type and a name cannot simply be written one after the other.
+  write_named_type(DataType dtype, str name) Option<CodegenErrorKind> {
+    if !dtype.has_fn_sig {
+      let plain = self.write_type(dtype);
+      if plain.is_none() {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
+      self.state.write(" ");
+      self.state.write(name);
+      ret .None;
+    }
+
+    let sig = dtype.fn_sig;
+    let rt = self.write_type(*sig.rtype);
+    if rt.is_none() {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
+    }
+    self.state.write(" (*");
+    self.state.write(name);
+    self.state.write(")(");
+    bin first = true;
+    for p : sig.params {
+      if !first {
+        self.state.write(", ");
+      }
+      first = false;
+      let pt = self.write_type(*p);
+      if pt.is_none() {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
@@ -6992,8 +7029,9 @@ impl Codegen {
   // it, `fork` enqueues onto the scheduler's worker pool without waiting.
   // `emit_name` is the function's final C name, used by the entry
   // trampoline and the call helper's synchronous fallback, and covers a
-  // monomorphized `async` method once per instantiation. A
-  // function-pointer-typed argument is rejected rather than supported.
+  // monomorphized `async` method once per instantiation. An argument of
+  // function type is carried like any other, written into the payload as
+  // the declarator C wants rather than as a type beside a name.
   emit_async_function_support(Node node, str emit_name) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
@@ -7010,9 +7048,6 @@ impl Codegen {
           for arg : f.args {
             fit arg.kind {
               .Variable(v) -> {
-                if v.var_type.has_fn_sig {
-                  ret .Some(CodegenErrorKind.UnsupportedNode);
-                }
                 arg_names.push(v.name);
                 arg_dtypes.push(v.var_type);
               }
@@ -7060,12 +7095,13 @@ impl Codegen {
         num ai = 0;
         for ai < arg_names.len {
           self.state.write("  ");
-          let awt = self.write_type(*arg_dtypes.get(ai));
-          if awt.is_none() {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
+          StringBuilder fb = string_builder_init(16);
+          fb.append("__arg");
+          fb.append(format_num(ai));
+          let awt = self.write_named_type(*arg_dtypes.get(ai), fb.build());
+          if awt.is_some() {
+            ret awt;
           }
-          self.state.write(" __arg");
-          self.state.write(format_num(ai));
           self.state.write(";\n");
           ai = ai + 1;
         }
