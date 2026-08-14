@@ -492,6 +492,9 @@ compound Checker {
   // Enums whose variants carry no payload, which stand for the numbers
   // they are written as.
   Set<str> plain_enums;
+  // Every enum the program declares, whether or not its variants carry
+  // payloads. `plain_enums` holds only the ones that read as numbers.
+  Set<str> enum_names;
   // What each declared compound holds, and what each type and quirk
   // declares as methods.
   Map<str, CompoundInfo> compounds;
@@ -503,15 +506,21 @@ compound Checker {
   // await.
   CheckedType rtype;
   bin in_async;
+  // The type parameters the declaration being walked names. They stand
+  // for types the checker never sees, so a name among them is a type
+  // rather than one nothing declares.
+  Vec<str> active_type_params;
   bin failed;
   TypeError error;
 }
 
 fun _checker_new() Checker {
   Checker c;
+  c.active_type_params.init(4);
   c.fns.init(32);
   c.quirks = set_init("", 16);
   c.plain_enums = set_init("", 16);
+  c.enum_names = set_init("", 16);
   c.compounds.init(16);
   c.methods.init(16);
   c.current_file = "";
@@ -575,6 +584,44 @@ impl Checker {
       ret from.pointer_depth > 0 || self.quirks.has(from.name);
     }
     ret false;
+  }
+
+  // Reports a `sizeof` of a name the program never declares. Measuring
+  // a type nothing defines has no answer, and C would be left to guess
+  // at a name it has never seen either.
+  check_sizeof_operand(Node* node, Node* operand) {
+    if operand == nil {
+      ret;
+    }
+    str named = "";
+    fit operand.kind {
+      .Identifier(text) -> { named = text; }
+      _ -> { ret; }
+    }
+    // Only a plain name is judged: a generic instantiation, an array or
+    // a parenthesized form carries its own structure and is read
+    // elsewhere.
+    str bare = named;
+    for ends_with(bare, "*") {
+      bare = substr(bare, 0, len(bare) - 1);
+    }
+    if equals(bare, "") || keyword_is_datatype(bare) {
+      ret;
+    }
+    if self.compounds.at(bare).is_some() || self.quirks.has(bare) || self.plain_enums.has(bare) {
+      ret;
+    }
+    if self.enum_names.has(bare) {
+      ret;
+    }
+    // A parameter of the declaration being walked stands for a type an
+    // instantiation supplies, which is a type all the same.
+    for tp : self.active_type_params {
+      if equals(tp, bare) {
+        ret;
+      }
+    }
+    self.fail(format("sizeof names no type called '{str}'", bare), node);
   }
 
   // Rejects a comparison between two different enums. A plain enum reads
@@ -1577,7 +1624,9 @@ impl Checker {
       if equals(name, "sizeof") {
         if args.len != 1 || !_names_a_type(args.get(0)) {
           self.fail("sizeof measures a type", node);
+          ret checked_of(DataTypeType.Num);
         }
+        self.check_sizeof_operand(node, args.get(0));
         ret checked_of(DataTypeType.Num);
       }
       ret checked_unknown();
@@ -2053,6 +2102,19 @@ impl Checker {
         _ -> {}
       }
     }
+    // The parameters this declaration names stand for types the checker
+    // never sees, so they are held while its body is checked: a name
+    // that is one of them is a type, not a name nothing declares.
+    Vec<str> previous_params = self.active_type_params;
+    Vec<str> params;
+    params.init(4);
+    if f.has_type_params {
+      for tp : f.type_params {
+        params.push(tp);
+      }
+    }
+    self.active_type_params = params;
+
     CheckedType previous = self.rtype;
     bin previous_async = self.in_async;
     self.in_async = f.is_async;
@@ -2063,6 +2125,8 @@ impl Checker {
     self.check_statement(f.body, &env);
     self.rtype = previous;
     self.in_async = previous_async;
+    self.active_type_params.free();
+    self.active_type_params = previous_params;
     env.pop();
     env.pop();
   }
@@ -2119,6 +2183,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
             carries_data = true;
           }
         }
+        checker.enum_names.add(e.name);
         if !carries_data {
           checker.plain_enums.add(e.name);
         }

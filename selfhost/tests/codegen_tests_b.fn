@@ -826,9 +826,9 @@ test "sizeof measures a pointer type" {
   assert contains(out, "sizeof(int64_t) * n"), "expected a multiplication beside it to survive";
 }
 
-// gap: a pointer type operand to sizeof was a parse error; see the test
-// above. What remains is `sizeof(Nope)` on an undeclared type, which is
-// still accepted and passed through to C.
+// Both halves of this are resolved: a pointer operand parses (see the
+// test above) and an undeclared type is rejected rather than passed
+// through to C (typecheck_tests.fn).
 // test "reaudit: sizeof accepts pointer types" { }
 
 test "reaudit: await binds tighter than a following binary operator" {

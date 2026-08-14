@@ -824,3 +824,35 @@ test "an enum compared with its own kind, or with a number, is accepted" {
     "expected an enum to compare with a number"
   );
 }
+
+test "sizeof names a type the program declares" {
+  // Measuring a type nothing defines has no answer, and C would be left
+  // guessing at a name it has never seen either.
+  assert contains(check(`fun main() num { ret sizeof(Nope); }`), "sizeof names no type"), "expected an undeclared type to be rejected";
+}
+
+test "sizeof accepts every shape that does name a type" {
+  // A parameter stands for whatever an instantiation supplies.
+  accepts(
+    `fun size_of<T>(T v) num { ret sizeof(T); }
+    `fun main() num { ret size_of(1); }`,
+    "expected a type parameter accepted"
+  );
+  // Declaration order is the reader's business, not the checker's.
+  accepts(
+    `fun main() num { ret sizeof(Later); }
+    `compound Later { num v; }`,
+    "expected a type declared later accepted"
+  );
+  // An enum whose variants carry payloads is a type like any other.
+  accepts(
+    `enum Shape { Dot, Held(num) }
+    `fun main() num { ret sizeof(Shape); }`,
+    "expected a data-carrying enum accepted"
+  );
+  accepts(
+    `compound Node { num v; }
+    `fun main() num { ret sizeof(Node*); }`,
+    "expected a pointer to a declared type accepted"
+  );
+}
