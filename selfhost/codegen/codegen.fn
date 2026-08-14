@@ -187,6 +187,12 @@ pub compound Codegen {
   // the owning block finishes.
   Vec<Node*> defer_stack;
   Vec<num> defer_scope_starts;
+  // `defer_stack.len` at the start of the innermost enclosing loop's own
+  // body, one entry pushed per nesting level of `for`. `break`/`continue`
+  // read the top entry to replay every defer registered since that loop
+  // began (which can span several nested block scopes, e.g. an `if`
+  // inside the loop) without also replaying a defer from further out.
+  Vec<num> loop_defer_marks;
   // Every non-generic compound's name and its fields' declared types, so
   // a chained field access can determine `.`/`->` at each link.
   Vec<str> compound_names;
@@ -454,6 +460,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
   g.quirk_inst_override_name = "";
+  g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.call_recv_temp_counter = 0;
@@ -5831,11 +5838,23 @@ impl Codegen {
         ret .None;
       }
       .StatementBreak -> {
+        if self.loop_defer_marks.len > 0 {
+          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          if derr.is_some() {
+            ret derr;
+          }
+        }
         self.state.write_indent();
         self.state.write("break;\n");
         ret .None;
       }
       .StatementContinue -> {
+        if self.loop_defer_marks.len > 0 {
+          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          if derr.is_some() {
+            ret derr;
+          }
+        }
         self.state.write_indent();
         self.state.write("continue;\n");
         ret .None;
@@ -6215,7 +6234,9 @@ impl Codegen {
       self.state.write("while (1) {\n");
     }
     self.state.indent_level = self.state.indent_level + 1;
+    self.loop_defer_marks.push(self.defer_stack.len);
     let berr = self.emit_body(*fc.body);
+    self.loop_defer_marks.pop();
     if berr.is_some() {
       ret berr;
     }
@@ -6252,7 +6273,9 @@ impl Codegen {
         self.state.write(fr.index_name);
         self.state.write("++) {\n");
         self.state.indent_level = self.state.indent_level + 1;
+        self.loop_defer_marks.push(self.defer_stack.len);
         let berr = self.emit_body(*fr.body);
+        self.loop_defer_marks.pop();
         if berr.is_some() {
           ret berr;
         }
@@ -6505,7 +6528,9 @@ impl Codegen {
             );
           }
         }
+        self.loop_defer_marks.push(self.defer_stack.len);
         let berr = self.emit_body(*fi.body);
+        self.loop_defer_marks.pop();
         if berr.is_some() {
           ret berr;
         }
@@ -6660,7 +6685,9 @@ impl Codegen {
         self.record_local_multidim(fi.item_name, len_root, len_offset + 1);
       }
     }
+    self.loop_defer_marks.push(self.defer_stack.len);
     let berr = self.emit_body(*fi.body);
+    self.loop_defer_marks.pop();
     if berr.is_some() {
       ret berr;
     }

@@ -71,32 +71,33 @@ test "defer in range loop runs at each iteration end" {
   assert contains(out, "logLine(\"defer iter\")"), "expected the loop-body defer to be emitted";
 }
 
-// gap: a loop-body defer is not replayed before `continue` or `break`, only at fall-through.
-// test "defer in loop runs on continue and break" {
-// str src = `imp std.c.io;
-// `fun logLine(str msg) { printf("%s\n", msg); }
-// `fun main() num {
-// `  num i = 0;
-// `  for i < 4 {
-// `    defer logLine("defer iter");
-// `    i = i + 1;
-// `    if i == 2 {
-// `      logLine("continue");
-// `      continue;
-// `    }
-// `    if i == 3 {
-// `      logLine("break");
-// `      break;
-// `    }
-// `    logLine("tail");
-// `  }
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "defer in loop runs on continue and break");
-// assert contains(out, "continue;"), "expected the continue statement";
-// assert contains(out, "break;"), "expected the break statement";
-// assert count(out, "logLine(\"defer iter\")") > 2, "expected the defer to be replayed at continue, break and fall-through";
-// }
+test "defer in loop runs on continue and break" {
+  str src = `imp std.c.io;
+  `fun logLine(str msg) { printf("%s\n", msg); }
+  `fun main() num {
+  `  num i = 0;
+  `  for i < 4 {
+  `    defer logLine("defer iter");
+  `    i = i + 1;
+  `    if i == 2 {
+  `      logLine("continue");
+  `      continue;
+  `    }
+  `    if i == 3 {
+  `      logLine("break");
+  `      break;
+  `    }
+  `    logLine("tail");
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "defer_loop_continue_break",
+    "defer in loop runs on continue and break"
+  );
+  assert equals(out, "tail\ndefer iter\ncontinue\ndefer iter\nbreak\ndefer iter\n"), "expected the defer to replay at fall-through, continue, and break";
+}
 
 test "compound assignment transpiles" {
   str src = `fun main() {
