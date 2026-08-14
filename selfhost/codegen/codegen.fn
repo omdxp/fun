@@ -5085,13 +5085,24 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(name) -> {
-            self.state.write(prefix);
-            self.state.write(name);
-            self.state.write("(");
             Vec<Node*> args;
             args.init(0);
             defer args.free();
             self.flatten_call_args(e.right, &args);
+            // A generic callee (`async fun id<T>(T x) T`) needs its
+            // mangled instantiation, not the bare template name: the
+            // thunk this prefix builds only exists under
+            // `__fun_async_call_<mangled name>`, emitted as a side
+            // effect of `emit_function_named` on the specialized body
+            // `maybe_instantiate_generic_function` produces here.
+            str callee_name = name;
+            let generic_inst = self.maybe_instantiate_generic_function(name, args);
+            if generic_inst.is_some() {
+              callee_name = generic_inst.unwrap().mangled_name;
+            }
+            self.state.write(prefix);
+            self.state.write(callee_name);
+            self.state.write("(");
             bin first = true;
             for arg : args {
               if !first {

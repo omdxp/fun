@@ -208,18 +208,16 @@ test "async field method await transpiles" {
   assert contains(out, "__fun_async_call_Counter__add("), "expected the receiver's own type to pick the thunk";
 }
 
-// gap: an async generic function is not monomorphized at its call site; the thunk
-// is emitted as `__fun_async_call_id` and the instantiated body is never emitted.
-// test "async generic function await transpiles" {
-// str src = `imp std.c.io;
-// `async fun id<T>(T x) T { ret x; }
-// `async fun main() {
-// `  num out = await id(42);
-// `  printf("%lld", out);
-// `}`;
-// let out = emit_c(src, "async generic function await transpiles");
-// assert contains(out, "__fun_async_call_id__num("), "expected the monomorphized async thunk";
-// }
+test "async generic function await transpiles" {
+  str src = `imp std.c.io;
+  `async fun id<T>(T x) T { ret x; }
+  `async fun main() {
+  `  num out = await id(42);
+  `  printf("%lld", out);
+  `}`;
+  let out = emit_c(src, "async generic function await transpiles");
+  assert contains(out, "__fun_async_call_id__num("), "expected the monomorphized async thunk";
+}
 
 test "async generic impl method await transpiles" {
   str src = `imp std.c.io;
