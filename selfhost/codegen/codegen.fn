@@ -330,6 +330,12 @@ pub compound Codegen {
   // with its own generic arguments intact rather than collapsing to an
   // opaque mangled name.
   Vec<DataType*> type_subst_arg_dtypes;
+  // Non-empty while `emit_quirk_vtable_machinery` is building the
+  // machinery for one concrete instantiation of a generic compound's
+  // quirk impl, naming that instantiation's mangled struct name (e.g.
+  // `Box__num`) in place of the template's own bare `type_name`. Empty
+  // is the ordinary, non-generic case.
+  str quirk_inst_override_name;
   // Where a lazily-monomorphized typedef or generic impl method
   // definition is spliced, instead of wherever the output happens to be
   // when it's first triggered: for a type used inside a function body
@@ -447,6 +453,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
+  g.quirk_inst_override_name = "";
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.call_recv_temp_counter = 0;
@@ -1186,6 +1193,14 @@ impl Codegen {
       arg_is_pointer,
       arg_dtypes
     );
+    self.maybe_emit_quirk_vtable_for_instantiation(
+      dt.type_str,
+      mangled_name,
+      type_params,
+      arg_type_names,
+      arg_is_pointer,
+      arg_dtypes
+    );
     ret .Some(mangled_name);
   }
 
@@ -1326,6 +1341,14 @@ impl Codegen {
     self.maybe_instantiate_generic_impl_methods(
       dt.type_str,
       mangled_name,
+      arg_type_names,
+      arg_is_pointer,
+      arg_dtypes
+    );
+    self.maybe_emit_quirk_vtable_for_instantiation(
+      dt.type_str,
+      mangled_name,
+      type_params,
       arg_type_names,
       arg_is_pointer,
       arg_dtypes
@@ -1784,6 +1807,172 @@ impl Codegen {
             self.type_subst_arg_is_pointer = prev_arg_ptrs;
             self.type_subst_arg_dtypes = prev_arg_dtypes;
           }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Companion to `maybe_instantiate_generic_impl_methods`: builds dynamic
+  // dispatch machinery for a generic compound's quirk impl, once per
+  // concrete instantiation (`Box<num>` gets its own `__fun_coerce_Box__num_
+  // Lenable`, wrapper trampolines, and vtable instance calling into that
+  // instantiation's own monomorphized methods). The quirk's vtable struct
+  // and fat-pointer type themselves are still shared across every
+  // instantiation, since a plain (non-generic) quirk's shape doesn't
+  // depend on `T` — `emit_quirk_vtable_machinery` already keys that half
+  // by bare quirk name. A doubly-generic quirk (`impl Box<T> as To<T>`,
+  // `i.has_quirk_concrete_instantiation`) is out of scope here; its
+  // vtable shape would depend on `T` too, needing machinery this doesn't
+  // attempt.
+  maybe_emit_quirk_vtable_for_instantiation(
+    str base_name,
+    str mangled_name,
+    Vec<str> type_params,
+    Vec<str> arg_type_names,
+    Vec<bin> arg_is_pointer,
+    Vec<DataType*> arg_dtypes
+  ) {
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || !i.has_quirk_name || i.has_quirk_concrete_instantiation || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          // `i.has_quirk_concrete_instantiation` only flags a generic
+          // quirk already resolved to concrete args at the impl (`impl
+          // PtrBox as Box<Node*>`, where `PtrBox` itself isn't generic).
+          // It says nothing about a generic quirk whose own argument is
+          // still one of the compound's unresolved type params (`impl
+          // MapIter<K, V> as Iterator<K>`) -- checked separately here,
+          // against the quirk's own declaration: that shape needs a
+          // vtable keyed by the resolved `K`, which this machinery
+          // doesn't build, so it's skipped rather than misfiring with a
+          // stale, unsubstituted vtable shape.
+          bin quirk_itself_generic = false;
+          num qdi = 0;
+          for qdi < self.quirk_decl_names.len {
+            if equals(self.quirk_decl_names.get(qdi), i.quirk_name) {
+              if self.quirk_decl_type_params.get(qdi).len > 0 {
+                quirk_itself_generic = true;
+              }
+              break;
+            }
+            qdi = qdi + 1;
+          }
+          if quirk_itself_generic {
+            continue;
+          }
+          // A forced instantiation (`impl Map<str, num> as Display`) only
+          // applies to a matching set of concrete arguments; without this
+          // check it would also misfire on an unrelated instantiation
+          // sharing the same argument COUNT (`Map<str, str>`), building a
+          // vtable off a substitution that maps two different forced
+          // names onto one instantiation's arguments.
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes
+          ) {
+            continue;
+          }
+          let prev_params = self.type_subst_param_names;
+          let prev_arg_names = self.type_subst_arg_type_strs;
+          let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+          let prev_arg_dtypes = self.type_subst_arg_dtypes;
+          self.type_subst_param_names = type_params;
+          self.type_subst_arg_type_strs = arg_type_names;
+          self.type_subst_arg_is_pointer = arg_is_pointer;
+          self.type_subst_arg_dtypes = arg_dtypes;
+          str prev_override = self.quirk_inst_override_name;
+          self.quirk_inst_override_name = mangled_name;
+
+          // Writes real struct/function definitions, not just
+          // declarations, so it can't go straight to `self.state`: this
+          // is reached mid-body, resolving a local's declared type, the
+          // same trigger point `ensure_compound_instantiated` hoists its
+          // own struct body from. The whole splice -- vtable machinery
+          // and each method's own monomorphized body -- has to land in
+          // one safe, hoisted block: `self.state` here can be an
+          // unrelated compound's own in-progress struct scratch (this
+          // whole call chain started from `ensure_compound_instantiated`,
+          // reachable from a field dependency, not just a real
+          // statement). `ensure_generic_impl_method_emitted` below calls
+          // `emit_hoisted` itself, which resolves against whatever
+          // `hoist_insert_pos`/`hoist_scratch_depth` happen to be at that
+          // moment; left at the caller's ambient values, a stale position
+          // captured for the outer real buffer would get applied against
+          // this small throwaway `qv_scratch` instead. Pinning both to
+          // "no position, no nesting" for the duration forces every
+          // nested `emit_hoisted` down the plain `self.state.write`
+          // path -- landing in `qv_scratch`, exactly where this needs it
+          // -- and the ambient values are restored before the real
+          // splice below, which needs them intact.
+          CodegenState qv_scratch = codegen_state_new();
+          CodegenState* saved_qv_state = self.state;
+          let saved_qv_hoist_pos = self.hoist_insert_pos;
+          let saved_qv_scratch_depth = self.hoist_scratch_depth;
+          // `ensure_generic_impl_method_emitted`'s own prototype-splicing
+          // (below) reads `current_stmt_start_pos`, not just
+          // `hoist_insert_pos`, to decide where to splice -- left at the
+          // caller's stale value, that position is only valid against the
+          // outer real buffer, not this tiny `qv_scratch`, and splicing
+          // against it here is an out-of-bounds substring read.
+          let saved_qv_stmt_start_pos = self.current_stmt_start_pos;
+          self.state = &qv_scratch;
+          self.hoist_insert_pos = .None;
+          self.hoist_scratch_depth = 0;
+          self.current_stmt_start_pos = .None;
+          self.emit_quirk_vtable_machinery(tmpl);
+
+          // The vtable's wrappers call straight through to each method's
+          // own monomorphized body, which nothing else triggers: a
+          // dynamically-dispatched `la.size()` never names
+          // `Box__num__Lenable__size` in the source the way a static
+          // `bn.size()` call would. `ensure_generic_impl_method_emitted`
+          // is the same lazy trigger a static call site uses, keyed and
+          // deduped off `self.instantiation_*`, which `.push`ed this
+          // instantiation's binding just above in
+          // `maybe_instantiate_generic_impl_methods`. Draining is
+          // suppressed here: this runs the moment the compound is first
+          // instantiated, which is too early for a method body that
+          // references some other type by value (`sizeof(JsonValue)`
+          // inside `Map<str, JsonValue>`'s own `clear()`) -- that other
+          // type's own full definition isn't necessarily emitted yet at
+          // this point, only forward-declared. Enqueuing without
+          // draining defers the actual body to `transpile`'s own
+          // end-of-program drain below, by which point everything the
+          // program ever uses has already been emitted at least once.
+          StringBuilder qm_pfx_sb = string_builder_init(16);
+          qm_pfx_sb.append(base_name);
+          qm_pfx_sb.append("__");
+          qm_pfx_sb.append(i.quirk_name);
+          qm_pfx_sb.append("__");
+          str qm_prefix = qm_pfx_sb.build();
+          bin prev_suppress_qv = self.suppress_generic_impl_method_draining;
+          self.suppress_generic_impl_method_draining = true;
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                let qm_bare = strip_prefix(fnv.name, qm_prefix);
+                self.ensure_generic_impl_method_emitted(mangled_name, qm_bare);
+              }
+              _ -> {}
+            }
+          }
+          self.suppress_generic_impl_method_draining = prev_suppress_qv;
+
+          self.state = saved_qv_state;
+          self.hoist_insert_pos = saved_qv_hoist_pos;
+          self.hoist_scratch_depth = saved_qv_scratch_depth;
+          self.current_stmt_start_pos = saved_qv_stmt_start_pos;
+          self.emit_hoisted(qv_scratch.out.build());
+
+          self.quirk_inst_override_name = prev_override;
+          self.type_subst_param_names = prev_params;
+          self.type_subst_arg_type_strs = prev_arg_names;
+          self.type_subst_arg_is_pointer = prev_arg_ptrs;
+          self.type_subst_arg_dtypes = prev_arg_dtypes;
         }
         _ -> {}
       }
@@ -9415,12 +9604,22 @@ impl Codegen {
       .Impl(i) -> {
         // A generic quirk impl (`impl Vec<T> as Sized { ... }`) has no
         // single monomorphic vtable signature: an unbound `T` in a method
-        // signature can't be expressed as one C function pointer.
-        if !i.has_quirk_name || i.has_type_params {
+        // signature can't be expressed as one C function pointer. The
+        // exception is a call arriving through `quirk_inst_override_name`,
+        // where the caller has already bound `T` to one concrete
+        // instantiation and set up substitution context accordingly.
+        if !i.has_quirk_name || (i.has_type_params && equals(self.quirk_inst_override_name, "")) {
           ret .None;
         }
         str quirk_name = i.quirk_name;
+        // The template's own bare name, used to strip each method's
+        // pre-mangled template name (`Box__Lenable__wrap`) down to its
+        // bare method name regardless of instantiation.
+        str bare_type_name = i.type_name;
         str type_name = i.type_name;
+        if !equals(self.quirk_inst_override_name, "") {
+          type_name = self.quirk_inst_override_name;
+        }
         // A no-op when this impl's machinery already ran, such as when
         // `ensure_plain_type_emitted`'s field-dependency check triggered
         // it early, so the later per-impl pass doesn't re-emit.
@@ -9445,7 +9644,7 @@ impl Codegen {
         }
 
         StringBuilder pfx = string_builder_init(16);
-        pfx.append(type_name);
+        pfx.append(bare_type_name);
         pfx.append("__");
         pfx.append(quirk_name);
         pfx.append("__");
@@ -9534,6 +9733,19 @@ impl Codegen {
           fit m.kind {
             .Function(fnv) -> {
               let base = strip_prefix(fnv.name, prefix);
+              // Equal to `fnv.name` itself for a plain impl (`prefix +
+              // base` reconstructs exactly what was stripped off it);
+              // rebuilt explicitly so a generic instantiation's mangled
+              // method name (`Box__num__Lenable__wrap`, never literally
+              // written on the template's own `fnv.name`) resolves the
+              // same way.
+              StringBuilder rfnb = string_builder_init(32);
+              rfnb.append(type_name);
+              rfnb.append("__");
+              rfnb.append(quirk_name);
+              rfnb.append("__");
+              rfnb.append(base);
+              str real_fn_name = rfnb.build();
               StringBuilder wsb = string_builder_init(32);
               wsb.append("__fun_wrap_");
               wsb.append(type_name);
@@ -9559,7 +9771,7 @@ impl Codegen {
                 self.state.write("void");
               }
               self.state.write(" ");
-              self.state.write(fnv.name);
+              self.state.write(real_fn_name);
               self.state.write("(");
               if fnv.has_args {
                 bin proto_first = true;
@@ -9626,7 +9838,7 @@ impl Codegen {
               if fnv.has_rtype {
                 self.state.write("return ");
               }
-              self.state.write(fnv.name);
+              self.state.write(real_fn_name);
               self.state.write("((");
               self.state.write(type_name);
               self.state.write("*)self");
@@ -10403,6 +10615,21 @@ impl Codegen {
           }
         }
         _ -> {}
+      }
+    }
+
+    // Catches any generic impl method enqueued but never drained: a
+    // quirk's vtable wrapper (`maybe_emit_quirk_vtable_for_instantiation`)
+    // enqueues its methods under suppression, since that trigger fires
+    // too early (right when the compound is first instantiated) for a
+    // body that references some other type by value. By now every type
+    // the program uses has been emitted at least once, so this is a safe
+    // position for whatever is still outstanding.
+    if self.pending_generic_impl_method_cursor < self.pending_generic_impl_method_owner.len {
+      self.hoist_insert_pos = .Some(self.state.out.len());
+      let drain_err = self.drain_pending_generic_impl_methods();
+      if drain_err.is_some() {
+        ret drain_err;
       }
     }
 
