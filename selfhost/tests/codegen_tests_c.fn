@@ -3,6 +3,7 @@
 // expectations run against this compiler.
 
 imp harness;
+imp std.process;
 imp std.fs;
 imp std.string;
 
@@ -500,8 +501,9 @@ test "default parameter values: free fn + method, omitting trailing args fills d
   assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
 }
 
-// skipped: the deadlock watchdog test asserts on a stalled process aborting,
-// which needs the built binary.
+// pending: the watchdog test needs `set_env`, which is staged for the
+// next release from main. It is written and waiting there rather than
+// skipped: once the release lands and merges, it goes back in here.
 
 test "a value renders through Display when written as {}" {
   str src = `imp std.io;

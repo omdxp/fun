@@ -125,6 +125,13 @@ pub fun emit_c_with_imports(str src, str name, str label) str {
 // The C compiler is asked for by name rather than assumed, so the same
 // helper works wherever the toolchain is built.
 pub fun run_source(str src, str name, str label) str {
+  ret run_source_result(src, name, label).stdout_text;
+}
+
+// The same, handing back everything the run produced: what it wrote to
+// either stream and how it ended. Some expectations are about a program
+// being stopped rather than about what it printed.
+pub fun run_source_result(str src, str name, str label) ProcessResult {
   StringBuilder sb = string_builder_init(64);
   sb.append("selfhost/tests/fixtures/");
   sb.append(name);
@@ -180,5 +187,5 @@ pub fun run_source(str src, str name, str label) str {
   invocation.push(base);
   let ran = run(argv_from(&invocation));
   assert ran.is_ok(), format("{str}: could not run the built program", label);
-  ret ran.unwrap().stdout_text;
+  ret ran.unwrap();
 }
