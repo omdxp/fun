@@ -4419,16 +4419,50 @@ impl Codegen {
     fit exp.kind {
       .Unary(u) -> {
         if equals(u.op, "&") && !u.is_left_operanded_unary {
-          fit u.operand.kind {
-            .Identifier(oname) -> { ret self.lookup_local_type_name(oname); }
-            _ -> {}
-          }
+          ret self.resolve_quirk_coerce_addressed_type(u.operand);
         }
       }
       .Identifier(name) -> {
         let is_ptr = self.lookup_local_is_pointer(name);
         if is_ptr.is_some() && is_ptr.unwrap() {
           ret self.lookup_local_type_name(name);
+        }
+      }
+      _ -> {}
+    }
+    ret .None;
+  }
+
+  // The concrete type a `&`-taken operand names, for `resolve_quirk_coerce_
+  // concrete_type`'s pointer case: a bare local, an array element
+  // (`&arr[i]`, which reads the element's own type since a fixed-size
+  // array local is already tracked under it), or a compound field
+  // (`&struct.field`, read from the field's declared type).
+  resolve_quirk_coerce_addressed_type(Node* operand) Option<str> {
+    fit operand.kind {
+      .Identifier(oname) -> { ret self.lookup_local_type_name(oname); }
+      .Expression(e) -> {
+        if equals(e.op, "[]") && e.has_left {
+          ret self.resolve_quirk_coerce_addressed_type(e.left);
+        }
+        if equals(e.op, ".") && e.has_left && e.has_right {
+          let recv_r_opt = self.resolve_field_chain(e.left);
+          if recv_r_opt.is_none() {
+            ret .None;
+          }
+          str field_name = "";
+          fit e.right.kind {
+            .Identifier(n) -> { field_name = n; }
+            _ -> { ret .None; }
+          }
+          if equals(field_name, "") {
+            ret .None;
+          }
+          let field_info = self.lookup_compound_field(recv_r_opt.unwrap().type_name, field_name);
+          if field_info.is_none() {
+            ret .None;
+          }
+          ret .Some(field_info.unwrap().type_name);
         }
       }
       _ -> {}
