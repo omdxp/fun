@@ -278,6 +278,12 @@ pub compound FnSig {
   Vec<str> arg_params;
 }
 
+// What a top-level variable offers, and where it was declared.
+compound GlobalInfo {
+  str file;
+  bin is_public;
+}
+
 // Where checking failed, and why.
 pub compound TypeError {
   str message;
@@ -492,6 +498,9 @@ compound Checker {
   // Enums whose variants carry no payload, which stand for the numbers
   // they are written as.
   Set<str> plain_enums;
+  // What each top-level variable offers, so a read from another file can
+  // be held to it.
+  Map<str, GlobalInfo> globals;
   // Every enum the program declares, whether or not its variants carry
   // payloads. `plain_enums` holds only the ones that read as numbers.
   Set<str> enum_names;
@@ -520,6 +529,7 @@ fun _checker_new() Checker {
   c.fns.init(32);
   c.quirks = set_init("", 16);
   c.plain_enums = set_init("", 16);
+  c.globals.init(16);
   c.enum_names = set_init("", 16);
   c.compounds.init(16);
   c.methods.init(16);
@@ -584,6 +594,56 @@ impl Checker {
       ret from.pointer_depth > 0 || self.quirks.has(from.name);
     }
     ret false;
+  }
+
+  // Judges `alias.name`, where `alias` names an imported file rather
+  // than a value: what follows the dot is a variable in the file that
+  // alias stands for. True when it was one, whether or not anything was
+  // reported.
+  check_alias_qualified_read(ExprNode e, str name, TypeEnv* env) bin {
+    if !e.has_left || e.left == nil {
+      ret false;
+    }
+    str alias = "";
+    fit e.left.kind {
+      .Identifier(text) -> { alias = text; }
+      _ -> { ret false; }
+    }
+    if equals(alias, "") {
+      ret false;
+    }
+    // A value of that name, or a type of that name, means this is not an
+    // alias at all.
+    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() || self.quirks.has(alias) || self.enum_names.has(alias) {
+      ret false;
+    }
+    let known = self.globals.at(name);
+    if known.is_none() {
+      ret false;
+    }
+    GlobalInfo info = known.unwrap();
+    self.check_visibility(name, info.file, info.is_public, "variable", e.left);
+    ret true;
+  }
+
+  // Reports a field another module has no business reading. A field
+  // whose name begins with `_` belongs to the file that declares the
+  // type: the type itself may be offered publicly while some of what it
+  // holds is its own business.
+  check_field_visibility(CompoundInfo holder, str type_name, str field, Node* at) {
+    if len(field) == 0 || field[0] != '_' {
+      ret;
+    }
+    if equals(holder.file, "") || equals(self.current_file, "") {
+      ret;
+    }
+    if equals(holder.file, self.current_file) {
+      ret;
+    }
+    self.fail(
+      format("'{str}' of '{str}' is private to the file that declares it", field, type_name),
+      at
+    );
   }
 
   // Reports a `sizeof` of a name the program never declares. Measuring
@@ -1158,6 +1218,9 @@ impl Checker {
     if equals(field, "") {
       ret checked_unknown();
     }
+    if self.check_alias_qualified_read(e, field, env) {
+      ret checked_unknown();
+    }
     let info = self.compounds.at(receiver.name);
     if info.is_none() {
       ret checked_unknown();
@@ -1165,6 +1228,7 @@ impl Checker {
     CompoundInfo holder = info.unwrap();
     let found = holder.fields.at(field);
     if found.is_some() {
+      self.check_field_visibility(holder, receiver.name, field, node);
       CheckedType declared = found.unwrap();
       if holder.is_generic {
         // Without the arguments the instantiation supplied, the field's
@@ -2175,6 +2239,15 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
           table.methods.put(m.name, sig);
         }
         checker.methods.put(q.name, table);
+      }
+      .Variable(v) -> {
+        GlobalInfo info;
+        info.is_public = node.flags.is_public;
+        info.file = "";
+        if node.has_pos {
+          info.file = node.pos.filename;
+        }
+        checker.globals.put(v.name, info);
       }
       .Enum(e) -> {
         bin carries_data = false;
