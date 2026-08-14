@@ -931,3 +931,16 @@ test "an un-awaited async call bound with let is rejected" {
     "expected an un-awaited async call to be rejected"
   );
 }
+
+test "a required parameter following a defaulted one is rejected" {
+  rejects(
+    `fun f(num x = 1, num y) num { ret x + y; }
+    `fun main() num { ret f(1, 2); }`,
+    "expected the bad parameter order to be rejected"
+  );
+  accepts(
+    `fun f(num x, num y = 1) num { ret x + y; }
+    `fun main() num { ret f(1); }`,
+    "expected the correctly-ordered defaults to be accepted"
+  );
+}

@@ -2150,6 +2150,23 @@ impl Checker {
     if !f.has_body {
       ret;
     }
+    // Once a parameter carries a default, every parameter after it must
+    // too, or a call omitting only the later ones would leave no way to
+    // tell which trailing argument binds to which parameter.
+    bin seen_default_param = false;
+    for pa : f.args {
+      fit pa.kind {
+        .Variable(pv) -> {
+          if pv.has_val {
+            seen_default_param = true;
+          } elif seen_default_param {
+            self.fail("a parameter without a default cannot follow a parameter with a default", pa);
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
     TypeEnv env = type_env_new();
     defer env.free();
     env.push();

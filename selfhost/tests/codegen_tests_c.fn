@@ -321,14 +321,9 @@ test "default parameter values: free fn, method, multi-default, explicit overrid
   assert contains(out, "Box__add(&b, 1, 100)"), "expected a method default to be filled";
 }
 
-// gap: a required parameter following a defaulted one is accepted instead of
-// rejected.
-// test "default parameter rejected: required param after a defaulted one" {
-// str src = `fun f(num x = 1, num y) num { ret x + y; }
-// `fun main() num { ret f(1, 2); }`;
-// let r = transpile_source(src);
-// assert r.is_err(), "expected the bad parameter order to be rejected";
-// }
+// Moved to typecheck_tests.fn: a required parameter following a
+// defaulted one is a `Checker` diagnostic, invisible to this file's
+// `transpile_source` (lex/parse/codegen only, no typechecker).
 
 test "default parameter rejected: default references self" {
   str src = `compound C { num cfg; }
