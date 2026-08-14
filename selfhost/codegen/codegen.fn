@@ -1171,6 +1171,35 @@ impl Codegen {
       }
       self.state.write(" ");
       self.state.write(resolved_field_names.get(wi));
+      // A fixed-size array field (`num[3] data;`) is a real C array, not
+      // a decayed pointer, the same as the plain-compound case in
+      // `emit_compound`: `field_dtypes` already carries the template
+      // field's own bracket nodes (an array's size doesn't depend on the
+      // instantiation's type argument), untouched by Pass 1's
+      // type-param substitution.
+      let wfield_dt = field_dtypes.get(wi);
+      if wfield_dt.is_array && resolved_field_ptr_depth.get(wi) == 0 && wfield_dt.array_brackets.len > 0 {
+        for bnode : wfield_dt.array_brackets {
+          self.state.write("[");
+          fit bnode.kind {
+            .Bracket(inner) -> {
+              let werr = self.emit_expr(*inner);
+              if werr.is_some() {
+                self.state = saved_state;
+                ret .None;
+              }
+            }
+            _ -> {
+              let werr = self.emit_expr(*bnode);
+              if werr.is_some() {
+                self.state = saved_state;
+                ret .None;
+              }
+            }
+          }
+          self.state.write("]");
+        }
+      }
       self.state.write(";\n");
       wi = wi + 1;
     }

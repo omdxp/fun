@@ -709,16 +709,29 @@ test "fixed-size array compound field is inline, not a pointer" {
   assert equals(out, "1 2\n"), "expected the field to hold and index as a real array";
 }
 
-// gap: the same fixed-size array compound field is still a pointer rather
-// than inline for a GENERIC compound's field. A generic compound's fields
-// are resolved through a flat name/pointer/pointer-depth vector, not the
-// full DataType, so there is nowhere to carry the array's bracket sizes
-// through to where the instantiated struct is written; needs a parallel
-// vector threaded through both resolution passes, not a one-line fix like
-// the plain-compound case above.
-// test "fixed-size array field is inline on a generic compound too" { }
-// test "reaudit R1: generic compound fixed-size array field is inline" { }
-// test "reaudit: array-literal struct field init (single + multi element)" { }
+test "fixed-size array field is inline on a generic compound too" {
+  str src = `imp std.c.io;
+  `compound Box<T> { T v; num[3] data; }
+  `fun main() num {
+  `  Box<num> b;
+  `  b.data[0] = 10;
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fixed-size array field is inline on a generic compound too");
+  assert contains(out, "int64_t data[3];"), "expected the field to be a real array, not a pointer";
+  assert !contains(out, "int64_t* data;"), "expected no pointer declarator for the field";
+}
+
+test "array-literal struct field init on a generic compound" {
+  str src = `imp std.c.io;
+  `compound Box<T> { T v; num[3] data; }
+  `fun main() num {
+  `  Box<num> b = Box<num>{v = 1, data = [10, 20, 30]};
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "array-literal struct field init on a generic compound");
+  assert contains(out, ".data = {10, 20, 30}"), "expected the literal to initialize the inline array field";
+}
 
 test "P0: unsized array compound field stays a pointer" {
   str src = `compound Dyn { num[] data; num n; }
