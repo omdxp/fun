@@ -881,9 +881,22 @@ test "P1: let inference from dereferenced generic pointer yields the value type"
   assert !contains(out, "Box__num* boxed"), "expected a value, not a pointer";
 }
 
-// gap: a hex string escape is not bounded to two digits, so `"\x42C"` is passed
-// through verbatim instead of being split into `"\x42" "C"`.
-// test "P1: hex string escape is bounded to two digits" { }
+test "a hex string escape is bounded to two digits" {
+  // C reads as many hex digits as follow `\x`, with no bound, while a
+  // Fun `\xHH` escape means exactly one byte. `"\x42C"` was passed
+  // through unchanged, which read as three hex digits to C and failed
+  // to compile as "hex escape sequence out of range". A hex digit
+  // immediately following the escape's two digits now starts its own
+  // adjacent literal, which C concatenates back: `"\x42" "C"`.
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  str s = "\x42C";
+  `  printf("%s\n", s);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "hex_escape_bounded", "a hex string escape is bounded to two digits");
+  assert equals(out, "BC\n"), "expected the escape read as one byte, followed by a literal C";
+}
 
 // gap: an empty enum declaration and `let x = <void call>` are both accepted
 // instead of rejected.

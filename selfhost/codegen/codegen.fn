@@ -620,6 +620,11 @@ fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Opti
   ret pos;
 }
 
+// True for a character C reads as part of a `\x` escape's digits.
+fun _is_hex_digit(chr c) bin {
+  ret (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 // True when `dt` is a pointer of any depth, matching `write_type`'s
 // `ptr_depth`/`flags.is_pointer` check.
 fun dtype_is_pointer(DataType dt) bin {
@@ -3196,6 +3201,46 @@ impl Codegen {
     ret .None;
   }
 
+  // Writes an ordinary (non-raw) string literal's body, already holding
+  // whatever escapes the source wrote. `\x` is the one that needs
+  // attention: C reads as many hex digits as follow it, with no bound,
+  // while a Fun `\xHH` escape means exactly one byte. A hex digit
+  // written right after such an escape is split into its own adjacent
+  // literal (`"\x42" "C"`, which C concatenates back), so it is read as
+  // the next character rather than swallowed into the same escape.
+  write_string_literal_body(str s) {
+    num i = 0;
+    num n = len(s);
+    for i < n {
+      chr c = s[i];
+      self.write_c_char(c);
+      i = i + 1;
+      if c == '\\' && i < n && s[i] == 'x' {
+        self.write_c_char('x');
+        i = i + 1;
+        num digits = 0;
+        for digits < 2 && i < n && _is_hex_digit(s[i]) {
+          self.write_c_char(s[i]);
+          i = i + 1;
+          digits = digits + 1;
+        }
+        if i < n && _is_hex_digit(s[i]) {
+          self.state.write("\" \"");
+        }
+      }
+    }
+  }
+
+  // Writes one byte, as the string helpers above pass characters through
+  // `self.state.write`, which takes a NUL-terminated string rather than
+  // a bare character.
+  write_c_char(chr c) {
+    str buf = malloc(2);
+    buf[0] = c;
+    buf[1] = 0;
+    self.state.write(buf);
+  }
+
   // Writes a raw string literal's bytes as a C string-literal body,
   // escaping backslash, double-quote, and newline; everything else
   // passes through unchanged.
@@ -3307,7 +3352,7 @@ impl Codegen {
         if node.flags.is_raw_string {
           self.write_raw_string_body(s);
         } else {
-          self.state.write(s);
+          self.write_string_literal_body(s);
         }
         self.state.write("\"");
         ret .None;
