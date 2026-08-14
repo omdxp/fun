@@ -5,6 +5,7 @@
 imp ..codegen.codegen;
 imp ..codegen.codegen_state;
 imp ..parser.import_resolver;
+imp ..semantics.typecheck;
 imp std.string;
 imp std.result;
 
@@ -123,9 +124,31 @@ test "an aliased generic function call is monomorphized" {
 // assertions below check the symbol is emitted and reachable rather
 // than a particular prefix.
 
-// gap: this compiler does not enforce `pub` visibility, so an
-// alias-qualified call to a private function is accepted rather than
-// rejected. The public half of the original test is kept below.
+// What the typechecker says about a whole resolved program. Visibility
+// is its business, not codegen's, so these read it directly rather than
+// through `transpile_file`.
+fun check_file(str path) str {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret parsed.unwrap_err();
+  }
+  let merged = parsed.unwrap();
+  let checked = typecheck_program(&merged.nodes);
+  if checked.is_err() {
+    ret checked.unwrap_err().message;
+  }
+  ret "";
+}
+
+test "an alias-qualified call to a private function is rejected" {
+  // A call written `one.secret()` reaches a function in the file that
+  // alias stands for. The merge flattens both files into one program, so
+  // what is left to say is whether that file offers the name at all.
+  str found = check_file("selfhost/tests/fixtures/privalias_main_bad.fn");
+  assert contains(found, "not public"), "expected the private function refused through its alias";
+  assert equals(check_file("selfhost/tests/fixtures/privalias_main_ok.fn"), ""), "expected the public one still reachable";
+}
+
 test "an alias-qualified call to a public function compiles" {
   let out = emit_file(
     "selfhost/tests/fixtures/privalias_main_ok.fn",
@@ -134,9 +157,9 @@ test "an alias-qualified call to a public function compiles" {
   assert contains(out, "visible"), "expected the public function to be emitted";
 }
 
-// gap: this compiler does not enforce `pub` visibility, so an
-// alias-qualified read of a private global is accepted rather than
-// rejected. The public half of the original test is kept below.
+// gap: a private global read through an alias is still accepted. A
+// private FUNCTION called that way is rejected (see above); reading a
+// global goes through a different path that does not check visibility.
 test "an alias-qualified read of a public global compiles" {
   let out = emit_file(
     "selfhost/tests/fixtures/privglob_main_ok.fn",
@@ -145,9 +168,9 @@ test "an alias-qualified read of a public global compiles" {
   assert contains(out, "shared_g"), "expected the public global to be emitted";
 }
 
-// gap: this compiler does not treat a leading-underscore field as
-// module-private, so a cross-module read of it is accepted rather than
-// rejected. The accessor half of the original test is kept below.
+// gap: a leading-underscore field is not treated as module-private, so
+// a cross-module read of it is accepted. Visibility is enforced for a
+// function and for a compound as a whole, but not per field.
 test "a public accessor reaching a leading-underscore field compiles" {
   let out = emit_file(
     "selfhost/tests/fixtures/privfield_main_ok.fn",

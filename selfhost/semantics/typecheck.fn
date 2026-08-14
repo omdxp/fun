@@ -1162,6 +1162,13 @@ impl Checker {
       _ -> {}
     }
     if resolved.is_none() {
+      // A call written `alias.name(...)` reaches a function in the file
+      // that alias stands for, not a method on a value. What the merge
+      // produced is one flat program, so the function is here under its
+      // own name; only whether the file offers it still has to be said.
+      if self.check_alias_qualified_call(node, e, method, env) {
+        ret checked_unknown();
+      }
       self.check_receiver_has_method(node, e, method, env);
       ret checked_unknown();
     }
@@ -1276,6 +1283,50 @@ impl Checker {
         break;
       }
     }
+  }
+
+  // Judges `alias.name(...)`, where `alias` names an imported file
+  // rather than a value. True when it was one, whether or not anything
+  // was reported: either way it is not a method call.
+  // 
+  // Only a name that resolves to nothing else is read this way, so a
+  // receiver whose type the checker does not model is left to the method
+  // path rather than being mistaken for an alias.
+  check_alias_qualified_call(Node* node, ExprNode e, str method, TypeEnv* env) bin {
+    if equals(method, "") || !e.has_left {
+      ret false;
+    }
+    str alias = "";
+    fit e.left.kind {
+      .Expression(callee) -> {
+        if !equals(callee.op, ".") || !callee.has_left || callee.left == nil {
+          ret false;
+        }
+        fit callee.left.kind {
+          .Identifier(name) -> { alias = name; }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+    if equals(alias, "") {
+      ret false;
+    }
+    // A value of that name, or a type of that name, means this is not an
+    // alias at all.
+    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() || self.quirks.has(alias) || self.plain_enums.has(alias) {
+      ret false;
+    }
+    let known = self.fns.at(method);
+    if known.is_none() {
+      ret false;
+    }
+    FnSig sig = known.unwrap();
+    if sig.ambiguous {
+      ret true;
+    }
+    self.check_visibility(method, sig.file, sig.is_public, "function", node);
+    ret true;
   }
 
   // Reports a method called on a value whose type declares none. Only a

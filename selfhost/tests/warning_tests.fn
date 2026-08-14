@@ -336,3 +336,59 @@ test "an unmet expect on a fit is an error" {
   // A claim a program makes about itself that is no longer true.
   assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
 }
+
+test "a fit branch an earlier one already covers is noticed" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "fit_unreachable_branch"), "expected the repeated branch noticed";
+}
+
+test "allow silences a repeated fit branch" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  allow fit_unreachable_branch, "the repeat is deliberate";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_unreachable_branch"), "expected allow to silence it";
+}
+
+test "expect is met by a repeated fit branch" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "this fit repeats a branch";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert !contains(found, "fit_unreachable_branch:"), "expected the expectation to absorb it";
+  assert !contains(found, "was not emitted"), "expected the expectation met";
+}
+
+test "an unmet expect on an unreachable branch is an error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "claims a branch repeats";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
+}

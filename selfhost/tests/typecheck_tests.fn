@@ -715,3 +715,35 @@ test "a method call inside the bound is accepted" {
     "expected both types the bound allows accepted"
   );
 }
+
+test "await outside an async function is rejected" {
+  // `await` suspends the caller, which only an async function can do.
+  assert contains(
+    check(`async fun work() num { ret 1; }
+    `fun main() num {
+    `  ret await work();
+    `}`),
+    "await is only allowed in an async function"
+  ), "expected await outside async rejected";
+}
+
+test "an async call that is never awaited is rejected" {
+  // Binding the call without awaiting it reads as a value but is not
+  // one, so it is reported rather than quietly producing a handle.
+  assert contains(
+    check(`async fun work() num { ret 1; }
+    `fun main() num {
+    `  let v = work();
+    `  ret 0;
+    `}`),
+    "needs await"
+  ), "expected the un-awaited call rejected";
+  accepts(
+    `async fun work() num { ret 1; }
+    `async fun caller() num {
+    `  let v = await work();
+    `  ret v;
+    `}`,
+    "expected the awaited call accepted"
+  );
+}
