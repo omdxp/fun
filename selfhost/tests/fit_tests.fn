@@ -43,6 +43,8 @@ test "fit duplicate bool branch still lowers both branches" {
   assert contains(out, "x == false"), "expected the trailing false branch";
 }
 
+// covered in warning_tests.fn: the fit warning controls are checked
+// where the warnings themselves are, against what the analysis reports.
 // gap: `allow fit_unreachable_branch` is rejected by codegen.
 // test "fit allow fit_unreachable_branch suppresses warning"
 
@@ -51,15 +53,6 @@ test "fit duplicate bool branch still lowers both branches" {
 
 // gap: an unmet `expect fit_unreachable_branch` should fail the compile.
 // test "fit unmet expect fit_unreachable_branch fails"
-
-// gap: `allow fit_non_exhaustive` is rejected by codegen.
-// test "fit allow fit_non_exhaustive suppresses warning"
-
-// gap: `expect fit_non_exhaustive` is rejected by codegen.
-// test "fit expect fit_non_exhaustive suppresses warning"
-
-// gap: an unmet `expect fit_non_exhaustive` should fail the compile.
-// test "fit unmet expect fit_non_exhaustive fails"
 
 test "fit bin exhausted via default lowers the catch-all to else" {
   str src = `imp std.c.io;

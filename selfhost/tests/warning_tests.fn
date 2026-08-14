@@ -276,3 +276,63 @@ test "sends beyond a channel's room with nothing receiving are noticed" {
     "expected sends a receive drains to be accepted"
   );
 }
+
+test "a fit written in shorthand is still checked for the variants it skips" {
+  // Every branch here names no enum, so what is being matched has to
+  // come from what the subject holds. Without that, a shorthand fit was
+  // never checked at all.
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant to be noticed";
+  assert contains(found, "S.B"), "expected the message to name what is missing";
+}
+
+test "allow silences a shorthand fit's missing variant" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  allow fit_non_exhaustive, "only A matters here";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected the warning silenced";
+}
+
+test "expect is met by a shorthand fit's missing variant" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_non_exhaustive, "this fit is deliberately partial";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert !contains(found, "fit_non_exhaustive:"), "expected the expectation to absorb it";
+  assert !contains(found, "was not emitted"), "expected the expectation met";
+}
+
+test "an unmet expect on a fit is an error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_non_exhaustive, "claims this fit is partial";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `  ret 0;
+  `}`;
+  // A claim a program makes about itself that is no longer true.
+  assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
+}

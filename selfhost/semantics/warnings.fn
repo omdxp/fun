@@ -1101,6 +1101,11 @@ impl Analysis {
       ret;
     }
     if equals(over, "") {
+      // Every branch was written in shorthand (`.Dot ->`), which names
+      // no enum, so what is being matched is what the subject holds.
+      over = self._fit_subject_enum(f);
+    }
+    if equals(over, "") {
       ret;
     }
     let declared = self.enum_variants.at(over);
@@ -1117,6 +1122,38 @@ impl Analysis {
         ret;
       }
     }
+  }
+
+  // The enum a `fit` is matching, taken from what its subject was
+  // declared as. Used when the branches name no enum of their own.
+  _fit_subject_enum(FitStmtNode f) str {
+    if f.exp == nil {
+      ret "";
+    }
+    Node* subject = f.exp;
+    // `fit *self` matches what the pointer holds.
+    fit subject.kind {
+      .Unary(u) -> {
+        if equals(u.op, "*") && u.operand != nil {
+          subject = u.operand;
+        }
+      }
+      _ -> {}
+    }
+    fit subject.kind {
+      .Identifier(name) -> {
+        let declared = self.local_types.at(name);
+        if declared.is_none() {
+          ret "";
+        }
+        str type_name = declared.unwrap();
+        if self.enum_variants.at(type_name).is_some() {
+          ret type_name;
+        }
+      }
+      _ -> {}
+    }
+    ret "";
   }
 
   // Reports more sends into a channel than it can hold when nothing in
