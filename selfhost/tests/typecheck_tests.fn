@@ -856,3 +856,33 @@ test "sizeof accepts every shape that does name a type" {
     "expected a pointer to a declared type accepted"
   );
 }
+
+test "an empty enum declaration is rejected" {
+  // No variants lowers to an empty C `enum`, which is invalid; caught
+  // here rather than left for the C compiler to explain.
+  assert contains(
+    check(`enum Empty { }
+    `fun main() num { ret 0; }`),
+    "must declare at least one variant"
+  ), "expected the empty enum rejected";
+}
+
+test "let cannot infer a type from a void call" {
+  // `let x = noop();` would declare `void x`, which holds nothing.
+  assert contains(
+    check(`fun noop() { }
+    `fun main() num {
+    `  let x = noop();
+    `  ret 0;
+    `}`),
+    "cannot be initialized from a value of type void"
+  ), "expected the void-returning call rejected";
+  accepts(
+    `fun give() num { ret 5; }
+    `fun main() num {
+    `  let x = give();
+    `  ret 0;
+    `}`,
+    "expected a non-void call still inferred normally"
+  );
+}

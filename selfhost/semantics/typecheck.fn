@@ -2028,6 +2028,18 @@ impl Checker {
           );
           ret;
         }
+        // A void-returning call has no value to bind: `let x = noop();`
+        // would declare a variable of a type that holds nothing.
+        if value.base == DataTypeType.Void && value.pointer_depth == 0 && !value.is_array {
+          self.fail(
+            format(
+              "'let' variable '{str}' cannot be initialized from a value of type void",
+              v.name
+            ),
+            stmt
+          );
+          ret;
+        }
         declared = value;
       } elif !self.assignable(declared, value) {
         self.fail(
@@ -2250,6 +2262,12 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         checker.globals.put(v.name, info);
       }
       .Enum(e) -> {
+        // No variants lowers to an empty C `enum`, which is invalid;
+        // rejected here rather than left for the C compiler to explain.
+        if e.variants.len == 0 {
+          checker.fail(format("enum '{str}' must declare at least one variant", e.name), node);
+          ret .Err(checker.error);
+        }
         bin carries_data = false;
         for v : e.variants {
           if v.has_payload && v.payload.len > 0 {

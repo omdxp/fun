@@ -898,9 +898,21 @@ test "a hex string escape is bounded to two digits" {
   assert equals(out, "BC\n"), "expected the escape read as one byte, followed by a literal C";
 }
 
-// gap: an empty enum declaration and `let x = <void call>` are both accepted
-// instead of rejected.
-// test "P1: empty enum, let-from-void, and format arg-mismatch are rejected" { }
+// Empty enum declarations and let-from-void are checked at the
+// typechecker (typecheck_tests.fn), which is where the rejection
+// actually happens.
+
+// gap: `format("{num} {num}", 1)`'s argument count against its own
+// placeholder count is not checked at all -- the reference parses the
+// literal format string for `{num}`/`{str}`/... placeholders (skipping
+// bare `{}`, which takes the general vararg path) as part of an
+// optimization that lowers a `format` call straight to `snprintf`, and
+// validates the count as a side effect of that parse. The self-hosted
+// codegen has no such parser or fast path at all; `format` is an
+// ordinary vararg stdlib call. Needs the fast path itself, not a
+// standalone count check bolted onto the general call path, to match
+// what is actually being validated.
+// test "format's argument count is checked against its own placeholders" { }
 
 // Resolved: an argument whose instantiation differs from the parameter's
 // is rejected, and the message names both (typecheck_tests.fn).
