@@ -258,10 +258,16 @@ pub compound Codegen {
   Vec<str> emitted_generic_instantiations;
   // Every plain (non-generic) compound/enum name already emitted, the
   // dedup bookkeeping `emitted_generic_instantiations` gives generics.
-  // Pushed when emission starts, not after it finishes, so a cycle (a
-  // compound transitively embedding itself by value) is caught instead of
-  // recursing forever.
+  // Pushed when emission starts, not after it finishes, so a repeat
+  // reference (a diamond, not a cycle: two unrelated types both embedding
+  // a third by value) resolves without redoing the work.
   Vec<str> emitted_plain_types;
+  // The plain types currently mid-emission, on the active
+  // `ensure_plain_type_emitted` recursion path: a name found in here
+  // again is a genuine cycle (a compound transitively embedding itself
+  // by value), not just a repeat reference, and gets reported instead of
+  // recursing forever.
+  Vec<str> plain_type_in_progress;
   // The program's flattened top-level node list, stashed once at the
   // start of `pub transpile` so `ensure_plain_type_emitted` and similar
   // lookups can find a plain type by name without `nodes` threaded
@@ -438,6 +444,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.generic_enum_variants.init(0);
   g.emitted_generic_instantiations.init(0);
   g.emitted_plain_types.init(0);
+  g.plain_type_in_progress.init(0);
   g.all_nodes.init(0);
   g.generic_impl_templates.init(0);
   g.instantiation_mangled_name.init(0);
@@ -8210,10 +8217,32 @@ impl Codegen {
   // exempt, needing only the forward-declared struct name, and recursing
   // into it could misfire on a self-referential type. `.None` means
   // success, including when `type_name` isn't a known plain type.
-  ensure_plain_type_emitted(str type_name) Option<CodegenErrorKind> {
+  // `via_direct_embed` distinguishes a true by-value struct embedding (a
+  // field typed directly as `type_name`) from a reference reached through
+  // a generic container's type argument (`Vec<type_name>`,
+  // `Map<str, type_name>`). A container like `Vec`/`Map` holds its
+  // elements behind a pointer, so `Vec<A>` inside `A` itself (a
+  // self-referential JSON-tree-style enum, say) is not an unbounded-size
+  // cycle and must not be reported as one; only the direct case is
+  // checked against `plain_type_in_progress`.
+  ensure_plain_type_emitted(str type_name, bin via_direct_embed = true) Option<CodegenErrorKind> {
     num ei = 0;
     for ei < self.emitted_plain_types.len {
       if equals(self.emitted_plain_types.get(ei), type_name) {
+        // Already started or finished. A name still on the active
+        // recursion path (`plain_type_in_progress`) is a genuine cycle,
+        // not just a repeat reference to an already-finished type.
+        if via_direct_embed {
+          for pip : self.plain_type_in_progress {
+            if equals(pip, type_name) {
+              self.error_note = format(
+                "cyclic by-value compound dependency: '{str}' transitively embeds itself by value (use a pointer to break the cycle)",
+                type_name
+              );
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+          }
+        }
         ret .None;
       }
       ei = ei + 1;
@@ -8225,6 +8254,8 @@ impl Codegen {
             // Pushed before recursing, not after emission finishes, so a
             // cycle is caught instead of recursing forever.
             self.emitted_plain_types.push(type_name);
+            self.plain_type_in_progress.push(type_name);
+            defer self.plain_type_in_progress.pop();
             for f : c.fields {
               if !dtype_is_pointer(*f.dtype) && !dtype_is_array_as_pointer(*f.dtype) {
                 let fderr = self.ensure_plain_type_emitted(f.dtype.type_str);
@@ -8249,7 +8280,7 @@ impl Codegen {
                 // argument.
                 for garg : f.dtype.generic_args {
                   if garg.generic_args.len == 0 {
-                    let gerr = self.ensure_plain_type_emitted(garg.type_str);
+                    let gerr = self.ensure_plain_type_emitted(garg.type_str, false);
                     if gerr.is_some() {
                       ret gerr;
                     }
@@ -8264,6 +8295,8 @@ impl Codegen {
         .Enum(e) -> {
           if equals(e.name, type_name) && !e.has_type_params {
             self.emitted_plain_types.push(type_name);
+            self.plain_type_in_progress.push(type_name);
+            defer self.plain_type_in_progress.pop();
             bin is_tagged_union = false;
             for v : e.variants {
               if v.has_payload && v.payload.len > 0 {
@@ -8282,7 +8315,7 @@ impl Codegen {
                     // the `.Compound` branch above.
                     for garg : pt.generic_args {
                       if garg.generic_args.len == 0 {
-                        let gerr = self.ensure_plain_type_emitted(garg.type_str);
+                        let gerr = self.ensure_plain_type_emitted(garg.type_str, false);
                         if gerr.is_some() {
                           ret gerr;
                         }

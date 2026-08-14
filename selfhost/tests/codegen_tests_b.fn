@@ -559,9 +559,30 @@ test "P3: uninstantiated generic compound does not trip false cyclic-dependency"
   assert !contains(out, "Box__"), "expected the unused template to be dropped";
 }
 
-// gap: a genuine by-value compound cycle (A holds B by value, B holds A by
-// value) is accepted instead of rejected.
-// test "P3: a genuine by-value compound cycle is still rejected" { }
+test "P3: a genuine by-value compound cycle is still rejected" {
+  str src = `compound A { B b; }
+  `compound B { A a; }
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  let r = transpile_source(src);
+  assert r.is_err(), "expected a cyclic by-value compound dependency to be rejected";
+}
+
+test "P3: two unrelated compounds sharing a third by value is not a false cycle" {
+  str src = `compound C { num x; }
+  `compound A { C c; }
+  `compound B { C c; }
+  `compound D { A a; B b; }
+  `fun main() num {
+  `  D d;
+  `  d.a.c.x = 5;
+  `  d.b.c.x = 6;
+  `  ret d.a.c.x + d.b.c.x;
+  `}`;
+  let out = emit_c(src, "P3: diamond by-value reference is not a false cycle");
+  assert contains(out, "struct D"), "expected D to be emitted";
+}
 
 test "private field (leading underscore): same-module read/write/self access works" {
   str src = `imp std.c.io;
