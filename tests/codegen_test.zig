@@ -11231,3 +11231,73 @@ test "stdlib make_dir_all creates parents and a Sink reads a file back" {
 
     try std.testing.expectEqualStrings("yes [one] [two]\n", stdout);
 }
+
+test "a local named argv does not collide with the entry point's own parameters" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_local_named_argv.fn";
+    const c_path = "codegen_local_named_argv.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_local_named_argv.exe" else "codegen_local_named_argv";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `main` is emitted with parameters of its own, so a program naming a
+    // variable after what it was given used to fail in the C compiler with
+    // "redefinition of 'argv' with a different type". Those parameters are
+    // reserved names now.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num argv = 3;\n" ++
+        "  num argc = 4;\n" ++
+        "  printf(\"%lld\\n\", argv + argc);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
+
+test "set_env hands a value to the program and to what it starts" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_set_env.fn";
+    const c_path = "codegen_set_env.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_set_env.exe" else "codegen_set_env";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A program could read its environment but never write it, so it had
+    // no way to hand a value to a process it starts.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.sys;\n" ++
+        "fun main() num {\n" ++
+        "  _ = set_env(\"FUN_TEST_SET_ENV\", \"written\");\n" ++
+        "  printf(\"%s\\n\", env(\"FUN_TEST_SET_ENV\"));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("written\n", stdout);
+}

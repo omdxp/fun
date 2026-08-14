@@ -9,6 +9,18 @@ pub fun env(str name) str {
   ret getenv(name);
 }
 
+// Sets an environment variable for this process, and so for every
+// process it starts afterward, since a child inherits what its parent
+// holds. Replaces a value already there.
+pub fun set_env(str name, str value) bin {
+  ret setenv(name, value, 1) == 0;
+}
+
+// Removes an environment variable, so a later read finds nothing.
+pub fun clear_env(str name) bin {
+  ret unsetenv(name) == 0;
+}
+
 // Reads an environment variable with Result.
 pub fun try_env(str name) Result<str, Error> {
   let out = env(name);

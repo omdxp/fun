@@ -37,6 +37,15 @@ pub fun system(str command) num;
 // Looks up an environment variable, returning null if missing (C semantics).
 pub fun getenv(str name) str;
 
+// Sets an environment variable for this process, and so for every process
+// it starts afterward. A zero `overwrite` leaves a value already there
+// alone. Returns 0 on success. Windows has no function of this name, so
+// codegen writes one in terms of what it does have.
+pub fun setenv(str name, str value, num overwrite) num;
+
+// Removes an environment variable. Returns 0 on success.
+pub fun unsetenv(str name) num;
+
 // Conversions
 // Parses an integer in base-10 (C semantics).
 pub fun atoi(str s) num;
