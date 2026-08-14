@@ -1292,6 +1292,7 @@ impl Codegen {
     self.state = &enum_scratch;
     if is_tagged_union {
       self.emit_tagged_union_enum_instance(
+        dt.type_str,
         mangled_name,
         variant_templates,
         type_params,
@@ -2715,6 +2716,7 @@ impl Codegen {
   // type-param names. A payload type that isn't a bare occurrence of a
   // type param is left unchanged.
   emit_tagged_union_enum_instance(
+    str template_name,
     str mangled_name,
     Vec<GenericEnumVariantTemplate> variant_templates,
     Vec<str> type_params,
@@ -2753,13 +2755,21 @@ impl Codegen {
           bin pptr = vt.payload_is_pointer.get(i);
           str resolved_type = ptype;
           bin resolved_ptr = pptr;
-          num pi = 0;
-          for pi < type_params.len {
-            if equals(type_params.get(pi), ptype) {
-              resolved_type = arg_type_names.get(pi);
-              resolved_ptr = arg_is_pointer.get(pi);
+          // A payload written as the enum's own name (`List<T>*` inside
+          // `List`'s own variant) refers to this instantiation itself,
+          // not to a type parameter: nothing in `type_params` would ever
+          // match it, since it names the enum, not a param.
+          if equals(ptype, template_name) {
+            resolved_type = mangled_name;
+          } else {
+            num pi = 0;
+            for pi < type_params.len {
+              if equals(type_params.get(pi), ptype) {
+                resolved_type = arg_type_names.get(pi);
+                resolved_ptr = arg_is_pointer.get(pi);
+              }
+              pi = pi + 1;
             }
-            pi = pi + 1;
           }
           self.write_type_name(resolved_type);
           if resolved_ptr {
