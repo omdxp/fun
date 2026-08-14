@@ -3,6 +3,7 @@
 // expectations run against this compiler.
 
 imp harness;
+imp std.fs;
 imp std.string;
 
 test "ra3: no crash on field access of a generic-impl method returning a compound" {
@@ -401,8 +402,29 @@ test "quirk-impl method call chains onto a call-expression receiver" {
   assert contains(out, "__fun_recv_tmp"), "expected the call receiver hoisted into a temporary";
 }
 
-// skipped: std.log's rotating sink needs import resolution and the assertion is
-// about the log file the built binary writes.
+test "a rotating sink writes what was logged to its file" {
+  str src = `imp std.io;
+  `imp std.fs;
+  `imp std.c.io;
+  `fun main() num {
+  `  RotatingSink r = rotating_sink_new("fun-out/rotate_probe.log", 4096, 2);
+  `  Sink s = Sink.Rotating(&r);
+  `  write_to(s, "first line\n");
+  `  _ = s.flush();
+  `  r.close();
+  `  str back = read_to_string("fun-out/rotate_probe.log");
+  `  printf("[%s]", back);
+  `  remove_file("fun-out/rotate_probe.log");
+  `  ret 0;
+  `}`;
+  make_dir_all("fun-out");
+  str out = run_source(
+    src,
+    "rotating_sink_probe",
+    "a rotating sink writes what was logged to its file"
+  );
+  assert contains(out, "first line"), "expected the line to reach the file";
+}
 
 // gap: `for x : c` over a value implementing a user Iterator quirk is rejected
 // as an unsupported node.
@@ -879,8 +901,31 @@ test "a generic array-typed value (T[]) compares against nil like any other poin
   assert contains(out, "NULL == a"), "expected nil on the left to compare too";
 }
 
-// skipped: WaitGroup comes from std.task and the assertion is about the built
-// binary not deadlocking.
+test "a wait group lets every forked task finish" {
+  str src = `imp std.c.io;
+  `imp std.task;
+  `async fun worker(WaitGroup* wg, num i) {
+  `  printf("task %lld\n", i);
+  `  wg.done();
+  `}
+  `fun main() num {
+  `  WaitGroup wg = wait_group_new(3);
+  `  num i = 0;
+  `  for i < 3 {
+  `    fork worker(&wg, i);
+  `    i = i + 1;
+  `  }
+  `  wg.wait();
+  `  printf("all done\n");
+  `  ret 0;
+  `}`;
+  // The point is that this returns at all: a wait group that miscounts
+  // hangs here rather than failing an assertion.
+  str out = run_source(src, "wait_group_probe", "a wait group lets every forked task finish");
+  assert contains(out, "all done"), "expected the wait to be satisfied";
+  assert contains(out, "task 0"), "expected every task to run";
+  assert contains(out, "task 2"), "expected every task to run";
+}
 
 test "a generic function calling a DIFFERENT generic function from its own body gets that callee emitted (indirect instantiation)" {
   str src = `imp std.c.io;
@@ -1202,5 +1247,34 @@ test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
 // assert contains(out, "char** make_names"), "expected the array return type to lower to a pointer-to-pointer";
 // }
 
-// skipped: std.process and std.fs both need import resolution and assert on
-// what the built binary observes on the real system.
+test "a built program observes the file system and other processes" {
+  str src = `imp std.c.io;
+  `imp std.fs;
+  `imp std.process;
+  `imp std.vec;
+  `imp std.string;
+  `imp std.result;
+  `fun main() num {
+  `  make_dir_all("fun-out/observe_probe");
+  `  write_string("fun-out/observe_probe/a.txt", "content");
+  `  str dir = "no";
+  `  if is_dir("fun-out/observe_probe") { dir = "yes"; }
+  `  Vec<str> command;
+  `  command.init(2);
+  `  command.push("echo");
+  `  command.push("spawned");
+  `  let r = run(argv_from(&command));
+  `  str spawned = "no";
+  `  if r.is_ok() && contains(r.unwrap().stdout_text, "spawned") { spawned = "yes"; }
+  `  printf("dir=%s spawned=%s\n", dir, spawned);
+  `  remove_file("fun-out/observe_probe/a.txt");
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "observe_probe",
+    "a built program observes the file system and other processes"
+  );
+  assert contains(out, "dir=yes"), "expected the directory it made to be there";
+  assert contains(out, "spawned=yes"), "expected the process it ran to report back";
+}
