@@ -838,18 +838,16 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
   assert contains(out, "Node* PtrBox__Box__get(PtrBox* self)"), "expected the impl method to keep its pointer return type";
 }
 
-// gap: `sizeof(Node*)` on a user-defined type name is a parse error; only a
-// primitive type keyword folds its trailing stars.
-// test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
-// str src = `imp std.c.io;
-// `compound Node { num value; }
-// `fun main() num {
-// `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
-// assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
-// }
+test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
+  str src = `imp std.c.io;
+  `compound Node { num value; }
+  `fun main() num {
+  `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
+  assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
+}
 
 test "self-referential recursive generic enum (List<T>) via generic helper functions" {
   str src = `imp std.c.io;
@@ -1297,27 +1295,29 @@ test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   assert !contains(out, "__fun_go("), "expected no scheduler runtime to be emitted";
 }
 
-// gap: a `str[]` return type is emitted as `char*` while the body returns
-// `char**`.
-// test "array return types: T[] is a valid function return type, with a body and signature-only" {
-// str src = `imp std.c.io;
-// `imp std.c.mem;
-// `pub fun unused_signature_only() str[];
-// `fun make_names() str[] {
-// `  str[] out = malloc(sizeof(str) * 3);
-// `  out[0] = "a";
-// `  out[1] = "b";
-// `  out[2] = nil;
-// `  ret out;
-// `}
-// `fun main() num {
-// `  str[] names = make_names();
-// `  printf("%s %s\n", names[0], make_names()[1]);
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "array return types: T[] is a valid function return type");
-// assert contains(out, "char** make_names"), "expected the array return type to lower to a pointer-to-pointer";
-// }
+test "array return types: T[] is a valid function return type, with a body and signature-only" {
+  str src = `imp std.c.io;
+  `imp std.c.mem;
+  `pub fun unused_signature_only() str[];
+  `fun make_names() str[] {
+  `  str[] out = malloc(sizeof(str) * 3);
+  `  out[0] = "a";
+  `  out[1] = "b";
+  `  out[2] = nil;
+  `  ret out;
+  `}
+  `fun main() num {
+  `  str[] names = make_names();
+  `  printf("%s %s\n", names[0], make_names()[1]);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "array_return_type",
+    "array return types: T[] is a valid function return type"
+  );
+  assert equals(out, "a b\n"), "expected the array return type to lower to a pointer-to-pointer, with a matching forward prototype";
+}
 
 test "a built program observes the file system and other processes" {
   str src = `imp std.c.io;

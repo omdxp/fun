@@ -1512,6 +1512,12 @@ impl Codegen {
         if rt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
+        // `write_type` writes a type's own `pointer_depth`, not its
+        // array-decay; see the matching star in `emit_function_named`'s
+        // own return-type write, which this prototype must agree with.
+        if dtype_is_array_as_pointer(*f.rtype) {
+          self.state.write("*");
+        }
         self.state.write(" ");
         self.state.write(new_name);
         self.state.write("(");
@@ -2274,6 +2280,12 @@ impl Codegen {
     self.hoist_insert_pos = .None;
     self.state.write_indent();
     let pm_rt = self.write_type(*pm_rtype);
+    // Matches the extra star the real definition writes for an
+    // array-decayed return type; see the same fix in
+    // `ensure_plain_function_prototype_emitted`.
+    if dtype_is_array_as_pointer(*pm_rtype) {
+      self.state.write("*");
+    }
     if pm_rt.is_some() {
       self.state.write(" ");
       self.state.write(pm_mangled);
@@ -2393,6 +2405,13 @@ impl Codegen {
     self.hoist_insert_pos = .None;
     self.state.write_indent();
     let pf_rt = self.write_type(*pf_rtype);
+    // Matches the same extra star the real definition writes for an
+    // array-decayed return type (`emit_function_named`); left off here,
+    // this inline prototype disagreed with it and the C compiler saw two
+    // conflicting declarations for the same function.
+    if dtype_is_array_as_pointer(*pf_rtype) {
+      self.state.write("*");
+    }
     if pf_rt.is_some() {
       self.state.write(" ");
       self.state.write(self.effective_function_name(fn_name));
@@ -7950,6 +7969,14 @@ impl Codegen {
           self.hoist_insert_pos = .None;
         }
         let rt = self.write_type(*f.rtype);
+        // `write_type` writes a type's own `pointer_depth`, not its
+        // array-decay: an unsized `str[]` return needs one more star
+        // than `str` alone (`char**`, not `char*`), the same extra star
+        // a field or parameter of the same array type already gets at
+        // its own, separate emission site.
+        if dtype_is_array_as_pointer(*f.rtype) {
+          self.state.write("*");
+        }
         if is_main {
           self.state = saved_rtype_state;
           self.hoist_insert_pos = saved_rtype_hoist_pos;
