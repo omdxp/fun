@@ -11232,7 +11232,6 @@ test "stdlib make_dir_all creates parents and a Sink reads a file back" {
     try std.testing.expectEqualStrings("yes [one] [two]\n", stdout);
 }
 
-
 test "a local named argv does not collide with the entry point's own parameters" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_local_named_argv.fn";
@@ -11268,7 +11267,6 @@ test "a local named argv does not collide with the entry point's own parameters"
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("7\n", stdout);
 }
-
 
 test "set_env hands a value to the program and to what it starts" {
     const allocator = std.testing.allocator;

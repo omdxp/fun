@@ -19697,6 +19697,19 @@ pub const TranspileProcess = struct {
             try self.write("extern char** environ;\n");
             try self.write("static char** environ_ptr(void){ return environ; }\n");
             try self.write("#endif\n");
+            // `setenv` is POSIX and has no Windows CRT equivalent under that
+            // name, so Windows gets one written in terms of what it does have.
+            // Same approach as `environ_ptr` above: the wrapper's C signature
+            // matches the POSIX one exactly, so `std.c.mem`'s single binding is
+            // correct on every platform. `_putenv_s` is declared by <stdlib.h>
+            // on both MSVC and MinGW-w64, neither of which declares `setenv`.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("static int setenv(const char* name, const char* value, int overwrite) {\n");
+            try self.write("  if (!overwrite && getenv(name) != NULL) { return 0; }\n");
+            try self.write("  return _putenv_s(name, value);\n");
+            try self.write("}\n");
+            try self.write("static int unsetenv(const char* name) { return _putenv_s(name, \"\"); }\n");
+            try self.write("#endif\n");
             // Directory iteration/creation/kind-check helpers for `std.c.dirent`
             // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
             // libc directory APIs differ enough across platforms (POSIX
