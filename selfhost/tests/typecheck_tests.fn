@@ -747,3 +747,41 @@ test "an async call that is never awaited is rejected" {
     "expected the awaited call accepted"
   );
 }
+
+test "one generic instantiation does not stand for another" {
+  // Both are written `Box`, so comparing names alone let a `Box<num>`
+  // pass where a `Box<str>` was asked for.
+  str src = `compound Box<T> { T value; }
+  `fun take(Box<str> b) num { ret 1; }
+  `fun main() num {
+  `  Box<num> n;
+  `  ret take(n);
+  `}`;
+  str found = check(src);
+  assert contains(found, "expects Box<str>"), "expected the message to name what was wanted";
+  assert contains(found, "found Box<num>"), "expected the message to name what was supplied";
+}
+
+test "a matching instantiation, and one still standing for a parameter, are accepted" {
+  accepts(
+    `compound Box<T> { T value; }
+    `fun take(Box<str> b) num { ret 1; }
+    `fun main() num {
+    `  Box<str> s;
+    `  ret take(s);
+    `}`,
+    "expected the same instantiation accepted"
+  );
+
+  // Inside a generic body the argument is still a parameter, which
+  // stands for whatever an instantiation supplies.
+  accepts(
+    `compound Box<T> { T value; }
+    `fun pass<T>(Box<T> b) num { ret 1; }
+    `fun main() num {
+    `  Box<num> n;
+    `  ret pass(n);
+    `}`,
+    "expected an unresolved parameter to stand for anything"
+  );
+}

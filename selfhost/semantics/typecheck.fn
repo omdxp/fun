@@ -139,6 +139,21 @@ pub fun type_name(CheckedType t) str {
   }
   StringBuilder b = string_builder_init(len(base) + 4);
   b.append(base);
+  // What a generic was instantiated with is part of what it is: without
+  // this, two different instantiations both read as `Box` and a message
+  // about them says nothing.
+  if t.generic_args.len > 0 {
+    b.append("<");
+    num g = 0;
+    for g < t.generic_args.len {
+      if g > 0 {
+        b.append(", ");
+      }
+      b.append(type_name(t.generic_args.get(g)));
+      g = g + 1;
+    }
+    b.append(">");
+  }
   num i = 0;
   for i < t.pointer_depth {
     b.append("*");
@@ -541,7 +556,11 @@ impl Checker {
   // including where `to` is a quirk a pointer satisfies.
   assignable(CheckedType to, CheckedType from) bin {
     if can_assign(to, from) {
-      ret true;
+      // Two instantiations of one generic type are the same type only
+      // when they were instantiated with the same arguments: a
+      // `Box<num>` is not a `Box<str>`, though both are written `Box`
+      // and compare equal by name alone.
+      ret self.generic_args_agree(to, from);
     }
     // A name the program never declares is a type parameter that no
     // instantiation resolved, which stands for anything.
@@ -556,6 +575,35 @@ impl Checker {
       ret from.pointer_depth > 0 || self.quirks.has(from.name);
     }
     ret false;
+  }
+
+  // True when two types instantiated from the same generic agree on what
+  // they hold. An argument the checker never resolved stands for
+  // anything, and a side carrying no arguments at all says nothing about
+  // what it holds, so only two resolved lists are compared.
+  generic_args_agree(CheckedType to, CheckedType from) bin {
+    if to.generic_args.len == 0 || from.generic_args.len == 0 {
+      ret true;
+    }
+    if to.generic_args.len != from.generic_args.len {
+      ret true;
+    }
+    num i = 0;
+    for i < to.generic_args.len {
+      CheckedType want = to.generic_args.get(i);
+      CheckedType got = from.generic_args.get(i);
+      i = i + 1;
+      if is_unknown(want) || is_unknown(got) {
+        continue;
+      }
+      if !self.names_a_declared_type(want) || !self.names_a_declared_type(got) {
+        continue;
+      }
+      if !self.assignable(want, got) {
+        ret false;
+      }
+    }
+    ret true;
   }
 
   // True when a type names something the program declares, as opposed to

@@ -799,7 +799,9 @@ test "P1: let inference from dereferenced generic pointer yields the value type"
 // instead of rejected.
 // test "P1: empty enum, let-from-void, and format arg-mismatch are rejected" { }
 
-// gap: a `Box<num>` argument is accepted where a `Box<str>` parameter is
+// Resolved: an argument whose instantiation differs from the parameter's
+// is rejected, and the message names both (typecheck_tests.fn).
+// gap (historical): a `Box<num>` argument was accepted where a `Box<str>` parameter is
 // declared, so distinct instantiations are interchangeable.
 // test "reaudit: distinct generic instantiations are not interchangeable types" { }
 
