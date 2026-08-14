@@ -500,9 +500,12 @@ test "default parameter values: free fn + method, omitting trailing args fills d
   assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
 }
 
-// pending: the watchdog test needs `set_env`, which is staged for the
-// next release from main. It is written and waiting there rather than
-// skipped: once the release lands and merges, it goes back in here.
+// pending: the watchdog test needs to hand a setting to the program it
+// runs, which the standard library cannot do yet. `setenv` was tried and
+// pulled back out: it is POSIX-only, and naming it broke every Windows
+// build. Doing this properly means either a shim the generated C carries
+// on both platforms, or letting `process.run` take the environment to
+// run under, which is the better shape anyway.
 
 test "a value renders through Display when written as {}" {
   str src = `imp std.io;
