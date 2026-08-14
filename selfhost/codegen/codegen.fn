@@ -4714,23 +4714,104 @@ impl Codegen {
     }
   }
 
+  // Hoists a call expression's rendered text (`recv_r.text`, an rvalue)
+  // into a fresh `__auto_type` temp spliced right before the current
+  // statement, returning the temp's name. Shared by `emit_method_call`
+  // (which needs `&<rvalue>`, invalid C without this) and
+  // `emit_quirk_dispatch_call` (which reads the same rvalue twice --
+  // once for `.vtable`, once for `.self` -- and without hoisting it,
+  // silently runs the call twice at runtime).
+  hoist_call_result_to_temp(str call_text) str {
+    self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
+    StringBuilder recv_tmp_name_sb = string_builder_init(24);
+    recv_tmp_name_sb.append("__fun_recv_tmp");
+    recv_tmp_name_sb.append(format_num(self.call_recv_temp_counter));
+    str recv_tmp_name = recv_tmp_name_sb.build();
+
+    StringBuilder recv_tmp_stmt_sb = string_builder_init(64);
+    num recv_tmp_ii = 0;
+    for recv_tmp_ii < self.state.indent_level {
+      recv_tmp_stmt_sb.append("    ");
+      recv_tmp_ii = recv_tmp_ii + 1;
+    }
+    recv_tmp_stmt_sb.append("__auto_type ");
+    recv_tmp_stmt_sb.append(recv_tmp_name);
+    recv_tmp_stmt_sb.append(" = ");
+    recv_tmp_stmt_sb.append(call_text);
+    recv_tmp_stmt_sb.append(";\n");
+
+    if self.hoist_scratch_depth > 0 {
+      // Nested inside `resolve_field_chain`'s call-as-receiver scratch
+      // buffer. `hoist_insert_pos`/`current_stmt_start_pos` only reach
+      // that enclosing buffer, which holds an expression result rather
+      // than a statement, so this reaches through to the root buffer
+      // and position instead.
+      CodegenState* saved_nested_state = self.state;
+      let saved_nested_hoist_pos = self.hoist_insert_pos;
+      let saved_nested_stmt_pos = self.current_stmt_start_pos;
+      self.state = self.root_state;
+      self.hoist_insert_pos = self.root_stmt_start_pos;
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+      str recv_tmp_text_root = recv_tmp_stmt_sb.build();
+      // `root_hoist_pos` tracks a coarser position into the same root
+      // buffer, so it needs the same splice-shift adjustment that
+      // `emit_hoisted` below applies to `current_stmt_start_pos`.
+      let root_splice_pos_before = self.current_stmt_start_pos;
+      self.emit_hoisted(recv_tmp_text_root);
+      if root_splice_pos_before.is_some() {
+        self.root_hoist_pos = adjust_pos_after_splice(
+          self.root_hoist_pos,
+          root_splice_pos_before.unwrap(),
+          len(recv_tmp_text_root)
+        );
+      }
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+      self.state = saved_nested_state;
+      self.hoist_insert_pos = saved_nested_hoist_pos;
+      self.current_stmt_start_pos = saved_nested_stmt_pos;
+    } else {
+      let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
+      let recv_tmp_splice_pos = self.current_stmt_start_pos;
+      self.hoist_insert_pos = recv_tmp_splice_pos;
+      str recv_tmp_text = recv_tmp_stmt_sb.build();
+      self.emit_hoisted(recv_tmp_text);
+      // `saved_recv_tmp_hoist_pos` is a captured local, so this splice
+      // needs a manual adjustment.
+      if recv_tmp_splice_pos.is_some() {
+        saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
+          saved_recv_tmp_hoist_pos,
+          recv_tmp_splice_pos.unwrap(),
+          len(recv_tmp_text)
+        );
+      }
+      self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
+    }
+    ret recv_tmp_name;
+  }
+
   // Emits `recv.method(args...)` as C `recv.vtable->method(recv.self,
   // args...)`, using `->` throughout when `recv` is a pointer to the
   // quirk's fat-pointer struct. The dynamic-dispatch counterpart to
   // `emit_method_call`'s static dispatch, called once `recv_r.type_name`
-  // is recognized as a quirk. A call-result receiver needs no
-  // temp-hoisting, since C allows `.field` access on a struct rvalue.
+  // is recognized as a quirk. A call-result receiver is hoisted into a
+  // temp first, since its rendered text is read twice below (`.vtable`,
+  // then `.self`) and evaluating the call itself twice would run it
+  // twice at runtime.
   emit_quirk_dispatch_call(ChainResolution recv_r, str method_name, Node* args_node) Option<CodegenErrorKind> {
+    str recv_text = recv_r.text;
+    if recv_r.is_call_result {
+      recv_text = self.hoist_call_result_to_temp(recv_r.text);
+    }
     str sep = ".";
     if recv_r.is_pointer {
       sep = "->";
     }
-    self.state.write(recv_r.text);
+    self.state.write(recv_text);
     self.state.write(sep);
     self.state.write("vtable->");
     self.state.write(method_name);
     self.state.write("(");
-    self.state.write(recv_r.text);
+    self.state.write(recv_text);
     self.state.write(sep);
     self.state.write("self");
     Vec<Node*> args;
@@ -4888,71 +4969,7 @@ impl Codegen {
       // `&<rvalue>` is invalid C. It is hoisted into a fresh
       // `__auto_type` temp spliced right before the current statement,
       // and the temp's address is taken instead.
-      self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
-      StringBuilder recv_tmp_name_sb = string_builder_init(24);
-      recv_tmp_name_sb.append("__fun_recv_tmp");
-      recv_tmp_name_sb.append(format_num(self.call_recv_temp_counter));
-      str recv_tmp_name = recv_tmp_name_sb.build();
-
-      StringBuilder recv_tmp_stmt_sb = string_builder_init(64);
-      num recv_tmp_ii = 0;
-      for recv_tmp_ii < self.state.indent_level {
-        recv_tmp_stmt_sb.append("    ");
-        recv_tmp_ii = recv_tmp_ii + 1;
-      }
-      recv_tmp_stmt_sb.append("__auto_type ");
-      recv_tmp_stmt_sb.append(recv_tmp_name);
-      recv_tmp_stmt_sb.append(" = ");
-      recv_tmp_stmt_sb.append(recv_r.text);
-      recv_tmp_stmt_sb.append(";\n");
-
-      if self.hoist_scratch_depth > 0 {
-        // Nested inside `resolve_field_chain`'s call-as-receiver scratch
-        // buffer. `hoist_insert_pos`/`current_stmt_start_pos` only reach
-        // that enclosing buffer, which holds an expression result rather
-        // than a statement, so this reaches through to the root buffer
-        // and position instead.
-        CodegenState* saved_nested_state = self.state;
-        let saved_nested_hoist_pos = self.hoist_insert_pos;
-        let saved_nested_stmt_pos = self.current_stmt_start_pos;
-        self.state = self.root_state;
-        self.hoist_insert_pos = self.root_stmt_start_pos;
-        self.current_stmt_start_pos = self.root_stmt_start_pos;
-        str recv_tmp_text_root = recv_tmp_stmt_sb.build();
-        // `root_hoist_pos` tracks a coarser position into the same root
-        // buffer, so it needs the same splice-shift adjustment that
-        // `emit_hoisted` below applies to `current_stmt_start_pos`.
-        let root_splice_pos_before = self.current_stmt_start_pos;
-        self.emit_hoisted(recv_tmp_text_root);
-        if root_splice_pos_before.is_some() {
-          self.root_hoist_pos = adjust_pos_after_splice(
-            self.root_hoist_pos,
-            root_splice_pos_before.unwrap(),
-            len(recv_tmp_text_root)
-          );
-        }
-        self.root_stmt_start_pos = self.current_stmt_start_pos;
-        self.state = saved_nested_state;
-        self.hoist_insert_pos = saved_nested_hoist_pos;
-        self.current_stmt_start_pos = saved_nested_stmt_pos;
-      } else {
-        let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
-        let recv_tmp_splice_pos = self.current_stmt_start_pos;
-        self.hoist_insert_pos = recv_tmp_splice_pos;
-        str recv_tmp_text = recv_tmp_stmt_sb.build();
-        self.emit_hoisted(recv_tmp_text);
-        // `saved_recv_tmp_hoist_pos` is a captured local, so this splice
-        // needs a manual adjustment.
-        if recv_tmp_splice_pos.is_some() {
-          saved_recv_tmp_hoist_pos = adjust_pos_after_splice(
-            saved_recv_tmp_hoist_pos,
-            recv_tmp_splice_pos.unwrap(),
-            len(recv_tmp_text)
-          );
-        }
-        self.hoist_insert_pos = saved_recv_tmp_hoist_pos;
-      }
-
+      str recv_tmp_name = self.hoist_call_result_to_temp(recv_r.text);
       self.state.write("&");
       self.state.write(recv_tmp_name);
     } else {

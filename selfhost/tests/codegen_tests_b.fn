@@ -691,10 +691,28 @@ test "generic compound coerces to a quirk at a call site and via var-init" {
   assert contains(out, "Sized sz = __fun_coerce_Box__num_"), "expected the var-init to use the mangled helper";
 }
 
-// gap: a quirk method called on a call result emits the receiver expression
-// twice (`make(&st).vtable->weight(make(&st).self)`), so the receiver call runs
-// twice instead of being materialized into a temp.
-// test "quirk method dispatched on a call result materializes the receiver once" { }
+test "quirk method dispatched on a call result materializes the receiver once" {
+  str src = `imp std.c.io;
+  `compound St { num v; }
+  `quirk Weighted { weight() num; }
+  `impl St as Weighted { weight() num { ret self.v; } }
+  `num call_count = 0;
+  `fun make(St* s) Weighted {
+  `  call_count = call_count + 1;
+  `  ret s;
+  `}
+  `fun main() num {
+  `  St st; st.v = 5;
+  `  printf("%lld %lld\n", make(&st).weight(), call_count);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "quirk_call_result_once",
+    "quirk method dispatched on a call result materializes the receiver once"
+  );
+  assert equals(out, "5 1\n"), "expected the receiver call to run once, materialized into a temp";
+}
 
 test "fixed-size array compound field is inline, not a pointer" {
   // `write_type` writes a base type plus pointer stars, nothing for
