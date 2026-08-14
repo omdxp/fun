@@ -32,11 +32,15 @@ pub compound Analyzed {
 // What has been read, by document URI.
 pub compound AnalysisCache {
   Map<str, Analyzed> entries;
+  // What every file the open documents import last parsed as. An edit
+  // changes one file, so the rest are reused rather than read again.
+  ImportCache imports;
 }
 
 pub fun analysis_cache_new() AnalysisCache {
   AnalysisCache c;
   c.entries.init(8);
+  c.imports = import_cache_new();
   ret c;
 }
 
@@ -66,7 +70,7 @@ impl AnalysisCache {
 
     // The text a client holds is what to read, not what is on disk;
     // everything it imports is still read from disk.
-    let merged = parse_program_with_source(doc.path, doc.text);
+    let merged = parse_program_cached(doc.path, doc.text, &self.imports);
     if merged.is_ok() {
       fresh.program = merged.unwrap();
       fresh.parsed = true;
@@ -83,5 +87,6 @@ impl AnalysisCache {
 
   pub free() {
     self.entries.free();
+    self.imports.files.free();
   }
 }

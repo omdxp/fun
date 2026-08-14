@@ -215,6 +215,50 @@ fun _import_nodes_only(Vec<Node> nodes) Vec<Node> {
   ret out;
 }
 
+// A file as it was last parsed, kept so an unchanged one is not parsed
+// again. The source it was parsed from is what says whether it is still
+// current, which costs a string comparison rather than a stat call and
+// is exact rather than a guess about clocks.
+// 
+// The names the program declares are part of the key too: the merge pass
+// parses with them in scope, so the same text can parse differently once
+// another file gains or loses a public compound.
+pub compound ParsedFile {
+  str source;
+  str symbols_key;
+  Vec<Node> nodes;
+}
+
+// What has been parsed, by resolved path. A long-running server keeps
+// one of these; a single compile makes one and drops it.
+pub compound ImportCache {
+  Map<str, ParsedFile> files;
+  bin ready;
+}
+
+pub fun import_cache_new() ImportCache {
+  ImportCache c;
+  c.files.init(16);
+  c.ready = true;
+  ret c;
+}
+
+// The declared names, in a fixed order, so two sets can be compared as
+// one string.
+fun _symbols_key(Map<str, GlobalSymbolInfo>* symbols) str {
+  Vec<str> names = symbols.keys();
+  defer names.free();
+  names.sort();
+  StringBuilder b = string_builder_init(names.len * 12);
+  num i = 0;
+  for i < names.len {
+    b.append(names.get(i));
+    b.append(",");
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
   ret parse_program_with_source(entry_path, nil);
 }
@@ -223,6 +267,15 @@ pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, st
 // disk. An editor holds text the file does not yet contain, and that is
 // the text to judge; everything it imports is still read from disk.
 pub fun parse_program_with_source(str entry_path, str entry_source) Result<ProgramMergeResult, str> {
+  ImportCache cache = import_cache_new();
+  defer cache.files.free();
+  ret parse_program_cached(entry_path, entry_source, &cache);
+}
+
+// The same, reusing what `cache` already holds. A file whose text and
+// surrounding declarations are unchanged is not parsed again, so an edit
+// in one file costs that file rather than the whole import graph.
+pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   Set<str> preload_visited = set_init("", 8);
@@ -245,6 +298,7 @@ pub fun parse_program_with_source(str entry_path, str entry_source) Result<Progr
   Vec<str> rename_targets;
   rename_targets.init(0);
   Set<str> visited = set_init("", 8);
+  str symbols_key = _symbols_key(&global_symbols);
   let err = _parse_and_merge_source(
     entry_path,
     entry_source,
@@ -254,7 +308,9 @@ pub fun parse_program_with_source(str entry_path, str entry_source) Result<Progr
     &global_symbols,
     "",
     &rename_keys,
-    &rename_targets
+    &rename_targets,
+    cache,
+    symbols_key
   );
   if err.is_some() {
     ret .Err(err.unwrap());
@@ -420,7 +476,9 @@ fun _parse_and_merge(
   GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
-  Vec<str>* rename_targets
+  Vec<str>* rename_targets,
+  ImportCache* cache,
+  str symbols_key
 ) Option<str> {
   ret _parse_and_merge_source(
     path,
@@ -431,7 +489,9 @@ fun _parse_and_merge(
     global_symbols,
     current_alias,
     rename_keys,
-    rename_targets
+    rename_targets,
+    cache,
+    symbols_key
   );
 }
 
@@ -445,7 +505,9 @@ fun _parse_and_merge_source(
   GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
-  Vec<str>* rename_targets
+  Vec<str>* rename_targets,
+  ImportCache* cache,
+  str symbols_key
 ) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
@@ -461,25 +523,52 @@ fun _parse_and_merge_source(
     src = read_to_string(path);
   }
 
-  let tok_result = tokenize(src, path);
-  if tok_result.is_err() {
-    ret .Some(format("lex error in {str}", path));
+  // A file reached under an alias has its own function names rewritten
+  // below, in place, so it is parsed fresh every time: handing out nodes
+  // that are about to be renamed would poison what is kept.
+  bin cacheable = equals(current_alias, "");
+  Vec<Node> parsed_nodes;
+  bin reused = false;
+  if cacheable {
+    let kept = cache.files.at(path);
+    if kept.is_some() {
+      ParsedFile held = kept.unwrap();
+      if equals(held.source, src) && equals(held.symbols_key, symbols_key) {
+        parsed_nodes = held.nodes;
+        reused = true;
+      }
+    }
   }
 
-  ParseState state = parse_state_new(path, src);
-  state.tokens = tok_result.unwrap();
-  state.global_symbols = *global_symbols;
-  Parser p = parser_new(&state);
-  let perr = p.parse();
-  if perr.is_some() {
-    ret .Some(format("parse error in {str}", path));
+  if !reused {
+    let tok_result = tokenize(src, path);
+    if tok_result.is_err() {
+      ret .Some(format("lex error in {str}", path));
+    }
+
+    ParseState state = parse_state_new(path, src);
+    state.tokens = tok_result.unwrap();
+    state.global_symbols = *global_symbols;
+    Parser p = parser_new(&state);
+    let perr = p.parse();
+    if perr.is_some() {
+      ret .Some(format("parse error in {str}", path));
+    }
+    parsed_nodes = state.nodes;
+    if cacheable {
+      ParsedFile fresh;
+      fresh.source = src;
+      fresh.symbols_key = symbols_key;
+      fresh.nodes = parsed_nodes;
+      cache.files.put(path, fresh);
+    }
   }
 
   // Pass 1: recurse into this file's own imports first (always grouped
   // at the top of a file, before any other declaration), so every one of
   // them is fully merged before `_rename_colliding_functions` below
   // checks this file's own declarations against `merged`.
-  for n : state.nodes {
+  for n : parsed_nodes {
     fit n.kind {
       .Import(imp_node) -> {
         str next_alias = "";
@@ -496,7 +585,9 @@ fun _parse_and_merge_source(
           global_symbols,
           next_alias,
           rename_keys,
-          rename_targets
+          rename_targets,
+          cache,
+          symbols_key
         );
         if ierr.is_some() {
           ret ierr;
@@ -509,11 +600,11 @@ fun _parse_and_merge_source(
   // Pass 2: rename any colliding plain function before pushing anything.
   // See `_rename_colliding_functions`.
   if !equals(current_alias, "") {
-    _rename_colliding_functions(&state.nodes, merged, current_alias, rename_keys, rename_targets);
+    _rename_colliding_functions(&parsed_nodes, merged, current_alias, rename_keys, rename_targets);
   }
 
   // Pass 3: push every non-import node, now settled.
-  for n : state.nodes {
+  for n : parsed_nodes {
     fit n.kind {
       .Import(_) -> {}
       _ -> { merged.push(n); }
