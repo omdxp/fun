@@ -954,6 +954,17 @@ impl Checker {
         ret checked_unknown();
       }
     }
+    // Dividing by a zero written into the program is a mistake the
+    // program can be told about, rather than one the machine finds.
+    if (equals(e.op, "/") || equals(e.op, "%")) && e.has_right {
+      if _is_constant_zero(e.right) {
+        self.fail(
+          format("division by zero: right operand of '{str}' is the constant 0", e.op),
+          node
+        );
+        ret checked_unknown();
+      }
+    }
     if equals(e.op, ".") {
       ret self.infer_field(node, e, env);
     }
@@ -1471,6 +1482,79 @@ fun _is_assignment(str op) bin {
   );
 }
 
+// The value an expression is known to hold when it is written out of
+// literals. Only the shapes a divisor is plausibly written as are folded:
+// a literal, a parenthesized one, and the arithmetic between two of them.
+fun _constant_value(Node* node) Option<num> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .Number(data) -> {
+      fit data {
+        .Num(v) -> { ret .Some(v); }
+        _ -> {}
+      }
+    }
+    .ExpressionParenthesis(inner) -> { ret _constant_value(inner); }
+    .Bracket(inner) -> { ret _constant_value(inner); }
+    .Expression(e) -> {
+      if !e.has_left || !e.has_right {
+        ret .None;
+      }
+      let left = _constant_value(e.left);
+      let right = _constant_value(e.right);
+      if left.is_none() || right.is_none() {
+        ret .None;
+      }
+      num l = left.unwrap();
+      num r = right.unwrap();
+      if equals(e.op, "+") {
+        ret .Some(l + r);
+      }
+      if equals(e.op, "-") {
+        ret .Some(l - r);
+      }
+      if equals(e.op, "*") {
+        ret .Some(l * r);
+      }
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
+// True when `node` is written as a zero, however it is spelled.
+fun _is_constant_zero(Node* node) bin {
+  let value = _constant_value(node);
+  ret value.is_some() && value.unwrap() == 0;
+}
+
+// The enum a branch pattern names, for a pattern written in full as
+// `Enum.Variant` or `Enum.Variant(x)`. Empty for shorthand, which names
+// no enum and so cannot disagree with one.
+fun _branch_enum_name(Node* condition) str {
+  if condition == nil {
+    ret "";
+  }
+  fit condition.kind {
+    .Expression(e) -> {
+      if equals(e.op, ".") && e.has_left && e.left != nil {
+        fit e.left.kind {
+          .Identifier(name) -> { ret name; }
+          _ -> {}
+        }
+      }
+      // A destructuring pattern is a call on the variant it names.
+      if equals(e.op, "()") && e.has_left {
+        ret _branch_enum_name(e.left);
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
 fun _is_comparison(str op) bin {
   ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") || equals(
     op,
@@ -1526,10 +1610,40 @@ impl Checker {
       .StatementElse(body) -> { self.check_statement(body, env); }
       .StatementDefer(inner) -> { self.check_statement(inner, env); }
       .StatementFor(kind) -> { self.check_for(kind, env); }
+      .StatementFit(f) -> { self.check_fit(f, env); }
       .Expression(_) -> { self.walk_expr(stmt, env); }
       .ExpressionParenthesis(_) -> { self.walk_expr(stmt, env); }
       .Unary(_) -> { self.walk_expr(stmt, env); }
       _ -> {}
+    }
+  }
+
+  // Checks that every branch matches the value being matched. A branch
+  // written `Other.Variant` against a different enum's value can never
+  // be taken, so it is a mistake rather than a dead branch.
+  check_fit(FitStmtNode f, TypeEnv* env) {
+    str subject = "";
+    if f.exp != nil {
+      CheckedType held = self.infer(f.exp, env);
+      subject = held.name;
+    }
+    for branch : f.branches {
+      if branch.has_condition {
+        str named = _branch_enum_name(branch.condition);
+        if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
+          self.fail(
+            format(
+              "fit branch names '{str}' but the value being matched is a '{str}'",
+              named,
+              subject
+            ),
+            branch.condition
+          );
+        }
+      }
+      env.push();
+      self.check_statement(branch.body, env);
+      env.pop();
     }
   }
 

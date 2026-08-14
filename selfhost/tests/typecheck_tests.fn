@@ -608,3 +608,70 @@ test "a type whose impls were never seen is left alone" {
   `}`;
   assert equals(check(src), ""), "expected a program that calls nothing to pass";
 }
+
+test "a zero divisor written into the program is rejected" {
+  // The machine would find this too, at the cost of a crash rather than
+  // a message. Every spelling of a written zero is caught: a literal, a
+  // remainder, and arithmetic that folds to one.
+  assert contains(check(`fun main() num { ret 10 / 0; }`), "division by zero"), "expected a literal zero divisor rejected";
+  assert contains(check(`fun main() num { ret 7 % 0; }`), "division by zero"), "expected a zero remainder rejected";
+  assert contains(check(`fun main() num { ret 8 / (2 - 2); }`), "division by zero"), "expected a folded zero rejected";
+  assert contains(check(`fun main() num { ret 8 / (0); }`), "division by zero"), "expected a parenthesized zero rejected";
+}
+
+test "a divisor that is not a written zero is left alone" {
+  // A zero only the running program could know about is not this
+  // check's business, and neither is a decimal divisor.
+  accepts(`fun main() num { ret 10 / 2; }`, "expected a plain divisor accepted");
+  accepts(`fun main() num { ret 8 / (2 + 2); }`, "expected a folded non-zero accepted");
+  accepts(
+    `fun main() num {
+    `  num z = 0;
+    `  ret 9 / z;
+    `}`,
+    "expected a runtime zero left to the program"
+  );
+  accepts(`fun main() dec { ret 1.5 / 0.5; }`, "expected a decimal divisor accepted");
+}
+
+test "a fit branch naming a different enum is rejected" {
+  // A branch written against another enum's variant can never be taken,
+  // so it is a mistake rather than a branch that happens to be dead.
+  str src = `enum A { X, Y }
+  `enum B { P, Q }
+  `fun main() num {
+  `  A a = .X;
+  `  fit a {
+  `    A.X -> { ret 1; }
+  `    B.P -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert contains(check(src), "fit branch names"), "expected the wrong enum to be rejected";
+}
+
+test "a fit branch naming its own enum, or nothing, is accepted" {
+  // Shorthand names no enum and so cannot disagree with one.
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  fit a {
+    `    A.X -> { ret 1; }
+    `    A.Y -> { ret 2; }
+    `  }
+    `}`,
+    "expected branches naming their own enum accepted"
+  );
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  fit a {
+    `    .X -> { ret 1; }
+    `    _ -> { ret 2; }
+    `  }
+    `}`,
+    "expected shorthand branches accepted"
+  );
+}

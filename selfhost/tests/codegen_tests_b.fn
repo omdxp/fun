@@ -397,9 +397,8 @@ test "sizeof works with generic types, generic instances, and locals" {
 // gap: `sizeof(Nope)` on an undeclared type is accepted and passed through to C.
 // test "sizeof on an undeclared type is still rejected" { }
 
-// gap: a constant-zero divisor (`10 / 0`, `7 % 0`, `8 / (2 - 2)`) is accepted
-// and passed through to C.
-// test "P5: constant division by zero is rejected at compile time" { }
+// A constant-zero divisor is rejected by the typechecker, which is where
+// the check belongs and where its tests live (typecheck_tests.fn).
 
 test "P5: non-zero and runtime divisors still compile" {
   str src = `imp std.c.io;
