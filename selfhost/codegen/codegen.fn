@@ -7057,11 +7057,37 @@ impl Codegen {
               .Identifier(n) -> { method_name = n; }
               _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
             }
-            let rtype = self.lookup_impl_method_rtype(owner_type_name, method_name);
-            if rtype.is_none() {
-              ret .Some(CodegenErrorKind.UnsupportedNode);
+            // A method declaring its own generic type param
+            // (`wrap<U>(U x) Maybe<U>`) needs the combined substitution
+            // `maybe_instantiate_generic_impl_method_own_params` builds,
+            // inferring `U` from this call's own arguments; the plain
+            // `lookup_impl_method_rtype` below only knows the raw
+            // unsubstituted `Maybe<U>` template.
+            Option<DataType> own_rtype_dt = .None;
+            if self.impl_method_has_own_type_params(owner_type_name, method_name) {
+              Vec<Node*> fit_own_args;
+              fit_own_args.init(0);
+              defer fit_own_args.free();
+              self.flatten_call_args(dot_e.right, &fit_own_args);
+              let own_res = self.maybe_instantiate_generic_impl_method_own_params(
+                owner_type_name,
+                method_name,
+                fit_own_args
+              );
+              if own_res.is_some() {
+                own_rtype_dt = .Some(own_res.unwrap().rtype);
+              }
             }
-            let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+            Option<str> resolved_rtype = .None;
+            if own_rtype_dt.is_some() {
+              resolved_rtype = self.resolve_type_name(own_rtype_dt.unwrap());
+            } else {
+              let rtype = self.lookup_impl_method_rtype(owner_type_name, method_name);
+              if rtype.is_none() {
+                ret .Some(CodegenErrorKind.UnsupportedNode);
+              }
+              resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+            }
             if resolved_rtype.is_none() {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }
@@ -9305,10 +9331,22 @@ impl Codegen {
             arg_type_names.init(0);
             Vec<bin> arg_is_pointer;
             arg_is_pointer.init(0);
+            // Parallel to `arg_type_names`, the full structural type
+            // behind each inferred binding, so a nested call inside this
+            // function's own body (another generic function or a
+            // generic impl method, referencing this same type param by
+            // name) substitutes against THIS call's argument and not
+            // whatever substitution context happens to still be active
+            // from an enclosing generic impl method. See
+            // `resolve_type_subst`'s own preference for this over the
+            // flat name below.
+            Vec<DataType*> arg_dtypes;
+            arg_dtypes.init(0);
             for tp : f.type_params {
               bin found = false;
               str found_name = "";
               bin found_is_pointer = false;
+              Option<DataType> found_dtype = .None;
               num ai = 0;
               for parg : f.args {
                 fit parg.kind {
@@ -9324,6 +9362,7 @@ impl Codegen {
                         // the matching position, since `ai` is stale once
                         // the loop ends, having passed every param.
                         found_is_pointer = self.infer_arg_is_pointer(arg_node);
+                        found_dtype = self.infer_arg_dtype(arg_node);
                         found = true;
                       }
                     }
@@ -9356,6 +9395,7 @@ impl Codegen {
                                 let nested_name = self.resolve_type_name(*nested);
                                 if nested_name.is_some() {
                                   found_name = nested_name.unwrap();
+                                  found_dtype = .Some(*nested);
                                   found = true;
                                 }
                               }
@@ -9382,6 +9422,14 @@ impl Codegen {
               }
               arg_type_names.push(found_name);
               arg_is_pointer.push(found_is_pointer);
+              DataType* dtp = malloc(sizeof(DataType));
+              if found_dtype.is_some() {
+                *dtp = found_dtype.unwrap();
+              } else {
+                *dtp = dtype_new();
+                dtp.type_str = found_name;
+              }
+              arg_dtypes.push(dtp);
             }
 
             StringBuilder nb = string_builder_init(16);
@@ -9400,9 +9448,11 @@ impl Codegen {
             let prev_params = self.type_subst_param_names;
             let prev_arg_names = self.type_subst_arg_type_strs;
             let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            let prev_arg_dtypes = self.type_subst_arg_dtypes;
             self.type_subst_param_names = f.type_params;
             self.type_subst_arg_type_strs = arg_type_names;
             self.type_subst_arg_is_pointer = arg_is_pointer;
+            self.type_subst_arg_dtypes = arg_dtypes;
 
             Vec<DataType> param_types;
             param_types.init(0);
@@ -9519,6 +9569,7 @@ impl Codegen {
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
             self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
 
             GenericCallResolution res;
             res.mangled_name = mangled_name;
@@ -10298,13 +10349,13 @@ impl Codegen {
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     ``);
@@ -14976,13 +15027,13 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     `#if defined(_WIN32)
@@ -15215,13 +15266,13 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     `#if defined(_WIN32)
@@ -16310,13 +16361,13 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }
+    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     `#if defined(_WIN32)

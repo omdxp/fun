@@ -1117,56 +1117,34 @@ test "a generic impl method calling a DIFFERENT generic free function from its o
   assert contains(out, "Box__num__get"), "expected the monomorphized method";
 }
 
-// gap: a generic free function instantiated from a method's own type param is
-// substituted with the impl's type argument instead of the method's, so
-// `identity__str` is emitted taking int64_t.
-// test "an impl method can declare its OWN generic type parameter beyond the impl's" {
-// str src = `imp std.c.io;
-// `fun identity<T>(T x) T {
-// `  ret x;
-// `}
-// `compound Box<T> {
-// `  T value;
-// `}
-// `impl Box<T> {
-// `  pub map<U>(U other) U {
-// `    ret identity(other);
-// `  }
-// `  pub sum_with<U: num | dec>(U other) U {
-// `    ret other + other;
-// `  }
-// `}
-// `fun main() num {
-// `  Box<num> b;
-// `  b.value = 1;
-// `  printf("%lld %s %lld\n", b.map(77), b.map("hello"), b.sum_with(21));
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "an impl method can declare its OWN generic type parameter beyond the impl's");
-// assert contains(out, "identity__str(char* x)"), "expected the callee substituted with the method's type argument";
-// }
-
-// A method's own bound is enforced too, on a plain impl and a generic
-// one alike (typecheck_tests.fn).
-// test "a method's own generic type param constraint is still enforced against a real violation" {
-// str src = `imp std.c.io;
-// `compound Box<T> {
-// `  T value;
-// `}
-// `impl Box<T> {
-// `  pub sum_with<U: num | dec>(U other) U {
-// `    ret other + other;
-// `  }
-// `}
-// `fun main() num {
-// `  Box<num> b;
-// `  b.value = 1;
-// `  printf("%s\n", b.sum_with("bad"));
-// `  ret 0;
-// `}`;
-// let r = transpile_source(src);
-// assert r.is_err(), "expected the constraint violation to be rejected";
-// }
+test "an impl method can declare its OWN generic type parameter beyond the impl's" {
+  str src = `imp std.c.io;
+  `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `compound Box<T> {
+  `  T value;
+  `}
+  `impl Box<T> {
+  `  pub map<U>(U other) U {
+  `    ret identity(other);
+  `  }
+  `  pub sum_with<U: num | dec>(U other) U {
+  `    ret other + other;
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  b.value = 1;
+  `  printf("%lld %s %lld\n", b.map(77), b.map("hello"), b.sum_with(21));
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "an impl method can declare its OWN generic type parameter beyond the impl's"
+  );
+  assert contains(out, "identity__str(char* x)"), "expected the callee substituted with the method's type argument";
+}
 
 test "an impl method's own generic type param also works on a non-generic impl/compound" {
   str src = `imp std.c.io;
@@ -1251,34 +1229,32 @@ test "method chaining on a generic method's own-type-param call result monomorph
   assert contains(out, "char* Box__str__get(Box__str* self)"), "expected the chained method resolved against that result";
 }
 
-// gap: the fit arms test the unsubstituted tag `Maybe__U_Has` while the value
-// carries `Maybe__str_Has`, so no arm matches.
-// test "constructing a generic enum from a method's own type param does not cross-substitute via a name collision" {
-// str src = `imp std.c.io;
-// `enum Maybe<T> {
-// `  Has(T),
-// `  None,
-// `}
-// `compound Box<T> {
-// `  T value;
-// `}
-// `impl Box<T> {
-// `  pub wrap<U>(U x) Maybe<U> {
-// `    ret Maybe.Has(x);
-// `  }
-// `}
-// `fun main() num {
-// `  Box<num> b;
-// `  b.value = 0;
-// `  fit b.wrap("hi") {
-// `    .Has(v) -> { printf("%s\n", v); }
-// `    .None -> { printf("none\n"); }
-// `  }
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "constructing a generic enum from a method's own type param");
-// assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
-// }
+test "constructing a generic enum from a method's own type param does not cross-substitute via a name collision" {
+  str src = `imp std.c.io;
+  `enum Maybe<T> {
+  `  Has(T),
+  `  None,
+  `}
+  `compound Box<T> {
+  `  T value;
+  `}
+  `impl Box<T> {
+  `  pub wrap<U>(U x) Maybe<U> {
+  `    ret Maybe.Has(x);
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  b.value = 0;
+  `  fit b.wrap("hi") {
+  `    .Has(v) -> { printf("%s\n", v); }
+  `    .None -> { printf("none\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "constructing a generic enum from a method's own type param");
+  assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
+}
 
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `imp std.c.io;

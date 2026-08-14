@@ -838,17 +838,13 @@ test "P0: block comment is lexed; unterminated and stray token error cleanly" {
   assert r.is_err(), "expected a stray top-level operator to be rejected";
 }
 
-// The parser's max_parse_expr_depth guard (parser.fn) is implemented and
-// verified by hand: a 700-deep parenthesized expression is rejected with
-// "expression nests too deeply to parse", matching the reference compiler,
-// when compiled directly (`fun -in deep.fn`). There is no automated
-// regression test for it here: reaching 600+ levels of real recursion
-// while running as a discovered `test` block crashes the test runner's own
-// worker thread with a stack overflow before the guard is ever reached,
-// because worker threads run with a far smaller stack than a normal
-// process (see the fork-deadlock note this suite's other tests avoid the
-// same way). That is a distinct concurrency-runtime limitation, not a
-// parser bug, and is out of scope for this fix.
+test "P0: pathologically deep expression errors cleanly instead of crashing" {
+  str opens = repeat("(", 700);
+  str closes = repeat(")", 700);
+  str src = format("fun main() num {{\n  ret {str}1{str};\n}}", opens, closes);
+  let r = transpile_source(src);
+  assert r.is_err(), "expected a depth guard to reject the expression instead of crashing";
+}
 
 test "P1: plain-impl method chaining on call results materializes once" {
   str src = `imp std.c.io;

@@ -955,3 +955,23 @@ test "a partial index of a 2D array is rejected as a num initializer" {
     "expected a single index of a 2D array (still an array) to be rejected as a num"
   );
 }
+
+test "a method's own generic type param constraint is still enforced against a real violation" {
+  rejects(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `impl Box<T> {
+    `  pub sum_with<U: num | dec>(U other) U {
+    `    ret other + other;
+    `  }
+    `}
+    `fun main() num {
+    `  Box<num> b;
+    `  b.value = 1;
+    `  let bad = b.sum_with("bad");
+    `  ret 0;
+    `}`,
+    "expected the constraint violation to be rejected"
+  );
+}
