@@ -370,9 +370,19 @@ test "compound initializer field after an address-of-valued field parses correct
   assert contains(out, ".wheels = 4"), "expected the field that follows it";
 }
 
-// gap: a generic compound with `impl Box<T> as Lenable` never emits a coercion
-// helper, so `Lenable la = &bn;` assigns the raw pointer and dispatch names an
-// undeclared `Lenable__size`.
+// gap: `impl Box<T> as Lenable`, where the COMPOUND is generic but the
+// QUIRK is not, never emits the quirk's vtable at all -- `Lenable` is not
+// even declared as a C type, and `la.size()` names an undeclared
+// `Lenable__size`. The vtable machinery gate
+// (`emit_quirk_vtable_machinery`, guarded by `i.has_type_params`)
+// conflates "the compound being implemented is generic" with "the quirk
+// is generic": the two are different, and a plain quirk's vtable shape
+// does not depend on the compound's own type argument. A real fix is two
+// pieces that have to work together -- the vtable/struct emitted once
+// per quirk regardless of `T`, and a coercion helper built lazily per
+// concrete instantiation (`Box__num`, `Box__str`, ...) the way
+// `ensure_compound_instantiated` already does for the compound itself --
+// not a one-line gate change.
 // test "generic compound coerces to a quirk (mangled coercion helper name)" { }
 
 test "sizeof works with generic types, generic instances, and locals" {
