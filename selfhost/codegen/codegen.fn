@@ -8122,6 +8122,30 @@ impl Codegen {
           }
           self.state.write(" ");
           self.state.write(f.name);
+          // A fixed-size array field (`num[3] data;`) is a real C array,
+          // not a decayed pointer: `dtype_is_array_as_pointer` is false
+          // exactly when there are bracket sizes to write, and without
+          // this the field silently became a bare scalar.
+          if f.dtype.is_array && !fld_arr_ptr && f.dtype.array_brackets.len > 0 {
+            for bnode : f.dtype.array_brackets {
+              self.state.write("[");
+              fit bnode.kind {
+                .Bracket(inner) -> {
+                  let ferr = self.emit_expr(*inner);
+                  if ferr.is_some() {
+                    ret ferr;
+                  }
+                }
+                _ -> {
+                  let ferr = self.emit_expr(*bnode);
+                  if ferr.is_some() {
+                    ret ferr;
+                  }
+                }
+              }
+              self.state.write("]");
+            }
+          }
           self.state.write(";\n");
           field_names.push(f.name);
           field_type_names.push(wt.unwrap());

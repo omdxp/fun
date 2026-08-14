@@ -649,10 +649,36 @@ test "generic compound coerces to a quirk at a call site and via var-init" {
 // twice instead of being materialized into a temp.
 // test "quirk method dispatched on a call result materializes the receiver once" { }
 
-// gap: a fixed-size array compound field (`num[3] data;`) is emitted as a
-// scalar/pointer rather than an inline `int64_t data[3]`, in both plain and
-// generic compounds.
-// test "P0: fixed-size array compound field is inline, not a pointer" { }
+test "fixed-size array compound field is inline, not a pointer" {
+  // `write_type` writes a base type plus pointer stars, nothing for
+  // array brackets, so `num[3] data;` silently became a bare
+  // `int64_t data;` -- not malformed, just missing its array-ness
+  // entirely, which read as accepted rather than rejected.
+  str src = `imp std.c.io;
+  `compound Grid { num[3] data; }
+  `fun main() num {
+  `  Grid g;
+  `  g.data[0] = 1;
+  `  g.data[1] = 2;
+  `  printf("%lld %lld\n", g.data[0], g.data[1]);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "fixed_array_compound_field",
+    "fixed-size array compound field is inline, not a pointer"
+  );
+  assert equals(out, "1 2\n"), "expected the field to hold and index as a real array";
+}
+
+// gap: the same fixed-size array compound field is still a pointer rather
+// than inline for a GENERIC compound's field. A generic compound's fields
+// are resolved through a flat name/pointer/pointer-depth vector, not the
+// full DataType, so there is nowhere to carry the array's bracket sizes
+// through to where the instantiated struct is written; needs a parallel
+// vector threaded through both resolution passes, not a one-line fix like
+// the plain-compound case above.
+// test "fixed-size array field is inline on a generic compound too" { }
 // test "reaudit R1: generic compound fixed-size array field is inline" { }
 // test "reaudit: array-literal struct field init (single + multi element)" { }
 
