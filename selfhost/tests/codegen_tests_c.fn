@@ -342,7 +342,21 @@ test "default parameter rejected: default references self" {
   assert r.is_err(), "expected a self-referencing default to be rejected";
 }
 
-// gap: a call omitting every argument to an all-defaulted function emits a
+test "a call omitting every default-carrying argument compiles" {
+  // The separator between arguments was written unconditionally, so a
+  // call that supplied none at all still opened with one: `f(, 1, 2)`.
+  str src = `imp std.c.io;
+  `fun f(num a = 1, num b = 2) num { ret a + b; }
+  `fun main() num {
+  `  printf("%lld\n", f());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a call omitting every default-carrying argument compiles");
+  assert !contains(out, "f(, "), "expected no leading comma when nothing was supplied";
+  assert contains(out, "f(1, 2)"), "expected both defaults filled in";
+}
+
+// gap (historical): a call omitting every argument to an all-defaulted function emitted a
 // leading comma, producing invalid C.
 // test "default parameter longhand enum values work for generic enums" {
 // str src = `imp std.c.io;
@@ -362,7 +376,41 @@ test "default parameter rejected: default references self" {
 // assert contains(out, "Option__num_None"), "expected the monomorphized variant tag";
 // }
 
-// gap: a generic function with a trailing defaulted parameter, called without
+test "a generic function's own trailing default is filled at its call site" {
+  // A generic function is recorded whole and monomorphized from its call
+  // site rather than through the plain-function registry, so its
+  // defaults were never looked up at all: `pick__num(1)` called a
+  // function declared with two parameters.
+  str src = `imp std.c.io;
+  `fun pick<T>(T v, num n = 3) num { ret n; }
+  `fun main() num {
+  `  printf("%lld\n", pick(1));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a generic function's own trailing default is filled at its call site");
+  assert contains(out, "pick__num(1, 3)"), "expected the default filled in at the instantiated call";
+}
+
+test "a method's own default does not collide with its receiver" {
+  // The receiver is written before any default, so the separator that
+  // starts a bare call's argument list is wrong here: it produced
+  // `C__add(&c5)`, concatenating the receiver and the default.
+  str src = `imp std.c.io;
+  `compound C { num v; }
+  `impl C {
+  `  pub add(num a = 5) num { ret self.v + a; }
+  `}
+  `fun main() num {
+  `  C c;
+  `  c.v = 1;
+  `  printf("%lld\n", c.add());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a method's own default does not collide with its receiver");
+  assert contains(out, "C__add(&c, 5)"), "expected the receiver and the default as separate arguments";
+}
+
+// gap (historical): a generic function with a trailing defaulted parameter, called without
 // it, is neither monomorphized nor emitted.
 // test "default parameter after a generic-typed param: omitting the trailing default still typechecks" {
 // str src = `imp std.c.io;

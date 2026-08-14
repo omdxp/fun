@@ -4226,15 +4226,32 @@ impl Codegen {
       arg_idx = arg_idx + 1;
     }
     // Trailing params omitted at this call site get their declared
-    // default value expression filled in here. A generic call never
-    // reaches this, since a generic function's defaults aren't tracked.
-    if generic_inst.is_none() {
-      let defaults = self.lookup_function_default_values(template_callee_name);
-      if defaults.is_some() {
-        let dparam_types = self.lookup_function_param_types(template_callee_name);
-        let derr = self.emit_default_trailing_args(defaults.unwrap(), dparam_types, args.len);
-        if derr.is_some() {
-          ret derr;
+    // default value expression filled in here. A generic call is looked
+    // up under the name it was written as, since what the instantiation
+    // is called says nothing about the defaults the template declared.
+    let defaults = self.lookup_function_default_values(template_callee_name);
+    if defaults.is_some() {
+      let dparam_types = self.lookup_function_param_types(template_callee_name);
+      let derr = self.emit_default_trailing_args(
+        defaults.unwrap(),
+        dparam_types,
+        args.len,
+        args.len > 0
+      );
+      if derr.is_some() {
+        ret derr;
+      }
+    } else {
+      let generic_defaults = self.lookup_generic_default_values(template_callee_name);
+      if generic_defaults.is_some() {
+        let gderr = self.emit_default_trailing_args(
+          generic_defaults.unwrap(),
+          .None,
+          args.len,
+          args.len > 0
+        );
+        if gderr.is_some() {
+          ret gderr;
         }
       }
     }
@@ -4251,15 +4268,23 @@ impl Codegen {
   emit_default_trailing_args(
     Vec<Node*> defaults,
     Option<Vec<DataType *>> param_types,
-    num provided_count
+    num provided_count,
+    bin anything_written
   ) Option<CodegenErrorKind> {
+    bin needs_separator = anything_written;
     num i = provided_count;
     for i < defaults.len {
       Node* d = defaults.get(i);
       if d == nil {
         ret .None;
       }
-      self.state.write(", ");
+      // A separator only where something precedes it. A method call has
+      // already written its receiver, while a call that supplied no
+      // arguments at all starts the list here.
+      if needs_separator {
+        self.state.write(", ");
+      }
+      needs_separator = true;
       str prev_expected_e = self.expected_enum_type;
       str prev_expected_c = self.expected_compound_type;
       if param_types.is_some() {
@@ -4583,10 +4608,13 @@ impl Codegen {
     let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
     if method_defaults.is_some() {
       let mdparam_types = self.lookup_impl_method_param_types(recv_r.type_name, method_name);
+      // A method call has already written its receiver, so a default
+      // never starts the list.
       let mderr = self.emit_default_trailing_args(
         method_defaults.unwrap(),
         mdparam_types,
-        args.len
+        args.len,
+        true
       );
       if mderr.is_some() {
         ret mderr;
@@ -8936,6 +8964,45 @@ impl Codegen {
 
   // Looks up `fn_name`'s trailing default-parameter value expressions.
   // `.None` means `fn_name` isn't registered as a plain function.
+  // The default value expressions a generic function's template
+  // declares. A generic is recorded whole and monomorphized from its
+  // call site, so its defaults are read from the template rather than
+  // from the plain-function registry, which never sees it.
+  lookup_generic_default_values(str fn_name) Option<Vec<Node *>> {
+    for tmpl : self.generic_function_templates {
+      fit tmpl.kind {
+        .Function(f) -> {
+          if !equals(f.name, fn_name) {
+            continue;
+          }
+          Vec<Node*> defaults;
+          defaults.init(f.args.len);
+          bin any = false;
+          for arg : f.args {
+            fit arg.kind {
+              .Variable(v) -> {
+                if v.has_val {
+                  defaults.push(v.val);
+                  any = true;
+                } else {
+                  defaults.push(nil);
+                }
+              }
+              _ -> { defaults.push(nil); }
+            }
+          }
+          if !any {
+            defaults.free();
+            ret .None;
+          }
+          ret .Some(defaults);
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   lookup_function_default_values(str fn_name) Option<Vec<Node *>> {
     num i = 0;
     for i < self.function_names.len {
