@@ -3722,11 +3722,18 @@ impl Codegen {
         self.state.write("}");
         ret .None;
       }
-      // A bare `[elem, elem, ...]` array literal. Only valid where
-      // `in_array_initializer` is already set.
+      // A bare `[elem, elem, ...]` array literal. Inside a declaration
+      // already providing the array's own type
+      // (`in_array_initializer`), just the bare `{...}` initializer
+      // fragment is legal C; anywhere else (a call argument, a nested
+      // expression) needs a full compound literal, self-typed from the
+      // elements the same way `let arr = [1, 2, 3];` already infers its
+      // own declared type.
       .Bracket(inner) -> {
         if !self.in_array_initializer {
-          ret .Some(CodegenErrorKind.UnsupportedNode);
+          self.state.write("(");
+          self.state.write(self.infer_array_literal_elem_c_type(inner));
+          self.state.write("[])");
         }
         Vec<Node*> elems;
         elems.init(0);
@@ -5576,9 +5583,24 @@ impl Codegen {
               let t = self.lookup_local_type_name(arr_name);
               if t.is_some() {
                 elem_type_name = t.unwrap();
-                let p = self.lookup_local_is_pointer(arr_name);
-                elem_is_pointer = p.is_some() && p.unwrap();
                 elem_dtype = self.lookup_local_dtype(arr_name);
+                if elem_dtype.is_some() {
+                  let edt = elem_dtype.unwrap();
+                  if edt.is_array {
+                    // A real array's own element star (if any) survives
+                    // indexing unchanged; the array-ness is what decays.
+                    elem_is_pointer = dtype_is_pointer(edt);
+                  } else {
+                    // A raw pointer indexed like an array (`pts[0]`,
+                    // pointer arithmetic for `*(pts + 0)`) dereferences
+                    // one level of the pointer itself: `Point* pts`
+                    // yields a value, `Point** pts` yields `Point*`.
+                    elem_is_pointer = edt.pointer_depth > 1;
+                  }
+                } else {
+                  let p = self.lookup_local_is_pointer(arr_name);
+                  elem_is_pointer = p.is_some() && p.unwrap();
+                }
                 have_elem = true;
               }
             }

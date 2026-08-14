@@ -938,10 +938,24 @@ test "P1: sizeof of primitive/pointer/compound/generic variables" {
   assert !contains(out, "sizeof(num)"), "expected no raw language keyword in the C output";
 }
 
-// gap: a pointer-as-array element field access (`pts[0].x` where `pts` is a
-// `Point*`) and an array literal passed directly as a call argument are
-// rejected with "unsupported node".
-// test "P1: pointer-as-array element field access uses dot, array-literal call arg, array fixes" { }
+test "P1: pointer-as-array element field access uses dot, array-literal call arg" {
+  str src = `imp std.c.io;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  Point p; p.x = 5; p.y = 6;
+  `  Point* pts = &p;
+  `  printf("%lld\n", pts[0].x);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P1: pointer-as-array element field access uses dot");
+  assert contains(out, "pts[0].x"), "expected a dot access, not an arrow, on the dereferenced element";
+
+  str src2 = `imp std.c.io;
+  `fun sum3(num[] arr) num { ret arr[0] + arr[1] + arr[2]; }
+  `fun main() num { printf("%lld\n", sum3([1, 2, 3])); ret 0; }`;
+  let out2 = emit_c(src2, "P1: array literal as a bare call argument");
+  assert contains(out2, "sum3((int64_t[]){1, 2, 3})"), "expected a self-typed compound literal as the argument";
+}
 
 test "P1: let inference from dereferenced generic pointer yields the value type" {
   str src = `imp std.c.io;
