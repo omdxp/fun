@@ -1066,12 +1066,59 @@ impl ParseState {
     ret stars.build();
   }
 
+  // Scans the whole token stream once for every top-level
+  // `compound`/`enum`/`quirk` name, so a `Name{...}` initializer can
+  // forward-reference a type declared later in the same file --
+  // `is_known_compound_symbol` alone only sees symbols registered by the
+  // point the cursor has reached. Guarded by `forward_type_names_scanned`
+  // since `parse()` is the only real caller but tests construct a
+  // `ParseState` directly and may re-enter parsing paths more than once.
+  pub prescan_forward_type_names() {
+    if self.forward_type_names_scanned {
+      ret;
+    }
+    self.forward_type_names_scanned = true;
+    num i = 0;
+    for i < self.tokens.len {
+      let t = self.tokens.get(i);
+      i = i + 1;
+      if !(token_is_keyword(t, "compound") || token_is_keyword(t, "enum") || token_is_keyword(
+        t,
+        "quirk"
+      )) {
+        continue;
+      }
+      num j = i;
+      for j < self.tokens.len && token_is_nl_or_comment_or_newline_separator(self.tokens.get(j)) {
+        j = j + 1;
+      }
+      if j >= self.tokens.len {
+        continue;
+      }
+      let name_tok = self.tokens.get(j);
+      if name_tok.type != TokenType.Identifier {
+        continue;
+      }
+      fit name_tok.data {
+        .Sval(name) -> { self.forward_type_names.put(name, true); }
+        _ -> {}
+      }
+    }
+  }
+
+  // True when `name` is a top-level `compound`/`enum`/`quirk` declared
+  // anywhere in the file, per `prescan_forward_type_names`.
+  pub is_forward_declared_type(str name) bin {
+    ret self.forward_type_names.has(name);
+  }
+
   // True if the identifier at the cursor is a known symbol resolving to a
   // `Compound` declaration, one of the conditions gating whether
   // `Name{...}`/`Name<T>{...}` parses as a compound-literal initializer.
-  // Searches this file's symbols registered so far, then `global_symbols`,
-  // so a type declared later in the same file isn't found and is read as a
-  // plain identifier instead.
+  // Searches this file's symbols registered so far, then `global_symbols`;
+  // a type declared later in the same file needs the separate
+  // `is_forward_declared_type` check, kept apart since it recognizes
+  // enum/quirk names too, which this deliberately doesn't.
   pub is_known_compound_symbol(str name) bin {
     let maybe_sym = self.get_symbol(name);
     if maybe_sym.is_some() {
@@ -1697,7 +1744,8 @@ impl Parser {
             .None -> {}
           }
           bin is_value_in_scope = self.state.get_scope_entity(name) != nil;
-          if !after_member_access && !is_value_in_scope && self.state.is_known_compound_symbol(name) && self.state.looks_like_compound_init() {
+          bin is_known_or_forward_type = self.state.is_known_compound_symbol(name) || self.state.is_forward_declared_type(name);
+          if !after_member_access && !is_value_in_scope && is_known_or_forward_type && self.state.looks_like_compound_init() {
             DataType* dt = malloc(sizeof(DataType));
             *dt = dtype_new();
             let dterr = self.state.parse_datatype(dt);
@@ -5866,12 +5914,13 @@ impl Parser {
 
   // Repeatedly parses top-level items until the token stream is exhausted
   // or a parse error occurs, opening the file's root scope first and never
-  // closing it. There is no forward type-name pre-scan, so a `Name{...}`
-  // initializer can't forward-reference a type declared later in the file,
-  // and no cross-file `global_symbols` registration, which
-  // `import_resolver.fn` does beforehand. Forward and out-of-order function
-  // calls are tolerated by `parse_single_token_to_node`'s identifier check.
+  // closing it. There is no cross-file `global_symbols` registration,
+  // which `import_resolver.fn` does beforehand. Forward and out-of-order
+  // function calls are tolerated by `parse_single_token_to_node`'s
+  // identifier check; a forward-referenced compound-literal type name is
+  // tolerated by the pre-scan below.
   pub parse() Option<ParseErrorKind> {
+    self.state.prescan_forward_type_names();
     self.state.init_root_scope();
     for true {
       let peeked = self.state.token_peek_next();

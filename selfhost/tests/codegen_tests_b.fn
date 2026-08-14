@@ -170,9 +170,17 @@ test "long type name with quirk impl does not overflow mangled C identifiers" {
   assert contains(out, "AAAAAAAAAA__Greeter__greet"), "expected the mangled impl method";
 }
 
-// gap: a compound-initializer expression that names a type declared later in
-// the file is rejected with a parse error.
-// test "forward-referenced compound struct-initializer expression compiles" { }
+test "forward-referenced compound struct-initializer expression compiles" {
+  str src = `fun main() num {
+  `  let z = Later{q = 1};
+  `  ret z.q;
+  `}
+  `compound Later {
+  `  num q;
+  `}`;
+  let out = emit_c(src, "forward-referenced compound struct-initializer expression compiles");
+  assert contains(out, "(Later){.q = 1}"), "expected the forward-referenced type to resolve";
+}
 
 test "compound-initializer with a genuinely unknown type is still rejected" {
   str src = `fun main() num {
