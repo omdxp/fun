@@ -3558,6 +3558,29 @@ impl Codegen {
         bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") || equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
         str prev_expected_compound = self.expected_compound_type;
+        // A quirk-typed left side needs the same coercion wrapper a
+        // declaration's own initializer gets: `h = &a;` for an already-
+        // declared `HasV h` hits the identical mismatch a fresh `HasV h
+        // = &a;` would, since plain assignment never went through that
+        // path at all.
+        bin did_assign_coerce = false;
+        if equals(e.op, "=") {
+          let lhs_resolved2 = self.resolve_field_chain(e.left);
+          if lhs_resolved2.is_some() {
+            let lhs_type_name2 = lhs_resolved2.unwrap().type_name;
+            if self.quirk_names.contains(lhs_type_name2) {
+              let concrete2 = self.resolve_quirk_coerce_concrete_type(e.right);
+              if concrete2.is_some() {
+                self.state.write("__fun_coerce_");
+                self.state.write(concrete2.unwrap());
+                self.state.write("_");
+                self.state.write(lhs_type_name2);
+                self.state.write("(");
+                did_assign_coerce = true;
+              }
+            }
+          }
+        }
         if resolves_rhs_shorthand {
           let lhs_resolved = self.resolve_field_chain(e.left);
           if lhs_resolved.is_some() {
@@ -3576,6 +3599,9 @@ impl Codegen {
         }
         if rerr.is_some() {
           ret rerr;
+        }
+        if did_assign_coerce {
+          self.state.write(")");
         }
         self.state.write(")");
         ret .None;
@@ -5225,6 +5251,81 @@ impl Codegen {
           r.is_pointer = dtype_is_pointer(rdt);
           r.dtype = .Some(rdt);
           r.is_call_result = true;
+          ret .Some(r);
+        }
+        // An indexed receiver (`arr[0].getV()`), for a fixed-size array
+        // local: the element is what is addressed, so its type is what
+        // the array itself is already tracked under (see
+        // `resolve_quirk_coerce_addressed_type`'s array case, which
+        // reads the same thing for `&arr[i]`). Only a bare array
+        // identifier is handled; a further chain (`self.arr[0]`) is not
+        // attempted.
+        if equals(inner_e.op, "[]") && inner_e.has_left {
+          str elem_type_name = "";
+          bin elem_is_pointer = false;
+          Option<DataType> elem_dtype = .None;
+          bin have_elem = false;
+          fit inner_e.left.kind {
+            .Identifier(arr_name) -> {
+              let t = self.lookup_local_type_name(arr_name);
+              if t.is_some() {
+                elem_type_name = t.unwrap();
+                let p = self.lookup_local_is_pointer(arr_name);
+                elem_is_pointer = p.is_some() && p.unwrap();
+                elem_dtype = self.lookup_local_dtype(arr_name);
+                have_elem = true;
+              }
+            }
+            _ -> {}
+          }
+          if !have_elem {
+            ret .None;
+          }
+
+          // Rendered the same way a call-as-receiver is: the index can
+          // be any expression, not just a literal, so it is emitted
+          // through the ordinary expression path into a scratch buffer
+          // rather than rebuilt by hand.
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          CodegenState idx_scratch = codegen_state_new();
+          CodegenState* saved_idx_state = self.state;
+          let saved_idx_hoist_pos = self.hoist_insert_pos;
+          let saved_idx_stmt_start_pos = self.current_stmt_start_pos;
+          let prev_idx_suppress = self.suppress_generic_impl_method_draining;
+          self.state = &idx_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
+          let ixerr = self.emit_expr(*recv);
+          self.state = saved_idx_state;
+          self.hoist_insert_pos = saved_idx_hoist_pos;
+          self.current_stmt_start_pos = saved_idx_stmt_start_pos;
+          self.suppress_generic_impl_method_draining = prev_idx_suppress;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+            self.hoist_insert_pos = self.root_hoist_pos;
+          }
+          if !prev_idx_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
+          if ixerr.is_some() {
+            ret .None;
+          }
+
+          ChainResolution r;
+          r.text = idx_scratch.out.build();
+          r.type_name = elem_type_name;
+          r.is_pointer = elem_is_pointer;
+          r.dtype = elem_dtype;
+          // A real array's element is addressable in C, unlike a call's
+          // rvalue result.
+          r.is_call_result = false;
           ret .Some(r);
         }
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
