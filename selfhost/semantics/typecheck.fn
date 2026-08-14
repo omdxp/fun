@@ -613,10 +613,16 @@ fun _names_a_type(Node* node) bin {
   }
   fit node.kind {
     .Identifier(name) -> {
-      if keyword_is_datatype(name) {
+      // A pointer written inside `sizeof(...)` is carried on the name,
+      // as `num*`, since the stars name no type of their own.
+      str bare = name;
+      for ends_with(bare, "*") {
+        bare = substr(bare, 0, len(bare) - 1);
+      }
+      if keyword_is_datatype(bare) {
         ret true;
       }
-      ret len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z';
+      ret len(bare) > 0 && bare[0] >= 'A' && bare[0] <= 'Z';
     }
     .Unary(u) -> {
       // A pointer or array spelling of a type still names one.

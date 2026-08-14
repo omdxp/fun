@@ -803,7 +803,27 @@ test "P1: let inference from dereferenced generic pointer yields the value type"
 // declared, so distinct instantiations are interchangeable.
 // test "reaudit: distinct generic instantiations are not interchangeable types" { }
 
-// gap: a pointer type operand to sizeof (`sizeof(num*)`) is a parse error.
+test "sizeof measures a pointer type" {
+  // The stars belong to the type, not to the expression around it: a
+  // `*` here is a pointer rather than a multiplication, and only when
+  // what follows the run closes the call.
+  str src = `imp std.c.io;
+  `compound Node { num v; }
+  `fun main() num {
+  `  num n = 4;
+  `  ret sizeof(num*) + sizeof(Node*) + sizeof(Node**) + sizeof(raw*) + sizeof(num) * n;
+  `}`;
+  let out = emit_c(src, "sizeof measures a pointer type");
+  assert contains(out, "sizeof(int64_t*)"), "expected a builtin pointer type";
+  assert contains(out, "sizeof(Node*)"), "expected a compound pointer type";
+  assert contains(out, "sizeof(Node**)"), "expected a pointer to a pointer";
+  assert contains(out, "sizeof(void*)"), "expected raw* to measure a void pointer";
+  assert contains(out, "sizeof(int64_t) * n"), "expected a multiplication beside it to survive";
+}
+
+// gap: a pointer type operand to sizeof was a parse error; see the test
+// above. What remains is `sizeof(Nope)` on an undeclared type, which is
+// still accepted and passed through to C.
 // test "reaudit: sizeof accepts pointer types" { }
 
 test "reaudit: await binds tighter than a following binary operator" {

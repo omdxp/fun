@@ -4131,8 +4131,17 @@ impl Codegen {
             spi = spi + 1;
           }
         }
+        // The operand may carry the stars of a pointer type, which name
+        // no type of their own: the base is mapped and they are written
+        // back after it.
+        StringBuilder stars = string_builder_init(4);
+        for ends_with(sizeof_operand, "*") {
+          stars.append("*");
+          sizeof_operand = substr(sizeof_operand, 0, len(sizeof_operand) - 1);
+        }
         self.state.write("sizeof(");
         self.write_type_name(sizeof_operand);
+        self.state.write(stars.build());
         self.state.write(")");
         ret .None;
       }

@@ -1028,6 +1028,44 @@ impl ParseState {
     ret token_is_symbol(next_opt.unwrap(), ')');
   }
 
+  // Consumes a run of `*` written after a type inside `sizeof(...)`, and
+  // reports it as the stars to append to the type's own name. A pointer
+  // is a type here rather than a multiplication, which is what the
+  // expression parser would otherwise make of it.
+  pub take_sizeof_pointer_stars() str {
+    StringBuilder stars = string_builder_init(4);
+    for true {
+      let next_opt = self.token_peek_next();
+      if next_opt.is_none() {
+        break;
+      }
+      if !token_is_operator(next_opt.unwrap(), "*") {
+        break;
+      }
+      // Only when what follows the run closes the call: anything else is
+      // an ordinary multiplication and not part of the type.
+      num ahead = 1;
+      for true {
+        let after_opt = self.token_peek_n(ahead);
+        if after_opt.is_none() {
+          ret stars.build();
+        }
+        if token_is_operator(after_opt.unwrap(), "*") {
+          ahead = ahead + 1;
+          continue;
+        }
+        break;
+      }
+      let closer_opt = self.token_peek_n(ahead);
+      if closer_opt.is_none() || !token_is_symbol(closer_opt.unwrap(), ')') {
+        break;
+      }
+      self.token_next();
+      stars.append("*");
+    }
+    ret stars.build();
+  }
+
   // True if the identifier at the cursor is a known symbol resolving to a
   // `Compound` declaration, one of the conditions gating whether
   // `Name{...}`/`Name<T>{...}` parses as a compound-literal initializer.
@@ -1264,6 +1302,15 @@ impl Parser {
               }
             }
           }
+        }
+
+        // A pointer written inside `sizeof(...)` belongs to the type,
+        // not to the expression around it.
+        if is_sizeof_type_operand {
+          StringBuilder named = string_builder_init(len(name) + 4);
+          named.append(name);
+          named.append(self.state.take_sizeof_pointer_stars());
+          name = named.build();
         }
 
         Node node = node_new(NodeKind.Identifier(name));
@@ -1784,7 +1831,11 @@ impl Parser {
             }
             if in_sizeof {
               self.state.token_next(); // consume the type keyword
-              Node node = node_new(NodeKind.Identifier(kw));
+              StringBuilder named = string_builder_init(8);
+              named.append(kw);
+              named.append(self.state.take_sizeof_pointer_stars());
+              str operand = named.build();
+              Node node = node_new(NodeKind.Identifier(operand));
               node.pos = t.pos;
               node.has_pos = true;
               self.create_node(&node);
