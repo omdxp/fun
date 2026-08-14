@@ -6921,7 +6921,12 @@ impl Codegen {
           }
           // A plain function-call subject, whose callee is a bare
           // `.Identifier` rather than a `recv.method()` `.Expression`,
-          // resolved via `lookup_function_rtype`.
+          // resolved via `lookup_function_rtype`. A generic callee's
+          // return type is resolved the same way a normal call site
+          // monomorphizes one: `maybe_instantiate_generic_function`
+          // infers `T` from this call's own arguments and substitutes it
+          // into the declared return type, since `lookup_function_rtype`
+          // only knows the template's unsubstituted `RR<T>`.
           bin is_plain_fn_call = false;
           str plain_fn_name = "";
           fit dot_e.left.kind {
@@ -6932,11 +6937,24 @@ impl Codegen {
             _ -> {}
           }
           if is_plain_fn_call {
-            let rtype = self.lookup_function_rtype(plain_fn_name);
-            if rtype.is_none() {
-              ret .Some(CodegenErrorKind.UnsupportedNode);
+            Vec<Node*> fit_call_args;
+            fit_call_args.init(0);
+            defer fit_call_args.free();
+            self.flatten_call_args(dot_e.right, &fit_call_args);
+            let generic_fit_inst = self.maybe_instantiate_generic_function(
+              plain_fn_name,
+              fit_call_args
+            );
+            Option<str> resolved_rtype = .None;
+            if generic_fit_inst.is_some() {
+              resolved_rtype = self.resolve_type_name(generic_fit_inst.unwrap().rtype);
+            } else {
+              let rtype = self.lookup_function_rtype(plain_fn_name);
+              if rtype.is_none() {
+                ret .Some(CodegenErrorKind.UnsupportedNode);
+              }
+              resolved_rtype = self.resolve_type_name(*rtype.unwrap());
             }
-            let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
             if resolved_rtype.is_none() {
               ret .Some(CodegenErrorKind.UnsupportedNode);
             }

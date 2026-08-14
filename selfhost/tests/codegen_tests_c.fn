@@ -21,27 +21,25 @@ test "ra3: no crash on field access of a generic-impl method returning a compoun
   assert contains(out, "get_inner"), "expected the method to be emitted";
 }
 
-// gap: chaining a method onto a quirk-returning quirk method result is
-// rejected as an unsupported node.
-// test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
-// str src = `imp std.c.io;
-// `compound C { num val; }
-// `quirk QC { gv() num; }
-// `impl C as QC { gv() num { ret self.val; } }
-// `compound B { C c; }
-// `quirk QB { to_c() QC; }
-// `impl B as QB { to_c() QC { ret &self.c; } }
-// `compound A { B b; }
-// `quirk QA { to_b() QB; }
-// `impl A as QA { to_b() QB { ret &self.b; } }
-// `fun main() num {
-// `  A a; a.b.c.val = 123; QA qa = &a;
-// `  printf("%lld\n", qa.to_b().to_c().gv());
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "ra3: deep method chains");
-// assert contains(out, "A__QA__to_b"), "expected the outermost quirk method";
-// }
+test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
+  str src = `imp std.c.io;
+  `compound C { num val; }
+  `quirk QC { gv() num; }
+  `impl C as QC { gv() num { ret self.val; } }
+  `compound B { C c; }
+  `quirk QB { to_c() QC; }
+  `impl B as QB { to_c() QC { ret &self.c; } }
+  `compound A { B b; }
+  `quirk QA { to_b() QB; }
+  `impl A as QA { to_b() QB { ret &self.b; } }
+  `fun main() num {
+  `  A a; a.b.c.val = 123; QA qa = &a;
+  `  printf("%lld\n", qa.to_b().to_c().gv());
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "deep_quirk_chain_3level", "ra3: deep method chains");
+  assert equals(out, "123\n"), "expected the 3-level quirk chain to dispatch to the innermost value";
+}
 
 test "ra3: deep method chains (generic-method chain)" {
   str src = `imp std.c.io;
@@ -258,26 +256,24 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
   assert contains(out, "Res__num__str"), "expected the two-parameter monomorphization";
 }
 
-// gap: a `fit` whose subject is a call expression returning a generic enum is
-// rejected as an unsupported node. Binding the result to a local first works.
-// test "generic fn returning a generic enum monomorphizes the enum type (regression)" {
-// str src = `imp std.c.io;
-// `enum RR<T> { Ok(T), Closed, Error(num) }
-// `fun wrap<T>(num rc, T value) RR<T> {
-// `  if rc == 0 { ret RR.Ok(value); }
-// `  ret RR.Error(rc);
-// `}
-// `fun main() num {
-// `  fit wrap(0, 42) {
-// `    RR.Ok(v) -> { printf("ok %lld\n", v); }
-// `    RR.Closed -> { printf("closed\n"); }
-// `    RR.Error(e) -> { printf("err %lld\n", e); }
-// `  }
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "generic fn returning a generic enum monomorphizes the enum type");
-// assert contains(out, "RR__num"), "expected the monomorphized enum typedef";
-// }
+test "generic fn returning a generic enum monomorphizes the enum type (regression)" {
+  str src = `imp std.c.io;
+  `enum RR<T> { Ok(T), Closed, Error(num) }
+  `fun wrap<T>(num rc, T value) RR<T> {
+  `  if rc == 0 { ret RR.Ok(value); }
+  `  ret RR.Error(rc);
+  `}
+  `fun main() num {
+  `  fit wrap(0, 42) {
+  `    RR.Ok(v) -> { printf("ok %lld\n", v); }
+  `    RR.Closed -> { printf("closed\n"); }
+  `    RR.Error(e) -> { printf("err %lld\n", e); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "generic fn returning a generic enum monomorphizes the enum type");
+  assert contains(out, "RR__num"), "expected the monomorphized enum typedef";
+}
 
 test "generic fn returning a generic enum monomorphizes the enum type via a local" {
   str src = `imp std.c.io;
@@ -860,9 +856,6 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
 // assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
 // }
 
-// gap: a recursive generic enum's self-referential payload pointer is emitted
-// with the unsubstituted template name (`List*` rather than `List__dec*`), so
-// the C does not compile.
 test "self-referential recursive generic enum (List<T>) via generic helper functions" {
   str src = `imp std.c.io;
   `imp std.c.mem;
