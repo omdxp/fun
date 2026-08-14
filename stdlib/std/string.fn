@@ -762,7 +762,45 @@ pub fun parse_dec(str s) dec {
     frac = frac * 0.1;
     i = i + 1;
   }
-  ret value * sign;
+  value = value * sign;
+
+  // An exponent, as in `1e6` or `1.5e-1`, scales what was read so far.
+  if s[i] != 'e' && s[i] != 'E' {
+    ret value;
+  }
+  i = i + 1;
+  bin negative_exponent = false;
+  if s[i] == '+' {
+    i = i + 1;
+  } elif s[i] == '-' {
+    negative_exponent = true;
+    i = i + 1;
+  }
+  num exponent = 0;
+  bin any = false;
+  for s[i] != 0 {
+    if s[i] < '0' || s[i] > '9' {
+      break;
+    }
+    exponent = exponent * 10 + (s[i] - '0');
+    any = true;
+    i = i + 1;
+  }
+  // A trailing `e` with nothing after it is not an exponent at all, and
+  // what was read before it stands on its own.
+  if !any {
+    ret value;
+  }
+  num step = 0;
+  for step < exponent {
+    if negative_exponent {
+      value = value / 10.0;
+    } else {
+      value = value * 10.0;
+    }
+    step = step + 1;
+  }
+  ret value;
 }
 
 // Parse a decimal, validating the whole string. `Ok(d)` only when `s` is a non-empty
@@ -788,6 +826,29 @@ pub fun try_parse_dec(str s) Result<dec, Error> {
       }
     } elif c >= '0' && c <= '9' {
       digits = digits + 1;
+    } elif c == 'e' || c == 'E' {
+      // What follows is the exponent: an optional sign, then at least
+      // one digit, and nothing after it.
+      if digits == 0 {
+        ret err_kind(.Parse, "parse_dec: no digits", 0.0);
+      }
+      i = i + 1;
+      if i < n && (s[i] == '+' || s[i] == '-') {
+        i = i + 1;
+      }
+      num exponent_digits = 0;
+      for i < n {
+        let e = s[i];
+        if e < '0' || e > '9' {
+          ret err_kind(.Parse, "parse_dec: invalid char", 0.0);
+        }
+        exponent_digits = exponent_digits + 1;
+        i = i + 1;
+      }
+      if exponent_digits == 0 {
+        ret err_kind(.Parse, "parse_dec: no exponent digits", 0.0);
+      }
+      ret .Ok(parse_dec(s));
     } else {
       ret err_kind(.Parse, "parse_dec: invalid char", 0.0);
     }
