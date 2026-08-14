@@ -308,9 +308,13 @@ test "double pointer dereference emits two stars" {
   assert contains(out, "**pp"), "expected a double dereference";
 }
 
-// gap: an array-of-pointers parameter type (`Item*[] arr`) is rejected by
-// codegen with "unsupported node"; the original accepts it and emits
-// `arr[0]->id`.
+// gap, though not a parity gap: the reference has the identical bug.
+// `Item*[] arr` as a parameter, then `arr[0]->id` in the body, fails
+// with "unknown identifier 'id'" against either compiler, reproduced
+// fresh against the reference before touching anything. The note's
+// original claim ("the original accepts it") was wrong; whatever this
+// is, it predates the self-hosted port and isn't something achieving
+// parity with the reference would fix.
 // test "field access on element of array-of-pointers emits arrow" { }
 
 test "fit on a string value lowers to strcmp chain" {
@@ -477,9 +481,9 @@ test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
   assert contains(out, "t[2][2][2]"), "expected a 3D declaration";
 }
 
-// gap: a single index of `num[2][3]` yields an array, but assigning it to a
-// `num` is accepted instead of rejected.
-// test "P4: partial index of a 2D array yields an array, not a num" { }
+// Moved to typecheck_tests.fn: a partial index of a 2D array yielding
+// an array assigned to a `num` is a `Checker` diagnostic, invisible to
+// this file's `emit_c` (no typechecker in the transpile-only path).
 
 test "P3: float literals and the range operator coexist" {
   // A trailing dot is a decimal, but a doubled one is the range
@@ -717,7 +721,7 @@ test "quirk method dispatched on a call result materializes the receiver once" {
 test "fixed-size array compound field is inline, not a pointer" {
   // `write_type` writes a base type plus pointer stars, nothing for
   // array brackets, so `num[3] data;` silently became a bare
-  // `int64_t data;` -- not malformed, just missing its array-ness
+  // `int64_t data;`, not malformed, just missing its array-ness
   // entirely, which read as accepted rather than rejected.
   str src = `imp std.c.io;
   `compound Grid { num[3] data; }
@@ -996,7 +1000,7 @@ test "a hex string escape is bounded to two digits" {
 // actually happens.
 
 // gap: `format("{num} {num}", 1)`'s argument count against its own
-// placeholder count is not checked at all -- the reference parses the
+// placeholder count is not checked at all. The reference parses the
 // literal format string for `{num}`/`{str}`/... placeholders (skipping
 // bare `{}`, which takes the general vararg path) as part of an
 // optimization that lowers a `format` call straight to `snprintf`, and

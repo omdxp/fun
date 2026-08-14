@@ -944,3 +944,14 @@ test "a required parameter following a defaulted one is rejected" {
     "expected the correctly-ordered defaults to be accepted"
   );
 }
+
+test "a partial index of a 2D array is rejected as a num initializer" {
+  rejects(
+    `fun main() num {
+    `  num[2][3] m;
+    `  num x = m[0];
+    `  ret 0;
+    `}`,
+    "expected a single index of a 2D array (still an array) to be rejected as a num"
+  );
+}

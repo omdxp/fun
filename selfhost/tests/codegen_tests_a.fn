@@ -167,7 +167,7 @@ test "async await statement form transpiles" {
 
 // Moved to typecheck_tests.fn: `transpile_source` (this file's own
 // helper) runs no typechecker at all, only lex/parse/codegen, so it can't
-// see either rejection -- both are `Checker` diagnostics.
+// see either rejection, both of which are `Checker` diagnostics.
 
 test "async impl method await transpiles" {
   str src = `imp std.c.io;
@@ -1035,15 +1035,14 @@ test "std.net offload async edge return codes are stable across backend selector
 // definition and `#include <pthread.h>` for a bare `imp std.c.thread;` with
 // no `fork` anywhere in the program, so this isn't (only) the existing
 // fork-triggered scheduler prelude (`write_prelude`'s `uses_fork` gate,
-// which both compilers already share) -- the reference has a separate
+// which both compilers already share). The reference has a separate
 // mechanism mapping specific C typedef/symbol names (`pthread_t`,
-// `pthread_mutex_t`, ...) back to the `std.c.*` module that owns them
-// (`transpiler.zig` around the `.{ .name = ..., .module = "std.c.thread" }`
-// table), used to decide what to emit for that import independent of
-// `fork` usage. Import nodes don't survive `import_resolver.fn`'s final
-// merge pass (`_import_nodes_only`/Pass 3 explicitly drops `.Import`,
-// keeping only what they resolved to), so codegen has no record of which
-// `std.c.*` modules a program named at all -- reproducing the reference's
+// `pthread_mutex_t`, ...) back to the `std.c.*` module that owns them,
+// used to decide what to emit for that import independent of `fork`
+// usage. Import nodes don't survive `import_resolver.fn`'s final merge
+// pass (`_import_nodes_only`/Pass 3 explicitly drops `.Import`, keeping
+// only what they resolved to), so codegen has no record of which
+// `std.c.*` modules a program named at all. Reproducing the reference's
 // behavior needs that same symbol-to-module table and a way to know the
 // import set survived long enough to consult it, not a one-line addition
 // to the existing fixed prelude.

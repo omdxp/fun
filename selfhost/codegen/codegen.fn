@@ -1886,7 +1886,7 @@ impl Codegen {
           // PtrBox as Box<Node*>`, where `PtrBox` itself isn't generic).
           // It says nothing about a generic quirk whose own argument is
           // still one of the compound's unresolved type params (`impl
-          // MapIter<K, V> as Iterator<K>`) -- checked separately here,
+          // MapIter<K, V> as Iterator<K>`), checked separately here
           // against the quirk's own declaration: that shape needs a
           // vtable keyed by the resolved `K`, which this machinery
           // doesn't build, so it's skipped rather than misfiring with a
@@ -1933,9 +1933,9 @@ impl Codegen {
           // declarations, so it can't go straight to `self.state`: this
           // is reached mid-body, resolving a local's declared type, the
           // same trigger point `ensure_compound_instantiated` hoists its
-          // own struct body from. The whole splice -- vtable machinery
-          // and each method's own monomorphized body -- has to land in
-          // one safe, hoisted block: `self.state` here can be an
+          // own struct body from. The whole splice, vtable machinery
+          // and each method's own monomorphized body alike, has to land
+          // in one safe, hoisted block: `self.state` here can be an
           // unrelated compound's own in-progress struct scratch (this
           // whole call chain started from `ensure_compound_instantiated`,
           // reachable from a field dependency, not just a real
@@ -1947,8 +1947,8 @@ impl Codegen {
           // this small throwaway `qv_scratch` instead. Pinning both to
           // "no position, no nesting" for the duration forces every
           // nested `emit_hoisted` down the plain `self.state.write`
-          // path -- landing in `qv_scratch`, exactly where this needs it
-          // -- and the ambient values are restored before the real
+          // path, landing in `qv_scratch`, exactly where this needs it,
+          // and the ambient values are restored before the real
           // splice below, which needs them intact.
           CodegenState qv_scratch = codegen_state_new();
           CodegenState* saved_qv_state = self.state;
@@ -1956,7 +1956,7 @@ impl Codegen {
           let saved_qv_scratch_depth = self.hoist_scratch_depth;
           // `ensure_generic_impl_method_emitted`'s own prototype-splicing
           // (below) reads `current_stmt_start_pos`, not just
-          // `hoist_insert_pos`, to decide where to splice -- left at the
+          // `hoist_insert_pos`, to decide where to splice; left at the
           // caller's stale value, that position is only valid against the
           // outer real buffer, not this tiny `qv_scratch`, and splicing
           // against it here is an out-of-bounds substring read.
@@ -1979,7 +1979,7 @@ impl Codegen {
           // suppressed here: this runs the moment the compound is first
           // instantiated, which is too early for a method body that
           // references some other type by value (`sizeof(JsonValue)`
-          // inside `Map<str, JsonValue>`'s own `clear()`) -- that other
+          // inside `Map<str, JsonValue>`'s own `clear()`); that other
           // type's own full definition isn't necessarily emitted yet at
           // this point, only forward-declared. Enqueuing without
           // draining defers the actual body to `transpile`'s own
@@ -4725,8 +4725,8 @@ impl Codegen {
   // into a fresh `__auto_type` temp spliced right before the current
   // statement, returning the temp's name. Shared by `emit_method_call`
   // (which needs `&<rvalue>`, invalid C without this) and
-  // `emit_quirk_dispatch_call` (which reads the same rvalue twice --
-  // once for `.vtable`, once for `.self` -- and without hoisting it,
+  // `emit_quirk_dispatch_call` (which reads the same rvalue twice, once
+  // for `.vtable` and once for `.self`; without hoisting it, that
   // silently runs the call twice at runtime).
   hoist_call_result_to_temp(str call_text) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
