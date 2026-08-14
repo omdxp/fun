@@ -6607,6 +6607,109 @@ impl Codegen {
         self.state.write("}\n");
         ret .None;
       }
+
+      // A plain type with a concrete `Iterator<T>` quirk impl (`impl
+      // Counter as Iterator<num> { pub next() Option<num> { ... } }`)
+      // iterates by calling `.next()` on itself directly each pass, no
+      // `.iter()` indirection: unlike Set/Map, the value already IS its
+      // own iterator state.
+      str user_iter_elem_type = "";
+      bin has_user_iter = false;
+      for n2 : self.all_nodes {
+        fit n2.kind {
+          .Impl(i2) -> {
+            if equals(i2.type_name, coll_dt.type_str) && i2.has_quirk_name && equals(
+              i2.quirk_name,
+              "Iterator"
+            ) && i2.has_quirk_concrete_instantiation {
+              // `quirk_concrete_instantiation` is the whole quirk
+              // instantiation's mangled name (`Iterator__num`), not the
+              // bare element type: strip the `Iterator__` prefix back
+              // off to recover it.
+              StringBuilder qpfx = string_builder_init(16);
+              qpfx.append(i2.quirk_name);
+              qpfx.append("__");
+              user_iter_elem_type = strip_prefix(i2.quirk_concrete_instantiation, qpfx.build());
+              has_user_iter = true;
+            }
+          }
+          _ -> {}
+        }
+      }
+      if has_user_iter {
+        let next_mangled_opt = self.lookup_impl_method(coll_dt.type_str, "next");
+        if next_mangled_opt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
+        str next_mangled = next_mangled_opt.unwrap();
+
+        DataType elem_dt2 = dtype_new();
+        elem_dt2.type_str = user_iter_elem_type;
+
+        DataType opt_dt = dtype_new();
+        opt_dt.type_str = "Option";
+        Vec<DataType*> opt_args;
+        opt_args.init(1);
+        DataType* opt_elem_ptr = malloc(sizeof(DataType));
+        *opt_elem_ptr = elem_dt2;
+        opt_args.push(opt_elem_ptr);
+        opt_dt.generic_args = opt_args;
+        let opt_name_opt = self.resolve_type_name(opt_dt);
+        if opt_name_opt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        str opt_name = opt_name_opt.unwrap();
+
+        self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+        StringBuilder uopt_tmp_sb = string_builder_init(24);
+        uopt_tmp_sb.append("__fun_iter_opt");
+        uopt_tmp_sb.append(format_num(self.for_iter_temp_counter));
+        str uopt_tmp = uopt_tmp_sb.build();
+
+        self.state.write("for (;;) {\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        self.state.write_indent();
+        self.state.write(opt_name);
+        self.state.write(" ");
+        self.state.write(uopt_tmp);
+        self.state.write(" = ");
+        self.state.write(next_mangled);
+        self.state.write("(&");
+        self.state.write(arr_text);
+        self.state.write(");\n");
+        self.state.write_indent();
+        self.state.write("if (");
+        self.state.write(uopt_tmp);
+        self.state.write(".tag == ");
+        self.state.write(opt_name);
+        self.state.write("_None) break;\n");
+        self.state.write_indent();
+        self.state.write("__auto_type ");
+        self.state.write(fi.item_name);
+        self.state.write(" = ");
+        self.state.write(uopt_tmp);
+        self.state.write(".payload.Some._0;\n");
+        let elem_name2 = self.resolve_type_name(elem_dt2);
+        if elem_name2.is_some() {
+          self.record_local_typed(
+            fi.item_name,
+            elem_name2.unwrap(),
+            dtype_is_pointer(elem_dt2),
+            elem_dt2
+          );
+        }
+        self.loop_defer_marks.push(self.defer_stack.len);
+        let uberr = self.emit_body(*fi.body);
+        self.loop_defer_marks.pop();
+        if uberr.is_some() {
+          ret uberr;
+        }
+        self.state.indent_level = self.state.indent_level - 1;
+        self.state.write_indent();
+        self.state.write("}\n");
+        ret .None;
+      }
     }
 
     if !is_vec && !is_raw_array {

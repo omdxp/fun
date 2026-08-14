@@ -466,34 +466,32 @@ test "a rotating sink writes what was logged to its file" {
   assert contains(out, "first line"), "expected the line to reach the file";
 }
 
-// gap: `for x : c` over a value implementing a user Iterator quirk is rejected
-// as an unsupported node.
-// test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
-// str src = `imp std.c.io;
-// `enum Option<T> { Some(T), None }
-// `quirk Iterator<T> { next() Option<T>; }
-// `compound Counter { num cur; num limit; }
-// `impl Counter as Iterator<num> {
-// `  pub next() Option<num> {
-// `    if self.cur >= self.limit { ret Option.None; }
-// `    num v = self.cur;
-// `    self.cur = self.cur + 1;
-// `    ret Option.Some(v);
-// `  }
-// `}
-// `fun main() num {
-// `  Counter c = Counter{cur = 0, limit = 5};
-// `  num sum = 0;
-// `  for x : c {
-// `    if x == 3 { break; }
-// `    sum = sum + x;
-// `  }
-// `  printf("%lld\n", sum);
-// `  ret 0;
-// `}`;
-// let out = emit_c(src, "for item : iterable drives a user Iterator");
-// assert contains(out, "Counter__Iterator__next"), "expected the loop to call next()";
-// }
+test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
+  str src = `imp std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Counter { num cur; num limit; }
+  `impl Counter as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.cur >= self.limit { ret Option.None; }
+  `    num v = self.cur;
+  `    self.cur = self.cur + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
+  `fun main() num {
+  `  Counter c = Counter{cur = 0, limit = 5};
+  `  num sum = 0;
+  `  for x : c {
+  `    if x == 3 { break; }
+  `    sum = sum + x;
+  `  }
+  `  printf("%lld\n", sum);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "for item : iterable drives a user Iterator");
+  assert contains(out, "Counter__Iterator__next"), "expected the loop to call next()";
+}
 
 test "for k, v :: map binds each key to its value" {
   str src = `imp std.c.io;
