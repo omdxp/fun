@@ -3,6 +3,7 @@
 // expectations run against this compiler.
 
 imp harness;
+imp std.sys;
 imp std.fs;
 imp std.string;
 
@@ -500,12 +501,35 @@ test "default parameter values: free fn + method, omitting trailing args fills d
   assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
 }
 
-// pending: the watchdog test needs to hand a setting to the program it
-// runs, which the standard library cannot do yet. `setenv` was tried and
-// pulled back out: it is POSIX-only, and naming it broke every Windows
-// build. Doing this properly means either a shim the generated C carries
-// on both platforms, or letting `process.run` take the environment to
-// run under, which is the better shape anyway.
+test "the watchdog stops a program waiting on a channel nothing sends to" {
+  str src = `imp std.c.io;
+  `imp std.channel;
+  `fun main() num {
+  `  Channel<num> ch = channel_new(1);
+  `  num v = 0;
+  `  ch.recv_into(&v);
+  `  printf("never reached\n");
+  `  ret 0;
+  `}`;
+  // The wait never ends on its own, so the watchdog is what ends it. On
+  // its own the watchdog only warns, over and over, and the program keeps
+  // waiting; asking it to abort is what makes this a test that finishes
+  // rather than one that hangs the suite. Both are read by the child from
+  // what this process holds, and the interval is short on purpose.
+  assert set_env("FUN_DEADLOCK_WATCHDOG_MS", "300"), "expected to set the watchdog";
+  assert set_env("FUN_DEADLOCK_ABORT", "1"), "expected to ask it to abort rather than warn";
+  ProcessResult r = run_source_result(
+    src,
+    "watchdog_probe",
+    "the watchdog stops a program waiting on a channel nothing sends to"
+  );
+  assert clear_env("FUN_DEADLOCK_WATCHDOG_MS"), "expected to clear the watchdog";
+  assert clear_env("FUN_DEADLOCK_ABORT"), "expected to clear the abort setting";
+
+  assert contains(r.stderr_text, "possible deadlock"), "expected the watchdog to say what it noticed";
+  assert !contains(r.stdout_text, "never reached"), "expected the program stopped before finishing";
+  assert r.exit_code != 0, "expected the program to end on the watchdog rather than normally";
+}
 
 test "a value renders through Display when written as {}" {
   str src = `imp std.io;

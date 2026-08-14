@@ -107,9 +107,11 @@ test "a scope resolves the last-declared entity and lookups by name" {
   assert s.get_entity_by_name("missing") == nil, "expected nil for an undeclared name";
 }
 
-// skipped: the original "Scope iteration works correctly" test drives a
-// start_iteration/iterate_back cursor. This Scope exposes
-// last_entity_at_scope and get_entity_by_name instead, covered above.
+// Not ported, because there is nothing to port it to: the original
+// "Scope iteration works correctly" test drives a
+// start_iteration/iterate_back cursor, an API this Scope does not have.
+// What that cursor was used to check is what last_entity_at_scope and
+// get_entity_by_name are checked for above.
 
 test "get_node_symbol returns a node only for node symbols" {
   Node n = node_new(NodeKind.Number(TokenData.Num(1)));
