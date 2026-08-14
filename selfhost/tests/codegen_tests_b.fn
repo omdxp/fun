@@ -434,9 +434,29 @@ test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
 // `num` is accepted instead of rejected.
 // test "P4: partial index of a 2D array yields an array, not a num" { }
 
-// gap: scientific-notation float literals (1e1, 1.5e-1, 2E+1) fail to lex.
-// Leading-dot and trailing-dot literals do lex.
-// test "P3: float literals and the range operator coexist" { }
+test "P3: float literals and the range operator coexist" {
+  // A trailing dot is a decimal, but a doubled one is the range
+  // operator and its first dot must not be eaten by the number.
+  str src = `imp std.c.io;
+  `fun main() num {
+  `  dec a = 1e1;
+  `  dec b = 1.5e-1;
+  `  dec c = 2E+1;
+  `  dec d = 1.;
+  `  num total = 0;
+  `  for i : 0..3 {
+  `    total = total + i;
+  `  }
+  `  printf("%f %f %f %f %lld\n", a, b, c, d, total);
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "P3: float literals and the range operator coexist");
+  assert contains(out, "10"), "expected the exponent folded into the literal";
+  assert contains(out, "0.15"), "expected a negative exponent folded";
+  assert contains(out, "20"), "expected an explicitly positive exponent folded";
+  assert contains(out, "1.0"), "expected a trailing dot to read as a decimal";
+  assert contains(out, "i < 3"), "expected the range operator to survive beside them";
+}
 
 test "P3: comparison operators do not maximal-munch a following minus" {
   str src = `imp std.c.io;
