@@ -729,14 +729,75 @@ test "P1: plain-impl method chaining on call results materializes once" {
   assert !contains(out, ").get("), "expected no raw member access on a call result";
 }
 
-// gap: coercing `&arr[i]` or `&struct.field` to a quirk, and quirk-typed array
-// elements, are rejected by codegen with "unsupported node".
-// test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" { }
-// test "reaudit Q: ptr->quirk coercion on field assign and array-literal elements" { }
+test "quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch and assignment" {
+  // Both `&arr[i]` and `&struct.field` used to compile to C that
+  // assigned a plain pointer where the quirk's fat-pointer struct was
+  // expected, since the coercion resolver only recognized `&identifier`.
+  // A quirk-typed array element was worse: the receiver was rejected
+  // outright, and once that resolved, plain assignment into an already-
+  // declared quirk slot (`arr[i] = &x;`) turned out to need the same
+  // coercion wrapper a declaration's own initializer gets, which nothing
+  // but a `let`/typed declaration had ever triggered.
+  str src = `imp std.c.io;
+  `compound Item { num v; }
+  `quirk HasV { getV() num; }
+  `impl Item as HasV { getV() num { ret self.v; } }
+  `compound Holder { Item it; }
+  `fun main() num {
+  `  Item[3] arr;
+  `  arr[0] = Item{v = 7};
+  `  HasV h1 = &arr[0];
+  `  Holder hd;
+  `  hd.it = Item{v = 9};
+  `  HasV h2 = &hd.it;
+  `  Item a = Item{v = 1};
+  `  Item b = Item{v = 2};
+  `  HasV[2] quirk_arr;
+  `  quirk_arr[0] = &a;
+  `  quirk_arr[1] = &b;
+  `  printf("%lld %lld %lld %lld\n", h1.getV(), h2.getV(), quirk_arr[0].getV(), quirk_arr[1].getV());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "quirk_coerce_index_field",
+    "quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch and assignment"
+  );
+  assert equals(out, "7 9 1 2\n"), "expected every coercion and dispatch shape to run correctly";
+}
 
-// gap: returning a coerced self from a quirk method, and chaining onto a
-// quirk-returning quirk method, are rejected with "unsupported node".
-// test "reaudit Q: return coerced self + chaining on a quirk-returning quirk method" { }
+test "returning a coerced self from a quirk method, and chaining onto a quirk-returning quirk method" {
+  // A method returning the very quirk it implements needs that quirk's
+  // struct typedef to already exist when its own signature is written;
+  // resolving a chained call's receiver type needs a quirk-typed call
+  // result's return type read from the quirk's own declaration, since no
+  // single concrete impl owns a dynamically-dispatched call.
+  str src = `imp std.c.io;
+  `compound Item { num v; }
+  `quirk Chain { self_ref() Chain; getV() num; }
+  `impl Item as Chain { self_ref() Chain { ret self; } getV() num { ret self.v; } }
+  `compound C { num val; }
+  `quirk QC { gv() num; }
+  `impl C as QC { gv() num { ret self.val; } }
+  `compound B { C c; }
+  `quirk QB { to_c() QC; }
+  `impl B as QB { to_c() QC { ret &self.c; } }
+  `fun main() num {
+  `  Item a = Item{v = 5};
+  `  Chain c = &a;
+  `  B b;
+  `  b.c.val = 42;
+  `  QB qb = &b;
+  `  printf("%lld %lld\n", c.self_ref().getV(), qb.to_c().gv());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "quirk_self_return_chain",
+    "returning a coerced self from a quirk method, and chaining onto a quirk-returning quirk method"
+  );
+  assert equals(out, "5 42\n"), "expected the self-return and the cross-quirk chain to both run correctly";
+}
 
 test "P1: fit on dec, comma multi-label, duplicate enum case" {
   str src = `imp std.c.io;
