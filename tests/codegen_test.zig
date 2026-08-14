@@ -11301,3 +11301,40 @@ test "set_env hands a value to the program and to what it starts" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("written\n", stdout);
 }
+
+test "parse_dec reads an exponent, and try_parse_dec rejects a malformed one" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_parse_dec_exponent.fn";
+    const c_path = "codegen_parse_dec_exponent.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_parse_dec_exponent.exe" else "codegen_parse_dec_exponent";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `parse_dec` stopped at the 'e', so "1e1" read as 1.0 rather than 10,
+    // and `try_parse_dec` called the 'e' an invalid character. That also
+    // kept scientific-notation literals from lexing at all.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.string;\n" ++
+        "imp std.result;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%.4f %.4f %.4f %.4f\\n\", parse_dec(\"1e1\"), parse_dec(\"1.5e-1\"), parse_dec(\"2E+1\"), parse_dec(\"-2.5e2\"));\n" ++
+        "  printf(\"%lld %lld %lld\\n\", try_parse_dec(\"1e\").is_err(), try_parse_dec(\"e5\").is_err(), try_parse_dec(\"1e2x\").is_err());\n" ++
+        "  printf(\"%.4f\\n\", 1.5e-1);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("10.0000 0.1500 20.0000 -250.0000\n1 1 1\n0.1500\n", stdout);
+}
