@@ -785,3 +785,42 @@ test "a matching instantiation, and one still standing for a parameter, are acce
     "expected an unresolved parameter to stand for anything"
   );
 }
+
+test "two different enums are not compared by ordinal" {
+  // Both lower to a number, so nothing stopped the comparison; it asks
+  // whether two unrelated ordinals coincide, which is never the point.
+  str found = check(`enum A { X }
+  `enum B { P }
+  `fun main() num {
+  `  A a = .X;
+  `  B b = .P;
+  `  if a == b { ret 1; }
+  `  ret 0;
+  `}`);
+  assert contains(found, "share no variants"), "expected the cross-enum comparison rejected";
+}
+
+test "an enum compared with its own kind, or with a number, is accepted" {
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  A b = .Y;
+    `  if a == b { ret 1; }
+    `  ret 0;
+    `}`,
+    "expected two values of one enum to compare"
+  );
+
+  // A plain enum reads as the number behind it, which is how a program
+  // written against C constants compares one.
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  if a == 0 { ret 1; }
+    `  ret 0;
+    `}`,
+    "expected an enum to compare with a number"
+  );
+}

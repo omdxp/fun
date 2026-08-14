@@ -663,7 +663,10 @@ test "P0: unsized array compound field stays a pointer" {
   assert contains(out, "int64_t* data"), "expected an unsized array field to stay a pointer";
 }
 
-// gap: comparing two different enums by ordinal (`a == b` for `enum A`/`enum B`)
+// Resolved: comparing two different enums is rejected, while an enum
+// still compares with its own kind and with a number
+// (typecheck_tests.fn).
+// gap (historical): comparing two different enums by ordinal (`a == b` for `enum A`/`enum B`)
 // is accepted instead of rejected.
 // test "P0: cross-enum equality is rejected, same-enum and enum-vs-num still allowed" { }
 

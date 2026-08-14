@@ -577,6 +577,33 @@ impl Checker {
     ret false;
   }
 
+  // Rejects a comparison between two different enums. A plain enum reads
+  // as the number behind it, so comparing one to a number is ordinary;
+  // comparing two enums that share no variants is asking whether two
+  // unrelated ordinals happen to coincide, which is never what was meant.
+  check_comparison(Node* node, ExprNode e, TypeEnv* env) {
+    if !e.has_left || !e.has_right {
+      ret;
+    }
+    CheckedType left = self.infer(e.left, env);
+    CheckedType right = self.infer(e.right, env);
+    if !self.plain_enums.has(left.name) || !self.plain_enums.has(right.name) {
+      ret;
+    }
+    if equals(left.name, right.name) {
+      ret;
+    }
+    self.fail(
+      format(
+        "'{str}' compares a {str} with a {str}, which share no variants",
+        e.op,
+        left.name,
+        right.name
+      ),
+      node
+    );
+  }
+
   // True when two types instantiated from the same generic agree on what
   // they hold. An argument the checker never resolved stands for
   // anything, and a side carrying no arguments at all says nothing about
@@ -1052,6 +1079,7 @@ impl Checker {
       ret checked_unknown();
     }
     if _is_comparison(e.op) || _is_logical(e.op) {
+      self.check_comparison(node, e, env);
       ret checked_of(DataTypeType.Bin);
     }
     if !e.has_left {
