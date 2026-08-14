@@ -294,6 +294,29 @@ test "a fit written in shorthand is still checked for the variants it skips" {
   assert contains(found, "S.B"), "expected the message to name what is missing";
 }
 
+test "a fit over num or a pointer with no catch-all is noticed" {
+  // Neither has a closed value set the way bin/enum do, so a catch-all
+  // is the only way to be exhaustive.
+  str num_src = `fun main() num {
+  `  num x = 1;
+  `  fit x {
+  `    1 -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(num_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for num";
+
+  str ptr_src = `imp std.c.mem;
+  `fun main() num {
+  `  raw* p = malloc(1);
+  `  fit p {
+  `    NULL -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(ptr_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for a pointer";
+}
+
 test "allow silences a shorthand fit's missing variant" {
   str src = `enum S { A, B }
   `fun main() num {

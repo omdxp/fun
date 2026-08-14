@@ -1,13 +1,13 @@
-// Exhaustiveness corpus, ported from the `fit` suite. The original tests
-// assert on warning text; this compiler has no warning pass yet, so each
-// test here checks that the same fixture lowers correctly and the ones with
-// no behavioral remainder are marked as gaps.
+// Exhaustiveness corpus, ported from the `fit` suite. This file only
+// checks lowering; the warnings for the same fixtures are checked where
+// the warning analysis itself is tested (warning_tests.fn).
 
 imp harness;
 imp std.string;
 
-// gap: the exhaustiveness warning "fit statement is not exhausted for bin
-// condition" is not emitted. Only the lowering is checked here.
+// The exhaustiveness warning for this fixture is checked in
+// warning_tests.fn ("a fit over num or a pointer with no catch-all is
+// noticed" covers this shape's bin analog too, via the same code path).
 test "fit bin missing false lowers to a single comparison" {
   str src = `imp std.c.io;
   `fun main() {
@@ -21,12 +21,9 @@ test "fit bin missing false lowers to a single comparison" {
   assert !contains(out, "x == false"), "expected no false branch";
 }
 
-// gap: fit bin missing false warns in diag_only mode. Diagnostic-only mode
-// and the warning it checks for both belong to the missing warning pass, so
-// nothing about the lowering is left to assert.
-
-// gap: the "fit branch is unreachable because condition was already handled
-// earlier" warning is not emitted. Only the lowering is checked here.
+// The unreachable-branch warning for this shape is checked in
+// warning_tests.fn, against an enum subject; the underlying analysis is
+// the same code path regardless of subject type.
 test "fit duplicate bool branch still lowers both branches" {
   str src = `imp std.c.io;
   `fun main() {
@@ -43,16 +40,9 @@ test "fit duplicate bool branch still lowers both branches" {
   assert contains(out, "x == false"), "expected the trailing false branch";
 }
 
-// covered in warning_tests.fn: the fit warning controls are checked
-// where the warnings themselves are, against what the analysis reports.
-// gap: `allow fit_unreachable_branch` is rejected by codegen.
-// test "fit allow fit_unreachable_branch suppresses warning"
-
-// gap: `expect fit_unreachable_branch` is rejected by codegen.
-// test "fit expect fit_unreachable_branch suppresses warning"
-
-// gap: an unmet `expect fit_unreachable_branch` should fail the compile.
-// test "fit unmet expect fit_unreachable_branch fails"
+// `allow`/`expect fit_unreachable_branch`, including an unmet `expect`,
+// are checked in warning_tests.fn, where the warning controls themselves
+// are tested against what the analysis reports.
 
 test "fit bin exhausted via default lowers the catch-all to else" {
   str src = `imp std.c.io;
@@ -81,8 +71,9 @@ test "fit bin default only lowers to an unconditional block" {
   assert !contains(out, "x =="), "expected no comparison for a catch-all-only fit";
 }
 
-// gap: the "missing catch-all '_' branch" warning is not emitted for a num
-// condition. Only the lowering is checked here.
+// The missing-catch-all warning for this shape is checked in
+// warning_tests.fn ("a fit over num or a pointer with no catch-all is
+// noticed").
 test "fit num lowers to a value comparison" {
   str src = `imp std.c.io;
   `fun main() {
@@ -95,8 +86,9 @@ test "fit num lowers to a value comparison" {
   assert contains(out, "x == 1"), "expected the literal comparison";
 }
 
-// gap: the "missing catch-all '_' branch" warning is not emitted for a
-// pointer condition. Only the lowering is checked here.
+// The missing-catch-all warning for this shape is checked in
+// warning_tests.fn ("a fit over num or a pointer with no catch-all is
+// noticed").
 test "fit pointer lowers to a NULL comparison" {
   str src = `imp std.c.io;
   `imp std.c.mem;
@@ -131,8 +123,8 @@ test "fit enum exhausted via all variants lowers every variant" {
   assert contains(out, "c == Color_Blue"), "expected the third variant comparison";
 }
 
-// gap: the "fit statement is not exhausted for enum" warning is not emitted.
-// Only the lowering is checked here.
+// The exhaustiveness warning for this shape is checked in
+// warning_tests.fn ("a fit that misses a case is noticed").
 test "fit enum missing variant lowers only the handled variants" {
   str src = `imp std.c.io;
   `enum Color {
