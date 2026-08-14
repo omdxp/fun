@@ -3,7 +3,6 @@
 // expectations run against this compiler.
 
 imp harness;
-imp std.process;
 imp std.fs;
 imp std.string;
 

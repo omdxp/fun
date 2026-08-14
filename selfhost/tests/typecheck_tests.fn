@@ -574,3 +574,37 @@ test "a file keeps to itself what it does not mark public" {
     "expected a file to read its own declarations"
   );
 }
+
+test "a call names a method the type does not have" {
+  // The type's methods are known here, since the program declares an
+  // impl for it, so a call naming none of them is wrong and is said so
+  // in Fun rather than left to the C compiler.
+  str src = `compound Box {
+  `  num v;
+  `}
+  `impl Box {
+  `  pub bump() num { ret self.v + 1; }
+  `}
+  `fun main() num {
+  `  Box b;
+  `  b.v = 1;
+  `  ret b.missing();
+  `}`;
+  str message = check(src);
+  assert contains(message, "has no method"), "expected the reason to name the method";
+  assert contains(message, "missing"), "expected the message to name the call";
+}
+
+test "a type whose impls were never seen is left alone" {
+  // Nothing here declares an impl for Outside, so the checker cannot
+  // know what it has and does not guess.
+  str src = `compound Outside {
+  `  num v;
+  `}
+  `fun main() num {
+  `  Outside o;
+  `  o.v = 1;
+  `  ret 0;
+  `}`;
+  assert equals(check(src), ""), "expected a program that calls nothing to pass";
+}

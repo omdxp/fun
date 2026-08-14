@@ -1058,6 +1058,21 @@ impl Checker {
     ret self.method_signature(receiver.name, method);
   }
 
+  // True when the checker has seen what methods a type has, which is
+  // what lets it say a call names none of them.
+  knows_methods_of(CheckedType receiver) bin {
+    if equals(receiver.name, "") {
+      ret false;
+    }
+    // An instantiation reaches methods through impls written against the
+    // type parameter, which these tables do not resolve, so only a type
+    // with no arguments of its own is judged.
+    if receiver.generic_args.len > 0 {
+      ret false;
+    }
+    ret self.methods.at(receiver.name).is_some();
+  }
+
   // The signature of `method` on `type_name`, if the type declares one.
   method_signature(str type_name, str method) Option<FnSig> {
     let table = self.methods.at(type_name);
@@ -1254,14 +1269,20 @@ impl Checker {
           ret;
         }
         CheckedType receiver = self.infer(callee.left, env);
-        // Only a builtin is judged here: it declares no methods at all,
-        // while a named type reaches them through impls the checker does
-        // not always see, and a pointer or array is not the receiver
-        // itself.
-        if receiver.base == DataTypeType.Unknown || receiver.pointer_depth > 0 || receiver.is_array {
+        // A pointer or an array is not the receiver itself, so what it
+        // reaches is judged elsewhere.
+        if receiver.pointer_depth > 0 || receiver.is_array {
           ret;
         }
         if self.receiver_method(receiver, method).is_some() {
+          ret;
+        }
+        // A builtin declares no methods at all, so any call through one
+        // is wrong. A named type is only judged once its methods are
+        // known: seeing an impl for it is what says they are, and a type
+        // whose impls the checker never saw is left alone rather than
+        // reported on a guess.
+        if receiver.base == DataTypeType.Unknown && !self.knows_methods_of(receiver) {
           ret;
         }
         self.fail(format("{str} has no method '{str}'", type_name(receiver), method), node);
