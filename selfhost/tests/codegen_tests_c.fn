@@ -1032,7 +1032,8 @@ test "a self-recursive CONSTRAINED generic function calling itself with the abst
   assert contains(out, "sum_down__num((n - 1))"), "expected the recursive call to reuse it";
 }
 
-// gap: a call violating a generic bound is accepted instead of rejected.
+// A call violating a generic bound is rejected by the typechecker,
+// where the check and its tests live (typecheck_tests.fn).
 // test "a self-recursive CONSTRAINED generic function rejects a bound violation" {
 // str src = `imp std.c.io;
 // `fun sum_down<T: num | dec>(T n) T {
@@ -1105,7 +1106,8 @@ test "a generic impl method calling a DIFFERENT generic free function from its o
 // assert contains(out, "identity__str(char* x)"), "expected the callee substituted with the method's type argument";
 // }
 
-// gap: a method's own generic bound is not enforced against a violating call.
+// A method's own bound is enforced too, on a plain impl and a generic
+// one alike (typecheck_tests.fn).
 // test "a method's own generic type param constraint is still enforced against a real violation" {
 // str src = `imp std.c.io;
 // `compound Box<T> {

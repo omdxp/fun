@@ -675,3 +675,43 @@ test "a fit branch naming its own enum, or nothing, is accepted" {
     "expected shorthand branches accepted"
   );
 }
+
+test "a method's own generic bound is enforced against the call" {
+  // The bound belongs to the method, not to the type it is written on,
+  // so it holds whether or not the impl is generic.
+  str on_plain = `compound Plain { num v; }
+  `impl Plain {
+  `  pub blend<U: num | str>(U other) num { ret 1; }
+  `}
+  `fun main() num {
+  `  Plain p;
+  `  dec d = 2.5;
+  `  ret p.blend(d);
+  `}`;
+  assert contains(check(on_plain), "does not accept"), "expected the bound enforced on a plain impl";
+
+  str on_generic = `compound Box<T> { T value; }
+  `impl Box<T> {
+  `  pub blend<U: num | str>(U other) num { ret 1; }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  dec d = 2.5;
+  `  ret b.blend(d);
+  `}`;
+  assert contains(check(on_generic), "does not accept"), "expected the bound enforced on a generic impl";
+}
+
+test "a method call inside the bound is accepted" {
+  accepts(
+    `compound Plain { num v; }
+    `impl Plain {
+    `  pub blend<U: num | str>(U other) num { ret 1; }
+    `}
+    `fun main() num {
+    `  Plain p;
+    `  ret p.blend(2) + p.blend("two");
+    `}`,
+    "expected both types the bound allows accepted"
+  );
+}

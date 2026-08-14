@@ -412,6 +412,17 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
     out.args.push(sig.args.get(i));
     i = i + 1;
   }
+  // What each argument was written as has to lose its first entry too:
+  // a call names arguments after `self`, and the two lists are read
+  // side by side. Leaving this one long shifted every argument by a
+  // place, so a method's own bound was tested against `self` and never
+  // against what the call supplied.
+  out.arg_params.init(sig.arg_params.len);
+  num a = 1;
+  for a < sig.arg_params.len {
+    out.arg_params.push(sig.arg_params.get(a));
+    a = a + 1;
+  }
   out.min_args = sig.min_args;
   if out.min_args > 0 {
     out.min_args = out.min_args - 1;
