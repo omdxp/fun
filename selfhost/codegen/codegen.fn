@@ -3085,6 +3085,29 @@ impl Codegen {
     self.impl_method_default_values.push(default_values);
   }
 
+  // The declared return type of `bare_name` on the quirk `quirk_name`
+  // itself, read from its declaration rather than from any one impl.
+  // What a dynamically-dispatched call returns is what the quirk says it
+  // returns; every impl of it agrees, since the quirk is what a caller
+  // sees.
+  lookup_quirk_method_rtype(str quirk_name, str bare_name) Option<DataType*> {
+    num i = 0;
+    for i < self.quirk_decl_names.len {
+      if equals(self.quirk_decl_names.get(i), quirk_name) {
+        for m : self.quirk_decl_methods.get(i) {
+          if equals(m.name, bare_name) {
+            if m.rtype == nil {
+              ret .None;
+            }
+            ret .Some(m.rtype);
+          }
+        }
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Looks up `bare_name`'s declared return type on `owner_type`. `.None`
   // means the method isn't recognized, or its return type wasn't
   // recorded (a generic impl's method).
@@ -5118,6 +5141,15 @@ impl Codegen {
                       let rt = self.lookup_impl_method_rtype(recv_r2.type_name, method_name);
                       if rt.is_some() {
                         call_rtype = .Some(*rt.unwrap());
+                      }
+                    }
+                    // A quirk-typed receiver dispatches dynamically, so
+                    // no concrete impl owns the call; the return type
+                    // comes from what the quirk itself declares instead.
+                    if call_rtype.is_none() && self.quirk_names.contains(recv_r2.type_name) {
+                      let qrt = self.lookup_quirk_method_rtype(recv_r2.type_name, method_name);
+                      if qrt.is_some() {
+                        call_rtype = .Some(*qrt.unwrap());
                       }
                     }
                   }
@@ -9250,6 +9282,17 @@ impl Codegen {
         str prefix = pfx.build();
 
         if !self.quirk_names.contains(quirk_type_identity) {
+          // Forward-declared ahead of the vtable struct: a method can
+          // return the very quirk it belongs to (`self_ref() Chain` on
+          // `impl X as Chain`), and the vtable's function-pointer field
+          // for it needs the name in scope before the quirk's own fat
+          // pointer struct is completed below. Harmless when nothing
+          // actually self-refers.
+          self.state.write("typedef struct ");
+          self.state.write(quirk_type_identity);
+          self.state.write(" ");
+          self.state.write(quirk_type_identity);
+          self.state.write(";\n");
           self.state.write("typedef struct ");
           self.state.write(quirk_type_identity);
           self.state.write("_vtable ");
@@ -9329,6 +9372,44 @@ impl Codegen {
               wsb.append("_");
               wsb.append(base);
               str wrap_name = wsb.build();
+
+              // The wrapper below calls straight through to the plain
+              // method it wraps, which this vtable machinery now runs
+              // ahead of: a forward prototype is what lets the wrapper
+              // reference it before `emit_impl` defines it. Only types
+              // are written, which is all a C prototype needs and avoids
+              // registering `self`/the other parameters as locals the
+              // way emitting them for a real body would.
+              if fnv.has_rtype {
+                let pwt = self.write_type(*fnv.rtype);
+                if pwt.is_none() {
+                  ret .Some(CodegenErrorKind.UnsupportedNode);
+                }
+              } else {
+                self.state.write("void");
+              }
+              self.state.write(" ");
+              self.state.write(fnv.name);
+              self.state.write("(");
+              if fnv.has_args {
+                bin proto_first = true;
+                for parg : fnv.args {
+                  fit parg.kind {
+                    .Variable(pv) -> {
+                      if !proto_first {
+                        self.state.write(", ");
+                      }
+                      proto_first = false;
+                      let ppt = self.write_type(*pv.var_type);
+                      if ppt.is_none() {
+                        ret .Some(CodegenErrorKind.UnsupportedNode);
+                      }
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+              self.state.write(");\n");
 
               self.state.write("static ");
               if fnv.has_rtype {
@@ -9908,17 +9989,17 @@ impl Codegen {
     self.c_shadow_names = collect_c_shadow_names(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
-    // Registers every generic quirk's declaration, pure bookkeeping with
-    // no C text, before anything referencing a concrete instantiation of
-    // one as a bare type needs to resolve it.
+    // Registers every quirk's declaration, pure bookkeeping with no C
+    // text: a generic one, before anything referencing a concrete
+    // instantiation of it as a bare type needs to resolve it, and a
+    // plain one, so a dynamically-dispatched call's return type can be
+    // read from here rather than from any one impl.
     for n : nodes {
       fit n.kind {
         .Quirk(q) -> {
-          if q.has_type_params {
-            self.quirk_decl_names.push(q.name);
-            self.quirk_decl_type_params.push(q.type_params);
-            self.quirk_decl_methods.push(q.methods);
-          }
+          self.quirk_decl_names.push(q.name);
+          self.quirk_decl_type_params.push(q.type_params);
+          self.quirk_decl_methods.push(q.methods);
         }
         _ -> {}
       }
@@ -10122,15 +10203,21 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
+          // The vtable machinery first: a method returning the very
+          // quirk it implements (`self_ref() Chain` on `impl X as
+          // Chain`) needs that quirk's own struct typedef to already
+          // exist when its signature is written, and nothing this
+          // writes depends on the method bodies emitted after it.
+          self.hoist_insert_pos = .Some(self.state.out.len());
+          let qerr = self.emit_quirk_vtable_machinery(n);
+          if qerr.is_some() {
+            ret qerr;
+          }
           self.hoist_insert_pos = .Some(self.state.out.len());
           let ierr = self.emit_impl(n);
           if ierr.is_some() {
             self.note_unsupported(n, "in an impl block");
             ret ierr;
-          }
-          let qerr = self.emit_quirk_vtable_machinery(n);
-          if qerr.is_some() {
-            ret qerr;
           }
         }
         .Function(f) -> {
