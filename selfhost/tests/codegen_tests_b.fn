@@ -432,8 +432,9 @@ test "sizeof works with generic types, generic instances, and locals" {
   assert contains(out, "sizeof(Box__Box__num)"), "expected a nested generic operand";
 }
 
-// gap: `sizeof(Nope)` on an undeclared type is accepted and passed through to C.
-// test "sizeof on an undeclared type is still rejected" { }
+// Moved to typecheck_tests.fn: `sizeof` on an undeclared type name is a
+// `Checker` diagnostic, invisible to this file's `transpile_source`
+// (lex/parse/codegen only, no typechecker).
 
 // A constant-zero divisor is rejected by the typechecker, which is where
 // the check belongs and where its tests live (typecheck_tests.fn).
@@ -747,8 +748,9 @@ test "P0: unsized array compound field stays a pointer" {
 // is accepted instead of rejected.
 // test "P0: cross-enum equality is rejected, same-enum and enum-vs-num still allowed" { }
 
-// gap: a fit branch labelled with a different enum's variant is accepted.
-// test "P0: fit with a different enum's variant as a branch is rejected" { }
+// Moved to typecheck_tests.fn: a fit branch naming a different enum than
+// its subject is a `Checker` diagnostic, invisible to this file's
+// `transpile_source` (lex/parse/codegen only, no typechecker).
 
 test "P0: char escapes are preserved and an unknown escape is rejected" {
   str src = `imp std.c.io;

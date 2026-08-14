@@ -845,7 +845,11 @@ impl Analysis {
       .Variable(v) -> {
         locals.add(v.name);
         if v.var_type != nil {
-          self.local_types.put(v.name, v.var_type.type_str);
+          str vtype = v.var_type.type_str;
+          if v.var_type.pointer_depth > 0 || v.var_type.flags.is_pointer {
+            vtype = format("{str}*", vtype);
+          }
+          self.local_types.put(v.name, vtype);
         }
         self.check_literal_range(stmt, v);
         if v.has_val {
@@ -1106,6 +1110,17 @@ impl Analysis {
       over = self._fit_subject_enum(f);
     }
     if equals(over, "") {
+      // Not a truth value and not an enum: a `num` or pointer subject has
+      // no fixed value set to enumerate, so the only way to be exhaustive
+      // is a catch-all `_` branch, already ruled out above.
+      str subj_type = self._fit_subject_type(f);
+      if equals(subj_type, "num") || ends_with(subj_type, "*") {
+        self.report(
+          .FitNonExhaustive,
+          "fit does not handle every value (missing catch-all '_' branch)",
+          stmt
+        );
+      }
       ret;
     }
     let declared = self.enum_variants.at(over);
@@ -1124,18 +1139,21 @@ impl Analysis {
     }
   }
 
-  // The enum a `fit` is matching, taken from what its subject was
-  // declared as. Used when the branches name no enum of their own.
-  _fit_subject_enum(FitStmtNode f) str {
+  // The type a `fit`'s subject ultimately reads from, taken from what its
+  // identifier was declared as (`local_types` carries a trailing `*` for
+  // a pointer-typed local). `fit *self` matches what the pointer holds,
+  // not the pointer itself, so an explicit deref strips one level.
+  _fit_subject_type(FitStmtNode f) str {
     if f.exp == nil {
       ret "";
     }
     Node* subject = f.exp;
-    // `fit *self` matches what the pointer holds.
+    bin deref = false;
     fit subject.kind {
       .Unary(u) -> {
         if equals(u.op, "*") && u.operand != nil {
           subject = u.operand;
+          deref = true;
         }
       }
       _ -> {}
@@ -1147,11 +1165,22 @@ impl Analysis {
           ret "";
         }
         str type_name = declared.unwrap();
-        if self.enum_variants.at(type_name).is_some() {
-          ret type_name;
+        if deref && ends_with(type_name, "*") {
+          type_name = substr(type_name, 0, len(type_name) - 1);
         }
+        ret type_name;
       }
       _ -> {}
+    }
+    ret "";
+  }
+
+  // The enum a `fit` is matching, taken from what its subject was
+  // declared as. Used when the branches name no enum of their own.
+  _fit_subject_enum(FitStmtNode f) str {
+    str type_name = self._fit_subject_type(f);
+    if !equals(type_name, "") && self.enum_variants.at(type_name).is_some() {
+      ret type_name;
     }
     ret "";
   }

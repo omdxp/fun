@@ -886,3 +886,48 @@ test "let cannot infer a type from a void call" {
     "expected a non-void call still inferred normally"
   );
 }
+
+test "sizeof on an undeclared type is rejected" {
+  rejects(
+    `fun main() num { ret sizeof(Nope); }`,
+    "expected sizeof on an unknown type name to be rejected"
+  );
+}
+
+test "a fit branch naming a different enum than its subject is rejected" {
+  rejects(
+    `enum A { X, Y }
+    `enum B { P, Q }
+    `fun main() num {
+    `  A a = A.X;
+    `  fit a {
+    `    B.P -> { ret 1; }
+    `    _ -> { ret 0; }
+    `  }
+    `  ret 0;
+    `}`,
+    "expected a branch naming a different enum to be rejected"
+  );
+}
+
+test "awaiting outside an async function is rejected" {
+  rejects(
+    `async fun inc(num x) num { ret x + 1; }
+    `fun main() {
+    `  let out = await inc(1);
+    `  _ = out;
+    `}`,
+    "expected awaiting outside an async function to be rejected"
+  );
+}
+
+test "an un-awaited async call bound with let is rejected" {
+  rejects(
+    `async fun inc(num x) num { ret x + 1; }
+    `async fun main() {
+    `  let out = inc(1);
+    `  _ = out;
+    `}`,
+    "expected an un-awaited async call to be rejected"
+  );
+}
