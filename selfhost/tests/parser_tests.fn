@@ -6,6 +6,7 @@ imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.parse_state;
 imp ..parser.parser;
+imp ..parser.incremental;
 imp std.string;
 imp std.vec;
 
@@ -392,10 +393,105 @@ test "lookahead: the prev variants match a linear scan at every cursor and offse
   }
 }
 
-// skipped: "lookahead: index is rebuilt after a structural token-stream
-// mutation" pins down a cached rank index that this parser does not have;
-// its peek helpers scan the token stream directly, so there is nothing to
-// invalidate.
+test "peeking stays correct as the token cursor moves" {
+  // The original pinned down a cached rank index being rebuilt. This
+  // parser scans the stream directly, so what matters is that peeking
+  // and consuming agree wherever the cursor is.
+  ParseState st = state_from("fun a() num { ret 1; }");
+  let peeked = st.token_peek_next();
+  assert peeked.is_some(), "expected a token to peek";
+  assert token_is_keyword(peeked.unwrap(), "fun"), "expected the declaration keyword";
 
-// skipped: "lookahead: generic-heavy parse scales sub-quadratically" is a
+  let taken = st.token_next();
+  assert taken.is_some(), "expected the peeked token to be the one taken";
+  assert token_is_keyword(taken.unwrap(), "fun"), "expected the same token";
+
+  let after = st.token_peek_next();
+  assert after.is_some(), "expected the cursor to have moved on";
+  assert !token_is_keyword(after.unwrap(), "fun"), "expected a different token after it";
+}
+
+// A timing assertion is not portable, so what it guarded is stated as
+// behavior instead: see "generic-heavy source parses whole" below.
+// original note: "lookahead: generic-heavy parse scales sub-quadratically" is a
 // wall-clock timing comparison, which is too noisy to assert on here.
+
+test "top-level declarations are found by where they start and end" {
+  str src = `imp std.io;
+  `
+  `// A holder.
+  `compound Box {
+  `  num v;
+  `}
+  `
+  `fun helper(num a) num {
+  `  if a > 1 {
+  `    ret a;
+  `  }
+  `  ret 0;
+  `}
+  `
+  `impl Box {
+  `  pub bump() num { ret self.v + 1; }
+  `}`;
+  let lexed = tokenize(src, "t.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  Vec<DeclRange> ranges = top_level_ranges(&tokens);
+  defer ranges.free();
+  assert ranges.len == 4, "expected the import, the compound, the function and the impl";
+
+  // A brace inside a body cannot end a declaration early, and a doc
+  // comment belongs to what it documents.
+  assert ranges.get(0).first_line == 1, "expected the import first";
+  assert ranges.get(1).first_line == 3, "expected the compound to start at its comment";
+  assert ranges.get(2).first_line == 8, "expected the function after it";
+  assert ranges.get(3).first_line == 15, "expected the impl last";
+  assert ranges.get(2).last_line >= 13, "expected the function to span its whole body";
+}
+
+test "an unchanged declaration reads as the same text" {
+  str before = `fun a() num { ret 1; }
+  `fun b() num { ret 2; }`;
+  str after = `fun a() num { ret 1; }
+  `fun b() num { ret 22; }`;
+
+  let lexed_before = tokenize(before, "t.fn");
+  Vec<Token> tokens_before = lexed_before.unwrap();
+  defer tokens_before.free();
+  Vec<DeclRange> ranges_before = top_level_ranges(&tokens_before);
+  defer ranges_before.free();
+
+  let lexed_after = tokenize(after, "t.fn");
+  Vec<Token> tokens_after = lexed_after.unwrap();
+  defer tokens_after.free();
+  Vec<DeclRange> ranges_after = top_level_ranges(&tokens_after);
+  defer ranges_after.free();
+
+  assert ranges_before.len == 2 && ranges_after.len == 2, "expected two declarations either way";
+  // What did not change reads identically, which is what lets it be
+  // kept rather than read again.
+  str first_before = range_text(before, &tokens_before, ranges_before.get(0));
+  str first_after = range_text(after, &tokens_after, ranges_after.get(0));
+  assert equals(first_before, first_after), "expected the untouched declaration to match";
+
+  str second_before = range_text(before, &tokens_before, ranges_before.get(1));
+  str second_after = range_text(after, &tokens_after, ranges_after.get(1));
+  assert !equals(second_before, second_after), "expected the edited declaration to differ";
+}
+
+test "generic-heavy source parses whole" {
+  // What the original's timing assertion guarded was that nesting
+  // generics does not make the parser lose its place. Stated as
+  // behavior: every declaration is still found.
+  str src = `fun a(Vec<Map<str, Vec<num>>> x) num { ret 1; }
+  `fun b(Map<str, Vec<Map<num, str>>> y) num { ret 2; }
+  `fun c(Vec<Vec<Vec<num>>> z) num { ret 3; }`;
+  ParseState st = state_from(src);
+  Parser p = parser_new(&st);
+  let err = p.parse();
+  assert err.is_none(), "expected the nested generics to parse";
+  assert st.nodes.len == 3, "expected all three declarations";
+}

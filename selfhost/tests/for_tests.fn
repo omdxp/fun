@@ -42,8 +42,28 @@ test "for array index and item transpiles" {
   assert contains(out, "int64_t item = arr[i];"), "expected the item binding to use it";
 }
 
-// skipped: the original test for a method call in an index-and-item loop body
-// asserts nothing, so there is no expectation to port.
+test "an index-and-item loop body can call a method" {
+  // The original asserted nothing, so this states what the shape should
+  // actually produce: the loop, and the call inside it.
+  str src = `imp std.c.io;
+  `compound Counter {
+  `  num n;
+  `}
+  `impl Counter {
+  `  pub bump() num { ret self.n + 1; }
+  `}
+  `fun main() num {
+  `  Counter[] items = [Counter{n = 1}, Counter{n = 2}];
+  `  for i, item :: items {
+  `    Counter c = item;
+  `    printf("%lld %lld\n", i, c.bump());
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "an index-and-item loop body can call a method");
+  assert contains(out, "Counter__bump"), "expected the method to be emitted";
+  assert contains(out, "for"), "expected the loop to be emitted";
+}
 
 test "for Vec values transpiles via len and data" {
   // The harness compiles a single source string without resolving imports,

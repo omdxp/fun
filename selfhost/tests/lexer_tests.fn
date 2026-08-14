@@ -23,12 +23,42 @@ fun tok_text(Token t) str {
   ret "";
 }
 
-// skipped: LexProcess initialization asserts on the fields of the original
-// implementation's lexing process object, which has no counterpart here.
+test "a fresh lex starts at the first character of the first line" {
+  // What the original asserted about a lexing object's initial fields is
+  // observable here as the position of the first token.
+  let lexed = tokenize("let x = 1;", "init.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+  assert tokens.len > 0, "expected at least one token";
+  Token first = tokens.get(0);
+  assert first.pos.line == 1, "expected the first line";
+  assert first.pos.start_col == 1, "expected the first column";
+  assert equals(first.pos.filename, "init.fn"), "expected the name it was read under";
+}
 
-// skipped: LexProcess next_char, peek_char and push_char all drive the
-// character cursor, an internal of the original implementation. This
-// tokenizer exposes only whole-token lexing.
+test "a character read ahead of the cursor is put back, not consumed" {
+  // The original drove next_char/peek_char/push_char directly. What that
+  // machinery is for is visible in the result: deciding a token needs
+  // reading past its end, and what was read past must still lex.
+  let lexed = tokenize("p.x", "peek.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+  // A dot followed by a name is member access, three tokens: reading the
+  // character after the dot must not consume the name.
+  assert tokens.len == 3, "expected the name after the dot to survive as its own token";
+
+  let decimal = tokenize(".5", "peek2.fn");
+  assert decimal.is_ok(), "expected a leading-dot number to lex";
+  Vec<Token> dtokens = decimal.unwrap();
+  defer dtokens.free();
+  assert dtokens.len >= 1, "expected the number";
+  fit dtokens.get(0).type {
+    .Number -> {}
+    _ -> { panic("expected a leading dot to start a number when a digit follows"); }
+  }
+}
 
 test "lexes a line comment" {
   let toks = lex_ok("// This is a comment\n");

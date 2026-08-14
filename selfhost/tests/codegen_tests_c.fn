@@ -433,7 +433,27 @@ test "quirk-impl method call chains onto a call-expression receiver" {
 // assert contains(out, "Counter__Iterator__next"), "expected the loop to call next()";
 // }
 
-// skipped: `for k, v :: map` needs std.map, which the harness cannot resolve.
+test "for k, v :: map binds each key to its value" {
+  str src = `imp std.c.io;
+  `imp std.map;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("a", 1);
+  `  for k, v :: m {
+  `    printf("%s=%lld\n", k, v);
+  `  }
+  `  m.free();
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "for_map_pairs",
+    "for k, v :: map binds each key to its value"
+  );
+  assert contains(out, "Map__str__num"), "expected the map instantiation";
+  assert contains(out, "printf"), "expected the body to be emitted";
+}
 
 test "default parameter values: free fn + method, omitting trailing args fills defaults" {
   str src = `imp std.c.io;
@@ -461,13 +481,92 @@ test "default parameter values: free fn + method, omitting trailing args fills d
 // skipped: the deadlock watchdog test asserts on a stalled process aborting,
 // which needs the built binary.
 
-// skipped: Display dispatch through `{}` only kicks in once std.io's
-// println_fmt is resolved, which the harness does not do.
+test "a value renders through Display when written as {}" {
+  str src = `imp std.io;
+  `imp std.quirks;
+  `compound Point {
+  `  num x;
+  `}
+  `impl Point as Display {
+  `  pub to_string() str { ret "point"; }
+  `}
+  `fun main() num {
+  `  Point p;
+  `  p.x = 1;
+  `  println_fmt("{}", &p);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "display_through_braces",
+    "a value renders through Display when written as {}"
+  );
+  assert contains(out, "Point__Display__to_string"), "expected the implementation to be emitted";
+  assert contains(out, "println_fmt"), "expected the call to survive";
+}
 
-// skipped: the exhaustive-fit Display test has the same std.io dependency.
+test "every branch of an exhaustive fit can render through Display" {
+  str src = `imp std.io;
+  `imp std.quirks;
+  `enum Shape {
+  `  Dot,
+  `  Line,
+  `}
+  `impl Shape as Display {
+  `  pub to_string() str {
+  `    fit *self {
+  `      .Dot -> { ret "dot"; }
+  `      .Line -> { ret "line"; }
+  `    }
+  `    ret "";
+  `  }
+  `}
+  `fun main() num {
+  `  Shape s = .Dot;
+  `  println_fmt("{}", &s);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "display_exhaustive_fit",
+    "every branch of an exhaustive fit can render through Display"
+  );
+  assert contains(out, "Shape__Display__to_string"), "expected the implementation";
+  assert contains(out, "Shape_Dot"), "expected both variants emitted";
+  assert contains(out, "Shape_Line"), "expected both variants emitted";
+}
 
-// skipped: workspace-shadowing and cross-file private-name collision both need
-// sibling files on disk.
+test "a private name in one file does not collide with the same name in another" {
+  // Sibling files on disk, which is the only way a cross-file collision
+  // can happen at all.
+  assert write_string(
+    "selfhost/tests/fixtures/priv_sibling_a.fn",
+    `fun _helper() num { ret 1; }
+    `pub fun from_a() num { ret _helper(); }`
+  ), "expected to stage the first file";
+  defer remove_file("selfhost/tests/fixtures/priv_sibling_a.fn");
+  assert write_string(
+    "selfhost/tests/fixtures/priv_sibling_b.fn",
+    `fun _helper() num { ret 2; }
+    `pub fun from_b() num { ret _helper(); }`
+  ), "expected to stage the second file";
+  defer remove_file("selfhost/tests/fixtures/priv_sibling_b.fn");
+
+  str src = `imp priv_sibling_a;
+  `imp priv_sibling_b;
+  `imp std.c.io;
+  `fun main() num {
+  `  printf("%lld\n", from_a() + from_b());
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "priv_sibling_main",
+    "a private name in one file does not collide with the same name in another"
+  );
+  assert contains(out, "from_a"), "expected the first file's function";
+  assert contains(out, "from_b"), "expected the second file's function";
+}
 
 test "fit statement with an explicit catch-all branch compiles and evaluates correctly" {
   str src = `imp std.c.io;
@@ -492,8 +591,40 @@ test "fit statement with an explicit catch-all branch compiles and evaluates cor
   assert contains(out, "} else {"), "expected the catch-all to lower to a trailing else";
 }
 
-// skipped: the multi-file torture program compiles a directory of sources, not
-// a single in-memory string.
+test "a program spread over several files merges into one" {
+  assert write_string(
+    "selfhost/tests/fixtures/spread_types.fn",
+    `pub compound Point {
+    `  num x;
+    `  num y;
+    `}`
+  ), "expected to stage the types";
+  defer remove_file("selfhost/tests/fixtures/spread_types.fn");
+  assert write_string(
+    "selfhost/tests/fixtures/spread_ops.fn",
+    `imp spread_types;
+    `pub fun area(Point p) num { ret p.x * p.y; }`
+  ), "expected to stage the operations";
+  defer remove_file("selfhost/tests/fixtures/spread_ops.fn");
+
+  str src = `imp spread_types;
+  `imp spread_ops;
+  `imp std.c.io;
+  `fun main() num {
+  `  Point p;
+  `  p.x = 3;
+  `  p.y = 4;
+  `  printf("%lld\n", area(p));
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "spread_main",
+    "a program spread over several files merges into one"
+  );
+  assert contains(out, "Point"), "expected the type from one file";
+  assert contains(out, "area"), "expected the function from the other";
+}
 
 test "fit on a chr subject checks every branch, not just the first (regression)" {
   str src = `imp std.c.io;
@@ -695,7 +826,7 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
 // assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
 // }
 
-// skipped: constructing the generic enum from non-generic code also needs
+// gap: constructing the generic enum from non-generic code also needs
 // std.io's Display formatting, and hits the same unsubstituted self-referential
 // payload as the two tests above.
 
