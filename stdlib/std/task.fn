@@ -10,6 +10,7 @@
 // channel that tracks a known number of task completions.
 
 imp std.channel;
+imp std.sync;
 
 // A completion barrier for a known number of virtual tasks. Each task calls
 // `done()` when it finishes; `wait()` blocks until every expected task has.
@@ -20,18 +21,31 @@ imp std.channel;
 pub compound WaitGroup {
   // Receives one signal per completed task.
   Channel<num> signals;
-  // Number of `done()` signals `wait()` should consume.
+  // Number of `done()` signals `wait()` should consume. Read and written
+  // under `mu`: a plain unguarded field here let `add()` (called from a
+  // forked task, growing the count for its own children) race with
+  // `wait()`'s own read of it (called concurrently on another thread,
+  // deciding whether to keep waiting) with nothing forcing one to see
+  // the other's update. That let `wait()` observe a stale, too-low count
+  // and return before every task had actually finished, letting the
+  // caller (often `main`) tear down state forked tasks were still using.
   num expected;
+  // Guards `expected` (not `signals`, which is already internally
+  // synchronized on its own).
+  Mutex mu;
 }
 
 // Creates a WaitGroup expecting `n` tasks to each call `done()` once;
 // `wait()` blocks until all `n` completions arrive. The signalling channel
 // is buffered to `n` so `done()` never blocks before `wait()` starts
 // draining. Starting at `wait_group_new(0)` and growing via `add()` later
-// is also safe, since `add()` grows the buffer to match.
+// is also safe, including concurrently from multiple already-forked
+// tasks, since `add()` grows the buffer to match and `expected` itself is
+// lock-protected.
 pub fun wait_group_new(num n) WaitGroup {
   WaitGroup wg;
   wg.expected = n;
+  wg.mu = mutex_new();
   num cap = n;
   if cap < 1 {
     cap = 1;
@@ -43,10 +57,14 @@ pub fun wait_group_new(num n) WaitGroup {
 
 impl WaitGroup {
   // Add `n` to the expected count. Grows the signalling buffer to match, so
-  // `done()` never blocks before `wait()` drains it; safe to call repeatedly.
+  // `done()` never blocks before `wait()` drains it; safe to call
+  // repeatedly, including concurrently from multiple forked tasks.
   pub add(num n) {
+    self.mu.lock();
     self.expected = self.expected + n;
-    let _rc = self.signals.grow_capacity(self.expected);
+    let target = self.expected;
+    self.mu.unlock();
+    let _rc = self.signals.grow_capacity(target);
   }
 
   // Signal that one task has finished. Called from inside a forked task body.
@@ -56,22 +74,34 @@ impl WaitGroup {
 
   // Block until all expected tasks have signalled `done()`.
   pub wait() {
-    for self.expected > 0 {
+    for true {
+      self.mu.lock();
+      bin more = self.expected > 0;
+      self.mu.unlock();
+      if !more {
+        ret;
+      }
       let _sig = <- self.signals;
+      self.mu.lock();
       self.expected = self.expected - 1;
+      self.mu.unlock();
     }
   }
 
-  // Number of tasks this group is still waiting on (best-effort, unsynchronized).
+  // Number of tasks this group is still waiting on.
   pub remaining() num {
-    if self.expected < 0 {
+    self.mu.lock();
+    num e = self.expected;
+    self.mu.unlock();
+    if e < 0 {
       ret 0;
     }
-    ret self.expected;
+    ret e;
   }
 
-  // Free the underlying channel. Call after `wait()` returns.
+  // Free the underlying channel and mutex. Call after `wait()` returns.
   pub destroy() {
     let _rc = self.signals.destroy();
+    let _rc2 = self.mu.destroy();
   }
 }

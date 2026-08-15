@@ -1804,7 +1804,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
-            pending_newlines += 1;
+            // A newline written inside an open generic argument list (e.g. a
+            // parameter type like `Map<str,\nGlobalSymbolInfo>`) splits a type
+            // expression that should read as one atomic unit; collapse it away
+            // so the normal spacing rule between tokens applies instead.
+            if (generic_angle_depth == 0) {
+                pending_newlines += 1;
+            }
             continue;
         }
 
@@ -2637,7 +2643,14 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             }
             if (c2 == ',') {
                 try state.out.append(',');
-                const in_wrap = wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
+                // A comma inside an open generic argument list (e.g. the one
+                // between `str` and `GlobalSymbolInfo` in `Map<str,
+                // GlobalSymbolInfo>`) belongs to the type expression, not to
+                // the wrap group's own item list -- `bracket_depth` doesn't
+                // track `<`/`>` nesting, so without this guard such a comma
+                // sat at the SAME depth as the group's real item separators
+                // and got a spurious line break in the middle of the type.
+                const in_wrap = generic_angle_depth == 0 and wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
                 if (in_wrap) {
                     // Newline only; the line-start path indents the next item.
                     try state.out.append('\n');
@@ -2664,7 +2677,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
 
         if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ",")) {
             try state.out.append(',');
-            const in_wrap = wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
+            // See the matching guard above: a comma inside an open generic
+            // argument list is part of the type, not a wrap-group separator.
+            const in_wrap = generic_angle_depth == 0 and wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
             if (in_wrap) {
                 // Newline only; the line-start path indents the next item.
                 try state.out.append('\n');
