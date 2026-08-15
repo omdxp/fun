@@ -268,7 +268,9 @@ test "ParseProcess parse_expression" {
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
         defer file.close(std.testing.io);
-        const input = "1 + 2 * 3";
+        // A top-level bare expression statement is terminated by `;`
+        // like every other statement kind.
+        const input = "1 + 2 * 3;";
         try file.writeStreamingAll(std.testing.io, input);
     }
 
