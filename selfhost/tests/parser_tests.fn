@@ -166,17 +166,14 @@ test "parses a return statement" {
   }
 }
 
-// gap: a top-level bare expression is terminated differently by the two
-// implementations. The original accepts `1 + 2 * 3` and rejects
-// `1 + 2 * 3;`; this parser is the other way round.
-// test "parses a binary expression" {
-// let st = parse_ok("1 + 2 * 3");
-// assert st.nodes.len == 1, "expected a single top-level node";
-// fit st.nodes.get(0).kind {
-// .Expression(_) -> {}
-// _ -> { panic("expected an Expression node"); }
-// }
-// }
+test "parses a binary expression" {
+  let st = parse_ok("1 + 2 * 3;");
+  assert st.nodes.len == 1, "expected a single top-level node";
+  fit st.nodes.get(0).kind {
+    .Expression(_) -> {}
+    _ -> { panic("expected an Expression node"); }
+  }
+}
 
 test "distinguishes an array literal from an index expression" {
   str src = `fun main() {
