@@ -23888,6 +23888,19 @@ pub const TranspileProcess = struct {
             try self.write("    return (long long)pid;\n");
             try self.write("}\n");
             try self.write("\n");
+            // `std.c.process.kill`'s Windows implementation. `sig` is
+            // ignored (Windows has no signal-delivery equivalent):
+            // `TerminateProcess` is the closest match to POSIX
+            // `SIGKILL`, so that's what every signal maps to here.
+            try self.write("long long kill(pid_t pid, long long sig) {\n");
+            try self.write("    (void)sig;\n");
+            try self.write("    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);\n");
+            try self.write("    if (h == NULL) return -1;\n");
+            try self.write("    BOOL ok = TerminateProcess(h, 1);\n");
+            try self.write("    CloseHandle(h);\n");
+            try self.write("    return ok ? 0 : -1;\n");
+            try self.write("}\n");
+            try self.write("\n");
             // `_pipe` needs a buffer size + text/binary mode that POSIX's
             // 1-arg `pipe(fds)` has no room for -- arity mismatch, so unlike
             // close/read/write/dup2 (which MinGW's io.h already aliases to
