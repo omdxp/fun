@@ -1023,17 +1023,17 @@ test "a hex string escape is bounded to two digits" {
 // typechecker (typecheck_tests.fn), which is where the rejection
 // actually happens.
 
-// gap: `format("{num} {num}", 1)`'s argument count against its own
-// placeholder count is not checked at all. The reference parses the
-// literal format string for `{num}`/`{str}`/... placeholders (skipping
-// bare `{}`, which takes the general vararg path) as part of an
-// optimization that lowers a `format` call straight to `snprintf`, and
-// validates the count as a side effect of that parse. The self-hosted
-// codegen has no such parser or fast path at all; `format` is an
-// ordinary vararg stdlib call. Needs the fast path itself, not a
-// standalone count check bolted onto the general call path, to match
-// what is actually being validated.
-// test "format's argument count is checked against its own placeholders" { }
+test "format's argument count is checked against its own placeholders" {
+  str src = `imp std.c.io;
+  `imp std.io;
+  `fun main() num {
+  `  str s = format("{num} {num}", 1);
+  `  printf("%s\n", s);
+  `  ret 0;
+  `}`;
+  let r = transpile_source(src);
+  assert r.is_err(), "expected a placeholder/argument count mismatch to be rejected";
+}
 
 // Resolved: an argument whose instantiation differs from the parameter's
 // is rejected, and the message names both (typecheck_tests.fn).

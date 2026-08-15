@@ -4113,6 +4113,58 @@ impl Codegen {
     ret .Some(res);
   }
 
+  // Counts each typed `{kind}` placeholder in a `format()` literal's
+  // format string (`{str}`/`{num}`/`{dec}`/`{bin}`/`{chr}`/`{ptr}`/`{raw}`),
+  // mirroring the reference compiler's own placeholder recognition:
+  // `{{`/`}}` are escaped braces, and a bare `{}` opts the whole string
+  // out of counting (returns `.None`), since it takes the general vararg
+  // path rather than a specific typed one.
+  count_format_placeholders(str fmt) Option<num> {
+    num i = 0;
+    num n = len(fmt);
+    num count = 0;
+    for i < n {
+      chr c = fmt[i];
+      if c == '{' {
+        if i + 1 < n && fmt[i + 1] == '{' {
+          i = i + 2;
+          continue;
+        }
+        if i + 1 < n && fmt[i + 1] == '}' {
+          ret .None;
+        }
+        if i + 4 < n && fmt[i + 4] == '}' {
+          chr a = fmt[i + 1];
+          chr b = fmt[i + 2];
+          chr d = fmt[i + 3];
+          bin matched = false;
+          if a == 's' && b == 't' && d == 'r' {
+            matched = true;
+          } elif a == 'n' && b == 'u' && d == 'm' {
+            matched = true;
+          } elif a == 'd' && b == 'e' && d == 'c' {
+            matched = true;
+          } elif a == 'b' && b == 'i' && d == 'n' {
+            matched = true;
+          } elif a == 'c' && b == 'h' && d == 'r' {
+            matched = true;
+          } elif a == 'p' && b == 't' && d == 'r' {
+            matched = true;
+          } elif a == 'r' && b == 'a' && d == 'w' {
+            matched = true;
+          }
+          if matched {
+            count = count + 1;
+            i = i + 5;
+            continue;
+          }
+        }
+      }
+      i = i + 1;
+    }
+    ret .Some(count);
+  }
+
   // Emits a call `callee(arg1, arg2, ...)`: a plain-identifier callee (an
   // ordinary free-function call) directly, or delegates to
   // `emit_method_call` when the callee is a `.`-Expression
@@ -4229,6 +4281,35 @@ impl Codegen {
     args.init(0);
     defer args.free();
     self.flatten_call_args(e.right, &args);
+
+    // `format("{num} {str}", a, b)`'s argument count is checked against
+    // its own placeholder count, matching the reference compiler's
+    // validation (a side effect there of a snprintf fast-path
+    // optimization this codegen doesn't have; format stays an ordinary
+    // vararg call here, this check just replicates the same accept/reject
+    // decision on its own). Only applies to a literal, non-raw format
+    // string with no bare `{}` placeholder, exactly like the reference:
+    // a bare `{}` takes the general vararg path, uncounted.
+    if equals(callee_name, "format") && args.len >= 1 && !args.get(0).flags.is_raw_string {
+      fit args.get(0).kind {
+        .String(fmt_str) -> {
+          let ph_opt = self.count_format_placeholders(fmt_str);
+          if ph_opt.is_some() {
+            num expected = ph_opt.unwrap();
+            num provided = args.len - 1;
+            if expected != provided {
+              self.error_note = format(
+                "format expects {num} arguments, got {num}",
+                expected,
+                provided
+              );
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
 
     // A call to a known variadic plain function needs an extra trailing
     // argument beyond its varargs: a `__fun_vtags` type-tag string, one
