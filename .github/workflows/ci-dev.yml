@@ -62,3 +62,51 @@ jobs:
         with:
           version: ${{ env.zig_version }}
       - run: zig fmt --check .
+  selfhost:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lane: linux-posix
+          - os: macos-latest
+            lane: macos-posix
+          - os: windows-latest
+            lane: windows-native
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
+    steps:
+      - uses: actions/checkout@v2
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.zig_version }}
+      - name: Bootstrap the reference compiler
+        run: zig build
+      - name: Build the self-hosted compiler and language server (fun build)
+        timeout-minutes: 10
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./zig-out/bin/fun.exe build
+          else
+            ./zig-out/bin/fun build
+          fi
+      - name: Run the self-hosted test suite on ${{ matrix.lane }}
+        timeout-minutes: 20
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./fun-out/bin/fun.exe test selfhost/tests
+          else
+            ./fun-out/bin/fun test selfhost/tests
+          fi
+      - name: Validate examples/ against the self-hosted compiler
+        timeout-minutes: 20
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            SELFHOST_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples_selfhost.sh
+          else
+            SELFHOST_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples_selfhost.sh
+          fi

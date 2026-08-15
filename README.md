@@ -19,7 +19,7 @@
 
 ## Overview
 
-Fun is a compiled language implemented in Zig that lowers Fun source code to readable C. The project focuses on a compact language surface, strong static typing, practical concurrency, and an editor-friendly toolchain built around formatting, diagnostics, and language-server support.
+Fun is a self-hosted compiled language: the compiler is itself written in Fun, and lowers Fun source code to readable C. The project focuses on a compact language surface, strong static typing, practical concurrency, and an editor-friendly toolchain built around formatting, diagnostics, and language-server support.
 
 The language provides high-level default numerics (`num`, `dec`), fixed-width scalar types (`i32`, `u64`, `f32`, `f64`), and arbitrary-width integers (`iN`, `uN`) so the same codebase can target ergonomic application code and lower-level systems work.
 
@@ -44,27 +44,6 @@ The language provides high-level default numerics (`num`, `dec`), fixed-width sc
 
 ## Installation
 
-### Prerequisites
-
-- [Zig](https://ziglang.org/download/) matching the version declared in [build.zig.zon](build.zig.zon)
-- macOS, Linux, or Windows
-
-### Build From Source
-
-```sh
-git clone https://github.com/omdxp/fun.git
-cd fun
-zig build
-```
-
-This produces the compiler and language server in `zig-out/bin/`.
-
-To install the compiler together with the standard library layout used by the runtime and editor tooling:
-
-```sh
-zig build install
-```
-
 ### Release Bundles
 
 Release assets are published as install bundles containing the compiler, the standard library under `share/fun/`, and platform-specific install assets.
@@ -81,6 +60,18 @@ At runtime, the compiler discovers the standard library in this order:
 
 `std.c.*` modules are signature-only C interop definitions used for typechecking and tooling. `std.*` modules without the `.c` namespace are Fun-native standard library modules.
 
+### Build From Source
+
+With a `fun` binary already on `PATH` (from a release, or a previous build), rebuild the compiler and language server from this repository's own source:
+
+```sh
+git clone https://github.com/omdxp/fun.git
+cd fun
+fun build
+```
+
+This reads [fun.toml](fun.toml) and produces `fun`/`fls` under `fun-out/bin/`. Building with nothing installed at all needs a one-time bootstrap step first — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Quickstart
 
 Create `hello.fn`:
@@ -93,11 +84,10 @@ fun main(str[] args) {
 }
 ```
 
-Build the toolchain and run the program:
+Run it:
 
 ```sh
-zig build
-./zig-out/bin/fun -in hello.fn
+fun -in hello.fn
 ```
 
 ## CLI
@@ -120,8 +110,8 @@ Key workflows:
 
 By default, `fun` selects a platform compiler unless `FUN_CC` is set.
 
-- macOS and Linux: `zig cc`, `clang`, `gcc`, `cc`
-- Windows: `zig cc`, `clang`, `gcc`, `cl`
+- macOS and Linux: `clang`, `gcc`, `cc`
+- Windows: `clang`, `gcc`, `cl`
 
 You can override the compiler with:
 
@@ -131,21 +121,11 @@ You can override the compiler with:
 Examples:
 
 - `FUN_CC=clang`
-- `FUN_CC=zig` with `FUN_CC_ARGS="cc"`
 - `FUN_CC="clang -O2 {src} -o {out}"`
 
 #### Windows Notes
 
-When using `cl`, run Fun from **Developer PowerShell for Visual Studio** (or after `VsDevCmd.bat`) so MSVC environment variables are initialized.
-
-Recommended stable Windows setup:
-
-```powershell
-$env:FUN_CC = "zig"
-$env:FUN_CC_ARGS = "cc"
-```
-
-Use `cl` only when the Visual Studio toolchain environment is already active:
+When using `cl`, run Fun from **Developer PowerShell for Visual Studio** (or after `VsDevCmd.bat`) so MSVC environment variables are initialized:
 
 ```powershell
 $env:FUN_CC = "cl /nologo /Fe{out} {src}"
@@ -160,7 +140,7 @@ The repository includes `fls`, the Fun language server. It communicates over LSP
 
 The official VS Code extension is published on the Visual Studio Marketplace: [Fun (FLS) for VS Code](https://marketplace.visualstudio.com/items?itemName=omdxp.fun-language).
 
-1. Build `fun` and `fls` with `zig build`.
+1. Build `fun` and `fls` with `fun build`, or install a release bundle.
 2. Install the published extension from the marketplace.
 3. For local development, packaging, or extension source, see [editors/vscode](editors/vscode).
 
@@ -218,13 +198,13 @@ jobs:
 
 ## Repository Layout
 
-- `cmd/`: command-line entrypoints
-- `modules/`: compiler and tooling modules
+- `selfhost/`: the self-hosted compiler, language server, and their own test suites, written in Fun
 - `stdlib/`: standard library source and documentation
 - `examples/`: sample Fun programs
-- `tests/`: repository test suites
+- `docs/`: source Markdown that feeds the published documentation site
 - `editors/`: editor integrations and language tooling packages
-- `build.zig`: Zig build definition
+- `scripts/`: repository validation and packaging scripts
+- `cmd/`, `modules/`, `tests/`: the bootstrap reference compiler's implementation and test suite (see [CONTRIBUTING.md](CONTRIBUTING.md) for how it relates to `selfhost/`)
 
 ## Contributing
 

@@ -16,12 +16,17 @@ Thank you for contributing to Fun. This document outlines the expected workflow 
 4. Run the relevant validation commands before opening a pull request.
 5. Open a pull request with a clear description of the problem, approach, and validation performed.
 
+## Building From Source
+
+Fun's compiler and language server are themselves written in Fun, under `selfhost/`. Building that from nothing needs a one-time bootstrap: this repository also carries a reference implementation of the compiler (`cmd/`, `modules/`, `tests/`), built with [Zig](https://ziglang.org/download/) (matching the version declared in [build.zig.zon](build.zig.zon)). `zig build` produces a first `fun` binary from that reference implementation; running `fun build` with that binary then reads [fun.toml](fun.toml) and builds the self-hosted `fun`/`fls` from `selfhost/` into `fun-out/bin/`. That self-hosted binary is what actually gets tested and iterated on day to day — the reference implementation exists to bootstrap it and to keep its own test suite (below) green as a safety net.
+
 ## Validation Expectations
 
 At minimum, contributors should run the repository validation relevant to the changed area.
 
-- Full repository validation: `zig build test --summary all`
-- Build validation: `zig build`
+- Full reference-implementation validation: `zig build test --summary all`
+- Reference-implementation build: `zig build`
+- Self-hosted build + test: `zig-out/bin/fun build`, then `fun-out/bin/fun test selfhost/tests`
 - Editor extension changes: run the local build steps documented in [editors/vscode/README.md](editors/vscode/README.md)
 
 If a change intentionally affects diagnostics, formatting, runtime backends, or editor tooling, include the commands used to verify that behavior in the pull request description.
