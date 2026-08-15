@@ -19757,13 +19757,20 @@ pub const TranspileProcess = struct {
             try self.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
             try self.write("typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\n");
             try self.write("static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\n");
-            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\n");
+            // A worker thread's stack is set explicitly to 8 MiB on both
+            // platforms rather than left at the OS default: a secondary
+            // pthread's default stack is far smaller than the main
+            // thread's on some platforms (512 KiB on macOS, for example),
+            // which is enough for a deeply recursive compiler pass (e.g.
+            // parsing a pathologically nested expression) to overflow it
+            // even though the same input is fine on the main thread.
+            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\n");
             try self.write("static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n");
             try self.write("#else\n");
             try self.write("#include <pthread.h>\n");
             try self.write("typedef pthread_t __fun_thread_t;\n");
             try self.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
-            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\n");
+            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }\n");
             try self.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
             try self.write("#endif\n\n");
 
