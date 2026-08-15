@@ -1144,7 +1144,13 @@ pub fun format_source(str src, str filename) Result<str, str> {
     Token t = tokens.get(i);
 
     if t.type == TokenType.NewLine {
-      s.pending_newlines = s.pending_newlines + 1;
+      // A newline written inside an open generic argument list (e.g. a
+      // parameter type like `Map<str,\nGlobalSymbolInfo>`) splits a type
+      // expression that should read as one atomic unit; collapse it away
+      // so the normal spacing rule between tokens applies instead.
+      if s.angle_depth == 0 {
+        s.pending_newlines = s.pending_newlines + 1;
+      }
       i = i + 1;
       continue;
     }

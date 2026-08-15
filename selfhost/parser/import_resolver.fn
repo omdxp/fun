@@ -18,6 +18,9 @@ imp std.set;
 imp std.map;
 imp std.option;
 imp std.result;
+imp std.task;
+imp std.sync;
+imp std.channel;
 
 // Converts one `imp`-statement's dotted `path` into an actual `.fn` file
 // path under `root`: segments join with `/`, and a run of N consecutive
@@ -63,7 +66,7 @@ fun _convert_dotted_path(str root, str import_path) str {
 // segments), e.g. `"selfhost/parser/../ast/ast.fn"` -> `"selfhost/ast/
 // ast.fn"`. Needed because the same file reached via two different
 // importing directories would otherwise dedup as two distinct raw
-// strings in `_preload_and_collect`/`_parse_and_merge`'s visited sets.
+// strings in `_preload_and_collect_source`/`_parse_and_merge`'s visited sets.
 // Backslashes are normalized to `/` first so a Windows-style path
 // collapses into the same dedup key.
 fun _normalize_path(str path) str {
@@ -347,35 +350,97 @@ pub compound ProgramMergeResult {
   Vec<str> alias_rename_targets;
 }
 
-// Recursively discovers `path`'s (transitive) import graph and collects
-// just the name of each public top-level `compound` declared anywhere in
-// it (into `out`, keyed by name): a lightweight first pass so
-// `is_known_compound_symbol` can recognize a compound from another file
-// before that file's own real parse starts. Doesn't reuse a full
-// `Parser.parse()`, since that needs `is_known_compound_symbol` to
-// already know about not-yet-visited files; the circularity this pass
-// exists to avoid. Instead, `imp` statements are parsed via the real
-// `Parser.parse_import` to discover the import graph accurately, and a
-// top-level `pub compound name` is found via a raw, depth-tracked token
-// scan that never needs to understand expressions.
-fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
-  ret _preload_and_collect_source(path, nil, out, visited);
+// Fixed worker-pool size for the concurrent preload fan-out below:
+// large enough to overlap I/O-bound file reads across a real project's
+// import graph, small enough to stay well under the M:N scheduler's own
+// worker-thread pool (`__fun_cpu_count()`-sized in the emitted runtime)
+// so blocking on `PreloadShared.mu` can never saturate it. Forking one
+// task per discovered file (unbounded, depth/width scaling with the
+// import graph itself) reliably deadlocks the scheduler once
+// concurrently in-flight tasks exceed its pool size: every worker
+// thread ends up blocked acquiring the same mutex, with none free to
+// run the task that would release it. A small, fixed pool pulling from
+// a shared queue keeps the number of simultaneously-blocked tasks
+// bounded regardless of how large the import graph is.
+const num preload_worker_count = 8;
+
+// State shared by every worker in the bounded preload pool: the
+// accumulating symbol table and visited set (genuinely mutated from
+// multiple workers, locked around every access), the work queue itself,
+// and the count of paths enqueued but not yet fully processed (also
+// locked; used to detect when every discovered file has been handled,
+// at which point the queue is closed so idle workers exit). A worker
+// whose own file fails still finishes its own queue draining rather
+// than trying to cancel in-flight work; only the first error actually
+// gets reported.
+compound PreloadShared {
+  Mutex mu;
+  Map<str, GlobalSymbolInfo>* out;
+  Set<str>* visited;
+  Channel<str> queue;
+  num pending;
+  bin has_error;
+  str first_error;
 }
 
-// The same, with this file's source supplied rather than read.
-fun _preload_and_collect_source(
-  str path,
-  str source,
-  Map<str,
-  GlobalSymbolInfo>* out,
-  Set<str>* visited
-) Option<str> {
-  path = _normalize_path(path);
-  if visited.has(path) {
-    ret .None;
+// Registers `path` as newly discovered work and enqueues it. Caller
+// must already hold `shared.mu`. Grows the queue's capacity to match
+// the pending count first, so `send` below can never block waiting for
+// room: queue length never exceeds `pending` (an item leaves the queue,
+// via a worker's `recv`, strictly before its processing finishes and
+// decrements `pending`), so capacity kept at least that high is always
+// enough.
+fun _preload_enqueue_locked(PreloadShared* shared, str path) {
+  shared.pending = shared.pending + 1;
+  if shared.pending > shared.queue.capacity() {
+    let _gc = shared.queue.grow_capacity(shared.pending);
   }
-  visited.add(path);
+  let _sc = shared.queue.send(path);
+}
 
+// Marks one item's processing as finished. Once every discovered path
+// has been handled (`pending` back to 0), closes the queue: every
+// worker idling in a blocking receive wakes with `.Closed` and exits,
+// and any worker that arrives at the queue later sees it already
+// closed rather than blocking forever.
+fun _preload_mark_done(PreloadShared* shared) {
+  shared.mu.lock();
+  shared.pending = shared.pending - 1;
+  bin finished = shared.pending == 0;
+  shared.mu.unlock();
+  if finished {
+    let _cc = shared.queue.close();
+  }
+}
+
+// Atomically checks whether `path` has already been claimed and, if
+// not, claims it and enqueues it for a worker to preload. The check,
+// the claim, and the enqueue all happen under one lock: two workers
+// racing to discover the same not-yet-visited import would otherwise
+// both decide it's theirs, parsing it twice and double-counting
+// `pending`.
+fun _preload_claim(PreloadShared* shared, str path) {
+  str norm = _normalize_path(path);
+  shared.mu.lock();
+  if !shared.visited.has(norm) {
+    shared.visited.add(norm);
+    _preload_enqueue_locked(shared, norm);
+  }
+  shared.mu.unlock();
+}
+
+// Reads (or takes the given `source` for) and lexes `path`, parses just
+// its `imp` statements to discover the import graph accurately (via the
+// real `Parser.parse_import`, since a full `Parser.parse()` needs
+// `is_known_compound_symbol` to already know about not-yet-visited
+// files, the circularity this whole pass exists to avoid), claiming and
+// enqueueing each newly discovered import, then scans the rest of the
+// file for top-level `pub compound name` declarations via a raw,
+// depth-tracked token scan that never needs to understand expressions.
+// `path` is assumed already claimed (added to `shared.visited`) by the
+// caller; `source` is non-nil only for the entry file, read from disk
+// otherwise.
+fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   str src = source;
   if src == nil {
     if !exists(path) {
@@ -405,20 +470,109 @@ fun _preload_and_collect_source(
     fit n.kind {
       .Import(imp_node) -> {
         str resolved = resolve_import_path(path, imp_node.path);
-        let rerr = _preload_and_collect(resolved, out, visited);
-        if rerr.is_some() {
-          ret rerr;
-        }
+        _preload_claim(shared, resolved);
       }
       _ -> {}
     }
   }
 
-  _scan_compound_names(state.tokens, state.pindex, path, out);
+  shared.mu.lock();
+  _scan_compound_names(state.tokens, state.pindex, path, shared.out);
+  shared.mu.unlock();
   ret .None;
 }
 
-// Raw token scan (see `_preload_and_collect` for why this doesn't reuse
+// One worker in the bounded preload pool: pulls paths off `shared`'s
+// queue until it closes (every discovered file has been claimed and
+// processed), preloading each one. `wpool` signals this worker's own
+// exit, so the top-level caller knows when every worker has drained and
+// stopped, not just when the queue emptied.
+async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
+  for true {
+    fit shared.queue.recv_result() {
+      .Ok(path) -> {
+        let ferr = _preload_one_file(shared, path, nil);
+        if ferr.is_some() {
+          shared.mu.lock();
+          if !shared.has_error {
+            shared.has_error = true;
+            shared.first_error = ferr.unwrap();
+          }
+          shared.mu.unlock();
+        }
+        _preload_mark_done(shared);
+      }
+      _ -> { break; }
+    }
+  }
+  wpool.done();
+}
+
+// Discovers `path`'s (transitive) import graph and collects just the
+// name of each public top-level `compound` declared anywhere in it
+// (into `out`, keyed by name): a lightweight first pass so
+// `is_known_compound_symbol` can recognize a compound from another file
+// before that file's own real parse starts.
+// 
+// Runs the walk through a small, fixed pool of `preload_worker_count`
+// virtual threads pulling from a shared queue (see `PreloadShared`'s own
+// doc comment for why the pool is bounded rather than one task per
+// file): reading, lexing, and scanning every file in a large import
+// graph is dominated by I/O and per-file parsing work with no ordering
+// dependency between files (the result, `out`, is a set keyed by name,
+// indifferent to discovery order), so overlapping that work across a
+// handful of workers is a real win without risking the scheduler itself.
+fun _preload_and_collect_source(
+  str path,
+  str source,
+  Map<str, GlobalSymbolInfo>* out,
+  Set<str>* visited
+) Option<str> {
+  str norm = _normalize_path(path);
+  if visited.has(norm) {
+    ret .None;
+  }
+  visited.add(norm);
+
+  PreloadShared shared;
+  shared.mu = mutex_new();
+  shared.out = out;
+  shared.visited = visited;
+  shared.queue = channel_new_cap("", 64);
+  shared.pending = 1;
+  shared.has_error = false;
+  shared.first_error = "";
+
+  // The entry file alone may carry an editor's unsaved source instead
+  // of disk content, so it is preloaded directly here, synchronously,
+  // rather than through the (always disk-reading) worker pool. Its own
+  // imports are claimed and enqueued exactly like any other file's.
+  let entry_err = _preload_one_file(&shared, norm, source);
+  if entry_err.is_some() {
+    shared.has_error = true;
+    shared.first_error = entry_err.unwrap();
+  }
+  _preload_mark_done(&shared);
+
+  WaitGroup wpool = wait_group_new(preload_worker_count);
+  num wi = 0;
+  for wi < preload_worker_count {
+    fork _preload_worker(&shared, &wpool);
+    wi = wi + 1;
+  }
+  wpool.wait();
+  wpool.destroy();
+
+  let _qd = shared.queue.destroy();
+  shared.mu.destroy();
+
+  if shared.has_error {
+    ret .Some(shared.first_error);
+  }
+  ret .None;
+}
+
+// Raw token scan (see `_preload_and_collect_source` for why this doesn't reuse
 // the real parser) for every top-level `pub compound name` sequence from
 // `start_idx` to the end of `tokens`, recording each into `out`. Tracks
 // `{`/`}` depth so only a depth-0 (top-level) sequence ever matches.
@@ -472,8 +626,7 @@ fun _parse_and_merge(
   Vec<Node>* merged,
   Vec<str>* aliases,
   Set<str>* visited,
-  Map<str,
-  GlobalSymbolInfo>* global_symbols,
+  Map<str, GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
   Vec<str>* rename_targets,
@@ -501,8 +654,7 @@ fun _parse_and_merge_source(
   Vec<Node>* merged,
   Vec<str>* aliases,
   Set<str>* visited,
-  Map<str,
-  GlobalSymbolInfo>* global_symbols,
+  Map<str, GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
   Vec<str>* rename_targets,
@@ -906,7 +1058,7 @@ test "parse_program_with_imports reports an error for a missing import rather th
 }
 
 test "parse_program_with_imports resolves a compound-literal expression whose type is declared in another file" {
-  // `_preload_and_collect` seeds every file's `ParseState.global_symbols`
+  // `_preload_and_collect_source` seeds every file's `ParseState.global_symbols`
   // before its real parse begins, so `is_known_compound_symbol` can
   // recognize a compound-literal's type even when it's declared in an
   // imported file rather than the current one.
