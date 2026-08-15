@@ -10338,6 +10338,14 @@ impl Codegen {
     if program_uses_std_c_header(self.all_nodes, "math.fn") {
       self.state.write("#include <math.h>\n");
     }
+    // `time_t`/`time()` happen to be visible transitively today through
+    // another always-included header on some platforms, but that's not
+    // guaranteed everywhere a C compiler runs; included explicitly
+    // whenever `std.c.time` bindings are actually imported, matching the
+    // same pattern as `<math.h>` above.
+    if program_uses_std_c_header(self.all_nodes, "time.fn") {
+      self.state.write("#include <time.h>\n");
+    }
     // These headers exist only on POSIX, so a program that never
     // spawns stays portable without them.
     // A failing assertion returns to the runner, which needs a jump

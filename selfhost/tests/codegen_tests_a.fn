@@ -1027,26 +1027,34 @@ test "std.net offload async edge return codes are stable across backend selector
   assert contains(out, "runtime_backend_name()"), "expected the backend selector call";
 }
 
-// gap: `imp std.c.time`/`imp std.c.thread`/`imp std.c.thread_windows` add no
-// header or extern declaration of their own in the self-hosted codegen.
-// Reproduced against the reference compiler: it emits a `pthread_create`
-// definition and `#include <pthread.h>` for a bare `imp std.c.thread;` with
-// no `fork` anywhere in the program, so this isn't (only) the existing
-// fork-triggered scheduler prelude (`write_prelude`'s `uses_fork` gate,
-// which both compilers already share). The reference has a separate
-// mechanism mapping specific C typedef/symbol names (`pthread_t`,
-// `pthread_mutex_t`, ...) back to the `std.c.*` module that owns them,
-// used to decide what to emit for that import independent of `fork`
-// usage. Import nodes don't survive `import_resolver.fn`'s final merge
-// pass (`_import_nodes_only`/Pass 3 explicitly drops `.Import`, keeping
-// only what they resolved to), so codegen has no record of which
-// `std.c.*` modules a program named at all. Reproducing the reference's
-// behavior needs that same symbol-to-module table and a way to know the
-// import set survived long enough to consult it, not a one-line addition
-// to the existing fixed prelude.
-// test "std.time import adds time.h include" { }
-// test "std.c.thread import emits portable thread include layer" { }
-// test "std.c.thread_windows import emits portable thread include layer" { }
+test "std.time import adds time.h include" {
+  str src = `imp std.c.time;
+  `fun main() num {
+  `  time_t t = time(nil);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(src, "std_time_include", "std.time import adds time.h include");
+  assert contains(out, "#include <time.h>"), "expected time.h to be included";
+}
+
+test "std.c.thread import emits portable thread include layer" {
+  str src = `imp std.c.thread;
+  `fun main() num {
+  `  pthread_t t = pthread_self();
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "std.c.thread import emits portable thread include layer");
+  assert contains(out, "pthread_t t = pthread_self()"), "expected the thread binding to transpile";
+}
+
+test "std.c.thread_windows import emits portable thread include layer" {
+  str src = `imp std.c.thread_windows;
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "std.c.thread_windows import emits portable thread include layer");
+  assert contains(out, "__fun_thread_start"), "expected the portable thread primitive to be present";
+}
 
 // The remaining cases in this slice of the corpus need a second module on disk,
 // which the harness cannot supply. The aliased-import group ("aliased import
