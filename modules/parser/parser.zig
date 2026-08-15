@@ -119,6 +119,17 @@ pub const ParseProcess = struct {
     /// unrelated calls.
     pending_call_generic_args: ?utils.Vector(*dtype.DataType) = null,
 
+    /// Set true right after the identifier-expression declaration fast
+    /// path (`T[] name = ...;`, `T name;`, ...) consumes its own trailing
+    /// `;`. Reset false before each top-level `next()` call so a bare
+    /// expression statement's own semicolon requirement can be enforced
+    /// without double-consuming the one this fast path already ate:
+    /// checking the token stream position directly for this is
+    /// unreliable across multiple preceding top-level declarations (their
+    /// own lookahead-table rebuilds can leave stale peek-back state), so
+    /// this flag is the explicit, position-independent signal instead.
+    last_stmt_self_terminated: bool = false,
+
     const Self = @This();
 
     /// Initializes a new `ParseProcess` instance.
@@ -3121,6 +3132,7 @@ pub const ParseProcess = struct {
                     try self.parse_datatype(dt);
                     try self.parse_variable(dt, hist, false, false, false);
                     try self.expect_sym(';');
+                    self.last_stmt_self_terminated = true;
                     break :blk true;
                 }
 
@@ -6824,7 +6836,24 @@ pub const ParseProcess = struct {
             .Number, .Identifier, .String => {
                 var hist = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
+                self.last_stmt_self_terminated = false;
                 try self.parse_expressionable(&hist);
+                // A bare top-level expression statement is terminated the
+                // same way every other statement is: consuming the `;`
+                // here (rather than leaving it for the next `next()` call
+                // to choke on as a stray symbol) also means one is
+                // required, matching every other statement kind.
+                //
+                // `parse_expressionable` itself already consumes a
+                // trailing `;` when it detects and parses a top-level
+                // variable declaration (`Counter[] counters = ...;`) via
+                // its own internal fast path (see
+                // `last_stmt_self_terminated`'s own doc comment): only a
+                // genuine bare expression, whose own parse never touched
+                // a `;`, needs one required here.
+                if (!self.last_stmt_self_terminated) {
+                    try self.expect_sym(';');
+                }
             },
             .Keyword => self.parse_global_keyword(),
             .Symbol => self.parse_symbol(),
