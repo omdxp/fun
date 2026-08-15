@@ -101,9 +101,37 @@ test "pointer field access uses arrow" {
   assert contains(out, "pp->x"), "expected an arrow field access";
 }
 
-// gap: two structurally identical quirks do not share a canonical C type, so
-// the second quirk emits no typedef and its dispatch names an undefined type.
-// test "structural quirks share canonical C type" { }
+// The reference compiler canonicalizes structurally identical quirks
+// (same method name/signature) to one shared C vtable type internally,
+// as a code-size optimization; this codegen has no such deduping and
+// gives each declared quirk its own independent vtable machinery
+// instead. Tried reproducing a resulting failure directly against the
+// reference across several shapes (two/three structurally identical
+// quirks, each concretely implemented and dispatched separately; one
+// declared but never implemented; a parameterized method signature) and
+// none failed, so whatever bug this note originally tracked looks
+// already fixed on the reference side. Not deduping costs nothing but
+// emitted C size, which this test doesn't check.
+test "structurally identical quirks each dispatch correctly, independently" {
+  str src = `imp std.c.io;
+  `quirk Speaker { speak() str; }
+  `quirk Talker { speak() str; }
+  `compound Dog { num age; }
+  `impl Dog as Speaker { pub speak() str { ret "woof"; } }
+  `compound Cat { num age; }
+  `impl Cat as Talker { pub speak() str { ret "meow"; } }
+  `fun main() num {
+  `  Dog d;
+  `  Cat c;
+  `  Speaker s = &d;
+  `  Talker t = &c;
+  `  printf("%s %s\n", s.speak(), t.speak());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "structurally identical quirks each dispatch correctly, independently");
+  assert contains(out, "Dog__Speaker__speak"), "expected the first quirk's own vtable machinery";
+  assert contains(out, "Cat__Talker__speak"), "expected the second quirk's own vtable machinery, not skipped";
+}
 
 test "asm statement transpiles" {
   str src = `fun main() {
