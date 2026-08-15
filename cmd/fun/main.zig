@@ -95,6 +95,56 @@ pub fn main(init: std.process.Init) void {
         return;
     }
 
+    // `fun test` (no path) or `fun test <dir>` runs every `.fn` file under
+    // that root (`.` by default) that declares a `test` block, one compile
+    // pass each, and reports an aggregate summary -- rather than requiring
+    // a hand-written loop over individual files. Only takes this path when
+    // there's no path argument, or the argument names an existing
+    // directory; `fun test <file.fn>` keeps the single-file form below.
+    if (argv.len >= 1 and std.mem.eql(u8, argv[0], "test")) {
+        // A path argument that starts with '-' is a flag, not a path (e.g.
+        // `fun test -g`); everything else follows `fun test <file.fn>`'s
+        // existing rule of treating argv[1] as the path when present.
+        const has_path_arg = argv.len >= 2 and argv[1].len > 0 and argv[1][0] != '-';
+        const named_path_is_file = has_path_arg and std.mem.endsWith(u8, argv[1], ".fn") and !cli.is_directory(init.io, argv[1]);
+        if (!named_path_is_file) {
+            const root: []const u8 = if (has_path_arg) argv[1] else ".";
+            const debug_info = blk: {
+                for (argv[1..]) |a| {
+                    if (std.mem.eql(u8, a, "-g")) break :blk true;
+                }
+                break :blk false;
+            };
+            cli.run_test_suite(global_allocator, init.io, root, debug_info) catch |err| print_error_and_exit(init.io, err);
+            return;
+        }
+    }
+
+    // `fun fuzz` (no path) or `fun fuzz <dir>` is the directory-wide
+    // counterpart to `fun test`'s above: every `fuzz` target across every
+    // `.fn` file under that root, each run for a short bounded budget
+    // (`FUN_FUZZ_DEFAULT_SECONDS`, default 30s) rather than the open-ended
+    // campaign a single named target normally gets -- meant for a CI-style
+    // "did anything regress" sweep, not a real fuzzing session. A target
+    // name only makes sense alongside a specific file, so this form never
+    // takes one; `fun fuzz <file.fn> [target]` keeps the single-target form
+    // below.
+    if (argv.len >= 1 and std.mem.eql(u8, argv[0], "fuzz")) {
+        const has_path_arg = argv.len >= 2 and argv[1].len > 0 and argv[1][0] != '-';
+        const named_path_is_file = has_path_arg and std.mem.endsWith(u8, argv[1], ".fn") and !cli.is_directory(init.io, argv[1]);
+        if (!named_path_is_file) {
+            const root: []const u8 = if (has_path_arg) argv[1] else ".";
+            const debug_info = blk: {
+                for (argv[1..]) |a| {
+                    if (std.mem.eql(u8, a, "-g")) break :blk true;
+                }
+                break :blk false;
+            };
+            cli.run_fuzz_suite(global_allocator, init.io, root, debug_info) catch |err| print_error_and_exit(init.io, err);
+            return;
+        }
+    }
+
     // `fun test <path> [...rest]` is shorthand for `fun -in <path> -test
     // [...rest]`, mirroring `zig test <path>`. Only rewritten when a path
     // actually follows "test" -- otherwise pass argv through unchanged so

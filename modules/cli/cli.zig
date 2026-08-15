@@ -131,7 +131,9 @@ fn print_usage(io: std.Io) void {
         \\Usage:
         \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-- <program args...>]
         \\  fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+        \\  fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
         \\  fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
+        \\  fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
         \\  fun build               (reads ./fun.toml, installs binaries under fun-out/bin/)
         \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
@@ -399,6 +401,369 @@ fn warning_control_group_for_tokens(tokens: []const token.Token, start_idx: usiz
 pub fn free_owned_paths(allocator: mem.Allocator, paths: []const []const u8) void {
     for (paths) |path| allocator.free(path);
     allocator.free(paths);
+}
+
+/// True when a directory exists at `path` (vs. a file, or nothing at all).
+/// Exposed so `cmd/fun/main.zig` can tell `fun test <path>`/`fun fuzz <path>`
+/// (directory/whole-project form) apart from the single-file form before
+/// committing to either pipeline.
+pub fn is_directory(io: std.Io, path: []const u8) bool {
+    return dir_exists(io, path);
+}
+
+/// Every `.fn` file under `root`, sorted, skipping the same build-artifact
+/// directories `-fmt-check-all` skips.
+fn collect_all_fun_files(allocator: mem.Allocator, io: std.Io, root: []const u8) ![]const []const u8 {
+    var files = ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (files.items) |path| allocator.free(path);
+        files.deinit();
+    }
+    try collect_fun_files_recursive(allocator, io, root, &files);
+    std.sort.pdq([]const u8, files.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return files.toOwnedSlice();
+}
+
+/// True when `path` declares at least one top-level `keyword "name" {`/`(`
+/// block (`keyword` is `"test"` or `"fuzz"`, both lexer keywords). A
+/// lightweight token scan rather than a real parse: a `test`/`fuzz`
+/// keyword token immediately followed by a string literal doesn't occur
+/// any other way in valid Fun source, so the shape alone is enough to
+/// decide whether a file belongs in a directory-wide run without paying
+/// for a full parse of every file just to filter the list. Any lex
+/// failure (the file will fail to compile anyway) is treated as "doesn't
+/// declare one" -- the real run below reports the actual error.
+fn declares_top_level_block(allocator: mem.Allocator, path: []const u8, keyword: []const u8) bool {
+    var tp = codegen.TranspileProcess.init_rw(allocator, path, "__scan_unused__.c", .{ .exec = false, .outf = false, .ast = false }) catch return false;
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    lp.lex() catch return false;
+
+    const tokens = tp.tokens.items();
+    var i: usize = 0;
+    while (i + 1 < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type != .Keyword) continue;
+        if (!mem.eql(u8, t.data.sval.items, keyword)) continue;
+        if (tokens[i + 1].type == .String) return true;
+    }
+    return false;
+}
+
+/// Compiles and runs `path` in `test` mode, reusing one fixed temp `.c` name
+/// across the whole suite (runs are sequential, never concurrent). Any
+/// failure -- a lex/parse/transpile error, a missing C compiler, or the
+/// compiled test binary itself exiting nonzero -- surfaces as a returned
+/// error rather than exiting the process, so `run_test_suite`'s loop can
+/// count it and move on to the next file.
+fn run_one_test_file(allocator: mem.Allocator, io: std.Io, path: []const u8, debug_info: bool) !void {
+    const out_c_path = "fun_test_suite_run.c";
+    defer std.Io.Dir.cwd().deleteFile(io, out_c_path) catch {};
+
+    var tp = try codegen.TranspileProcess.init(allocator, path, out_c_path, .{
+        .exec = false,
+        .outf = true,
+        .debug_info = debug_info,
+        .test_mode = true,
+    });
+    var lp = lexer.LexProcess.init(&tp);
+    var pp = parser.ParseProcess.init(&tp);
+    defer {
+        lp.deinit();
+        tp.deinit();
+    }
+    try lp.lex();
+    try pp.parse();
+    try tp.transpile();
+
+    try compile_and_run_ex(allocator, io, out_c_path, true, path, &.{}, debug_info, false, false);
+}
+
+/// `fun test <dir>` / `fun test` (no path): discovers every `.fn` file under
+/// `root` that declares a `test` block, runs each in its own fresh compile
+/// pass, and prints an aggregate pass/fail summary. Returns
+/// `CliError.ExecutionFailed` if any file failed, so the process exit code
+/// stays shell-script-friendly the same way a single `fun test <file>` is.
+pub fn run_test_suite(allocator: mem.Allocator, io: std.Io, root: []const u8, debug_info: bool) !void {
+    const files = try collect_all_fun_files(allocator, io, root);
+    defer free_owned_paths(allocator, files);
+
+    const stdout = std.Io.File.stdout();
+    var passed: usize = 0;
+    var failed: usize = 0;
+    for (files) |path| {
+        if (!declares_top_level_block(allocator, path, "test")) continue;
+
+        var hdr_buf: [1024]u8 = undefined;
+        const hdr = std.fmt.bufPrint(&hdr_buf, "== {s} ==\n", .{path}) catch "==\n";
+        stdout.writeStreamingAll(io, hdr) catch {};
+
+        run_one_test_file(allocator, io, path, debug_info) catch |err| {
+            // `ExecutionFailed` means the compiled test binary itself ran
+            // and reported failures -- its own `test: <name> ... FAIL`
+            // lines already said so, so naming the error again here would
+            // just repeat the same fact in a less useful form. Any other
+            // error (a lex/parse/transpile failure, a missing C compiler)
+            // never got its own message, so it's reported here.
+            if (err != CliError.ExecutionFailed) {
+                var ebuf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&ebuf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
+                stdout.writeStreamingAll(io, msg) catch {};
+            }
+            failed += 1;
+            continue;
+        };
+        passed += 1;
+    }
+
+    if (passed + failed == 0) {
+        var nbuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&nbuf, "no `test` blocks found under {s}\n", .{root}) catch "no test blocks found\n";
+        stdout.writeStreamingAll(io, msg) catch {};
+        return;
+    }
+
+    var summary_buf: [128]u8 = undefined;
+    const summary = std.fmt.bufPrint(&summary_buf, "\n{d}/{d} test files passed\n", .{ passed, passed + failed }) catch "done\n";
+    stdout.writeStreamingAll(io, summary) catch {};
+
+    // Exit directly with a plain nonzero code rather than returning an
+    // error for `cmd/fun/main.zig` to report -- the summary just printed
+    // already says what happened; a generic "Error: ..." line under it
+    // would only repeat that in a less useful form (matches how a single
+    // failing `fun test <file.fn>` exits: nonzero, no extra banner).
+    if (failed > 0) std.process.exit(1);
+}
+
+/// Every `fuzz "<name>" (...)` target `path` declares, in source order. A
+/// file can declare more than one; the directory-wide fuzz runner builds
+/// and runs each separately (a fuzz harness only ever exercises one target
+/// per binary, selected at compile time by `-fuzz-target`).
+fn collect_fuzz_targets(allocator: mem.Allocator, path: []const u8) ![]const []const u8 {
+    var targets = ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (targets.items) |t| allocator.free(t);
+        targets.deinit();
+    }
+
+    var tp = codegen.TranspileProcess.init_rw(allocator, path, "__scan_unused__.c", .{ .exec = false, .outf = false, .ast = false }) catch return targets.toOwnedSlice();
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    lp.lex() catch return targets.toOwnedSlice();
+
+    const tokens = tp.tokens.items();
+    var i: usize = 0;
+    while (i + 1 < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type != .Keyword or !mem.eql(u8, t.data.sval.items, "fuzz")) continue;
+        if (tokens[i + 1].type != .String) continue;
+        try targets.append(try allocator.dupe(u8, tokens[i + 1].data.sval.items));
+    }
+    return targets.toOwnedSlice();
+}
+
+/// Default wall-clock budget (seconds) for one fuzz target when running the
+/// directory-wide `fun fuzz [path]` form, where multiple targets across
+/// possibly multiple files each get their own bounded run rather than the
+/// open-ended campaign a single `fun fuzz <file.fn> <target>` normally
+/// leaves to the caller. Short enough to keep a whole project's fuzz suite
+/// bounded in CI, long enough to be a real regression check rather than a
+/// no-op. Override with `FUN_FUZZ_DEFAULT_SECONDS`.
+const default_fuzz_seconds: u32 = 30;
+
+fn fuzz_budget_seconds() u32 {
+    if (std.c.getenv("FUN_FUZZ_DEFAULT_SECONDS")) |z| {
+        const s = mem.sliceTo(z, 0);
+        if (s.len > 0) {
+            if (std.fmt.parseInt(u32, s, 10) catch null) |v| return v;
+        }
+    }
+    return default_fuzz_seconds;
+}
+
+/// Runs `argv` (index 0 is the executable) to completion, sending SIGKILL
+/// if it's still running after `budget_seconds`. Deliberately does NOT use
+/// `std.process.Child.kill` from the watchdog thread while `wait` runs on
+/// this one: `Child.kill` on POSIX reaps the process itself (its own
+/// `wait4` call), and so does `Child.wait` -- calling both concurrently on
+/// the same pid from two threads is a real double-reap race (confirmed by
+/// reading the standard library's own POSIX implementation: the loser's
+/// `wait4` gets ECHILD, which its own code path is labeled "Double-free"
+/// and treated as a bug). The watchdog thread here only ever sends a raw
+/// signal via `std.posix.kill`, which does not reap; the actual `wait` (the
+/// only call that reaps) stays solely on this function's own thread. POSIX
+/// only -- on Windows the budget isn't enforced, matching the fuzzing
+/// feature's existing best-effort Windows support elsewhere in this file.
+const BoundedRunResult = struct {
+    term: std.process.Child.Term,
+    // True when the watchdog itself force-terminated the process because
+    // `budget_seconds` elapsed -- expected, successful completion of a
+    // time-bounded run, NOT a crash. The caller must check this before
+    // treating a nonzero/signal `term` as a real failure: a `SIGKILL` term
+    // caused by hitting the budget looks identical, in `term` alone, to one
+    // caused by an actual crash.
+    killed_by_budget: bool,
+};
+
+fn spawn_and_wait_bounded(io: std.Io, argv: []const []const u8, budget_seconds: u32) !BoundedRunResult {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+
+    if (builtin.target.os.tag == .windows) {
+        return .{ .term = try child.wait(io), .killed_by_budget = false };
+    }
+
+    const WatchdogCtx = struct {
+        pid: std.posix.pid_t,
+        budget_seconds: u32,
+        done: std.atomic.Value(bool),
+        killed: std.atomic.Value(bool),
+    };
+    var ctx = WatchdogCtx{
+        .pid = child.id.?,
+        .budget_seconds = budget_seconds,
+        .done = std.atomic.Value(bool).init(false),
+        .killed = std.atomic.Value(bool).init(false),
+    };
+    const watchdog = std.Thread.spawn(.{}, struct {
+        // A plain libc `usleep` rather than any `std.Io`-based sleep: this
+        // runs on a bare OS thread this function spawned itself, outside
+        // whatever event loop `io` belongs to, and pairing it with that
+        // event loop's own sleep primitive is untested territory. `usleep`
+        // has no such dependency.
+        extern "c" fn usleep(usec: c_uint) c_int;
+
+        fn run(c: *WatchdogCtx) void {
+            var slept: u32 = 0;
+            while (slept < c.budget_seconds and !c.done.load(.acquire)) {
+                _ = usleep(1_000_000);
+                slept += 1;
+            }
+            if (!c.done.load(.acquire)) {
+                c.killed.store(true, .release);
+                std.posix.kill(c.pid, .KILL) catch {};
+            }
+        }
+    }.run, .{&ctx}) catch null;
+
+    const term = try child.wait(io);
+    ctx.done.store(true, .release);
+    if (watchdog) |t| t.join();
+    return .{ .term = term, .killed_by_budget = ctx.killed.load(.acquire) };
+}
+
+/// Compiles `path`'s `target` fuzz harness and runs it for `budget_seconds`.
+/// Also passes libFuzzer's own `-max_total_time` (a well-behaved libFuzzer
+/// build stops on its own), but the real enforcement is
+/// `spawn_and_wait_bounded`'s watchdog -- `-max_total_time` was observed
+/// NOT to reliably stop a run in every environment (confirmed directly: a
+/// hand-compiled libFuzzer binary invoked with no `fun` code involved at
+/// all still ran well past its budget in this sandbox), so a directory-wide
+/// sweep can't depend on it alone without risking exactly the unbounded
+/// hang this feature exists to avoid. Reuses one fixed temp `.c`/exe name
+/// across the whole suite (runs are sequential, never concurrent). Any
+/// failure -- a lex/parse/transpile error, a missing fuzzing-capable C
+/// compiler, or the harness itself finding a crash -- surfaces as a
+/// returned error rather than exiting the process.
+fn run_one_fuzz_target(allocator: mem.Allocator, io: std.Io, path: []const u8, target: []const u8, debug_info: bool, budget_seconds: u32) !void {
+    const out_c_path = "fun_fuzz_suite_run.c";
+    defer std.Io.Dir.cwd().deleteFile(io, out_c_path) catch {};
+
+    var tp = try codegen.TranspileProcess.init(allocator, path, out_c_path, .{
+        .exec = false,
+        .outf = true,
+        .debug_info = debug_info,
+        .fuzz_mode = true,
+    });
+    tp.fuzz_target = target;
+    var lp = lexer.LexProcess.init(&tp);
+    var pp = parser.ParseProcess.init(&tp);
+    defer {
+        lp.deinit();
+        tp.deinit();
+    }
+    try lp.lex();
+    try pp.parse();
+    try tp.transpile();
+
+    const exe_file = if (builtin.target.os.tag == .windows) "fun_fuzz_suite_run.exe" else "fun_fuzz_suite_run";
+    defer std.Io.Dir.cwd().deleteFile(io, exe_file) catch {};
+    try invoke_fuzz_compiler_to_exe(allocator, io, out_c_path, exe_file, debug_info);
+
+    const exe_for_os = if (builtin.target.os.tag == .windows) ".\\fun_fuzz_suite_run.exe" else "./fun_fuzz_suite_run";
+    var arg_buf: [64]u8 = undefined;
+    const time_arg = try std.fmt.bufPrint(&arg_buf, "-max_total_time={d}", .{budget_seconds});
+    const result = try spawn_and_wait_bounded(io, &.{ exe_for_os, time_arg }, budget_seconds);
+    // A watchdog kill just means the budget ran out with nothing found --
+    // the expected, successful outcome of a bounded sweep, not a crash. Only
+    // a term the process reached ON ITS OWN (whether libFuzzer's own
+    // `-max_total_time` firing, or an actual crash) reflects a real result.
+    if (result.killed_by_budget) return;
+    switch (result.term) {
+        .exited => |code| if (code != 0) return CliError.ExecutionFailed,
+        else => return CliError.ExecutionFailed,
+    }
+}
+
+/// `fun fuzz <dir>` / `fun fuzz` (no path): discovers every `.fn` file
+/// under `root` that declares one or more `fuzz` targets, runs each target
+/// for a bounded `FUN_FUZZ_DEFAULT_SECONDS` (default 30s), and prints an
+/// aggregate summary. Unlike `fun fuzz <file.fn> <target>`'s open-ended
+/// single-target run, this form exists for CI-style "did anything
+/// regress" sweeps across a whole project, so every target gets the same
+/// short, bounded budget rather than running indefinitely.
+pub fn run_fuzz_suite(allocator: mem.Allocator, io: std.Io, root: []const u8, debug_info: bool) !void {
+    const files = try collect_all_fun_files(allocator, io, root);
+    defer free_owned_paths(allocator, files);
+
+    const budget = fuzz_budget_seconds();
+    const stdout = std.Io.File.stdout();
+    var ran: usize = 0;
+    var failed: usize = 0;
+    for (files) |path| {
+        if (!declares_top_level_block(allocator, path, "fuzz")) continue;
+        const targets = try collect_fuzz_targets(allocator, path);
+        defer free_owned_paths(allocator, targets);
+
+        for (targets) |target| {
+            var hdr_buf: [1024]u8 = undefined;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "== {s} :: {s} ({d}s) ==\n", .{ path, target, budget }) catch "==\n";
+            stdout.writeStreamingAll(io, hdr) catch {};
+
+            run_one_fuzz_target(allocator, io, path, target, debug_info, budget) catch |err| {
+                var ebuf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&ebuf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
+                stdout.writeStreamingAll(io, msg) catch {};
+                failed += 1;
+                ran += 1;
+                continue;
+            };
+            ran += 1;
+        }
+    }
+
+    if (ran == 0) {
+        var nbuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&nbuf, "no `fuzz` targets found under {s}\n", .{root}) catch "no fuzz targets found\n";
+        stdout.writeStreamingAll(io, msg) catch {};
+        return;
+    }
+
+    var summary_buf: [128]u8 = undefined;
+    const summary = std.fmt.bufPrint(&summary_buf, "\n{d}/{d} fuzz targets clean\n", .{ ran - failed, ran }) catch "done\n";
+    stdout.writeStreamingAll(io, summary) catch {};
+
+    if (failed > 0) std.process.exit(1);
 }
 
 pub fn collect_unformatted_fun_files(allocator: mem.Allocator, io: std.Io, input_path: []const u8) ![]const []const u8 {
@@ -3578,6 +3943,18 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
 }
 
 pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool, fuzz_mode: bool) !void {
+    return compile_and_run_ex(allocator, io, c_file_or_content, is_file, input_file, program_args, debug_info, fuzz_mode, true);
+}
+
+/// Same as `compile_and_run`, but with control over how a nonzero exit from
+/// the compiled program is reported. `exit_process_on_nonzero = true`
+/// matches `compile_and_run` (calls `std.process.exit`, preserving the exit
+/// code for shell scripts -- the right behavior for a single `fun -in
+/// file.fn` invocation). A caller running many files in one process (e.g.
+/// the `fun test`/`fun fuzz` directory runner) passes `false` instead, so a
+/// failing file returns `CliError.ExecutionFailed` to its own caller rather
+/// than ending the whole process before the rest of the suite runs.
+pub fn compile_and_run_ex(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool, fuzz_mode: bool, exit_process_on_nonzero: bool) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -3691,6 +4068,7 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
             switch (term) {
                 .exited => |code| {
                     if (code != 0) {
+                        if (!exit_process_on_nonzero) return CliError.ExecutionFailed;
                         // Preserve program exit status for callers/shell scripts.
                         std.process.exit(code);
                     }
