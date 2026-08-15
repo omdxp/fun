@@ -208,9 +208,9 @@ payload; payload-free variants still coexist.
       assert add(2, 3) == 5, "expected 5";
     }
     ```
-- **Ignored by an ordinary compile**: matching `zig build` vs `zig test`, `fun -in
-  file.fn` never type-checks or emits `test` blocks at all — a test referencing
-  something broken doesn't stop the normal program from compiling.
+- **Ignored by an ordinary compile**: `fun -in file.fn` never type-checks or
+  emits `test` blocks at all, so a test referencing something broken doesn't
+  stop the normal program from compiling.
 - **Running tests**: `fun test <path>` (shorthand for `fun -in <path> -test`)
   compiles `test` blocks into a runner and runs it. Every discovered test runs
   CONCURRENTLY (each dispatched onto its own virtual task, via the same
@@ -353,7 +353,7 @@ payload; payload-free variants still coexist.
   supported (e.g. mirroring this repo's own `fun` + `fls` binaries).
 - **`fun build`**: reads `./fun.toml`, compiles every `[[bin]]` target, and
   installs the resulting binaries under `fun-out/bin/`. Unlike `fun -in
-  file.fn`, nothing is run afterward — matching `zig build` (compile only).
+  file.fn`, nothing is run afterward: `fun build` only ever compiles.
 - Only a narrow TOML subset is supported: no nested tables, no arrays of
   scalars, no multi-line/escaped strings — just what a package name/version
   and a flat list of binary targets need.

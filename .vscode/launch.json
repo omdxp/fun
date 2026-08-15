@@ -5,7 +5,7 @@
             "name": "debug",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/zig-out/bin/fun",
+            "program": "${workspaceFolder}/fun-out/bin/fun",
             "args": [
                 "-in",
                 "examples/test.fn",

@@ -7,7 +7,7 @@ This directory contains runnable examples covering the language core, standard l
 After building the compiler, run any example directly:
 
 ```sh
-zig-out/bin/fun -in examples/<example>.fn
+fun -in examples/<example>.fn
 ```
 
 ## Suggested Reading Order

@@ -6,11 +6,8 @@ on:
     branches:
       - main
 
-env:
-  zig_version: 0.16.0
-
 jobs:
-  test:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -25,88 +22,43 @@ jobs:
             runtime_backend: windows
             lane: windows-native
     runs-on: ${{ matrix.os }}
-    env:
-      FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - name: Run all tests (including fls LSP) on ${{ matrix.lane }}
-        timeout-minutes: 20
-        run: zig build test --summary all
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - run: zig build run -- -in examples/test.fn # usingnamespace is not supported for incremental compilation
-  examples:
-    runs-on: ubuntu-latest
-    env:
-      FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - run: zig build
-      - run: FUN_STDLIB_DIR="$GITHUB_WORKSPACE/stdlib" ./scripts/run_examples.sh
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - run: zig fmt --check .
-  selfhost:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            lane: linux-posix
-          - os: macos-latest
-            lane: macos-posix
-          - os: windows-latest
-            lane: windows-native
-    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     env:
+      FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
       FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: actions/checkout@v4
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
         with:
-          version: ${{ env.zig_version }}
-      - name: Bootstrap the reference compiler
-        run: zig build
-      - name: Build the self-hosted compiler and language server (fun build)
+          version: latest
+      - name: Build fun and fls
         timeout-minutes: 10
-        run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./zig-out/bin/fun.exe build
-          else
-            ./zig-out/bin/fun build
-          fi
-      - name: Run the self-hosted test suite on ${{ matrix.lane }}
+        run: fun build
+      - name: Run the test suite on ${{ matrix.lane }}
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./fun-out/bin/fun.exe test selfhost/tests
+            ./fun-out/bin/fun.exe test compiler/tests
           else
-            ./fun-out/bin/fun test selfhost/tests
+            ./fun-out/bin/fun test compiler/tests
           fi
-      - name: Validate examples/ against the self-hosted compiler
+      - name: Validate examples/
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            SELFHOST_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples_selfhost.sh
+            FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
           else
-            SELFHOST_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples_selfhost.sh
+            FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
           fi
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
+        with:
+          version: latest
+      - run: fun -fmt-check-all

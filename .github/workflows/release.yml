@@ -1,8 +1,12 @@
 # =============================================================
-# Zig 'fun' Compiler Release Workflow
+# 'fun' Compiler Release Workflow
 #
 # This workflow builds the 'fun' binary for multiple platforms
-# and uploads the resulting artifacts for each release.
+# and uploads the resulting artifacts for each release. Every
+# target is built natively on a runner of its own architecture
+# (no cross-compilation): a previously published `fun` release
+# bootstraps the toolchain, which then builds this checkout's
+# own compiler and language server via `fun build`.
 #
 # - Triggers: Manual (workflow_dispatch) or GitHub Release publish
 # - Matrix build: Linux, Windows, macOS (x86_64 & aarch64)
@@ -31,25 +35,49 @@ on:
 
 jobs:
   build-unix-bundles:
-    name: Build bundles (Linux/macOS)
-    runs-on: ubuntu-latest
+    name: Build bundles (${{ matrix.target }})
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
+      fail-fast: false
       matrix:
-        zig_version: [0.16.0]
-        target:
-          - x86_64-linux-gnu
-          - x86_64-macos
-          - aarch64-linux-gnu
-          - aarch64-macos
+        include:
+          - target: x86_64-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-macos
+            os: macos-13
+          - target: aarch64-macos
+            os: macos-14
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Zig ${{ matrix.zig_version }}
-        uses: goto-bus-stop/setup-zig@v2
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
         with:
-          version: ${{ matrix.zig_version }}
+          version: latest
+
+      - name: Check fun.toml's version matches the release tag
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          if [ -z "$tag" ]; then tag="0.0.0"; fi
+          tag="${tag#v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' fun.toml)"
+          if [ "$manifest_version" != "$tag" ]; then
+            echo "fun.toml's version ('$manifest_version') does not match release tag ('$tag')." >&2
+            echo "Bump the [package] version in fun.toml to $tag before tagging the release." >&2
+            exit 1
+          fi
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+
+      - name: Build fun and fls
+        run: |
+          set -euo pipefail
+          FUN_STDLIB_DIR="$PWD/stdlib" fun build
 
       - name: Build install bundle for ${{ matrix.target }}
         run: |
@@ -60,20 +88,20 @@ jobs:
           if [ -z "$tag" ]; then tag="0.0.0"; fi
           tag="${tag#v}"
 
-          zig build install --release=safe -Dtarget=${{ matrix.target }} -Dversion="$tag" --prefix dist/fun-${{ matrix.target }}
-          cp scripts/installer/install.sh dist/fun-${{ matrix.target }}/install.sh
-          cp scripts/installer/uninstall.sh dist/fun-${{ matrix.target }}/uninstall.sh
-          chmod +x dist/fun-${{ matrix.target }}/install.sh dist/fun-${{ matrix.target }}/uninstall.sh || true
+          out="dist/fun-${{ matrix.target }}"
+          mkdir -p "$out/bin" "$out/share"
+          cp fun-out/bin/fun fun-out/bin/fls "$out/bin/"
+          chmod 755 "$out/bin/fun" "$out/bin/fls"
+          cp -R stdlib "$out/share/fun"
+          cp scripts/installer/install.sh "$out/install.sh"
+          cp scripts/installer/uninstall.sh "$out/uninstall.sh"
+          chmod +x "$out/install.sh" "$out/uninstall.sh"
 
-          # Cross-target builds cannot execute the produced binary here.
-          # As a cheap sanity check, ensure the expected version string is embedded.
-          exe_path="dist/fun-${{ matrix.target }}/bin/fun"
-          if [ ! -f "$exe_path" ]; then
-            echo "Expected executable not found: $exe_path" >&2
-            exit 1
-          fi
-          if ! strings "$exe_path" | grep -Fq -- "$tag"; then
-            echo "Expected version '$tag' not found in $exe_path" >&2
+          # Every target here runs natively, so the built binary can just be
+          # asked what version it thinks it is.
+          got="$("$out/bin/fun" -version)"
+          if [ "$got" != "$tag" ]; then
+            echo "Expected version '$tag' but got '$got'" >&2
             exit 1
           fi
 
@@ -89,26 +117,47 @@ jobs:
           path: artifacts/fun-${{ matrix.target }}.tar.gz
 
   build-windows-msi:
-    name: Build MSI + portable zip (Windows)
-    runs-on: windows-latest
+    name: Build MSI + portable zip (${{ matrix.target }})
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
+      fail-fast: false
       matrix:
-        zig_version: [0.16.0]
-        target:
-          - x86_64-windows-gnu
-          - aarch64-windows-gnu
+        include:
+          - target: x86_64-windows-gnu
+            os: windows-latest
+          - target: aarch64-windows-gnu
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Zig ${{ matrix.zig_version }}
-        uses: goto-bus-stop/setup-zig@v2
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
         with:
-          version: ${{ matrix.zig_version }}
+          version: latest
 
       - name: Install WiX Toolset (v3)
         run: choco install wixtoolset -y
+
+      - name: Check fun.toml's version matches the release tag
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}"
+          if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
+          if (-not $tag) { $tag = '0.0.0' }
+          $manifestVersion = (Select-String -Path fun.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          if ($manifestVersion -ne $tag) {
+            throw "fun.toml's version ('$manifestVersion') does not match release tag ('$tag'). Bump the [package] version in fun.toml to $tag before tagging the release."
+          }
+
+      - name: Build fun and fls
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:FUN_STDLIB_DIR = "$PWD\stdlib"
+          fun build
 
       - name: Build MSI + portable zip for ${{ matrix.target }}
         shell: powershell
@@ -120,51 +169,29 @@ jobs:
           if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
           if (-not $tag) { $tag = '0.0.0' }
 
-          # IMPORTANT: always pass -Dversion as a single argument.
-          # PowerShell can mis-tokenize version-like strings (e.g. 0.12.10) if they appear unquoted.
-          zig build install --release=safe -Dtarget=${{ matrix.target }} "-Dversion=$tag" --prefix dist\fun-${{ matrix.target }}
+          $out = "dist\fun-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "$out\bin" | Out-Null
+          Copy-Item "fun-out\bin\fun.exe" "$out\bin\fun.exe"
+          Copy-Item "fun-out\bin\fls.exe" "$out\bin\fls.exe"
+          Copy-Item -Recurse "stdlib" "$out\share\fun"
 
-          # Verify version embedding. We can execute x86_64 builds; for aarch64 just scan bytes.
-          $exePath = "dist\fun-${{ matrix.target }}\bin\fun.exe"
-          if (-not (Test-Path $exePath)) {
-            throw "Expected executable not found: $exePath"
-          }
-          function Test-ContainsBytes([byte[]]$haystack, [byte[]]$needle) {
-            if ($needle.Length -eq 0) { return $true }
-            if ($haystack.Length -lt $needle.Length) { return $false }
-            for ($i = 0; $i -le $haystack.Length - $needle.Length; $i++) {
-              $ok = $true
-              for ($j = 0; $j -lt $needle.Length; $j++) {
-                if ($haystack[$i + $j] -ne $needle[$j]) { $ok = $false; break }
-              }
-              if ($ok) { return $true }
-            }
-            return $false
+          # Every target here runs natively, so the built binary can just be
+          # asked what version it thinks it is.
+          $exePath = "$out\bin\fun.exe"
+          $got = & $exePath -version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed running $exePath" }
+          $got = ($got | Out-String).Trim()
+          if ($got -ne $tag) {
+            throw "Expected version '$tag' but got '$got'"
           }
 
-          if ("${{ matrix.target }}" -eq "x86_64-windows-gnu") {
-            $out = & $exePath -version
-            if ($LASTEXITCODE -ne 0) { throw "Version check failed running $exePath" }
-            $out = ($out | Out-String).Trim()
-            if ($out -ne $tag) {
-              throw "Expected version '$tag' but got '$out'"
-            }
-          } else {
-            $bytes = [System.IO.File]::ReadAllBytes($exePath)
-            $needleUtf8 = [System.Text.Encoding]::UTF8.GetBytes($tag)
-            $needleUtf16 = [System.Text.Encoding]::Unicode.GetBytes($tag) # UTF-16LE
-            if (-not (Test-ContainsBytes $bytes $needleUtf8) -and -not (Test-ContainsBytes $bytes $needleUtf16)) {
-              throw "Expected version '$tag' not found in $exePath"
-            }
-          }
-
-          Copy-Item "installer\windows\PORTABLE-README.txt" "dist\fun-${{ matrix.target }}\README-portable.txt"
+          Copy-Item "installer\windows\PORTABLE-README.txt" "$out\README-portable.txt"
 
           New-Item -ItemType Directory -Force artifacts | Out-Null
 
           # Build portable zip that can be unzipped and run without installing.
           $portableZip = "artifacts\fun-${{ matrix.target }}-$tag.zip"
-          Compress-Archive -Path "dist\fun-${{ matrix.target }}" -DestinationPath $portableZip -Force
+          Compress-Archive -Path $out -DestinationPath $portableZip -Force
 
           # WiX Product/@Version requires x.x.x.x with each x in [0, 65534].
           # Accept tags like 1.2.3 or 1.2.3-beta and normalize.
@@ -193,7 +220,7 @@ jobs:
           Write-Host "Tag: $tag"
           Write-Host "WiX Version: $wixVersion"
 
-          $src = "dist\fun-${{ matrix.target }}"
+          $src = $out
           $harvest = "dist\Harvest.wxs"
           # -ag makes heat emit Component Guid="*" (stable, deterministic GUIDs based on keypath)
           heat dir $src -cg FunFiles -dr INSTALLFOLDER -ag -srd -sreg -sfrag -var var.SourceDir -out $harvest

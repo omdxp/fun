@@ -172,9 +172,12 @@ function Cleanup-Leftovers {
 
 try {
 
-  $funExe = Join-Path $RepoRoot 'zig-out\bin\fun.exe'
+  $funExe = $env:FUN_EXE
+  if ([string]::IsNullOrWhiteSpace($funExe)) {
+    $funExe = Join-Path $RepoRoot 'fun-out\bin\fun.exe'
+  }
   if (-not (Test-Path -LiteralPath $funExe)) {
-    throw "Missing $funExe. Run 'zig build' first."
+    throw "Missing $funExe. Run 'fun build' first, or set `$env:FUN_EXE to point at a built fun.exe."
   }
 
   # Minimal output assertions (only where we have stable strings).

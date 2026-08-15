@@ -1,0 +1,6 @@
+// Names the CPU architecture the compiler binary itself was built for.
+// Not a libc binding: the compiler emits the definition into the
+// prelude every compiled program carries (see `write_prelude`), reading
+// it from the C compiler's own predefined macros, the same approach as
+// `__fun_sleep_seconds`.
+pub fun __fun_host_arch_name() str;

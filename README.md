@@ -70,7 +70,7 @@ cd fun
 fun build
 ```
 
-This reads [fun.toml](fun.toml) and produces `fun`/`fls` under `fun-out/bin/`. Building with nothing installed at all needs a one-time bootstrap step first — see [CONTRIBUTING.md](CONTRIBUTING.md).
+This reads [fun.toml](fun.toml) and produces `fun`/`fls` under `fun-out/bin/`. Building with nothing installed at all needs a one-time bootstrap step first, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
@@ -198,13 +198,12 @@ jobs:
 
 ## Repository Layout
 
-- `selfhost/`: the self-hosted compiler, language server, and their own test suites, written in Fun
+- `compiler/`: the compiler, language server, and their own test suites, written in Fun
 - `stdlib/`: standard library source and documentation
 - `examples/`: sample Fun programs
 - `docs/`: source Markdown that feeds the published documentation site
 - `editors/`: editor integrations and language tooling packages
 - `scripts/`: repository validation and packaging scripts
-- `cmd/`, `modules/`, `tests/`: the bootstrap reference compiler's implementation and test suite (see [CONTRIBUTING.md](CONTRIBUTING.md) for how it relates to `selfhost/`)
 
 ## Contributing
 

@@ -55,7 +55,7 @@ function resolveExe(
   const trimmed = stripOuterQuotes(configured ?? "");
   const expanded = expandWindowsEnvVars(expandWorkspaceVars(trimmed, root));
 
-  // If user left it as default, try workspace-local zig-out first.
+  // If user left it as default, try workspace-local fun-out first.
   if (!expanded || expanded === "fls" || expanded === "fun") {
     if (root) {
       const candidate = path.join(root, defaultRel);
@@ -219,7 +219,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
   const config = vscode.workspace.getConfiguration("fun");
   const funCfg = config.get<string>("fls.funPath", "");
   const stdlibCfg = config.get<string>("fls.stdlibDir", "");
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
   const funPath = resolveExe(funCfg, root, funDefaultRel);
 
   const existingStdlibRaw =
@@ -256,7 +256,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
       : "") ||
     (root
       ? deriveStdlibDirFromExe(
-          path.join(root, "zig-out", "bin", platformExeName("fun")),
+          path.join(root, "fun-out", "bin", platformExeName("fun")),
         )
       : "");
 
@@ -269,7 +269,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
 function resolveFunCompilerExe(root: string | undefined): string {
   const config = vscode.workspace.getConfiguration("fun");
   const funCfg = config.get<string>("fls.funPath", "");
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
   const resolved = resolveExe(funCfg, root, funDefaultRel);
   return resolved || "fun";
 }
@@ -574,8 +574,8 @@ function createClient(output: vscode.LogOutputChannel): LanguageClient {
   const debugImports = config.get<boolean>("fls.debugImports", false);
   const debugDefinitions = config.get<boolean>("fls.debugDefinitions", false);
 
-  const flsDefaultRel = path.join("zig-out", "bin", platformExeName("fls"));
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const flsDefaultRel = path.join("fun-out", "bin", platformExeName("fls"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
 
   const flsResolved = resolveExe(flsCfg, root, flsDefaultRel);
   const flsPath = flsResolved;

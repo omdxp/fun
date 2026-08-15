@@ -1,11 +1,11 @@
 [package]
 name = "fun"
-version = "0.46.0"
+version = "0.50.0"
 
 [[bin]]
 name = "fun"
-path = "selfhost/cli/main.fn"
+path = "compiler/cli/main.fn"
 
 [[bin]]
 name = "fls"
-path = "selfhost/fls/main.fn"
+path = "compiler/fls/main.fn"

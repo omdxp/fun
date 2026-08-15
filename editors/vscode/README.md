@@ -25,7 +25,7 @@ For the **Debug** feature you also need:
 
 By default the extension will try, in order:
 
-1. Workspace-local binaries: `zig-out/bin/fls(.exe)` and `zig-out/bin/fun(.exe)`
+1. Workspace-local binaries: `fun-out/bin/fls(.exe)` and `fun-out/bin/fun(.exe)`
 2. Your system `PATH` (e.g. `fls`, `fun`)
 
 ## Getting Started
@@ -34,7 +34,7 @@ By default the extension will try, in order:
 2. Open a `.fn` file.
 3. If the server doesn’t start, open **View → Output** and select **Fun Language Server**.
 
-For local development builds, the extension prefers workspace binaries from `zig-out/bin` before falling back to executables on `PATH`.
+For local development builds, the extension prefers workspace binaries from `fun-out/bin` before falling back to executables on `PATH`.
 
 Optional: set **Preferences → Theme → Color Theme → Fun Web** to use the same code palette as the website.
 
@@ -44,7 +44,7 @@ These settings live under **Settings → Extensions → Fun**:
 
 - `fun.fls.path`
   - Path to the `fls` executable.
-  - Default: `fls` (falls back to `zig-out/bin/fls` when available)
+  - Default: `fls` (falls back to `fun-out/bin/fls` when available)
 - `fun.fls.funPath`
   - Optional path to the `fun` executable.
   - When set to a valid executable, it is passed to `fls` via the `FLS_FUN_PATH` environment variable.
@@ -127,7 +127,7 @@ Open the Command Palette and run:
 
 - Verify `fls` is found:
   - Either ensure it’s on `PATH`, or set `fun.fls.path` to the full path.
-- If you’re building Fun from source, ensure `zig-out/bin` exists (or point settings at the built executables).
+- If you’re building Fun from source, ensure `fun-out/bin` exists (or point settings at the built executables).
 
 **Standard library isn’t found**
 

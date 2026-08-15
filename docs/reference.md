@@ -590,8 +590,7 @@ wait to avoid warning on slow-but-live operations.
 ## Testing
 - `test "description" { ... }` at the top level; body reuses ordinary statement
   parsing (`assert`, `panic`, `if`/`for`, ... all work inside).
-- Ignored entirely by an ordinary compile (not type-checked, not emitted) —
-  matches `zig build` vs `zig test`.
+- Ignored entirely by an ordinary compile: not type-checked, not emitted.
 - `fun test <path>` (or `-test`) compiles every discovered `test` block into a
   runner and runs it. Tests run CONCURRENTLY, one per virtual task (`fork`),
   printing `test: <name> ... PASS`/`FAIL` in completion order plus a final

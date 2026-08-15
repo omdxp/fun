@@ -18,15 +18,22 @@ Thank you for contributing to Fun. This document outlines the expected workflow 
 
 ## Building From Source
 
-Fun's compiler and language server are themselves written in Fun, under `selfhost/`. Building that from nothing needs a one-time bootstrap: this repository also carries a reference implementation of the compiler (`cmd/`, `modules/`, `tests/`), built with [Zig](https://ziglang.org/download/) (matching the version declared in [build.zig.zon](build.zig.zon)). `zig build` produces a first `fun` binary from that reference implementation; running `fun build` with that binary then reads [fun.toml](fun.toml) and builds the self-hosted `fun`/`fls` from `selfhost/` into `fun-out/bin/`. That self-hosted binary is what actually gets tested and iterated on day to day — the reference implementation exists to bootstrap it and to keep its own test suite (below) green as a safety net.
+Fun's compiler and language server are themselves written in Fun, under `compiler/`. Building them needs an existing `fun` binary to run the build with: install one from a [release bundle](README.md#installation) or [`omdxp/setup-fun`](https://github.com/omdxp/setup-fun), then run:
+
+```sh
+fun build
+```
+
+This reads [fun.toml](fun.toml) and builds `fun`/`fls` from `compiler/` into `fun-out/bin/`. That freshly built binary is what actually gets tested and iterated on day to day.
 
 ## Validation Expectations
 
 At minimum, contributors should run the repository validation relevant to the changed area.
 
-- Full reference-implementation validation: `zig build test --summary all`
-- Reference-implementation build: `zig build`
-- Self-hosted build + test: `zig-out/bin/fun build`, then `fun-out/bin/fun test selfhost/tests`
+- Build: `fun build`
+- Test suite: `fun-out/bin/fun test compiler/tests`
+- Examples corpus: `FUN_EXE=fun-out/bin/fun ./scripts/run_examples.sh`
+- Formatting: `fun -fmt-check-all`
 - Editor extension changes: run the local build steps documented in [editors/vscode/README.md](editors/vscode/README.md)
 
 If a change intentionally affects diagnostics, formatting, runtime backends, or editor tooling, include the commands used to verify that behavior in the pull request description.

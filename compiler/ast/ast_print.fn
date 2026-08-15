@@ -1,0 +1,360 @@
+// `-ast`'s dump: a plain-text tree of what the parser produced, for
+// looking at the shape of a program without reading generated C.
+
+imp ast;
+imp ..lexer.token;
+imp std.string;
+imp std.io;
+imp std.vec;
+
+fun _indent(num depth) str {
+  StringBuilder b = string_builder_init(depth * 2);
+  num i = 0;
+  for i < depth {
+    b.append("  ");
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+fun _line(num depth, str text) {
+  println(format("{str}{str}", _indent(depth), text));
+}
+
+fun _dtype_str(DataType* dt) str {
+  if dt == nil {
+    ret "";
+  }
+  if dt.pointer_depth > 0 {
+    ret format("{str} (pointer depth: {num})", dt.type_str, dt.pointer_depth);
+  }
+  ret dt.type_str;
+}
+
+// Prints `node` and everything under it, indented one level per nesting
+// step.
+pub fun print_node(Node* node, num depth) {
+  if node == nil {
+    ret;
+  }
+  _line(depth, format("Node Type: {str}", node_kind_name(node.kind)));
+  fit node.kind {
+    .Expression(e) -> {
+      if !equals(e.op, "") {
+        _line(depth + 1, format("Operator: {str}", e.op));
+      }
+      if e.has_left {
+        _line(depth + 1, "Left:");
+        print_node(e.left, depth + 2);
+      }
+      if e.has_right {
+        _line(depth + 1, "Right:");
+        print_node(e.right, depth + 2);
+      }
+    }
+    .ExpressionParenthesis(inner) -> {
+      _line(depth + 1, "Inner:");
+      print_node(inner, depth + 2);
+    }
+    .Number(data) -> {
+      fit data {
+        .Num(n) -> { _line(depth + 1, format("Value: {num}", n)); }
+        .Dec(d) -> { _line(depth + 1, format("Value: {dec}", d)); }
+        _ -> {}
+      }
+    }
+    .Identifier(name) -> { _line(depth + 1, format("Name: {str}", name)); }
+    .String(s) -> { _line(depth + 1, format("Value: \"{str}\"", s)); }
+    .Character(c) -> { _line(depth + 1, format("Value: '{chr}'", c)); }
+    .Boolean(v) -> { _line(depth + 1, format("Value: {bin}", v)); }
+    .Nil -> {}
+    .Panic(msg) -> {
+      _line(depth + 1, "Message:");
+      print_node(msg, depth + 2);
+    }
+    .Variable(v) -> {
+      if !equals(v.name, "") {
+        _line(depth + 1, format("Name: {str}", v.name));
+      }
+      str tstr = _dtype_str(v.var_type);
+      if !equals(tstr, "") {
+        _line(depth + 1, format("Type: {str}", tstr));
+      }
+      if v.is_const {
+        _line(depth + 1, "Const: true");
+      }
+      if v.has_val {
+        _line(depth + 1, "Value:");
+        print_node(v.val, depth + 2);
+      }
+    }
+    .Function(f) -> {
+      if f.has_name {
+        _line(depth + 1, format("Name: {str}", f.name));
+      }
+      if f.has_rtype {
+        _line(depth + 1, format("Return Type: {str}", _dtype_str(f.rtype)));
+      }
+      if f.has_type_params {
+        _line(depth + 1, format("Type params ({num}):", f.type_params.len));
+        num ti = 0;
+        for ti < f.type_params.len {
+          _line(depth + 2, format("{num}: {str}", ti, f.type_params.get(ti)));
+          ti = ti + 1;
+        }
+      }
+      if f.is_variadic {
+        _line(depth + 1, "Variadic: true");
+      }
+      if f.is_async {
+        _line(depth + 1, "Async: true");
+      }
+      if f.has_args {
+        _line(depth + 1, format("Arguments count: {num}", f.args.len));
+        num ai = 0;
+        for ai < f.args.len {
+          _line(depth + 1, format("Arg {num}:", ai));
+          print_node(f.args.get(ai), depth + 2);
+          ai = ai + 1;
+        }
+      }
+      if f.has_body {
+        _line(depth + 1, "Body:");
+        print_node(f.body, depth + 2);
+      }
+    }
+    .Body(b) -> {
+      if b.statements.len > 0 {
+        _line(depth + 1, format("Statements count: {num}", b.statements.len));
+        num si = 0;
+        for si < b.statements.len {
+          _line(depth + 1, format("Statement {num}:", si));
+          print_node(b.statements.get(si), depth + 2);
+          si = si + 1;
+        }
+      }
+    }
+    .StatementReturn(v) -> {
+      if v != nil {
+        _line(depth + 1, "Value:");
+        print_node(v, depth + 2);
+      }
+    }
+    .StatementDefer(body) -> {
+      _line(depth + 1, "Body:");
+      print_node(body, depth + 2);
+    }
+    .StatementIf(s) -> {
+      _line(depth + 1, "Condition:");
+      print_node(s.condition, depth + 2);
+      _line(depth + 1, "Body:");
+      print_node(s.body, depth + 2);
+    }
+    .StatementElseIf(s) -> {
+      _line(depth + 1, "Condition:");
+      print_node(s.condition, depth + 2);
+      _line(depth + 1, "Body:");
+      print_node(s.body, depth + 2);
+    }
+    .StatementElse(body) -> {
+      _line(depth + 1, "Body:");
+      print_node(body, depth + 2);
+    }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if c.has_condition {
+            _line(depth + 1, "Condition:");
+            print_node(c.condition, depth + 2);
+          }
+          _line(depth + 1, "Body:");
+          print_node(c.body, depth + 2);
+        }
+        .Range(r) -> {
+          _line(depth + 1, format("Index: {str}", r.index_name));
+          _line(depth + 1, "Range:");
+          print_node(r.range_expr, depth + 2);
+          _line(depth + 1, "Body:");
+          print_node(r.body, depth + 2);
+        }
+        .Iter(it) -> {
+          if it.has_index_name {
+            _line(depth + 1, format("Index: {str}", it.index_name));
+          }
+          _line(depth + 1, format("Item: {str}", it.item_name));
+          _line(depth + 1, "Iterable:");
+          print_node(it.iterable, depth + 2);
+          _line(depth + 1, "Body:");
+          print_node(it.body, depth + 2);
+        }
+      }
+    }
+    .StatementBreak -> {}
+    .StatementContinue -> {}
+    .StatementAssert(a) -> {
+      _line(depth + 1, "Condition:");
+      print_node(a.condition, depth + 2);
+      if a.has_message {
+        _line(depth + 1, "Message:");
+        print_node(a.message, depth + 2);
+      }
+    }
+    .StatementWarningControl(w) -> {
+      _line(depth + 1, format("Id: {str}", warning_id_name(w.id)));
+      if !equals(w.reason, "") {
+        _line(depth + 1, format("Reason: {str}", w.reason));
+      }
+    }
+    .StatementFit(f) -> {
+      _line(depth + 1, "Expression:");
+      print_node(f.exp, depth + 2);
+      if f.branches.len > 0 {
+        _line(depth + 1, format("Branches ({num}):", f.branches.len));
+        num bi = 0;
+        for bi < f.branches.len {
+          FitBranch br = f.branches.get(bi);
+          _line(depth + 2, format("Branch {num}:", bi));
+          if br.has_condition {
+            _line(depth + 3, "Condition:");
+            print_node(br.condition, depth + 4);
+          } else {
+            _line(depth + 3, "Default branch");
+          }
+          _line(depth + 3, "Body:");
+          print_node(br.body, depth + 4);
+          bi = bi + 1;
+        }
+      }
+    }
+    .StatementFork(inner) -> {
+      _line(depth + 1, "Call:");
+      print_node(inner, depth + 2);
+    }
+    .StatementAsm(a) -> {
+      _line(depth + 1, format("Template: {str}", a.template));
+      _line(depth + 1, format("Volatile: {bin}", a.is_volatile));
+      if a.has_arch {
+        _line(depth + 1, format("Arch: {str}", a.arch_name));
+      }
+      if a.clobbers.len > 0 {
+        _line(depth + 1, format("Clobbers ({num}):", a.clobbers.len));
+        num ci = 0;
+        for ci < a.clobbers.len {
+          _line(depth + 2, format("{num}: {str}", ci, a.clobbers.get(ci)));
+          ci = ci + 1;
+        }
+      }
+    }
+    .Unary(u) -> {
+      _line(depth + 1, format("Operator: {str}", u.op));
+      if u.has_indirection {
+        _line(depth + 1, format("Indirection depth: {num}", u.indirection_depth));
+      }
+      _line(depth + 1, "Operand:");
+      print_node(u.operand, depth + 2);
+    }
+    .Tenary(t) -> {
+      _line(depth + 1, "Condition:");
+      print_node(t.cond, depth + 2);
+      _line(depth + 1, "Then:");
+      print_node(t.then_val, depth + 2);
+      _line(depth + 1, "Else:");
+      print_node(t.else_val, depth + 2);
+    }
+    .Bracket(inner) -> {
+      _line(depth + 1, "Inner:");
+      print_node(inner, depth + 2);
+    }
+    .CompoundInit(c) -> {
+      if c.has_dtype {
+        _line(depth + 1, format("Type: {str}", _dtype_str(c.init_dtype)));
+      }
+      if c.fields.len > 0 {
+        _line(depth + 1, format("Fields ({num}):", c.fields.len));
+        num fi = 0;
+        for fi < c.fields.len {
+          CompoundInitField field = c.fields.get(fi);
+          _line(depth + 2, format("{str}:", field.name));
+          print_node(field.value, depth + 3);
+          fi = fi + 1;
+        }
+      }
+    }
+    .Import(i) -> {
+      _line(depth + 1, format("Path: {str}", i.path));
+      if i.has_alias {
+        _line(depth + 1, format("Alias: {str}", i.alias));
+      }
+    }
+    .Compound(c) -> {
+      _line(depth + 1, format("Name: {str}", c.name));
+      if c.fields.len > 0 {
+        _line(depth + 1, format("Fields ({num}):", c.fields.len));
+        num fi = 0;
+        for fi < c.fields.len {
+          CompoundField field = c.fields.get(fi);
+          _line(depth + 2, format("{str}: {str}", field.name, _dtype_str(field.dtype)));
+          fi = fi + 1;
+        }
+      }
+    }
+    .Quirk(q) -> {
+      _line(depth + 1, format("Name: {str}", q.name));
+      if q.methods.len > 0 {
+        _line(depth + 1, format("Methods ({num}):", q.methods.len));
+        num mi = 0;
+        for mi < q.methods.len {
+          QuirkMethodSig m = q.methods.get(mi);
+          _line(depth + 2, format("{str}", m.name));
+          mi = mi + 1;
+        }
+      }
+    }
+    .Enum(e) -> {
+      _line(depth + 1, format("Name: {str}", e.name));
+      if e.variants.len > 0 {
+        _line(depth + 1, format("Variants ({num}):", e.variants.len));
+        num vi = 0;
+        for vi < e.variants.len {
+          EnumVariant v = e.variants.get(vi);
+          _line(depth + 2, format("{str}", v.name));
+          vi = vi + 1;
+        }
+      }
+    }
+    .Impl(i) -> {
+      _line(depth + 1, format("Type: {str}", i.type_name));
+      if i.has_quirk_name {
+        _line(depth + 1, format("Quirk: {str}", i.quirk_name));
+      }
+      if i.methods.len > 0 {
+        _line(depth + 1, format("Methods ({num}):", i.methods.len));
+        num mi = 0;
+        for mi < i.methods.len {
+          print_node(i.methods.get(mi), depth + 2);
+          mi = mi + 1;
+        }
+      }
+    }
+    .Test(t) -> {
+      _line(depth + 1, format("Name: {str}", t.name));
+      _line(depth + 1, "Body:");
+      print_node(t.body, depth + 2);
+    }
+    .Fuzz(f) -> {
+      _line(depth + 1, format("Name: {str}", f.name));
+      _line(depth + 1, "Body:");
+      print_node(f.body, depth + 2);
+    }
+    .Blank -> {}
+  }
+}
+
+// Prints every top-level node in `nodes`, in order.
+pub fun print_ast(Vec<Node>* nodes) {
+  num i = 0;
+  for i < nodes.len {
+    print_node(&nodes.data[i], 0);
+    i = i + 1;
+  }
+}
