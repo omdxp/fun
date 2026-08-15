@@ -10604,6 +10604,15 @@ impl Codegen {
       `    return (long long)pid;
       `}
       `
+      `long long kill(pid_t pid, long long sig) {
+      `    (void)sig;
+      `    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+      `    if (h == NULL) return -1;
+      `    BOOL ok = TerminateProcess(h, 1);
+      `    CloseHandle(h);
+      `    return ok ? 0 : -1;
+      `}
+      `
       `long long pipe(int32_t* fds) {
       `    return (long long)_pipe(fds, 4096, _O_BINARY);
       `}
@@ -10633,6 +10642,7 @@ impl Codegen {
     // nanosleep has no Windows equivalent under the same name; Windows
     // gets its own implementation in terms of Sleep.
     self.state.write(`#ifdef _WIN32
+    `#include <windows.h>
     `static void __fun_sleep_seconds(long long seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000));
@@ -15490,6 +15500,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#include <windows.h>
     `static void __fun_sleep_seconds(long long seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000));
@@ -15742,6 +15753,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#include <windows.h>
     `static void __fun_sleep_seconds(long long seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000));
@@ -16850,6 +16862,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#include <windows.h>
     `static void __fun_sleep_seconds(long long seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000));
