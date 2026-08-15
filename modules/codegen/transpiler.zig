@@ -19716,6 +19716,14 @@ pub const TranspileProcess = struct {
             // name; Windows gets its own implementation in terms of `Sleep`,
             // the same approach `setenv` above takes.
             try self.write("#ifdef _WIN32\n");
+            // Not covered by whatever else in this translation unit
+            // happens to include <windows.h> (e.g. std.c.dirent's
+            // Windows branch, emitted later): `Sleep`/`DWORD` need it
+            // directly here too, or a program using only `sleep_seconds`
+            // sees an implicit-declaration conflict against `Sleep`'s
+            // real prototype once something else does include it later
+            // in the same file.
+            try self.write("#include <windows.h>\n");
             try self.write("static void __fun_sleep_seconds(long long seconds) {\n");
             try self.write("  if (seconds < 0) seconds = 0;\n");
             try self.write("  Sleep((DWORD)(seconds * 1000));\n");
