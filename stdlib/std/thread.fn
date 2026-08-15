@@ -25,12 +25,20 @@ pub fun thread_new() Thread {
 }
 
 impl Thread {
-  // Starts this thread running `entry(arg)`.
+  // Starts this thread running `entry(arg)`. Its stack is sized
+  // explicitly (8 MiB) rather than left at the OS default: a secondary
+  // thread's default stack is far smaller than the main thread's on some
+  // platforms (512 KiB on macOS, for example), easily overflowed by a
+  // deeply recursive `entry`.
   pub start(raw* entry, raw* arg) num {
     if self.started == true {
       ret 0;
     }
-    let rc = pthread_create(&self.handle, nil, entry, arg);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+    let rc = pthread_create(&self.handle, &attr, entry, arg);
+    pthread_attr_destroy(&attr);
     if rc == 0 {
       self.started = true;
     }

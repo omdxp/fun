@@ -18,6 +18,17 @@ pub fun pthread_detach(pthread_t thread) num;
 // Returns the calling thread's handle.
 pub fun pthread_self() pthread_t;
 
+// Thread attributes
+// Initializes a thread-attributes object with default values.
+pub fun pthread_attr_init(pthread_attr_t* attr) num;
+
+// Sets the stack size (bytes) a thread created with `attr` will use.
+pub fun pthread_attr_setstacksize(pthread_attr_t* attr, num stacksize) num;
+
+// Destroys a thread-attributes object. The thread itself is unaffected
+// once created; only the attributes object's own resources are freed.
+pub fun pthread_attr_destroy(pthread_attr_t* attr) num;
+
 // Compares two thread handles, returning nonzero when equal, 0 otherwise (C semantics).
 pub fun pthread_equal(pthread_t t1, pthread_t t2) num;
 
