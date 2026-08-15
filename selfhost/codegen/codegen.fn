@@ -396,6 +396,13 @@ pub compound Codegen {
   str last_where;
   // Emit test blocks and a runner in place of the program's own `main`.
   bin test_mode;
+  // Emit exactly one `fuzz` block as a harness in place of the program's
+  // own `main`.
+  bin fuzz_mode;
+  // The `fuzz` target's name to build when a file declares more than one.
+  // Empty means "not given", which is only valid when the file declares
+  // exactly one target.
+  str fuzz_target;
   bin in_main;
 }
 
@@ -497,6 +504,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.error_note = "";
   g.last_where = "";
   g.test_mode = false;
+  g.fuzz_mode = false;
+  g.fuzz_target = "";
   g.in_main = false;
   ret g;
 }
@@ -10602,6 +10611,7 @@ impl Codegen {
       `#include <spawn.h>
       `#include <sys/wait.h>
       `#include <unistd.h>
+      `#include <signal.h>
       `#endif
       `#ifdef _WIN32
       `static char** environ_ptr(void){ return _environ; }
@@ -10617,6 +10627,24 @@ impl Codegen {
     self.state.write(`static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
+    ``);
+    // Suspends the calling thread for whole seconds, used by
+    // std.time's sleep_seconds. Not a direct libc binding since POSIX's
+    // nanosleep has no Windows equivalent under the same name; Windows
+    // gets its own implementation in terms of Sleep.
+    self.state.write(`#ifdef _WIN32
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  Sleep((DWORD)(seconds * 1000));
+    `}
+    `#else
+    `#include <time.h>
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `#endif
     ``);
     // FNV-1a-style hashes backing the `__fun_key_hash` intrinsic. Always
     // emitted, harmless when unused.
@@ -11189,8 +11217,11 @@ impl Codegen {
         }
         .Function(f) -> {
           // A test run supplies its own entry point, so the program's
-          // own `main` is left out rather than competing with it.
-          if !f.has_type_params && !(self.test_mode && equals(f.name, "main")) {
+          // own `main` is left out rather than competing with it. The
+          // fuzzing engine's own driver supplies `main` too, so a
+          // user-defined one would collide with it at link time.
+          bin skip_main = equals(f.name, "main") && (self.test_mode || self.fuzz_mode);
+          if !f.has_type_params && !skip_main {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function(n);
             if ferr.is_some() {
@@ -11220,6 +11251,9 @@ impl Codegen {
 
     if self.test_mode {
       ret self.emit_test_runner(nodes);
+    }
+    if self.fuzz_mode {
+      ret self.emit_fuzz_harness(nodes);
     }
     ret .None;
   }
@@ -11328,6 +11362,101 @@ impl Codegen {
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
     self.state.write("    return passed == ran ? 0 : 1;\n");
     self.state.write("}\n");
+    ret .None;
+  }
+
+  // Emits the chosen `fuzz` target's body as `LLVMFuzzerTestOneInput`, the
+  // entry point the fuzzing engine's own `main` (supplied at link time by
+  // `-fsanitize=fuzzer`) calls once per input. `self.fuzz_target` names
+  // which target to build when a file declares more than one; a file with
+  // exactly one target doesn't need it named.
+  emit_fuzz_harness(Vec<Node> nodes) Option<CodegenErrorKind> {
+    Vec<Node> targets;
+    targets.init(0);
+    defer targets.free();
+    for n : nodes {
+      fit n.kind {
+        .Fuzz(_) -> { targets.push(n); }
+        _ -> {}
+      }
+    }
+
+    if targets.len == 0 {
+      self.error_note = "no 'fuzz' target declared, fuzz mode needs at least one fuzz \"name\" (data, len) { ... } block";
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+
+    Node chosen;
+    bin have_chosen = false;
+    if !equals(self.fuzz_target, "") {
+      for n : targets {
+        fit n.kind {
+          .Fuzz(fd) -> {
+            if equals(fd.name, self.fuzz_target) {
+              chosen = n;
+              have_chosen = true;
+            }
+          }
+          _ -> {}
+        }
+      }
+      if !have_chosen {
+        self.error_note = format("no fuzz target named '{str}' found", self.fuzz_target);
+        ret .Some(CodegenErrorKind.InvalidNode);
+      }
+    } elif targets.len == 1 {
+      chosen = targets.get(0);
+      have_chosen = true;
+    } else {
+      self.error_note = "multiple fuzz targets declared, specify which one to build";
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+
+    fit chosen.kind {
+      .Fuzz(fd) -> {
+        // A fuzz body starts from the same clean slate a function body
+        // does, matching `emit_test_runner`'s own reset.
+        self.local_names.init(0);
+        self.local_is_pointer.init(0);
+        self.local_type_name.init(0);
+        self.local_dtype.init(0);
+        self.local_multidim_names.init(0);
+        self.local_multidim_roots.init(0);
+        self.local_multidim_depths.init(0);
+        self.defer_stack.init(0);
+        self.defer_scope_starts.init(0);
+        // `LLVMFuzzerTestOneInput` returns `int`, like a real `main`, so a
+        // bare `ret;` (the only form typecheck allows in a void-context
+        // fuzz body) needs to become C `return 0;`, not a bare `return;`.
+        // `in_main` is the existing mechanism a Fun-level `void main() { ...
+        // ret; }` already uses for its own `int main(void)` wrapper, reused
+        // here for the same reason.
+        self.in_main = true;
+        self.hoist_insert_pos = .Some(self.state.out.len());
+
+        str data_name = "";
+        str len_name = "";
+        fit fd.data_param.kind {
+          .Variable(v) -> { data_name = v.name; }
+          _ -> {}
+        }
+        fit fd.len_param.kind {
+          .Variable(v) -> { len_name = v.name; }
+          _ -> {}
+        }
+
+        self.state.write("int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n");
+        self.state.write(format("  void* {str} = (void*)__fun_fuzz_data;\n", data_name));
+        self.state.write(format("  int64_t {str} = (int64_t)__fun_fuzz_size;\n", len_name));
+        let berr = self.emit_body(*fd.body);
+        if berr.is_some() {
+          self.note_unsupported(chosen, format("in fuzz target `{str}`", fd.name));
+          ret berr;
+        }
+        self.state.write("\n  return 0;\n}\n");
+      }
+      _ -> {}
+    }
     ret .None;
   }
 }
@@ -15360,6 +15489,19 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
+    `#ifdef _WIN32
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  Sleep((DWORD)(seconds * 1000));
+    `}
+    `#else
+    `#include <time.h>
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
@@ -15599,6 +15741,19 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
+    `#ifdef _WIN32
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  Sleep((DWORD)(seconds * 1000));
+    `}
+    `#else
+    `#include <time.h>
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
@@ -16694,6 +16849,19 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
+    `#ifdef _WIN32
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  Sleep((DWORD)(seconds * 1000));
+    `}
+    `#else
+    `#include <time.h>
+    `static void __fun_sleep_seconds(long long seconds) {
+    `  if (seconds < 0) seconds = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')

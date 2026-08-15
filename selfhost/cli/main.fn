@@ -61,6 +61,22 @@ fun main(str[] args) num {
     }
     ret run_tests(opts.input, &opts.program_args);
   }
+  if equals(opts.subcommand, "fuzz") {
+    // No path, or a path that names a directory rather than a `.fn`
+    // file, runs every `fuzz` target found under that root instead of a
+    // single file, each bounded to a short default budget rather than
+    // fuzzing's normal open-ended campaign. A target name only makes
+    // sense alongside a specific file, so this form never takes one.
+    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") || is_dir(opts.input);
+    if is_dir_form {
+      str root = opts.input;
+      if equals(root, "") {
+        root = ".";
+      }
+      ret run_fuzz_suite(root);
+    }
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args);
+  }
   // Scanning a tree needs no input file: the working directory is the
   // root when none is named.
   if opts.fmt_check_all {
@@ -113,7 +129,15 @@ fun main(str[] args) num {
   if equals(c_path, "") {
     c_path = default_c_path(opts.input, ".c");
   }
-  let lowered = compile_to_c_mode(opts.input, c_path, &opts.defines, false, opts.warn_unused);
+  let lowered = compile_to_c_mode(
+    opts.input,
+    c_path,
+    &opts.defines,
+    false,
+    opts.warn_unused,
+    false,
+    ""
+  );
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());
   }
