@@ -743,6 +743,90 @@ pub fun run_tests(str input, Vec<str>* args) num {
   ret code;
 }
 
+// True when `path` declares at least one top level `test "name" { ... }`
+// block. A lightweight token scan rather than a real parse: a `test`
+// keyword token immediately followed by a string literal doesn't occur
+// any other way in valid Fun source, so the shape alone is enough to
+// decide whether a file belongs in a directory-wide run. Any read or lex
+// failure is treated as "doesn't declare one". The real compile below
+// reports the actual error.
+fun _declares_test_block(str path) bin {
+  if !exists(path) {
+    ret false;
+  }
+  str src = read_to_string(path);
+  let lexed = tokenize(src, path);
+  if lexed.is_err() {
+    ret false;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  num i = 0;
+  for i + 1 < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != TokenType.Keyword || !equals(token_text(t), "test") {
+      continue;
+    }
+    if tokens.get(i).type == TokenType.String {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
+// `root` that declares a `test` block, runs each with `run_tests`, and
+// prints an aggregate pass/fail summary. Every file gets its own compile
+// pass and its own process for the compiled binary, so one file's failure
+// or crash can't take the rest of the run down with it.
+pub fun run_test_suite(str root) num {
+  str dir = root;
+  if equals(dir, "") {
+    dir = ".";
+  }
+
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  _collect_fun_files(dir, &files);
+  files.sort();
+
+  Vec<str> no_args;
+  no_args.init(0);
+  defer no_args.free();
+
+  num passed = 0;
+  num failed = 0;
+  num i = 0;
+  for i < files.len {
+    str path = files.get(i);
+    i = i + 1;
+    if !_declares_test_block(path) {
+      continue;
+    }
+    println(format("== {str} ==", path));
+    let code = run_tests(path, &no_args);
+    if code == 0 {
+      passed = passed + 1;
+    } else {
+      failed = failed + 1;
+    }
+  }
+
+  if passed + failed == 0 {
+    println(format("no `test` blocks found under {str}", dir));
+    ret 0;
+  }
+
+  println(format("\n{num}/{num} test files passed", passed, passed + failed));
+  if failed > 0 {
+    ret 1;
+  }
+  ret 0;
+}
+
 // Formats `path` in place, reporting whether the file changed. A file
 // that is already formatted is left untouched, so its timestamp only
 // moves when its contents do.
