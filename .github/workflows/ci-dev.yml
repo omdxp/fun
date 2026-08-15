@@ -55,10 +55,15 @@ jobs:
           fi
   lint:
     runs-on: ubuntu-latest
+    env:
+      FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
       - uses: actions/checkout@v4
       - name: Set up fun
         uses: omdxp/setup-fun@v1
         with:
           version: latest
-      - run: fun -fmt-check-all
+      - name: Build fun
+        timeout-minutes: 10
+        run: fun build
+      - run: ./fun-out/bin/fun -fmt-check-all

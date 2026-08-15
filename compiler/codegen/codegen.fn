@@ -5216,15 +5216,14 @@ impl Codegen {
 
   // Emits an `asm` statement as GCC/Clang extended inline assembly
   // (`__asm__ __volatile__ ("template" : outputs : inputs : clobbers);`).
-  // `arch`, when given, is checked against the architecture this
-  // compiler binary was itself built for (`__fun_host_arch_name`,
-  // defined in the prelude every compiled program carries), matching
-  // the reference compiler's own check.
+  // `arch`, when given, is checked against `host_arch_name()`, read
+  // from the host machine at runtime rather than baked into the
+  // compiler binary, matching the reference compiler's own check.
   emit_asm_stmt(AsmStmtNode a) Option<CodegenErrorKind> {
     if a.has_arch {
       bin arch_ok = false;
       str want = a.arch_name;
-      str host = __fun_host_arch_name();
+      str host = host_arch_name();
       if equals(want, "x86_64") || equals(want, "amd64") {
         arch_ok = equals(host, "x86_64");
       } elif equals(want, "x86") || equals(want, "i386") {
@@ -10694,24 +10693,6 @@ impl Codegen {
     `}
     `#endif
     ``);
-    // Names the CPU architecture this compiler binary was itself built
-    // for, backing `asm arch` validation below: a block written for a
-    // different architecture is rejected at compile time rather than
-    // silently emitted.
-    self.state.write(`static char* __fun_host_arch_name(void) {
-    `#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    `  return "aarch64";
-    `#elif defined(__x86_64__) || defined(_M_X64)
-    `  return "x86_64";
-    `#elif defined(__i386__) || defined(_M_IX86)
-    `  return "x86";
-    `#elif defined(__arm__) || defined(_M_ARM)
-    `  return "arm";
-    `#else
-    `  return "";
-    `#endif
-    `}
-    ``);
     // FNV-1a-style hashes backing the `__fun_key_hash` intrinsic. Always
     // emitted, harmless when unused.
     self.state.write(`static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
@@ -15569,19 +15550,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
-    `static char* __fun_host_arch_name(void) {
-    `#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    `  return "aarch64";
-    `#elif defined(__x86_64__) || defined(_M_X64)
-    `  return "x86_64";
-    `#elif defined(__i386__) || defined(_M_IX86)
-    `  return "x86";
-    `#elif defined(__arm__) || defined(_M_ARM)
-    `  return "arm";
-    `#else
-    `  return "";
-    `#endif
-    `}
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
@@ -15835,19 +15803,6 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
-    `static char* __fun_host_arch_name(void) {
-    `#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    `  return "aarch64";
-    `#elif defined(__x86_64__) || defined(_M_X64)
-    `  return "x86_64";
-    `#elif defined(__i386__) || defined(_M_IX86)
-    `  return "x86";
-    `#elif defined(__arm__) || defined(_M_ARM)
-    `  return "arm";
-    `#else
-    `  return "";
-    `#endif
-    `}
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
@@ -16957,19 +16912,6 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
-    `static char* __fun_host_arch_name(void) {
-    `#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    `  return "aarch64";
-    `#elif defined(__x86_64__) || defined(_M_X64)
-    `  return "x86_64";
-    `#elif defined(__i386__) || defined(_M_IX86)
-    `  return "x86";
-    `#elif defined(__arm__) || defined(_M_ARM)
-    `  return "arm";
-    `#else
-    `  return "";
-    `#endif
-    `}
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
