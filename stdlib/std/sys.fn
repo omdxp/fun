@@ -9,6 +9,18 @@ pub fun env(str name) str {
   ret getenv(name);
 }
 
+// Reads an environment variable, returning `fallback` if missing. The
+// safe default for a caller that just wants a string to check
+// (`equals`/`strcmp`/etc. don't null-check their argument, so calling
+// them directly on a possibly-missing `env()` result crashes).
+pub fun env_or(str name, str fallback) str {
+  let v = getenv(name);
+  if v == nil {
+    ret fallback;
+  }
+  ret v;
+}
+
 // Sets an environment variable for this process, and so for every
 // process it starts afterward, since a child inherits what its parent
 // holds. Replaces a value already there.

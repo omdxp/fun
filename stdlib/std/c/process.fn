@@ -42,6 +42,10 @@ pub fun fork() num;
 // to `posix_spawnp`. Does not return on success; -1 on failure (C semantics).
 pub fun execvp(str file, str[] argv) num;
 
+// Sends signal `sig` to process `pid` (9 is `SIGKILL`, 15 is `SIGTERM`).
+// Returns 0 on success, -1 on failure, e.g. no such process (C semantics).
+pub fun kill(num pid, num sig) num;
+
 // Terminates the calling process immediately, without running atexit
 // handlers or flushing stdio buffers. Use in a forked child after `execvp`
 // fails, so a failed exec can't fall through into the parent's own code path.

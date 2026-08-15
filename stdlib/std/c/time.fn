@@ -44,6 +44,12 @@ pub fun clock() num;
 // typically 0) into `tp`. Returns 0 on success, nonzero on failure (C semantics).
 pub fun clock_gettime(num clk_id, raw* tp) num;
 
+// Suspends the calling thread for `seconds` whole seconds. Not a real
+// libc function: the compiler emits it in the prelude (`Sleep` on
+// Windows, `nanosleep` elsewhere), the same approach as `environ_ptr`/
+// `setenv`, since Windows has no direct `nanosleep` equivalent to bind.
+pub fun __fun_sleep_seconds(num seconds);
+
 // Returns the difference time1 - time0 in seconds as dec (C semantics).
 pub fun difftime(num time1, num time0) dec;
 

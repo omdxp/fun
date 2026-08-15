@@ -18569,7 +18569,7 @@ pub const TranspileProcess = struct {
         try Collector.collect(self, &targets);
 
         if (targets.items.len == 0) {
-            self.report_type_error(null, "no 'fuzz' target declared -- fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
+            self.report_type_error(null, "no 'fuzz' target declared, fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
             return TranspileError.TypeMismatch;
         }
 
@@ -18588,7 +18588,7 @@ pub const TranspileProcess = struct {
         } else if (targets.items.len == 1) {
             chosen = targets.items[0];
         } else {
-            self.report_type_error(null, "multiple fuzz targets declared -- specify which one to build", .{});
+            self.report_type_error(null, "multiple fuzz targets declared, specify which one to build", .{});
             return TranspileError.TypeMismatch;
         }
 
@@ -19709,6 +19709,28 @@ pub const TranspileProcess = struct {
             try self.write("  return _putenv_s(name, value);\n");
             try self.write("}\n");
             try self.write("static int unsetenv(const char* name) { return _putenv_s(name, \"\"); }\n");
+            try self.write("#endif\n");
+            // Suspends the calling thread for whole seconds, used by
+            // `std.time`'s `sleep_seconds`. Not a direct libc binding since
+            // POSIX's `nanosleep` has no Windows equivalent under the same
+            // name; Windows gets its own implementation in terms of `Sleep`,
+            // the same approach `setenv` above takes.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("static void __fun_sleep_seconds(long long seconds) {\n");
+            try self.write("  if (seconds < 0) seconds = 0;\n");
+            try self.write("  Sleep((DWORD)(seconds * 1000));\n");
+            try self.write("}\n");
+            try self.write("#else\n");
+            // Not covered by `std.c.time`'s own conditional `#include
+            // <time.h>` (this helper is unconditional, unlike that
+            // module), so it needs its own; a repeated include of the
+            // same standard header is harmless.
+            try self.write("#include <time.h>\n");
+            try self.write("static void __fun_sleep_seconds(long long seconds) {\n");
+            try self.write("  if (seconds < 0) seconds = 0;\n");
+            try self.write("  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;\n");
+            try self.write("  nanosleep(&__fun_sleep_ts, NULL);\n");
+            try self.write("}\n");
             try self.write("#endif\n");
             // Directory iteration/creation/kind-check helpers for `std.c.dirent`
             // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
@@ -23870,6 +23892,7 @@ pub const TranspileProcess = struct {
             try self.write("#include <spawn.h>\n");
             try self.write("#include <sys/wait.h>\n");
             try self.write("#include <unistd.h>\n");
+            try self.write("#include <signal.h>\n");
             try self.write("#endif\n");
         }
     }
