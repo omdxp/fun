@@ -369,13 +369,27 @@ async fun main() {
 
 ### Concurrency: virtual threads (`fork`) & channels
 - **`fork <call>;`** spawns a *virtual thread* — a fire-and-forget task that runs
-  on a runtime **M:N scheduler**: a small pool of OS worker threads (sized to the
-  CPU count) multiplexes many cheap `fork` tasks. The target is an `async fun`.
-  `fork` returns nothing; results flow back through channels.
+  on a runtime **M:N scheduler**: a pool of OS worker threads multiplexes many
+  cheap `fork` tasks. The target is an `async fun`. `fork` returns nothing;
+  results flow back through channels.
 - **Automatic drain**: `main` blocks until every `fork`ed task has completed before
   it returns, so spawned work always finishes.
 - **Cooperative**: a task that blocks on a channel op holds its worker (the yield
   points are the blocking primitives). It is not preemptive.
+- **Elastic worker pool**: the scheduler starts with a base pool sized to the CPU
+  count, but a task that blocks inside a blocking primitive (a channel op, a
+  `Mutex`, a `WaitGroup`) doesn't starve the rest of the program — the scheduler
+  spins up an extra worker whenever none is idle and the pool has room to grow
+  (default cap 4096, override with the `FUN_SCHED_MAX_WORKERS` env var). Idle
+  workers above the base pool retire after 10 seconds of nothing to do, so a
+  burst of blocking work doesn't leave the process holding hundreds of threads
+  open indefinitely.
+- **`std.sync.Mutex`/`CondVar`**: `mutex_new()`/`condvar_new()` initialize
+  eagerly at construction, which is the safe form to use when the value will be
+  shared across threads (e.g. captured by multiple `fork`ed tasks) — a value
+  that only ever sees single-threaded use may rely on the lazy fallback in
+  `lock`/`wait`, but a fresh `Mutex`/`CondVar` several tasks might lock/wait on
+  concurrently for the first time should always come from `_new()`.
 - **Channel operators** (sugar over `std.channel`):
   - `ch <- v` — send `v` into `ch` (equivalent to `ch.send(v)`).
   - `<-ch` — receive from `ch` (equivalent to `ch.recv()`, lossy; use
@@ -409,6 +423,10 @@ async fun main() {
     ```
 - **`std.task` WaitGroup**: wait for a batch of `fork`ed tasks. `wait_group_new(n)`,
   each task calls `wg.done()`, and `wg.wait()` blocks until all `n` complete.
+  Its completion count is guarded by its own internal `Mutex`, so `add()` is
+  safe to call concurrently from multiple already-forked tasks (growing the
+  group for their own children), and `wait()` never returns before every
+  expected `done()` has actually landed.
 
 Example:
 ```fun

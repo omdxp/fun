@@ -377,7 +377,9 @@ async fun main() {
 
 ## Concurrency: `fork` & channels
 - `fork <async-call>;` spawns a **virtual thread** (fire-and-forget) onto an M:N
-  scheduler — a CPU-count-sized pool of OS worker threads runs many cheap tasks.
+  scheduler — an elastic pool of OS worker threads (CPU-count base, grows under
+  contention up to `FUN_SCHED_MAX_WORKERS`, default 4096; idle growth retires
+  after 10s) runs many cheap tasks.
 - `main` automatically waits for all `fork`ed tasks to finish before returning.
 - Channel operators (sugar over `std.channel`):
   - `ch <- v` ≡ `ch.send(v)` (send)
@@ -389,7 +391,8 @@ async fun main() {
   `SendResult` (`Ok`/`Closed`/`Full`/`Cancelled`/`Error(num)`) — `fit` on them instead of
   decoding a numeric status. Timeout/token and `try_*`/`*_async` variants exist for both.
 - **`std.task` WaitGroup**: `wait_group_new(n)` + `wg.done()` in each task + `wg.wait()`
-  blocks until all `n` `fork`ed tasks complete.
+  blocks until all `n` `fork`ed tasks complete. Its count is `Mutex`-guarded, so
+  concurrent `add()`/`wait()` from multiple already-forked tasks is safe.
 
 ```fun
 imp std.channel;
@@ -689,7 +692,7 @@ wait to avoid warning on slow-but-live operations.
 - `std.sync_backend_posix`: POSIX sync backend module (`sync_backend_posix_*`) used by `std.sync_runtime`
 - `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread_windows`
 - `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
-- `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
+- `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms); `mutex_new()`/`condvar_new()` initialize eagerly and are the safe choice for a value shared across threads, with a lazy fallback in `lock`/`wait` for single-threaded use
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via `std.quirks`' generic `To<JsonValue>`/`From<JsonValue>` (hand-implemented — Fun has no reflection), plus `to_json_value`/`to_json_string` convenience wrappers.
 - `std.toml`: typed TOML via the `TomlValue` enum (`Str`/`Int`/`Float`/`Bool`); `parse_document`, typed `get(key) -> Option<TomlValue>`, `as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`. Top-level `key = value` pairs sit on the document; `[name]` sections are reached with `table(name)` and `[[name]]` entries with `array(name)`, both giving a `TomlTable` with its own `get`/`get_str`.
 - `std.serde`: text-layer `to_string`/`from_string`, dispatching through `std.quirks`' generic `To<str>`/`From<str>` (implemented by `JsonValue` and `TomlDoc`).
