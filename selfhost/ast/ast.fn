@@ -614,6 +614,43 @@ pub compound FuzzDeclNode {
   Node* body;
 }
 
+// One named operand of an `asm` statement's `in`/`out` list: the name
+// referenced as `%[name]` in the template, its GCC-style constraint
+// string, and the Fun expression it binds to.
+pub compound AsmOperand {
+  str name;
+  str constraint;
+  Node* expr;
+}
+
+// An `asm` statement (see NodeKind.StatementAsm). `template` is the raw
+// assembly text: a decoded string literal when `is_string_literal`, or
+// the exact source bytes between `{`/`}` (including whitespace, newlines,
+// and comments) for the block form.
+pub compound AsmStmtNode {
+  str template;
+  bin is_volatile;
+  str arch_name;
+  bin has_arch;
+  Vec<AsmOperand> outputs;
+  Vec<AsmOperand> inputs;
+  Vec<str> clobbers;
+  bin is_string_literal;
+}
+
+pub fun asm_stmt_node_new() AsmStmtNode {
+  AsmStmtNode a;
+  a.template = "";
+  a.is_volatile = false;
+  a.arch_name = "";
+  a.has_arch = false;
+  a.outputs.init(0);
+  a.inputs.init(0);
+  a.clobbers.init(0);
+  a.is_string_literal = false;
+  ret a;
+}
+
 // ===== The node kind itself =====
 pub enum NodeKind {
   Expression(ExprNode),
@@ -651,6 +688,8 @@ pub enum NodeKind {
   StatementFit(FitStmtNode),
   // Fire-and-forget virtual-thread spawn (`fork worker(&wg, i);`).
   StatementFork(Node*),
+  // Inline assembly (`asm volatile arch x86_64 (out y: "=r" = y; ...) { ... };`).
+  StatementAsm(AsmStmtNode),
   Unary(UnaryNode),
   Tenary(TenaryNode),
   Bracket(Node*),

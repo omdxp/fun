@@ -4324,6 +4324,378 @@ impl Parser {
     ret .None;
   }
 
+  // Parses one `name: "constraint" = expr` operand into `list`, then
+  // consumes the `,` continuing the list, the `;` ending this section, or
+  // stops (without consuming) at the `)` ending the whole operand list.
+  // Shared by both the `out`/`in` sections of an `asm` statement, which
+  // have an identical shape.
+  _parse_asm_operand_list(Vec<AsmOperand>* list) Option<ParseErrorKind> {
+    for true {
+      self.state.skip_nl_or_comment();
+      let name_tok = self.state.token_next();
+      if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected operand name");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str name = "";
+      fit name_tok.unwrap().data {
+        .Sval(s) -> { name = s; }
+        _ -> {}
+      }
+
+      let colon_tok = self.state.token_next();
+      bin colon_ok = false;
+      if colon_tok.is_some() {
+        let ct = colon_tok.unwrap();
+        colon_ok = token_is_symbol(ct, ':') || token_is_operator(ct, ":");
+      }
+      if !colon_ok {
+        self.state.err("expected ':' after operand name");
+        ret .Some(ParseErrorKind.InvalidSymbol);
+      }
+
+      let constraint_tok = self.state.token_next();
+      if constraint_tok.is_none() || constraint_tok.unwrap().type != TokenType.String {
+        self.state.err("expected constraint string");
+        ret .Some(ParseErrorKind.InvalidString);
+      }
+      str constraint = "";
+      fit constraint_tok.unwrap().data {
+        .Sval(s) -> { constraint = s; }
+        _ -> {}
+      }
+
+      let eqerr = self.state.expect_op("=");
+      if eqerr.is_some() {
+        ret eqerr;
+      }
+      let everr = self.parse_expressionable_root();
+      if everr.is_some() {
+        ret everr;
+      }
+      let maybe_expr = self.state.node_pop();
+      if maybe_expr.is_none() {
+        self.state.err("expected operand expression");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* expr = malloc(sizeof(Node));
+      *expr = maybe_expr.unwrap();
+
+      AsmOperand op;
+      op.name = name;
+      op.constraint = constraint;
+      op.expr = expr;
+      list.push(op);
+
+      let peek_tok = self.state.token_peek_next();
+      if peek_tok.is_none() {
+        ret .None;
+      }
+      let pt = peek_tok.unwrap();
+      if token_is_symbol(pt, ',') || token_is_operator(pt, ",") {
+        self.state.token_next();
+        continue;
+      }
+      if token_is_symbol(pt, ';') || token_is_operator(pt, ";") {
+        self.state.token_next();
+        ret .None;
+      }
+      if token_is_symbol(pt, ')') || token_is_operator(pt, ")") {
+        ret .None;
+      }
+      self.state.err("expected ',', ';', or ')' after operand");
+      ret .Some(ParseErrorKind.InvalidSymbol);
+    }
+    ret .None;
+  }
+
+  // Parses a comma/semicolon-separated list of clobber string literals
+  // into `list`, the same way `_parse_asm_operand_list` handles operands.
+  _parse_asm_clobber_list(Vec<str>* list) Option<ParseErrorKind> {
+    for true {
+      self.state.skip_nl_or_comment();
+      let ctok = self.state.token_next();
+      if ctok.is_none() || ctok.unwrap().type != TokenType.String {
+        self.state.err("expected clobber string");
+        ret .Some(ParseErrorKind.InvalidString);
+      }
+      str cname = "";
+      fit ctok.unwrap().data {
+        .Sval(s) -> { cname = s; }
+        _ -> {}
+      }
+      list.push(cname);
+
+      let peek_tok = self.state.token_peek_next();
+      if peek_tok.is_none() {
+        ret .None;
+      }
+      let pt = peek_tok.unwrap();
+      if token_is_symbol(pt, ',') || token_is_operator(pt, ",") {
+        self.state.token_next();
+        continue;
+      }
+      if token_is_symbol(pt, ';') || token_is_operator(pt, ";") {
+        self.state.token_next();
+        ret .None;
+      }
+      if token_is_symbol(pt, ')') || token_is_operator(pt, ")") {
+        ret .None;
+      }
+      self.state.err("expected ',', ';', or ')' after clobber");
+      ret .Some(ParseErrorKind.InvalidSymbol);
+    }
+    ret .None;
+  }
+
+  // Finds the byte offset in `src` of `line`/`col` (both 1-based),
+  // walking newlines from the start. Used to slice out an asm block's
+  // exact raw source text between its braces.
+  _source_index_from_line_col(str src, num line, num col) Option<num> {
+    if line == 0 || col == 0 {
+      ret .None;
+    }
+    num n = len(src);
+    num current_line = 1;
+    num line_start = 0;
+    num i = 0;
+    for i < n && current_line < line {
+      if src[i] == '\n' {
+        current_line = current_line + 1;
+        line_start = i + 1;
+      }
+      i = i + 1;
+    }
+    if current_line != line {
+      ret .None;
+    }
+    num offset = col - 1;
+    num idx = line_start + offset;
+    if idx > n {
+      ret .None;
+    }
+    ret .Some(idx);
+  }
+
+  // Captures an asm block's `{ ... }` body as raw source text, appending
+  // it to `out`. Walks the raw token stream (not the "skip insignificant"
+  // view `token_next` gives) tracking brace depth, since the body must
+  // preserve exactly what the user wrote, comments and newlines included,
+  // rather than anything the lexer/formatter would normalize.
+  _append_raw_asm_block_template(StringBuilder* out, Token open_brace_tok) Option<ParseErrorKind> {
+    num depth = 1;
+    Option<Token> close_brace_tok = .None;
+    for true {
+      if self.state.pindex >= self.state.tokens.len {
+        self.state.err("unexpected end of file in asm block");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      let t = self.state.tokens.get(self.state.pindex);
+      if t.type == TokenType.Symbol {
+        fit t.data {
+          .Cval(c) -> {
+            if c == '{' {
+              depth = depth + 1;
+            } elif c == '}' {
+              depth = depth - 1;
+              if depth == 0 {
+                close_brace_tok = .Some(t);
+                self.state.pindex = self.state.pindex + 1;
+                break;
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+      self.state.pindex = self.state.pindex + 1;
+    }
+    if close_brace_tok.is_none() {
+      self.state.err("unexpected end of file in asm block");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let close_tok = close_brace_tok.unwrap();
+
+    let start_idx_opt = self._source_index_from_line_col(
+      self.state.input_source,
+      open_brace_tok.pos.end_line,
+      open_brace_tok.pos.end_col
+    );
+    let end_idx_opt = self._source_index_from_line_col(
+      self.state.input_source,
+      close_tok.pos.line,
+      close_tok.pos.start_col
+    );
+    if start_idx_opt.is_none() || end_idx_opt.is_none() {
+      self.state.err("internal parser error: invalid asm block span");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    num start_idx = start_idx_opt.unwrap();
+    num end_idx = end_idx_opt.unwrap();
+    if end_idx < start_idx || end_idx > len(self.state.input_source) {
+      self.state.err("internal parser error: malformed asm block span");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    out.append(substr(self.state.input_source, start_idx, end_idx - start_idx));
+    ret .None;
+  }
+
+  // Parses an `asm` statement: optional `volatile`, optional `arch
+  // <name>`, an optional parenthesized `out`/`in`/`clobber` operand list
+  // (GCC-style extended asm), then the template body as either a string
+  // literal or a raw `{ ... }` block.
+  pub parse_asm_statement() Option<ParseErrorKind> {
+    let asm_tok = self.state.token_peek_next();
+    if !self.has_current_function {
+      self.state.err("asm statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    self.state.token_next(); // consume 'asm'
+
+    bin is_volatile = false;
+    let vol_tok = self.state.token_peek_next();
+    if vol_tok.is_some() && token_is_keyword(vol_tok.unwrap(), "volatile") {
+      self.state.token_next();
+      is_volatile = true;
+    }
+
+    str arch_name = "";
+    bin has_arch = false;
+    let arch_kw_tok = self.state.token_peek_next();
+    if arch_kw_tok.is_some() && token_is_keyword(arch_kw_tok.unwrap(), "arch") {
+      self.state.token_next();
+      let arch_val_tok = self.state.token_next();
+      if arch_val_tok.is_none() || (arch_val_tok.unwrap().type != TokenType.Identifier && arch_val_tok.unwrap().type != TokenType.Keyword) {
+        self.state.err("expected architecture name after 'arch'");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      fit arch_val_tok.unwrap().data {
+        .Sval(s) -> { arch_name = s; }
+        _ -> {}
+      }
+      has_arch = true;
+    }
+
+    Vec<AsmOperand> outputs;
+    outputs.init(0);
+    Vec<AsmOperand> inputs;
+    inputs.init(0);
+    Vec<str> clobbers;
+    clobbers.init(0);
+
+    let open_paren_tok = self.state.token_peek_next();
+    if open_paren_tok.is_some() && (token_is_symbol(open_paren_tok.unwrap(), '(') || token_is_operator(
+      open_paren_tok.unwrap(),
+      "("
+    )) {
+      self.state.token_next();
+      for true {
+        self.state.skip_nl_or_comment();
+        let peek_tok = self.state.token_peek_next();
+        if peek_tok.is_none() {
+          self.state.err("expected ')' to close asm operands");
+          ret .Some(ParseErrorKind.InvalidStatement);
+        }
+        let pt = peek_tok.unwrap();
+        if token_is_symbol(pt, ')') || token_is_operator(pt, ")") {
+          self.state.token_next();
+          break;
+        }
+        let section_tok = self.state.token_next();
+        if section_tok.is_none() || (section_tok.unwrap().type != TokenType.Identifier && section_tok.unwrap().type != TokenType.Keyword) {
+          self.state.err("expected asm operand section");
+          ret .Some(ParseErrorKind.InvalidKeyword);
+        }
+        str section = "";
+        fit section_tok.unwrap().data {
+          .Sval(s) -> { section = s; }
+          _ -> {}
+        }
+        if equals(section, "in") {
+          let ierr = self._parse_asm_operand_list(&inputs);
+          if ierr.is_some() {
+            ret ierr;
+          }
+        } elif equals(section, "out") {
+          let oerr = self._parse_asm_operand_list(&outputs);
+          if oerr.is_some() {
+            ret oerr;
+          }
+        } elif equals(section, "clobber") {
+          let cerr = self._parse_asm_clobber_list(&clobbers);
+          if cerr.is_some() {
+            ret cerr;
+          }
+        } else {
+          let msg = format("unknown asm section '{str}'", section);
+          defer free(msg);
+          self.state.err(msg);
+          ret .Some(ParseErrorKind.InvalidKeyword);
+        }
+      }
+    }
+
+    str template = "";
+    bin is_string_literal = false;
+    self.state.skip_nl_or_comment();
+
+    let body_tok = self.state.token_peek_next();
+    if body_tok.is_none() {
+      self.state.err("expected asm body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let bt = body_tok.unwrap();
+    if bt.type == TokenType.String {
+      self.state.token_next();
+      fit bt.data {
+        .Sval(s) -> { template = s; }
+        _ -> {}
+      }
+      is_string_literal = true;
+    } elif token_is_symbol(bt, '{') {
+      let open_brace_tok = self.state.token_next();
+      if open_brace_tok.is_none() {
+        self.state.err("expected '{' to start asm block");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      StringBuilder tmpl_sb = string_builder_init(32);
+      let berr = self._append_raw_asm_block_template(&tmpl_sb, open_brace_tok.unwrap());
+      if berr.is_some() {
+        ret berr;
+      }
+      template = tmpl_sb.build();
+    } else {
+      self.state.err("expected asm body (string or block)");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    let serr = self.state.expect_sym(';');
+    if serr.is_some() {
+      ret serr;
+    }
+
+    AsmStmtNode a = asm_stmt_node_new();
+    a.template = template;
+    a.is_volatile = is_volatile;
+    a.arch_name = arch_name;
+    a.has_arch = has_arch;
+    a.outputs = outputs;
+    a.inputs = inputs;
+    a.clobbers = clobbers;
+    a.is_string_literal = is_string_literal;
+
+    Node node = node_new(NodeKind.StatementAsm(a));
+    fit asm_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
   // Parses `test "name" { ... }`, top-level only since `test` is never
   // wired into `parse_statement`'s dispatch. The body reuses ordinary
   // statement parsing under a synthetic nameless function context, so
@@ -4590,9 +4962,9 @@ impl Parser {
   // entity, so `w * h;` isn't misread as a pointer declaration, and `fork`
   // is contextual: it's only a keyword when not followed by `(`, since it
   // is also an ordinary identifier for the POSIX `fork()` binding.
-  // Top-level-only declarations are not dispatched here; `asm` and other
-  // unsupported keywords report a clean "not yet supported" error instead
-  // of misparsing.
+  // Top-level-only declarations are not dispatched here; a keyword with
+  // no other case above reports a clean "not yet supported" error
+  // instead of misparsing.
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -4658,6 +5030,9 @@ impl Parser {
           ret eerr;
         }
         ret self.state.expect_sym(';');
+      }
+      if equals(kw, "asm") {
+        ret self.parse_asm_statement();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);

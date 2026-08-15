@@ -5153,6 +5153,115 @@ impl Codegen {
     ret self.emit_async_or_fork_call(expr, "__fun_fork_call_");
   }
 
+  // Writes `text` as a C string-literal body, escaping the handful of
+  // bytes that would otherwise break or change its meaning: a raw asm
+  // template's own `%[name]` placeholders and everything else pass
+  // through unchanged.
+  write_asm_escaped(str text) {
+    num i = 0;
+    num n = len(text);
+    for i < n {
+      chr c = text[i];
+      if c == '\\' {
+        self.state.write("\\\\");
+      } elif c == '"' {
+        self.state.write("\\\"");
+      } elif c == '\n' {
+        self.state.write("\\n");
+      } elif c == '\r' {
+        self.state.write("\\r");
+      } elif c == '\t' {
+        self.state.write("\\t");
+      } elif c == 0 {
+        self.state.write("\\0");
+      } else {
+        self.write_c_char(c);
+      }
+      i = i + 1;
+    }
+  }
+
+  // Writes one `[name] "constraint"(expr)` operand of an asm statement's
+  // out/in list.
+  emit_asm_operand_list(Vec<AsmOperand> list) Option<CodegenErrorKind> {
+    bin first = true;
+    for op : list {
+      if !first {
+        self.state.write(", ");
+      }
+      first = false;
+      self.state.write("[");
+      self.state.write(op.name);
+      self.state.write("] \"");
+      self.write_asm_escaped(op.constraint);
+      self.state.write("\"(");
+      let eerr = self.emit_expr(*op.expr);
+      if eerr.is_some() {
+        ret eerr;
+      }
+      self.state.write(")");
+    }
+    ret .None;
+  }
+
+  // Emits an `asm` statement as GCC/Clang extended inline assembly
+  // (`__asm__ __volatile__ ("template" : outputs : inputs : clobbers);`).
+  // `arch` is parsed but not enforced here: the reference compiler checks
+  // it against the compiler's OWN host architecture at transpile time, an
+  // assumption that does not hold for this compiler once it is producing
+  // portable C for a possibly different target; a C-level `#if`/`#error`
+  // guard would be the faithful equivalent, and is left for whoever picks
+  // this back up, not silently guessed at here.
+  emit_asm_stmt(AsmStmtNode a) Option<CodegenErrorKind> {
+    self.state.write_indent();
+    self.state.write("__asm__");
+    if a.is_volatile {
+      self.state.write(" __volatile__");
+    }
+    self.state.write("(\"");
+    self.write_asm_escaped(a.template);
+    self.state.write("\"");
+
+    bin has_outputs = a.outputs.len > 0;
+    bin has_inputs = a.inputs.len > 0;
+    bin has_clobbers = a.clobbers.len > 0;
+
+    if has_outputs || has_inputs || has_clobbers {
+      self.state.write(" : ");
+      if has_outputs {
+        let oerr = self.emit_asm_operand_list(a.outputs);
+        if oerr.is_some() {
+          ret oerr;
+        }
+      }
+      if has_inputs || has_clobbers {
+        self.state.write(" : ");
+        if has_inputs {
+          let ierr = self.emit_asm_operand_list(a.inputs);
+          if ierr.is_some() {
+            ret ierr;
+          }
+        }
+        if has_clobbers {
+          self.state.write(" : ");
+          bin first_cl = true;
+          for cl : a.clobbers {
+            if !first_cl {
+              self.state.write(", ");
+            }
+            first_cl = false;
+            self.state.write("\"");
+            self.write_asm_escaped(cl);
+            self.state.write("\"");
+          }
+        }
+      }
+    }
+
+    self.state.write(");\n");
+    ret .None;
+  }
+
   // Shared lowering for `await` and `fork` over `f(args...)` or
   // `recv.method(args...)`: both rewrite the call to `<prefix><mangled
   // callee name>(args...)`, with the receiver and self-arg handling an
@@ -6366,6 +6475,7 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
+      .StatementAsm(a) -> { ret self.emit_asm_stmt(a); }
       // `allow`/`expect` control diagnostics rather than describing
       // runtime behavior, so they contribute no C of their own.
       .StatementWarningControl(_) -> { ret .None; }

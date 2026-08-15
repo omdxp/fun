@@ -105,11 +105,30 @@ test "pointer field access uses arrow" {
 // the second quirk emits no typedef and its dispatch names an undefined type.
 // test "structural quirks share canonical C type" { }
 
-// gap: the asm statement form is not parsed.
-// test "asm statement transpiles" { }
+test "asm statement transpiles" {
+  str src = `fun main() {
+  `  asm { nop };
+  `}`;
+  let out = emit_c(src, "asm statement transpiles");
+  assert contains(out, "__asm__"), "expected extended inline asm";
+  assert contains(out, "nop"), "expected the template text to survive";
+}
 
-// gap: the asm block form is not parsed.
-// test "asm block preserves newlines" { }
+test "asm block preserves newlines" {
+  str src = `fun main() num {
+  `  num x = 21 + 21;
+  `  num y = 0;
+  `  asm volatile (out y: "=r" = y; in x: "r" = x) {
+  `    mov %[x], %[y]
+  `  };
+  `  ret y;
+  `}`;
+  let out = emit_c(src, "asm block preserves newlines");
+  assert contains(out, "__asm__ __volatile__"), "expected volatile extended inline asm";
+  assert contains(out, "\\n    mov %[x], %[y]\\n"), "expected the block's raw newlines to survive";
+  assert contains(out, "[y] \"=r\"(y)"), "expected the output operand";
+  assert contains(out, "[x] \"r\"(x)"), "expected the input operand";
+}
 
 test "transitive std.net import emits socket headers" {
   str src = `imp std.net;
