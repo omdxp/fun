@@ -195,3 +195,31 @@ pub fun spawn_inherited(str[] argv) num {
   }
   ret _wait_exit_code(pid);
 }
+
+// Spawns `argv[0]` (searched via PATH) with inherited stdio like
+// `spawn_inherited`, but returns immediately with the child's pid instead
+// of waiting for it to exit. Pair with `wait_exit_code` to reap it later,
+// or `kill_pid` to force-terminate it first. Used where the caller needs
+// to do something else (like enforce a timeout) while the child runs,
+// which `spawn_inherited`'s own blocking wait doesn't allow.
+pub fun spawn_background(str[] argv) Result<num, Error> {
+  pid_t pid = 0;
+  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, environ_ptr());
+  if spawn_rc != 0 {
+    ret err_kind(.System, "process.spawn_background: spawn failed", 0);
+  }
+  ret .Ok(pid);
+}
+
+// Blocks until `pid` exits, returning its exit code (shell-style:
+// 128+signal on a fatal signal).
+pub fun wait_exit_code(num pid) num {
+  ret _wait_exit_code(pid);
+}
+
+// Sends `SIGKILL` to `pid`, forcibly terminating it. Idempotent: killing a
+// pid that has already exited (and been reaped) is a harmless no-op (C
+// `kill` returns -1/`ESRCH`, ignored here).
+pub fun kill_pid(num pid) {
+  let _rc = kill(pid, 9);
+}

@@ -18569,7 +18569,7 @@ pub const TranspileProcess = struct {
         try Collector.collect(self, &targets);
 
         if (targets.items.len == 0) {
-            self.report_type_error(null, "no 'fuzz' target declared -- fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
+            self.report_type_error(null, "no 'fuzz' target declared, fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
             return TranspileError.TypeMismatch;
         }
 
@@ -18588,7 +18588,7 @@ pub const TranspileProcess = struct {
         } else if (targets.items.len == 1) {
             chosen = targets.items[0];
         } else {
-            self.report_type_error(null, "multiple fuzz targets declared -- specify which one to build", .{});
+            self.report_type_error(null, "multiple fuzz targets declared, specify which one to build", .{});
             return TranspileError.TypeMismatch;
         }
 
@@ -19709,6 +19709,36 @@ pub const TranspileProcess = struct {
             try self.write("  return _putenv_s(name, value);\n");
             try self.write("}\n");
             try self.write("static int unsetenv(const char* name) { return _putenv_s(name, \"\"); }\n");
+            try self.write("#endif\n");
+            // Suspends the calling thread for whole seconds, used by
+            // `std.time`'s `sleep_seconds`. Not a direct libc binding since
+            // POSIX's `nanosleep` has no Windows equivalent under the same
+            // name; Windows gets its own implementation in terms of `Sleep`,
+            // the same approach `setenv` above takes.
+            try self.write("#ifdef _WIN32\n");
+            // Not covered by whatever else in this translation unit
+            // happens to include <windows.h> (e.g. std.c.dirent's
+            // Windows branch, emitted later): `Sleep`/`DWORD` need it
+            // directly here too, or a program using only `sleep_seconds`
+            // sees an implicit-declaration conflict against `Sleep`'s
+            // real prototype once something else does include it later
+            // in the same file.
+            try self.write("#include <windows.h>\n");
+            try self.write("static void __fun_sleep_seconds(long long seconds) {\n");
+            try self.write("  if (seconds < 0) seconds = 0;\n");
+            try self.write("  Sleep((DWORD)(seconds * 1000));\n");
+            try self.write("}\n");
+            try self.write("#else\n");
+            // Not covered by `std.c.time`'s own conditional `#include
+            // <time.h>` (this helper is unconditional, unlike that
+            // module), so it needs its own; a repeated include of the
+            // same standard header is harmless.
+            try self.write("#include <time.h>\n");
+            try self.write("static void __fun_sleep_seconds(long long seconds) {\n");
+            try self.write("  if (seconds < 0) seconds = 0;\n");
+            try self.write("  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;\n");
+            try self.write("  nanosleep(&__fun_sleep_ts, NULL);\n");
+            try self.write("}\n");
             try self.write("#endif\n");
             // Directory iteration/creation/kind-check helpers for `std.c.dirent`
             // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
@@ -23858,6 +23888,19 @@ pub const TranspileProcess = struct {
             try self.write("    return (long long)pid;\n");
             try self.write("}\n");
             try self.write("\n");
+            // `std.c.process.kill`'s Windows implementation. `sig` is
+            // ignored (Windows has no signal-delivery equivalent):
+            // `TerminateProcess` is the closest match to POSIX
+            // `SIGKILL`, so that's what every signal maps to here.
+            try self.write("long long kill(pid_t pid, long long sig) {\n");
+            try self.write("    (void)sig;\n");
+            try self.write("    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);\n");
+            try self.write("    if (h == NULL) return -1;\n");
+            try self.write("    BOOL ok = TerminateProcess(h, 1);\n");
+            try self.write("    CloseHandle(h);\n");
+            try self.write("    return ok ? 0 : -1;\n");
+            try self.write("}\n");
+            try self.write("\n");
             // `_pipe` needs a buffer size + text/binary mode that POSIX's
             // 1-arg `pipe(fds)` has no room for -- arity mismatch, so unlike
             // close/read/write/dup2 (which MinGW's io.h already aliases to
@@ -23870,6 +23913,7 @@ pub const TranspileProcess = struct {
             try self.write("#include <spawn.h>\n");
             try self.write("#include <sys/wait.h>\n");
             try self.write("#include <unistd.h>\n");
+            try self.write("#include <signal.h>\n");
             try self.write("#endif\n");
         }
     }

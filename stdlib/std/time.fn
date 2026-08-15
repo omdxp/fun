@@ -20,6 +20,14 @@ pub fun now() Timestamp {
   ret t;
 }
 
+// Suspends the calling thread for `seconds` whole seconds. Works on every
+// platform: `__fun_sleep_seconds` is a compiler-provided helper, not a
+// direct libc binding, since POSIX's `nanosleep` has no Windows
+// equivalent to bind under the same name.
+pub fun sleep_seconds(num seconds) {
+  __fun_sleep_seconds(seconds);
+}
+
 fun _copy_str(str dst, num dst_len, str src) num {
   if dst == nil {
     ret 0;
