@@ -19875,26 +19875,42 @@ pub const TranspileProcess = struct {
             \\static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){SleepConditionVariableCS(c, m, INFINITE);}
             \\static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
             \\static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
+            \\static int __fun_sched_cv_timedwait(__fun_sched_cv* c, __fun_sched_mtx* m, long long ms){
+            \\  BOOL __ok = SleepConditionVariableCS(c, m, (DWORD)ms);
+            \\  return __ok ? 0 : 1;
+            \\}
             \\static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
             \\#else
+            \\#include <unistd.h>
+            \\#include <time.h>
+            \\#include <errno.h>
             \\typedef pthread_mutex_t __fun_sched_mtx; typedef pthread_cond_t __fun_sched_cv;
             \\static void __fun_sched_mtx_init(__fun_sched_mtx* m){pthread_mutex_init(m,NULL);}
             \\static void __fun_sched_mtx_lock(__fun_sched_mtx* m){pthread_mutex_lock(m);}
             \\static void __fun_sched_mtx_unlock(__fun_sched_mtx* m){pthread_mutex_unlock(m);}
             \\static void __fun_sched_cv_init(__fun_sched_cv* c){pthread_cond_init(c,NULL);}
             \\static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){pthread_cond_wait(c,m);}
+            \\static int __fun_sched_cv_timedwait(__fun_sched_cv* c, __fun_sched_mtx* m, long long ms){
+            \\  struct timespec __ts; clock_gettime(CLOCK_REALTIME, &__ts);
+            \\  __ts.tv_sec += ms/1000; __ts.tv_nsec += (ms%1000)*1000000L;
+            \\  if(__ts.tv_nsec >= 1000000000L){ __ts.tv_nsec -= 1000000000L; __ts.tv_sec += 1; }
+            \\  int __rc = pthread_cond_timedwait(c, m, &__ts);
+            \\  return (__rc == ETIMEDOUT) ? 1 : 0;
+            \\}
             \\static void __fun_sched_cv_signal(__fun_sched_cv* c){pthread_cond_signal(c);}
             \\static void __fun_sched_cv_broadcast(__fun_sched_cv* c){pthread_cond_broadcast(c);}
-            \\#include <unistd.h>
-            \\#include <time.h>
             \\static int __fun_cpu_count(void){long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0?(int)n:1;}
             \\#endif
             \\#define __FUN_SCHED_QCAP 4096
+            \\/* An idle worker beyond the CPU-sized base pool retires after this long
+            \\   with nothing to do, so a burst of blocking work doesn't leave the
+            \\   process holding hundreds of OS threads open indefinitely. */
+            \\#define __FUN_SCHED_IDLE_RETIRE_MS 10000
             \\typedef struct __fun_sched {
             \\  __fun_sched_mtx mu; __fun_sched_cv not_empty; __fun_sched_cv not_full; __fun_sched_cv idle;
             \\  __fun_task q[__FUN_SCHED_QCAP]; int head, tail, count;
             \\  long long pending; /* queued + running tasks */
-            \\  int started, shutting_down, nworkers;
+            \\  int started, shutting_down, base_workers, nworkers, max_workers, idle_workers;
             \\  /* Opt-in deadlock watchdog (FUN_DEADLOCK_WATCHDOG_MS). When wd_armed==0
             \\     (the default) none of these are touched and no watchdog thread runs,
             \\     so the scheduler is byte-identical to the non-watchdog build. */
@@ -19940,11 +19956,26 @@ pub const TranspileProcess = struct {
             \\    }
             \\  }
             \\}
+            \\/* A worker's run loop, launched both by the initial CPU-sized base pool
+            \\   and elastically by __fun_go under contention (see there). A worker
+            \\   beyond the base pool that stays idle past __FUN_SCHED_IDLE_RETIRE_MS
+            \\   exits rather than waiting forever, so the pool grows to absorb a
+            \\   burst of blocking work and shrinks back once it passes; the base
+            \\   pool itself never retires, so there is always at least CPU-count
+            \\   capacity ready with zero spin-up latency. */
             \\static void* __fun_sched_worker(void* unused){ (void)unused;
             \\  for(;;){
             \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
-            \\    while(__fun_g_sched.count==0 && !__fun_g_sched.shutting_down)
-            \\      __fun_sched_cv_wait(&__fun_g_sched.not_empty, &__fun_g_sched.mu);
+            \\    __fun_g_sched.idle_workers++;
+            \\    while(__fun_g_sched.count==0 && !__fun_g_sched.shutting_down){
+            \\      int __timed_out = __fun_sched_cv_timedwait(&__fun_g_sched.not_empty, &__fun_g_sched.mu, __FUN_SCHED_IDLE_RETIRE_MS);
+            \\      if(__timed_out && __fun_g_sched.count==0 && !__fun_g_sched.shutting_down && __fun_g_sched.nworkers > __fun_g_sched.base_workers){
+            \\        __fun_g_sched.nworkers--; __fun_g_sched.idle_workers--;
+            \\        __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\        return NULL;
+            \\      }
+            \\    }
+            \\    __fun_g_sched.idle_workers--;
             \\    if(__fun_g_sched.count==0 && __fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); return NULL; }
             \\    __fun_task t = __fun_g_sched.q[__fun_g_sched.head];
             \\    __fun_g_sched.head = (__fun_g_sched.head+1) % __FUN_SCHED_QCAP;
@@ -19979,13 +20010,27 @@ pub const TranspileProcess = struct {
             \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
             \\  if(!__fun_g_sched.started){
             \\    __fun_g_sched.started=1; __fun_g_sched.head=__fun_g_sched.tail=__fun_g_sched.count=0;
-            \\    __fun_g_sched.pending=0; __fun_g_sched.shutting_down=0;
-            \\    int n=__fun_cpu_count(); if(n<1)n=1; if(n>64)n=64; __fun_g_sched.nworkers=n;
+            \\    __fun_g_sched.pending=0; __fun_g_sched.shutting_down=0; __fun_g_sched.idle_workers=0;
+            \\    int n=__fun_cpu_count(); if(n<1)n=1; if(n>64)n=64; __fun_g_sched.base_workers=n; __fun_g_sched.nworkers=n;
+            \\    { const char* mw = getenv("FUN_SCHED_MAX_WORKERS");
+            \\      long long mwv = (mw && mw[0]) ? atoll(mw) : 4096;
+            \\      if(mwv < n) mwv = n;
+            \\      __fun_g_sched.max_workers = (int)mwv; }
             \\    for(int i=0;i<n;i++){ __fun_thread_t th; __fun_thread_start(&th, __fun_sched_worker, NULL); }
             \\    if(__fun_g_sched.wd_armed){ __fun_thread_t wt; __fun_thread_start(&wt, __fun_sched_watchdog, NULL); }
             \\  }
             \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\}
+            \\/* Enqueues fn(arg) for a worker to run. Beyond simply queuing, this
+            \\   is what keeps a burst of blocking work (e.g. many forked tasks all
+            \\   contending on the same Mutex) from starving the fixed base pool: if
+            \\   no worker is currently idle to pick this task up and the pool has
+            \\   room to grow, one more worker is spun up right away. Without this,
+            \\   once every base worker is blocked on something other than the
+            \\   scheduler's own queue, nothing is left to drain it and the whole
+            \\   program deadlocks -- the base pool alone is sized for CPU-bound
+            \\   throughput, not for absorbing however many tasks happen to block at
+            \\   once. */
             \\static void __fun_go(__fun_task_fn fn, void* arg){
             \\  __fun_sched_init_once(); __fun_sched_ensure_started();
             \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
@@ -20003,8 +20048,11 @@ pub const TranspileProcess = struct {
             \\  __fun_g_sched.q[__fun_g_sched.tail].fn=fn; __fun_g_sched.q[__fun_g_sched.tail].arg=arg;
             \\  __fun_g_sched.tail=(__fun_g_sched.tail+1)%__FUN_SCHED_QCAP; __fun_g_sched.count++; __fun_g_sched.pending++;
             \\  if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
+            \\  int __need_worker = (__fun_g_sched.idle_workers==0) && (__fun_g_sched.nworkers < __fun_g_sched.max_workers);
+            \\  if(__need_worker){ __fun_g_sched.nworkers++; }
             \\  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
             \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\  if(__need_worker){ __fun_thread_t __th; __fun_thread_start(&__th, __fun_sched_worker, NULL); }
             \\}
             \\static void __fun_sched_wait_idle(void){
             \\  if(!__fun_g_sched.started) return;

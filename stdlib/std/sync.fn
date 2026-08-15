@@ -1,8 +1,21 @@
 // Synchronization helpers built on POSIX pthread APIs.
 // 
-// Provides mutex and condition variable wrappers with lazy init. Lock/wait
-// helpers auto-initialize wrappers on first use; unlock/signal/destroy on
-// uninitialized wrappers are no-ops.
+// `mutex_new`/`condvar_new` initialize eagerly, on the thread that calls
+// them, before the result is ever shared with another thread in the
+// normal create-then-share pattern: checking "initialized yet?" and
+// calling `pthread_*_init` are two separate steps, and doing that check
+// lazily inside `lock`/`wait` (as this module used to) is a real race
+// once more than one thread might call `lock` on the same fresh Mutex
+// for the first time concurrently, which is exactly what a burst of
+// forked tasks sharing one Mutex does. Two threads can both see
+// "not initialized yet" and both call `pthread_mutex_init` on the same
+// memory at once, which is undefined behavior and was observed to
+// corrupt the mutex outright under load. `lock`/`wait`/etc. still carry
+// a lazy-init fallback for a value that reaches them some other way
+// (e.g. a bare zero-initialized `Mutex`, never a concurrent target on
+// its own), but `mutex_new()`/`condvar_new()` are the safe-by-
+// construction path and should be preferred whenever the result will be
+// shared across threads.
 
 imp std.c.thread;
 
@@ -22,17 +35,21 @@ pub compound CondVar {
   bin initialized;
 }
 
-// Creates an uninitialized mutex wrapper.
+// Creates a mutex wrapper, initialized immediately (see this module's
+// own header comment for why eager beats lazy here).
 pub fun mutex_new() Mutex {
   Mutex m;
   m.initialized = false;
+  let _rc = m.init();
   ret m;
 }
 
-// Creates an uninitialized condition variable wrapper.
+// Creates a condition variable wrapper, initialized immediately (see
+// this module's own header comment for why eager beats lazy here).
 pub fun condvar_new() CondVar {
   CondVar c;
   c.initialized = false;
+  let _rc = c.init();
   ret c;
 }
 
