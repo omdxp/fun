@@ -220,6 +220,11 @@ payload; payload-free variants still coexist.
 - **Filtering to one test**: `fun test <path> -- "exact name"` runs just the
   matching test(s) instead of the whole file — what an editor's per-test
   "Run"/"Debug" button uses under the hood, needing no separate flag.
+- **Running every test in a project**: `fun test` (no path) or `fun test <dir>`
+  discovers every `.fn` file under that root declaring a `test` block, compiles
+  and runs each one in its own pass, and prints an aggregate `== <file> ==`
+  header per file plus a final `N/N test files passed` summary. `fun test
+  <file.fn>` keeps compiling and running just that one file, unchanged.
 - **Failure semantics**: a failing `assert` inside a test is caught and reported
   as `FAIL` — it does NOT abort the run, so every other test still executes.
   `panic`, by contrast, still aborts the whole process outright (no per-test
@@ -316,6 +321,20 @@ payload; payload-free variants still coexist.
   flags, but whether the runtime is reliably bundled and the result actually
   runs correctly on Windows is genuinely unknown — treat it as "might work,"
   not confirmed.
+- **Running every fuzz target in a project**: `fun fuzz` (no path) or `fun
+  fuzz <dir>` discovers every `.fn` file under that root declaring one or
+  more `fuzz` targets and runs each for a short, bounded budget
+  (`FUN_FUZZ_DEFAULT_SECONDS`, default 30s) instead of the open-ended
+  campaign a single named target normally gets. This form is for a CI-style
+  "did anything regress" sweep, not a real fuzzing session — a target that
+  survives its whole budget with nothing found counts as clean, exactly like
+  a target that stops early on its own. Because the fuzzing engine's own
+  `-max_total_time` flag isn't reliable in every environment, the budget is
+  enforced independently: a watchdog force-kills a target's process if it's
+  still running when the budget elapses, and that alone is never treated as
+  a failure (only an actual crash is). A target name only makes sense
+  alongside one specific file, so this form never takes one; `fun fuzz
+  <file.fn> [target]` keeps its existing open-ended single-target behavior.
 
 ### Build Manifest (`fun.toml`)
 - **Declares build targets, not an import graph**: `imp` already does path-based

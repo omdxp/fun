@@ -598,6 +598,10 @@ wait to avoid warning on slow-but-live operations.
   `N/N tests passed` summary.
 - `fun test <path> -- "exact name"` filters to just the matching test(s) — no
   separate flag; this is what an editor's per-test Run/Debug button uses.
+- `fun test` (no path) or `fun test <dir>` discovers every `.fn` file under
+  that root declaring a `test` block, compiles and runs each in its own pass,
+  and prints an aggregate `N/N test files passed` summary. `fun test
+  <file.fn>` keeps its existing single-file behavior.
 - A failing `assert` inside a test is caught and reported as `FAIL` without
   aborting the run — every other test still executes. `panic` still aborts
   the whole process (no per-test recovery for it); prefer `assert`.
@@ -642,6 +646,16 @@ wait to avoid warning on slow-but-live operations.
   environments hang during AddressSanitizer's own startup, unrelated to Fun
   or the fuzzing engine. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety
   half of the sanitizer flag — fuzzing still runs and still finds crashes.
+- `fun fuzz` (no path) or `fun fuzz <dir>` discovers every `.fn` file under
+  that root declaring one or more `fuzz` targets and runs each for a bounded
+  `FUN_FUZZ_DEFAULT_SECONDS` (default 30s) rather than the open-ended
+  campaign a single named target gets — a CI-style regression sweep, not a
+  real fuzzing session. Since the engine's own `-max_total_time` isn't
+  reliable in every environment, the budget is enforced independently by a
+  watchdog that force-kills a target still running when it elapses; that
+  alone doesn't count as a failure, only an actual crash does. Never takes a
+  target name (only meaningful alongside one file); `fun fuzz <file.fn>
+  [target]` is unchanged.
 - Windows is unverified: the macOS (via the Homebrew-LLVM fallback) and
   (expected, by similar reasoning) Linux paths have actually been confirmed
   working; Windows has not, for lack of a machine to test on. Plain LLVM
@@ -701,14 +715,16 @@ wait to avoid warning on slow-but-live operations.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.mock_time`: a `Clock` quirk for time-mocked tests — `SystemClock` (the real clock) and `MockClock` (a fully controllable fake one, advanced only via explicit `advance`/`set` calls, never real time)
 - `std.testing`: the concurrent test-mode runner (`run_discovered_tests`) `fun test` auto-imports and calls into — not intended to be used directly from ordinary Fun source
-- `std.sys`: environment and process helpers (`env`/`set_env`/`clear_env` for environment variables, `sys_exit`, `sys_abort`, `sys_system`)
+- `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/`clear_env` for environment variables — `env` returns null when unset, `env_or(name, fallback)` is the null-safe form; `sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI
 ```
 fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-fuzz] [-fuzz-target <name>] [-help]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
+fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
 
