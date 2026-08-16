@@ -23493,6 +23493,19 @@ pub const TranspileProcess = struct {
             try self.write("    long tv_nsec;\n");
             try self.write("} __fun_win_timespec;\n");
             try self.write("\n");
+            // `clock_gettime` is POSIX-only; Windows has no equivalent in
+            // <time.h>, so "now" comes from `GetSystemTimeAsFileTime`
+            // instead, converted from its 100ns-since-1601 epoch to the
+            // Unix (1970) one `__fun_win_timespec` expects.
+            try self.write("static void __fun_win_clock_gettime(__fun_win_timespec* out) {\n");
+            try self.write("    FILETIME ft;\n");
+            try self.write("    GetSystemTimeAsFileTime(&ft);\n");
+            try self.write("    unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;\n");
+            try self.write("    t -= 116444736000000000ULL;\n");
+            try self.write("    out->tv_sec = (time_t)(t / 10000000ULL);\n");
+            try self.write("    out->tv_nsec = (long)((t % 10000000ULL) * 100);\n");
+            try self.write("}\n");
+            try self.write("\n");
             try self.write("typedef struct __fun_win_thread_ctx {\n");
             try self.write("    void* (*entry)(void*);\n");
             try self.write("    void* arg;\n");
@@ -23667,9 +23680,7 @@ pub const TranspileProcess = struct {
             try self.write("    }\n");
             try self.write("\n");
             try self.write("    __fun_win_timespec now_ts;\n");
-            try self.write("    if (clock_gettime(0, (void*)&now_ts) != 0) {\n");
-            try self.write("        return (long long)ETIMEDOUT;\n");
-            try self.write("    }\n");
+            try self.write("    __fun_win_clock_gettime(&now_ts);\n");
             try self.write("    if (now_ts.tv_nsec < 0 || now_ts.tv_nsec >= 1000000000L) {\n");
             try self.write("        return (long long)ETIMEDOUT;\n");
             try self.write("    }\n");
@@ -23748,14 +23759,19 @@ pub const TranspileProcess = struct {
             try self.write("#include <process.h>\n");
             try self.write("#pragma pop_macro(\"close\")\n");
             try self.write("\n");
-            // `pid_t` is ALREADY typedef'd by <sys/types.h> (transitively
-            // pulled in above) as a plain integer -- unlike POSIX, real
+            // <sys/types.h> typedefs `pid_t` on MinGW, but not on the
+            // MSVC/clang-cl headers a Developer-Prompt build actually
+            // uses, so it needs an explicit fallback. Unlike POSIX, real
             // Win32 process handles (HANDLE) and process IDs (DWORD) are
             // different things, so this compat layer stores the numeric PID
             // in `*pid` (matching real POSIX semantics exactly) and has
             // `waitpid` re-open a HANDLE from it via OpenProcess, rather
             // than repurposing `pid_t` to mean HANDLE.
             try self.write("#include <sys/types.h>\n");
+            try self.write("#ifndef _PID_T_\n");
+            try self.write("#define _PID_T_\n");
+            try self.write("typedef int pid_t;\n");
+            try self.write("#endif\n");
             try self.write("typedef void* posix_spawnattr_t;\n");
             try self.write("typedef struct {\n");
             try self.write("    int has_dup2_1; int dup2_1_fd;\n");
