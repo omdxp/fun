@@ -44,7 +44,18 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(doc_text, span_of(t));
     }
-    .Identifier -> {}
+    .Identifier -> {
+      // `fork` is not a lexer-level keyword (its recognition is
+      // contextual, parser-side), so it lexes as a plain identifier;
+      // checked here, before ordinary name resolution, since nothing
+      // named `fork` could ever be a real declared symbol anyway.
+      if equals(token_word(t), "fork") {
+        str fork_doc = keyword_doc("fork");
+        if !equals(fork_doc, "") {
+          ret _hover_result(fork_doc, span_of(t));
+        }
+      }
+    }
     _ -> { ret NO_HOVER; }
   }
 
@@ -53,7 +64,15 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     ret NO_HOVER;
   }
   Declaration d = declared.unwrap();
+  str doc_comment = "";
+  if equals(d.pos.filename, doc.path) {
+    doc_comment = doc_comment_above(doc.text, d.pos.line);
+  }
   StringBuilder b = string_builder_init(96);
+  if !equals(doc_comment, "") {
+    b.append(doc_comment);
+    b.append("\n\n");
+  }
   b.append("```fun\n");
   b.append(d.detail);
   b.append("\n```");
@@ -128,11 +147,35 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
       if field.is_some() {
         ret field;
       }
+      let method = lookup_method(&program.nodes, type_name, name);
+      if method.is_some() {
+        ret method;
+      }
+    }
+    // `receiver` might not be a local at all, but an enum type named
+    // directly (`OptionalInt.Some`), the qualified form of a fit
+    // destructuring pattern (or an ordinary variant-constructing call
+    // outside any fit, `ret OptionalInt.Some(v);`).
+    let qualified_variant = enum_variant_declaration(&program.nodes, receiver, name);
+    if qualified_variant.is_some() {
+      ret qualified_variant;
     }
   } elif _is_dot_shorthand(tokens, t) {
     let variant = lookup_fit_variant(&program.nodes, name, doc.path, source_line);
     if variant.is_some() {
       ret variant;
+    }
+    // A bare `.Variant(...)` outside any fit, most commonly a `ret`'s
+    // own value (`ret .Ok(x);`): resolved against the enclosing
+    // function's own declared return type.
+    if _is_return_value(tokens, t) {
+      str rt = enclosing_return_type(&program.nodes, doc.path, source_line);
+      if !equals(rt, "") {
+        let rv = enum_variant_declaration(&program.nodes, rt, name);
+        if rv.is_some() {
+          ret rv;
+        }
+      }
     }
   }
 
@@ -204,6 +247,26 @@ fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
     _ -> {}
   }
   ret true;
+}
+
+// True when the nearest preceding token that could start a new
+// statement, walked back from `t`, is the `ret` keyword: `t` is (or
+// begins) a `ret`'s own value expression.
+fun _is_return_value(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  num i = index - 1;
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if token_is_symbol(tok, ';') || token_is_symbol(tok, '{') || token_is_symbol(tok, '}') {
+      ret false;
+    }
+    fit tok.type {
+      .Keyword -> { ret equals(token_word(tok), "ret"); }
+      _ -> {}
+    }
+    i = i - 1;
+  }
+  ret false;
 }
 
 fun _hover_result(str markdown, Span s) str {
@@ -323,6 +386,158 @@ pub fun keyword_doc(str word) str {
       `  assert condition, "message";
       `}`,
       `A test, run by fun -test and ignored by an ordinary build.`
+    );
+  }
+  if equals(word, "fuzz") {
+    ret _doc(
+      `fuzz "never crashes on arbitrary input" (raw* data, num len) {
+      `  ...
+      `}`,
+      `A fuzz test, run by fun -fuzz against random bytes. Must not crash
+      `or leak, however malformed the input.`
+    );
+  }
+  if equals(word, "pub") {
+    ret _doc(
+      `pub fun name(...) Type { ... }`,
+      `Marks a declaration visible outside the file it is written in.
+      `Without it, a function, type, or method is private to its own
+      `file.`
+    );
+  }
+  if equals(word, "fun") {
+    ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
+  }
+  if equals(word, "as") {
+    ret _doc(
+      `impl Type as Quirk { ... }`,
+      `Names the quirk an impl block implements for a type.`
+    );
+  }
+  if equals(word, "enum") {
+    ret _doc(
+      `enum Name {
+      `  A,
+      `  B(num),
+      `}`,
+      `Declares a set of variants a value can be, each optionally
+      `carrying a payload. Matched with fit.`
+    );
+  }
+  if equals(word, "compound") {
+    ret _doc(
+      `compound Name {
+      `  num field;
+      `}`,
+      `Declares a struct-like type: a fixed set of named, typed fields.`
+    );
+  }
+  if equals(word, "let") {
+    ret _doc(`let x = value;`, `Declares a local with its type inferred from value.`);
+  }
+  if equals(word, "const") {
+    ret _doc(
+      `const num x = 5;`,
+      `Declares a binding that cannot be reassigned after its initial
+      `value.`
+    );
+  }
+  if equals(word, "asm") {
+    ret _doc(
+      `asm volatile(out y: "=r" = y; in x: "r" = x) "...";
+      `asm arch aarch64 { ... };`,
+      `Emits inline assembly. volatile forbids the optimizer from
+      `dropping or reordering it; arch restricts it to one target,
+      `compiled out on any other.`
+    );
+  }
+  if equals(word, "volatile") {
+    ret _doc(
+      `asm volatile(...) "...";`,
+      `Marks an asm block as having effects the optimizer must not
+      `assume away, forbidding it from being dropped or reordered.`
+    );
+  }
+  if equals(word, "arch") {
+    ret _doc(
+      `asm arch aarch64 { ... };`,
+      `Restricts an asm block to one target architecture; compiled out
+      `entirely on any other.`
+    );
+  }
+  if equals(word, "void") {
+    ret _doc(`fun name() void { ... }`, `The absence of a value, for a function that returns nothing.`);
+  }
+  if equals(word, "num") {
+    ret _doc(`num x;`, `A 64-bit signed integer.`);
+  }
+  if equals(word, "dec") {
+    ret _doc(`dec x;`, `A 64-bit floating-point number.`);
+  }
+  if equals(word, "str") {
+    ret _doc(`str s;`, `A NUL-terminated byte string.`);
+  }
+  if equals(word, "bin") {
+    ret _doc(`bin flag;`, `A boolean: true or false.`);
+  }
+  if equals(word, "chr") {
+    ret _doc(`chr c;`, `A single byte, written as a character literal ('a').`);
+  }
+  if equals(word, "if") {
+    ret _doc(`if condition { ... }`, `Runs its body only when condition is true.`);
+  }
+  if equals(word, "elif") {
+    ret _doc(
+      `if a { ... } elif b { ... } else { ... }`,
+      `An else-if arm, tried in order when every earlier condition in
+      `the chain was false.`
+    );
+  }
+  if equals(word, "else") {
+    ret _doc(
+      `if condition { ... } else { ... }`,
+      `Runs when every earlier condition in the chain was false.`
+    );
+  }
+  if equals(word, "true") {
+    ret _doc(`bin flag = true;`, `The boolean literal for a true value.`);
+  }
+  if equals(word, "false") {
+    ret _doc(`bin flag = false;`, `The boolean literal for a false value.`);
+  }
+  if equals(word, "for") {
+    ret _doc(
+      `for condition { ... }
+      `for item : collection { ... }`,
+      `Loops while condition is true, or once per item of a collection.`
+    );
+  }
+  if equals(word, "break") {
+    ret _doc(`break;`, `Exits the innermost enclosing loop immediately.`);
+  }
+  if equals(word, "continue") {
+    ret _doc(`continue;`, `Skips to the next iteration of the innermost enclosing loop.`);
+  }
+  if equals(word, "allow") {
+    ret _doc(
+      `allow unused_variable;`,
+      `Silences a specific warning for the declaration or scope it
+      `precedes, deliberately overriding the usual warning-clean
+      `requirement.`
+    );
+  }
+  if equals(word, "expect") {
+    ret _doc(
+      `expect unused_variable;`,
+      `Asserts that a specific warning does fire here; a build fails if
+      `it doesn't. Used to test the compiler's own warning detection.`
+    );
+  }
+  if equals(word, "assert") {
+    ret _doc(
+      `assert condition, "message";`,
+      `Inside a test or fuzz block, fails it with message when condition
+      `is false.`
     );
   }
   ret "";

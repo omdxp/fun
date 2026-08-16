@@ -172,6 +172,60 @@ fun _render_param(Node* arg) str {
   ret "";
 }
 
+// The contiguous `//`-prefixed comment lines immediately above
+// `decl_line` (1-indexed, as `Pos.line` reads) in `text`, with each
+// line's own `// ` prefix stripped and re-joined top to bottom. Empty
+// when there is no such block directly above: a blank line or a
+// non-comment line breaks the search, so a doc block separated from
+// the declaration by a blank line (or an unrelated trailing comment
+// on the previous declaration) is never mistaken for this one's own.
+pub fun doc_comment_above(str text, num decl_line) str {
+  if decl_line <= 1 {
+    ret "";
+  }
+  Vec<str> src_lines = split_lines(text);
+  num idx = decl_line - 2;
+  // `decl_line` reads however the lexer counted lines, which is not
+  // guaranteed to match `split_lines`'s own count exactly at the
+  // edges (a missing final newline, a `\r\n` line ending); `Vec.get`
+  // has no bounds check of its own, so a mismatch here would read out
+  // of bounds rather than just finding no comment.
+  if idx >= src_lines.len {
+    ret "";
+  }
+  Vec<str> collected;
+  collected.init(4);
+  for idx >= 0 {
+    str line_text = src_lines.get(idx);
+    str t = trim(line_text);
+    if equals(t, "") {
+      break;
+    }
+    if !starts_with(t, "//") {
+      break;
+    }
+    str content = substr(t, 2, len(t) - 2);
+    if len(content) > 0 && content[0] == ' ' {
+      content = substr(content, 1, len(content) - 1);
+    }
+    collected.push(content);
+    idx = idx - 1;
+  }
+  if collected.len == 0 {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(64);
+  num i = collected.len;
+  for i > 0 {
+    i = i - 1;
+    b.append(collected.get(i));
+    if i > 0 {
+      b.append("\n");
+    }
+  }
+  ret b.build();
+}
+
 // The declaration of `name` as seen from `file` at `line`: a parameter
 // or local of the function that line sits in, before anything the whole
 // program shares.
@@ -252,6 +306,43 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field) Option<Declar
           b.append(" ");
           b.append(cf.name);
           ret .Some(_declaration(field, .Field, b.build(), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The method `method_name` declared in an `impl` block targeting
+// `type_name`. Unlike a field or an enum variant, a method keeps its
+// own real declaration position, so go-to-definition lands on the
+// method itself, not on the enclosing impl or type.
+pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Impl(im) -> {
+        if !equals(im.type_name, type_name) {
+          continue;
+        }
+        num m = 0;
+        for m < im.methods.len {
+          Node* method = im.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              if equals(f.name, method_name) {
+                ret .Some(_declaration(method_name, .Function, render_function(f), method.pos));
+              }
+            }
+            _ -> {}
+          }
         }
       }
       _ -> {}
@@ -372,6 +463,64 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
   ret .None;
 }
 
+// The enclosing function's own declared return type, bare (generic
+// args and pointer stars stripped, matching `type_name_of_local`), for
+// a bare `.Variant(...)` shorthand written as a `ret`'s own value.
+// "" when `line` isn't inside a function with a declared, non-void
+// return type.
+pub fun enclosing_return_type(Vec<Node>* program, str file, num line) str {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !_covers(n, f, file, line) {
+          continue;
+        }
+        ret _bare_return_type(f);
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(mf) -> {
+              if !_covers(*m, mf, file, line) {
+                continue;
+              }
+              ret _bare_return_type(mf);
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
+// `f`'s own declared return type, bare (generic args and pointer
+// stars stripped, matching `type_name_of_local`). "" for a declared
+// void return, same as the caller not finding an enclosing function
+// at all -- neither is ever a variant hover's expected enum.
+fun _bare_return_type(FunctionNode f) str {
+  if !f.has_rtype {
+    ret "";
+  }
+  str rendered = render_type(f.rtype);
+  num cut = index_of_char(rendered, '<');
+  if cut > 0 {
+    rendered = substr(rendered, 0, cut);
+  }
+  ret trim(replace_char(rendered, '*', ' '));
+}
+
 // True when `line` falls inside the function `f` declared by `n`, in the
 // file being asked about.
 fun _covers(Node n, FunctionNode f, str file, num line) bin {
@@ -462,24 +611,104 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
         ret found;
       }
     }
+    .StatementFor(fk) -> {
+      let found = _lookup_in_body(_for_body(fk), name);
+      if found.is_some() {
+        ret found;
+      }
+    }
     _ -> {}
   }
   ret .None;
 }
 
 // The enum type name a `fit` statement's subject expression resolves
-// to. Only a bare local/parameter subject is resolved, the only
-// receiver shape a variant hover or binding lookup needs so far; a
-// call or chained field access subject yields "".
+// to: a bare local/parameter subject's own declared type, or, for
+// `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a call
+// whose callee is `ch`'s own `.recv` method access), the channel's
+// element type. Anything else yields "".
 fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
   if subject == nil {
     ret "";
   }
   fit subject.kind {
     .Identifier(s) -> { ret type_name_of_local(program, s, file, line); }
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left || e.left == nil {
+        ret "";
+      }
+      fit e.left.kind {
+        .Expression(callee) -> {
+          if !equals(callee.op, ".") || !callee.has_right || callee.right == nil {
+            ret "";
+          }
+          if !callee.has_left || callee.left == nil {
+            ret "";
+          }
+          bin is_recv = false;
+          fit callee.right.kind {
+            .Identifier(m) -> {
+              if equals(m, "recv") {
+                is_recv = true;
+              }
+            }
+            _ -> {}
+          }
+          if !is_recv {
+            ret "";
+          }
+          fit callee.left.kind {
+            .Identifier(chan_name) -> {
+              ret _first_generic_arg_of_local(program, chan_name, file, line);
+            }
+            _ -> {}
+          }
+        }
+        _ -> {}
+      }
+    }
     _ -> {}
   }
   ret "";
+}
+
+// The first generic type argument of local/parameter `name`'s own
+// declared type, as written (`Job` from `Channel<Job>`). "" when
+// `name` isn't found, or its declared type isn't generic.
+fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line) str {
+  let found = _lookup_local(program, name, file, line);
+  if found.is_none() {
+    ret "";
+  }
+  Declaration d = found.unwrap();
+  num open = index_of_char(d.detail, '<');
+  if open < 0 {
+    ret "";
+  }
+  num depth = 0;
+  num i = open;
+  num n = len(d.detail);
+  num end = -1;
+  for i < n {
+    chr c = d.detail[i];
+    if c == '<' {
+      depth = depth + 1;
+    } elif c == '>' {
+      depth = depth - 1;
+      if depth == 0 {
+        end = i;
+        break;
+      }
+    } elif c == ',' && depth == 1 {
+      end = i;
+      break;
+    }
+    i = i + 1;
+  }
+  if end < 0 {
+    ret "";
+  }
+  ret trim(substr(d.detail, open + 1, end - open - 1));
 }
 
 // The `fit` statement, among every function's body in the program,
@@ -555,9 +784,21 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
     }
     .StatementIf(s) -> { ret _find_covering_fit(s.body, line); }
     .StatementElse(inner) -> { ret _find_covering_fit(inner, line); }
+    .StatementFor(fk) -> { ret _find_covering_fit(_for_body(fk), line); }
     _ -> {}
   }
   ret .None;
+}
+
+// The body of any of the three `for` loop shapes, so a caller
+// recursing through a function's statements doesn't need its own
+// three-way match just to keep descending.
+fun _for_body(ForKind fk) Node* {
+  fit fk {
+    .Cond(c) -> { ret c.body; }
+    .Range(r) -> { ret r.body; }
+    .Iter(it) -> { ret it.body; }
+  }
 }
 
 // The declaration of `variant_name`, one of `enum_name`'s own
@@ -701,6 +942,9 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
     }
     .StatementIf(s) -> { ret _lookup_fit_binding(s.body, name, program, file, line); }
     .StatementElse(inner) -> { ret _lookup_fit_binding(inner, name, program, file, line); }
+    .StatementFor(fk) -> {
+      ret _lookup_fit_binding(_for_body(fk), name, program, file, line);
+    }
     .StatementFit(f) -> {
       num bi = 0;
       for bi < f.branches.len {
@@ -732,12 +976,20 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
                 b.append(payload_type.unwrap());
                 b.append(" ");
                 b.append(name);
-                ret .Some(_declaration(name, .Local, b.build(), br.body.pos));
+                // A fit arm's body block isn't always given its own
+                // position by the parser (has_pos can read false, its
+                // fields then unset stack garbage); the enclosing fit
+                // statement's own position, `body.pos`, is reliably
+                // set and close enough for a hover result to point at.
+                Pos decl_pos = body.pos;
+                if br.body.has_pos {
+                  decl_pos = br.body.pos;
+                }
+                ret .Some(_declaration(name, .Local, b.build(), decl_pos));
               }
             }
           }
         }
-        // A nested `fit`/`if` inside this arm's body can shadow.
         let nested = _lookup_fit_binding(br.body, name, program, file, line);
         if nested.is_some() {
           ret nested;

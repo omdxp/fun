@@ -4147,7 +4147,17 @@ impl Parser {
     *condition = maybe_cond.unwrap();
 
     bin has_pos = false;
+    // Zeroed rather than left uninitialized: `parse_fit_body` never
+    // reads `pos` when `has_pos` is false, but passing an
+    // uninitialized struct by value is undefined behavior in the
+    // generated C regardless of whether the callee looks at it.
     Pos pos;
+    pos.line = 0;
+    pos.col = 0;
+    pos.start_col = 0;
+    pos.end_col = 0;
+    pos.end_line = 0;
+    pos.filename = "";
     fit fit_tok {
       .Some(t) -> {
         pos = t.pos;
