@@ -110,12 +110,21 @@ fun _base_type_name(DataType* dt) str {
 
 // A function as its signature reads, without its body.
 pub fun render_function(FunctionNode f) str {
+  ret render_function_named(f, f.name);
+}
+
+// Like `render_function`, but spelled back under `name` instead of
+// `f.name` -- an impl method's own `f.name` is always mangled with
+// its owning type (`Box__doubled`, never the bare `doubled` a reader
+// wrote), so a caller resolving a method needs to supply the
+// de-mangled name itself.
+pub fun render_function_named(FunctionNode f, str name) str {
   StringBuilder b = string_builder_init(64);
   if f.is_async {
     b.append("async ");
   }
   b.append("fun ");
-  b.append(f.name);
+  b.append(name);
   if f.has_type_params && f.type_params.len > 0 {
     b.append("<");
     num t = 0;
@@ -337,8 +346,8 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option
           }
           fit method.kind {
             .Function(f) -> {
-              if equals(f.name, method_name) {
-                ret .Some(_declaration(method_name, .Function, render_function(f), method.pos));
+              if equals(_bare_method_name(f.name, type_name), method_name) {
+                ret .Some(_declaration(method_name, .Function, render_function_named(f, method_name), method.pos));
               }
             }
             _ -> {}
@@ -349,6 +358,21 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option
     }
   }
   ret .None;
+}
+
+// A method's own name, with the `Type__` prefix it is mangled with
+// removed (an impl method's `f.name` is never the bare name a reader
+// wrote; see `completion.fn`'s own `_method_label`, the same
+// de-mangling under a different name for a different caller).
+fun _bare_method_name(str mangled, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(mangled, prefix) {
+    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+  }
+  ret mangled;
 }
 
 // The field `name` of whichever compound is being declared at `line`.
@@ -463,12 +487,13 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
   ret .None;
 }
 
-// The enclosing function's own declared return type, bare (generic
-// args and pointer stars stripped, matching `type_name_of_local`), for
-// a bare `.Variant(...)` shorthand written as a `ret`'s own value.
-// "" when `line` isn't inside a function with a declared, non-void
-// return type.
-pub fun enclosing_return_type(Vec<Node>* program, str file, num line) str {
+// The enclosing function or impl method's own declared return type,
+// unstripped, so a caller can resolve a generic instantiation's
+// concrete type arguments rather than just its bare template name
+// (`Result<str, Error>`'s own `str`/`Error`, not just `Result`).
+// `.None` when `line` isn't inside a function with a declared,
+// non-void return type.
+pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<DataType*> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -478,7 +503,10 @@ pub fun enclosing_return_type(Vec<Node>* program, str file, num line) str {
         if !_covers(n, f, file, line) {
           continue;
         }
-        ret _bare_return_type(f);
+        if !f.has_rtype {
+          ret .None;
+        }
+        ret .Some(f.rtype);
       }
       .Impl(im) -> {
         num mi = 0;
@@ -493,7 +521,10 @@ pub fun enclosing_return_type(Vec<Node>* program, str file, num line) str {
               if !_covers(*m, mf, file, line) {
                 continue;
               }
-              ret _bare_return_type(mf);
+              if !mf.has_rtype {
+                ret .None;
+              }
+              ret .Some(mf.rtype);
             }
             _ -> {}
           }
@@ -502,23 +533,7 @@ pub fun enclosing_return_type(Vec<Node>* program, str file, num line) str {
       _ -> {}
     }
   }
-  ret "";
-}
-
-// `f`'s own declared return type, bare (generic args and pointer
-// stars stripped, matching `type_name_of_local`). "" for a declared
-// void return, same as the caller not finding an enclosing function
-// at all -- neither is ever a variant hover's expected enum.
-fun _bare_return_type(FunctionNode f) str {
-  if !f.has_rtype {
-    ret "";
-  }
-  str rendered = render_type(f.rtype);
-  num cut = index_of_char(rendered, '<');
-  if cut > 0 {
-    rendered = substr(rendered, 0, cut);
-  }
-  ret trim(replace_char(rendered, '*', ' '));
+  ret .None;
 }
 
 // True when `line` falls inside the function `f` declared by `n`, in the
@@ -844,6 +859,76 @@ pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_
     }
   }
   ret .None;
+}
+
+// Like `enum_variant_declaration`, but resolved against `dt`'s own
+// concrete generic arguments (`Result<str, Error>`'s `str`/`Error`),
+// so a payload declared as a bare type param in the template (`Ok(T)`)
+// renders as the caller's actual concrete type (`Ok(str)`) rather
+// than the template's own param name. A payload that isn't a bare
+// type param (already concrete, or itself a further generic
+// instantiation) renders as declared, unsubstituted.
+pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str variant_name) Option<Declaration> {
+  if dt == nil {
+    ret .None;
+  }
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, dt.type_str) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(24);
+          b.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            b.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                b.append(", ");
+              }
+              b.append(_substituted_payload_type(variant.payload.get(p), e.type_params, dt.generic_args));
+              p = p + 1;
+            }
+            b.append(")");
+          }
+          ret .Some(_declaration(variant_name, .Variant, b.build(), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `payload`'s own rendered type, substituted with the matching entry
+// of `concrete_args` when `payload` is written as a bare type param
+// name found in `type_params` (positional match). Renders as-is
+// otherwise.
+fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataType*> concrete_args) str {
+  if payload == nil {
+    ret "";
+  }
+  if payload.generic_args.len == 0 {
+    num i = 0;
+    for i < type_params.len {
+      if equals(type_params.get(i), payload.type_str) && i < concrete_args.len {
+        ret render_type(concrete_args.get(i));
+      }
+      i = i + 1;
+    }
+  }
+  ret render_type(payload);
 }
 
 // The declaration of a bare `.VariantName` (or a fit destructuring

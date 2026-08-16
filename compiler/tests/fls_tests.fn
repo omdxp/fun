@@ -326,6 +326,50 @@ test "hover resolves a bare variant shorthand and its payload binding inside a f
   assert contains(variant_def, `"line":0`), "expected the enum's own declaration line";
 }
 
+test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {
+  str src = `compound Box {
+  `  num width;
+  `}
+  `impl Box {
+  `  pub doubled() num {
+  `    ret self.width * 2;
+  `  }
+  `}
+  `enum Outcome<T> {
+  `  Ok(T),
+  `  Err(str),
+  `}
+  `fun risky(str path) Outcome<num> {
+  `  ret .Ok(5);
+  `}
+  `fun other(str path) Outcome<num> {
+  `  ret Outcome.Ok(5);
+  `}
+  `fun use_box(Box b) num {
+  `  ret b.doubled();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///methods.fn";
+  doc.path = "methods.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `doubled` in the call `b.doubled()`.
+  str method_hover = hover(&reads, doc, 19, 8);
+  assert contains(method_hover, "doubled(Box* self) num"), "expected the method's own signature, de-mangled, with its implicit self";
+
+  // On the bare `.Ok(5)` inside `risky`'s own `ret`, substituted with
+  // Outcome<num>'s own concrete type argument, not the template's bare T.
+  str bare_ret_hover = hover(&reads, doc, 13, 7);
+  assert contains(bare_ret_hover, "Ok(num)"), "expected the bare ret variant substituted with the concrete type argument";
+
+  // On the qualified `Outcome.Ok(5)` inside `other`.
+  str qualified_hover = hover(&reads, doc, 16, 15);
+  assert contains(qualified_hover, "Ok("), "expected the qualified variant to resolve";
+}
+
 test "completion still answers while the text does not parse" {
   // What a reader is typing is half-written by definition, so a failed
   // parse must not turn into an empty reply.

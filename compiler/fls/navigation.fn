@@ -167,11 +167,14 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
     }
     // A bare `.Variant(...)` outside any fit, most commonly a `ret`'s
     // own value (`ret .Ok(x);`): resolved against the enclosing
-    // function's own declared return type.
+    // function's own declared return type, substituting a generic
+    // instantiation's concrete type arguments so a payload declared
+    // as a bare type param in the template (`Ok(T)`) reads as the
+    // caller's actual type (`Ok(str)`).
     if _is_return_value(tokens, t) {
-      str rt = enclosing_return_type(&program.nodes, doc.path, source_line);
-      if !equals(rt, "") {
-        let rv = enum_variant_declaration(&program.nodes, rt, name);
+      let rdt = enclosing_return_dtype(&program.nodes, doc.path, source_line);
+      if rdt.is_some() {
+        let rv = enum_variant_declaration_typed(&program.nodes, rdt.unwrap(), name);
         if rv.is_some() {
           ret rv;
         }
