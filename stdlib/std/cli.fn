@@ -66,7 +66,7 @@ pub fun cli_parse_ext(str[] args) CliArgs {
       continue;
     }
 
-    if arg == "--" {
+    if equals(arg, "--") {
       end_opts = true;
       i = i + 1;
       continue;
