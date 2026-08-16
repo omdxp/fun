@@ -360,6 +360,14 @@ pub compound Codegen {
   // prototype land as its own declaration right before the current
   // statement rather than at the live tail.
   Option<num> current_stmt_start_pos;
+  // One-shot: `emit_condition` sets this right before calling `emit_
+  // expr` on an `if`/`while` condition that's a plain binary op, so
+  // that call's own wrapping parens are skipped (C's `if (...)`/`while
+  // (...)` already supplies them). Consumed by the very next `.Expression`
+  // binary op `emit_expr` handles, whichever that is, and reset
+  // immediately, so it never reaches into `left`/`right`'s own nested
+  // emission.
+  bin suppress_next_expr_parens;
   // Unique counter for `resolve_field_chain`'s call-as-receiver temp
   // names.
   num call_recv_temp_counter;
@@ -478,6 +486,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
+  g.suppress_next_expr_parens = false;
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
   g.hoist_scratch_depth = 0;
@@ -3626,6 +3635,38 @@ impl Codegen {
     self.error_note = format("{str} ({str}){str}", node_kind_name(node.kind), stage, where);
   }
 
+  // Emits `cond` as an `if`/`while` condition, without the one redundant
+  // layer of parens a plain binary expression's own self-wrapping would
+  // otherwise stack on top of C's own `if (...)`/`while (...)`: `emit_
+  // expr` always wraps a binary op in its own parens, correct for a
+  // sub-expression nested somewhere else, but doubled up here it reads
+  // as `if ((x == y))`, which GCC and clang both warn on (mistaking it
+  // for a disguised assignment). `emit_expr`'s own `.Expression`
+  // binary-op case checks the flag set below right before writing its
+  // wrapping `(`/`)` pair, consuming it (one shot, not inherited by
+  // `left`/`right`'s own recursive emission) so only the outermost
+  // pair is skipped.
+  emit_condition(Node cond) Option<CodegenErrorKind> {
+    bin is_plain_binary = false;
+    fit cond.kind {
+      .Expression(ce) -> {
+        // `=` isn't excluded because it's exempt from the double-paren
+        // warning (it's just as much a candidate); it's excluded
+        // because a bare `_ = expr` discard returns before ever
+        // reaching the flag check below, which would leak the flag,
+        // set but never consumed, into whatever gets emitted next.
+        if !equals(ce.op, "()") && !equals(ce.op, ".") && !equals(ce.op, "[]") && !equals(ce.op, ",") && !equals(ce.op, "=") {
+          is_plain_binary = true;
+        }
+      }
+      _ -> {}
+    }
+    if is_plain_binary {
+      self.suppress_next_expr_parens = true;
+    }
+    ret self.emit_expr(cond);
+  }
+
   pub emit_expr(Node node) Option<CodegenErrorKind> {
     self.mark_node(node);
     fit node.kind {
@@ -3890,7 +3931,13 @@ impl Codegen {
             _ -> {}
           }
         }
-        self.state.write("(");
+        // Consumed here, one shot: only this outermost pair is skipped,
+        // never `e.left`/`e.right`'s own recursive `emit_expr` calls.
+        bin wrote_own_parens = !self.suppress_next_expr_parens;
+        self.suppress_next_expr_parens = false;
+        if wrote_own_parens {
+          self.state.write("(");
+        }
         let lerr = self.emit_expr(*e.left);
         if lerr.is_some() {
           ret lerr;
@@ -3950,7 +3997,9 @@ impl Codegen {
         if did_assign_coerce {
           self.state.write(")");
         }
-        self.state.write(")");
+        if wrote_own_parens {
+          self.state.write(")");
+        }
         ret .None;
       }
       _ -> {
@@ -6553,7 +6602,7 @@ impl Codegen {
   emit_for_cond(ForCondNode fc) Option<CodegenErrorKind> {
     if fc.has_condition {
       self.state.write("while (");
-      let cerr = self.emit_expr(*fc.condition);
+      let cerr = self.emit_condition(*fc.condition);
       if cerr.is_some() {
         ret cerr;
       }
@@ -7671,7 +7720,7 @@ impl Codegen {
   // the caller decides what comes next.
   emit_if_block(Node* condition, Node* body) Option<CodegenErrorKind> {
     self.state.write("if (");
-    let cerr = self.emit_expr(*condition);
+    let cerr = self.emit_condition(*condition);
     if cerr.is_some() {
       ret cerr;
     }
@@ -10558,6 +10607,10 @@ impl Codegen {
       `#pragma pop_macro("close")
       `
       `#include <sys/types.h>
+      `#ifndef _PID_T_
+      `#define _PID_T_
+      `typedef int pid_t;
+      `#endif
       `typedef void* posix_spawnattr_t;
       `typedef struct {
       `    int has_dup2_1; int dup2_1_fd;

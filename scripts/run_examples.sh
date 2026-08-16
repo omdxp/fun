@@ -101,6 +101,13 @@ is_expected_fail() {
     return 0
   fi
 
+  # Apple's clang caps `_BitInt` at 128 bits (mainline LLVM clang and real
+  # GCC both go well past that), so `u256` in this example only fails to
+  # compile on macOS specifically.
+  if [[ "$rel" == "examples/let_and_lowlevel_types.fn" && "$(uname -s)" == "Darwin" ]]; then
+    return 0
+  fi
+
   # Direct files in examples/error_cases are meant to fail.
   if [[ "$rel" =~ ^examples/error_cases/[^/]+\.fn$ ]]; then
     return 0
