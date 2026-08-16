@@ -2150,20 +2150,36 @@ impl Codegen {
             self.state.write_indent();
             self.emit_generic_impl_method_prototype(*m, new_name);
             self.state = saved_proto_state;
-            let proto_splice_pos = self.current_stmt_start_pos;
-            self.hoist_insert_pos = proto_splice_pos;
             str proto_text = proto_scratch.out.build();
-            self.emit_hoisted(proto_text);
-            // A captured local, so it needs the shift `emit_hoisted`
-            // applies automatically only to `current_stmt_start_pos`.
-            if proto_splice_pos.is_some() {
-              saved_proto_hoist_pos = adjust_pos_after_splice(
-                saved_proto_hoist_pos,
-                proto_splice_pos.unwrap(),
-                len(proto_text)
-              );
+            if self.hoist_scratch_depth > 0 {
+              // Nested inside a generic method's own lazily-drained
+              // body: `self.state` here is that method's own scratch
+              // buffer, not the root buffer, so `current_stmt_start_
+              // pos` (freshly set against whichever buffer `emit_
+              // statements` last dispatched a statement into) would be
+              // relative to the wrong buffer entirely, splicing this
+              // prototype inside the scratch text rather than at file
+              // scope. Forcing `hoist_insert_pos` to `.None` routes
+              // this through `emit_hoisted`'s own root-relative path
+              // instead, via `root_hoist_pos`.
+              self.hoist_insert_pos = .None;
+              self.emit_hoisted(proto_text);
+              self.hoist_insert_pos = saved_proto_hoist_pos;
+            } else {
+              let proto_splice_pos = self.current_stmt_start_pos;
+              self.hoist_insert_pos = proto_splice_pos;
+              self.emit_hoisted(proto_text);
+              // A captured local, so it needs the shift `emit_hoisted`
+              // applies automatically only to `current_stmt_start_pos`.
+              if proto_splice_pos.is_some() {
+                saved_proto_hoist_pos = adjust_pos_after_splice(
+                  saved_proto_hoist_pos,
+                  proto_splice_pos.unwrap(),
+                  len(proto_text)
+                );
+              }
+              self.hoist_insert_pos = saved_proto_hoist_pos;
             }
-            self.hoist_insert_pos = saved_proto_hoist_pos;
 
             // An async method's call-helper forward declaration is
             // `static`, which C forbids at block scope, so it is spliced
@@ -2316,20 +2332,29 @@ impl Codegen {
       self.state.write(");\n");
     }
     self.state = saved_pm_state;
-    // `saved_pm_hoist_pos` is a plain captured local, so it needs manual
-    // adjustment for this splice.
-    let pm_splice_pos = self.current_stmt_start_pos;
-    self.hoist_insert_pos = pm_splice_pos;
     str pm_text = pm_scratch.out.build();
-    self.emit_hoisted(pm_text);
-    if pm_splice_pos.is_some() {
-      saved_pm_hoist_pos = adjust_pos_after_splice(
-        saved_pm_hoist_pos,
-        pm_splice_pos.unwrap(),
-        len(pm_text)
-      );
+    if self.hoist_scratch_depth > 0 {
+      // See the matching branch in `emit_generic_impl_method_prototype_
+      // now`: `self.state` here is a nested scratch buffer, not root,
+      // so this has to route through `root_hoist_pos` instead.
+      self.hoist_insert_pos = .None;
+      self.emit_hoisted(pm_text);
+      self.hoist_insert_pos = saved_pm_hoist_pos;
+    } else {
+      // `saved_pm_hoist_pos` is a plain captured local, so it needs
+      // manual adjustment for this splice.
+      let pm_splice_pos = self.current_stmt_start_pos;
+      self.hoist_insert_pos = pm_splice_pos;
+      self.emit_hoisted(pm_text);
+      if pm_splice_pos.is_some() {
+        saved_pm_hoist_pos = adjust_pos_after_splice(
+          saved_pm_hoist_pos,
+          pm_splice_pos.unwrap(),
+          len(pm_text)
+        );
+      }
+      self.hoist_insert_pos = saved_pm_hoist_pos;
     }
-    self.hoist_insert_pos = saved_pm_hoist_pos;
   }
 
   // The C name to emit for the program-defined function `name`: prefixed
@@ -2452,20 +2477,29 @@ impl Codegen {
       self.state.write(");\n");
     }
     self.state = saved_pf_state;
-    // `saved_pf_hoist_pos` is a captured local, so this splice needs a
-    // manual adjustment.
-    let pf_splice_pos = self.current_stmt_start_pos;
-    self.hoist_insert_pos = pf_splice_pos;
     str pf_text = pf_scratch.out.build();
-    self.emit_hoisted(pf_text);
-    if pf_splice_pos.is_some() {
-      saved_pf_hoist_pos = adjust_pos_after_splice(
-        saved_pf_hoist_pos,
-        pf_splice_pos.unwrap(),
-        len(pf_text)
-      );
+    if self.hoist_scratch_depth > 0 {
+      // See the matching branch in `emit_generic_impl_method_prototype_
+      // now`: `self.state` here is a nested scratch buffer, not root,
+      // so this has to route through `root_hoist_pos` instead.
+      self.hoist_insert_pos = .None;
+      self.emit_hoisted(pf_text);
+      self.hoist_insert_pos = saved_pf_hoist_pos;
+    } else {
+      // `saved_pf_hoist_pos` is a captured local, so this splice needs a
+      // manual adjustment.
+      let pf_splice_pos = self.current_stmt_start_pos;
+      self.hoist_insert_pos = pf_splice_pos;
+      self.emit_hoisted(pf_text);
+      if pf_splice_pos.is_some() {
+        saved_pf_hoist_pos = adjust_pos_after_splice(
+          saved_pf_hoist_pos,
+          pf_splice_pos.unwrap(),
+          len(pf_text)
+        );
+      }
+      self.hoist_insert_pos = saved_pf_hoist_pos;
     }
-    self.hoist_insert_pos = saved_pf_hoist_pos;
   }
 
   // Lazily emits one monomorphization of a generic impl method's

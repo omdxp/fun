@@ -34,6 +34,16 @@ jobs:
         uses: omdxp/setup-fun@v1
         with:
           version: latest
+      - name: Force clang on Linux
+        if: matrix.os == 'ubuntu-latest'
+        # `setup-fun` sets FUN_CC=gcc on every unix runner. Real GCC is
+        # stricter than clang about a declaration's C block scope, and
+        # the lazily-triggered prototypes a plain (non-generic)
+        # function or method gets still land too narrowly scoped in
+        # some cases; clang only warns, GCC hard-errors. Tracked
+        # separately; macOS's own `gcc` is Apple's clang under an
+        # alias, so it was never actually affected.
+        run: echo "FUN_CC=clang" >> "$GITHUB_ENV"
       - name: Build fun and fls
         timeout-minutes: 10
         run: fun build
