@@ -291,7 +291,12 @@ pub compound Codegen {
   Vec<Vec<DataType*>> instantiation_arg_dtypes;
   // Every generic impl method emitted (or enqueued, see
   // `pending_generic_impl_method_owner`) so far, keyed
-  // `"<mangled_name>::<bare_method_name>"`.
+  // `"<mangled_name>::<quirk_name>::<bare_method_name>"` (`<quirk_name>`
+  // empty for a plain impl method). The quirk segment matters: a type
+  // can define a plain method and a same-named quirk method side by
+  // side (`Vec<T>`'s own `clear()` next to its `Clearable` quirk's
+  // `clear()`), and without it the second lookup would see the first
+  // one's key and wrongly skip emitting its own definition.
   Vec<str> emitted_generic_impl_methods;
   // Emitted monomorphizations of a method that declares its own generic
   // type params on top of the impl's (`impl Box<T> { pub wrap<U>(U x)
@@ -313,6 +318,11 @@ pub compound Codegen {
   // from the outermost call rather than nested inline.
   Vec<str> pending_generic_impl_method_owner;
   Vec<str> pending_generic_impl_method_bare;
+  // Parallel to the queue above: the quirk name this entry's lookup
+  // needs to match against (empty for a plain impl method). See
+  // `emitted_generic_impl_methods`'s own comment for why this can't
+  // just be folded into `bare_name`.
+  Vec<str> pending_generic_impl_method_quirk;
   // Parallel to the queue above: whether this entry's prototype was
   // already written at discovery time. False only for an entry
   // discovered while draining was suppressed, whose prototype the drain
@@ -491,6 +501,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.emitted_plain_function_protos.init(0);
   g.pending_generic_impl_method_owner.init(0);
   g.pending_generic_impl_method_bare.init(0);
+  g.pending_generic_impl_method_quirk.init(0);
   g.pending_generic_impl_method_proto_written.init(0);
   g.pending_generic_impl_method_cursor = 0;
   g.draining_generic_impl_methods = false;
@@ -2069,7 +2080,7 @@ impl Codegen {
             fit m.kind {
               .Function(fnv) -> {
                 let qm_bare = strip_prefix(fnv.name, qm_prefix);
-                self.ensure_generic_impl_method_emitted(mangled_name, qm_bare);
+                self.ensure_generic_impl_method_emitted(mangled_name, qm_bare, i.quirk_name);
               }
               _ -> {}
             }
@@ -2099,7 +2110,9 @@ impl Codegen {
   // that body can call another not-yet-bodied method of the same
   // instantiation. A no-op when `owner_type` isn't a known instantiation
   // or `self.state` points at a throwaway text-capture probe.
-  emit_generic_impl_method_prototype_now(str owner_type, str bare_name) {
+  // `quirk_name`, when non-empty, narrows the search to that quirk's
+  // own impl, same as `emit_one_generic_impl_method`.
+  emit_generic_impl_method_prototype_now(str owner_type, str bare_name, str quirk_name) {
     num ii = 0;
     bin found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -2121,6 +2134,9 @@ impl Codegen {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !equals(quirk_name, "") && (!i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
             continue;
           }
           if !impl_allows_generic_args(
@@ -2591,6 +2607,78 @@ impl Codegen {
     }
   }
 
+  // Resolves the quirk name a `bare_name` lookup on `owner_type`
+  // actually lands on, given the caller's own `requested_quirk`. A
+  // non-empty request is trusted outright: the quirk vtable machinery
+  // already knows exactly which quirk it means. An empty request (an
+  // ordinary static call site, `v.len()`) mirrors the same search
+  // `emit_one_generic_impl_method` runs later, so it agrees with
+  // whichever impl that search would land on: for a method that exists
+  // ONLY via one quirk impl (`Vec<T>`'s `len()`, from `Sized`, with no
+  // plain-impl duplicate), a plain call site and the vtable's own
+  // explicit lookup must resolve to the SAME canonical identity, or
+  // the method gets emitted twice under two different dedup keys.
+  // Empty when nothing matches, same as the real lookup would find.
+  resolve_generic_impl_quirk_for_bare(str owner_type, str bare_name, str requested_quirk) str {
+    if !equals(requested_quirk, "") {
+      ret requested_quirk;
+    }
+    num ii = 0;
+    bin found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), owner_type) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret "";
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes
+          ) {
+            continue;
+          }
+          StringBuilder rq_pfx_sb = string_builder_init(16);
+          rq_pfx_sb.append(i.type_name);
+          rq_pfx_sb.append("__");
+          if i.has_quirk_name {
+            rq_pfx_sb.append(i.quirk_name);
+            rq_pfx_sb.append("__");
+          }
+          str rq_prefix = rq_pfx_sb.build();
+          for m : i.methods {
+            str rq_tmpl_name = "";
+            fit m.kind {
+              .Function(rq_fnv) -> { rq_tmpl_name = rq_fnv.name; }
+              _ -> {}
+            }
+            if equals(strip_prefix(rq_tmpl_name, rq_prefix), bare_name) {
+              if i.has_quirk_name {
+                ret i.quirk_name;
+              }
+              ret "";
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret "";
+  }
+
   // Lazily emits one monomorphization of a generic impl method's
   // prototype and body, called from every generic-impl-method call site,
   // so a method is emitted only for the instantiations actually called.
@@ -2598,9 +2686,21 @@ impl Codegen {
   // already draining, since a queued body may call another not-yet-
   // emitted method while `self.state` is the outer method's scratch
   // buffer. `.None` when `owner_type` isn't a known instantiation.
-  ensure_generic_impl_method_emitted(str owner_type, str bare_name) Option<CodegenErrorKind> {
+  // `quirk_name` narrows the lookup to one specific quirk impl (see
+  // `emitted_generic_impl_methods`); every ordinary static-call site
+  // passes `""`, resolved against the real target impl below rather
+  // than trusted as-is, so it can't disagree with a quirk-qualified
+  // call site over the identity of a quirk-only method.
+  ensure_generic_impl_method_emitted(
+    str owner_type,
+    str bare_name,
+    str quirk_name
+  ) Option<CodegenErrorKind> {
+    str resolved_quirk = self.resolve_generic_impl_quirk_for_bare(owner_type, bare_name, quirk_name);
     StringBuilder key_sb = string_builder_init(16);
     key_sb.append(owner_type);
+    key_sb.append("::");
+    key_sb.append(resolved_quirk);
     key_sb.append("::");
     key_sb.append(bare_name);
     str key = key_sb.build();
@@ -2616,10 +2716,11 @@ impl Codegen {
     self.emitted_generic_impl_methods.push(key);
     bin proto_written = !self.suppress_generic_impl_method_draining;
     if proto_written {
-      self.emit_generic_impl_method_prototype_now(owner_type, bare_name);
+      self.emit_generic_impl_method_prototype_now(owner_type, bare_name, resolved_quirk);
     }
     self.pending_generic_impl_method_owner.push(owner_type);
     self.pending_generic_impl_method_bare.push(bare_name);
+    self.pending_generic_impl_method_quirk.push(resolved_quirk);
     self.pending_generic_impl_method_proto_written.push(proto_written);
 
     // Also deferred while `self.state` points at a throwaway probe; the
@@ -2630,9 +2731,9 @@ impl Codegen {
     ret self.drain_pending_generic_impl_methods();
   }
 
-  // Processes every queued (owner, bare name) pair. Writes straight to
-  // `self.state`/`self.hoist_insert_pos`, so the caller must have
-  // restored the real ones first.
+  // Processes every queued (owner, bare name, quirk name) triple. Writes
+  // straight to `self.state`/`self.hoist_insert_pos`, so the caller must
+  // have restored the real ones first.
   drain_pending_generic_impl_methods() Option<CodegenErrorKind> {
     self.draining_generic_impl_methods = true;
     // Not saved and restored around the whole drain: each splice this
@@ -2643,10 +2744,11 @@ impl Codegen {
     for qi < self.pending_generic_impl_method_owner.len {
       let q_owner = self.pending_generic_impl_method_owner.get(qi);
       let q_bare = self.pending_generic_impl_method_bare.get(qi);
+      let q_quirk = self.pending_generic_impl_method_quirk.get(qi);
       if !self.pending_generic_impl_method_proto_written.get(qi) {
-        self.emit_generic_impl_method_prototype_now(q_owner, q_bare);
+        self.emit_generic_impl_method_prototype_now(q_owner, q_bare, q_quirk);
       }
-      let err = self.emit_one_generic_impl_method(q_owner, q_bare);
+      let err = self.emit_one_generic_impl_method(q_owner, q_bare, q_quirk);
       if err.is_some() && first_err.is_none() {
         first_err = err;
       }
@@ -2657,9 +2759,17 @@ impl Codegen {
     ret first_err;
   }
 
-  // Emits the body for one queued (owner, bare name) pair; the
-  // prototype is already written by now.
-  emit_one_generic_impl_method(str owner_type, str bare_name) Option<CodegenErrorKind> {
+  // Emits the body for one queued (owner, bare name, quirk name)
+  // triple; the prototype is already written by now. `quirk_name`,
+  // when non-empty, restricts matching to the impl that implements
+  // that specific quirk, so a plain method and a same-named quirk
+  // method on the same type (`Vec<T>`'s own `clear()` next to its
+  // `Clearable` quirk's `clear()`) can't shadow each other.
+  emit_one_generic_impl_method(
+    str owner_type,
+    str bare_name,
+    str quirk_name
+  ) Option<CodegenErrorKind> {
     num ii = 0;
     bin found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -2681,6 +2791,14 @@ impl Codegen {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          // An empty `quirk_name` keeps the original behavior of
+          // matching whichever impl (plain or quirk) provides the bare
+          // name first, since most call sites here have no quirk to
+          // disambiguate with in the first place. Only a non-empty
+          // `quirk_name` narrows the search, and only to that quirk.
+          if !equals(quirk_name, "") && (!i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
             continue;
           }
           if !impl_allows_generic_args(
@@ -4291,7 +4409,7 @@ impl Codegen {
                       type_name.unwrap(),
                       "to_string"
                     );
-                    self.ensure_generic_impl_method_emitted(type_name.unwrap(), "to_string");
+                    self.ensure_generic_impl_method_emitted(type_name.unwrap(), "to_string", "");
                     DisplayResolution res2;
                     res2.fn_name = fn_name_opt2.unwrap();
                     // `*p` evaluates to a plain value, so a
@@ -4339,7 +4457,7 @@ impl Codegen {
     // exists for a plain impl method and, harmlessly when inapplicable, a
     // generic compound's mangled instantiation.
     self.ensure_plain_impl_method_prototype_emitted(r.type_name, "to_string");
-    self.ensure_generic_impl_method_emitted(r.type_name, "to_string");
+    self.ensure_generic_impl_method_emitted(r.type_name, "to_string", "");
     DisplayResolution res;
     res.fn_name = fn_name_opt.unwrap();
     res.pass_by_ref = !r.is_pointer;
@@ -5271,7 +5389,7 @@ impl Codegen {
       // A generic impl method such as `Vec<str>.sum()` gets its C
       // prototype and body emitted here, at the first call site for this
       // instantiation. A no-op for a plain type's method.
-      let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
+      let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name, "");
       if emit_err.is_some() {
         ret emit_err;
       }
@@ -5573,7 +5691,7 @@ impl Codegen {
             }
             // A generic impl method's first call site for this
             // instantiation; see `emit_method_call`.
-            let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name);
+            let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name, "");
             if emit_err.is_some() {
               ret emit_err;
             }
@@ -6950,10 +7068,10 @@ impl Codegen {
         str iter_name = iter_name_opt.unwrap();
         str opt_name = opt_name_opt.unwrap();
 
-        self.ensure_generic_impl_method_emitted(coll_name, "iter");
-        self.ensure_generic_impl_method_emitted(iter_name, "next");
+        self.ensure_generic_impl_method_emitted(coll_name, "iter", "");
+        self.ensure_generic_impl_method_emitted(iter_name, "next", "");
         if is_map && fi.has_index_name {
-          self.ensure_generic_impl_method_emitted(coll_name, "get");
+          self.ensure_generic_impl_method_emitted(coll_name, "get", "");
         }
 
         self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
