@@ -149,6 +149,10 @@ impl Server {
       self.answer_document_symbols(id, message);
       ret;
     }
+    if equals(method, "workspace/symbol") {
+      self.answer_workspace_symbols(id, message);
+      ret;
+    }
     if equals(method, "shutdown") {
       self.shutting_down = true;
       write_message(response(id, "null"));
@@ -357,6 +361,14 @@ impl Server {
     write_message(response(id, document_symbols(&self.reads, doc.unwrap())));
   }
 
+  // Every symbol matching `query`, across every document this server
+  // holds open.
+  answer_workspace_symbols(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    str query = _string_field(params, "query");
+    write_message(response(id, workspace_symbols(&self.docs, &self.reads, query)));
+  }
+
   // The document and position a request names, or nothing when it names
   // a document this server does not hold.
   document_at(JsonValue message) Option<Request> {
@@ -430,7 +442,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentFormattingProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentFormattingProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.

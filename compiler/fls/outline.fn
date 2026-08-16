@@ -86,6 +86,61 @@ pub fun document_symbols(AnalysisCache* cache, Document doc) str {
   ret b.build();
 }
 
+// Every symbol across every open document whose name contains `query`
+// (case-insensitively; an empty query matches everything), as the
+// result a client is sent. Limited to documents already open: the
+// self-hosted fls keeps no workspace-wide filesystem index of its
+// own, only what a client has actually opened, unlike a client's own
+// broader project-wide search.
+pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, str query) str {
+  str lower_query = to_lower(query);
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  Vec<Document> open_docs = docs.open.values();
+  num di = 0;
+  for di < open_docs.len {
+    Document doc = open_docs.get(di);
+    di = di + 1;
+    Analyzed read = cache.of(doc);
+    if !read.parsed {
+      continue;
+    }
+    ProgramMergeResult program = read.program;
+    Vec<OutlineEntry> found;
+    found.init(16);
+    defer found.free();
+    _collect(&program.entry_nodes, doc.path, &found);
+    str document_uri = path_to_uri(doc.path);
+    num i = 0;
+    for i < found.len {
+      OutlineEntry s = found.get(i);
+      i = i + 1;
+      if !equals(lower_query, "") && !contains(to_lower(s.name), lower_query) {
+        continue;
+      }
+      if any {
+        b.append(",");
+      }
+      any = true;
+      Span span = span_of_pos(s.pos, len(s.name));
+      b.append(format(
+        `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
+        json_quote(s.name),
+        s.kind,
+        json_quote(s.container),
+        json_quote(document_uri),
+        span.line,
+        span.start,
+        span.line,
+        span.end
+      ));
+    }
+  }
+  b.append("]");
+  ret b.build();
+}
+
 // What `nodes` declares in `file`, in source order. Only the file's own
 // declarations are listed: what it imports belongs to the outline of the
 // file that declares it.

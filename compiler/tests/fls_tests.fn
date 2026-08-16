@@ -232,6 +232,24 @@ test "an outline carries a location a client can jump to" {
   assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
 }
 
+test "workspace symbol search matches by name, case-insensitively, across every open document" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///a.fn", `fun helper() num { ret 1; }`, 1);
+  docs.opened("file:///b.fn", `compound Helper { num n; }`, 1);
+
+  str matches = workspace_symbols(&docs, &reads, "help");
+  assert contains(matches, `"name":"helper"`), "expected the lowercase match from a.fn";
+  assert contains(matches, `"name":"Helper"`), "expected the differently-cased match from b.fn";
+  assert contains(matches, `"uri":"file:///a.fn"`), "expected a.fn's own location";
+  assert contains(matches, `"uri":"file:///b.fn"`), "expected b.fn's own location";
+
+  assert equals(workspace_symbols(&docs, &reads, "nope_no_such_symbol"), "[]"), "expected no matches";
+  assert !equals(workspace_symbols(&docs, &reads, ""), "[]"), "expected an empty query to match everything";
+}
+
 test "a rename is refused when the new name is not one" {
   assert is_identifier("total"), "expected an ordinary name";
   assert is_identifier("_private"), "expected a leading underscore to be allowed";
