@@ -368,6 +368,23 @@ pub compound Codegen {
   // immediately, so it never reaches into `left`/`right`'s own nested
   // emission.
   bin suppress_next_expr_parens;
+  // Root-buffer-relative position right before the current top-level
+  // function's own signature, only ever trustworthy while `self.state
+  // == self.root_state` (several other scratch buffers, a struct or
+  // enum's own typedef in progress, say, also run at `hoist_scratch_
+  // depth == 0`, and this position is meaningless against any of
+  // them). Set once by the outermost `emit_function_named` (or `emit_
+  // test_runner`, for a test body) call; a nested one leaves it alone.
+  // Lets a lazily-triggered plain prototype splice somewhere every
+  // call site in the whole function can see, not just whichever
+  // triggered it first, which `current_stmt_start_pos` alone can't do
+  // since it's scoped to whatever C block the triggering statement
+  // sits in. Only trusted once every type the prototype names is
+  // confirmed already declared ahead of this position: a type this
+  // exact call also happens to be the first to instantiate lands its
+  // own typedef wherever the ambient splice position was at the time,
+  // not necessarily ahead of this one.
+  Option<num> current_fn_body_start_pos;
   // Unique counter for `resolve_field_chain`'s call-as-receiver temp
   // names.
   num call_recv_temp_counter;
@@ -487,10 +504,14 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
   g.suppress_next_expr_parens = false;
+  g.current_fn_body_start_pos = .None;
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
   g.hoist_scratch_depth = 0;
-  g.root_state = nil;
+  // Matches `g.state`, so `self.state == self.root_state` is already
+  // true for the very first function, not just after the first nested
+  // generic-impl-method transition sets it.
+  g.root_state = state;
   g.root_hoist_pos = .None;
   g.root_stmt_start_pos = .None;
   g.fit_subj_temp_counter = 0;
@@ -658,6 +679,22 @@ fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Opti
     ret .Some(pos.unwrap() + splice_len);
   }
   ret pos;
+}
+
+// True when splicing new text in at `pos` (within `full`) lands
+// between two top-level declarations rather than mid-signature: every
+// declaration this codegen emits ends its own line, so `pos` has to
+// sit right after a newline. This is a second, independent safety net
+// alongside checking that every type a prototype names is already
+// declared: that check can pass while `pos` still isn't a real
+// declaration boundary if some other position it was derived from
+// went stale, and landing mid-signature there would silently split an
+// identifier in two.
+fun is_safe_splice_boundary(str full, num pos) bin {
+  if pos <= 0 || pos >= len(full) {
+    ret true;
+  }
+  ret full[pos - 1] == '\n';
 }
 
 // True for a character C reads as part of a `\x` escape's digits.
@@ -941,6 +978,15 @@ impl Codegen {
       pos,
       len(text)
     );
+    // Only trustworthy when `self.state` is confirmed to be the real
+    // buffer this splice just landed in.
+    if self.state == self.root_state {
+      self.current_fn_body_start_pos = adjust_pos_after_splice(
+        self.current_fn_body_start_pos,
+        pos,
+        len(text)
+      );
+    }
   }
 
   // Given a generic compound template's bare name (from a literal with no
@@ -2125,18 +2171,29 @@ impl Codegen {
             // Pre-resolves the method's return and param types before
             // `self.state` swaps to the scratch buffer below, so a
             // generic instantiation triggered by one of them splices its
-            // typedef at top level, not into the scratch.
+            // typedef at top level, not into the scratch. Also collects
+            // each resolved name, so a splice against `current_fn_body_
+            // start_pos` below can confirm they're all already declared
+            // ahead of that position before trusting it.
+            Vec<str> proto_type_names;
+            proto_type_names.init(2);
             fit m.kind {
               .Function(proto_fnv) -> {
                 if proto_fnv.has_rtype {
-                  self.resolve_type_name(self.resolve_type_subst(*proto_fnv.rtype));
+                  let proto_rt_name = self.resolve_type_name(self.resolve_type_subst(*proto_fnv.rtype));
+                  if proto_rt_name.is_some() {
+                    proto_type_names.push(proto_rt_name.unwrap());
+                  }
                 }
                 if proto_fnv.has_args {
                   for proto_arg : proto_fnv.args {
                     fit proto_arg.kind {
                       .Variable(proto_v) -> {
                         if !proto_v.var_type.has_fn_sig {
-                          self.resolve_type_name(self.resolve_type_subst(*proto_v.var_type));
+                          let proto_pt_name = self.resolve_type_name(self.resolve_type_subst(*proto_v.var_type));
+                          if proto_pt_name.is_some() {
+                            proto_type_names.push(proto_pt_name.unwrap());
+                          }
                         }
                       }
                       _ -> {}
@@ -2175,7 +2232,7 @@ impl Codegen {
               self.emit_hoisted(proto_text);
               self.hoist_insert_pos = saved_proto_hoist_pos;
             } else {
-              let proto_splice_pos = self.current_stmt_start_pos;
+              let proto_splice_pos = self.fn_proto_splice_pos(proto_type_names);
               self.hoist_insert_pos = proto_splice_pos;
               self.emit_hoisted(proto_text);
               // A captured local, so it needs the shift `emit_hoisted`
@@ -2308,10 +2365,22 @@ impl Codegen {
 
     // Pre-resolved before swapping to the scratch buffer below, so a
     // generic instantiation triggered by one of these types splices at
-    // top level rather than into the scratch.
-    self.resolve_type_name(*pm_rtype);
+    // top level rather than into the scratch. Also collects each
+    // resolved name (plus the receiver's own type), so a splice
+    // against `current_fn_body_start_pos` below can confirm they're
+    // all already declared ahead of that position before trusting it.
+    Vec<str> pm_type_names;
+    pm_type_names.init(2);
+    pm_type_names.push(owner_type);
+    let pm_rt_pre = self.resolve_type_name(*pm_rtype);
+    if pm_rt_pre.is_some() {
+      pm_type_names.push(pm_rt_pre.unwrap());
+    }
     for pm_pt3 : pm_param_types {
-      self.resolve_type_name(*pm_pt3);
+      let pm_pt3_name = self.resolve_type_name(*pm_pt3);
+      if pm_pt3_name.is_some() {
+        pm_type_names.push(pm_pt3_name.unwrap());
+      }
     }
 
     CodegenState pm_scratch = codegen_state_new();
@@ -2352,7 +2421,7 @@ impl Codegen {
     } else {
       // `saved_pm_hoist_pos` is a plain captured local, so it needs
       // manual adjustment for this splice.
-      let pm_splice_pos = self.current_stmt_start_pos;
+      let pm_splice_pos = self.fn_proto_splice_pos(pm_type_names);
       self.hoist_insert_pos = pm_splice_pos;
       self.emit_hoisted(pm_text);
       if pm_splice_pos.is_some() {
@@ -2443,9 +2512,20 @@ impl Codegen {
 
     self.emitted_plain_function_protos.push(fn_name);
 
-    self.resolve_type_name(*pf_rtype);
+    // Collects each resolved name, so a splice against `current_fn_
+    // body_start_pos` below can confirm they're all already declared
+    // ahead of that position before trusting it.
+    Vec<str> pf_type_names;
+    pf_type_names.init(2);
+    let pf_rt_pre = self.resolve_type_name(*pf_rtype);
+    if pf_rt_pre.is_some() {
+      pf_type_names.push(pf_rt_pre.unwrap());
+    }
     for pf_pt3 : pf_param_types {
-      self.resolve_type_name(*pf_pt3);
+      let pf_pt3_name = self.resolve_type_name(*pf_pt3);
+      if pf_pt3_name.is_some() {
+        pf_type_names.push(pf_pt3_name.unwrap());
+      }
     }
 
     CodegenState pf_scratch = codegen_state_new();
@@ -2497,7 +2577,7 @@ impl Codegen {
     } else {
       // `saved_pf_hoist_pos` is a captured local, so this splice needs a
       // manual adjustment.
-      let pf_splice_pos = self.current_stmt_start_pos;
+      let pf_splice_pos = self.fn_proto_splice_pos(pf_type_names);
       self.hoist_insert_pos = pf_splice_pos;
       self.emit_hoisted(pf_text);
       if pf_splice_pos.is_some() {
@@ -3646,6 +3726,66 @@ impl Codegen {
   // wrapping `(`/`)` pair, consuming it (one shot, not inherited by
   // `left`/`right`'s own recursive emission) so only the outermost
   // pair is skipped.
+  // Whether every name in `type_names` that could possibly need one
+  // already has its own `typedef struct`/`typedef enum` declared
+  // somewhere before `pos` in the true root buffer. A name skipped by
+  // `map_type_to_c` (a scalar like `num`/`str`, or a raw C keyword
+  // spelling it already maps to) never gets a typedef of its own, so
+  // it's excluded rather than always failing the check.
+  fn_types_declared_before(Vec<str> type_names, num pos) bin {
+    if pos <= 0 {
+      ret false;
+    }
+    str head = "";
+    bin head_built = false;
+    for name : type_names {
+      if equals(name, "") || equals(name, "void") || !equals(map_type_to_c(name), name) {
+        continue;
+      }
+      if !head_built {
+        head = substr(self.state.out.build(), 0, pos);
+        head_built = true;
+      }
+      StringBuilder struct_needle_sb = string_builder_init(20);
+      struct_needle_sb.append("typedef struct ");
+      struct_needle_sb.append(name);
+      StringBuilder enum_needle_sb = string_builder_init(20);
+      enum_needle_sb.append("typedef enum ");
+      enum_needle_sb.append(name);
+      if !contains(head, struct_needle_sb.build()) && !contains(head, enum_needle_sb.build()) {
+        ret false;
+      }
+    }
+    ret true;
+  }
+
+  // Non-nested splice position for a lazily-triggered plain (generic
+  // or non-generic) prototype: the earlier of the enclosing function's
+  // own start and the current-statement position, so escaping a nested
+  // C block (the reason to prefer the function's own start at all)
+  // never lands later than the plain statement-scoped splice already
+  // did. `current_stmt_start_pos` isn't always actually inside the
+  // function `current_fn_body_start_pos` names — a generic plain
+  // function's deferred impl-method drain rewinds it to a position
+  // from a different splice entirely, which can sit before the
+  // enclosing function's own start. The function's own start is only
+  // trusted at all when it's confirmed safe (`self.state` is the real
+  // buffer, and every type the prototype names is already declared
+  // ahead of that position). `type_names` is the prototype's own
+  // return type plus every parameter type, in any order.
+  fn_proto_splice_pos(Vec<str> type_names) Option<num> {
+    if self.state == self.root_state && self.current_fn_body_start_pos.is_some() {
+      num fp = self.current_fn_body_start_pos.unwrap();
+      if self.fn_types_declared_before(type_names, fp) && is_safe_splice_boundary(self.state.out.build(), fp) {
+        if self.current_stmt_start_pos.is_some() && self.current_stmt_start_pos.unwrap() < fp {
+          ret self.current_stmt_start_pos;
+        }
+        ret self.current_fn_body_start_pos;
+      }
+    }
+    ret self.current_stmt_start_pos;
+  }
+
   emit_condition(Node cond) Option<CodegenErrorKind> {
     bin is_plain_binary = false;
     fit cond.kind {
@@ -6271,7 +6411,15 @@ impl Codegen {
         // name`, a stricter guarantee this codegen doesn't enforce). For
         // an `__auto_type`-inferred const the pointer-ness isn't known
         // yet, so `const` lands before; that's valid GNU C either way.
-        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr);
+        // `str` needs the same treatment despite `dtype_is_pointer`
+        // reading false for it (Fun's own type system doesn't consider
+        // a bare `str` a pointer type, even though its C spelling,
+        // `char*`, is one): landing `const` before it declares `const
+        // char*`, incompatible with the plain `char*` every ordinary
+        // `str` value uses, which is what every str-returning function
+        // and str-taking parameter expects.
+        bin const_is_ptr_binding =
+        !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(v.var_type.type_str, "str"));
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
@@ -8426,6 +8574,18 @@ impl Codegen {
             ret aserr;
           }
         }
+        // Marks the true start of this function's own signature, so a
+        // lazily-triggered prototype can splice somewhere every call
+        // site in the whole function (not just the one that happened
+        // to trigger it first) can see. Only the outermost call owns
+        // this: a nested one reached through some scratch buffer
+        // (`self.state != self.root_state`) leaves it alone, since its
+        // own position would be relative to the wrong buffer entirely.
+        bin owns_fn_body_start_pos =
+        self.state == self.root_state && self.current_fn_body_start_pos.is_none();
+        if owns_fn_body_start_pos {
+          self.current_fn_body_start_pos = .Some(self.state.out.len());
+        }
         // Fresh per function, and not scoped to nested blocks, so an
         // inner `{ }` shadowing an outer local of the same name isn't
         // tracked correctly.
@@ -8621,8 +8781,39 @@ impl Codegen {
         if berr.is_some() {
           ret berr;
         }
+        // Typecheck already rejects a non-void function whose body
+        // doesn't return on every path; C's own, weaker flow analysis
+        // can't always see that an exhaustive `fit`'s if/else-if chain
+        // covers everything, and warns as if it were a real gap. Only
+        // added when the body's own last statement isn't already a
+        // plain `ret`, the common case C can already prove itself:
+        // this doesn't need to be exhaustive about every provably-
+        // terminating shape, just conservative about not stacking an
+        // extra statement onto the ordinary one. Stays deliberately
+        // loud (a crash) rather than `__builtin_unreachable()` (silent
+        // undefined behavior), in case that guarantee is ever wrong.
+        bin fn_body_ends_in_return = false;
+        fit (*f.body).kind {
+          .Body(fn_bn) -> {
+            if fn_bn.statements.len > 0 {
+              let fn_last_stmt = fn_bn.statements.get(fn_bn.statements.len - 1);
+              fit fn_last_stmt.kind {
+                .StatementReturn(_) -> { fn_body_ends_in_return = true; }
+                _ -> {}
+              }
+            }
+          }
+          _ -> {}
+        }
+        if !is_main && !fn_body_ends_in_return && rt.is_some() && !equals(rt.unwrap(), "void") {
+          self.state.write_indent();
+          self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
+        }
         self.state.indent_level = self.state.indent_level - 1;
         self.state.write("}\n");
+        if owns_fn_body_start_pos {
+          self.current_fn_body_start_pos = .None;
+        }
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -9053,7 +9244,11 @@ impl Codegen {
             }
           }
         }
-        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr);
+        // See the matching fix on the local-variable declaration site:
+        // `str` needs the same "pointer for const-placement purposes"
+        // treatment `dtype_is_pointer` alone doesn't give it.
+        bin const_is_ptr_binding =
+        !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(v.var_type.type_str, "str"));
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
@@ -11420,6 +11615,14 @@ impl Codegen {
           // Instantiations belong at file scope, not nested inside the
           // test function.
           self.hoist_insert_pos = .Some(self.state.out.len());
+          // A test body compiles straight through `emit_body`, never
+          // through `emit_function_named`, so it needs its own copy of
+          // that function's function-start ownership capture.
+          bin owns_test_fn_body_start_pos =
+          self.state == self.root_state && self.current_fn_body_start_pos.is_none();
+          if owns_test_fn_body_start_pos {
+            self.current_fn_body_start_pos = .Some(self.state.out.len());
+          }
           self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
           self.state.indent_level = self.state.indent_level + 1;
           let berr = self.emit_body(*t.body);
@@ -11429,6 +11632,9 @@ impl Codegen {
           }
           self.state.indent_level = self.state.indent_level - 1;
           self.state.write("}\n\n");
+          if owns_test_fn_body_start_pos {
+            self.current_fn_body_start_pos = .None;
+          }
           index = index + 1;
         }
         _ -> {}
@@ -15985,16 +16191,16 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  int64_t value;
     `} Box__num;
     `
+    `    int64_t Box__num__get(Box__num* self);
     `int64_t Box__num__get(Box__num* self) {
     `    return self->value;
     `}
     `int main(int argc, char** argv) {
     `    Box__num b;
-    `    int64_t Box__num__get(Box__num* self);
     `    Box__num__get(&b);
     `}
     ``
-  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces -- its bare PROTOTYPE, unlike the definition, is legal (if unusually placed) right at its own first-use point, since a declaration (not a full definition) is valid C at block scope. Also expects `main`'s own C signature forced to the real entry-point shape (`int main(int argc, char** argv)`), not its naive Fun-level `num`-returning, no-arg signature";
+  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces. Its bare PROTOTYPE now splices to the same file-scope position, visible from every call site in the whole function rather than just the block that happened to trigger it first. Also expects `main`'s own C signature forced to the real entry-point shape (`int main(int argc, char** argv)`), not its naive Fun-level `num`-returning, no-arg signature";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
