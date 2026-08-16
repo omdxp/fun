@@ -1,0 +1,238 @@
+// Signature help.
+// 
+// What a call's own signature looks like, and which parameter the
+// cursor sits on, while a reader is still typing inside its parens.
+
+imp protocol;
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+
+// What a client is told when the cursor isn't inside a resolvable call.
+const str NO_SIGNATURE = "null";
+
+// The signature help for the position `line`/`character` in `doc`, as
+// the result a client is sent.
+pub fun signature_help(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret NO_SIGNATURE;
+  }
+  Vec<Token> tokens = read.tokens;
+  let call = _enclosing_call(&tokens, line, character);
+  if call.is_none() {
+    ret NO_SIGNATURE;
+  }
+  CallSite c = call.unwrap();
+  ProgramMergeResult program = read.program;
+  num source_line = line + 1;
+
+  Option<Declaration> found = .None;
+  // A method's own rendered signature includes its implicit `self` as
+  // parameter 0, which the reader never types; shifting the active
+  // index by one keeps it pointing at the actual argument the cursor
+  // sits on rather than at `self`.
+  num active_param = c.active_param;
+  if !equals(c.receiver, "") {
+    str type_name = type_name_of_local(&program.nodes, c.receiver, doc.path, source_line);
+    if !equals(type_name, "") {
+      found = lookup_method(&program.nodes, type_name, c.callee);
+      active_param = active_param + 1;
+    }
+  } else {
+    found = lookup_top_level(&program.nodes, c.callee);
+  }
+  if found.is_none() {
+    ret NO_SIGNATURE;
+  }
+  Declaration d = found.unwrap();
+  fit d.kind {
+    .Function -> {}
+    _ -> { ret NO_SIGNATURE; }
+  }
+  ret _signature_result(d.detail, active_param);
+}
+
+// One call the cursor sits inside: the callee's own bare name, its
+// receiver when reached through a dot (empty for a plain function
+// call), and which positional argument (0-based) the cursor currently
+// sits on.
+compound CallSite {
+  str callee;
+  str receiver;
+  num active_param;
+}
+
+// Walks backward from `line`/`character` to the nearest unmatched
+// `(`, counting top-level commas along the way to know which argument
+// the cursor is inside, then reads the identifier (and its own
+// receiver, if reached through a dot) immediately before it.
+fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite> {
+  let anchor = _token_index_at_or_before(tokens, line, character);
+  if anchor.is_none() {
+    ret .None;
+  }
+  num i = anchor.unwrap();
+  num depth = 0;
+  num commas = 0;
+  for i >= 0 {
+    Token tk = tokens.get(i);
+    if token_is_symbol(tk, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(tk, "(") {
+      if depth == 0 {
+        break;
+      }
+      depth = depth - 1;
+    } elif depth == 0 && token_is_operator(tk, ",") {
+      commas = commas + 1;
+    }
+    i = i - 1;
+  }
+  if i < 0 {
+    ret .None;
+  }
+  // `i` now indexes the opening `(` itself.
+  let callee_tok = token_before(tokens, i);
+  if callee_tok.is_none() {
+    ret .None;
+  }
+  Token ct = callee_tok.unwrap();
+  fit ct.type {
+    .Identifier -> {}
+    _ -> { ret .None; }
+  }
+  str callee = token_word(ct);
+  str receiver = "";
+  num callee_index = index_of_token(tokens, ct);
+  let dot = token_before(tokens, callee_index);
+  if dot.is_some() && token_is_operator(dot.unwrap(), ".") {
+    num dot_index = index_of_token(tokens, dot.unwrap());
+    let recv_tok = token_before(tokens, dot_index);
+    if recv_tok.is_some() {
+      fit recv_tok.unwrap().type {
+        .Identifier -> { receiver = token_word(recv_tok.unwrap()); }
+        _ -> {}
+      }
+    }
+  }
+  CallSite c;
+  c.callee = callee;
+  c.receiver = receiver;
+  c.active_param = commas;
+  ret .Some(c);
+}
+
+// The index of the last non-trivia token at or before `line`/
+// `character`, so a cursor sitting in whitespace just after a token
+// (typing a new argument, nothing under the cursor itself) still has
+// something to walk backward from.
+fun _token_index_at_or_before(Vec<Token>* tokens, num line, num character) Option<num> {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num best = -1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+      continue;
+    }
+    if t.pos.line > source_line {
+      break;
+    }
+    if t.pos.line == source_line && t.pos.start_col > source_col {
+      break;
+    }
+    best = i - 1;
+  }
+  if best < 0 {
+    ret .None;
+  }
+  ret .Some(best);
+}
+
+// The comma-separated parameter labels between the first pair of
+// parens in `signature` (a rendered function detail, "fun name(Type
+// p1, Type p2) RetType"), tracking angle-bracket depth so a generic
+// parameter type's own comma ("Map<str, num> m") isn't mistaken for a
+// parameter separator.
+fun _split_params(str signature) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num open = index_of_char(signature, '(');
+  if open < 0 {
+    ret out;
+  }
+  num depth_paren = 0;
+  num depth_angle = 0;
+  num start = open + 1;
+  num i = start;
+  num n = len(signature);
+  for i < n {
+    chr c = signature[i];
+    if c == '(' {
+      depth_paren = depth_paren + 1;
+    } elif c == ')' {
+      if depth_paren == 0 {
+        str piece = trim(substr(signature, start, i - start));
+        if !equals(piece, "") {
+          out.push(piece);
+        }
+        ret out;
+      }
+      depth_paren = depth_paren - 1;
+    } elif c == '<' {
+      depth_angle = depth_angle + 1;
+    } elif c == '>' {
+      if depth_angle > 0 {
+        depth_angle = depth_angle - 1;
+      }
+    } elif c == ',' && depth_paren == 0 && depth_angle == 0 {
+      str piece = trim(substr(signature, start, i - start));
+      if !equals(piece, "") {
+        out.push(piece);
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The LSP `SignatureHelp` result: `signature`'s own parameters broken
+// out individually, with `active_param` (clamped into range) marking
+// which one the cursor sits on.
+fun _signature_result(str signature, num active_param) str {
+  Vec<str> params = _split_params(signature);
+  StringBuilder b = string_builder_init(128);
+  b.append(`{"signatures":[{"label":`);
+  b.append(json_quote(signature));
+  b.append(`,"parameters":[`);
+  num i = 0;
+  for i < params.len {
+    if i > 0 {
+      b.append(",");
+    }
+    b.append(`{"label":`);
+    b.append(json_quote(params.get(i)));
+    b.append("}");
+    i = i + 1;
+  }
+  num clamped = active_param;
+  if params.len > 0 && clamped >= params.len {
+    clamped = params.len - 1;
+  }
+  if clamped < 0 {
+    clamped = 0;
+  }
+  b.append(`]}],"activeSignature":0,"activeParameter":`);
+  b.append(format_num(clamped));
+  b.append("}");
+  ret b.build();
+}

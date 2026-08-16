@@ -4,6 +4,7 @@ imp ..fls.protocol;
 imp ..fls.positions;
 imp ..fls.symbols;
 imp ..fls.navigation;
+imp ..fls.signature_help;
 imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
@@ -368,6 +369,52 @@ test "hover on a method call, a qualified variant, and a ret's own bare variant 
   // On the qualified `Outcome.Ok(5)` inside `other`.
   str qualified_hover = hover(&reads, doc, 16, 15);
   assert contains(qualified_hover, "Ok("), "expected the qualified variant to resolve";
+}
+
+test "signature help shows a call's own parameters and tracks the active one, self included for a method" {
+  str src = `compound Box {
+  `  num width;
+  `}
+  `impl Box {
+  `  pub scale(num factor, num offset) num {
+  `    ret self.width * factor + offset;
+  `  }
+  `}
+  `fun add(num a, num b) num {
+  `  ret a + b;
+  `}
+  `fun main() num {
+  `  num x = add(1, 2);
+  `  Box b;
+  `  num y = b.scale(3, 4);
+  `  ret x + y;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sig.fn";
+  doc.path = "sig.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after `add(`, on the first argument.
+  str first_arg = signature_help(&reads, doc, 12, 14);
+  assert contains(first_arg, `"label":"fun add(num a, num b) num"`), "expected add's own signature";
+  assert contains(first_arg, `"activeParameter":0`), "expected the first parameter active";
+
+  // Right after the comma, on the second argument.
+  str second_arg = signature_help(&reads, doc, 12, 17);
+  assert contains(second_arg, `"activeParameter":1`), "expected the second parameter active";
+
+  // A method call's implicit self shifts the active index by one, so
+  // the first argument the reader actually types still lands on
+  // "factor", not on self.
+  str method_first_arg = signature_help(&reads, doc, 14, 18);
+  assert contains(method_first_arg, `"label":"fun scale(Box* self, num factor, num offset) num"`), "expected scale's own signature with self";
+  assert contains(method_first_arg, `"activeParameter":1`), "expected the first real argument active, past the implicit self";
+
+  // Outside any call at all.
+  assert equals(signature_help(&reads, doc, 0, 0), "null"), "expected no signature help outside a call";
 }
 
 test "completion still answers while the text does not parse" {

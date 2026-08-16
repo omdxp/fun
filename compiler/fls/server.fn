@@ -10,6 +10,7 @@ imp documents;
 imp analysis;
 imp diagnostics;
 imp navigation;
+imp signature_help;
 imp outline;
 imp references;
 imp completion;
@@ -113,6 +114,10 @@ impl Server {
     }
     if equals(method, "textDocument/hover") {
       self.answer_hover(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/signatureHelp") {
+      self.answer_signature_help(id, message);
       ret;
     }
     // A client asks for a declaration under four names; what it wants
@@ -255,6 +260,18 @@ impl Server {
     }
     Request r = asked.unwrap();
     write_message(response(id, hover(&self.reads, r.doc, r.line, r.character)));
+  }
+
+  // Shows a call's own signature and which parameter the cursor sits
+  // on, while the reader is still typing inside its parens.
+  answer_signature_help(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, signature_help(&self.reads, r.doc, r.line, r.character)));
   }
 
   // Says where the name under the cursor was declared.
@@ -413,7 +430,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"documentFormattingProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentFormattingProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.
