@@ -292,6 +292,40 @@ test "completion after a dot offers what the receiver has" {
   assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
 }
 
+test "hover resolves a bare variant shorthand and its payload binding inside a fit" {
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `    .Square(side) -> { ret side * side; }
+  `  }
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shape.fn";
+  doc.path = "shape.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `Circle` in `.Circle(r) ->`.
+  str variant_hover = hover(&reads, doc, 6, 6);
+  assert contains(variant_hover, "Circle(num)"), "expected the variant's own payload signature";
+
+  // On the second `r` in `ret r * r;`, the payload binding's use, not
+  // its declaration site inside the pattern's parens.
+  str binding_hover = hover(&reads, doc, 6, 24);
+  assert contains(binding_hover, "num r"), "expected the binding's inferred payload type";
+
+  // Go to definition on the variant lands on the enum it belongs to.
+  str variant_def = definition(&reads, doc, 6, 6);
+  assert contains(variant_def, `"line":0`), "expected the enum's own declaration line";
+}
+
 test "completion still answers while the text does not parse" {
   // What a reader is typing is half-written by definition, so a failed
   // parse must not turn into an empty reply.

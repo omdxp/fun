@@ -129,6 +129,11 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
         ret field;
       }
     }
+  } elif _is_dot_shorthand(tokens, t) {
+    let variant = lookup_fit_variant(&program.nodes, name, doc.path, source_line);
+    if variant.is_some() {
+      ret variant;
+    }
   }
 
   let declared_field = lookup_field_at(&program.nodes, doc.path, source_line, name);
@@ -168,6 +173,37 @@ fun _receiver_of(Vec<Token>* tokens, Token t) str {
     _ -> {}
   }
   ret "";
+}
+
+// True when `t` is a bare `.Name` fit-pattern shorthand: directly
+// preceded by a `.` that is not itself preceded by an identifier (an
+// ordinary field or method access, which `_receiver_of` resolves
+// instead).
+fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret false;
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() {
+    ret false;
+  }
+  if !token_is_operator(dot.unwrap(), ".") {
+    ret false;
+  }
+  num dot_index = index_of_token(tokens, dot.unwrap());
+  if dot_index <= 0 {
+    ret true;
+  }
+  let before = token_before(tokens, dot_index);
+  if before.is_none() {
+    ret true;
+  }
+  fit before.unwrap().type {
+    .Identifier -> { ret false; }
+    _ -> {}
+  }
+  ret true;
 }
 
 fun _hover_result(str markdown, Span s) str {

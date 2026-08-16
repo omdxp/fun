@@ -23,6 +23,7 @@ pub enum DeclarationKind {
   Local,
   Parameter,
   Global,
+  Variant,
 }
 
 // A name's declaration: what it is, how to spell it back to a reader,
@@ -359,6 +360,10 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
           if found.is_some() {
             ret found;
           }
+          let found_binding = _lookup_fit_binding(f.body, name, program, file, line);
+          if found_binding.is_some() {
+            ret found_binding;
+          }
         }
       }
       _ -> {}
@@ -455,6 +460,288 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
       let found = _lookup_in_body(inner, name);
       if found.is_some() {
         ret found;
+      }
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
+// The enum type name a `fit` statement's subject expression resolves
+// to. Only a bare local/parameter subject is resolved, the only
+// receiver shape a variant hover or binding lookup needs so far; a
+// call or chained field access subject yields "".
+fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
+  if subject == nil {
+    ret "";
+  }
+  fit subject.kind {
+    .Identifier(s) -> { ret type_name_of_local(program, s, file, line); }
+    _ -> {}
+  }
+  ret "";
+}
+
+// The `fit` statement, among every function's body in the program,
+// whose braces cover `line` in `file`.
+fun _covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !_covers(n, f, file, line) {
+          continue;
+        }
+        if f.has_body {
+          let found = _find_covering_fit(f.body, line);
+          if found.is_some() {
+            ret found;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// Descends into every nested block a statement can hide one inside,
+// looking for a `fit` whose overall span (from its own line through
+// the last line any of its branches reaches) covers `line`.
+fun _find_covering_fit(Node* body, num line) Option<Node*> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .StatementFit(f) -> {
+      num last = 0;
+      num bi = 0;
+      for bi < f.branches.len {
+        FitBranch br = f.branches.get(bi);
+        bi = bi + 1;
+        num reach = _last_line(br.body);
+        if reach > last {
+          last = reach;
+        }
+      }
+      num start = 0;
+      if body.has_pos {
+        start = body.pos.line;
+      }
+      if line >= start && line <= last {
+        ret .Some(body);
+      }
+      num bi2 = 0;
+      for bi2 < f.branches.len {
+        FitBranch br2 = f.branches.get(bi2);
+        bi2 = bi2 + 1;
+        let nested = _find_covering_fit(br2.body, line);
+        if nested.is_some() {
+          ret nested;
+        }
+      }
+    }
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _find_covering_fit(block.statements.get(i), line);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    .StatementIf(s) -> { ret _find_covering_fit(s.body, line); }
+    .StatementElse(inner) -> { ret _find_covering_fit(inner, line); }
+    _ -> {}
+  }
+  ret .None;
+}
+
+// The declaration of `variant_name`, one of `enum_name`'s own
+// variants, rendered as a reader would write its own pattern (bare,
+// or with its payload types in parens). No per-variant position is
+// tracked, so go-to-definition lands on the enum's own declaration,
+// the same way a compound field points at its compound.
+pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, enum_name) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(24);
+          b.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            b.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                b.append(", ");
+              }
+              b.append(render_type(variant.payload.get(p)));
+              p = p + 1;
+            }
+            b.append(")");
+          }
+          ret .Some(_declaration(variant_name, .Variant, b.build(), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The declaration of a bare `.VariantName` (or a fit destructuring
+// pattern's own qualified `Enum.VariantName`) written at `line` in
+// `file`, resolved against the enclosing `fit` statement's subject
+// type.
+pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  let found = _covering_fit(program, file, line);
+  if found.is_none() {
+    ret .None;
+  }
+  fit found.unwrap().kind {
+    .StatementFit(f) -> {
+      str enum_name = _fit_subject_type(program, f.exp, file, line);
+      if equals(enum_name, "") {
+        ret .None;
+      }
+      ret enum_variant_declaration(program, enum_name, name);
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
+// The variant name a fit branch's own condition names, when it is a
+// data-carrying destructuring pattern (`.Circle(r)` or
+// `Shape.Circle(r)`): the identifier `_try_parse_fit_destructure`
+// builds as the right side of the condition's `.` expression.
+fun _branch_variant_name(FitBranch br) str {
+  if !br.has_condition || br.condition == nil {
+    ret "";
+  }
+  fit br.condition.kind {
+    .Expression(e) -> {
+      if equals(e.op, ".") && e.has_right && e.right != nil {
+        fit e.right.kind {
+          .Identifier(s) -> { ret s; }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
+// The payload type at position `idx` of `enum_name`'s variant named
+// `variant_name`, rendered as a reader would write it.
+fun _variant_payload_type(Vec<Node>* program, str enum_name, str variant_name, num idx) Option<str> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, enum_name) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          if idx < 0 || idx >= variant.payload.len {
+            ret .None;
+          }
+          ret .Some(render_type(variant.payload.get(idx)));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// A fit arm's own payload binding named `name`, if `line` falls
+// within that arm: its pattern through the end of its body. Its type
+// is the matching positional payload type of whichever variant the
+// arm's own condition names, resolved against the fit's subject.
+fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _lookup_fit_binding(block.statements.get(i), name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    .StatementIf(s) -> { ret _lookup_fit_binding(s.body, name, program, file, line); }
+    .StatementElse(inner) -> { ret _lookup_fit_binding(inner, name, program, file, line); }
+    .StatementFit(f) -> {
+      num bi = 0;
+      for bi < f.branches.len {
+        FitBranch br = f.branches.get(bi);
+        bi = bi + 1;
+        num start = 0;
+        if br.has_condition && br.condition != nil && br.condition.has_pos {
+          start = br.condition.pos.line;
+        } elif br.body != nil && br.body.has_pos {
+          start = br.body.pos.line;
+        }
+        num last = _last_line(br.body);
+        bin covers = line >= start && line <= last;
+        if covers && br.has_bindings {
+          num idx = -1;
+          num k = 0;
+          for k < br.bindings.len {
+            if equals(br.bindings.get(k), name) {
+              idx = k;
+            }
+            k = k + 1;
+          }
+          if idx >= 0 {
+            str enum_name = _fit_subject_type(program, f.exp, file, line);
+            if !equals(enum_name, "") {
+              let payload_type = _variant_payload_type(program, enum_name, _branch_variant_name(br), idx);
+              if payload_type.is_some() && br.body != nil {
+                StringBuilder b = string_builder_init(24);
+                b.append(payload_type.unwrap());
+                b.append(" ");
+                b.append(name);
+                ret .Some(_declaration(name, .Local, b.build(), br.body.pos));
+              }
+            }
+          }
+        }
+        // A nested `fit`/`if` inside this arm's body can shadow.
+        let nested = _lookup_fit_binding(br.body, name, program, file, line);
+        if nested.is_some() {
+          ret nested;
+        }
       }
     }
     _ -> {}
