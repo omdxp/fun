@@ -27,6 +27,17 @@ test "a string is written with what JSON reserves escaped" {
   assert equals(json_quote("a\\b"), `"a\\b"`), "expected the backslash to be escaped";
 }
 
+test "a string with non-ASCII UTF-8 bytes is passed through unescaped" {
+  // `chr` is a signed C `char`, so a UTF-8 lead/continuation byte
+  // (>= 0x80) reads as negative; regression test for that byte
+  // getting misread as a C0 control character and escaped as a bare
+  // `\u` with no hex digits (an unparseable JSON string).
+  str s = "caf\xC3\xA9";
+  let q = json_quote(s);
+  assert equals(q, "\"caf\xC3\xA9\""), "expected the UTF-8 bytes to pass through untouched";
+  assert !contains(q, "\\u"), "expected no \\u escape for a non-control byte";
+}
+
 test "a header name is read whatever case it is written in" {
   assert starts_with_ignore_case("Content-Length: 5", "content-length:"), "expected the header to be recognized";
   assert starts_with_ignore_case("content-length: 5", "Content-Length:"), "expected either case to match";

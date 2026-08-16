@@ -100,7 +100,16 @@ pub fun notification(str method, str params_json) str {
 }
 
 // Writes `s` as a JSON string, with the characters JSON reserves
-// escaped.
+// escaped. `s` is UTF-8, and `chr` is a signed C `char`, so a byte >=
+// 0x80 (any lead or continuation byte of a multi-byte UTF-8 character)
+// reads as negative; normalizing to its true 0-255 value before the
+// control-character check is what tells a real C0 control character
+// (0x00-0x1F, the only thing JSON requires escaped here) apart from an
+// ordinary non-ASCII byte, which is valid unescaped JSON content and
+// must pass through untouched. Without this, a negative byte both
+// misfired the escape and fed a negative `code` to `to_hex`, which
+// returns "" for a negative input -- producing a bare `\u` with no
+// hex digits, an escape sequence no JSON parser can read.
 pub fun json_quote(str s) str {
   StringBuilder b = string_builder_init(len(s) + 2);
   b.append_char('"');
@@ -108,6 +117,10 @@ pub fun json_quote(str s) str {
   for i < len(s) {
     let c = s[i];
     i = i + 1;
+    num code = c;
+    if code < 0 {
+      code = code + 256;
+    }
     if c == '"' {
       b.append("\\\"");
     } elif c == '\\' {
@@ -118,8 +131,7 @@ pub fun json_quote(str s) str {
       b.append("\\r");
     } elif c == '\t' {
       b.append("\\t");
-    } elif c < ' ' {
-      num code = c;
+    } elif code < 32 {
       b.append(format("\\u{str}", to_hex(code, 4)));
     } else {
       b.append_char(c);
