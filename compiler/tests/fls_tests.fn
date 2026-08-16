@@ -5,6 +5,7 @@ imp ..fls.positions;
 imp ..fls.symbols;
 imp ..fls.navigation;
 imp ..fls.signature_help;
+imp ..fls.inlay_hints;
 imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
@@ -465,6 +466,45 @@ test "signature help shows a call's own parameters and tracks the active one, se
 
   // Outside any call at all.
   assert equals(signature_help(&reads, doc, 0, 0), "null"), "expected no signature help outside a call";
+}
+
+test "inlay hints infer a let local's own type from a literal, a plain call, and a method call" {
+  str src = `compound Box {
+  `  num width;
+  `}
+  `impl Box {
+  `  pub doubled() num {
+  `    ret self.width * 2;
+  `  }
+  `}
+  `fun helper() str {
+  `  ret "hi";
+  `}
+  `fun main() num {
+  `  let x = 5;
+  `  let s = helper();
+  `  Box b;
+  `  let n = b.doubled();
+  `  ret x;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hints.fn";
+  doc.path = "hints.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  assert contains(hints, `"label":": num"`), "expected a literal's own type";
+  assert contains(hints, `"label":": str"`), "expected a plain call's own declared return type";
+  // Both the literal-int local and the method-call local infer "num",
+  // so this only confirms at least one num hint landed at the right
+  // position rather than counting occurrences.
+  assert contains(hints, `"line":12,"character":7`), "expected the first hint positioned right after x";
+
+  // Nothing inside the given line range.
+  assert equals(inlay_hints(&reads, doc, 0, 0), "[]"), "expected no hints outside the requested range";
 }
 
 test "completion still answers while the text does not parse" {

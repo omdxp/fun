@@ -1,0 +1,171 @@
+// Inlay hints.
+// 
+// A `let`-inferred local's own resolved type, shown as inline "ghost"
+// text right after its name -- the same information hover already
+// gives on demand, made visible without asking for it.
+// 
+// `let`'s declared type never actually resolves in the parsed tree:
+// the parser leaves it as a permanent __let_infer__ sentinel, and
+// only codegen (embedding its own on-the-fly inference) ever turns
+// that into a real type, without writing it back anywhere fls can
+// read. Rather than reimplement that inference in full, this covers
+// the shapes a `let`'s own initializer most commonly takes: a
+// literal, a plain function call, or a method call.
+
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp protocol;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+
+// Every `let name = value;` local within lines `start_line` through
+// `end_line` (both 0-indexed, inclusive) of `doc`, each as a type
+// hint positioned right after its own name.
+pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_line) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed || !read.lexed {
+    ret "[]";
+  }
+  Vec<Token> tokens = read.tokens;
+  ProgramMergeResult program = read.program;
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != TokenType.Keyword || !equals(token_word(t), "let") {
+      continue;
+    }
+    num src_line = t.pos.line;
+    num line0 = src_line - 1;
+    if line0 < start_line || line0 > end_line {
+      continue;
+    }
+    let name_tok_opt = _next_non_trivia(&tokens, i);
+    if name_tok_opt.is_none() {
+      continue;
+    }
+    Token name_tok = name_tok_opt.unwrap();
+    fit name_tok.type {
+      .Identifier -> {}
+      _ -> { continue; }
+    }
+    num name_idx = index_of_token(&tokens, name_tok);
+    let eq_tok_opt = _next_non_trivia(&tokens, name_idx + 1);
+    if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
+      continue;
+    }
+    num eq_idx = index_of_token(&tokens, eq_tok_opt.unwrap());
+    let val_tok_opt = _next_non_trivia(&tokens, eq_idx + 1);
+    if val_tok_opt.is_none() {
+      continue;
+    }
+    str type_part = _infer_type(&tokens, val_tok_opt.unwrap(), &program.nodes, doc.path, src_line);
+    if equals(type_part, "") {
+      continue;
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    b.append(format(
+      `{"position":{"line":{num},"character":{num}},"label":{str},"kind":1,"paddingLeft":true}`,
+      line0,
+      name_tok.pos.end_col - 1,
+      json_quote(format(": {str}", type_part))
+    ));
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The token right after index `from_index`, skipping what carries no
+// meaning.
+fun _next_non_trivia(Vec<Token>* tokens, num from_index) Option<Token> {
+  num i = from_index;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != TokenType.Comment && t.type != TokenType.NewLine {
+      ret .Some(t);
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// A best-effort read of `val_tok`'s own type, when it's the first
+// token of a `let`'s initializer: a literal's own type directly, or
+// (for a plain or method call) the callee's own declared return type.
+// "" for any other shape -- a binary expression, an already-typed
+// local read back, a compound literal, and so on aren't covered.
+fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file, num line) str {
+  fit val_tok.type {
+    .Number -> {
+      fit val_tok.data {
+        .Dec(_) -> { ret "dec"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String -> { ret "str"; }
+    .Boolean -> { ret "bin"; }
+    .Identifier -> {
+      str name = token_word(val_tok);
+      num idx = index_of_token(tokens, val_tok);
+      let next_opt = _next_non_trivia(tokens, idx + 1);
+      if next_opt.is_none() {
+        ret "";
+      }
+      Token next = next_opt.unwrap();
+      if token_is_operator(next, ".") {
+        // `receiver.method(...)`: the receiver's own declared type
+        // names which impl to look the method up on.
+        let method_tok_opt = _next_non_trivia(tokens, index_of_token(tokens, next) + 1);
+        if method_tok_opt.is_none() {
+          ret "";
+        }
+        Token method_tok = method_tok_opt.unwrap();
+        fit method_tok.type {
+          .Identifier -> {}
+          _ -> { ret ""; }
+        }
+        str type_name = type_name_of_local(program, name, file, line);
+        if equals(type_name, "") {
+          ret "";
+        }
+        let found = lookup_method(program, type_name, token_word(method_tok));
+        if found.is_none() {
+          ret "";
+        }
+        ret _return_type_from_signature(found.unwrap().detail);
+      }
+      if token_is_operator(next, "(") {
+        let found = lookup_top_level(program, name);
+        if found.is_none() {
+          ret "";
+        }
+        ret _return_type_from_signature(found.unwrap().detail);
+      }
+      ret "";
+    }
+    _ -> { ret ""; }
+  }
+}
+
+// `detail` (a rendered "fun name(args) RetType" signature) with only
+// the return type kept -- everything after its own closing paren.
+// "" for a declared void return, same as a caller not resolving a
+// callee at all: neither is worth showing a hint for.
+fun _return_type_from_signature(str detail) str {
+  num close = last_index_of_char(detail, ')');
+  if close < 0 {
+    ret "";
+  }
+  ret trim(substr(detail, close + 1, len(detail) - close - 1));
+}

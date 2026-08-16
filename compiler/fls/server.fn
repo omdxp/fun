@@ -11,6 +11,7 @@ imp analysis;
 imp diagnostics;
 imp navigation;
 imp signature_help;
+imp inlay_hints;
 imp outline;
 imp references;
 imp completion;
@@ -118,6 +119,10 @@ impl Server {
     }
     if equals(method, "textDocument/signatureHelp") {
       self.answer_signature_help(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/inlayHint") {
+      self.answer_inlay_hints(id, message);
       ret;
     }
     // A client asks for a declaration under four names; what it wants
@@ -276,6 +281,29 @@ impl Server {
     }
     Request r = asked.unwrap();
     write_message(response(id, signature_help(&self.reads, r.doc, r.line, r.character)));
+  }
+
+  // Shows a `let`-inferred local's own resolved type as inline text
+  // right after its name, for every one in the requested range.
+  answer_inlay_hints(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    JsonValue range = _field(params, "range");
+    JsonValue start = _field(range, "start");
+    JsonValue end = _field(range, "end");
+    num start_line = _number_field(start, "line");
+    num end_line = _number_field(end, "line");
+    write_message(response(id, inlay_hints(&self.reads, doc.unwrap(), start_line, end_line)));
   }
 
   // Says where the name under the cursor was declared.
@@ -442,7 +470,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentFormattingProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"documentFormattingProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.
