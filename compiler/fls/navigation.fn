@@ -10,12 +10,14 @@ imp analysis;
 imp positions;
 imp symbols;
 imp uri;
+imp imports;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
 imp std.option;
 imp std.io;
+imp std.fs;
 
 // What a client is told when there is nothing to say.
 const str NO_HOVER = "null";
@@ -54,6 +56,10 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if !equals(fork_doc, "") {
           ret _hover_result(fork_doc, span_of(t));
         }
+      }
+      str target = import_target(&tokens, doc.path, line, character);
+      if !equals(target, "") {
+        ret _import_hover_result(target, span_of(t));
       }
     }
     _ -> { ret NO_HOVER; }
@@ -97,6 +103,18 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   fit t.type {
     .Identifier -> {}
     _ -> { ret NO_LOCATION; }
+  }
+
+  str target = import_target(&tokens, doc.path, line, character);
+  if !equals(target, "") {
+    StringBuilder ib = string_builder_init(96);
+    ib.append("[");
+    ib.append(format(
+      `{"uri":{str},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
+      json_quote(path_to_uri(target))
+    ));
+    ib.append("]");
+    ret ib.build();
   }
 
   let declared = _resolve(cache, doc, &tokens, t, line);
@@ -281,6 +299,24 @@ fun _hover_result(str markdown, Span s) str {
     s.line,
     s.end
   );
+}
+
+// The hover for an import path segment resolved to `target`: a
+// README.md's own content verbatim, or a `.fn` module's own leading
+// doc comment.
+fun _import_hover_result(str target, Span s) str {
+  str text = read_to_string(target);
+  if text == nil {
+    ret NO_HOVER;
+  }
+  str shown = text;
+  if !ends_with(target, "README.md") {
+    shown = leading_doc_comment(text);
+    if equals(shown, "") {
+      ret NO_HOVER;
+    }
+  }
+  ret _hover_result(shown, s);
 }
 
 // `code` shown as a Fun snippet, with `prose` under it. A fence is

@@ -1,0 +1,178 @@
+// Import hover and go to definition.
+// 
+// Hovering (or jumping to) a segment of an `imp` statement's own
+// dotted path answers the same question as any other declaration:
+// where does this lead. A segment resolving to a real file shows that
+// file's own leading doc comment (or jumps to it); one resolving to a
+// directory shows its README.md when it has one, the same as the
+// reference fls did.
+
+imp positions;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.fs;
+imp std.path;
+
+// Where an `imp`-path segment at `line`/`character` (in a document
+// whose own path is `current_file`) leads: a resolved file path (a
+// real .fn module) or a directory's own README.md, when present. ""
+// when the cursor isn't on an import segment at all, or the segment
+// it's on doesn't resolve to anything real.
+pub fun import_target(Vec<Token>* tokens, str current_file, num line, num character) str {
+  let found = token_at(tokens, line, character);
+  if found.is_none() {
+    ret "";
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret ""; }
+  }
+  if !_is_import_segment(tokens, t) {
+    ret "";
+  }
+  str specifier = _specifier_through(tokens, t);
+  if equals(specifier, "") {
+    ret "";
+  }
+  // `std` alone names the stdlib's own namespace prefix, not a real
+  // sibling file or subdirectory of the importing file's own
+  // directory -- resolve_import_path only recognizes a `std.`-
+  // prefixed (dotted) path as a stdlib reference, so it's resolved
+  // through a known-existing stdlib file (`std.io`, always real)
+  // instead, taking the directory two levels up from it (past `io.fn`
+  // and past `std/` itself) to reach the stdlib root, where its own
+  // README lives.
+  if equals(specifier, "std") {
+    str anchor = resolve_import_path(current_file, "std.io");
+    str root_readme = path_join(dirname(dirname(anchor)), "README.md");
+    if exists(root_readme) {
+      ret root_readme;
+    }
+    ret "";
+  }
+  str resolved = resolve_import_path(current_file, specifier);
+  if exists(resolved) {
+    ret resolved;
+  }
+  // The hovered segment may name a directory rather than a file --
+  // resolve_import_path always assumes a trailing ".fn" module, so
+  // strip that back off and check.
+  if ends_with(resolved, ".fn") {
+    str as_dir = substr(resolved, 0, len(resolved) - 3);
+    if is_dir(as_dir) {
+      str readme = path_join(as_dir, "README.md");
+      if exists(readme) {
+        ret readme;
+      }
+    }
+  }
+  ret "";
+}
+
+// True when `t` sits somewhere in an `imp path.path;` statement's own
+// path, judged by walking back from it past dots and identifiers only
+// until the nearest keyword: `imp` means yes, anything else (or
+// running off the front of the file) means no.
+fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
+  num i = index_of_token(tokens, t);
+  if i < 0 {
+    ret false;
+  }
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+      i = i - 1;
+      continue;
+    }
+    fit tok.type {
+      .Identifier -> {}
+      .Keyword -> { ret equals(token_word(tok), "imp"); }
+      _ -> {
+        if !token_is_operator(tok, ".") {
+          ret false;
+        }
+      }
+    }
+    i = i - 1;
+  }
+  ret false;
+}
+
+// The dotted specifier from the start of the import path through `t`
+// (inclusive), as a reader would write it -- hovering an intermediate
+// segment (`std` in `std.channel`) resolves only that much of it.
+fun _specifier_through(Vec<Token>* tokens, Token t) str {
+  num end = index_of_token(tokens, t);
+  if end < 0 {
+    ret "";
+  }
+  num start = end;
+  for start > 0 {
+    let prev = tokens.get(start - 1);
+    if prev.type == TokenType.Comment || prev.type == TokenType.NewLine {
+      start = start - 1;
+      continue;
+    }
+    bin extends = false;
+    fit prev.type {
+      .Identifier -> { extends = true; }
+      _ -> { extends = token_is_operator(prev, "."); }
+    }
+    if !extends {
+      break;
+    }
+    start = start - 1;
+  }
+  StringBuilder b = string_builder_init(32);
+  num i = start;
+  for i <= end {
+    Token tok = tokens.get(i);
+    if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+      i = i + 1;
+      continue;
+    }
+    fit tok.type {
+      .Identifier -> { b.append(token_word(tok)); }
+      _ -> {
+        if token_is_operator(tok, ".") {
+          b.append(".");
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// The contiguous `//`-prefixed comment lines starting at the very top
+// of `text` (a whole file's own text, unlike `doc_comment_above`,
+// which reads backward from a declaration elsewhere in it), with each
+// line's own `// ` prefix stripped and re-joined top to bottom. Empty
+// when the file doesn't open with one.
+pub fun leading_doc_comment(str text) str {
+  Vec<str> src_lines = split_lines(text);
+  StringBuilder b = string_builder_init(64);
+  num i = 0;
+  bin any = false;
+  for i < src_lines.len {
+    str t = trim(src_lines.get(i));
+    if !starts_with(t, "//") {
+      break;
+    }
+    str content = substr(t, 2, len(t) - 2);
+    if len(content) > 0 && content[0] == ' ' {
+      content = substr(content, 1, len(content) - 1);
+    }
+    if any {
+      b.append("\n");
+    }
+    b.append(content);
+    any = true;
+    i = i + 1;
+  }
+  ret b.build();
+}

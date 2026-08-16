@@ -162,6 +162,38 @@ test "a keyword carries documentation, and an ordinary word does not" {
   assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
 }
 
+test "hover and go-to-definition on an import path segment resolve to the module or its stdlib README" {
+  str src = `imp std.io;
+  `imp std.channel;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///examples/advanced/probe.fn";
+  doc.path = "examples/advanced/probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `channel` in `imp std.channel;`: the module's own leading doc
+  // comment.
+  str module_hover = hover(&reads, doc, 1, 9);
+  assert contains(module_hover, "channel"), "expected std.channel's own leading doc comment";
+
+  str module_def = definition(&reads, doc, 1, 9);
+  assert contains(module_def, "channel.fn"), "expected a jump straight to the module file";
+
+  // On `std` alone: the stdlib's own root README, since `std/` itself
+  // has no README of its own.
+  str root_hover = hover(&reads, doc, 1, 5);
+  assert contains(root_hover, "Standard Library"), "expected the stdlib root's own README";
+
+  str root_def = definition(&reads, doc, 1, 5);
+  assert contains(root_def, "README.md"), "expected a jump to the stdlib root's README";
+}
+
 test "an outline lists what a file declares, by kind" {
   str src = `pub const num LIMIT = 8;
   `pub compound Buffer {
