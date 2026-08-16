@@ -1232,6 +1232,20 @@ impl Codegen {
           }
         }
       }
+      // A bare type param substituted straight to a plain (non-generic)
+      // name (`compound Result<T, E> { T value; E err; }` instantiated
+      // as `Result<num, Error>`) never goes through the nested-generic
+      // branch above, which is the only place this function otherwise
+      // ensures a by-value dependency's own body exists first. Guarded
+      // to the root buffer: `self.state` can be some other type's own
+      // in-progress scratch here (a nested instantiation reached from
+      // deeper in Pass 1), and `ensure_plain_type_emitted` writes
+      // straight to `self.state` with no scratch-aware routing of its
+      // own, same as everywhere else in this codebase that only trusts
+      // a splice while `self.state == self.root_state`.
+      if !resolved_ptr && self.state == self.root_state {
+        self.ensure_plain_type_emitted(resolved_type);
+      }
       resolved_field_names.push(field_names.get(fi));
       resolved_field_type_names.push(resolved_type);
       resolved_field_is_pointer.push(resolved_ptr);
@@ -1417,6 +1431,41 @@ impl Codegen {
     for vt : variant_templates {
       if vt.has_payload {
         is_tagged_union = true;
+      }
+    }
+
+    // A payload written as a bare type param, substituted straight to a
+    // plain (non-generic) name, needs that name's own body ensured
+    // first, mirroring `ensure_compound_instantiated`'s own field pass
+    // and for the same reason: nothing else guarantees the substituted
+    // type's body already exists by the time it's embedded by value
+    // here. Has to run before `self.state` swaps to `enum_scratch`
+    // below, since `ensure_plain_type_emitted` writes straight to
+    // `self.state` with no scratch-aware routing of its own -- same
+    // root-buffer guard as the compound side.
+    if is_tagged_union && self.state == self.root_state {
+      for vt2 : variant_templates {
+        if !vt2.has_payload {
+          continue;
+        }
+        num pti = 0;
+        for pti < vt2.payload_type_strs.len {
+          str ptype2 = vt2.payload_type_strs.get(pti);
+          bin pptr2 = vt2.payload_is_pointer.get(pti);
+          pti = pti + 1;
+          if pptr2 || equals(ptype2, dt.type_str) {
+            continue;
+          }
+          num pi2 = 0;
+          for pi2 < type_params.len {
+            if equals(type_params.get(pi2), ptype2) {
+              if !arg_is_pointer.get(pi2) {
+                self.ensure_plain_type_emitted(arg_type_names.get(pi2));
+              }
+            }
+            pi2 = pi2 + 1;
+          }
+        }
       }
     }
 
