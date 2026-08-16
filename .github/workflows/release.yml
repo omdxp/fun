@@ -58,6 +58,7 @@ jobs:
         uses: omdxp/setup-fun@v1
         with:
           version: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check fun.toml's version matches the release tag
         run: |
@@ -136,6 +137,7 @@ jobs:
         uses: omdxp/setup-fun@v1
         with:
           version: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install WiX Toolset (v3)
         run: choco install wixtoolset -y
