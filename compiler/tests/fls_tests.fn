@@ -6,6 +6,8 @@ imp ..fls.symbols;
 imp ..fls.navigation;
 imp ..fls.signature_help;
 imp ..fls.inlay_hints;
+imp ..fls.code_action;
+imp ..fls.diagnostics;
 imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
@@ -505,6 +507,52 @@ test "inlay hints infer a let local's own type from a literal, a plain call, and
 
   // Nothing inside the given line range.
   assert equals(inlay_hints(&reads, doc, 0, 0), "[]"), "expected no hints outside the requested range";
+}
+
+test "code actions offer to remove an unused import and to silence any warning" {
+  Document doc;
+  doc.uri = "file:///unused.fn";
+  doc.path = "unused.fn";
+  doc.text = `imp std.io;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 0;
+  d.col = 0;
+  d.end_line = 0;
+  d.end_col = 1;
+  d.severity = SEVERITY_WARNING;
+  d.message = "unused_import: unused import 'std.io'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(doc, doc.uri, &diags);
+  assert contains(out, `"title":"Remove unused import"`), "expected the removal quick fix";
+  // Deletes the whole line 0, including its own newline.
+  assert contains(
+    out,
+    `"start":{"line":0,"character":0},"end":{"line":1,"character":0}},"newText":""`
+  ), "expected an edit deleting the whole import line";
+  assert contains(out, `"title":"Silence with 'allow unused_import;'"`), "expected the allow quick fix";
+  assert contains(out, `"newText":"allow unused_import;\n"`), "expected the allow statement inserted above";
+
+  // An error carries no safe mechanical fix.
+  Diagnostic err;
+  err.line = 2;
+  err.col = 0;
+  err.end_line = 2;
+  err.end_col = 1;
+  err.severity = SEVERITY_ERROR;
+  err.message = "some type error";
+  Vec<Diagnostic> err_diags;
+  err_diags.init(1);
+  err_diags.push(err);
+  assert equals(code_actions(doc, doc.uri, &err_diags), "[]"), "expected no quick fix offered for an error";
 }
 
 test "completion still answers while the text does not parse" {

@@ -12,6 +12,7 @@ imp diagnostics;
 imp navigation;
 imp signature_help;
 imp inlay_hints;
+imp code_action;
 imp outline;
 imp references;
 imp completion;
@@ -123,6 +124,10 @@ impl Server {
     }
     if equals(method, "textDocument/inlayHint") {
       self.answer_inlay_hints(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/codeAction") {
+      self.answer_code_action(id, message);
       ret;
     }
     // A client asks for a declaration under four names; what it wants
@@ -306,6 +311,46 @@ impl Server {
     write_message(response(id, inlay_hints(&self.reads, doc.unwrap(), start_line, end_line)));
   }
 
+  // Offers a quick fix for each warning the client's own request
+  // names, echoed back in its context: removing an unused import
+  // outright, or silencing any warning with the same `allow` a reader
+  // could write by hand.
+  answer_code_action(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    JsonValue context = _field(params, "context");
+    JsonValue diags_json = _field(context, "diagnostics");
+    Vec<Diagnostic> diags;
+    diags.init(4);
+    let arr = diags_json.as_array();
+    if arr.is_some() {
+      for item : arr.unwrap() {
+        JsonValue range = _field(item, "range");
+        JsonValue start = _field(range, "start");
+        JsonValue end = _field(range, "end");
+        Diagnostic d;
+        d.line = _number_field(start, "line");
+        d.col = _number_field(start, "character");
+        d.end_line = _number_field(end, "line");
+        d.end_col = _number_field(end, "character");
+        d.severity = _number_field(item, "severity");
+        d.message = _string_field(item, "message");
+        diags.push(d);
+      }
+    }
+    write_message(response(id, code_actions(doc.unwrap(), document_uri, &diags)));
+  }
+
   // Says where the name under the cursor was declared.
   answer_definition(str id, JsonValue message) {
     let asked = self.document_at(message);
@@ -470,7 +515,7 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"documentFormattingProvider":true}}`;
+  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true}}`;
 }
 
 // The value of a string field, or empty when the message has none.

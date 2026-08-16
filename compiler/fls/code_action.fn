@@ -1,0 +1,92 @@
+// Code actions.
+// 
+// Quick fixes offered for a diagnostic already reported: removing an
+// unused import outright, or silencing any warning with the same
+// `allow` a reader would write by hand. Never offered for an error,
+// which has no safe mechanical fix.
+
+imp protocol;
+imp documents;
+imp diagnostics;
+imp std.string;
+imp std.vec;
+imp std.option;
+
+// The quick fixes available for `diags`, as the result a client is
+// sent.
+pub fun code_actions(Document doc, str document_uri, Vec<Diagnostic>* diags) str {
+  Vec<str> lines = split(doc.text, '\n');
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < diags.len {
+    Diagnostic d = diags.get(i);
+    i = i + 1;
+    if d.severity != SEVERITY_WARNING {
+      continue;
+    }
+    str id_name = _warning_id_from_message(d.message);
+    if equals(id_name, "") {
+      continue;
+    }
+    if equals(id_name, "unused_import") && d.line >= 0 && d.line < lines.len {
+      if any {
+        b.append(",");
+      }
+      any = true;
+      b.append(_remove_line_action(document_uri, "Remove unused import", d.line));
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    b.append(_allow_action(document_uri, d, id_name));
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The warning's own bare id: the part of `message` (formatted
+// "id_name: text" by `diagnose`) before the first colon.
+fun _warning_id_from_message(str message) str {
+  num sep = index_of_char(message, ':');
+  if sep < 0 {
+    ret "";
+  }
+  ret substr(message, 0, sep);
+}
+
+// Deletes line `line` (0-indexed) outright, including its own
+// trailing newline.
+fun _remove_line_action(str document_uri, str title, num line) str {
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":`);
+  b.append(json_quote(title));
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  b.append(json_quote(document_uri));
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append(format_num(line));
+  b.append(`,"character":0},"end":{"line":`);
+  b.append(format_num(line + 1));
+  b.append(`,"character":0}},"newText":""}]}}}`);
+  ret b.build();
+}
+
+// Inserts `allow id_name;` right above the line the diagnostic points
+// at, the same suppression a reader could write by hand.
+fun _allow_action(str document_uri, Diagnostic d, str id_name) str {
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":`);
+  b.append(json_quote(format("Silence with 'allow {str};'", id_name)));
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  b.append(json_quote(document_uri));
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append(format_num(d.line));
+  b.append(`,"character":0},"end":{"line":`);
+  b.append(format_num(d.line));
+  b.append(`,"character":0}},"newText":`);
+  b.append(json_quote(format("allow {str};\n", id_name)));
+  b.append(`}]}}}`);
+  ret b.build();
+}
