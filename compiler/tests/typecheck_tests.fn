@@ -322,7 +322,7 @@ test "an impl supplies every method its quirk requires" {
 test "a missing quirk method is reported at its own impl block, not file start" {
   // check_quirk_conformance used to call self.fail with a nil node, so
   // every such error landed at line 0 col 0 regardless of where the
-  // offending impl actually was -- useless for an editor pointing a
+  // offending impl actually was, useless for an editor pointing a
   // squiggle at it, and indistinguishable from a second, unrelated
   // impl earlier in the same file.
   str src = `compound Point {

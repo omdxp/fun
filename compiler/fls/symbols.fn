@@ -111,20 +111,24 @@ fun _base_type_name(DataType* dt) str {
 
 // A function as its signature reads, without its body.
 pub fun render_function(FunctionNode f) str {
-  ret render_function_named(f, f.name);
+  ret render_function_named(f, f.name, true);
 }
 
 // Like `render_function`, but spelled back under `name` instead of
-// `f.name` -- an impl method's own `f.name` is always mangled with
-// its owning type (`Box__doubled`, never the bare `doubled` a reader
-// wrote), so a caller resolving a method needs to supply the
-// de-mangled name itself.
-pub fun render_function_named(FunctionNode f, str name) str {
+// `f.name`, since an impl method's own `f.name` is always mangled
+// with its owning type (`Box__doubled`, never the bare `doubled` a
+// reader wrote), so a caller resolving a method needs to supply the
+// de-mangled name itself. `include_fun` leaves off the leading `fun `
+// for a method, which is never written with one of its own
+// (`pub doubled(...) num { ... }`, not `pub fun doubled(...)`).
+pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
   StringBuilder b = string_builder_init(64);
   if f.is_async {
     b.append("async ");
   }
-  b.append("fun ");
+  if include_fun {
+    b.append("fun ");
+  }
   b.append(name);
   if f.has_type_params && f.type_params.len > 0 {
     b.append("<");
@@ -352,7 +356,7 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
           fit method.kind {
             .Function(f) -> {
               if equals(_bare_method_name(f.name, type_name), method_name) {
-                str signature = render_function_named(f, method_name);
+                str signature = render_function_named(f, method_name, false);
                 if im.has_type_params {
                   signature = specialize_signature(signature, im.type_params, concrete_args);
                 }

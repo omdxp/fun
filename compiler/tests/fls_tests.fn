@@ -23,6 +23,7 @@ imp std.result;
 imp std.string;
 imp std.io;
 imp std.fs;
+imp std.path;
 
 test "a string is written with what JSON reserves escaped" {
   assert equals(json_quote("plain"), `"plain"`), "expected a plain string to be quoted";
@@ -165,6 +166,37 @@ test "a keyword carries documentation, and an ordinary word does not" {
   assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
 }
 
+test "hovering 'as' reads contextually: import alias vs quirk impl" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document import_doc;
+  import_doc.uri = "file:///aliasimport.fn";
+  import_doc.path = "aliasimport.fn";
+  import_doc.text = "imp std.io as io2;\n";
+  import_doc.version = 1;
+  str import_hover = hover(&reads, import_doc, 0, 11);
+  assert contains(import_hover, "Binds an import to a different name"), "expected the import-alias doc for 'as' inside an imp statement";
+  assert !contains(import_hover, "Names the quirk"), "expected the impl-quirk doc not to leak into an import context";
+
+  Document impl_doc;
+  impl_doc.uri = "file:///aliasimpl.fn";
+  impl_doc.path = "aliasimpl.fn";
+  impl_doc.text = `compound Point {
+  `  num x;
+  `}
+  `quirk Q {
+  `  a() num;
+  `}
+  `impl Point as Q {
+  `  a() num { ret self.x; }
+  `}`;
+  impl_doc.version = 1;
+  str impl_hover = hover(&reads, impl_doc, 6, 11);
+  assert contains(impl_hover, "Names the quirk"), "expected the impl-quirk doc for 'as' inside an impl statement";
+  assert !contains(impl_hover, "Binds an import"), "expected the import-alias doc not to leak into an impl context";
+}
+
 test "hover and go-to-definition on an import path segment resolve to the module or its stdlib README" {
   str src = `imp std.io;
   `imp std.channel;
@@ -216,7 +248,8 @@ test "hover shows a doc comment for a method declared in another, imported file"
   // stdlib/std/option.fn, not in this document's own text.
   str hovered = hover(&reads, doc, 3, 14);
   assert contains(hovered, "The contained value"), "expected the doc comment read from option.fn itself, not this document's text";
-  assert contains(hovered, "fun unwrap(Option<num>* self) num"), "expected the signature resolved too";
+  assert contains(hovered, "unwrap(Option<num>* self) num"), "expected the signature resolved too";
+  assert !contains(hovered, "fun unwrap"), "expected no 'fun ' prefix, a method is never written with one";
 }
 
 test "an outline lists what a file declares, by kind" {
@@ -368,6 +401,38 @@ test "completion after a dot offers what the receiver has" {
   assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
 }
 
+test "completion lists an import path's own directory, filtered by what's typed so far" {
+  str base = "fun-out/_import_completion_test";
+  make_dir_all(base);
+  make_dir_all(path_join(base, "subdir"));
+  write_string(path_join(base, "sibling_a.fn"), "fun a() {}\n");
+  write_string(path_join(base, "sibling_b.fn"), "fun b() {}\n");
+  defer remove_file(path_join(base, "sibling_a.fn"));
+  defer remove_file(path_join(base, "sibling_b.fn"));
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///here.fn";
+  doc.path = path_join(base, "here.fn");
+  doc.text = "imp sub";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 7, false);
+  assert contains(out, `"label":"subdir","kind":19`), "expected the subdirectory offered as a folder, filtered by the 'sub' prefix";
+  assert !contains(out, "sibling_a"), "expected the non-matching sibling filtered out";
+  assert !contains(out, "sibling_b"), "expected the non-matching sibling filtered out";
+
+  // The unfiltered case, right after 'imp ' with nothing typed: every
+  // sibling and the synthetic 'std' entry point.
+  doc.text = "imp ";
+  str out_all = completion(&reads, doc, 0, 4, false);
+  assert contains(out_all, `"label":"std","kind":19`), "expected the synthetic stdlib entry point";
+  assert contains(out_all, `"label":"subdir","kind":19`), "expected the sibling directory";
+  assert contains(out_all, `"label":"sibling_a","kind":17`), "expected the sibling module, bare of its .fn extension";
+  assert contains(out_all, `"label":"sibling_b","kind":17`), "expected the other sibling module";
+}
+
 test "hover and completion resolve a dotted chain through its own receiver's declared type" {
   str src = `compound Engine {
   `  num rpm;
@@ -423,7 +488,7 @@ test "hover and signature help specialize a generic method against its receiver'
 
   // Same specialization inside the call's own parens.
   str help = signature_help(&reads, doc, 3, 22);
-  assert contains(help, `"label":"fun unwrap_or(Option<num>* self, num fallback) num"`), "expected the same specialized signature from signature help";
+  assert contains(help, `"label":"unwrap_or(Option<num>* self, num fallback) num"`), "expected the same specialized signature from signature help, no 'fun ' prefix";
 }
 
 test "hover resolves a bare variant shorthand and its payload binding inside a fit" {
@@ -543,7 +608,7 @@ test "signature help shows a call's own parameters and tracks the active one, se
   // the first argument the reader actually types still lands on
   // "factor", not on self.
   str method_first_arg = signature_help(&reads, doc, 14, 18);
-  assert contains(method_first_arg, `"label":"fun scale(Box* self, num factor, num offset) num"`), "expected scale's own signature with self";
+  assert contains(method_first_arg, `"label":"scale(Box* self, num factor, num offset) num"`), "expected scale's own signature with self, no 'fun ' prefix";
   assert contains(method_first_arg, `"activeParameter":1`), "expected the first real argument active, past the implicit self";
 
   // Outside any call at all.

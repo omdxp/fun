@@ -40,6 +40,9 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
 
   fit t.type {
     .Keyword -> {
+      if equals(token_word(t), "as") {
+        ret _hover_result(_as_keyword_doc(&tokens, t), span_of(t));
+      }
       str doc_text = keyword_doc(token_word(t));
       if equals(doc_text, "") {
         ret NO_HOVER;
@@ -75,8 +78,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     doc_comment = doc_comment_above(doc.text, d.pos.line);
   } elif !equals(d.pos.filename, "") {
     // A symbol declared in another file (reached through an `imp`)
-    // needs that file's own text, not the current document's -- its
-    // doc comment sits above the declaration wherever that file
+    // needs that file's own text, not the current document's, since
+    // its doc comment sits above the declaration wherever that file
     // actually lives, not at the same line number here. Read fresh
     // each time rather than cached, since this file isn't one the
     // client has open for `didChange` to keep current.
@@ -347,6 +350,45 @@ fun _import_hover_result(str target, Span s) str {
   ret _hover_result(shown, s);
 }
 
+// `as` reads two different ways depending on the statement it sits
+// in: naming an import alias (`imp mod as alias;`) or naming the
+// quirk an impl block implements (`impl Type as Quirk { ... }`).
+// Told apart by walking back from `t` past the identifiers and dots
+// that make up whatever comes before it, to the keyword that started
+// the statement.
+fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
+  str impl_doc = _doc(
+    `impl Type as Quirk { ... }`,
+    `Names the quirk an impl block implements for a type.`
+  );
+  str import_doc = _doc(
+    `imp module.path as alias;`,
+    `Binds an import to a different name, reached afterward as
+    `alias.name instead of the module's own leading segment.`
+  );
+  num i = index_of_token(tokens, t);
+  if i < 0 {
+    ret impl_doc;
+  }
+  i = i - 1;
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+      i = i - 1;
+      continue;
+    }
+    if tok.type == TokenType.Identifier || token_is_operator(tok, ".") {
+      i = i - 1;
+      continue;
+    }
+    if token_is_keyword(tok, "imp") {
+      ret import_doc;
+    }
+    ret impl_doc;
+  }
+  ret impl_doc;
+}
+
 // `code` shown as a Fun snippet, with `prose` under it. A fence is
 // written as doubled backticks, which is how a raw string carries one.
 fun _doc(str code, str prose) str {
@@ -476,10 +518,7 @@ pub fun keyword_doc(str word) str {
     ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
   }
   if equals(word, "as") {
-    ret _doc(
-      `impl Type as Quirk { ... }`,
-      `Names the quirk an impl block implements for a type.`
-    );
+    ret _doc(`impl Type as Quirk { ... }`, `Names the quirk an impl block implements for a type.`);
   }
   if equals(word, "enum") {
     ret _doc(
@@ -533,7 +572,10 @@ pub fun keyword_doc(str word) str {
     );
   }
   if equals(word, "void") {
-    ret _doc(`fun name() void { ... }`, `The absence of a value, for a function that returns nothing.`);
+    ret _doc(
+      `fun name() void { ... }`,
+      `The absence of a value, for a function that returns nothing.`
+    );
   }
   if equals(word, "num") {
     ret _doc(`num x;`, `A 64-bit signed integer.`);

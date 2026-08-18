@@ -16,6 +16,8 @@ imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
 imp std.io;
+imp std.path;
+imp std.fs;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -28,6 +30,8 @@ enum ItemKind {
   Interface = 8,
   Enumeration = 13,
   Keyword = 14,
+  File = 17,
+  Folder = 19,
   Struct = 22,
 }
 
@@ -51,6 +55,14 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   Vec<Item> items;
   items.init(64);
   defer items.free();
+
+  // Line-based, independent of whether the rest of the document
+  // parses: half-written `imp a.b.` is exactly when a reader wants
+  // this most, and exactly when the usual AST-driven path below has
+  // nothing to offer.
+  if _try_import_completions(&items, doc.path, doc.text, line, character) {
+    ret _reply(&items);
+  }
 
   Analyzed read = cache.of(doc);
   if !read.lexed {
@@ -82,7 +94,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     str type_name = "";
     let receiver_tok = _receiver_token_before(&tokens, line, character);
     if receiver_tok.is_some() {
-      type_name = _receiver_own_type(&tokens, receiver_tok.unwrap(), &program.nodes, doc.path, source_line);
+      type_name = _receiver_own_type(
+        &tokens,
+        receiver_tok.unwrap(),
+        &program.nodes,
+        doc.path,
+        source_line
+      );
     }
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items);
@@ -97,6 +115,149 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   _reserved(&items, snippets);
   _abbreviations(&items, snippets);
   ret _reply(&items);
+}
+
+// Directory/file listing for whatever's typed so far in an `imp
+// a.b.c` path, filling `items` and returning true when the cursor
+// sits in one at all (even with zero matches), worked out purely
+// from the current line's own text, independent of tokens or a
+// parsed program, so it still answers while the path is unfinished.
+fun _try_import_completions(Vec<Item>* items, str current_file, str text, num line, num character) bin {
+  Vec<str> lines = split_lines(text);
+  if line < 0 || line >= lines.len {
+    ret false;
+  }
+  str raw_line = lines.get(line);
+  num cut = character;
+  if cut > len(raw_line) {
+    cut = len(raw_line);
+  }
+  if cut < 0 {
+    ret false;
+  }
+  str stripped = trim_left(substr(raw_line, 0, cut));
+  if !starts_with(stripped, "imp") {
+    ret false;
+  }
+  num rest_len = len(stripped) - 3;
+  if rest_len == 0 {
+    ret false;
+  }
+  chr after_kw = stripped[3];
+  if after_kw != ' ' && after_kw != '\t' {
+    ret false;
+  }
+  str after_imp = trim_left(substr(stripped, 3, rest_len));
+  num semi = index_of_char(after_imp, ';');
+  if semi >= 0 {
+    after_imp = substr(after_imp, 0, semi);
+  }
+
+  num last_dot = last_index_of_char(after_imp, '.');
+  str parent_specifier = "";
+  str partial = after_imp;
+  if last_dot >= 0 {
+    parent_specifier = substr(after_imp, 0, last_dot);
+    partial = substr(after_imp, last_dot + 1, len(after_imp) - last_dot - 1);
+  }
+
+  str base_dir = "";
+  if equals(parent_specifier, "") {
+    base_dir = dirname(current_file);
+    if equals(partial, "") || starts_with("std", partial) {
+      items.push(_item("std", .Folder, "stdlib"));
+    }
+  } else {
+    base_dir = _import_dir(current_file, parent_specifier);
+  }
+
+  let listed = list_dir(base_dir);
+  if listed.is_err() {
+    ret true;
+  }
+  Vec<str> names = listed.unwrap();
+  defer names.free();
+  bin saw_c_dir = false;
+  bin saw_any_fn = false;
+  num i = 0;
+  for i < names.len {
+    str name = names.get(i);
+    i = i + 1;
+    // A `.`-led entry (a build cache directory, a dotfile) can never
+    // be spelled as an import segment, since identifiers don't start
+    // with one, so it is never a real candidate here.
+    if len(name) > 0 && name[0] == '.' {
+      continue;
+    }
+    if is_dir(path_join(base_dir, name)) {
+      if !equals(partial, "") && !starts_with(name, partial) {
+        continue;
+      }
+      items.push(_item(name, .Folder, "directory"));
+      if equals(parent_specifier, "std") && equals(name, "c") {
+        saw_c_dir = true;
+      }
+      continue;
+    }
+    if !ends_with(name, ".fn") {
+      continue;
+    }
+    str base = substr(name, 0, len(name) - 3);
+    if !equals(partial, "") && !starts_with(base, partial) {
+      continue;
+    }
+    items.push(_item(base, .File, "module"));
+    saw_any_fn = true;
+  }
+
+  // `imp std.` when std/ holds only subdirectories (like c/) still
+  // surfaces the common leaf modules living one level deeper, the
+  // same convenience the reference offers.
+  if equals(parent_specifier, "std") && saw_c_dir && !saw_any_fn {
+    let listed2 = list_dir(path_join(base_dir, "c"));
+    if listed2.is_ok() {
+      Vec<str> names2 = listed2.unwrap();
+      defer names2.free();
+      num k = 0;
+      for k < names2.len {
+        str name2 = names2.get(k);
+        k = k + 1;
+        if !ends_with(name2, ".fn") {
+          continue;
+        }
+        str base2 = substr(name2, 0, len(name2) - 3);
+        if !equals(partial, "") && !starts_with(base2, partial) {
+          continue;
+        }
+        items.push(_item(base2, .File, "module"));
+      }
+    }
+  }
+
+  ret true;
+}
+
+// The directory `parent_specifier` (an import path with its own
+// trailing incomplete segment already cut off, e.g. `std.c` or
+// `..lexer`) names, resolved the same way a real import in that spot
+// would be: through `resolve_import_path`, adding back a trailing dot
+// so the "std." stdlib-root check still fires for a bare `std`, then
+// peeling off the `.fn` suffix that always assumes a leaf module.
+fun _import_dir(str current_file, str parent_specifier) str {
+  str resolved = resolve_import_path(current_file, format("{str}.", parent_specifier));
+  str stripped = resolved;
+  if ends_with(stripped, ".fn") {
+    stripped = substr(stripped, 0, len(stripped) - 3);
+  }
+  num n = len(stripped);
+  for n > 0 {
+    chr last = stripped[n - 1];
+    if last != '/' && last != '\\' {
+      break;
+    }
+    n = n - 1;
+  }
+  ret substr(stripped, 0, n);
 }
 
 // Short triggers that write a whole shape, the way `psvm` writes a main
@@ -289,7 +450,13 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
 // everything *before* the token it's handed). When there's no dotted
 // chain ahead of `receiver_tok` at all, it's a bare local/global
 // itself.
-fun _receiver_own_type(Vec<Token>* tokens, Token receiver_tok, Vec<Node>* program, str file, num line) str {
+fun _receiver_own_type(
+  Vec<Token>* tokens,
+  Token receiver_tok,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
   str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
   if equals(prefix_type, "") {
     ret type_name_of_local(program, token_word(receiver_tok), file, line);
@@ -335,7 +502,8 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
               if !f.has_name || equals(f.name, "") {
                 continue;
               }
-              items.push(_item(_method_label(f.name, type_name), .Method, render_function(f)));
+              str method_name = _method_label(f.name, type_name);
+              items.push(_item(method_name, .Method, render_function_named(f, method_name, false)));
             }
             _ -> {}
           }
