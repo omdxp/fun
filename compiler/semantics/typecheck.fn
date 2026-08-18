@@ -720,10 +720,10 @@ impl Checker {
     }
     self.fail(
       format(
-      "'{str}' compares a {str} with a {str}, which share no variants",
-      e.op,
-      left.name,
-      right.name
+        "'{str}' compares a {str} with a {str}, which share no variants",
+        e.op,
+        left.name,
+        right.name
       ),
       node
     );
@@ -1111,9 +1111,9 @@ impl Checker {
       if !can_assign(held, element) && !can_assign(element, held) {
         self.fail(
           format(
-          "an array literal holds one type, found {str} and {str}",
-          type_name(held),
-          type_name(element)
+            "an array literal holds one type, found {str} and {str}",
+            type_name(held),
+            type_name(element)
           ),
           node
         );
@@ -1624,11 +1624,11 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-          "argument {num} of '{str}' expects {str}, found {str}",
-          i + 1,
-          name,
-          type_name(want),
-          type_name(got)
+            "argument {num} of '{str}' expects {str}, found {str}",
+            i + 1,
+            name,
+            type_name(want),
+            type_name(got)
           ),
           args.get(i)
         );
@@ -1932,9 +1932,9 @@ impl Checker {
         if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
           self.fail(
             format(
-            "fit branch names '{str}' but the value being matched is a '{str}'",
-            named,
-            subject
+              "fit branch names '{str}' but the value being matched is a '{str}'",
+              named,
+              subject
             ),
             branch.condition
           );
@@ -2003,9 +2003,9 @@ impl Checker {
         if !self.assignable(field, value) {
           self.fail(
             format(
-            "cannot assign {str} to a field of type {str}",
-            type_name(value),
-            type_name(field)
+              "cannot assign {str} to a field of type {str}",
+              type_name(value),
+              type_name(field)
             ),
             node
           );
@@ -2028,10 +2028,10 @@ impl Checker {
         if !self.assignable(b.type, value) {
           self.fail(
             format(
-            "cannot assign {str} to '{str}' of type {str}",
-            type_name(value),
-            name,
-            type_name(b.type)
+              "cannot assign {str} to '{str}' of type {str}",
+              type_name(value),
+              name,
+              type_name(b.type)
             ),
             node
           );
@@ -2076,8 +2076,8 @@ impl Checker {
         if value.base == DataTypeType.Void && value.pointer_depth == 0 && !value.is_array {
           self.fail(
             format(
-            "'let' variable '{str}' cannot be initialized from a value of type void",
-            v.name
+              "'let' variable '{str}' cannot be initialized from a value of type void",
+              v.name
             ),
             stmt
           );
@@ -2087,10 +2087,10 @@ impl Checker {
       } elif !self.assignable(declared, value) {
         self.fail(
           format(
-          "cannot initialize '{str}' of type {str} with {str}",
-          v.name,
-          type_name(declared),
-          type_name(value)
+            "cannot initialize '{str}' of type {str} with {str}",
+            v.name,
+            type_name(declared),
+            type_name(value)
           ),
           stmt
         );
@@ -2108,9 +2108,9 @@ impl Checker {
     if !self.assignable(self.rtype, got) {
       self.fail(
         format(
-        "cannot return {str} from a function returning {str}",
-        type_name(got),
-        type_name(self.rtype)
+          "cannot return {str} from a function returning {str}",
+          type_name(got),
+          type_name(self.rtype)
         ),
         stmt
       );
@@ -2139,7 +2139,7 @@ impl Checker {
 
   // Reports a method a quirk requires that the impl block does not
   // supply.
-  check_quirk_conformance(ImplNode block) {
+  check_quirk_conformance(ImplNode block, Node* node) {
     if !block.has_quirk_name {
       ret;
     }
@@ -2158,12 +2158,12 @@ impl Checker {
       if supplied.is_none() {
         self.fail(
           format(
-          "'{str}' does not supply '{str}', which '{str}' requires",
-          block.type_name,
-          name,
-          block.quirk_name
+            "'{str}' does not supply '{str}', which '{str}' requires",
+            block.type_name,
+            name,
+            block.quirk_name
           ),
-          nil
+          node
         );
         ret;
       }
@@ -2173,12 +2173,12 @@ impl Checker {
       if promised.is_some() && promised.unwrap().is_async != supplied.unwrap().is_async {
         self.fail(
           format(
-          "'{str}' does not match how '{str}' declares '{str}'",
-          block.type_name,
-          block.quirk_name,
-          name
+            "'{str}' does not match how '{str}' declares '{str}'",
+            block.type_name,
+            block.quirk_name,
+            name
           ),
-          nil
+          node
         );
         ret;
       }
@@ -2387,7 +2387,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         if node.has_pos {
           checker.current_file = node.pos.filename;
         }
-        checker.check_quirk_conformance(block);
+        checker.check_quirk_conformance(block, node);
         checker.check_impl(block, nodes);
       }
       _ -> {}

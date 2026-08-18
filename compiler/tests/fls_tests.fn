@@ -623,7 +623,8 @@ test "code actions offer to remove an unused import and to silence any warning" 
   assert contains(out, `"title":"Silence with 'allow unused_import;'"`), "expected the allow quick fix";
   assert contains(out, `"newText":"allow unused_import;\n"`), "expected the allow statement inserted above";
 
-  // An error carries no safe mechanical fix.
+  // Most errors carry no mechanical fix of their own (unlike the
+  // quirk-conformance shape tested below).
   Diagnostic err;
   err.line = 2;
   err.col = 0;
@@ -634,7 +635,7 @@ test "code actions offer to remove an unused import and to silence any warning" 
   Vec<Diagnostic> err_diags;
   err_diags.init(1);
   err_diags.push(err);
-  assert equals(code_actions(&reads, doc, doc.uri, &err_diags), "[]"), "expected no quick fix offered for an error";
+  assert equals(code_actions(&reads, doc, doc.uri, &err_diags), "[]"), "expected no quick fix offered for an unrecognized error";
 }
 
 test "code actions fill in a fit's missing arm with a correctly-sized stub" {
@@ -671,6 +672,42 @@ test "code actions fill in a fit's missing arm with a correctly-sized stub" {
   assert contains(out, `"newText":"  .Square(v0) -> {}\n"`), "expected a correctly-sized stub, Square takes one payload value";
   // Inserted right before the fit block's own closing brace (line 7).
   assert contains(out, `"start":{"line":7,"character":2}`), "expected the insertion right before the fit's closing brace";
+}
+
+test "code actions implement a quirk's missing method with its exact declared signature" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkgap.fn";
+  doc.path = "quirkgap.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `quirk Q {
+  `  a() num;
+  `  b(num n) bin;
+  `}
+  `impl Point as Q {
+  `  a() num { ret self.x; }
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 7;
+  d.col = 0;
+  d.end_line = 7;
+  d.end_col = 1;
+  d.severity = SEVERITY_ERROR;
+  d.message = "'Point' does not supply 'b', which 'Q' requires";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Implement missing 'Q.b'"`), "expected the quirk-method quick fix";
+  assert contains(out, `"newText":"  pub b(num n) bin {\n    // TODO: implement\n  }\n"`), "expected a stub with the quirk's own declared signature, no 'self'";
+  // Inserted right before the impl block's own closing brace (line 9).
+  assert contains(out, `"start":{"line":9,"character":0}`), "expected the insertion right before the impl's closing brace";
 }
 
 test "completion still answers while the text does not parse" {

@@ -1,9 +1,9 @@
 // Code actions.
 // 
 // Quick fixes offered for a diagnostic already reported: removing an
-// unused import outright, filling in a fit's missing arm, or
-// silencing any warning with the same `allow` a reader could write by
-// hand. Never offered for an error, which has no safe mechanical fix.
+// unused import outright, filling in a fit's missing arm or a quirk
+// impl's missing method, or silencing any warning with the same
+// `allow` a reader could write by hand.
 
 imp protocol;
 imp documents;
@@ -26,6 +26,17 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
   for i < diags.len {
     Diagnostic d = diags.get(i);
     i = i + 1;
+    if d.severity == SEVERITY_ERROR {
+      str quirk_fix = _quirk_stub_action(cache, doc, document_uri, d);
+      if !equals(quirk_fix, "") {
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(quirk_fix);
+      }
+      continue;
+    }
     if d.severity != SEVERITY_WARNING {
       continue;
     }
@@ -134,7 +145,7 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   num arity = _payload_arity(variant.unwrap().detail);
   str arm = _stub_arm(ev.variant_name, arity);
   Vec<Token> tokens = read.tokens;
-  let close = _find_fit_close(&tokens, d.line);
+  let close = _find_block_close(&tokens, d.line);
   if close.is_none() {
     ret "";
   }
@@ -236,12 +247,116 @@ fun _stub_arm(str variant_name, num arity) str {
   ret b.build();
 }
 
+// The method and quirk names out of `diagnose()`'s own "'Type' does
+// not supply 'method', which 'Quirk' requires" message: its second
+// and third single-quoted segments.
+compound QuirkConformanceRef {
+  str method_name;
+  str quirk_name;
+}
+
+// The quick fix for a "does not supply" quirk-conformance error: a
+// stub method (`pub name(args) rtype { // TODO: implement }`) with
+// the exact signature the quirk itself declares, inserted right
+// before the impl block's own closing brace. "" when the message
+// isn't shaped that way, the quirk or method can't be found, or the
+// enclosing impl block's closing brace can't be found.
+fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  let parsed = _quirk_conformance_from_message(d.message);
+  if parsed.is_none() {
+    ret "";
+  }
+  QuirkConformanceRef qc = parsed.unwrap();
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret "";
+  }
+  let method = quirk_method_declaration(&read.program.nodes, qc.quirk_name, qc.method_name);
+  if method.is_none() {
+    ret "";
+  }
+  Vec<Token> tokens = read.tokens;
+  let close = _find_block_close(&tokens, d.line);
+  if close.is_none() {
+    ret "";
+  }
+  Pos p = close.unwrap();
+  num line0 = p.line - 1;
+  num col0 = p.col - 1;
+  StringBuilder b = string_builder_init(192);
+  b.append(`{"title":`);
+  b.append(json_quote(format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name)));
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  b.append(json_quote(document_uri));
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append(format_num(line0));
+  b.append(`,"character":`);
+  b.append(format_num(col0));
+  b.append(`},"end":{"line":`);
+  b.append(format_num(line0));
+  b.append(`,"character":`);
+  b.append(format_num(col0));
+  b.append(`}},"newText":`);
+  b.append(json_quote(format(
+    "  pub {str} {\n    // TODO: implement\n  }\n",
+    method.unwrap().detail
+  )));
+  b.append(`}]}}}`);
+  ret b.build();
+}
+
+fun _quirk_conformance_from_message(str message) Option<QuirkConformanceRef> {
+  if !contains(message, "does not supply") || !contains(message, "requires") {
+    ret .None;
+  }
+  // Segment 1 is the impl's own type name, which this fix has no use
+  // for; only the method (segment 2) and quirk (segment 3) matter.
+  num q1 = index_of_char(message, '\'');
+  if q1 < 0 {
+    ret .None;
+  }
+  str after1 = substr(message, q1 + 1, len(message) - q1 - 1);
+  num q2 = index_of_char(after1, '\'');
+  if q2 < 0 {
+    ret .None;
+  }
+  str rest1 = substr(after1, q2 + 1, len(after1) - q2 - 1);
+  num q3 = index_of_char(rest1, '\'');
+  if q3 < 0 {
+    ret .None;
+  }
+  str after3 = substr(rest1, q3 + 1, len(rest1) - q3 - 1);
+  num q4 = index_of_char(after3, '\'');
+  if q4 < 0 {
+    ret .None;
+  }
+  str method_name = substr(after3, 0, q4);
+
+  str rest2 = substr(after3, q4 + 1, len(after3) - q4 - 1);
+  num q5 = index_of_char(rest2, '\'');
+  if q5 < 0 {
+    ret .None;
+  }
+  str after5 = substr(rest2, q5 + 1, len(rest2) - q5 - 1);
+  num q6 = index_of_char(after5, '\'');
+  if q6 < 0 {
+    ret .None;
+  }
+  str quirk_name = substr(after5, 0, q6);
+
+  QuirkConformanceRef qc;
+  qc.method_name = method_name;
+  qc.quirk_name = quirk_name;
+  ret .Some(qc);
+}
+
 // The position right before the closing `}` of the block whose
 // opening `{` is the first one found at or after `diag_line`
-// (0-indexed): the fit statement's own body, since that's exactly
-// where `diagnose()`'s own position for a `fit_non_exhaustive`
-// warning points.
-fun _find_fit_close(Vec<Token>* tokens, num diag_line) Option<Pos> {
+// (0-indexed): the fit statement's own body when `diag_line` is a
+// `fit_non_exhaustive` warning's own position, or the impl block's
+// own body when it is a quirk-conformance error's, since that's
+// exactly where each diagnostic's own position points.
+fun _find_block_close(Vec<Token>* tokens, num diag_line) Option<Pos> {
   num source_line = diag_line + 1;
   bin found_open = false;
   num depth = 0;

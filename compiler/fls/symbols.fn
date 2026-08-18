@@ -369,6 +369,64 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
   ret .None;
 }
 
+// The signature `quirk_name` requires for `method_name`, as declared
+// in the `quirk` block itself (no `self`, no body): what an `impl ...
+// as quirk_name` block has to supply. `None` when no such quirk or
+// method exists.
+pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Quirk(q) -> {
+        if !equals(q.name, quirk_name) {
+          continue;
+        }
+        num m = 0;
+        for m < q.methods.len {
+          QuirkMethodSig ms = q.methods.get(m);
+          m = m + 1;
+          if equals(ms.name, method_name) {
+            ret .Some(_declaration(method_name, .Function, _render_quirk_method(ms), n.pos));
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `m` as a reader would write it inside an `impl` block: no `self`,
+// since a quirk method's signature never carries one of its own.
+fun _render_quirk_method(QuirkMethodSig m) str {
+  StringBuilder b = string_builder_init(48);
+  if m.is_async {
+    b.append("async ");
+  }
+  b.append(m.name);
+  b.append("(");
+  num i = 0;
+  for i < m.args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    QuirkArg a = m.args.get(i);
+    b.append(render_type(a.dtype));
+    b.append(" ");
+    b.append(a.name);
+    i = i + 1;
+  }
+  b.append(")");
+  let rendered = render_type(m.rtype);
+  if !equals(rendered, "") && !equals(rendered, "void") {
+    b.append(" ");
+    b.append(rendered);
+  }
+  ret b.build();
+}
+
 // `signature`, with each of `type_params`'s own name replaced by its
 // positional entry in `concrete_args` wherever it appears as a whole
 // word: `o.unwrap_or` on an `Option<num>` receiver shows
@@ -1085,7 +1143,11 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
               if p > 0 {
                 b.append(", ");
               }
-              b.append(_substituted_payload_type(variant.payload.get(p), e.type_params, dt.generic_args));
+              b.append(_substituted_payload_type(
+                variant.payload.get(p),
+                e.type_params,
+                dt.generic_args
+              ));
               p = p + 1;
             }
             b.append(")");
@@ -1243,7 +1305,12 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
           if idx >= 0 {
             str enum_name = _fit_subject_type(program, f.exp, file, line);
             if !equals(enum_name, "") {
-              let payload_type = _variant_payload_type(program, enum_name, _branch_variant_name(br), idx);
+              let payload_type = _variant_payload_type(
+                program,
+                enum_name,
+                _branch_variant_name(br),
+                idx
+              );
               if payload_type.is_some() && br.body != nil {
                 StringBuilder b = string_builder_init(24);
                 b.append(payload_type.unwrap());
