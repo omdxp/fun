@@ -198,6 +198,91 @@ test "hover appends a 'See also' footer linking a user-defined type in the signa
   assert contains(quirk_hovered, "[`Greeter`]"), "expected a link to the quirk's own declaration";
 }
 
+test "hover on a primitive-typed field still links back to its own compound" {
+  // A `num` field has no type name of its own in its rendered detail
+  // to pull a 'See also' candidate from, but the compound it belongs
+  // to is still worth linking.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///containerlink.fn";
+  doc.path = "containerlink.fn";
+  doc.text = `compound Counter {
+  `  num value;
+  `}
+  `fun bump(Counter* c) {
+  `  c.value = c.value + 1;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 3, 5);
+  assert contains(hovered, "See also:"), "expected the footer linking the field's own compound";
+  assert contains(hovered, "[`Counter`]"), "expected a link back to Counter itself";
+}
+
+test "go-to-definition on a compound field or enum variant lands on its own declaration line, not the type's" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///owndecl.fn";
+  doc.path = "owndecl.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `enum Color {
+  `  Red,
+  `  Green,
+  `}
+  `fun main() {
+  `  Point p;
+  `  num n = p.y;
+  `  Color c = Color.Green;
+  `}`;
+  doc.version = 1;
+
+  // 'y' is declared on line 2 (0-indexed), not Point's own line 0.
+  str field_def = definition(&reads, doc, 10, 12);
+  assert contains(field_def, `"line":2`), "expected the field's own declaration line, not the compound's";
+
+  // 'Green' is declared on line 6 (0-indexed), not Color's own line 4.
+  str variant_def = definition(&reads, doc, 11, 21);
+  assert contains(variant_def, `"line":6`), "expected the variant's own declaration line, not the enum's";
+}
+
+test "field and variant doc comments: a leading block scopes to just the field, a trailing comment is the fallback" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fielddoc.fn";
+  doc.path = "fielddoc.fn";
+  doc.text = `// The compound's own doc, not any field's.
+  `compound Config {
+  `  // The port to listen on.
+  `  num port;
+  `  num timeout; // Seconds before giving up.
+  `}
+  `enum Status {
+  `  Ok,
+  `  Failed, // Something went wrong.
+  `}`;
+  doc.version = 1;
+
+  // 'port' has its own leading block; must not leak Config's doc.
+  str port_hover = hover(&reads, doc, 3, 6);
+  assert contains(port_hover, "The port to listen on."), "expected the field's own leading doc comment";
+  assert !contains(port_hover, "The compound's own doc"), "expected the compound's doc not to leak onto a field that has its own";
+
+  // 'timeout' has no leading block, only a trailing same-line comment.
+  str timeout_hover = hover(&reads, doc, 4, 6);
+  assert contains(timeout_hover, "Seconds before giving up."), "expected the trailing comment used as a fallback";
+  assert !contains(timeout_hover, "The compound's own doc"), "expected no leak from the compound here either";
+
+  // 'Failed' has only a trailing same-line comment too.
+  str failed_hover = hover(&reads, doc, 8, 2);
+  assert contains(failed_hover, "Something went wrong."), "expected the variant's own trailing comment";
+}
+
 test "a keyword carries documentation, and an ordinary word does not" {
   assert !equals(keyword_doc("fit"), ""), "expected fit to be documented";
   assert contains(keyword_doc("fit"), "```fun"), "expected a fenced example";
@@ -265,6 +350,32 @@ test "hover and go-to-definition on an import path segment resolve to the module
 
   str root_def = definition(&reads, doc, 1, 5);
   assert contains(root_def, "README.md"), "expected a jump to the stdlib root's README";
+}
+
+test "hover and go-to-definition resolve a parent-traversal import ('..')" {
+  // '..' lexes as one operator token, not two '.'s; both the
+  // is-this-an-import-segment check and the specifier reconstruction
+  // used to only recognize a single '.', silently dropping the whole
+  // '..' prefix and resolving relative to the wrong directory.
+  str src = `imp ..lexer.lexer;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///compiler/fls/importprobe.fn";
+  doc.path = "compiler/fls/importprobe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On the final 'lexer' (the module segment): its own leading doc.
+  str module_hover = hover(&reads, doc, 0, 12);
+  assert contains(module_hover, "Vec<Token>"), "expected lexer.fn's own leading doc comment through a '..' path";
+
+  str module_def = definition(&reads, doc, 0, 12);
+  assert contains(module_def, "lexer/lexer.fn"), "expected a jump to the module file up and over from '..'";
 }
 
 test "hover shows a doc comment for a method declared in another, imported file" {
@@ -588,9 +699,10 @@ test "hover resolves a bare variant shorthand and its payload binding inside a f
   str binding_hover = hover(&reads, doc, 6, 24);
   assert contains(binding_hover, "num r"), "expected the binding's inferred payload type";
 
-  // Go to definition on the variant lands on the enum it belongs to.
+  // Go to definition on the variant lands on the variant's own line,
+  // not the enum's.
   str variant_def = definition(&reads, doc, 6, 6);
-  assert contains(variant_def, `"line":0`), "expected the enum's own declaration line";
+  assert contains(variant_def, `"line":1`), "expected the variant's own declaration line";
 }
 
 test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {

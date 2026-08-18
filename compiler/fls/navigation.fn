@@ -74,9 +74,9 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     ret NO_HOVER;
   }
   Declaration d = declared.unwrap();
-  str doc_comment = "";
+  str source_text = "";
   if equals(d.pos.filename, doc.path) {
-    doc_comment = doc_comment_above(doc.text, d.pos.line);
+    source_text = doc.text;
   } elif !equals(d.pos.filename, "") {
     // A symbol declared in another file (reached through an `imp`)
     // needs that file's own text, not the current document's, since
@@ -86,7 +86,18 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // client has open for `didChange` to keep current.
     str other_text = read_to_string(d.pos.filename);
     if other_text != nil {
-      doc_comment = doc_comment_above(other_text, d.pos.line);
+      source_text = other_text;
+    }
+  }
+  str doc_comment = "";
+  if !equals(source_text, "") {
+    doc_comment = doc_comment_above(source_text, d.pos.line);
+    // A field or variant with no leading block of its own falls back
+    // to a trailing same-line comment (`Circle(num), // meaning`),
+    // scoped to these two kinds since a trailing comment on a
+    // function/compound/etc. is rarely meant as its doc.
+    if equals(doc_comment, "") && (d.kind == DeclarationKind.Field || d.kind == DeclarationKind.Variant) {
+      doc_comment = doc_comment_trailing(source_text, d.pos.line);
     }
   }
   StringBuilder b = string_builder_init(96);
@@ -346,6 +357,12 @@ fun _hover_result(str markdown, Span s) str {
 fun _see_also_footer(Vec<Node>* program, Declaration d) str {
   Vec<str> names = _candidate_type_names(d.detail, d.name);
   defer names.free();
+  // A field/method/variant's own container is worth linking even
+  // when its detail carries no type name of its own (a `num` field
+  // has nowhere else useful to point).
+  if !equals(d.container, "") && !equals(d.container, d.name) && !names.contains(d.container) {
+    names.push(d.container);
+  }
   StringBuilder links = string_builder_init(64);
   num count = 0;
   num i = 0;

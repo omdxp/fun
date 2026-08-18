@@ -452,6 +452,8 @@ pub compound ImportNode {
 pub compound CompoundField {
   str name;
   DataType* dtype;
+  Pos pos;
+  bin has_pos;
 }
 
 // A `compound Name { fields }` declaration (a struct-like user-defined
@@ -537,6 +539,8 @@ pub compound EnumVariant {
   // any of its variants has a payload.
   Vec<DataType*> payload;
   bin has_payload;
+  Pos pos;
+  bin has_pos;
 }
 
 pub fun enum_variant_new() EnumVariant {
@@ -546,6 +550,7 @@ pub fun enum_variant_new() EnumVariant {
   v.has_value = false;
   v.payload.init(0);
   v.has_payload = false;
+  v.has_pos = false;
   ret v;
 }
 

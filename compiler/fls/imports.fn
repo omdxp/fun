@@ -92,7 +92,7 @@ fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
       .Identifier -> {}
       .Keyword -> { ret equals(token_word(tok), "imp"); }
       _ -> {
-        if !token_is_operator(tok, ".") {
+        if !_is_dot_run_token(tok) {
           ret false;
         }
       }
@@ -120,7 +120,7 @@ fun _specifier_through(Vec<Token>* tokens, Token t) str {
     bin extends = false;
     fit prev.type {
       .Identifier -> { extends = true; }
-      _ -> { extends = token_is_operator(prev, "."); }
+      _ -> { extends = _is_dot_run_token(prev); }
     }
     if !extends {
       break;
@@ -138,14 +138,36 @@ fun _specifier_through(Vec<Token>* tokens, Token t) str {
     fit tok.type {
       .Identifier -> { b.append(token_word(tok)); }
       _ -> {
-        if token_is_operator(tok, ".") {
-          b.append(".");
+        if _is_dot_run_token(tok) {
+          b.append(token_word(tok));
         }
       }
     }
     i = i + 1;
   }
   ret b.build();
+}
+
+// True for `.`, `..`, `...`: a run of dots lexes as one operator
+// token, not several, so a parent-traversal segment (`imp
+// ..lexer.lexer;`) needs its own check, not `token_is_operator(t,
+// ".")` alone, which only ever matches a single dot.
+fun _is_dot_run_token(Token t) bin {
+  if t.type != TokenType.Operator {
+    ret false;
+  }
+  str w = token_word(t);
+  if equals(w, "") {
+    ret false;
+  }
+  num i = 0;
+  for i < len(w) {
+    if w[i] != '.' {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
 }
 
 // The contiguous `//`-prefixed comment lines starting at the very top

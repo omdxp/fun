@@ -36,6 +36,12 @@ pub compound Declaration {
   // or `Vec<str>* data`.
   str detail;
   Pos pos;
+  // The compound/enum this was found on (a field, a method, a
+  // variant); empty for anything declared at the top level. A field
+  // typed `num` has no type name of its own to link from its
+  // `detail`, but "See also: its own compound" is still worth
+  // showing.
+  str container;
 }
 
 // The word a client's cursor sits on, given the token it landed on.
@@ -240,6 +246,28 @@ pub fun doc_comment_above(str text, num decl_line) str {
   ret b.build();
 }
 
+// A trailing same-line comment on `decl_line` itself (`Circle(num), //
+// meaning`), for a declaration with no leading block of its own to
+// fall back to. Only the first `//` on the line, whatever comes
+// before it on the source line is not re-parsed as code.
+pub fun doc_comment_trailing(str text, num decl_line) str {
+  if decl_line < 1 {
+    ret "";
+  }
+  Vec<str> src_lines = split_lines(text);
+  num idx = decl_line - 1;
+  if idx >= src_lines.len {
+    ret "";
+  }
+  str line_text = src_lines.get(idx);
+  num slashes = index_of_str(line_text, "//");
+  if slashes < 0 {
+    ret "";
+  }
+  str content = trim(substr(line_text, slashes + 2, len(line_text) - slashes - 2));
+  ret content;
+}
+
 // The declaration of `name` as seen from `file` at `line`: a parameter
 // or local of the function that line sits in, before anything the whole
 // program shares.
@@ -327,7 +355,13 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field) Option<Declar
           b.append(render_type(cf.dtype));
           b.append(" ");
           b.append(cf.name);
-          ret .Some(_declaration(field, .Field, b.build(), n.pos));
+          Pos field_pos = n.pos;
+          if cf.has_pos {
+            field_pos = cf.pos;
+          }
+          Declaration d = _declaration(field, .Field, b.build(), field_pos);
+          d.container = type_name;
+          ret .Some(d);
         }
       }
       _ -> {}
@@ -368,7 +402,9 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
                 if im.has_type_params {
                   signature = specialize_signature(signature, im.type_params, concrete_args);
                 }
-                ret .Some(_declaration(method_name, .Function, signature, method.pos));
+                Declaration d = _declaration(method_name, .Function, signature, method.pos);
+                d.container = type_name;
+                ret .Some(d);
               }
             }
             _ -> {}
@@ -400,7 +436,9 @@ pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_
           QuirkMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            ret .Some(_declaration(method_name, .Function, _render_quirk_method(ms), n.pos));
+            Declaration d = _declaration(method_name, .Function, _render_quirk_method(ms), n.pos);
+            d.container = quirk_name;
+            ret .Some(d);
           }
         }
       }
@@ -570,9 +608,9 @@ fun _bare_method_name(str mangled, str type_name) str {
   ret mangled;
 }
 
-// The field `name` of whichever compound is being declared at `line`.
-// A name written inside a compound's own body is one of its fields, and
-// is the only place a field is met without a value in front of it.
+// The field or enum variant `name` of whichever compound or enum is
+// being declared at `line`. A bare name written inside one of their
+// bodies is only ever met without a value in front of it there.
 pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option<Declaration> {
   num best_line = -1;
   Declaration best;
@@ -601,7 +639,46 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
             b.append(render_type(cf.dtype));
             b.append(" ");
             b.append(cf.name);
-            best = _declaration(name, .Field, b.build(), n.pos);
+            Pos field_pos = n.pos;
+            if cf.has_pos {
+              field_pos = cf.pos;
+            }
+            best = _declaration(name, .Field, b.build(), field_pos);
+            best.container = c.name;
+            found = true;
+          }
+        }
+      }
+      .Enum(e) -> {
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, name) {
+            continue;
+          }
+          if n.pos.line > best_line {
+            best_line = n.pos.line;
+            StringBuilder b = string_builder_init(24);
+            b.append(variant.name);
+            if variant.has_payload && variant.payload.len > 0 {
+              b.append("(");
+              num p = 0;
+              for p < variant.payload.len {
+                if p > 0 {
+                  b.append(", ");
+                }
+                b.append(render_type(variant.payload.get(p)));
+                p = p + 1;
+              }
+              b.append(")");
+            }
+            Pos variant_pos = n.pos;
+            if variant.has_pos {
+              variant_pos = variant.pos;
+            }
+            best = _declaration(name, .Variant, b.build(), variant_pos);
+            best.container = e.name;
             found = true;
           }
         }
@@ -1076,9 +1153,7 @@ fun _for_body(ForKind fk) Node* {
 
 // The declaration of `variant_name`, one of `enum_name`'s own
 // variants, rendered as a reader would write its own pattern (bare,
-// or with its payload types in parens). No per-variant position is
-// tracked, so go-to-definition lands on the enum's own declaration,
-// the same way a compound field points at its compound.
+// or with its payload types in parens).
 pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_name) Option<Declaration> {
   num i = 0;
   for i < program.len {
@@ -1110,7 +1185,13 @@ pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_
             }
             b.append(")");
           }
-          ret .Some(_declaration(variant_name, .Variant, b.build(), n.pos));
+          Pos variant_pos = n.pos;
+          if variant.has_pos {
+            variant_pos = variant.pos;
+          }
+          Declaration d = _declaration(variant_name, .Variant, b.build(), variant_pos);
+          d.container = enum_name;
+          ret .Some(d);
         }
       }
       _ -> {}
@@ -1359,5 +1440,6 @@ fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaratio
   d.kind = kind;
   d.detail = detail;
   d.pos = pos;
+  d.container = "";
   ret d;
 }
