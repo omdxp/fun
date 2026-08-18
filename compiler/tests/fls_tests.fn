@@ -378,6 +378,32 @@ test "hover and completion resolve a dotted chain through its own receiver's dec
   assert !contains(out, `"label":"engine"`), "expected Car's own field excluded, one level too shallow";
 }
 
+test "hover and signature help specialize a generic method against its receiver's own concrete type" {
+  str src = `imp std.option;
+  `fun main() num {
+  `  Option<num> o;
+  `  num v = o.unwrap_or(5);
+  `  ret v;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic.fn";
+  doc.path = "generic.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `unwrap_or`: the template's own `T` substituted with `num`
+  // throughout, self's own receiver type included, not the bare
+  // `unwrap_or(T fallback) T` the template itself declares.
+  str hovered = hover(&reads, doc, 3, 13);
+  assert contains(hovered, "unwrap_or(Option<num>* self, num fallback) num"), "expected T specialized to num everywhere it appears";
+
+  // Same specialization inside the call's own parens.
+  str help = signature_help(&reads, doc, 3, 22);
+  assert contains(help, `"label":"fun unwrap_or(Option<num>* self, num fallback) num"`), "expected the same specialized signature from signature help";
+}
+
 test "hover resolves a bare variant shorthand and its payload binding inside a fit" {
   str src = `enum Shape {
   `  Circle(num),

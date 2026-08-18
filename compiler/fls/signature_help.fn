@@ -41,7 +41,12 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   if !equals(c.receiver, "") {
     str type_name = type_name_of_local(&program.nodes, c.receiver, doc.path, source_line);
     if !equals(type_name, "") {
-      found = lookup_method(&program.nodes, type_name, c.callee);
+      found = lookup_method(
+        &program.nodes,
+        type_name,
+        c.callee,
+        local_generic_args(&program.nodes, c.receiver, doc.path, source_line)
+      );
       active_param = active_param + 1;
     }
   } else {

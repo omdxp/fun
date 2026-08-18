@@ -327,8 +327,12 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field) Option<Declar
 // The method `method_name` declared in an `impl` block targeting
 // `type_name`. Unlike a field or an enum variant, a method keeps its
 // own real declaration position, so go-to-definition lands on the
-// method itself, not on the enclosing impl or type.
-pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option<Declaration> {
+// method itself, not on the enclosing impl or type. `concrete_args`
+// is the receiver's own generic arguments in source order (`num` for
+// an `Option<num>` receiver), when known; pass an empty `Vec` when
+// they aren't (or the receiver isn't generic at all) to get the
+// signature exactly as declared, template params included.
+pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<str> concrete_args) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -348,7 +352,11 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option
           fit method.kind {
             .Function(f) -> {
               if equals(_bare_method_name(f.name, type_name), method_name) {
-                ret .Some(_declaration(method_name, .Function, render_function_named(f, method_name), method.pos));
+                str signature = render_function_named(f, method_name);
+                if im.has_type_params {
+                  signature = specialize_signature(signature, im.type_params, concrete_args);
+                }
+                ret .Some(_declaration(method_name, .Function, signature, method.pos));
               }
             }
             _ -> {}
@@ -359,6 +367,122 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name) Option
     }
   }
   ret .None;
+}
+
+// `signature`, with each of `type_params`'s own name replaced by its
+// positional entry in `concrete_args` wherever it appears as a whole
+// word: `o.unwrap_or` on an `Option<num>` receiver shows
+// `unwrap_or(num value) num`, not the bare template's own
+// `unwrap_or(T value) T`. A length mismatch (an absent or unparsed
+// concrete argument list) leaves `signature` unchanged, template
+// params and all.
+pub fun specialize_signature(str signature, Vec<str> type_params, Vec<str> concrete_args) str {
+  if type_params.len == 0 || type_params.len != concrete_args.len {
+    ret signature;
+  }
+  str out = signature;
+  num i = 0;
+  for i < type_params.len {
+    out = _replace_word(out, type_params.get(i), concrete_args.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The comma-separated generic type arguments in a rendered "Type<Arg1,
+// Arg2> name" declaration detail, depth-aware so a nested generic
+// argument's own comma isn't mistaken for a separator. Empty when
+// `detail` names no generic instantiation at all.
+pub fun generic_args_of_detail(str detail) Vec<str> {
+  Vec<str> out;
+  out.init(2);
+  num open = index_of_char(detail, '<');
+  if open < 0 {
+    ret out;
+  }
+  num depth = 0;
+  num start = open + 1;
+  num i = start;
+  num n = len(detail);
+  for i < n {
+    chr c = detail[i];
+    if c == '<' {
+      depth = depth + 1;
+    } elif c == '>' {
+      if depth == 0 {
+        str piece = trim(substr(detail, start, i - start));
+        if !equals(piece, "") {
+          out.push(piece);
+        }
+        ret out;
+      }
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      str piece = trim(substr(detail, start, i - start));
+      if !equals(piece, "") {
+        out.push(piece);
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The generic type arguments of the local or parameter named `name`,
+// as declared (`["num"]` for an `Option<num>` local); empty when it
+// isn't generic, or isn't a known local at all.
+pub fun local_generic_args(Vec<Node>* program, str name, str file, num line) Vec<str> {
+  let found = _lookup_local(program, name, file, line);
+  if found.is_none() {
+    Vec<str> empty;
+    empty.init(0);
+    ret empty;
+  }
+  ret generic_args_of_detail(found.unwrap().detail);
+}
+
+// `s` with every whole-word occurrence of `word` replaced by
+// `replacement`. `word` must not be preceded or followed by an
+// identifier character, so substituting `T` doesn't corrupt `Type`
+// or a local actually named `Tx`.
+fun _replace_word(str s, str word, str replacement) str {
+  num n = len(s);
+  num wlen = len(word);
+  if wlen == 0 {
+    ret s;
+  }
+  StringBuilder b = string_builder_init(n + 8);
+  num i = 0;
+  for i < n {
+    bin matches = i + wlen <= n;
+    if matches {
+      num k = 0;
+      for k < wlen {
+        if s[i + k] != word[k] {
+          matches = false;
+        }
+        k = k + 1;
+      }
+    }
+    if matches {
+      bin before_ok = i == 0 || !_is_type_param_ident_char(s[i - 1]);
+      bin after_ok = i + wlen >= n || !_is_type_param_ident_char(s[i + wlen]);
+      if before_ok && after_ok {
+        b.append(replacement);
+        i = i + wlen;
+        continue;
+      }
+    }
+    b.append_char(s[i]);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// True for a character that can appear in an identifier.
+fun _is_type_param_ident_char(chr c) bin {
+  ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
 // A method's own name, with the `Type__` prefix it is mangled with

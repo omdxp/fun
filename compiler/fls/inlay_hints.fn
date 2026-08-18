@@ -139,7 +139,7 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         if equals(type_name, "") {
           ret "";
         }
-        let found = lookup_method(program, type_name, token_word(method_tok));
+        let found = lookup_method(program, type_name, token_word(method_tok), local_generic_args(program, name, file, line));
         if found.is_none() {
           ret "";
         }

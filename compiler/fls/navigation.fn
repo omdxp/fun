@@ -170,7 +170,19 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
       if field.is_some() {
         ret field;
       }
-      let method = lookup_method(&program.nodes, type_name, name);
+      // Specializes a generic method's own signature against the
+      // receiver's concrete type arguments (`o.unwrap_or` on
+      // `Option<num>` shows `num`, not the bare template's own `T`),
+      // when `receiver` is itself a plain local carrying them; a
+      // receiver reached through a deeper chain falls back to the
+      // unspecialized signature rather than resolving no method at
+      // all.
+      let method = lookup_method(
+        &program.nodes,
+        type_name,
+        name,
+        local_generic_args(&program.nodes, receiver, doc.path, source_line)
+      );
       if method.is_some() {
         ret method;
       }
