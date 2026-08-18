@@ -160,6 +160,44 @@ test "a function is spelled back as its signature" {
   assert equals(found.unwrap().detail, "fun probe(str name, num count) bin"), "expected the whole signature";
 }
 
+test "hover appends a 'See also' footer linking a user-defined type in the signature" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///seealso.fn";
+  doc.path = "seealso.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `fun make() Point {
+  `  Point p;
+  `  ret p;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 3, 5);
+  assert contains(hovered, "See also:"), "expected the footer to appear";
+  assert contains(hovered, "[`Point`]"), "expected a link to the return type";
+  assert contains(hovered, "#L1"), "expected the link to point at Point's own declaration line";
+
+  // A quirk name is resolved the same way (lookup_top_level previously
+  // had no case for it at all, so a quirk-typed parameter never
+  // resolved here).
+  Document quirk_doc;
+  quirk_doc.uri = "file:///seealsoquirk.fn";
+  quirk_doc.path = "seealsoquirk.fn";
+  quirk_doc.text = `quirk Greeter {
+  `  greet() str;
+  `}
+  `fun announce(Greeter* g) str {
+  `  ret g.greet();
+  `}`;
+  quirk_doc.version = 1;
+  str quirk_hovered = hover(&reads, quirk_doc, 3, 5);
+  assert contains(quirk_hovered, "See also:"), "expected the footer for a quirk-typed parameter too";
+  assert contains(quirk_hovered, "[`Greeter`]"), "expected a link to the quirk's own declaration";
+}
+
 test "a keyword carries documentation, and an ordinary word does not" {
   assert !equals(keyword_doc("fit"), ""), "expected fit to be documented";
   assert contains(keyword_doc("fit"), "```fun"), "expected a fenced example";

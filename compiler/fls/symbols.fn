@@ -279,6 +279,14 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           ret .Some(_declaration(name, .Enum, b.build(), n.pos));
         }
       }
+      .Quirk(q) -> {
+        if equals(q.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("quirk ");
+          b.append(q.name);
+          ret .Some(_declaration(name, .Quirk, b.build(), n.pos));
+        }
+      }
       .Variable(v) -> {
         if equals(v.name, name) {
           StringBuilder b = string_builder_init(32);

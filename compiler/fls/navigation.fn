@@ -18,6 +18,7 @@ imp std.vec;
 imp std.option;
 imp std.io;
 imp std.fs;
+imp std.ctype;
 
 // What a client is told when there is nothing to say.
 const str NO_HOVER = "null";
@@ -96,6 +97,9 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   b.append("```fun\n");
   b.append(d.detail);
   b.append("\n```");
+  if read.parsed {
+    b.append(_see_also_footer(&read.program.nodes, d));
+  }
   ret _hover_result(b.build(), span_of(t));
 }
 
@@ -330,6 +334,72 @@ fun _hover_result(str markdown, Span s) str {
     s.line,
     s.end
   );
+}
+
+// A "See also" footer linking the user-defined types mentioned in
+// `d`'s own signature: its own capitalized type-shaped words (Fun's
+// own convention, matching every builtin/C-typedef's lowercase
+// spelling), each resolved through the program's own top-level
+// declarations and rendered as a clickable file link. Skips a name
+// that doesn't resolve to anything real, or resolves outside any
+// file (nothing to link to). "" when nothing resolves at all.
+fun _see_also_footer(Vec<Node>* program, Declaration d) str {
+  Vec<str> names = _candidate_type_names(d.detail, d.name);
+  defer names.free();
+  StringBuilder links = string_builder_init(64);
+  num count = 0;
+  num i = 0;
+  for i < names.len && count < 8 {
+    str name = names.get(i);
+    i = i + 1;
+    let found = lookup_top_level(program, name);
+    if found.is_none() {
+      continue;
+    }
+    Declaration td = found.unwrap();
+    if equals(td.pos.filename, "") {
+      continue;
+    }
+    if count > 0 {
+      links.append(", ");
+    }
+    links.append(format("[`{str}`]({str}#L{num})", name, path_to_uri(td.pos.filename), td.pos.line));
+    count = count + 1;
+  }
+  if count == 0 {
+    ret "";
+  }
+  ret format("\n\n---\n\nSee also: {str}\n", links.build());
+}
+
+// The capitalized, identifier-shaped words in `detail` (a rendered
+// signature or type), Fun's own convention for a user-defined type
+// name as opposed to a builtin or C typedef (always spelled lower).
+// Deduplicated, and never `exclude_name` itself, so a hovered
+// symbol never "sees also" its own name.
+fun _candidate_type_names(str detail, str exclude_name) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num n = len(detail);
+  num i = 0;
+  for i < n {
+    chr c = detail[i];
+    if !is_upper(c) {
+      i = i + 1;
+      continue;
+    }
+    num start = i;
+    i = i + 1;
+    for i < n && (is_alnum(detail[i]) || detail[i] == '_') {
+      i = i + 1;
+    }
+    str word = substr(detail, start, i - start);
+    if equals(word, exclude_name) || out.contains(word) {
+      continue;
+    }
+    out.push(word);
+  }
+  ret out;
 }
 
 // The hover for an import path segment resolved to `target`: a
