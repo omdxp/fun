@@ -13,11 +13,13 @@ imp ..ast.ast;
 imp ..lexer.lexdefs;
 imp ..lexer.token;
 imp ..parser.import_resolver;
+imp ..semantics.warnings;
 imp std.string;
 imp std.vec;
 imp std.io;
 imp std.path;
 imp std.fs;
+imp std.ctype;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -32,6 +34,7 @@ enum ItemKind {
   Keyword = 14,
   File = 17,
   Folder = 19,
+  Constant = 21,
   Struct = 22,
 }
 
@@ -61,6 +64,9 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   // this most, and exactly when the usual AST-driven path below has
   // nothing to offer.
   if _try_import_completions(&items, doc.path, doc.text, line, character) {
+    ret _reply(&items);
+  }
+  if _try_warning_id_completions(&items, doc.text, line, character) {
     ret _reply(&items);
   }
 
@@ -258,6 +264,107 @@ fun _import_dir(str current_file, str parent_specifier) str {
     n = n - 1;
   }
   ret substr(stripped, 0, n);
+}
+
+// Every warning id `allow`/`expect` can name, as `diagnose()` itself
+// spells them (`warning_id_name`), so this list can never drift out
+// of sync with what a real diagnostic's own message prefix carries.
+fun _all_warning_ids() Vec<str> {
+  Vec<str> out;
+  out.init(14);
+  out.push(warning_id_name(.ReturnLocalPtr));
+  out.push(warning_id_name(.FitNonExhaustive));
+  out.push(warning_id_name(.FitUnreachableBranch));
+  out.push(warning_id_name(.UnreachableCode));
+  out.push(warning_id_name(.AssertConstant));
+  out.push(warning_id_name(.UnusedVariable));
+  out.push(warning_id_name(.UnusedImport));
+  out.push(warning_id_name(.UnusedFunction));
+  out.push(warning_id_name(.UnusedCompound));
+  out.push(warning_id_name(.MissingReturn));
+  out.push(warning_id_name(.BlockingForkDeadlock));
+  out.push(warning_id_name(.SharedMutableCaptureRace));
+  out.push(warning_id_name(.IntegerLiteralOutOfRange));
+  out.push(warning_id_name(.ChannelCapacityOverflow));
+  ret out;
+}
+
+// A warning id, for the first argument of `allow <id>, "reason";` or
+// `expect <id>, "reason";`, filled in from what's typed so far.
+// Line-based like `_try_import_completions`, and for the same reason:
+// this needs to answer before the rest of the line even parses.
+fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num character) bin {
+  Vec<str> lines = split_lines(text);
+  if line < 0 || line >= lines.len {
+    ret false;
+  }
+  str raw_line = lines.get(line);
+  num cut = character;
+  if cut > len(raw_line) {
+    cut = len(raw_line);
+  }
+  if cut < 0 {
+    ret false;
+  }
+  str stripped = trim_left(substr(raw_line, 0, cut));
+
+  str after_kw = "";
+  if starts_with(stripped, "allow") && _kw_boundary(stripped, 5) {
+    after_kw = substr(stripped, 5, len(stripped) - 5);
+  } elif starts_with(stripped, "expect") && _kw_boundary(stripped, 6) {
+    after_kw = substr(stripped, 6, len(stripped) - 6);
+  } else {
+    ret false;
+  }
+  after_kw = trim_left(after_kw);
+
+  // Only for the first argument, before any comma, closing quote, or
+  // the statement's own semicolon, past any of which the id is
+  // already written, and a reader is typing the reason instead.
+  if index_of_char(after_kw, ',') >= 0 || index_of_char(after_kw, ';') >= 0 || index_of_char(
+    after_kw,
+    '"'
+  ) >= 0 {
+    ret false;
+  }
+  num i = 0;
+  num n = len(after_kw);
+  for i < n {
+    chr c = after_kw[i];
+    if c == ' ' || c == '\t' {
+      i = i + 1;
+      continue;
+    }
+    if !is_alnum(c) && c != '_' {
+      ret false;
+    }
+    i = i + 1;
+  }
+
+  str prefix = trim(after_kw);
+  Vec<str> ids = _all_warning_ids();
+  defer ids.free();
+  num k = 0;
+  for k < ids.len {
+    str id = ids.get(k);
+    k = k + 1;
+    if !equals(prefix, "") && !starts_with(id, prefix) {
+      continue;
+    }
+    items.push(_item(id, .Constant, "warning id"));
+  }
+  ret true;
+}
+
+// True when `stripped` is exactly `keyword_len` characters long (the
+// bare keyword, nothing following yet) or the character right after
+// it is whitespace, so `allow` matches but `allowed` does not.
+fun _kw_boundary(str stripped, num keyword_len) bin {
+  if len(stripped) == keyword_len {
+    ret true;
+  }
+  chr next = stripped[keyword_len];
+  ret next == ' ' || next == '\t';
 }
 
 // Short triggers that write a whole shape, the way `psvm` writes a main

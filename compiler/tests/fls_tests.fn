@@ -471,6 +471,36 @@ test "completion lists an import path's own directory, filtered by what's typed 
   assert contains(out_all, `"label":"sibling_b","kind":17`), "expected the other sibling module";
 }
 
+test "completion offers a warning id for the first argument of allow/expect, filtered by prefix" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///warnid.fn";
+  doc.path = "warnid.fn";
+  doc.text = "  allow unused_";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 15, false);
+  assert contains(out, `"label":"unused_variable","kind":21`), "expected a matching warning id, kind Constant";
+  assert contains(out, `"label":"unused_import"`), "expected another matching warning id";
+  assert contains(out, `"label":"unused_function"`), "expected a third matching warning id";
+  assert contains(out, `"label":"unused_compound"`), "expected a fourth matching warning id";
+  assert !contains(out, `"label":"fit_non_exhaustive"`), "expected a non-matching id filtered out";
+
+  // Same for 'expect'.
+  doc.text = "expect fit_non_exhaustive";
+  str out2 = completion(&reads, doc, 0, 25, false);
+  assert contains(out2, `"label":"fit_non_exhaustive"`), "expected 'expect' to offer ids too";
+
+  // Past the id (a comma already typed, a reason started) this no
+  // longer fires at all, checked by kind since the fallback
+  // written-word completion legitimately re-offers the same text for
+  // an unrelated reason (it is, after all, right there in the file).
+  doc.text = "allow unused_import, \"";
+  str out3 = completion(&reads, doc, 0, 22, false);
+  assert !contains(out3, `"label":"unused_import","kind":21`), "expected no warning-id completion once the id is already typed and a reason has started";
+}
+
 test "hover and completion resolve a dotted chain through its own receiver's declared type" {
   str src = `compound Engine {
   `  num rpm;
