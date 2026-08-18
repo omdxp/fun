@@ -294,6 +294,26 @@ test "a fit written in shorthand is still checked for the variants it skips" {
   assert contains(found, "S.B"), "expected the message to name what is missing";
 }
 
+test "a fit over a function parameter is checked exactly like one over a local" {
+  // local_types only ever registered a `.Variable` statement's own
+  // name, never a parameter's, so `fit`ing straight over what a
+  // function was handed (the single most common shape) silently
+  // skipped exhaustiveness checking entirely.
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant noticed for a parameter subject";
+  assert contains(found, "Shape.Square"), "expected the message to name what is missing";
+}
+
 test "a fit over num or a pointer with no catch-all is noticed" {
   // Neither has a closed value set the way bin/enum do, so a catch-all
   // is the only way to be exhaustive.

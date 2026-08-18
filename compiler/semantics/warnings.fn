@@ -1286,6 +1286,30 @@ impl Analysis {
     Set<str> locals = set_init("", 8);
     defer locals.free();
     self.local_types.clear();
+    // A parameter is exactly as good a `fit` subject as a `let`
+    // local, but only a `.Variable` statement inside the body ever
+    // registered here before this: `fit` over a plain parameter never
+    // resolved its own enum type, so exhaustiveness checking silently
+    // never ran for what is, in practice, the single most common
+    // shape (`fit` straight over what the function was handed).
+    for arg : f.args {
+      if arg == nil {
+        continue;
+      }
+      fit arg.kind {
+        .Variable(av) -> {
+          locals.add(av.name);
+          if av.var_type != nil {
+            str atype = av.var_type.type_str;
+            if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
+              atype = format("{str}*", atype);
+            }
+            self.local_types.put(av.name, atype);
+          }
+        }
+        _ -> {}
+      }
+    }
     self.waits_on_unsized_group = _creates_empty_wait_group(f.body);
     self.check_channel_sends(f.body);
     self.walk_body(f.body, &locals);
