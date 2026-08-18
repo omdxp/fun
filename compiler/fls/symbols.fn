@@ -789,34 +789,68 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if !_covers(n, f, file, line) {
           continue;
         }
-        num a = 0;
-        for a < f.args.len {
-          Node* arg = f.args.get(a);
-          a = a + 1;
-          if arg == nil {
+        let found = _lookup_in_function(f, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
             continue;
           }
-          fit arg.kind {
-            .Variable(v) -> {
-              if equals(v.name, name) {
-                ret .Some(_declaration(name, .Parameter, _render_param(arg), arg.pos));
+          fit m.kind {
+            .Function(f) -> {
+              if !_covers(*m, f, file, line) {
+                continue;
+              }
+              let found = _lookup_in_function(f, name, program, file, line);
+              if found.is_some() {
+                ret found;
               }
             }
             _ -> {}
           }
         }
-        if f.has_body {
-          let found = _lookup_in_body(f.body, name);
-          if found.is_some() {
-            ret found;
-          }
-          let found_binding = _lookup_fit_binding(f.body, name, program, file, line);
-          if found_binding.is_some() {
-            ret found_binding;
-          }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `name` as a parameter or local of `f`, whether declared directly at
+// the top level or reached as one of an impl block's own methods
+// (which are `FunctionNode`s just the same, only nested one level
+// deeper in the program's own node list).
+fun _lookup_in_function(FunctionNode f, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+  num a = 0;
+  for a < f.args.len {
+    Node* arg = f.args.get(a);
+    a = a + 1;
+    if arg == nil {
+      continue;
+    }
+    fit arg.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(arg), arg.pos));
         }
       }
       _ -> {}
+    }
+  }
+  if f.has_body {
+    let found = _lookup_in_body(f.body, name);
+    if found.is_some() {
+      ret found;
+    }
+    let found_binding = _lookup_fit_binding(f.body, name, program, file, line);
+    if found_binding.is_some() {
+      ret found_binding;
     }
   }
   ret .None;

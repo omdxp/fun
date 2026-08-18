@@ -220,6 +220,69 @@ test "hover on a primitive-typed field still links back to its own compound" {
   assert contains(hovered, "[`Counter`]"), "expected a link back to Counter itself";
 }
 
+test "hover resolves a parameter or local declared inside an impl method's own body" {
+  // _lookup_local only ever walked top-level .Function nodes; an impl
+  // block's own methods (also FunctionNodes, just nested one level
+  // deeper under .Impl) were never reached at all, so every hover on
+  // a method's own parameter or local resolved to nothing, in a
+  // codebase almost entirely made of impl methods.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///implocal.fn";
+  doc.path = "implocal.fn";
+  doc.text = `compound Server {
+  `  num count;
+  `}
+  `impl Server {
+  `  bump(num message) {
+  `    num delta = message;
+  `    self.count = self.count + delta;
+  `  }
+  `}`;
+  doc.version = 1;
+
+  // The method's own parameter, at its use site (the right side of
+  // 'num delta = message;', line 5).
+  str param_hover = hover(&reads, doc, 5, 16);
+  assert contains(param_hover, "num message"), "expected the method's own parameter to resolve";
+
+  // The local it's assigned to, at its own declaration site.
+  str local_decl_hover = hover(&reads, doc, 5, 8);
+  assert contains(local_decl_hover, "num delta"), "expected the method's own local to resolve at its declaration";
+
+  // The same local, at a later use (line 6).
+  str local_use_hover = hover(&reads, doc, 6, 30);
+  assert contains(local_use_hover, "num delta"), "expected the method's own local to resolve at a use too";
+}
+
+test "typeDefinition jumps to a local's declared type, and to itself when hovering the type directly" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///typedef.fn";
+  doc.path = "typedef.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `fun main() num {
+  `  Point p;
+  `  ret p.x;
+  `}`;
+  doc.version = 1;
+
+  // Hovering the local 'p' jumps to Point's own declaration, not p's.
+  str from_local = type_definition(&reads, doc, 5, 8);
+  assert contains(from_local, `"line":0`), "expected a jump to Point's own line, not the local's";
+  assert contains(from_local, `"character":9`), "expected the range to land on Point's own name";
+
+  // Hovering 'Point' itself (the type reference on the same line)
+  // jumps to itself, same as plain definition.
+  str from_type_name = type_definition(&reads, doc, 5, 2);
+  assert contains(from_type_name, `"line":0`), "expected Point hovered directly to resolve to itself";
+}
+
 test "go-to-definition on a compound field or enum variant lands on its own declaration line, not the type's" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

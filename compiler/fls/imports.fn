@@ -8,6 +8,7 @@
 // reference fls did.
 
 imp positions;
+imp symbols;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;

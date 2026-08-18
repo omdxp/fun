@@ -150,11 +150,15 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   if declared.is_none() {
     ret NO_LOCATION;
   }
-  Declaration d = declared.unwrap();
+  ret _location_result(declared.unwrap());
+}
+
+// A single-element `Location[]`, the shape every definition-like
+// method answers with, pointing at `d`'s own declaration.
+fun _location_result(Declaration d) str {
   if equals(d.pos.filename, "") {
     ret NO_LOCATION;
   }
-
   Span s = span_of_pos(d.pos, len(d.name));
   StringBuilder b = string_builder_init(160);
   b.append("[");
@@ -168,6 +172,53 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   ));
   b.append("]");
   ret b.build();
+}
+
+// Where the *type* of the name at `line`/`character` was declared,
+// rather than the name itself: hovering a compound name jumps to
+// itself (the same place plain `definition` would land), but hovering
+// a local/field/parameter/global jumps to what it was declared *as*,
+// the way an editor's "Go to Type Definition" is meant to work. `[]`
+// for anything whose type can't be resolved to a real declaration (a
+// primitive, an inferred `let` local, a function's own name).
+pub fun type_definition(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+
+  let declared = _resolve(cache, doc, &tokens, t, line);
+  if declared.is_none() {
+    ret NO_LOCATION;
+  }
+  Declaration d = declared.unwrap();
+  fit d.kind {
+    .Compound -> { ret _location_result(d); }
+    .Enum -> { ret _location_result(d); }
+    .Quirk -> { ret _location_result(d); }
+    _ -> {}
+  }
+
+  str type_name = bare_type_from_detail(d.detail);
+  if equals(type_name, "") {
+    ret NO_LOCATION;
+  }
+  let type_decl = lookup_top_level(&read.program.nodes, type_name);
+  if type_decl.is_none() {
+    ret NO_LOCATION;
+  }
+  ret _location_result(type_decl.unwrap());
 }
 
 // What the name `t` refers to, judged from where it sits: a field when

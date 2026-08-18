@@ -130,13 +130,19 @@ impl Server {
       self.answer_code_action(id, message);
       ret;
     }
-    // A client asks for a declaration under four names; what it wants
-    // back is the same place.
+    // A client asks for a declaration under three names; what it wants
+    // back is the same place. `typeDefinition` asks a different
+    // question (what a value's type is, not where the value itself
+    // was declared) and gets its own handler.
     if equals(method, "textDocument/definition") || equals(method, "textDocument/declaration") || equals(
       method,
-      "textDocument/typeDefinition"
-    ) || equals(method, "textDocument/implementation") {
+      "textDocument/implementation"
+    ) {
       self.answer_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/typeDefinition") {
+      self.answer_type_definition(id, message);
       ret;
     }
     if equals(method, "textDocument/formatting") {
@@ -360,6 +366,17 @@ impl Server {
     }
     Request r = asked.unwrap();
     write_message(response(id, definition(&self.reads, r.doc, r.line, r.character)));
+  }
+
+  // Says where the *type* of the name under the cursor was declared.
+  answer_type_definition(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, type_definition(&self.reads, r.doc, r.line, r.character)));
   }
 
   // Formats the whole document.
