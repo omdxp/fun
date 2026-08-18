@@ -12,6 +12,7 @@ imp symbols;
 imp uri;
 imp imports;
 imp ..lexer.token;
+imp ..parser.datatype_defs;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
@@ -60,6 +61,27 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if !equals(fork_doc, "") {
           ret _hover_result(fork_doc, span_of(t));
         }
+      }
+      // A sized integer type (`i7`, `u23`, ...) is recognized the
+      // same contextual way `fork` is: never a lexer keyword, just an
+      // identifier shape the parser accepts wherever a type is
+      // expected, so it never resolves as a declared symbol and would
+      // otherwise fall straight through to NO_HOVER like any other
+      // undeclared name.
+      let dynamic_int = parse_dynamic_int_datatype(token_word(t));
+      if dynamic_int.is_some() {
+        DynamicIntType dit = dynamic_int.unwrap();
+        str sign_word = "unsigned";
+        if dit.is_signed {
+          sign_word = "signed";
+        }
+        ret _hover_result(
+          _doc(
+            format("{str} x;", token_word(t)),
+            format("A {num}-bit {str} integer.", dit.bits, sign_word)
+          ),
+          span_of(t)
+        );
       }
       str target = import_target(&tokens, doc.path, line, character);
       if !equals(target, "") {

@@ -352,6 +352,28 @@ test "a keyword carries documentation, and an ordinary word does not" {
   assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
 }
 
+test "hover documents a sized integer type (i7, u23), never a real declared symbol" {
+  // Never a lexer keyword, contextual like fork, resolved purely
+  // from the identifier's own shape, the same way the parser accepts
+  // it wherever a type is expected.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sizedint.fn";
+  doc.path = "sizedint.fn";
+  doc.text = `fun main() {
+  `  i7 a = 1;
+  `  u23 b = 2;
+  `}`;
+  doc.version = 1;
+
+  str signed_hover = hover(&reads, doc, 1, 3);
+  assert contains(signed_hover, "7-bit signed integer"), "expected i7's own bit width and signedness";
+
+  str unsigned_hover = hover(&reads, doc, 2, 3);
+  assert contains(unsigned_hover, "23-bit unsigned integer"), "expected u23's own bit width and signedness";
+}
+
 test "hovering 'as' reads contextually: import alias vs quirk impl" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
