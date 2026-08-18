@@ -909,6 +909,83 @@ test "inlay hints infer a let local's own type from a literal, a plain call, and
   assert equals(inlay_hints(&reads, doc, 0, 0), "[]"), "expected no hints outside the requested range";
 }
 
+test "inlay hints cover a char literal, a field read, an impl method's own local, and a bare copy" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hints2.fn";
+  doc.path = "hints2.fn";
+  doc.text = `compound Server {
+  `  num count;
+  `}
+  `impl Server {
+  `  peek() num {
+  `    let x = self.count;
+  `    ret x;
+  `  }
+  `}
+  `fun top() {
+  `  num a = 5;
+  `  let b = 'c';
+  `  let c = a;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  // 'x' inside the impl method's own body: a field read, num.
+  assert contains(hints, `"position":{"line":5,"character":9}`), "expected a hint positioned right after 'x'";
+  assert contains(hints, `"label":": num"`), "expected the field read inside a method to resolve";
+  // A char literal was previously reported as 'num' (the catch-all in
+  // .Number's own fit), not 'chr'.
+  assert contains(hints, `"position":{"line":11,"character":7}`), "expected a hint positioned right after 'b'";
+  assert contains(hints, `"label":": chr"`), "expected a char literal to infer chr, not num";
+  // A bare copy of an explicitly-typed local ('a' is a real num, not
+  // a let) carries that type forward.
+  assert contains(hints, `"position":{"line":12,"character":7}`), "expected a hint positioned right after 'c'";
+}
+
+test "inlay hints don't chase a bare copy through another unresolved let, only a real declared type" {
+  // 'a' is itself let-inferred, so its own AST-stored type is
+  // permanently the sentinel regardless of what heuristic guess its
+  // own hint shows, and a copy of it can't resolve any further than
+  // that, correctly showing no hint rather than a stale or wrong one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hints2b.fn";
+  doc.path = "hints2b.fn";
+  doc.text = `fun helper() num { ret 5; }
+  `fun top() {
+  `  let a = helper();
+  `  let c = a;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert !contains(hints, "__let_infer__"), "expected the sentinel never shown verbatim";
+  assert !contains(hints, `"position":{"line":3`), "expected no hint at all for the chained copy";
+}
+
+test "inlay hints suppress the raw __let_infer__ sentinel rather than showing it verbatim" {
+  // A bare copy of a let local whose OWN type this heuristic could
+  // not resolve (an unsupported initializer shape) must not leak the
+  // parser's internal placeholder into the hint text.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hints3.fn";
+  doc.path = "hints3.fn";
+  doc.text = `fun main() {
+  `  let a = 1 + 2;
+  `  let b = a;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert !contains(hints, "__let_infer__"), "expected the sentinel never shown verbatim";
+  assert !contains(hints, `"line":2`), "expected no hint at all for the unresolved copy";
+}
+
 test "code actions offer to remove an unused import and to silence any warning" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

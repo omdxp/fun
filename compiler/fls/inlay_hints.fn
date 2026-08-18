@@ -18,6 +18,7 @@ imp positions;
 imp symbols;
 imp protocol;
 imp ..lexer.token;
+imp ..semantics.typecheck;
 imp std.string;
 imp std.vec;
 imp std.option;
@@ -110,6 +111,7 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
     .Number -> {
       fit val_tok.data {
         .Dec(_) -> { ret "dec"; }
+        .Cval(_) -> { ret "chr"; }
         _ -> { ret "num"; }
       }
     }
@@ -124,14 +126,13 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
       }
       Token next = next_opt.unwrap();
       if token_is_operator(next, ".") {
-        // `receiver.method(...)`: the receiver's own declared type
-        // names which impl to look the method up on.
-        let method_tok_opt = _next_non_trivia(tokens, index_of_token(tokens, next) + 1);
-        if method_tok_opt.is_none() {
+        num member_idx = index_of_token(tokens, next) + 1;
+        let member_tok_opt = _next_non_trivia(tokens, member_idx);
+        if member_tok_opt.is_none() {
           ret "";
         }
-        Token method_tok = method_tok_opt.unwrap();
-        fit method_tok.type {
+        Token member_tok = member_tok_opt.unwrap();
+        fit member_tok.type {
           .Identifier -> {}
           _ -> { ret ""; }
         }
@@ -139,11 +140,27 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         if equals(type_name, "") {
           ret "";
         }
-        let found = lookup_method(program, type_name, token_word(method_tok), local_generic_args(program, name, file, line));
-        if found.is_none() {
+        let after_member_opt = _next_non_trivia(tokens, index_of_token(tokens, member_tok) + 1);
+        // `receiver.method(...)`: the receiver's own declared type
+        // names which impl to look the method up on.
+        if after_member_opt.is_some() && token_is_operator(after_member_opt.unwrap(), "(") {
+          let found = lookup_method(
+            program,
+            type_name,
+            token_word(member_tok),
+            local_generic_args(program, name, file, line)
+          );
+          if found.is_none() {
+            ret "";
+          }
+          ret _return_type_from_signature(found.unwrap().detail);
+        }
+        // `receiver.field`: no call following, so it's a plain read.
+        let field = lookup_field(program, type_name, token_word(member_tok));
+        if field.is_none() {
           ret "";
         }
-        ret _return_type_from_signature(found.unwrap().detail);
+        ret _full_declared_type(field.unwrap());
       }
       if token_is_operator(next, "(") {
         let found = lookup_top_level(program, name);
@@ -152,10 +169,37 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         }
         ret _return_type_from_signature(found.unwrap().detail);
       }
-      ret "";
+      // A bare read of an already-typed local/field/parameter/global
+      // (`let c = a;`): whatever `a` itself was declared as, in full
+      // (a pointer star or generic argument matters here, unlike
+      // `type_name_of_local`'s bare form, which exists for looking a
+      // further member up rather than for display). `a` may itself be
+      // a `let` local this same heuristic couldn't resolve, in which
+      // case its own recorded type is the raw sentinel rather than a
+      // real one, shown as no hint rather than leaked verbatim.
+      let existing = lookup(program, name, file, line);
+      if existing.is_none() {
+        ret "";
+      }
+      str existing_type = _full_declared_type(existing.unwrap());
+      if equals(existing_type, LET_INFER_TYPE) {
+        ret "";
+      }
+      ret existing_type;
     }
     _ -> { ret ""; }
   }
+}
+
+// `d`'s own declared type, spelled in full (pointer star, generic
+// args, everything): whatever precedes `d`'s own name in its
+// rendered "Type name" detail.
+fun _full_declared_type(Declaration d) str {
+  num name_len = len(d.name);
+  if len(d.detail) <= name_len {
+    ret "";
+  }
+  ret trim(substr(d.detail, 0, len(d.detail) - name_len));
 }
 
 // `detail` (a rendered "fun name(args) RetType" signature) with only
