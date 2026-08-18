@@ -1199,6 +1199,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     ret .Err("lex error");
   }
   let raw_tokens = lexed.unwrap();
+  defer raw_tokens.free();
   Vec<Token> tokens = _group_top_level(&raw_tokens);
   defer tokens.free();
 
