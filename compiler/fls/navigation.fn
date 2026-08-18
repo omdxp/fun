@@ -73,6 +73,17 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   str doc_comment = "";
   if equals(d.pos.filename, doc.path) {
     doc_comment = doc_comment_above(doc.text, d.pos.line);
+  } elif !equals(d.pos.filename, "") {
+    // A symbol declared in another file (reached through an `imp`)
+    // needs that file's own text, not the current document's -- its
+    // doc comment sits above the declaration wherever that file
+    // actually lives, not at the same line number here. Read fresh
+    // each time rather than cached, since this file isn't one the
+    // client has open for `didChange` to keep current.
+    str other_text = read_to_string(d.pos.filename);
+    if other_text != nil {
+      doc_comment = doc_comment_above(other_text, d.pos.line);
+    }
   }
   StringBuilder b = string_builder_init(96);
   if !equals(doc_comment, "") {

@@ -348,7 +348,7 @@ impl Server {
         diags.push(d);
       }
     }
-    write_message(response(id, code_actions(doc.unwrap(), document_uri, &diags)));
+    write_message(response(id, code_actions(&self.reads, doc.unwrap(), document_uri, &diags)));
   }
 
   // Says where the name under the cursor was declared.
