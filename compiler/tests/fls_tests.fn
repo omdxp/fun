@@ -346,6 +346,38 @@ test "completion after a dot offers what the receiver has" {
   assert !contains(out, `"label":"ret"`), "expected no reserved words after a dot";
 }
 
+test "hover and completion resolve a dotted chain through its own receiver's declared type" {
+  str src = `compound Engine {
+  `  num rpm;
+  `}
+  `compound Car {
+  `  Engine engine;
+  `}
+  `fun main() num {
+  `  Car c;
+  `  num r = c.engine.rpm;
+  `  ret r;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chain.fn";
+  doc.path = "chain.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `rpm` in `c.engine.rpm`: not `c`'s own field (it has none
+  // named `rpm`), only reachable by resolving `engine`'s own type
+  // first.
+  str hovered = hover(&reads, doc, 8, 21);
+  assert contains(hovered, "num rpm"), "expected rpm resolved through the whole chain, not just c";
+
+  // Right after `c.engine.`: only Engine's own members, not Car's.
+  str out = completion(&reads, doc, 8, 19, false);
+  assert contains(out, `"label":"rpm"`), "expected Engine's own field";
+  assert !contains(out, `"label":"engine"`), "expected Car's own field excluded, one level too shallow";
+}
+
 test "hover resolves a bare variant shorthand and its payload binding inside a fit" {
   str src = `enum Shape {
   `  Circle(num),

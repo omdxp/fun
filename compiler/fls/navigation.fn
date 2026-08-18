@@ -159,7 +159,12 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
 
   str receiver = _receiver_of(tokens, t);
   if !equals(receiver, "") {
-    str type_name = type_name_of_local(&program.nodes, receiver, doc.path, source_line);
+    // Walks the whole dotted chain (`a.b.c`), not just the immediate
+    // `receiver` segment: `type_name_of_local(receiver, ...)` alone
+    // would fail here whenever the receiver is itself a field access
+    // rather than a bare local, since a field name was never declared
+    // as one.
+    str type_name = chain_receiver_type(tokens, t, &program.nodes, doc.path, source_line);
     if !equals(type_name, "") {
       let field = lookup_field(&program.nodes, type_name, name);
       if field.is_some() {

@@ -76,8 +76,14 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
 
   if !equals(receiver, "") {
     // After a dot, only what the receiver actually has is worth
-    // offering; the reserved words are not.
-    str type_name = type_name_of_local(&program.nodes, receiver, doc.path, source_line);
+    // offering; the reserved words are not. Walks the whole dotted
+    // chain, not just the immediate receiver segment, the same way
+    // hover/definition do.
+    str type_name = "";
+    let receiver_tok = _receiver_token_before(&tokens, line, character);
+    if receiver_tok.is_some() {
+      type_name = _receiver_own_type(&tokens, receiver_tok.unwrap(), &program.nodes, doc.path, source_line);
+    }
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items);
     }
@@ -191,44 +197,108 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
 }
 
 // The name a dot immediately before the cursor is reached through, or
-// empty when the cursor does not follow a dot.
+// empty when the cursor does not follow a dot. For a chain
+// (`a.b.c|`), this is `c`'s own dot, reached through `b`, not `a`:
+// every identifier seen updates `receiver`, so the last one standing
+// is always whichever segment sits right before the cursor's own
+// dot, not the chain's first segment.
 fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
   num source_line = line + 1;
   num source_col = character + 1;
   str receiver = "";
-  bin saw_dot = false;
+  bin last_was_dot = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
+    // A `NewLine` token's own `end_col` restarts near the left margin
+    // rather than continuing the line's own column count, which would
+    // otherwise slip it past the position filter below and reset
+    // `receiver` right as the scan reaches the cursor.
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      continue;
+    }
     if t.pos.line != source_line || t.pos.end_col > source_col {
       continue;
     }
     if token_is_operator(t, ".") {
-      saw_dot = true;
+      last_was_dot = true;
       continue;
     }
     fit t.type {
       .Identifier -> {
-        if saw_dot {
-          // A name already being typed after the dot, which does not
-          // change what the dot is reached through.
-          continue;
-        }
         receiver = token_word(t);
-        saw_dot = false;
+        last_was_dot = false;
       }
       _ -> {
-        if !saw_dot {
-          receiver = "";
-        }
+        receiver = "";
+        last_was_dot = false;
       }
     }
   }
-  if !saw_dot {
+  if !last_was_dot {
     ret "";
   }
   ret receiver;
+}
+
+// The token the receiver before `line`/`character` was written as,
+// mirroring `_receiver_before`'s own scan, but keeping the token
+// itself rather than just its word: what `chain_receiver_type` needs
+// to walk a whole dotted chain (`a.b.` offering `b`'s own fields, not
+// failing because `b` was never declared as a local).
+fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<Token> {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  Option<Token> receiver = .None;
+  bin last_was_dot = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    if token_is_operator(t, ".") {
+      last_was_dot = true;
+      continue;
+    }
+    fit t.type {
+      .Identifier -> {
+        receiver = .Some(t);
+        last_was_dot = false;
+      }
+      _ -> {
+        receiver = .None;
+        last_was_dot = false;
+      }
+    }
+  }
+  if !last_was_dot {
+    ret .None;
+  }
+  ret receiver;
+}
+
+// The receiver token's own declared type: for `a.b.c|`, `c`'s
+// receiver is `b`, and this is `b`'s own type (not `a`'s, which is
+// what `chain_receiver_type` alone would give, since it resolves
+// everything *before* the token it's handed). When there's no dotted
+// chain ahead of `receiver_tok` at all, it's a bare local/global
+// itself.
+fun _receiver_own_type(Vec<Token>* tokens, Token receiver_tok, Vec<Node>* program, str file, num line) str {
+  str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
+  if equals(prefix_type, "") {
+    ret type_name_of_local(program, token_word(receiver_tok), file, line);
+  }
+  let field = lookup_field(program, prefix_type, token_word(receiver_tok));
+  if field.is_none() {
+    ret "";
+  }
+  ret bare_type_from_detail(field.unwrap().detail);
 }
 
 // The fields of `type_name`, and the methods declared on it.

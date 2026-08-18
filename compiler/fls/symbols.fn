@@ -9,6 +9,7 @@
 
 imp ..ast.ast;
 imp ..lexer.token;
+imp positions;
 imp std.string;
 imp std.vec;
 imp std.option;
@@ -427,20 +428,83 @@ pub fun type_name_of_local(Vec<Node>* program, str name, str file, num line) str
   if found.is_none() {
     ret "";
   }
-  Declaration d = found.unwrap();
-  // The detail reads `Type name`; the type is what precedes the space,
-  // with any pointer or array spelling removed.
-  num space = index_of_char(d.detail, ' ');
+  ret bare_type_from_detail(found.unwrap().detail);
+}
+
+// The bare declared type of a rendered "Type name" declaration
+// detail, with any generic args or pointer spelling removed: what
+// precedes the space, up to the first `<`, stars stripped. Shared by
+// `type_name_of_local` and `chain_receiver_type`, since a field's own
+// `Declaration.detail` reads the same shape a local's does.
+pub fun bare_type_from_detail(str detail) str {
+  num space = index_of_char(detail, ' ');
   if space <= 0 {
     ret "";
   }
-  str written = substr(d.detail, 0, space);
+  str written = substr(detail, 0, space);
   num cut = index_of_char(written, '<');
   if cut > 0 {
     written = substr(written, 0, cut);
   }
   str stripped = replace_char(written, '*', ' ');
   ret trim(stripped);
+}
+
+// The type at the end of a dotted chain of field accesses leading up
+// to (but not including) `t`: for `a.b.c`, `c`'s own receiver type is
+// whatever `b` resolves to on `a`'s declared type, not just `a`'s own
+// type. Walks backward through consecutive `ident.ident...` segments;
+// a call (`f().g`) or index (`x[0].g`) ends the chain one segment
+// short, same as a bare identifier already does today.
+pub fun chain_receiver_type(Vec<Token>* tokens, Token t, Vec<Node>* program, str file, num line) str {
+  Vec<str> segments;
+  segments.init(4);
+  num cursor = index_of_token(tokens, t);
+  for cursor > 0 {
+    let dot = token_before(tokens, cursor);
+    if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
+      break;
+    }
+    num dot_idx = index_of_token(tokens, dot.unwrap());
+    let seg_tok = token_before(tokens, dot_idx);
+    if seg_tok.is_none() {
+      break;
+    }
+    Token seg = seg_tok.unwrap();
+    fit seg.type {
+      .Identifier -> {}
+      _ -> { break; }
+    }
+    segments.push(token_word(seg));
+    cursor = index_of_token(tokens, seg);
+  }
+  if segments.len == 0 {
+    ret "";
+  }
+  // Collected closest-to-`t` first; reverse to left-to-right order.
+  num lo = 0;
+  num hi = segments.len - 1;
+  for lo < hi {
+    let tmp = segments.get(lo);
+    segments.set(lo, segments.get(hi));
+    segments.set(hi, tmp);
+    lo = lo + 1;
+    hi = hi - 1;
+  }
+  str current_type = type_name_of_local(program, segments.get(0), file, line);
+  num i = 1;
+  for i < segments.len {
+    if equals(current_type, "") {
+      ret "";
+    }
+    let field = lookup_field(program, current_type, segments.get(i));
+    if field.is_none() {
+      ret "";
+    }
+    current_type = bare_type_from_detail(field.unwrap().detail);
+    i = i + 1;
+  }
+  ret current_type;
 }
 
 // A parameter or local of the function containing `line` in `file`.
