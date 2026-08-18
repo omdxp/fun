@@ -376,6 +376,18 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
 
   str module_def = definition(&reads, doc, 0, 12);
   assert contains(module_def, "lexer/lexer.fn"), "expected a jump to the module file up and over from '..'";
+
+  // A longer dot run ('....', two levels up) lexes as multiple tokens
+  // (only '.'/'..'/'...' are known multi-char operators, so this one
+  // splits into '...' + '.'), which the fix has to re-concatenate
+  // rather than assume a single '..' token.
+  Document doc2;
+  doc2.uri = "file:///compiler/parser/importprobe.fn";
+  doc2.path = "compiler/parser/importprobe.fn";
+  doc2.text = "imp ....compiler.lexer.lexer;\n";
+  doc2.version = 1;
+  str deep_hover = hover(&reads, doc2, 0, 23);
+  assert contains(deep_hover, "Vec<Token>"), "expected the same doc comment through a four-dot path";
 }
 
 test "hover shows a doc comment for a method declared in another, imported file" {
