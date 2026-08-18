@@ -93,6 +93,77 @@ pub fun index_of_token(Vec<Token>* tokens, Token t) num {
   ret -1;
 }
 
+// One function body still open while scanning toward `target_line`:
+// the depth its own `{` opened at, and where `async ` would go (empty
+// when the function already is async, nothing left to fix).
+compound FnAsyncScope {
+  num body_depth;
+  bin has_insert;
+  Pos insert_pos;
+}
+
+// Where to insert `async ` to make the function enclosing
+// `target_line` (0-indexed, as a diagnostic reports it) async: right
+// before its own `fun` keyword. `None` when no enclosing function is
+// found, or it already is async (an `await_outside_async_function`
+// diagnostic naming a function this can't find is a bug elsewhere,
+// not something to paper over here).
+pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line) Option<Pos> {
+  num source_target = target_line + 1;
+  Vec<FnAsyncScope> scopes;
+  scopes.init(8);
+  num depth = 0;
+  bin has_pending = false;
+  Pos pending_pos;
+  bin pending_is_async = false;
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.pos.line > source_target {
+      break;
+    }
+    if token_is_keyword(t, "fun") {
+      bin is_async = false;
+      let prev = token_before(tokens, i);
+      if prev.is_some() && token_is_keyword(prev.unwrap(), "async") {
+        is_async = true;
+      }
+      pending_pos = t.pos;
+      has_pending = true;
+      pending_is_async = is_async;
+    } elif token_is_symbol(t, '{') {
+      depth = depth + 1;
+      if has_pending {
+        FnAsyncScope sc;
+        sc.body_depth = depth;
+        sc.has_insert = !pending_is_async;
+        sc.insert_pos = pending_pos;
+        scopes.push(sc);
+        has_pending = false;
+        pending_is_async = false;
+      }
+    } elif token_is_symbol(t, '}') {
+      if scopes.len != 0 && scopes.get(scopes.len - 1).body_depth == depth {
+        scopes.pop();
+      }
+      if depth > 0 {
+        depth = depth - 1;
+      }
+    }
+    i = i + 1;
+  }
+
+  if scopes.len == 0 {
+    ret .None;
+  }
+  FnAsyncScope last = scopes.get(scopes.len - 1);
+  if !last.has_insert {
+    ret .None;
+  }
+  ret .Some(last.insert_pos);
+}
+
 // True for a token that is only there for the reader.
 fun _is_trivia(Token t) bin {
   fit t.type {

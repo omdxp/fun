@@ -2,14 +2,16 @@
 // 
 // Quick fixes offered for a diagnostic already reported: removing an
 // unused import outright, filling in a fit's missing arm or a quirk
-// impl's missing method, or silencing any warning with the same
-// `allow` a reader could write by hand.
+// impl's missing method, inserting a missing `await` or marking a
+// function `async`, or silencing any warning with the same `allow` a
+// reader could write by hand.
 
 imp protocol;
 imp documents;
 imp analysis;
 imp diagnostics;
 imp symbols;
+imp positions;
 imp ..lexer.token;
 imp std.string;
 imp std.vec;
@@ -27,13 +29,19 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
     Diagnostic d = diags.get(i);
     i = i + 1;
     if d.severity == SEVERITY_ERROR {
-      str quirk_fix = _quirk_stub_action(cache, doc, document_uri, d);
-      if !equals(quirk_fix, "") {
+      str error_fix = _quirk_stub_action(cache, doc, document_uri, d);
+      if equals(error_fix, "") {
+        error_fix = _insert_await_action(document_uri, d);
+      }
+      if equals(error_fix, "") {
+        error_fix = _mark_async_action(cache, doc, document_uri, d);
+      }
+      if !equals(error_fix, "") {
         if any {
           b.append(",");
         }
         any = true;
-        b.append(quirk_fix);
+        b.append(error_fix);
       }
       continue;
     }
@@ -112,6 +120,63 @@ fun _allow_action(str document_uri, Diagnostic d, str id_name) str {
   b.append(`,"character":0}},"newText":`);
   b.append(json_quote(format("allow {str};\n", id_name)));
   b.append(`}]}}}`);
+  ret b.build();
+}
+
+// The quick fix for a "call to async ... needs await" error: inserts
+// `await ` right where the diagnostic itself points, which `fail`
+// always positions at the call's own start.
+fun _insert_await_action(str document_uri, Diagnostic d) str {
+  if !contains(d.message, "needs await") {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":"Insert 'await'","kind":"quickfix","edit":{"changes":{`);
+  b.append(json_quote(document_uri));
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append(format_num(d.line));
+  b.append(`,"character":`);
+  b.append(format_num(d.col));
+  b.append(`},"end":{"line":`);
+  b.append(format_num(d.line));
+  b.append(`,"character":`);
+  b.append(format_num(d.col));
+  b.append(`}},"newText":"await "}]}}}`);
+  ret b.build();
+}
+
+// The quick fix for an "await is only allowed in an async function"
+// error: inserts `async ` right before the enclosing function's own
+// `fun` keyword, found by scanning tokens for whichever function body
+// is still open at the diagnostic's own line.
+fun _mark_async_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  if !contains(d.message, "only allowed in an async function") {
+    ret "";
+  }
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "";
+  }
+  Vec<Token> tokens = read.tokens;
+  let found = enclosing_function_async_insert_pos(&tokens, d.line);
+  if found.is_none() {
+    ret "";
+  }
+  Pos p = found.unwrap();
+  num line0 = p.line - 1;
+  num col0 = p.col - 1;
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":"Mark enclosing function async","kind":"quickfix","edit":{"changes":{`);
+  b.append(json_quote(document_uri));
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append(format_num(line0));
+  b.append(`,"character":`);
+  b.append(format_num(col0));
+  b.append(`},"end":{"line":`);
+  b.append(format_num(line0));
+  b.append(`,"character":`);
+  b.append(format_num(col0));
+  b.append(`}},"newText":"async "}]}}}`);
   ret b.build();
 }
 

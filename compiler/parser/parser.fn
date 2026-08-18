@@ -1843,7 +1843,10 @@ impl Parser {
             num after_generic = self.state.skip_generic_args_tokens(1);
             if after_generic != 1 {
               let next_after_generic = self.state.token_peek_n(after_generic);
-              if next_after_generic.is_some() && token_is_operator(next_after_generic.unwrap(), "(") {
+              if next_after_generic.is_some() && token_is_operator(
+                next_after_generic.unwrap(),
+                "("
+              ) {
                 looks_like_generic_call = true;
               }
             }
@@ -2095,6 +2098,8 @@ impl Parser {
             self.has_pending_call_generic_args = false;
           }
           Node call_node = node_new(NodeKind.Expression(call_e));
+          call_node.pos = left_node.pos;
+          call_node.has_pos = left_node.has_pos;
           self.create_node(&call_node);
         }
         .None -> {}

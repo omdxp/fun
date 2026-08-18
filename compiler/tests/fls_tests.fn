@@ -710,6 +710,66 @@ test "code actions implement a quirk's missing method with its exact declared si
   assert contains(out, `"start":{"line":9,"character":0}`), "expected the insertion right before the impl's closing brace";
 }
 
+test "code actions insert 'await' right where a missing-await error points" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///needsawait.fn";
+  doc.path = "needsawait.fn";
+  doc.text = `async fun fetch() num { ret 1; }
+  `fun main() num {
+  `  let v = fetch();
+  `  ret v;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 2;
+  d.col = 10;
+  d.end_line = 2;
+  d.end_col = 17;
+  d.severity = SEVERITY_ERROR;
+  d.message = "call to async function 'fetch' needs await";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Insert 'await'"`), "expected the insert-await quick fix";
+  assert contains(out, `"start":{"line":2,"character":10}`), "expected the insertion right where the diagnostic points";
+  assert contains(out, `"newText":"await "`), "expected 'await ' as the inserted text";
+}
+
+test "code actions mark the enclosing function async for an await-outside-async error" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///awaitoutside.fn";
+  doc.path = "awaitoutside.fn";
+  doc.text = `async fun fetch() num { ret 1; }
+  `fun main() num {
+  `  ret await fetch();
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 2;
+  d.col = 8;
+  d.end_line = 2;
+  d.end_col = 20;
+  d.severity = SEVERITY_ERROR;
+  d.message = "await is only allowed in an async function";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Mark enclosing function async"`), "expected the mark-async quick fix";
+  // Right before 'main''s own 'fun' keyword (line 1).
+  assert contains(out, `"start":{"line":1,"character":0}`), "expected the insertion right before the enclosing 'fun'";
+  assert contains(out, `"newText":"async "`), "expected 'async ' as the inserted text";
+}
+
 test "completion still answers while the text does not parse" {
   // What a reader is typing is half-written by definition, so a failed
   // parse must not turn into an empty reply.
