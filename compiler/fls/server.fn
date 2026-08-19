@@ -21,6 +21,7 @@ imp completion;
 imp formatting;
 imp folding_range;
 imp code_lens;
+imp selection_range;
 imp uri;
 imp std.string;
 imp std.option;
@@ -217,6 +218,10 @@ impl Server {
     }
     if equals(method, "textDocument/codeLens") {
       self.answer_code_lens(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/selectionRange") {
+      self.answer_selection_range(id, message);
       ret;
     }
     if equals(method, "shutdown") {
@@ -578,6 +583,42 @@ impl Server {
     write_message(response(id, code_lenses(&self.reads, &self.docs, doc.unwrap())));
   }
 
+  // One expanding selection-range chain per requested position.
+  answer_selection_range(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Vec<num> lines;
+    lines.init(4);
+    defer lines.free();
+    Vec<num> chars;
+    chars.init(4);
+    defer chars.free();
+    JsonValue positions = _field(params, "positions");
+    fit positions {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue p = items.get(i);
+          i = i + 1;
+          lines.push(_number_field(p, "line"));
+          chars.push(_number_field(p, "character"));
+        }
+      }
+      _ -> {}
+    }
+    write_message(response(id, selection_ranges(&self.reads, doc.unwrap(), &lines, &chars)));
+  }
+
   // Every symbol matching `query`, across every document this server
   // holds open.
   answer_workspace_symbols(str id, JsonValue message) {
@@ -716,7 +757,7 @@ fun _number_field(JsonValue message, str name) num {
 // is one a request handler answers.
 fun _initialize_result() str {
   ret format(
-    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"codeLensProvider":{"resolveProvider":false},"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"codeLensProvider":{"resolveProvider":false},"selectionRangeProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
     TOKEN_TYPES,
     TOKEN_MODIFIERS
   );

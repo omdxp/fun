@@ -26,7 +26,7 @@ fun notice(str src, bin report_unused) str {
   }
   let found = analyze(&state.nodes, &state.nodes, report_unused, "t.fn");
   if found.is_err() {
-    ret found.unwrap_err();
+    ret found.unwrap_err().message;
   }
   Vec<Warning> warnings = found.unwrap();
   defer warnings.free();
@@ -434,4 +434,28 @@ test "an unmet expect on an unreachable branch is an error" {
   `  }
   `}`;
   assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
+}
+
+test "an unmet expect reports its own position, not the top of the file, and is a real error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "claims a branch repeats";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `}`;
+  let tokens = tokenize(src, "t.fn");
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  assert p.parse().is_none(), "expected the source to parse";
+  let found = analyze(&state.nodes, &state.nodes, false, "t.fn");
+  assert found.is_err(), "expected the unmet expectation to be an error";
+  UnmetExpectation err = found.unwrap_err();
+  assert err.has_pos, "expected a real position, not just a message";
+  // Line 4 (1-indexed), the `expect` statement's own line, not line 1.
+  assert err.pos.line == 4, "expected the expect statement's own line, not the top of the file";
 }

@@ -72,7 +72,10 @@ compound Analysis {
   // The warnings a program asked to silence, and the ones it requires,
   // by the name each is written as.
   Set<str> allowed;
-  Set<str> expected;
+  // The `expect` statement's own position, by the name it names -
+  // needed so an unmet expectation can be reported right where it
+  // was written, not just somewhere in the file.
+  Map<str, Pos> expected;
   // Expectations that have been met, so an unmet one can be reported.
   Set<str> met;
 }
@@ -88,7 +91,7 @@ fun _analysis_new() Analysis {
   a.local_types.init(16);
   a.waits_on_unsized_group = false;
   a.allowed = set_init("", 8);
-  a.expected = set_init("", 8);
+  a.expected.init(8);
   a.met = set_init("", 8);
   ret a;
 }
@@ -116,12 +119,14 @@ impl Analysis {
     self.found.push(w);
   }
 
-  // Records what a `allow` or `expect` statement asks for.
-  control(WarningCtrlNode ctrl) {
+  // Records what a `allow` or `expect` statement asks for. `pos` is
+  // the control statement's own position, kept for `expect` so an
+  // unmet expectation can be reported right where it was written.
+  control(WarningCtrlNode ctrl, Pos pos) {
     str name = warning_id_name(ctrl.id);
     fit ctrl.action {
       .Allow -> { self.allowed.add(name); }
-      .Expect -> { self.expected.add(name); }
+      .Expect -> { self.expected.put(name, pos); }
     }
   }
 
@@ -822,7 +827,7 @@ impl Analysis {
         // including the part that is never reached.
         for s : body.statements {
           fit s.kind {
-            .StatementWarningControl(ctrl) -> { self.control(ctrl); }
+            .StatementWarningControl(ctrl) -> { self.control(ctrl, s.pos); }
             _ -> {}
           }
         }
@@ -871,7 +876,7 @@ impl Analysis {
           }
         }
       }
-      .StatementWarningControl(ctrl) -> { self.control(ctrl); }
+      .StatementWarningControl(ctrl) -> { self.control(ctrl, stmt.pos); }
       .StatementFit(f) -> { self.check_fit(stmt, f, locals); }
       .StatementIf(ifn) -> { self.walk_body(ifn.body, locals); }
       .StatementElseIf(ein) -> { self.walk_body(ein.body, locals); }
@@ -1666,9 +1671,20 @@ fun _import_is_read(str path, Set<str>* read) bin {
   ret false;
 }
 
-// Reads a program and reports what it notices, or names the warning an
-// `expect` asked for that never fired.
-pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str file) Result<Vec<Warning>, str> {
+// An `expect` asked for a warning that never fired: a claim the
+// program makes about itself that turned out not to be true. `pos`
+// is the `expect` statement's own position (not the warning site,
+// since there wasn't one), so a caller can point at the stale claim
+// itself rather than the top of the file.
+pub compound UnmetExpectation {
+  str message;
+  Pos pos;
+  bin has_pos;
+}
+
+// Reads a program and reports what it notices, or the `expect` that
+// never fired.
+pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str file) Result<Vec<Warning>, UnmetExpectation> {
   Analysis state = _analysis_new();
   state.report_unused = report_unused;
   state.file = file;
@@ -1709,7 +1725,7 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
       Node* node = &nodes.data[i];
       i = i + 1;
       fit node.kind {
-        .StatementWarningControl(ctrl) -> { state.control(ctrl); }
+        .StatementWarningControl(ctrl) -> { state.control(ctrl, node.pos); }
         _ -> {}
       }
     }
@@ -1752,9 +1768,23 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
       Vec<Warning> empty = state.found;
       empty.free();
       state.allowed.free();
+      UnmetExpectation err;
+      err.message = format("expected warning '{str}' was not emitted", name);
+      err.has_pos = false;
+      err.pos.line = 0;
+      err.pos.col = 0;
+      err.pos.start_col = 0;
+      err.pos.end_col = 0;
+      err.pos.end_line = 0;
+      err.pos.filename = "";
+      let at = state.expected.at(name);
+      if at.is_some() {
+        err.pos = at.unwrap();
+        err.has_pos = true;
+      }
       state.expected.free();
       state.met.free();
-      ret .Err(format("expected warning '{str}' was not emitted", name));
+      ret .Err(err);
     }
   }
 

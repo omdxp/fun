@@ -354,7 +354,21 @@ pub fun compile_to_c_mode(
   // what another file declares is its own business.
   let noticed = analyze(&merged.entry_nodes, &merged.nodes, warn_unused, input);
   if noticed.is_err() {
-    ret .Err(noticed.unwrap_err());
+    UnmetExpectation ue = noticed.unwrap_err();
+    if ue.has_pos {
+      str where = ue.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        ue.message,
+        where,
+        ue.pos.line,
+        ue.pos.col
+      ));
+    }
+    ret .Err(ue.message);
   }
   Vec<Warning> warnings = noticed.unwrap();
   defer warnings.free();

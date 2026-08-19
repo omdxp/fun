@@ -204,6 +204,13 @@ fun _render_param(Node* arg) str {
       b.append(render_type(v.var_type));
       b.append(" ");
       b.append(v.name);
+      if v.has_val {
+        str default_text = _literal_value_text(v.val);
+        if !equals(default_text, "") {
+          b.append(" = ");
+          b.append(default_text);
+        }
+      }
       ret b.build();
     }
     _ -> {}
@@ -241,16 +248,21 @@ fun _quote_escaped(str s) str {
   ret b.build();
 }
 
-// A constant's own literal value, spelled back the way a reader would
-// read it (a re-rendered numeric form rather than the exact source
-// text, so `0xFF` shows as `255`): "" for an initializer that isn't a
-// plain literal at all, `const`s being the only variable-shaped
-// declaration this is ever asked for.
+// A constant's own literal value (or a parameter's own default one:
+// `num times = 2`), spelled back the way a reader would read it (a
+// re-rendered numeric form rather than the exact source text, so
+// `0xFF` shows as `255`): "" for an initializer that isn't a plain
+// literal, a bare name, or a unary minus over one of those - covers
+// every shape a default parameter value is allowed to take (a
+// constant, a global, `nil`, or an enum variant's own bare name;
+// arbitrary expressions aren't legal there to begin with), but not
+// a qualified or dot-shorthand variant construction.
 fun _literal_value_text(Node* val) str {
   if val == nil {
     ret "";
   }
   fit val.kind {
+    .Identifier(s) -> { ret s; }
     .Number(d) -> {
       fit d {
         .Num(n) -> { ret format_num(n); }
@@ -1946,6 +1958,20 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
   }
   fit body.kind {
     .StatementFit(f) -> {
+      // A branch's own body can hide another `fit` (matching a
+      // nested field, say), whose own span always sits inside this
+      // one's - checking it first means the deepest, most specific
+      // fit statement wins, instead of every line inside any nested
+      // fit incorrectly resolving against this outer one's subject.
+      num bi2 = 0;
+      for bi2 < f.branches.len {
+        FitBranch br2 = f.branches.get(bi2);
+        bi2 = bi2 + 1;
+        let nested = _find_covering_fit(br2.body, line);
+        if nested.is_some() {
+          ret nested;
+        }
+      }
       num last = 0;
       num bi = 0;
       for bi < f.branches.len {
@@ -1962,15 +1988,6 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
       }
       if line >= start && line <= last {
         ret .Some(body);
-      }
-      num bi2 = 0;
-      for bi2 < f.branches.len {
-        FitBranch br2 = f.branches.get(bi2);
-        bi2 = bi2 + 1;
-        let nested = _find_covering_fit(br2.body, line);
-        if nested.is_some() {
-          ret nested;
-        }
       }
     }
     .Body(block) -> {

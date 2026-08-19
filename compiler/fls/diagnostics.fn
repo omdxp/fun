@@ -182,7 +182,19 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     out.push(type_error_diag);
   }
   if noticed.is_err() {
-    out.push(_at_start(SEVERITY_WARNING, noticed.unwrap_err()));
+    // A genuine compile error (the CLI fails the build over this
+    // exact condition), not a mere warning - and reported right at
+    // the `expect` statement itself when it's in this file, not just
+    // file start.
+    UnmetExpectation ue = noticed.unwrap_err();
+    Diagnostic ue_diag = _at_start(SEVERITY_ERROR, ue.message);
+    if ue.has_pos && equals(ue.pos.filename, path) {
+      ue_diag.line = ue.pos.line - 1;
+      ue_diag.col = ue.pos.col - 1;
+      ue_diag.end_line = ue_diag.line;
+      ue_diag.end_col = ue_diag.col + 1;
+    }
+    out.push(ue_diag);
     ret out;
   }
   Vec<Warning> found = noticed.unwrap();

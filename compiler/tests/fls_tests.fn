@@ -15,6 +15,7 @@ imp ..fls.completion;
 imp ..fls.formatting;
 imp ..fls.folding_range;
 imp ..fls.code_lens;
+imp ..fls.selection_range;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
@@ -312,6 +313,41 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   Vec<Diagnostic> third = diagnose(&reads, &dcache, doc);
   assert third.len == 0, "expected the stale warning to be gone once the revision changed";
   third.free();
+}
+
+test "an unmet expect diagnoses as an error, at the expect statement's own position" {
+  // `analyze`'s own unmet-expectation case used to surface as
+  // SEVERITY_WARNING at file start (0,0), always - it's a genuine
+  // compile error (the CLI fails the build over the same condition),
+  // and now carries the expect statement's own position.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  Document doc;
+  doc.uri = "file:///unmet_expect.fn";
+  doc.path = "unmet_expect.fn";
+  doc.text = `compound Hidden {
+  `  num value;
+  `}
+  `
+  `  expect unused_compound, "this expectation will never be met";
+  `
+  `fun main() num {
+  `  Hidden h;
+  `  h.value = 1;
+  `  ret h.value;
+  `}`;
+  doc.version = 1;
+
+  Vec<Diagnostic> diags = diagnose(&reads, &dcache, doc);
+  defer diags.free();
+  assert diags.len == 1, "expected exactly the unmet-expectation diagnostic";
+  Diagnostic d = diags.get(0);
+  assert d.severity == SEVERITY_ERROR, "expected the unmet expectation to be an error, not a warning";
+  assert d.line == 4, "expected the expect statement's own line, not file start";
+  assert d.col == 2, "expected the expect statement's own column, not file start";
 }
 
 test "hover documents sizeof, never a real declared symbol" {
@@ -2027,6 +2063,72 @@ test "a bare variant shorthand inside a fit resolves when the subject is a let-i
   assert contains(hovered, "Circle(num)"), "expected the variant to resolve when the fit's own subject is a let-inferred local";
 }
 
+test "a bare variant shorthand inside a fit nested in another fit's own branch resolves against its own subject" {
+  // `_find_covering_fit` used to return the outer fit as soon as a
+  // line fell anywhere in its own span, before ever checking a
+  // nested fit inside one of its own branches - since a nested fit's
+  // span always sits inside its own outer one's, this made every
+  // line inside a nested fit resolve against the wrong (outer)
+  // subject type instead.
+  str src = `enum Outer {
+  `  A(Inner),
+  `  B,
+  `}
+  `enum Inner {
+  `  X(num),
+  `  Y,
+  `}
+  `fun use_it(Outer o) num {
+  `  fit o {
+  `    .A(inner) -> {
+  `      fit inner {
+  `        .X(n) -> { ret n; }
+  `        .Y -> { ret 0; }
+  `      }
+  `    }
+  `    .B -> { ret 0; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///nested.fn";
+  doc.path = "nested.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `X` in the nested fit's own `.X(n) ->` (line 12, 0-indexed).
+  str inner_hover = hover(&reads, doc, 12, 9);
+  assert contains(inner_hover, "X(num)"), "expected the nested fit's own variant, not the outer fit's own Outer.A";
+}
+
+test "hover on a function or method shows a defaulted parameter's own default value" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///defparam.fn";
+  doc.path = "defparam.fn";
+  doc.text = `fun greet(str name, num times = 2, str sep = "-") str {
+  `  ret sep;
+  `}
+  `compound Counter {
+  `  num base;
+  `}
+  `impl Counter {
+  `  pub add(num x = 10) num {
+  `    ret self.base + x;
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str fn_hover = hover(&reads, doc, 0, 4);
+  assert contains(fn_hover, "num times = 2"), "expected the function's own defaulted num param";
+  assert contains(fn_hover, `str sep = \"-\"`), "expected the function's own defaulted str param";
+
+  str method_hover = hover(&reads, doc, 7, 6);
+  assert contains(method_hover, "num x = 10"), "expected the method's own defaulted param";
+}
+
 test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {
   str src = `compound Box {
   `  num width;
@@ -2803,6 +2905,37 @@ test "code lens shows a reference count per function, correctly pluralized" {
   // use_it: declared, never called.
   assert contains(out, `"title":"1 reference"`), "expected use_it's own count, singular";
   assert contains(out, `"command":"editor.action.showReferences"`), "expected the built-in show-references command";
+}
+
+test "selection range expands from a token through each enclosing bracket pair, outermost last" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sel.fn";
+  doc.path = "sel.fn";
+  doc.text = `fun add(num a, num b) num {
+  `  ret f(a, b);
+  `}
+  `fun f(num a, num b) num {
+  `  ret a + b;
+  `}`;
+  doc.version = 1;
+
+  // On the `a` argument inside `f(a, b)` (line 1, character 8).
+  Vec<num> lines;
+  lines.init(1);
+  lines.push(1);
+  Vec<num> chars;
+  chars.init(1);
+  chars.push(8);
+
+  str out = selection_ranges(&reads, doc, &lines, &chars);
+  // Token itself.
+  assert contains(out, `{"line":1,"character":8}`), "expected the token's own start position";
+  // The call's own parens, one level out.
+  assert contains(out, `{"line":1,"character":7}`), "expected the call's own opening paren as the next range out";
+  // The enclosing function body, outermost.
+  assert contains(out, `{"line":0,"character":26}`), "expected the function body as the outermost range";
 }
 
 test "semantic tokens classify a function declaration, a type, a keyword styled as a type, and a literal" {
