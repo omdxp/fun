@@ -2093,6 +2093,7 @@ pub fun enum_variant_declaration(
           // args known) leaves it as declared, template params and
           // all, matching every existing caller's own behavior.
           str detail = specialize_signature(b.build(), e.type_params, concrete_args);
+          detail = format("{str} = {num}", detail, _variant_ordinal(e, v - 1));
           Declaration d = _declaration(variant_name, .Variant, detail, variant_pos);
           d.container = enum_name;
           ret .Some(d);
@@ -2149,7 +2150,8 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
             }
             b.append(")");
           }
-          Declaration d = _declaration(variant_name, .Variant, b.build(), n.pos);
+          str typed_detail = format("{str} = {num}", b.build(), _variant_ordinal(e, v - 1));
+          Declaration d = _declaration(variant_name, .Variant, typed_detail, n.pos);
           d.container = e.name;
           ret .Some(d);
         }
@@ -2158,6 +2160,30 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
     }
   }
   ret .None;
+}
+
+// The ordinal `e`'s variant at `index` (0-indexed) is tagged with:
+// its own explicit `= N` when written, otherwise one past whatever
+// the variant before it resolved to (0 for the very first), the
+// same auto-increment rule an ordinary C-style enum follows.
+// Payload or not - a data-carrying variant can still be given its
+// own explicit tag (`Circle(num) = 3`), and the auto-incremented one
+// is just as fixed at compile time either way.
+fun _variant_ordinal(EnumDeclNode e, num index) num {
+  num running = 0;
+  num i = 0;
+  for i <= index {
+    EnumVariant variant = e.variants.get(i);
+    if variant.has_value {
+      running = variant.value;
+    }
+    if i == index {
+      ret running;
+    }
+    running = running + 1;
+    i = i + 1;
+  }
+  ret running;
 }
 
 // `payload`'s own rendered type, substituted with the matching entry

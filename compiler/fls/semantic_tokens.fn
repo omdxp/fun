@@ -13,7 +13,6 @@ imp symbols;
 imp ..lexer.token;
 imp ..ast.ast;
 imp ..parser.datatype_defs;
-imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
 imp std.map;
@@ -22,21 +21,26 @@ imp std.ctype;
 // The protocol's own token-type/modifier legend, in the exact order
 // each index below refers to. `initialize`'s own capabilities must
 // declare this same legend, or a client will show the wrong colors.
+// `defaultLibrary` marks a language primitive (`num`, `str`, `i7`,
+// ...) as distinct from every declared type - a `compound`/`enum`/
+// `quirk`, whether written in this project or the stdlib, is a
+// "type" like any other, uncolored differently by where it happens
+// to be declared.
 pub const str TOKEN_TYPES = `["keyword","comment","string","number","operator","function","variable","type","enumMember","boolean"]`;
 pub const str TOKEN_MODIFIERS = `["defaultLibrary"]`;
 
-// The protocol's own numbering, matching `TOKEN_TYPES`'s own order
-// (index 8, `enumMember`, is never emitted, so it's absent here).
+// The protocol's own numbering, matching `TOKEN_TYPES`'s own order.
 enum TokenKind {
-  Keyword = 0,
-  Comment = 1,
-  String = 2,
-  Number = 3,
-  Operator = 4,
-  Function = 5,
-  Variable = 6,
-  Type = 7,
-  Boolean = 9,
+  Keyword,
+  Comment,
+  String,
+  Number,
+  Operator,
+  Function,
+  Variable,
+  Type,
+  EnumMember,
+  Boolean,
 }
 
 // The full-document semantic tokens for `doc`, as the LSP result a
@@ -51,18 +55,25 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   }
   Vec<Token> tokens = read.tokens;
 
-  // Every top-level name declared in a file under the stdlib root,
-  // built once per call rather than resolved per token: cheap enough
-  // (one linear walk of already-parsed declarations, already paid for
-  // by `cache.of`) and avoids a per-identifier lookup against the
-  // whole merged program.
-  Map<str, bin> stdlib_names;
-  stdlib_names.init(64);
-  defer stdlib_names.free();
+  // Every name declared `const`, anywhere in the merged program, not
+  // just this file - a const's own name is otherwise indistinguishable
+  // from a type's by shape alone (`NAME`/`Widget` are both a bare
+  // capitalized identifier), and the same set membership check covers
+  // both the declaration site and every later reference to it.
+  Map<str, bin> const_names;
+  const_names.init(16);
+  defer const_names.free();
   if read.parsed {
-    str root = _normalize_path(stdlib_root(doc.path));
-    _collect_stdlib_names(&read.program.nodes, root, &stdlib_names);
+    _collect_const_names(&read.program.nodes, &const_names);
   }
+
+  // Every enum variant's own declaration-site name token (`Circle` in
+  // `enum Shape { Circle(num), ... }`) - not the payload types inside
+  // its parens, and not the enum's own name - so it reads as an enum
+  // member rather than a called function despite the same `Name(`
+  // shape a variant with a payload has.
+  Vec<bin> variant_decl = _enum_variant_name_flags(&tokens);
+  defer variant_decl.free();
 
   Vec<num> data;
   data.init(tokens.len * 5);
@@ -82,12 +93,17 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     if length <= 0 {
       continue;
     }
-    num ttype = _token_type_of(&tokens, idx, t);
+    num ttype = _token_type_of(&tokens, idx, t, &const_names, &variant_decl);
     if ttype < 0 {
       continue;
     }
+    // Both a lexer-keyword primitive (`num`, `str`, ...) and a
+    // dynamic-width one (`i7`, `u23`, ..., lexed as a plain
+    // identifier, see `_identifier_token_type` below) share the same
+    // name-based check, so this applies regardless of which token
+    // kind carried it.
     num modifier = 0;
-    if t.type == TokenType.Identifier && stdlib_names.at(token_word(t)).is_some() {
+    if ttype == TokenKind.Type && keyword_is_datatype(token_word(t)) {
       modifier = 1;
     }
 
@@ -125,34 +141,100 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   ret b.build();
 }
 
-// Every top-level declaration name whose own file sits under `root`
-// (both compared normalized, so a Windows-style path in either
-// operand still matches). A name found this way earns the
-// `defaultLibrary` modifier wherever it is later referenced.
-fun _collect_stdlib_names(Vec<Node>* nodes, str root, Map<str, bin>* out) {
+// Every name declared `const` anywhere in `nodes`. A local `const`
+// inside a function body isn't reached here (`nodes` is the top-level
+// program only) - a narrower, separately-scoped gap, same tradeoff
+// `outline.fn`'s own top-level walks already accept.
+fun _collect_const_names(Vec<Node>* nodes, Map<str, bin>* out) {
   num i = 0;
   for i < nodes.len {
     Node n = nodes.get(i);
     i = i + 1;
-    if !n.has_pos || !starts_with(_normalize_path(n.pos.filename), root) {
-      continue;
-    }
     fit n.kind {
-      .Function(f) -> { out.put(f.name, true); }
-      .Compound(c) -> { out.put(c.name, true); }
-      .Enum(e) -> { out.put(e.name, true); }
-      .Quirk(q) -> { out.put(q.name, true); }
-      .Variable(v) -> { out.put(v.name, true); }
+      .Variable(v) -> {
+        if v.is_const {
+          out.put(v.name, true);
+        }
+      }
       _ -> {}
     }
   }
+}
+
+// One flag per token in `tokens`, true at the index of an enum
+// variant's own declaration-site name (`Circle` in `enum Shape {
+// Circle(num), Square, }`) - the first identifier right after the
+// enum's own `{` or after a `,` at the variant list's own top level,
+// never a payload type sitting inside a variant's own parens.
+fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<bin> {
+  Vec<bin> flags;
+  flags.init(tokens.len);
+  num fi = 0;
+  for fi < tokens.len {
+    flags.push(false);
+    fi = fi + 1;
+  }
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if !token_is_keyword(t, "enum") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+      j = j + 1;
+    }
+    if j >= tokens.len {
+      break;
+    }
+    num depth = 1;
+    num paren_depth = 0;
+    bin expect_name = true;
+    num k = j + 1;
+    for k < tokens.len && depth > 0 {
+      Token tk = tokens.get(k);
+      if token_is_symbol(tk, '{') {
+        depth = depth + 1;
+      } elif token_is_symbol(tk, '}') {
+        depth = depth - 1;
+        if depth == 0 {
+          break;
+        }
+      } elif token_is_operator(tk, "(") {
+        paren_depth = paren_depth + 1;
+      } elif token_is_symbol(tk, ')') {
+        if paren_depth > 0 {
+          paren_depth = paren_depth - 1;
+        }
+      } elif token_is_operator(tk, ",") && paren_depth == 0 {
+        expect_name = true;
+        k = k + 1;
+        continue;
+      }
+      if paren_depth == 0 && expect_name && tk.type == TokenType.Identifier {
+        flags.set(k, true);
+        expect_name = false;
+      }
+      k = k + 1;
+    }
+    i = k;
+  }
+  ret flags;
 }
 
 // `t`'s own semantic type, or -1 for a token worth no highlight of
 // its own (a comment/string/number already read that way lexically
 // still gets one, since a client's own regex highlighting for those
 // is often less reliable than the lexer's real classification).
-fun _token_type_of(Vec<Token>* tokens, num idx, Token t) num {
+fun _token_type_of(
+  Vec<Token>* tokens,
+  num idx,
+  Token t,
+  Map<str, bin>* const_names,
+  Vec<bin>* variant_decl
+) num {
   fit t.type {
     .Comment -> { ret TokenKind.Comment; }
     .String -> { ret TokenKind.String; }
@@ -161,7 +243,7 @@ fun _token_type_of(Vec<Token>* tokens, num idx, Token t) num {
     .Operator -> { ret TokenKind.Operator; }
     .Symbol -> { ret TokenKind.Operator; }
     .Keyword -> { ret _keyword_token_type(t); }
-    .Identifier -> { ret _identifier_token_type(tokens, idx, t); }
+    .Identifier -> { ret _identifier_token_type(tokens, idx, t, const_names, variant_decl); }
     _ -> { ret -1; }
   }
 }
@@ -182,17 +264,46 @@ fun _keyword_token_type(Token t) num {
   ret TokenKind.Keyword;
 }
 
-// An identifier's own type, read from its immediate neighbors: a
-// function's declaration name (after `fun`, or any bare name
-// immediately followed by `(`, which covers a method's own
-// declaration too, with no `fun` keyword of its own, the same way it
-// covers an ordinary call); otherwise Fun's own naming convention
-// (a type is always capitalized, a value never is) decides between a
-// type reference and a plain variable/field/parameter read.
-fun _identifier_token_type(Vec<Token>* tokens, num idx, Token t) num {
+// An identifier's own type, read from its immediate neighbors and
+// from what was already collected about the whole program:
+// 
+// - a function's declaration name (after `fun`), an enum variant's
+// own declaration site (`variant_decl`) or a qualified/bare-dot
+// reference to one (`Enum.Circle`, `.Circle`, preceded by `.` and
+// capitalized - Fun's own convention never capitalizes a field or
+// method name, so this is unambiguous) both read as an enum
+// member, checked before the "any bare name immediately followed
+// by `(`" function-call rule below, since a variant with a payload
+// has that exact shape too
+// - any other bare name immediately followed by `(`, covering a
+// method's own declaration with no `fun` keyword of its own the
+// same way it covers an ordinary call
+// - a name already known to be `const` (`const_names`), regardless
+// of its own capitalization
+// - a dynamic-width sized integer (`i7`, `u23`, ...), never a lexer
+// keyword despite naming a primitive type the same way `num`/`str`
+// do
+// - otherwise Fun's own naming convention (a type is always
+// capitalized, a value never is) decides between a type reference
+// and a plain variable/field/parameter read
+fun _identifier_token_type(
+  Vec<Token>* tokens,
+  num idx,
+  Token t,
+  Map<str, bin>* const_names,
+  Vec<bin>* variant_decl
+) num {
   let prev = token_before(tokens, idx);
   if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
     ret TokenKind.Function;
+  }
+
+  if variant_decl.get(idx) {
+    ret TokenKind.EnumMember;
+  }
+  str word = token_word(t);
+  if prev.is_some() && token_is_operator(prev.unwrap(), ".") && len(word) > 0 && is_upper(word[0]) {
+    ret TokenKind.EnumMember;
   }
 
   let next = token_after(tokens, idx + 1);
@@ -200,8 +311,10 @@ fun _identifier_token_type(Vec<Token>* tokens, num idx, Token t) num {
     ret TokenKind.Function;
   }
 
-  str word = token_word(t);
-  if len(word) > 0 && is_upper(word[0]) {
+  if const_names.at(word).is_some() {
+    ret TokenKind.Variable;
+  }
+  if keyword_is_datatype(word) || (len(word) > 0 && is_upper(word[0])) {
     ret TokenKind.Type;
   }
   ret TokenKind.Variable;
