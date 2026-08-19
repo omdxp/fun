@@ -303,6 +303,58 @@ test "compound-init literal offers only the type's own field names" {
   assert !contains(out, `"label":"make"`), "expected the surrounding scope's own declarations not to leak in here";
 }
 
+test "a function completion item carries structured labelDetails" {
+  str src = `fun probe(str name, num count) bin {
+  `  ret true;
+  `}
+  `fun caller() bin {
+  `  ret probe("x", 1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///labeldetails.fn";
+  doc.path = "labeldetails.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Params dimmed, return type right-aligned.
+  str out = completion(&reads, doc, 4, 8, true);
+  assert contains(
+    out,
+    `"labelDetails":{"detail":"(str name, num count)","description":"bin"}`
+  ), "expected structured labelDetails for the function";
+
+  // Reserved words carry no labelDetails at all.
+  assert !contains(out, `"label":"ret","kind":14,"detail":"declaration","labelDetails"`), "expected no labelDetails on a keyword";
+}
+
+test "a method completion item's own labelDetails excludes the implicit self" {
+  str src = `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer {
+  `  pub resize(num n) bin { self.len = n; ret true; }
+  `}
+  `fun helper(Buffer b) bin {
+  `  ret b.resize(1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///labeldetails_method.fn";
+  doc.path = "labeldetails_method.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after `b.re`.
+  str out = completion(&reads, doc, 7, 10, true);
+  assert contains(
+    out,
+    `"labelDetails":{"detail":"(num n)","description":"bin"}`
+  ), "expected self excluded from the method's own labelDetails, matching its snippet";
+}
+
 test "completion offers a call snippet with one tab stop per parameter" {
   str src = `fun probe(str name, num count) bin {
   `  ret true;

@@ -1012,6 +1012,55 @@ fun _snippet_item(str label, ItemKind kind, str detail, str snippet) Item {
   ret it;
 }
 
+// A function/method item's own `labelDetails`: the parameter list
+// (shown dimmed beside the label) and the return type (shown right-
+// aligned), split from its own already-rendered detail the same way
+// `split_signature_params`/`return_type_from_detail` already do. ""
+// for anything else, or a detail that isn't call-shaped at all. A
+// method's own rendered detail still carries its implicit `self` as a
+// literal first parameter (`render_function_named`'s own convention),
+// skipped here the same way `_call_snippet` skips it.
+fun _label_details_json(str detail, ItemKind kind) str {
+  if kind != .Function && kind != .Method {
+    ret "";
+  }
+  if index_of_char(detail, '(') < 0 {
+    ret "";
+  }
+  Vec<str> params = split_signature_params(detail);
+  num start = 0;
+  if kind == .Method && params.len > 0 {
+    start = 1;
+  }
+  StringBuilder pd = string_builder_init(64);
+  pd.append("(");
+  num i = start;
+  for i < params.len {
+    if i > start {
+      pd.append(", ");
+    }
+    pd.append(params.get(i));
+    i = i + 1;
+  }
+  pd.append(")");
+
+  num close = last_index_of_char(detail, ')');
+  str return_type = "";
+  if close >= 0 {
+    return_type = trim(substr(detail, close + 1, len(detail) - close - 1));
+  }
+
+  StringBuilder b = string_builder_init(96);
+  b.append(`,"labelDetails":{"detail":`);
+  b.append(json_quote(pd.build()));
+  if !equals(return_type, "") {
+    b.append(`,"description":`);
+    b.append(json_quote(return_type));
+  }
+  b.append("}");
+  ret b.build();
+}
+
 fun _reply(Vec<Item>* items) str {
   StringBuilder b = string_builder_init(512);
   b.append("[");
@@ -1022,24 +1071,29 @@ fun _reply(Vec<Item>* items) str {
       b.append(",");
     }
     i = i + 1;
+    str extra = _label_details_json(it.detail, it.kind);
     if equals(it.snippet, "") {
       b.append(format(
-        `{"label":{str},"kind":{num},"detail":{str}}`,
+        `{"label":{str},"kind":{num},"detail":{str}`,
         json_quote(it.label),
         it.kind,
         json_quote(it.detail)
       ));
+      b.append(extra);
+      b.append("}");
       continue;
     }
     // Format 2 is the protocol's snippet format: `$1` and the rest are
     // where the cursor stops, `$0` where it ends up.
     b.append(format(
-      `{"label":{str},"kind":{num},"detail":{str},"insertText":{str},"insertTextFormat":2}`,
+      `{"label":{str},"kind":{num},"detail":{str},"insertText":{str},"insertTextFormat":2`,
       json_quote(it.label),
       it.kind,
       json_quote(it.detail),
       json_quote(it.snippet)
     ));
+    b.append(extra);
+    b.append("}");
   }
   b.append("]");
   ret b.build();
