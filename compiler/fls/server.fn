@@ -408,7 +408,10 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, definition(&self.reads, r.doc, r.line, r.character)));
+    write_message(response(
+      id,
+      definition_workspace_wide(&self.reads, &self.docs, r.doc, r.line, r.character)
+    ));
   }
 
   // Says where the *type* of the name under the cursor was declared.

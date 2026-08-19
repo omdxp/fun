@@ -198,6 +198,68 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   ret _location_result(declared.unwrap());
 }
 
+// `definition`, extended with a last-resort fallback: when the
+// current document's own transitively-merged program has nothing by
+// this name, a top-level declaration in any other document this
+// server already knows about (open, or already indexed by an earlier
+// `references`/`workspace/symbol` scan) still counts. Doesn't trigger
+// a workspace scan of its own, matching the reference's own
+// `findTypeDefinitionAnyDoc`, which only ever searches what's already
+// indexed rather than indexing on demand.
+pub fun definition_workspace_wide(
+  AnalysisCache* cache,
+  Documents* docs,
+  Document doc,
+  num line,
+  num character
+) str {
+  str local = definition(cache, doc, line, character);
+  if !equals(local, NO_LOCATION) {
+    ret local;
+  }
+
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = read.tokens;
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+  str name = token_word(t);
+
+  Vec<str> uris = docs.all_uris();
+  defer uris.free();
+  num i = 0;
+  for i < uris.len {
+    str other_uri = uris.get(i);
+    i = i + 1;
+    let other_doc_opt = docs.at(other_uri);
+    if other_doc_opt.is_none() {
+      continue;
+    }
+    Document other_doc = other_doc_opt.unwrap();
+    if equals(other_doc.path, doc.path) {
+      continue;
+    }
+    Analyzed other_read = cache.of(other_doc);
+    if !other_read.parsed {
+      continue;
+    }
+    let hit = lookup_top_level(&other_read.program.nodes, name);
+    if hit.is_some() {
+      ret _location_result(hit.unwrap());
+    }
+  }
+  ret NO_LOCATION;
+}
+
 // A single-element `Location[]`, the shape every definition-like
 // method answers with, pointing at `d`'s own declaration.
 fun _location_result(Declaration d) str {

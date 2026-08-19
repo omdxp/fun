@@ -714,6 +714,37 @@ test "references and workspace/symbol find a symbol in a document that was never
   assert count(edit, `"newText":"renamed_util"`) == 1, "expected only the open document's own occurrence renamed";
 }
 
+test "definition_workspace_wide falls back to a type in a document never imported, once indexed" {
+  // definition() itself only ever sees the current file's own
+  // transitively-merged program, so a type this file never imports
+  // is invisible to it no matter how the workspace is arranged.
+  // definition_workspace_wide adds exactly the reference's own
+  // findTypeDefinitionAnyDoc fallback: a last-resort scan of every
+  // already-known document, triggering no scan of its own (an
+  // unindexed workspace still finds nothing, matching the reference).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///main.fn", `fun main() num {
+  `  OrphanType x;
+  `  ret 0;
+  `}`, 1);
+  let main_doc = docs.at("file:///main.fn").unwrap();
+
+  // Not yet indexed anywhere: no fallback match.
+  assert equals(definition_workspace_wide(&reads, &docs, main_doc, 1, 2), "[]"), "expected no match before any document declaring OrphanType is known";
+
+  // Indexed now (standing in for an earlier references/workspace-
+  // symbol call having already scanned the workspace).
+  docs.opened("file:///unrelated.fn", `compound OrphanType {
+  `  num n;
+  `}`, 1);
+  str found = definition_workspace_wide(&reads, &docs, main_doc, 1, 2);
+  assert contains(found, `"uri":"file:///unrelated.fn"`), "expected the fallback to find OrphanType's own declaration";
+  assert contains(found, `"character":9`), "expected the range to land on OrphanType's own name, not the compound keyword";
+}
+
 test "a rename is refused when the new name is not one" {
   assert is_identifier("total"), "expected an ordinary name";
   assert is_identifier("_private"), "expected a leading underscore to be allowed";
