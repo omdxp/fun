@@ -72,7 +72,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
     b.append(format(
       `{"position":{"line":{num},"character":{num}},"label":{str},"kind":1,"paddingLeft":true}`,
       line0,
-      name_tok.pos.end_col - 1,
+      byte_col_to_utf16_char(doc.text, line0, name_tok.pos.end_col - 1),
       json_quote(format(": {str}", type_part))
     ));
   }
@@ -191,7 +191,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       b.append(format(
         `{"position":{"line":{num},"character":{num}},"label":{str},"kind":2,"paddingRight":true}`,
         at.pos.line - 1,
-        at.pos.start_col - 1,
+        byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1),
         json_quote(format("{str}:", pname))
       ));
     }

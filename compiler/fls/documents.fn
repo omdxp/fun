@@ -167,10 +167,9 @@ impl Documents {
   }
 }
 
-// The offset in `text` of a position given as a line and a column, both
-// counted from zero. A position past the end of a line lands at its end,
-// which is what an editor means by a column beyond the text.
-pub fun offset_of(str text, num line, num col) num {
+// The byte offset in `text` where `line` (counted from zero) begins,
+// or the text's own end when there aren't that many lines.
+pub fun line_byte_start(str text, num line) num {
   num offset = 0;
   num current_line = 0;
   num n = len(text);
@@ -183,19 +182,59 @@ pub fun offset_of(str text, num line, num col) num {
     }
     offset = offset + 1;
   }
-  num column = 0;
-  for column < col {
+  ret offset;
+}
+
+// The offset in `text` of a position given as a line and a column, both
+// counted from zero. `col` is a UTF-16 code unit count, matching what
+// LSP itself sends, not a byte count — a line with any character
+// outside ASCII needs decoding to land on the right byte. A position
+// past the end of a line lands at its end, which is what an editor
+// means by a column beyond the text.
+pub fun offset_of(str text, num line, num col) num {
+  num offset = line_byte_start(text, line);
+  num n = len(text);
+  num units = 0;
+  for units < col {
     if offset >= n || text[offset] == '\n' {
       ret offset;
     }
-    offset = offset + 1;
-    column = column + 1;
+    num seq_len = utf8_seq_len(text[offset]);
+    units = units + utf16_units_for_utf8_seq_len(seq_len);
+    offset = offset + seq_len;
   }
   ret offset;
 }
 
-// The line and column an offset falls on, both counted from zero. The
-// reverse of `offset_of`, for reporting a position back to a client.
+// A byte column on `line` (not a client's UTF-16 count) converted to
+// the UTF-16 code unit count LSP itself reports for that same point.
+pub fun byte_col_to_utf16_char(str text, num line, num byte_col) num {
+  num start = line_byte_start(text, line);
+  num target = start + byte_col;
+  num offset = start;
+  num units = 0;
+  num n = len(text);
+  for offset < target {
+    if offset >= n || text[offset] == '\n' {
+      break;
+    }
+    num seq_len = utf8_seq_len(text[offset]);
+    units = units + utf16_units_for_utf8_seq_len(seq_len);
+    offset = offset + seq_len;
+  }
+  ret units;
+}
+
+// A client's UTF-16 character count on `line` converted to the byte
+// column on that line the rest of the server operates in. The read-side
+// counterpart to `byte_col_to_utf16_char`.
+pub fun utf16_char_to_byte_col(str text, num line, num utf16_char) num {
+  ret offset_of(text, line, utf16_char) - line_byte_start(text, line);
+}
+
+// The line and column an offset falls on, both counted from zero (`col`
+// as a UTF-16 code unit count, matching `offset_of`). The reverse of
+// `offset_of`, for reporting a position back to a client.
 pub fun position_of(str text, num offset, num* line, num* col) {
   num current_line = 0;
   num current_col = 0;
@@ -205,10 +244,12 @@ pub fun position_of(str text, num offset, num* line, num* col) {
     if text[i] == '\n' {
       current_line = current_line + 1;
       current_col = 0;
+      i = i + 1;
     } else {
-      current_col = current_col + 1;
+      num seq_len = utf8_seq_len(text[i]);
+      current_col = current_col + utf16_units_for_utf8_seq_len(seq_len);
+      i = i + seq_len;
     }
-    i = i + 1;
   }
   *line = current_line;
   *col = current_col;

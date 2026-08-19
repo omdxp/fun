@@ -118,6 +118,57 @@ test "a position lands on the token the cursor is in" {
   assert token_at(&tokens, 1, 11).is_none(), "expected nothing under a space";
 }
 
+test "utf8_seq_len classifies a lead byte's own UTF-8 sequence length" {
+  str ascii = "a";
+  assert utf8_seq_len(ascii[0]) == 1, "expected ASCII to be a one-byte sequence";
+  // U+00E9 (e-acute), a 2-byte UTF-8 lead.
+  str two = "\xC3\xA9";
+  assert utf8_seq_len(two[0]) == 2, "expected a 2-byte lead";
+  // U+4E2D (中), a 3-byte UTF-8 lead.
+  str three = "\xE4\xB8\xAD";
+  assert utf8_seq_len(three[0]) == 3, "expected a 3-byte lead";
+  // U+1F600 (an emoji), a 4-byte UTF-8 lead, past the Basic Multilingual
+  // Plane.
+  str four = "\xF0\x9F\x98\x80";
+  assert utf8_seq_len(four[0]) == 4, "expected a 4-byte lead";
+
+  assert utf16_units_for_utf8_seq_len(1) == 1, "expected one UTF-16 unit for ASCII";
+  assert utf16_units_for_utf8_seq_len(2) == 1, "expected one UTF-16 unit still within the BMP";
+  assert utf16_units_for_utf8_seq_len(3) == 1, "expected one UTF-16 unit still within the BMP";
+  assert utf16_units_for_utf8_seq_len(4) == 2, "expected a surrogate pair past the BMP";
+}
+
+test "byte and UTF-16 columns convert correctly across a non-ASCII line" {
+  // "café " - c/a/f/space are one byte each, e-acute is 2 UTF-8 bytes
+  // but still one UTF-16 unit, so the line is 6 bytes but only 5
+  // UTF-16 units wide.
+  str text = "caf\xC3\xA9 x\n";
+
+  // The client's own UTF-16 count for "x" (just past "café ") is 5;
+  // that must land on byte offset 6, not byte offset 5 (which would
+  // still be inside the e-acute's own second byte).
+  assert utf16_char_to_byte_col(text, 0, 5) == 6, "expected the UTF-16 count to skip the full 2-byte character";
+
+  // The reverse: byte offset 6 (the 'x') is UTF-16 character 5, not 6.
+  assert byte_col_to_utf16_char(text, 0, 6) == 5, "expected the byte column to collapse to one UTF-16 unit for the 2-byte character";
+
+  // A plain ASCII prefix converts as the identity, the common case.
+  assert utf16_char_to_byte_col(text, 0, 2) == 2, "expected ASCII columns to pass through unchanged";
+  assert byte_col_to_utf16_char(text, 0, 2) == 2, "expected ASCII columns to pass through unchanged";
+
+  // offset_of (used for didChange edits) takes the same UTF-16 count
+  // and returns the absolute byte offset in the whole document.
+  assert offset_of(text, 0, 5) == 6, "expected offset_of to land on the byte after the 2-byte character";
+}
+
+test "a non-BMP character counts as two UTF-16 units, a surrogate pair" {
+  // "x\xF0\x9F\x98\x80y" - the emoji is 4 UTF-8 bytes but 2 UTF-16
+  // units (a surrogate pair), so 'y' sits at UTF-16 character 3, not 2.
+  str text = "x\xF0\x9F\x98\x80y\n";
+  assert byte_col_to_utf16_char(text, 0, 5) == 3, "expected the astral character to cost two UTF-16 units";
+  assert utf16_char_to_byte_col(text, 0, 3) == 5, "expected UTF-16 character 3 to land right after the emoji's 4 bytes";
+}
+
 test "a pointer type keeps its star when spelled back" {
   str src = `compound Holder {
   `  Vec<str>* data;

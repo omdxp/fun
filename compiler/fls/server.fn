@@ -283,7 +283,7 @@ impl Server {
     }
     Vec<Diagnostic> found = diagnose(&self.reads, doc.unwrap());
     defer found.free();
-    write_message(publish(document_uri, &found));
+    write_message(publish(document_uri, doc.unwrap().text, &found));
   }
 
   closed(JsonValue message) {
@@ -389,9 +389,9 @@ impl Server {
         JsonValue end = _field(range, "end");
         Diagnostic d;
         d.line = _number_field(start, "line");
-        d.col = _number_field(start, "character");
+        d.col = utf16_char_to_byte_col(doc.unwrap().text, d.line, _number_field(start, "character"));
         d.end_line = _number_field(end, "line");
-        d.end_col = _number_field(end, "character");
+        d.end_col = utf16_char_to_byte_col(doc.unwrap().text, d.end_line, _number_field(end, "character"));
         d.severity = _number_field(item, "severity");
         d.message = _string_field(item, "message");
         diags.push(d);
@@ -548,7 +548,10 @@ impl Server {
     Request r;
     r.doc = doc.unwrap();
     r.line = _number_field(position, "line");
-    r.character = _number_field(position, "character");
+    // The client sends a UTF-16 code unit count; everything downstream
+    // (token_at, position-based lookups) works in byte columns, matching
+    // the lexer's own convention.
+    r.character = utf16_char_to_byte_col(r.doc.text, r.line, _number_field(position, "character"));
     ret .Some(r);
   }
 }

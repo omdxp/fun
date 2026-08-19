@@ -961,3 +961,39 @@ fun _to_hex_with(num value, num width, str digits) str {
   }
   ret out.build();
 }
+
+// The number of bytes the UTF-8 sequence starting at `lead` occupies,
+// read from the lead byte's own high bits: 1 for ASCII, 2/3/4 for a
+// multi-byte lead. A continuation byte or an invalid lead (malformed
+// input) is treated as its own one-byte sequence, so a bad byte can't
+// desync a walk past it.
+pub fun utf8_seq_len(chr lead) num {
+  num b = lead - '\0';
+  if b < 0 {
+    b = b + 256;
+  }
+  if b < 0x80 {
+    ret 1;
+  }
+  if b >= 0xC0 && b < 0xE0 {
+    ret 2;
+  }
+  if b >= 0xE0 && b < 0xF0 {
+    ret 3;
+  }
+  if b >= 0xF0 && b < 0xF8 {
+    ret 4;
+  }
+  ret 1;
+}
+
+// How many UTF-16 code units a codepoint encoded in `seq_len` UTF-8
+// bytes takes: one for anything in the Basic Multilingual Plane (every
+// codepoint up to U+FFFF fits in at most 3 UTF-8 bytes), two (a
+// surrogate pair) for anything past it, which always takes 4.
+pub fun utf16_units_for_utf8_seq_len(num seq_len) num {
+  if seq_len >= 4 {
+    ret 2;
+  }
+  ret 1;
+}

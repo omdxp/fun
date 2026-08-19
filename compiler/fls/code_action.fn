@@ -31,7 +31,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
     if d.severity == SEVERITY_ERROR {
       str error_fix = _quirk_stub_action(cache, doc, document_uri, d);
       if equals(error_fix, "") {
-        error_fix = _insert_await_action(document_uri, d);
+        error_fix = _insert_await_action(document_uri, doc.text, d);
       }
       if equals(error_fix, "") {
         error_fix = _mark_async_action(cache, doc, document_uri, d);
@@ -126,21 +126,22 @@ fun _allow_action(str document_uri, Diagnostic d, str id_name) str {
 // The quick fix for a "call to async ... needs await" error: inserts
 // `await ` right where the diagnostic itself points, which `fail`
 // always positions at the call's own start.
-fun _insert_await_action(str document_uri, Diagnostic d) str {
+fun _insert_await_action(str document_uri, str text, Diagnostic d) str {
   if !contains(d.message, "needs await") {
     ret "";
   }
+  num character = byte_col_to_utf16_char(text, d.line, d.col);
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":"Insert 'await'","kind":"quickfix","edit":{"changes":{`);
   b.append(json_quote(document_uri));
   b.append(`:[{"range":{"start":{"line":`);
   b.append(format_num(d.line));
   b.append(`,"character":`);
-  b.append(format_num(d.col));
+  b.append(format_num(character));
   b.append(`},"end":{"line":`);
   b.append(format_num(d.line));
   b.append(`,"character":`);
-  b.append(format_num(d.col));
+  b.append(format_num(character));
   b.append(`}},"newText":"await "}]}}}`);
   ret b.build();
 }
@@ -164,18 +165,18 @@ fun _mark_async_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   }
   Pos p = found.unwrap();
   num line0 = p.line - 1;
-  num col0 = p.col - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":"Mark enclosing function async","kind":"quickfix","edit":{"changes":{`);
   b.append(json_quote(document_uri));
   b.append(`:[{"range":{"start":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`},"end":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`}},"newText":"async "}]}}}`);
   ret b.build();
 }
@@ -216,7 +217,7 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   }
   Pos p = close.unwrap();
   num line0 = p.line - 1;
-  num col0 = p.col - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
   b.append(json_quote(format("Fill in missing '{str}.{str}' arm", ev.enum_name, ev.variant_name)));
@@ -225,11 +226,11 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   b.append(`:[{"range":{"start":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`},"end":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`}},"newText":`);
   b.append(json_quote(format("  {str}\n", arm)));
   b.append(`}]}}}`);
@@ -347,7 +348,7 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   }
   Pos p = close.unwrap();
   num line0 = p.line - 1;
-  num col0 = p.col - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
   b.append(json_quote(format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name)));
@@ -356,11 +357,11 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   b.append(`:[{"range":{"start":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`},"end":{"line":`);
   b.append(format_num(line0));
   b.append(`,"character":`);
-  b.append(format_num(col0));
+  b.append(format_num(character));
   b.append(`}},"newText":`);
   b.append(json_quote(format(
     "  pub {str} {\n    // TODO: implement\n  }\n",

@@ -197,7 +197,7 @@ fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Oc
           if equals(token_word(tok), name) {
             Occurrence o;
             o.document_uri = document_uri;
-            o.span = span_of(tok);
+            o.span = span_of(tok, d.text);
             out.push(o);
           }
         }

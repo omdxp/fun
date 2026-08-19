@@ -6,6 +6,7 @@
 // has to turn one into the other goes through here.
 
 imp ..lexer.token;
+imp documents;
 imp std.vec;
 imp std.option;
 
@@ -69,12 +70,14 @@ pub fun token_after(Vec<Token>* tokens, num index) Option<Token> {
   ret .None;
 }
 
-// Where `t` sits, in the terms a client understands.
-pub fun span_of(Token t) Span {
+// Where `t` sits, in the terms a client understands: `start`/`end` are
+// UTF-16 code unit counts, matching LSP itself, not the byte columns
+// the lexer counts in. `text` is the document `t` was lexed from.
+pub fun span_of(Token t, str text) Span {
   Span s;
   s.line = t.pos.line - 1;
-  s.start = t.pos.start_col - 1;
-  s.end = t.pos.end_col - 1;
+  s.start = byte_col_to_utf16_char(text, s.line, t.pos.start_col - 1);
+  s.end = byte_col_to_utf16_char(text, s.line, t.pos.end_col - 1);
   if s.end < s.start {
     s.end = s.start;
   }
@@ -84,12 +87,13 @@ pub fun span_of(Token t) Span {
 // The span of a declaration's own name, given where the declaration
 // starts. A declaration is reported at its name rather than at the
 // keyword introducing it, which is where a client puts the cursor after
-// jumping.
-pub fun span_of_pos(Pos p, num name_length) Span {
+// jumping. `text` is the document `p` sits in, needed for the same
+// byte-to-UTF-16 conversion `span_of` does.
+pub fun span_of_pos(Pos p, num name_length, str text) Span {
   Span s;
   s.line = p.line - 1;
-  s.start = p.col - 1;
-  s.end = s.start + name_length;
+  s.start = byte_col_to_utf16_char(text, s.line, p.col - 1);
+  s.end = byte_col_to_utf16_char(text, s.line, p.col - 1 + name_length);
   ret s;
 }
 

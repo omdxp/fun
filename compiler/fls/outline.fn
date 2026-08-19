@@ -69,7 +69,7 @@ pub fun document_symbols(AnalysisCache* cache, Document doc) str {
       b.append(",");
     }
     i = i + 1;
-    Span span = span_of_pos(s.pos, len(s.name));
+    Span span = span_of_pos(s.pos, len(s.name), doc.text);
     b.append(format(
       `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
       json_quote(s.name),
@@ -129,7 +129,7 @@ pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, str query) str 
         b.append(",");
       }
       any = true;
-      Span span = span_of_pos(s.pos, len(s.name));
+      Span span = span_of_pos(s.pos, len(s.name), doc.text);
       b.append(format(
         `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
         json_quote(s.name),

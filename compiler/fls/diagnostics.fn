@@ -148,8 +148,10 @@ fun _at_start(num severity, str message) Diagnostic {
 
 // The notification telling a client what is wrong with a document. An
 // empty list is what clears the margin, so it is sent as readily as a
-// list of findings.
-pub fun publish(str document_uri, Vec<Diagnostic>* found) str {
+// list of findings. `text` is the document's own source, needed to
+// convert each finding's byte columns to the UTF-16 code units LSP
+// itself reports.
+pub fun publish(str document_uri, str text, Vec<Diagnostic>* found) str {
   StringBuilder b = string_builder_init(256);
   b.append(format(`{"uri":{str},"diagnostics":[`, json_quote(document_uri)));
   num i = 0;
@@ -162,9 +164,9 @@ pub fun publish(str document_uri, Vec<Diagnostic>* found) str {
     b.append(format(
       `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"severity":{num},"source":"fun","message":{str}}`,
       d.line,
-      d.col,
+      byte_col_to_utf16_char(text, d.line, d.col),
       d.end_line,
-      d.end_col,
+      byte_col_to_utf16_char(text, d.end_line, d.end_col),
       d.severity,
       json_quote(d.message)
     ));

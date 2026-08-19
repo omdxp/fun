@@ -44,13 +44,13 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   fit t.type {
     .Keyword -> {
       if equals(token_word(t), "as") {
-        ret _hover_result(_as_keyword_doc(&tokens, t), span_of(t));
+        ret _hover_result(_as_keyword_doc(&tokens, t), span_of(t, doc.text));
       }
       str doc_text = keyword_doc(token_word(t));
       if equals(doc_text, "") {
         ret NO_HOVER;
       }
-      ret _hover_result(doc_text, span_of(t));
+      ret _hover_result(doc_text, span_of(t, doc.text));
     }
     .Identifier -> {
       // `fork` is not a lexer-level keyword (its recognition is
@@ -60,7 +60,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       if equals(token_word(t), "fork") {
         str fork_doc = keyword_doc("fork");
         if !equals(fork_doc, "") {
-          ret _hover_result(fork_doc, span_of(t));
+          ret _hover_result(fork_doc, span_of(t, doc.text));
         }
       }
       // A sized integer type (`i7`, `u23`, ...) is recognized the
@@ -78,15 +78,15 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         }
         ret _hover_result(
           _doc(
-            format("{str} x;", token_word(t)),
-            format("A {num}-bit {str} integer.", dit.bits, sign_word)
+          format("{str} x;", token_word(t)),
+          format("A {num}-bit {str} integer.", dit.bits, sign_word)
           ),
-          span_of(t)
+          span_of(t, doc.text)
         );
       }
       str target = import_target(&tokens, doc.path, line, character);
       if !equals(target, "") {
-        ret _import_hover_result(target, span_of(t));
+        ret _import_hover_result(target, span_of(t, doc.text));
       }
     }
     _ -> { ret NO_HOVER; }
@@ -156,7 +156,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   if read.parsed {
     b.append(_see_also_footer(&read.program.nodes, d));
   }
-  ret _hover_result(b.build(), span_of(t));
+  ret _hover_result(b.build(), span_of(t, doc.text));
 }
 
 // Where the name at `line`/`character` in `doc` was declared, as the
@@ -195,7 +195,7 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   if declared.is_none() {
     ret NO_LOCATION;
   }
-  ret _location_result(declared.unwrap());
+  ret _location_result(doc, declared.unwrap());
 }
 
 // `definition`, extended with a last-resort fallback: when the
@@ -254,19 +254,32 @@ pub fun definition_workspace_wide(
     }
     let hit = lookup_top_level(&other_read.program.nodes, name);
     if hit.is_some() {
-      ret _location_result(hit.unwrap());
+      ret _location_result(other_doc, hit.unwrap());
     }
   }
   ret NO_LOCATION;
 }
 
 // A single-element `Location[]`, the shape every definition-like
-// method answers with, pointing at `d`'s own declaration.
-fun _location_result(Declaration d) str {
+// method answers with, pointing at `d`'s own declaration. `doc` is the
+// document the request was made against, reused directly when `d`
+// turns out to sit in that same file; a declaration reached through an
+// `imp` needs that other file's own text read fresh, the same
+// same-file-or-read pattern `hover()` uses for a doc comment.
+fun _location_result(Document doc, Declaration d) str {
   if equals(d.pos.filename, "") {
     ret NO_LOCATION;
   }
-  Span s = span_of_pos(d.pos, len(d.name));
+  str target_text = doc.text;
+  if !equals(d.pos.filename, doc.path) {
+    str other_text = read_to_string(d.pos.filename);
+    if other_text != nil {
+      target_text = other_text;
+    } else {
+      target_text = "";
+    }
+  }
+  Span s = span_of_pos(d.pos, len(d.name), target_text);
   StringBuilder b = string_builder_init(160);
   b.append("[");
   b.append(format(
@@ -311,9 +324,9 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
   }
   Declaration d = declared.unwrap();
   fit d.kind {
-    .Compound -> { ret _location_result(d); }
-    .Enum -> { ret _location_result(d); }
-    .Quirk -> { ret _location_result(d); }
+    .Compound -> { ret _location_result(doc, d); }
+    .Enum -> { ret _location_result(doc, d); }
+    .Quirk -> { ret _location_result(doc, d); }
     _ -> {}
   }
 
@@ -336,7 +349,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
   if type_decl.is_none() {
     ret NO_LOCATION;
   }
-  ret _location_result(type_decl.unwrap());
+  ret _location_result(doc, type_decl.unwrap());
 }
 
 // What the name `t` refers to, judged from where it sits: a field when
