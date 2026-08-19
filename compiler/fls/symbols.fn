@@ -858,6 +858,64 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
           }
         }
       }
+      .Test(td) -> {
+        if !covers_body(n, td.body, file, line) {
+          continue;
+        }
+        let found = _lookup_in_body(td.body, name);
+        if found.is_some() {
+          ret found;
+        }
+        let found_binding = _lookup_fit_binding(td.body, name, program, file, line);
+        if found_binding.is_some() {
+          ret found_binding;
+        }
+      }
+      .Fuzz(fz) -> {
+        if !covers_body(n, fz.body, file, line) {
+          continue;
+        }
+        let param = _fuzz_param_named(fz, name);
+        if param.is_some() {
+          ret param;
+        }
+        let found = _lookup_in_body(fz.body, name);
+        if found.is_some() {
+          ret found;
+        }
+        let found_binding = _lookup_fit_binding(fz.body, name, program, file, line);
+        if found_binding.is_some() {
+          ret found_binding;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `fz`'s own `data`/`len` parameter, if it is spelled `name`. A
+// `fuzz` block's two parameters aren't in a `Vec<Node*>` the way a
+// function's are, just two direct fields, so they're checked by hand
+// rather than through `_lookup_in_function`'s own arg loop.
+fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
+  if fz.data_param != nil {
+    fit fz.data_param.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(fz.data_param), fz.data_param.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  if fz.len_param != nil {
+    fit fz.len_param.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(fz.len_param), fz.len_param.pos));
+        }
+      }
       _ -> {}
     }
   }
@@ -952,16 +1010,26 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
 // needs the exact same coverage test to scope what it offers to the
 // function the cursor actually sits in.
 pub fun covers(Node n, FunctionNode f, str file, num line) bin {
+  if !f.has_body {
+    ret false;
+  }
+  ret covers_body(n, f.body, file, line);
+}
+
+// The same test as `covers`, for a declaration whose body isn't
+// wrapped in a `FunctionNode` (a `test`/`fuzz` block, which has no
+// return type or generic params of its own to carry one).
+pub fun covers_body(Node n, Node* body, str file, num line) bin {
   if !n.has_pos || !equals(n.pos.filename, file) {
     ret false;
   }
   if line < n.pos.line {
     ret false;
   }
-  if !f.has_body || f.body == nil {
+  if body == nil {
     ret false;
   }
-  num last = _last_line(f.body);
+  num last = _last_line(body);
   ret line <= last;
 }
 

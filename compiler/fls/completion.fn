@@ -661,6 +661,34 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
           }
         }
       }
+      .Test(td) -> {
+        if !covers_body(n, td.body, file, line) {
+          continue;
+        }
+        _collect_locals(td.body, items);
+      }
+      .Fuzz(fz) -> {
+        if !covers_body(n, fz.body, file, line) {
+          continue;
+        }
+        if fz.data_param != nil {
+          fit fz.data_param.kind {
+            .Variable(v) -> {
+              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+            }
+            _ -> {}
+          }
+        }
+        if fz.len_param != nil {
+          fit fz.len_param.kind {
+            .Variable(v) -> {
+              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+            }
+            _ -> {}
+          }
+        }
+        _collect_locals(fz.body, items);
+      }
       .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
       .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }

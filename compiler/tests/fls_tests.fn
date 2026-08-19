@@ -941,6 +941,38 @@ test "hover and completion resolve a local declared inside a fit arm, including 
   assert contains(completed, `"label":"doubled"`), "expected the fit-arm local offered in scope completion";
 }
 
+test "hover and completion resolve a local or parameter inside a test or fuzz block" {
+  // Neither _lookup_local nor _declared ever had a .Test or .Fuzz
+  // case at all, user-reported (via a real local in this very test
+  // suite's own source): every parameter and local declared anywhere
+  // inside a test/fuzz block, across the whole codebase's own test
+  // files, was invisible to hover and completion alike.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///testblock.fn";
+  doc.path = "testblock.fn";
+  doc.text = `test "a demo" {
+  `  num total = 5;
+  `  ret total;
+  `}
+  `fuzz "a demo fuzz" (raw* data, num len) {
+  `  ret len;
+  `}`;
+  doc.version = 1;
+
+  str local_hover = hover(&reads, doc, 2, 6);
+  assert contains(local_hover, "total"), "expected a local declared inside a test block to resolve";
+  str local_completion = completion(&reads, doc, 2, 6, false);
+  assert contains(local_completion, `"label":"total"`), "expected the test-block local offered in scope completion";
+
+  str param_hover = hover(&reads, doc, 5, 6);
+  assert contains(param_hover, "len"), "expected a fuzz block's own parameter to resolve";
+  str param_completion = completion(&reads, doc, 5, 6, false);
+  assert contains(param_completion, `"label":"len"`), "expected the fuzz parameter offered in scope completion";
+  assert contains(param_completion, `"label":"data"`), "expected the fuzz block's other parameter offered too";
+}
+
 test "completion offers an impl method's own parameters and body locals, scoped to that method" {
   // _declared had no .Impl case at all, and never walked into any
   // function's body for locals, only its own top-level args, so
