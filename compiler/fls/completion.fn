@@ -747,7 +747,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if !covers(n, f, file, line) {
           continue;
         }
-        _collect_function_scope(f, items);
+        _collect_function_scope(f, items, program, file, line);
       }
       .Impl(im) -> {
         // A method's own bare name is never itself a completable
@@ -766,7 +766,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
               if !covers(*m, mf, file, line) {
                 continue;
               }
-              _collect_function_scope(mf, items);
+              _collect_function_scope(mf, items, program, file, line);
             }
             _ -> {}
           }
@@ -776,7 +776,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if !covers_body(n, td.body, file, line) {
           continue;
         }
-        _collect_locals(td.body, items);
+        _collect_locals(td.body, items, program, file, line);
       }
       .Fuzz(fz) -> {
         if !covers_body(n, fz.body, file, line) {
@@ -798,7 +798,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
             _ -> {}
           }
         }
-        _collect_locals(fz.body, items);
+        _collect_locals(fz.body, items, program, file, line);
       }
       .Compound(c) -> {
         items.push(
@@ -822,7 +822,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
 // `f`'s own parameters, plus every local declared anywhere in its
 // body, including inside a nested if/for/fit: a name is in scope for
 // the rest of the function once declared, wherever that is.
-fun _collect_function_scope(FunctionNode f, Vec<Item>* items) {
+fun _collect_function_scope(FunctionNode f, Vec<Item>* items, Vec<Node>* program, str file, num line) {
   num a = 0;
   for a < f.args.len {
     Node* arg = f.args.get(a);
@@ -838,14 +838,18 @@ fun _collect_function_scope(FunctionNode f, Vec<Item>* items) {
     }
   }
   if f.has_body {
-    _collect_locals(f.body, items);
+    _collect_locals(f.body, items, program, file, line);
   }
 }
 
 // Every local declared in `body`, descending into a nested block the
 // same way `symbols.fn::_lookup_in_body` does, but collecting every
-// match instead of stopping at the first name that fits.
-fun _collect_locals(Node* body, Vec<Item>* items) {
+// match instead of stopping at the first name that fits. `program`/
+// `file`/`line` are only there to resolve a fit arm's own payload
+// bindings (`.Circle(r)`'s own `r`) against the fit's own subject
+// type, the same way hover already does via `fit_subject_type`/
+// `variant_payload_type` — every other case ignores them.
+fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, num line) {
   if body == nil {
     ret;
   }
@@ -856,19 +860,32 @@ fun _collect_locals(Node* body, Vec<Item>* items) {
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        _collect_locals(block.statements.get(i), items);
+        _collect_locals(block.statements.get(i), items, program, file, line);
         i = i + 1;
       }
     }
-    .StatementIf(s) -> { _collect_locals(s.body, items); }
-    .StatementElse(inner) -> { _collect_locals(inner, items); }
-    .StatementFor(fk) -> { _collect_locals(for_body(fk), items); }
+    .StatementIf(s) -> { _collect_locals(s.body, items, program, file, line); }
+    .StatementElse(inner) -> { _collect_locals(inner, items, program, file, line); }
+    .StatementFor(fk) -> { _collect_locals(for_body(fk), items, program, file, line); }
     .StatementFit(fs) -> {
+      str enum_name = fit_subject_type(program, fs.exp, file, line);
       num i = 0;
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
         i = i + 1;
-        _collect_locals(branch.body, items);
+        if branch.has_bindings && !equals(enum_name, "") {
+          str variant_name = branch_variant_name(branch);
+          num bi = 0;
+          for bi < branch.bindings.len {
+            str binding_name = branch.bindings.get(bi);
+            let payload_type = variant_payload_type(program, enum_name, variant_name, bi);
+            if payload_type.is_some() {
+              items.push(_item(binding_name, .Variable, payload_type.unwrap()));
+            }
+            bi = bi + 1;
+          }
+        }
+        _collect_locals(branch.body, items, program, file, line);
       }
     }
     _ -> {}

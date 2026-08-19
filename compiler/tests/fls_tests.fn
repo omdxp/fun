@@ -1911,14 +1911,18 @@ test "hover and completion resolve a local declared inside a fit arm, including 
   assert contains(completed, `"label":"doubled"`), "expected the fit-arm local offered in scope completion";
 }
 
-test "hover resolves a fit arm's own payload binding when the subject is a field access, not just a bare local" {
-  // _fit_subject_type only ever handled a bare identifier subject
+test "hover and completion resolve a fit arm's own payload binding when the subject is a field access, not just a bare local" {
+  // fit_subject_type only ever handled a bare identifier subject
   // (fit s { ... }) or the fit <- ch channel-receive desugar. A
   // subject reached through a field (fit s.kind { ... }, this
   // codebase's own dominant idiom - every fit over an AST node's kind
   // is shaped exactly this way) fell through to "", so a payload
   // binding's own type never resolved at all, user-reported live
   // against this exact file (symbols.fn's own `.Variable(v)` fit arm).
+  // completion._collect_locals had a separate, deeper version of the
+  // same gap: its own .StatementFit case never pushed a branch's own
+  // bindings as completion items at all, regardless of subject shape,
+  // so "r" was never offered while typing inside the arm's own body.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -1947,6 +1951,10 @@ test "hover resolves a fit arm's own payload binding when the subject is a field
   // At a later use, "ret r;".
   str at_use = hover(&reads, doc, 9, 10);
   assert contains(at_use, "num r"), "expected the same binding to resolve at a later use too";
+
+  // Mid-word on "r" inside the arm's own body.
+  str completed = completion(&reads, doc, 9, 10, false);
+  assert contains(completed, `"label":"r","kind":6,"detail":"num"`), "expected the payload binding offered in scope completion, correctly typed";
 }
 
 test "hover and completion resolve a local or parameter inside a test or fuzz block" {

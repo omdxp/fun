@@ -1710,7 +1710,7 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
   ret .None;
 }
 
-// The type name of an arbitrary expression, as far as `_fit_subject_type`
+// The type name of an arbitrary expression, as far as `fit_subject_type`
 // needs to resolve one: a bare identifier's own declared type, or (for
 // `base.field`) `base`'s own type resolved the same way, then that
 // field's own declared type on it. Covers the shape a fit subject most
@@ -1755,7 +1755,7 @@ fun _expr_type_name(Vec<Node>* program, Node* expr, str file, num line) str {
 // for `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a
 // call whose callee is `ch`'s own `.recv` method access), the
 // channel's element type. Anything else yields "".
-fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
+pub fun fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
   if subject == nil {
     ret "";
   }
@@ -2072,7 +2072,7 @@ pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Opt
   }
   fit found.unwrap().kind {
     .StatementFit(f) -> {
-      str enum_name = _fit_subject_type(program, f.exp, file, line);
+      str enum_name = fit_subject_type(program, f.exp, file, line);
       if equals(enum_name, "") {
         ret .None;
       }
@@ -2087,7 +2087,7 @@ pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Opt
 // data-carrying destructuring pattern (`.Circle(r)` or
 // `Shape.Circle(r)`): the identifier `_try_parse_fit_destructure`
 // builds as the right side of the condition's `.` expression.
-fun _branch_variant_name(FitBranch br) str {
+pub fun branch_variant_name(FitBranch br) str {
   if !br.has_condition || br.condition == nil {
     ret "";
   }
@@ -2107,7 +2107,7 @@ fun _branch_variant_name(FitBranch br) str {
 
 // The payload type at position `idx` of `enum_name`'s variant named
 // `variant_name`, rendered as a reader would write it.
-fun _variant_payload_type(Vec<Node>* program, str enum_name, str variant_name, num idx) Option<str> {
+pub fun variant_payload_type(Vec<Node>* program, str enum_name, str variant_name, num idx) Option<str> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2183,12 +2183,12 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
             k = k + 1;
           }
           if idx >= 0 {
-            str enum_name = _fit_subject_type(program, f.exp, file, line);
+            str enum_name = fit_subject_type(program, f.exp, file, line);
             if !equals(enum_name, "") {
-              let payload_type = _variant_payload_type(
+              let payload_type = variant_payload_type(
                 program,
                 enum_name,
-                _branch_variant_name(br),
+                branch_variant_name(br),
                 idx
               );
               if payload_type.is_some() && br.body != nil {
