@@ -92,6 +92,14 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   }
   ProgramMergeResult program = read.program;
 
+  if equals(receiver, "") {
+    str init_type = _compound_init_type_at(&tokens, &program.nodes, line, character);
+    if !equals(init_type, "") {
+      _init_fields_of(&program.nodes, init_type, &items);
+      ret _reply(&items);
+    }
+  }
+
   if !equals(receiver, "") {
     // After a dot, only what the receiver actually has is worth
     // offering; the reserved words are not. Walks the whole dotted
@@ -576,6 +584,100 @@ fun _receiver_own_type(
 }
 
 // The fields of `type_name`, and the methods declared on it.
+// The compound type a `Type{ field| }` literal's cursor sits inside,
+// found by walking every token up to the cursor with a brace-depth
+// stack, each frame recording the capitalized identifier (Fun's own
+// convention: a type name is always capitalized, a value never is)
+// immediately before that `{`, or "" for an ordinary block. "" unless
+// the innermost still-open frame both looks like a type name *and* is
+// one an actual `.Compound` declares, which rules out a bare
+// capitalized condition (`if IsReady { ... }`) being mistaken for one.
+fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num character) str {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  Vec<str> stack;
+  stack.init(4);
+  Option<Token> prev = .None;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      continue;
+    }
+    if t.pos.line > source_line || (t.pos.line == source_line && t.pos.start_col >= source_col) {
+      break;
+    }
+    if token_is_symbol(t, '{') {
+      str ctx = "";
+      if prev.is_some() {
+        fit prev.unwrap().type {
+          .Identifier -> {
+            str name = token_word(prev.unwrap());
+            if len(name) > 0 && is_upper(name[0]) {
+              ctx = name;
+            }
+          }
+          _ -> {}
+        }
+      }
+      stack.push(ctx);
+    } elif token_is_symbol(t, '}') {
+      if stack.len > 0 {
+        stack.pop();
+      }
+    }
+    prev = .Some(t);
+  }
+  if stack.len == 0 {
+    ret "";
+  }
+  str candidate = stack.get(stack.len - 1);
+  if equals(candidate, "") {
+    ret "";
+  }
+  num p = 0;
+  for p < program.len {
+    Node n = program.get(p);
+    p = p + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if equals(c.name, candidate) {
+          ret candidate;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
+// A compound-init literal's own field names, exactly as `_members_of`
+// finds them, but never its methods: `Type{ field = value, ... }`
+// never calls a method, so offering one would be a wrong suggestion,
+// not just a redundant one.
+fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if !equals(c.name, type_name) {
+          continue;
+        }
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          items.push(_item(cf.name, .Field, render_type(cf.dtype)));
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
 fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
   num i = 0;
   for i < program.len {

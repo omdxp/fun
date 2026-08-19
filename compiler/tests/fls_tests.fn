@@ -239,6 +239,53 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   third.free();
 }
 
+test "compound-init literal offers only the type's own field names" {
+  str src = `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `fun make() Point {
+  `  ret Point{ x = 1,  };
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///init.fn";
+  doc.path = "init.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Cursor sits between the trailing comma and the closing brace, on
+  // `  ret Point{ x = 1,  };`.
+  str out = completion(&reads, doc, 5, 20, false);
+  assert contains(out, `"label":"y"`), "expected the still-unset field to be offered";
+  assert !contains(out, `"label":"make"`), "expected the surrounding scope's own declarations not to leak in here";
+}
+
+test "a bare capitalized condition isn't mistaken for a compound-init literal" {
+  str src = `const bin Ready = true;
+  `fun check() num {
+  `  if Ready {
+  `    ret 1;
+  `  }
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///cond.fn";
+  doc.path = "cond.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Cursor right inside the `if Ready { }` block, which looks exactly
+  // like a compound-init literal at the token level (a capitalized
+  // identifier followed by `{`) but isn't one, since `Ready` names no
+  // compound.
+  str out = completion(&reads, doc, 3, 4, false);
+  assert contains(out, `"label":"ret"`), "expected the ordinary block's own scope completion, not field completion";
+}
+
 test "publish with no findings clears an editor's own diagnostics for a document" {
   Vec<Diagnostic> none;
   none.init(0);
