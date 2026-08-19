@@ -865,7 +865,10 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
       }
     }
     .StatementFit(fs) -> {
-      str enum_name = fit_subject_type(program, fs.exp, file, line);
+      // `nil`: `_collect_locals` has no tokens of its own to thread
+      // here either (same deeper gap noted in symbols.fn's own
+      // `_lookup_fit_binding`).
+      str enum_name = fit_subject_type(nil, program, fs.exp, file, line);
       num i = 0;
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);

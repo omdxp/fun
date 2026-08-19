@@ -166,6 +166,39 @@ test "parses a return statement" {
   }
 }
 
+test "a multi-line statement's own pos.end_line reaches its last consumed line" {
+  // A statement's own `pos` is stamped from its leading token alone
+  // (the `ret` keyword here), which never reflects a multi-line call
+  // spanning several more lines below it. `parse_statement` patches
+  // this from the last token it actually consumed once dispatch
+  // finishes, since consumers reading a statement's own span (fls's
+  // own scope-boundary checks, most directly) need the real extent.
+  str src = `fun f() num {
+  `  ret g(
+  `    1,
+  `    2
+  `  );
+  `}
+  `fun g(num a, num b) num {
+  `  ret a + b;
+  `}`;
+  let st = parse_ok(src);
+  let stmts = fn_body_statements(st.nodes.get(0));
+  assert stmts.len == 1, "expected the single ret statement";
+  Node* ret_stmt = stmts.get(0);
+  assert ret_stmt.has_pos, "expected the ret statement to carry a position";
+  assert ret_stmt.pos.line == 2, "expected the leading line unchanged";
+  assert ret_stmt.pos.end_line == 5, "expected end_line to reach the call's own closing ');'";
+}
+
+test "a single-line statement's own pos.end_line matches its start" {
+  let st = parse_ok("fun f() num { ret 1; }");
+  let stmts = fn_body_statements(st.nodes.get(0));
+  Node* ret_stmt = stmts.get(0);
+  assert ret_stmt.has_pos, "expected a position";
+  assert ret_stmt.pos.end_line == 0 || ret_stmt.pos.end_line == ret_stmt.pos.line, "expected no false extension for a single-line statement";
+}
+
 test "parses a binary expression" {
   let st = parse_ok("1 + 2 * 3;");
   assert st.nodes.len == 1, "expected a single top-level node";

@@ -1,0 +1,98 @@
+// Code lenses.
+// 
+// One "N references" lens per top-level function this document
+// declares, its own count reusing references.fn's workspace-wide
+// occurrence scan rather than re-implementing name matching. Clicking
+// it runs VS Code's own built-in "show references" command, which
+// needs no extension-side wiring of its own to work.
+
+imp documents;
+imp analysis;
+imp positions;
+imp references;
+imp protocol;
+imp uri;
+imp ..ast.ast;
+imp std.vec;
+imp std.string;
+
+// Every function's own reference-count lens in `doc`, as the result a
+// client is sent.
+pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
+    ret "[]";
+  }
+  str document_uri = path_to_uri(doc.path);
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < read.program.entry_nodes.len {
+    Node n = read.program.entry_nodes.get(i);
+    i = i + 1;
+    str name = "";
+    fit n.kind {
+      .Function(f) -> { name = f.name; }
+      _ -> {}
+    }
+    if equals(name, "") || !n.has_pos {
+      continue;
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    b.append(_references_lens(cache, docs, name, n.pos, document_uri, doc.text));
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The "N references" lens for the declaration named `name` at
+// `decl_pos`, in the document identified by `document_uri`.
+fun _references_lens(
+  AnalysisCache* cache,
+  Documents* docs,
+  str name,
+  Pos decl_pos,
+  str document_uri,
+  str decl_text
+) str {
+  Vec<Occurrence> found;
+  found.init(4);
+  defer found.free();
+  _collect_occurrences(cache, docs, name, &found);
+
+  StringBuilder locs = string_builder_init(128);
+  locs.append("[");
+  num i = 0;
+  for i < found.len {
+    if i > 0 {
+      locs.append(",");
+    }
+    locs.append(_occurrence_location(found.get(i)));
+    i = i + 1;
+  }
+  locs.append("]");
+
+  Span span = span_of_pos(decl_pos, len(name), decl_text);
+  str plural = "s";
+  if found.len == 1 {
+    plural = "";
+  }
+  ret format(
+    `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"command":{"title":"{num} reference{str}","command":"editor.action.showReferences","arguments":[{str},{"line":{num},"character":{num}},{str}]}}`,
+    span.line,
+    span.start,
+    span.line,
+    span.end,
+    found.len,
+    plural,
+    json_quote(document_uri),
+    span.line,
+    span.start,
+    locs.build()
+  );
+}

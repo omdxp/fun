@@ -14,6 +14,7 @@ imp ..fls.references;
 imp ..fls.completion;
 imp ..fls.formatting;
 imp ..fls.folding_range;
+imp ..fls.code_lens;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
@@ -1910,6 +1911,82 @@ test "hover on a bare variant shorthand inside a fit substitutes the subject's o
   assert contains(variant_hover, "Full(str)"), "expected the variant substituted with the subject's own concrete type argument";
 }
 
+test "a bare variant shorthand inside a fit resolves inside a test block, an impl method, and a fuzz block" {
+  // `_covering_fit` used to walk only top-level `.Function` nodes,
+  // so a fit statement inside anything else was silently
+  // unreachable no matter how the earlier `_last_line` fix bounded
+  // its own span.
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `compound Widget {
+  `  Shape s;
+  `}
+  `impl Widget {
+  `  pub area() num {
+  `    fit self.s {
+  `      .Circle(r) -> { ret r; }
+  `      .Square(x) -> { ret x; }
+  `    }
+  `  }
+  `}
+  `test "shape" {
+  `  Shape s = .Circle(1);
+  `  fit s {
+  `    .Circle(r) -> { assert r == 1, "x"; }
+  `    .Square(x) -> {}
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///covering.fn";
+  doc.path = "covering.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `Circle` in the impl method's own fit (line 10).
+  str method_hover = hover(&reads, doc, 10, 7);
+  assert contains(method_hover, "Circle(num)"), "expected the variant to resolve inside an impl method's own fit";
+
+  // On `Circle` in the test block's own fit (line 18).
+  str test_hover = hover(&reads, doc, 18, 5);
+  assert contains(test_hover, "Circle(num)"), "expected the variant to resolve inside a test block's own fit";
+}
+
+test "a bare variant shorthand inside a fit resolves when the subject is a let-inferred local" {
+  // `fit_subject_type`/`fit_subject_generic_args` used to hardcode a
+  // nil token stream, permanently skipping type_name_of_local's own
+  // let-inference fallback - a fit over a `let`-bound local (an
+  // extremely common shape) never resolved its own variant hover.
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `fun make() Shape {
+  `  ret .Circle(1);
+  `}
+  `fun use_it() num {
+  `  let s = make();
+  `  fit s {
+  `    .Circle(r) -> { ret r; }
+  `    .Square(x) -> { ret x; }
+  `  }
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letfit.fn";
+  doc.path = "letfit.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 10, 5);
+  assert contains(hovered, "Circle(num)"), "expected the variant to resolve when the fit's own subject is a let-inferred local";
+}
+
 test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {
   str src = `compound Box {
   `  num width;
@@ -2664,6 +2741,28 @@ test "folding range covers a multi-line block, but not a single-line one" {
   assert contains(out, `{"startLine":1,"endLine":3}`), "expected the nested if-block to fold";
   // one_liner's own braces share a line, nothing worth folding there.
   assert !contains(out, `"startLine":6`), "expected no fold starting on the one-liner's own line";
+}
+
+test "code lens shows a reference count per function, correctly pluralized" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///cl.fn", `fun add(num a, num b) num {
+  `  ret a + b;
+  `}
+  `fun use_it() num {
+  `  ret add(1, 2) + add(3, 4);
+  `}`, 1);
+  let held = docs.at("file:///cl.fn");
+  Document doc = held.unwrap();
+
+  str out = code_lenses(&reads, &docs, doc);
+  // add: its own declaration plus two calls.
+  assert contains(out, `"title":"3 references"`), "expected add's own count, plural";
+  // use_it: declared, never called.
+  assert contains(out, `"title":"1 reference"`), "expected use_it's own count, singular";
+  assert contains(out, `"command":"editor.action.showReferences"`), "expected the built-in show-references command";
 }
 
 test "semantic tokens classify a function declaration, a type, a keyword styled as a type, and a literal" {

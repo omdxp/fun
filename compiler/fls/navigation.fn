@@ -12,7 +12,6 @@ imp symbols;
 imp symbol_table;
 imp uri;
 imp imports;
-imp inlay_hints;
 imp ..lexer.token;
 imp ..parser.datatype_defs;
 imp ..parser.import_resolver;
@@ -436,7 +435,7 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
       ret qualified_variant;
     }
   } elif _is_dot_shorthand(tokens, t) {
-    let variant = lookup_fit_variant(&program.nodes, name, doc.path, source_line);
+    let variant = lookup_fit_variant(tokens, &program.nodes, name, doc.path, source_line);
     if variant.is_some() {
       ret variant;
     }

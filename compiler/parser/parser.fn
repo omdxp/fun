@@ -5045,6 +5045,48 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
+  // Parses exactly one statement, then stamps its own `pos.end_line`
+  // from the last token it consumed: every individual `parse_X`
+  // dispatched by `_parse_statement_dispatch` below sets `pos` from
+  // its own leading token only (a `ret`'s own keyword, a `fit`'s own
+  // keyword, ...), which never reflects a multi-line statement's real
+  // extent (a call spanning several lines, an `if` whose own body
+  // runs past it). Anything that reads a statement's own span - most
+  // directly, fls's own scope-boundary checks (`covers`/`_last_line`)
+  // - needs the real extent, not just the start. One shared fix here
+  // covers every statement kind at once, rather than patching each
+  // `parse_X` individually.
+  pub parse_statement() Option<ParseErrorKind> {
+    let err = self._parse_statement_dispatch();
+    if err.is_some() {
+      ret err;
+    }
+    self._stamp_statement_end();
+    ret .None;
+  }
+
+  // The last token this statement consumed (its own trailing `;` or
+  // `}`) is always `current_token` by the time dispatch returns
+  // successfully, so its line is the statement's own true last line.
+  // A no-op when it's not past the statement's own already-recorded
+  // start line, which covers a single-line statement without needing
+  // its own case.
+  _stamp_statement_end() {
+    let top = self.state.node_peek_last();
+    if top.is_none() {
+      ret;
+    }
+    Node n = top.unwrap();
+    if !n.has_pos || !self.state.has_current_token {
+      ret;
+    }
+    num end_line = self.state.current_token.pos.line;
+    if end_line > n.pos.line {
+      n.pos.end_line = end_line;
+      self.state.nodes.set(self.state.nodes.len - 1, n);
+    }
+  }
+
   // Parses one statement: a nested `{ ... }` body, a variable declaration
   // (`let`, `num x = 5;`, or a bare user type like `Point* p = ...;`), any
   // of the `ret`/`assert`/`if`/`for`/`fit`/`defer`/`break`/`continue`/
@@ -5058,7 +5100,7 @@ impl Parser {
   // Top-level-only declarations are not dispatched here; a keyword with
   // no other case above reports a clean "not yet supported" error
   // instead of misparsing.
-  pub parse_statement() Option<ParseErrorKind> {
+  _parse_statement_dispatch() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
       self.state.err("unexpected end of file");

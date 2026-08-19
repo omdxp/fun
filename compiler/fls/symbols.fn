@@ -1734,17 +1734,17 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
 // long) — narrower than `chain_ending_type`'s own token-based walk on
 // purpose, since this operates on the already-parsed AST a fit
 // statement carries, not a token stream.
-fun _expr_type_name(Vec<Node>* program, Node* expr, str file, num line) str {
+fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) str {
   if expr == nil {
     ret "";
   }
   fit expr.kind {
-    .Identifier(s) -> { ret type_name_of_local(nil, program, s, file, line); }
+    .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
     .Expression(fe) -> {
       if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right || fe.right == nil {
         ret "";
       }
-      str base_type = _expr_type_name(program, fe.left, file, line);
+      str base_type = _expr_type_name(tokens, program, fe.left, file, line);
       if equals(base_type, "") {
         ret "";
       }
@@ -1769,15 +1769,15 @@ fun _expr_type_name(Vec<Node>* program, Node* expr, str file, num line) str {
 // for `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a
 // call whose callee is `ch`'s own `.recv` method access), the
 // channel's element type. Anything else yields "".
-pub fun fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
+pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, str file, num line) str {
   if subject == nil {
     ret "";
   }
   fit subject.kind {
-    .Identifier(s) -> { ret type_name_of_local(nil, program, s, file, line); }
+    .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
     .Expression(e) -> {
       if equals(e.op, ".") {
-        ret _expr_type_name(program, subject, file, line);
+        ret _expr_type_name(tokens, program, subject, file, line);
       }
       if !equals(e.op, "()") || !e.has_left || e.left == nil {
         ret "";
@@ -1823,14 +1823,14 @@ pub fun fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) 
 // hover most needs. "" for the field-access and channel-receive
 // shapes `fit_subject_type` also covers, matching what
 // `local_generic_args` itself only resolves for a bare identifier.
-pub fun fit_subject_generic_args(Vec<Node>* program, Node* subject, str file, num line) Vec<str> {
+pub fun fit_subject_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* subject, str file, num line) Vec<str> {
   Vec<str> empty;
   empty.init(0);
   if subject == nil {
     ret empty;
   }
   fit subject.kind {
-    .Identifier(s) -> { ret local_generic_args(nil, program, s, file, line); }
+    .Identifier(s) -> { ret local_generic_args(tokens, program, s, file, line); }
     _ -> { ret empty; }
   }
 }
@@ -1874,29 +1874,66 @@ fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line
   ret trim(substr(d.detail, open + 1, end - open - 1));
 }
 
-// The `fit` statement, among every function's body in the program,
-// whose braces cover `line` in `file`.
-fun _covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
+// The body of whichever function-like construct - a plain function,
+// an impl method, a test, or a fuzz block, the same set `_lookup_local`
+// enumerates for a local's own scope - covers `line` in `file`. Shared
+// so a caller only cares "what body am I inside," not which of the
+// four shapes got it there.
+pub fun enclosing_body(Vec<Node>* program, str file, num line) Option<Node*> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if !covers(n, f, file, line) {
-          continue;
+        if covers(n, f, file, line) && f.has_body {
+          ret .Some(f.body);
         }
-        if f.has_body {
-          let found = _find_covering_fit(f.body, line);
-          if found.is_some() {
-            ret found;
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
           }
+          fit m.kind {
+            .Function(f) -> {
+              if covers(*m, f, file, line) && f.has_body {
+                ret .Some(f.body);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Test(td) -> {
+        if covers_body(n, td.body, file, line) {
+          ret .Some(td.body);
+        }
+      }
+      .Fuzz(fz) -> {
+        if covers_body(n, fz.body, file, line) {
+          ret .Some(fz.body);
         }
       }
       _ -> {}
     }
   }
   ret .None;
+}
+
+// The `fit` statement, among every function-like body in the program
+// (not just a plain function's - an impl method's, a test's, or a
+// fuzz block's own body can carry one just as well), whose braces
+// cover `line` in `file`.
+fun _covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
+  let body = enclosing_body(program, file, line);
+  if body.is_none() {
+    ret .None;
+  }
+  ret _find_covering_fit(body.unwrap(), line);
 }
 
 // Descends into every nested block a statement can hide one inside,
@@ -2147,14 +2184,14 @@ fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataT
 // pattern's own qualified `Enum.VariantName`) written at `line` in
 // `file`, resolved against the enclosing `fit` statement's subject
 // type.
-pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
   let found = _covering_fit(program, file, line);
   if found.is_none() {
     ret .None;
   }
   fit found.unwrap().kind {
     .StatementFit(f) -> {
-      str enum_name = fit_subject_type(program, f.exp, file, line);
+      str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
       if equals(enum_name, "") {
         ret .None;
       }
@@ -2162,7 +2199,7 @@ pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Opt
         program,
         enum_name,
         name,
-        fit_subject_generic_args(program, f.exp, file, line)
+        fit_subject_generic_args(tokens, program, f.exp, file, line)
       );
     }
     _ -> {}
@@ -2265,7 +2302,12 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
             k = k + 1;
           }
           if idx >= 0 {
-            str enum_name = fit_subject_type(program, f.exp, file, line);
+            // `nil`, not the real token stream: `_lookup_fit_binding`
+            // is reached through `_lookup_local`, which has no tokens
+            // of its own to thread here (a deeper, separate gap - see
+            // `lookup_fit_variant`'s own `tokens` param for the
+            // shallow case this was fixed for).
+            str enum_name = fit_subject_type(nil, program, f.exp, file, line);
             if !equals(enum_name, "") {
               let payload_type = variant_payload_type(
                 program,

@@ -19,7 +19,7 @@ imp std.option;
 imp std.io;
 
 // One place a name is written.
-compound Occurrence {
+pub compound Occurrence {
   str document_uri;
   Span span;
 }
@@ -208,7 +208,7 @@ pub fun is_identifier(str s) bin {
 }
 
 // Every place `name` is written, across the documents a client holds.
-fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+pub fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
   Vec<str> uris = docs.all_uris();
   defer uris.free();
   num i = 0;
@@ -248,7 +248,7 @@ fun _occurrences_in_doc(AnalysisCache* cache, Document d, str document_uri, str 
   }
 }
 
-fun _occurrence_location(Occurrence o) str {
+pub fun _occurrence_location(Occurrence o) str {
   ret format(
     `{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
     json_quote(o.document_uri),
