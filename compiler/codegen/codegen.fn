@@ -2347,7 +2347,9 @@ impl Codegen {
   // unknown, its signature is already safe, it already has a prototype,
   // or `self.state` points at a throwaway text-capture probe.
   ensure_plain_impl_method_prototype_emitted(str owner_type, str bare_name) {
-    if self.suppress_generic_impl_method_draining {
+    // See `ensure_plain_function_prototype_emitted`: only bails outright
+    // with no scratch depth to route the splice through.
+    if self.suppress_generic_impl_method_draining && self.hoist_scratch_depth == 0 {
       ret;
     }
     StringBuilder pm_key_sb = string_builder_init(16);
@@ -2529,7 +2531,13 @@ impl Codegen {
   // `ensure_plain_impl_method_prototype_emitted`, sourced from the
   // plain-function registry and with no `self` param to prepend.
   ensure_plain_function_prototype_emitted(str fn_name) {
-    if self.suppress_generic_impl_method_draining {
+    // Only bails outright when there's no scratch depth to route
+    // through: `emit_hoisted` below already splices safely into the
+    // root buffer whenever `hoist_scratch_depth > 0`, so a plain
+    // (non-generic-impl-method) prototype request nested in a call's
+    // return-type probe doesn't need the deferral generic impl methods
+    // use this flag for.
+    if self.suppress_generic_impl_method_draining && self.hoist_scratch_depth == 0 {
       ret;
     }
     num pfi = 0;
