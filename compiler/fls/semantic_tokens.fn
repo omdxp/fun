@@ -11,9 +11,12 @@ imp analysis;
 imp positions;
 imp symbols;
 imp ..lexer.token;
+imp ..ast.ast;
 imp ..parser.datatype_defs;
+imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
+imp std.map;
 imp std.ctype;
 
 // The protocol's own token-type/modifier legend, in the exact order
@@ -48,6 +51,19 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   }
   Vec<Token> tokens = read.tokens;
 
+  // Every top-level name declared in a file under the stdlib root,
+  // built once per call rather than resolved per token: cheap enough
+  // (one linear walk of already-parsed declarations, already paid for
+  // by `cache.of`) and avoids a per-identifier lookup against the
+  // whole merged program.
+  Map<str, bin> stdlib_names;
+  stdlib_names.init(64);
+  defer stdlib_names.free();
+  if read.parsed {
+    str root = _normalize_path(stdlib_root(doc.path));
+    _collect_stdlib_names(&read.program.nodes, root, &stdlib_names);
+  }
+
   Vec<num> data;
   data.init(tokens.len * 5);
   num last_line = 0;
@@ -70,6 +86,10 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     if ttype < 0 {
       continue;
     }
+    num modifier = 0;
+    if t.type == TokenType.Identifier && stdlib_names.at(token_word(t)).is_some() {
+      modifier = 1;
+    }
 
     num line0 = t.pos.line - 1;
     num start0 = t.pos.start_col - 1;
@@ -85,7 +105,7 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     data.push(delta_start);
     data.push(length);
     data.push(ttype);
-    data.push(0);
+    data.push(modifier);
     last_line = line0;
     last_start = start0;
     have_last = true;
@@ -103,6 +123,29 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   }
   b.append("]}");
   ret b.build();
+}
+
+// Every top-level declaration name whose own file sits under `root`
+// (both compared normalized, so a Windows-style path in either
+// operand still matches). A name found this way earns the
+// `defaultLibrary` modifier wherever it is later referenced.
+fun _collect_stdlib_names(Vec<Node>* nodes, str root, Map<str, bin>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    if !n.has_pos || !starts_with(_normalize_path(n.pos.filename), root) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> { out.put(f.name, true); }
+      .Compound(c) -> { out.put(c.name, true); }
+      .Enum(e) -> { out.put(e.name, true); }
+      .Quirk(q) -> { out.put(q.name, true); }
+      .Variable(v) -> { out.put(v.name, true); }
+      _ -> {}
+    }
+  }
 }
 
 // `t`'s own semantic type, or -1 for a token worth no highlight of

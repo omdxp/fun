@@ -2600,6 +2600,29 @@ test "semantic tokens classify a function declaration, a type, a keyword styled 
   assert !contains(out, `"data":[]`), "expected at least one token classified";
 }
 
+test "semantic tokens mark a stdlib call defaultLibrary, but not the file's own function" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///stdlibtok.fn";
+  doc.path = "stdlibtok.fn";
+  doc.text = `imp std.io;
+  `fun main() num {
+  `  println("hi");
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str out = semantic_tokens(&reads, doc);
+  // println's own token: length 7, type 5 (function), modifier 1
+  // (defaultLibrary) - declared in a file under the stdlib root, not
+  // this document.
+  assert contains(out, "7,5,1,"), "expected println's own token marked defaultLibrary";
+  // main's own token: length 4, type 5 (function), modifier 0 - it
+  // is declared right here, not in the stdlib.
+  assert contains(out, "4,5,0,"), "expected main's own declaration NOT marked defaultLibrary";
+}
+
 test "semantic tokens' declared legend matches what the token-type indices actually mean" {
   // initialize's own capabilities and the encoder must agree on what
   // index 5 (say) means, or a client colors every token wrong.

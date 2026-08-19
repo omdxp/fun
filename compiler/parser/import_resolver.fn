@@ -69,7 +69,7 @@ fun _convert_dotted_path(str root, str import_path) str {
 // strings in `_preload_and_collect_source`/`_parse_and_merge`'s visited sets.
 // Backslashes are normalized to `/` first so a Windows-style path
 // collapses into the same dedup key.
-fun _normalize_path(str path) str {
+pub fun _normalize_path(str path) str {
   str slashed = replace_char(path, '\\', '/');
   // An absolute path keeps its root: dropping the empty first segment
   // would turn it into a relative one.
@@ -115,7 +115,7 @@ const num max_stdlib_search_depth = 32;
 // likes, and a compiler is run from wherever a project happens to sit.
 // An explicit setting wins, then the nearest `stdlib` at or above the
 // file being read, and only then the working directory.
-fun _stdlib_root(str input_file_path) str {
+pub fun stdlib_root(str input_file_path) str {
   str configured = env("FUN_STDLIB_DIR");
   if configured != nil && !equals(configured, "") {
     ret configured;
@@ -152,7 +152,7 @@ fun _stdlib_root(str input_file_path) str {
 // conversion shared by both).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
-    ret _convert_dotted_path(_stdlib_root(input_file_path), import_path);
+    ret _convert_dotted_path(stdlib_root(input_file_path), import_path);
   }
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
