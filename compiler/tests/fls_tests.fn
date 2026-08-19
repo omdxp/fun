@@ -13,6 +13,7 @@ imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
 imp ..fls.formatting;
+imp ..fls.folding_range;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
@@ -2639,6 +2640,30 @@ test "formatting leaves text it cannot read alone" {
   // Refusing to format is better than rewriting a file whose meaning is
   // not yet clear.
   assert equals(formatting(doc), "[]"), "expected no edit for text that does not parse";
+}
+
+test "folding range covers a multi-line block, but not a single-line one" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fold.fn";
+  doc.path = "fold.fn";
+  doc.text = `fun add(num a, num b) num {
+  `  if a > b {
+  `    ret a;
+  `  }
+  `  ret b;
+  `}
+  `fun one_liner() num { ret 1; }`;
+  doc.version = 1;
+
+  str out = folding_ranges(&reads, doc);
+  // The outer function (lines 0-5) and the nested if-block (lines
+  // 1-3), 0-indexed, each on different lines for their own braces.
+  assert contains(out, `{"startLine":0,"endLine":5}`), "expected the outer function to fold";
+  assert contains(out, `{"startLine":1,"endLine":3}`), "expected the nested if-block to fold";
+  // one_liner's own braces share a line, nothing worth folding there.
+  assert !contains(out, `"startLine":6`), "expected no fold starting on the one-liner's own line";
 }
 
 test "semantic tokens classify a function declaration, a type, a keyword styled as a type, and a literal" {

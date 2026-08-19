@@ -1,0 +1,60 @@
+// Folding ranges.
+// 
+// One range per `{`...`}` block whose braces sit on different lines,
+// depth-tracked directly off the token stream. No parse needed, the
+// same way every other purely lexical fls feature works.
+
+imp documents;
+imp analysis;
+imp ..lexer.token;
+imp std.vec;
+imp std.string;
+
+// Every foldable block in `doc`, as the result a client is sent.
+pub fun folding_ranges(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "[]";
+  }
+  Vec<Token> tokens = read.tokens;
+
+  // Line of each still-open `{`, in nesting order, so a `}` always
+  // closes whichever one opened most recently.
+  Vec<num> open_lines;
+  open_lines.init(16);
+  defer open_lines.free();
+
+  StringBuilder b = string_builder_init(128);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if token_is_symbol(t, '{') {
+      open_lines.push(t.pos.line);
+      continue;
+    }
+    if !token_is_symbol(t, '}') {
+      continue;
+    }
+    if open_lines.len == 0 {
+      continue;
+    }
+    num open_line = open_lines.pop();
+    if open_line == t.pos.line {
+      continue;
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    b.append(format(
+      `{"startLine":{num},"endLine":{num}}`,
+      open_line - 1,
+      t.pos.line - 1
+    ));
+  }
+  b.append("]");
+  ret b.build();
+}

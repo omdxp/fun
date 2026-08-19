@@ -19,6 +19,7 @@ imp outline;
 imp references;
 imp completion;
 imp formatting;
+imp folding_range;
 imp uri;
 imp std.string;
 imp std.option;
@@ -207,6 +208,10 @@ impl Server {
     }
     if equals(method, "workspace/symbol") {
       self.answer_workspace_symbols(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/foldingRange") {
+      self.answer_folding_range(id, message);
       ret;
     }
     if equals(method, "shutdown") {
@@ -534,6 +539,23 @@ impl Server {
     write_message(response(id, document_symbols(&self.reads, doc.unwrap())));
   }
 
+  // Every foldable `{`...`}` block in the document.
+  answer_folding_range(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    write_message(response(id, folding_ranges(&self.reads, doc.unwrap())));
+  }
+
   // Every symbol matching `query`, across every document this server
   // holds open.
   answer_workspace_symbols(str id, JsonValue message) {
@@ -672,7 +694,7 @@ fun _number_field(JsonValue message, str name) num {
 // is one a request handler answers.
 fun _initialize_result() str {
   ret format(
-    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
     TOKEN_TYPES,
     TOKEN_MODIFIERS
   );
