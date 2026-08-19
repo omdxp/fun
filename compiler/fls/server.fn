@@ -299,6 +299,12 @@ impl Server {
       self.docs.closed(document_uri);
       self.reads.forget(document_uri);
       self.diagnosed.forget(document_uri);
+      // A closed document's own errors/warnings would otherwise sit in
+      // the editor's Problems panel forever, since nothing else ever
+      // tells the client to drop them.
+      Vec<Diagnostic> none;
+      none.init(0);
+      write_message(publish(document_uri, "", &none));
     }
   }
 

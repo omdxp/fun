@@ -239,6 +239,15 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   third.free();
 }
 
+test "publish with no findings clears an editor's own diagnostics for a document" {
+  Vec<Diagnostic> none;
+  none.init(0);
+  str note = publish("file:///closed.fn", "", &none);
+  assert contains(note, `"method":"textDocument/publishDiagnostics"`), "expected the publish notification";
+  assert contains(note, `"uri":"file:///closed.fn"`), "expected the closed document's own uri";
+  assert contains(note, `"diagnostics":[]`), "expected an empty diagnostics array, which is what clears the gutter";
+}
+
 test "a non-BMP character counts as two UTF-16 units, a surrogate pair" {
   // "x\xF0\x9F\x98\x80y" - the emoji is 4 UTF-8 bytes but 2 UTF-16
   // units (a surrogate pair), so 'y' sits at UTF-16 character 3, not 2.
