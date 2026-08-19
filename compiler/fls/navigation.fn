@@ -263,7 +263,7 @@ pub fun definition_workspace_wide(
       continue;
     }
     let hit = lookup_top_level(&other_read.program.nodes, name);
-    if hit.is_some() {
+    if hit.is_some() && declaration_visible_from(hit.unwrap(), doc.path) {
       ret _location_result(other_doc, hit.unwrap());
     }
   }

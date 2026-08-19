@@ -193,6 +193,44 @@ test "a generic method on a let-inferred receiver specializes, not the bare temp
   assert !contains(hovered, "self) T"), "expected no unspecialized template leaking through";
 }
 
+test "definition_workspace_wide respects cross-file pub visibility" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+
+  docs.opened(
+    "file:///vis_other.fn",
+    `fun hidden() num {
+    `  ret 1;
+    `}
+    `pub fun shown() num {
+    `  ret 2;
+    `}`,
+    1
+  );
+
+  Document doc;
+  doc.uri = "file:///vis_main.fn";
+  doc.path = "vis_main.fn";
+  doc.text = `fun use_hidden() num {
+  `  ret hidden();
+  `}
+  `fun use_shown() num {
+  `  ret shown();
+  `}`;
+  doc.version = 1;
+
+  // "hidden" is declared in another file and never made pub: a
+  // workspace-wide jump must not treat it as the target just because
+  // the name matches.
+  str hidden_result = definition_workspace_wide(&reads, &docs, doc, 1, 8);
+  assert equals(hidden_result, "[]"), "expected a private cross-file symbol not to be offered as a definition target";
+
+  // "shown" is pub, so it's a legitimate cross-file jump target.
+  str shown_result = definition_workspace_wide(&reads, &docs, doc, 4, 8);
+  assert contains(shown_result, "vis_other.fn"), "expected a pub cross-file symbol to resolve normally";
+}
+
 test "hover and definition resolve a method called on a let-inferred local" {
   str src = `compound Box {
   `  num width;
@@ -1199,12 +1237,12 @@ test "definition_workspace_wide falls back to a type in a document never importe
 
   // Indexed now (standing in for an earlier references/workspace-
   // symbol call having already scanned the workspace).
-  docs.opened("file:///unrelated.fn", `compound OrphanType {
+  docs.opened("file:///unrelated.fn", `pub compound OrphanType {
   `  num n;
   `}`, 1);
   str found = definition_workspace_wide(&reads, &docs, main_doc, 1, 2);
   assert contains(found, `"uri":"file:///unrelated.fn"`), "expected the fallback to find OrphanType's own declaration";
-  assert contains(found, `"character":9`), "expected the range to land on OrphanType's own name, not the compound keyword";
+  assert contains(found, `"character":13`), "expected the range to land on OrphanType's own name, not the compound keyword";
 }
 
 test "a rename is refused when the new name is not one" {

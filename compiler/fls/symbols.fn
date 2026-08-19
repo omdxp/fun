@@ -43,6 +43,24 @@ pub compound Declaration {
   // `detail`, but "See also: its own compound" is still worth
   // showing.
   str container;
+  // Whether this declaration was written `pub`. Meaningful only for
+  // the top-level kinds a cross-file lookup can actually reach
+  // (Function, Compound, Enum, Quirk, Global); `true` for everything
+  // else (a field, a local, a parameter, a variant, an impl method),
+  // which visibility filtering doesn't apply to in the same way and
+  // is never independently gated by this field.
+  bin is_public;
+}
+
+// Whether `d` is visible from `current_file`: always, from the same
+// file it's declared in (`pos.filename` empty means no position info
+// at all, trusted the same way), otherwise only when it was written
+// `pub`. Matches `check_visibility`'s own rule in typecheck.fn exactly.
+pub fun declaration_visible_from(Declaration d, str current_file) bin {
+  if d.is_public || equals(d.pos.filename, "") || equals(current_file, "") {
+    ret true;
+  }
+  ret equals(d.pos.filename, current_file);
 }
 
 // The word a client's cursor sits on, given the token it landed on.
@@ -377,7 +395,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
     fit n.kind {
       .Function(f) -> {
         if equals(f.name, name) {
-          ret .Some(_declaration(name, .Function, render_function(f), n.pos));
+          ret .Some(_declaration_vis(name, .Function, render_function(f), n.pos, n.flags.is_public));
         }
       }
       .Compound(c) -> {
@@ -385,7 +403,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("compound ");
           b.append(c.name);
-          ret .Some(_declaration(name, .Compound, b.build(), n.pos));
+          ret .Some(_declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public));
         }
       }
       .Enum(e) -> {
@@ -393,7 +411,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("enum ");
           b.append(e.name);
-          ret .Some(_declaration(name, .Enum, b.build(), n.pos));
+          ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
         }
       }
       .Quirk(q) -> {
@@ -401,7 +419,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("quirk ");
           b.append(q.name);
-          ret .Some(_declaration(name, .Quirk, b.build(), n.pos));
+          ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
         }
       }
       .Variable(v) -> {
@@ -420,7 +438,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
               b.append(literal);
             }
           }
-          ret .Some(_declaration(name, .Global, b.build(), n.pos));
+          ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
         }
       }
       _ -> {}
@@ -2161,11 +2179,22 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
 }
 
 fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaration {
+  ret _declaration_vis(name, kind, detail, pos, true);
+}
+
+// `_declaration`, additionally recording whether the declaration was
+// written `pub` (see `Declaration.is_public`). Used directly only at
+// the handful of top-level call sites where that matters; every other
+// call site keeps going through the plain `_declaration` wrapper,
+// which is always visible from anywhere within the merged program the
+// same way it always has been.
+fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, bin is_public) Declaration {
   Declaration d;
   d.name = name;
   d.kind = kind;
   d.detail = detail;
   d.pos = pos;
   d.container = "";
+  d.is_public = is_public;
   ret d;
 }
