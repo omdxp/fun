@@ -988,6 +988,49 @@ test "inlay hints don't chase a bare copy through another unresolved let, only a
   assert !contains(hints, `"position":{"line":3`), "expected no hint at all for the chained copy";
 }
 
+test "inlay hints name each call argument, skip declarations, skip redundant matches, and skip self on a method" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///paramhints.fn";
+  doc.path = "paramhints.fn";
+  doc.text = `fun greet(str name, num count) str {
+  `  ret name;
+  `}
+  `compound Server {
+  `  num count;
+  `}
+  `impl Server {
+  `  bump(num delta, num limit) num {
+  `    ret self.count + delta + limit;
+  `  }
+  `}
+  `fun main() num {
+  `  num delta = 3;
+  `  greet("hi", 2);
+  `  Server s;
+  `  s.bump(delta, 10);
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 30);
+  // A plain call names both arguments.
+  assert contains(hints, `"label":"name:"`), "expected a hint for the first argument";
+  assert contains(hints, `"label":"count:"`), "expected a hint for the second argument";
+  // Neither the function declaration nor the method declaration (no
+  // 'fun' keyword at all) is itself mistaken for a call.
+  assert !contains(hints, `"line":0`), "expected no hint on the function declaration's own line";
+  assert !contains(hints, `"line":7`), "expected no hint on the method declaration's own line";
+  // A method call skips 'self' (parameter 0 in its own rendered
+  // signature) and names only the arguments actually written.
+  assert !contains(hints, `"label":"self:"`), "expected self never shown as an argument hint";
+  assert contains(hints, `"label":"limit:"`), "expected the method's second real parameter to be named";
+  // The first argument to bump (a bare 'delta' matching the
+  // parameter name 'delta' exactly) is redundant and gets no hint.
+  assert !contains(hints, `"label":"delta:"`), "expected the redundant bare-identifier argument to be suppressed";
+}
+
 test "inlay hints suppress the raw __let_infer__ sentinel rather than showing it verbatim" {
   // A bare copy of a let local whose OWN type this heuristic could
   // not resolve (an unsupported initializer shape) must not leak the

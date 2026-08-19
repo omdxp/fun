@@ -162,12 +162,13 @@ fun _token_index_at_or_before(Vec<Token>* tokens, num line, num character) Optio
   ret .Some(best);
 }
 
-// The comma-separated parameter labels between the first pair of
-// parens in `signature` (a rendered function detail, "fun name(Type
-// p1, Type p2) RetType"), tracking angle-bracket depth so a generic
-// parameter type's own comma ("Map<str, num> m") isn't mistaken for a
-// parameter separator.
-fun _split_params(str signature) Vec<str> {
+// `signature`'s own parameter list, one rendered piece per parameter
+// (`"str name"`, `"Vec<T>* data"`, ...), split at top-level commas
+// only: angle-bracket and paren depth are both tracked so a comma
+// inside a param's own generic args ("Map<str, num> m") is never
+// mistaken for a separator. Shared with `inlay_hints.fn`, which needs
+// the same parameter list to place a name hint at each call argument.
+pub fun split_signature_params(str signature) Vec<str> {
   Vec<str> out;
   out.init(4);
   num open = index_of_char(signature, '(');
@@ -214,7 +215,7 @@ fun _split_params(str signature) Vec<str> {
 // out individually, with `active_param` (clamped into range) marking
 // which one the cursor sits on.
 fun _signature_result(str signature, num active_param) str {
-  Vec<str> params = _split_params(signature);
+  Vec<str> params = split_signature_params(signature);
   StringBuilder b = string_builder_init(128);
   b.append(`{"signatures":[{"label":`);
   b.append(json_quote(signature));
