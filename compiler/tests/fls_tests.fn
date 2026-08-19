@@ -1911,6 +1911,44 @@ test "hover and completion resolve a local declared inside a fit arm, including 
   assert contains(completed, `"label":"doubled"`), "expected the fit-arm local offered in scope completion";
 }
 
+test "hover resolves a fit arm's own payload binding when the subject is a field access, not just a bare local" {
+  // _fit_subject_type only ever handled a bare identifier subject
+  // (fit s { ... }) or the fit <- ch channel-receive desugar. A
+  // subject reached through a field (fit s.kind { ... }, this
+  // codebase's own dominant idiom - every fit over an AST node's kind
+  // is shaped exactly this way) fell through to "", so a payload
+  // binding's own type never resolved at all, user-reported live
+  // against this exact file (symbols.fn's own `.Variable(v)` fit arm).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fitfield.fn";
+  doc.path = "fitfield.fn";
+  doc.text = `enum ShapeKind {
+  `  Circle(num),
+  `}
+  `compound Shape {
+  `  ShapeKind kind;
+  `}
+  `fun check(Shape* s) num {
+  `  fit s.kind {
+  `    .Circle(r) -> {
+  `      ret r;
+  `    }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  // At the binding's own site, "(r)".
+  str at_binding = hover(&reads, doc, 8, 12);
+  assert contains(at_binding, "num r"), "expected the payload binding's own type to resolve at its declaration";
+
+  // At a later use, "ret r;".
+  str at_use = hover(&reads, doc, 9, 10);
+  assert contains(at_use, "num r"), "expected the same binding to resolve at a later use too";
+}
+
 test "hover and completion resolve a local or parameter inside a test or fuzz block" {
   // Neither _lookup_local nor _declared ever had a .Test or .Fuzz
   // case at all, user-reported (via a real local in this very test

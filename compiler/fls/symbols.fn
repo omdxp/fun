@@ -1710,11 +1710,51 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
   ret .None;
 }
 
+// The type name of an arbitrary expression, as far as `_fit_subject_type`
+// needs to resolve one: a bare identifier's own declared type, or (for
+// `base.field`) `base`'s own type resolved the same way, then that
+// field's own declared type on it. Covers the shape a fit subject most
+// commonly takes in this codebase's own source (`fit n.kind { ... }`,
+// `fit node.data { ... }`), which a bare identifier alone never did.
+// "" for anything deeper (a call, an index, a chain more than one dot
+// long) — narrower than `chain_ending_type`'s own token-based walk on
+// purpose, since this operates on the already-parsed AST a fit
+// statement carries, not a token stream.
+fun _expr_type_name(Vec<Node>* program, Node* expr, str file, num line) str {
+  if expr == nil {
+    ret "";
+  }
+  fit expr.kind {
+    .Identifier(s) -> { ret type_name_of_local(nil, program, s, file, line); }
+    .Expression(fe) -> {
+      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right || fe.right == nil {
+        ret "";
+      }
+      str base_type = _expr_type_name(program, fe.left, file, line);
+      if equals(base_type, "") {
+        ret "";
+      }
+      fit fe.right.kind {
+        .Identifier(field_name) -> {
+          let field = lookup_field(program, base_type, field_name);
+          if field.is_none() {
+            ret "";
+          }
+          ret bare_type_from_detail(field.unwrap().detail);
+        }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+}
+
 // The enum type name a `fit` statement's subject expression resolves
-// to: a bare local/parameter subject's own declared type, or, for
-// `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a call
-// whose callee is `ch`'s own `.recv` method access), the channel's
-// element type. Anything else yields "".
+// to: a bare local/parameter subject's own declared type, a
+// `base.field` subject's own field type (see `_expr_type_name`), or,
+// for `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a
+// call whose callee is `ch`'s own `.recv` method access), the
+// channel's element type. Anything else yields "".
 fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str {
   if subject == nil {
     ret "";
@@ -1722,6 +1762,9 @@ fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str
   fit subject.kind {
     .Identifier(s) -> { ret type_name_of_local(nil, program, s, file, line); }
     .Expression(e) -> {
+      if equals(e.op, ".") {
+        ret _expr_type_name(program, subject, file, line);
+      }
       if !equals(e.op, "()") || !e.has_left || e.left == nil {
         ret "";
       }
