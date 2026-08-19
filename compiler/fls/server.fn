@@ -197,6 +197,10 @@ impl Server {
       self.answer_rename(id, message);
       ret;
     }
+    if equals(method, "textDocument/documentHighlight") {
+      self.answer_document_highlight(id, message);
+      ret;
+    }
     if equals(method, "textDocument/documentSymbol") {
       self.answer_document_symbols(id, message);
       ret;
@@ -485,6 +489,18 @@ impl Server {
     write_message(response(id, references(&self.reads, &self.docs, r.doc, r.line, r.character)));
   }
 
+  // Highlights every place the name under the cursor is written,
+  // scoped to the current document (no workspace scan).
+  answer_document_highlight(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, document_highlights(&self.reads, r.doc, r.line, r.character)));
+  }
+
   // Renames the name under the cursor everywhere it is written.
   answer_rename(str id, JsonValue message) {
     let asked = self.document_at(message);
@@ -656,7 +672,7 @@ fun _number_field(JsonValue message, str name) num {
 // is one a request handler answers.
 fun _initialize_result() str {
   ret format(
-    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
     TOKEN_TYPES,
     TOKEN_MODIFIERS
   );

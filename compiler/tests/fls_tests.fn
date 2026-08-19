@@ -1419,6 +1419,35 @@ test "every place a name is written is found, and renamed together" {
   assert equals(rename_symbol(&reads, &docs, doc, 1, 6, "9bad"), "null"), "expected the rename refused";
 }
 
+test "document highlight finds every occurrence in the current document, but never another one" {
+  str src_a = `fun total(num n) num {
+  `  ret n + total(0);
+  `}`;
+  str src_b = `fun total(num n) num {
+  `  ret n;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///a.fn", src_a, 1);
+  docs.opened("file:///b.fn", src_b, 1);
+  let held = docs.at("file:///a.fn");
+  assert held.is_some(), "expected the document to be held";
+  Document doc = held.unwrap();
+
+  // `total` in `a.fn` is written twice: the declaration and its own
+  // recursive call. `references` also finds `b.fn`'s own unrelated
+  // `total`, since it scans every open document; document_highlights
+  // must not.
+  str refs = references(&reads, &docs, doc, 0, 5);
+  assert count(refs, `"uri"`) == 3, "expected references to find all three, across both files";
+
+  str highlights = document_highlights(&reads, doc, 0, 5);
+  assert count(highlights, `"range"`) == 2, "expected only a.fn's own two occurrences";
+  assert !contains(highlights, `"uri"`), "expected no uri field at all: every result is implicitly the requested document";
+}
+
 test "completion after a dot offers what the receiver has" {
   str src = `compound Buffer {
   `  num len;

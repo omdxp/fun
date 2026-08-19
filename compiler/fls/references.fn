@@ -24,6 +24,43 @@ compound Occurrence {
   Span span;
 }
 
+// Every place the name at `line`/`character` is written, but only
+// within `doc` itself, as the result a client is sent. Unlike
+// `references`, no workspace scan and no other document's own
+// occurrences: a client asks for this on essentially every cursor
+// move, so it stays scoped to what is already read for free.
+pub fun document_highlights(AnalysisCache* cache, Document doc, num line, num character) str {
+  str name = name_at(cache, doc, line, character);
+  if equals(name, "") {
+    ret "[]";
+  }
+
+  Vec<Occurrence> found;
+  found.init(8);
+  defer found.free();
+  _occurrences_in_doc(cache, doc, doc.uri, name, &found);
+
+  StringBuilder b = string_builder_init(128);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    Occurrence o = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(format(
+      `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
+      o.span.line,
+      o.span.start,
+      o.span.line,
+      o.span.end
+    ));
+  }
+  b.append("]");
+  ret b.build();
+}
+
 // Every place the name at `line`/`character` is written, as the result a
 // client is sent.
 pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line, num character) str {
@@ -182,27 +219,31 @@ fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Oc
     if held.is_none() {
       continue;
     }
-    Document d = held.unwrap();
-    Analyzed read = cache.of(d);
-    if !read.lexed {
-      continue;
-    }
-    Vec<Token> tokens = read.tokens;
-    num t = 0;
-    for t < tokens.len {
-      Token tok = tokens.get(t);
-      t = t + 1;
-      fit tok.type {
-        .Identifier -> {
-          if equals(token_word(tok), name) {
-            Occurrence o;
-            o.document_uri = document_uri;
-            o.span = span_of(tok, d.text);
-            out.push(o);
-          }
+    _occurrences_in_doc(cache, held.unwrap(), document_uri, name, out);
+  }
+}
+
+// Every place `name` is written in `d` alone.
+fun _occurrences_in_doc(AnalysisCache* cache, Document d, str document_uri, str name, Vec<Occurrence>* out) {
+  Analyzed read = cache.of(d);
+  if !read.lexed {
+    ret;
+  }
+  Vec<Token> tokens = read.tokens;
+  num t = 0;
+  for t < tokens.len {
+    Token tok = tokens.get(t);
+    t = t + 1;
+    fit tok.type {
+      .Identifier -> {
+        if equals(token_word(tok), name) {
+          Occurrence o;
+          o.document_uri = document_uri;
+          o.span = span_of(tok, d.text);
+          out.push(o);
         }
-        _ -> {}
       }
+      _ -> {}
     }
   }
 }
