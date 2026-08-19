@@ -262,6 +262,60 @@ test "compound-init literal offers only the type's own field names" {
   assert !contains(out, `"label":"make"`), "expected the surrounding scope's own declarations not to leak in here";
 }
 
+test "completion offers a call snippet with one tab stop per parameter" {
+  str src = `fun probe(str name, num count) bin {
+  `  ret true;
+  `}
+  `fun caller() bin {
+  `  ret probe("x", 1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///snippet_call.fn";
+  doc.path = "snippet_call.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Mid-word on "probe", snippets on.
+  str out = completion(&reads, doc, 4, 8, true);
+  assert contains(out, `"label":"probe"`), "expected the function itself";
+  assert contains(
+    out,
+    `"insertText":"probe(${1:name}, ${2:count})$0","insertTextFormat":2`
+  ), "expected a snippet with one tab stop per parameter";
+
+  // Same position, snippets off: plain label insertion, no snippet.
+  str out_plain = completion(&reads, doc, 4, 8, false);
+  assert contains(out_plain, `"label":"probe"`), "expected the function itself";
+  assert !contains(out_plain, `"insertText"`), "expected no snippet when the client doesn't support one";
+}
+
+test "dot-completion offers a method's own call snippet too" {
+  str src = `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer {
+  `  pub resize(num n) { self.len = n; }
+  `}
+  `fun helper(Buffer b) num {
+  `  b.resize(1);
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///snippet_method.fn";
+  doc.path = "snippet_method.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after `b.re`, snippets on.
+  str out = completion(&reads, doc, 7, 6, true);
+  assert contains(out, `"label":"resize"`), "expected the method itself";
+  assert contains(out, `"insertText":"resize(${1:n})$0","insertTextFormat":2`), "expected the method's own call snippet";
+}
+
 test "dot-completion merges a method declared in a different file than the type" {
   str helper_src = `pub compound Widget {
   `  num n;

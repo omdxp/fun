@@ -8,6 +8,8 @@
 imp documents;
 imp analysis;
 imp symbols;
+imp signature_help;
+imp inlay_hints;
 imp protocol;
 imp ..ast.ast;
 imp ..lexer.lexdefs;
@@ -117,7 +119,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       );
     }
     if !equals(type_name, "") {
-      _members_of(&program.nodes, type_name, &items);
+      _members_of(&program.nodes, type_name, &items, snippets);
     }
     if items.len == 0 {
       _written_names(&tokens, receiver, &items);
@@ -125,7 +127,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     ret _reply(&items);
   }
 
-  _declared(&program.nodes, doc.path, source_line, &items);
+  _declared(&program.nodes, doc.path, source_line, &items, snippets);
   _reserved(&items, snippets);
   _abbreviations(&items, snippets);
   ret _reply(&items);
@@ -678,7 +680,7 @@ fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
   }
 }
 
-fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
+fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippets) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -712,7 +714,13 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
                 continue;
               }
               str method_name = bare_method_name(f.name);
-              items.push(_item(method_name, .Method, render_function_named(f, method_name, false)));
+              str method_detail = render_function_named(f, method_name, false);
+              items.push(_snippet_item(
+                method_name,
+                .Method,
+                method_detail,
+                _call_snippet(method_name, method_detail, true, snippets)
+              ));
             }
             _ -> {}
           }
@@ -725,7 +733,7 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
 
 // What the program declares, plus the parameters and locals of the
 // function or impl method the cursor sits in.
-fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
+fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snippets) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -733,7 +741,8 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
     fit n.kind {
       .Function(f) -> {
         if f.has_name && !equals(f.name, "") {
-          items.push(_item(f.name, .Function, render_function(f)));
+          str fn_detail = render_function(f);
+          items.push(_snippet_item(f.name, .Function, fn_detail, _call_snippet(f.name, fn_detail, false, snippets)));
         }
         if !covers(n, f, file, line) {
           continue;
@@ -952,6 +961,46 @@ fun _skeleton(str word) str {
 
 fun _item(str label, ItemKind kind, str detail) Item {
   ret _snippet_item(label, kind, detail, "");
+}
+
+// A call snippet for a function/method completion: `label(${1:arg1},
+// ${2:arg2})$0`, or just `label()$0` for no parameters, read straight
+// from `signature`'s own already-rendered parameter list (the same
+// split `signature_help.fn`/`inlay_hints.fn` already use). "" (plain
+// label insertion) when the client wouldn't understand a snippet, or
+// `signature` isn't call-shaped at all. `is_method` skips the first
+// parameter: unlike `signature_help.fn`'s own active-param index,
+// `render_function_named` still renders a method's implicit `self`
+// as a literal first parameter, which a reader never types and a
+// snippet must not ask for.
+fun _call_snippet(str label, str signature, bin is_method, bin snippets) str {
+  if !snippets || index_of_char(signature, '(') < 0 {
+    ret "";
+  }
+  Vec<str> params = split_signature_params(signature);
+  StringBuilder b = string_builder_init(64);
+  b.append(label);
+  b.append("(");
+  num start = 0;
+  if is_method && params.len > 0 {
+    start = 1;
+  }
+  num i = start;
+  num stop = 1;
+  for i < params.len {
+    if i > start {
+      b.append(", ");
+    }
+    b.append("${");
+    b.append_num(stop);
+    b.append(":");
+    b.append(param_name_from_piece(params.get(i)));
+    b.append("}");
+    i = i + 1;
+    stop = stop + 1;
+  }
+  b.append(")$0");
+  ret b.build();
 }
 
 fun _snippet_item(str label, ItemKind kind, str detail, str snippet) Item {

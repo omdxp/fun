@@ -175,7 +175,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       if param_index >= params.len {
         continue;
       }
-      str pname = _param_name_from_piece(params.get(param_index));
+      str pname = param_name_from_piece(params.get(param_index));
       if equals(pname, "") {
         continue;
       }
@@ -263,8 +263,10 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
 // A parameter's own name from one rendered piece of a split signature
 // (`"str name"` -> `"name"`, `"Vec<T>* data"` -> `"data"`): the
 // trailing run of identifier characters, since a parameter's name is
-// always what a rendered "Type name" piece ends with.
-fun _param_name_from_piece(str piece) str {
+// always what a rendered "Type name" piece ends with. Shared with
+// `completion.fn`, which needs the same names to build a call
+// snippet's own tab stops.
+pub fun param_name_from_piece(str piece) str {
   num end = len(piece);
   num start = end;
   for start > 0 && (is_alnum(piece[start - 1]) || piece[start - 1] == '_') {
