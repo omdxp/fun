@@ -840,6 +840,19 @@ pub fun type_name_of_local(Vec<Node>* program, str name, str file, num line) str
   ret bare_type_from_detail(found.unwrap().detail);
 }
 
+// `type_expr`'s own bare name, with any generic args or pointer
+// spelling removed: up to the first `<`, stars stripped. `type_expr`
+// is already just a type on its own, not a "Type name" pair (see
+// `bare_type_from_detail` for that shape).
+fun _bare_type_expr(str type_expr) str {
+  str written = type_expr;
+  num cut = index_of_char(written, '<');
+  if cut > 0 {
+    written = substr(written, 0, cut);
+  }
+  ret trim(replace_char(written, '*', ' '));
+}
+
 // The bare declared type of a rendered "Type name" declaration
 // detail, with any generic args or pointer spelling removed: what
 // precedes the space, up to the first `<`, stars stripped. Shared by
@@ -850,13 +863,19 @@ pub fun bare_type_from_detail(str detail) str {
   if space <= 0 {
     ret "";
   }
-  str written = substr(detail, 0, space);
-  num cut = index_of_char(written, '<');
-  if cut > 0 {
-    written = substr(written, 0, cut);
+  ret _bare_type_expr(substr(detail, 0, space));
+}
+
+// The bare return type of a rendered function/method signature
+// ("name(args) RetType"), generics/pointer stripped: everything after
+// its own last closing paren. "" for a declared void return, or a
+// signature with no return type written at all.
+pub fun return_type_from_detail(str signature) str {
+  num close = last_index_of_char(signature, ')');
+  if close < 0 {
+    ret "";
   }
-  str stripped = replace_char(written, '*', ' ');
-  ret trim(stripped);
+  ret _bare_type_expr(trim(substr(signature, close + 1, len(signature) - close - 1)));
 }
 
 // One segment of a dotted chain, closest-to-the-cursor first until

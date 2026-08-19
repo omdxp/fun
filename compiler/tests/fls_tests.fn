@@ -285,6 +285,38 @@ test "typeDefinition jumps to a local's declared type, and to itself when hoveri
   assert contains(from_type_name, `"line":0`), "expected Point hovered directly to resolve to itself";
 }
 
+test "typeDefinition on a method call jumps to its own declared return type" {
+  // d.detail reads as a full "name(args) RetType" signature for a
+  // function/method, not a bare "Type name" pair. bare_type_from_detail
+  // (built for the "Type name" shape) mistook the whole signature text
+  // for a type name and found nothing.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///typedefcall.fn";
+  doc.path = "typedefcall.fn";
+  doc.text = `compound Engine {
+  `  num rpm;
+  `}
+  `compound Car {
+  `  Engine engine;
+  `}
+  `impl Car {
+  `  own() Engine {
+  `    ret self.engine;
+  `  }
+  `}
+  `fun main() num {
+  `  Car c;
+  `  ret c.own().rpm;
+  `}`;
+  doc.version = 1;
+
+  str from_call = type_definition(&reads, doc, 13, 8);
+  assert contains(from_call, `"line":0`), "expected a jump to Engine's own declaration";
+  assert contains(from_call, `"character":9`), "expected the range to land on Engine's own name";
+}
+
 test "hover on a method's own declaration name resolves, unlike hovering it through nothing at all before" {
   // No path in _resolve covered a method's own name at its own
   // declaration site (not reached through a receiver): lookup_field_at

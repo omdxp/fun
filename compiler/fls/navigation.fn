@@ -317,7 +317,18 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
     _ -> {}
   }
 
-  str type_name = bare_type_from_detail(d.detail);
+  // `d.detail` reads as a full "name(args) RetType" signature for a
+  // function or method, not a bare "Type name" pair. Hovering the
+  // call itself (the closing hop of a chain like `c.own().rpm`, or a
+  // plain call anywhere) means its own declared return type, not
+  // whatever `bare_type_from_detail`'s "Type name" splitting would
+  // make of a whole signature.
+  str type_name = "";
+  if d.kind == DeclarationKind.Function {
+    type_name = return_type_from_detail(d.detail);
+  } else {
+    type_name = bare_type_from_detail(d.detail);
+  }
   if equals(type_name, "") {
     ret NO_LOCATION;
   }
