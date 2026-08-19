@@ -3,6 +3,7 @@
 imp ..fls.protocol;
 imp ..fls.positions;
 imp ..fls.symbols;
+imp ..fls.symbol_table;
 imp ..fls.navigation;
 imp ..fls.signature_help;
 imp ..fls.inlay_hints;
@@ -197,6 +198,8 @@ test "definition_workspace_wide respects cross-file pub visibility" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Documents docs = documents_new();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
 
   docs.opened(
     "file:///vis_other.fn",
@@ -223,11 +226,11 @@ test "definition_workspace_wide respects cross-file pub visibility" {
   // "hidden" is declared in another file and never made pub: a
   // workspace-wide jump must not treat it as the target just because
   // the name matches.
-  str hidden_result = definition_workspace_wide(&reads, &docs, doc, 1, 8);
+  str hidden_result = definition_workspace_wide(&reads, &docs, &symbols, doc, 1, 8);
   assert equals(hidden_result, "[]"), "expected a private cross-file symbol not to be offered as a definition target";
 
   // "shown" is pub, so it's a legitimate cross-file jump target.
-  str shown_result = definition_workspace_wide(&reads, &docs, doc, 4, 8);
+  str shown_result = definition_workspace_wide(&reads, &docs, &symbols, doc, 4, 8);
   assert contains(shown_result, "vis_other.fn"), "expected a pub cross-file symbol to resolve normally";
 }
 
@@ -1122,17 +1125,19 @@ test "workspace symbol search matches by name, case-insensitively, across every 
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
   docs.opened("file:///a.fn", `fun helper() num { ret 1; }`, 1);
   docs.opened("file:///b.fn", `compound Helper { num n; }`, 1);
 
-  str matches = workspace_symbols(&docs, &reads, "help");
+  str matches = workspace_symbols(&docs, &reads, &symbols, "help");
   assert contains(matches, `"name":"helper"`), "expected the lowercase match from a.fn";
   assert contains(matches, `"name":"Helper"`), "expected the differently-cased match from b.fn";
   assert contains(matches, `"uri":"file:///a.fn"`), "expected a.fn's own location";
   assert contains(matches, `"uri":"file:///b.fn"`), "expected b.fn's own location";
 
-  assert equals(workspace_symbols(&docs, &reads, "nope_no_such_symbol"), "[]"), "expected no matches";
-  assert !equals(workspace_symbols(&docs, &reads, ""), "[]"), "expected an empty query to match everything";
+  assert equals(workspace_symbols(&docs, &reads, &symbols, "nope_no_such_symbol"), "[]"), "expected no matches";
+  assert !equals(workspace_symbols(&docs, &reads, &symbols, ""), "[]"), "expected an empty query to match everything";
 }
 
 test "a workspace-indexed document is visible alongside open ones, but an open one always wins" {
@@ -1184,6 +1189,8 @@ test "references and workspace/symbol find a symbol in a document that was never
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
   docs.opened("file:///main.fn", `fun main() num {
   `  ret shared_util();
   `}`, 1);
@@ -1198,7 +1205,7 @@ test "references and workspace/symbol find a symbol in a document that was never
   assert count(found, `"uri"`) == 3, "expected all 3 occurrences across both files";
   assert contains(found, json_quote(other_uri)), "expected the unopened file's own uri present";
 
-  str matches = workspace_symbols(&docs, &reads, "another");
+  str matches = workspace_symbols(&docs, &reads, &symbols, "another");
   assert contains(matches, `"name":"another_user"`), "expected the unopened file's own function found by workspace symbol search";
 
   // Rename never scans the workspace on its own: only the already-
@@ -1226,6 +1233,8 @@ test "definition_workspace_wide falls back to a type in a document never importe
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
   docs.opened("file:///main.fn", `fun main() num {
   `  OrphanType x;
   `  ret 0;
@@ -1233,16 +1242,110 @@ test "definition_workspace_wide falls back to a type in a document never importe
   let main_doc = docs.at("file:///main.fn").unwrap();
 
   // Not yet indexed anywhere: no fallback match.
-  assert equals(definition_workspace_wide(&reads, &docs, main_doc, 1, 2), "[]"), "expected no match before any document declaring OrphanType is known";
+  assert equals(definition_workspace_wide(&reads, &docs, &symbols, main_doc, 1, 2), "[]"), "expected no match before any document declaring OrphanType is known";
 
   // Indexed now (standing in for an earlier references/workspace-
-  // symbol call having already scanned the workspace).
+  // symbol call having already scanned the workspace). Also exercises
+  // the table's own incremental rebuild: the first call above already
+  // built it against a workspace with only main.fn in it.
   docs.opened("file:///unrelated.fn", `pub compound OrphanType {
   `  num n;
   `}`, 1);
-  str found = definition_workspace_wide(&reads, &docs, main_doc, 1, 2);
+  str found = definition_workspace_wide(&reads, &docs, &symbols, main_doc, 1, 2);
   assert contains(found, `"uri":"file:///unrelated.fn"`), "expected the fallback to find OrphanType's own declaration";
   assert contains(found, `"character":13`), "expected the range to land on OrphanType's own name, not the compound keyword";
+}
+
+test "the workspace symbol table is a version-gated no-op on an unchanged document" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+  docs.opened("file:///stable.fn", `fun steady() num { ret 1; }`, 1);
+
+  str first = workspace_symbols(&docs, &reads, &symbols, "steady");
+  str second = workspace_symbols(&docs, &reads, &symbols, "steady");
+  assert equals(first, second), "expected identical results across two calls with nothing changed in between";
+}
+
+test "the workspace symbol table rebuilds on edit, scrubbing the old name rather than shadowing it" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+
+  // A second, unrelated file also declares "foo" - proves the rename
+  // below scrubs only rename.fn's own contribution, not every "foo"
+  // in the table.
+  docs.opened("file:///other_foo.fn", `fun foo() num { ret 9; }`, 1);
+  docs.opened("file:///rename.fn", `fun foo() num { ret 1; }`, 1);
+
+  str before = workspace_symbols(&docs, &reads, &symbols, "foo");
+  assert count(before, `"name":"foo"`) == 2, "expected both files' own foo found";
+
+  docs.opened("file:///rename.fn", `fun bar() num { ret 1; }`, 2);
+
+  str after_foo = workspace_symbols(&docs, &reads, &symbols, "foo");
+  assert count(after_foo, `"name":"foo"`) == 1, "expected rename.fn's own foo gone, other_foo.fn's own foo still present";
+  assert contains(after_foo, `"uri":"file:///other_foo.fn"`), "expected the surviving foo to be the unrelated file's own";
+
+  str after_bar = workspace_symbols(&docs, &reads, &symbols, "bar");
+  assert contains(after_bar, `"name":"bar"`), "expected the renamed function to be found under its new name";
+}
+
+test "closing a document forgets its own workspace symbol table entries" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+  docs.opened("file:///closing.fn", `fun going_away() num { ret 1; }`, 1);
+
+  str before = workspace_symbols(&docs, &reads, &symbols, "going_away");
+  assert contains(before, `"name":"going_away"`), "expected the symbol found while the document is open";
+
+  docs.closed("file:///closing.fn");
+  symbols.forget("file:///closing.fn");
+
+  str after = workspace_symbols(&docs, &reads, &symbols, "going_away");
+  assert equals(after, "[]"), "expected the symbol gone once its own document was closed and forgotten";
+}
+
+test "workspace symbol search finds a field, a variant, and a method, not just top-level names" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+  docs.opened(
+    "file:///richness.fn",
+    `compound Widget {
+    `  num special_field;
+    `}
+    `impl Widget {
+    `  pub special_method() num { ret 1; }
+    `}
+    `enum Outcome {
+    `  SpecialVariant,
+    `}`,
+    1
+  );
+
+  str field_match = workspace_symbols(&docs, &reads, &symbols, "special_field");
+  assert contains(field_match, `"name":"special_field"`), "expected a compound field found";
+  assert contains(field_match, `"containerName":"Widget"`), "expected its own container recorded";
+
+  str method_match = workspace_symbols(&docs, &reads, &symbols, "special_method");
+  assert contains(method_match, `"name":"special_method"`), "expected an impl method found";
+
+  str variant_match = workspace_symbols(&docs, &reads, &symbols, "SpecialVariant");
+  assert contains(variant_match, `"name":"SpecialVariant"`), "expected an enum variant found";
 }
 
 test "a rename is refused when the new name is not one" {

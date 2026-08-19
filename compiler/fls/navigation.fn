@@ -9,6 +9,7 @@ imp documents;
 imp analysis;
 imp positions;
 imp symbols;
+imp symbol_table;
 imp uri;
 imp imports;
 imp inlay_hints;
@@ -211,14 +212,17 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
 // `definition`, extended with a last-resort fallback: when the
 // current document's own transitively-merged program has nothing by
 // this name, a top-level declaration in any other document this
-// server already knows about (open, or already indexed by an earlier
-// `references`/`workspace/symbol` scan) still counts. Doesn't trigger
-// a workspace scan of its own, matching the reference's own
-// `findTypeDefinitionAnyDoc`, which only ever searches what's already
-// indexed rather than indexing on demand.
+// server already knows about (open, or already indexed) still counts.
+// Queries the persistent `symbols` table rather than re-walking every
+// other document's own AST. Triggers no workspace scan of its own —
+// `symbols.ensure_all` only re-parses documents `docs` already knows
+// about, matching the reference's own `findTypeDefinitionAnyDoc`;
+// walking the workspace root for files nobody's opened yet is
+// `_ensure_workspace_indexed`'s own job, done by the caller first.
 pub fun definition_workspace_wide(
   AnalysisCache* cache,
   Documents* docs,
+  WorkspaceSymbolTable* symbols,
   Document doc,
   num line,
   num character
@@ -244,27 +248,36 @@ pub fun definition_workspace_wide(
   }
   str name = token_word(t);
 
-  Vec<str> uris = docs.all_uris();
-  defer uris.free();
+  symbols.ensure_all(cache, docs);
+  let bucket_opt = symbols.by_name.at(name);
+  if bucket_opt.is_none() {
+    ret NO_LOCATION;
+  }
+  Vec<IndexedDeclaration> bucket = bucket_opt.unwrap();
   num i = 0;
-  for i < uris.len {
-    str other_uri = uris.get(i);
+  for i < bucket.len {
+    IndexedDeclaration entry = bucket.get(i);
     i = i + 1;
-    let other_doc_opt = docs.at(other_uri);
-    if other_doc_opt.is_none() {
+    Declaration d = entry.decl;
+    // Restrict to true top-level declarations only (what
+    // lookup_top_level itself would have matched), not a field,
+    // variant, or method the table also indexes.
+    bin is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) && equals(
+      d.container,
+      ""
+    );
+    if !is_top_level {
       continue;
     }
-    Document other_doc = other_doc_opt.unwrap();
-    if equals(other_doc.path, doc.path) {
+    if equals(d.pos.filename, doc.path) {
       continue;
     }
-    Analyzed other_read = cache.of(other_doc);
-    if !other_read.parsed {
+    if !declaration_visible_from(d, doc.path) {
       continue;
     }
-    let hit = lookup_top_level(&other_read.program.nodes, name);
-    if hit.is_some() && declaration_visible_from(hit.unwrap(), doc.path) {
-      ret _location_result(other_doc, hit.unwrap());
+    let other_doc = docs.at(entry.uri);
+    if other_doc.is_some() {
+      ret _location_result(other_doc.unwrap(), d);
     }
   }
   ret NO_LOCATION;

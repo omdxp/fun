@@ -8,6 +8,7 @@
 imp protocol;
 imp documents;
 imp analysis;
+imp symbol_table;
 imp diagnostics;
 imp navigation;
 imp signature_help;
@@ -57,6 +58,10 @@ pub compound Server {
   // it recorded in `docs`, so the (possibly large) scan only ever
   // runs once per server lifetime, not once per request.
   bin workspace_indexed;
+  // The persistent workspace symbol table `workspace_symbols`/
+  // `definition_workspace_wide` query, kept current by version
+  // rather than re-walked from scratch on every request.
+  WorkspaceSymbolTable symbols;
 }
 
 pub fun server_new() Server {
@@ -66,6 +71,7 @@ pub fun server_new() Server {
   s.docs = documents_new();
   s.reads = analysis_cache_new();
   s.diagnosed = diagnostics_cache_new();
+  s.symbols = workspace_symbol_table_new();
   s.snippets = false;
   s.workspace_root = "";
   s.has_workspace_root = false;
@@ -299,6 +305,7 @@ impl Server {
       self.docs.closed(document_uri);
       self.reads.forget(document_uri);
       self.diagnosed.forget(document_uri);
+      self.symbols.forget(document_uri);
       // A closed document's own errors/warnings would otherwise sit in
       // the editor's Problems panel forever, since nothing else ever
       // tells the client to drop them.
@@ -414,6 +421,7 @@ impl Server {
 
   // Says where the name under the cursor was declared.
   answer_definition(str id, JsonValue message) {
+    self._ensure_workspace_symbols_current();
     let asked = self.document_at(message);
     if asked.is_none() {
       write_message(response(id, "[]"));
@@ -422,7 +430,7 @@ impl Server {
     Request r = asked.unwrap();
     write_message(response(
       id,
-      definition_workspace_wide(&self.reads, &self.docs, r.doc, r.line, r.character)
+      definition_workspace_wide(&self.reads, &self.docs, &self.symbols, r.doc, r.line, r.character)
     ));
   }
 
@@ -513,10 +521,10 @@ impl Server {
   // Every symbol matching `query`, across every document this server
   // holds open.
   answer_workspace_symbols(str id, JsonValue message) {
-    self._ensure_workspace_indexed();
+    self._ensure_workspace_symbols_current();
     JsonValue params = _field(message, "params");
     str query = _string_field(params, "query");
-    write_message(response(id, workspace_symbols(&self.docs, &self.reads, query)));
+    write_message(response(id, workspace_symbols(&self.docs, &self.reads, &self.symbols, query)));
   }
 
   // Walks every `.fn` file under the workspace root and records it,
@@ -541,6 +549,18 @@ impl Server {
       i = i + 1;
       self.docs.index_from_disk(path_to_uri(path), path);
     }
+  }
+
+  // `_ensure_workspace_indexed`, plus keeping the persistent symbol
+  // table current. Deliberately *not* folded into
+  // `_ensure_workspace_indexed` itself: that gate runs its body once
+  // per server lifetime, but the table needs to stay current across
+  // every later edit too, so `symbols.ensure_all` runs on every call
+  // here, relying on its own per-document version check to make
+  // repeat calls cheap.
+  _ensure_workspace_symbols_current() {
+    self._ensure_workspace_indexed();
+    self.symbols.ensure_all(&self.reads, &self.docs);
   }
 
   // The document and position a request names, or nothing when it names

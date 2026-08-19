@@ -2198,3 +2198,127 @@ fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, bin is
   d.is_public = is_public;
   ret d;
 }
+
+// Every declaration `file` itself makes at the top level, as
+// `Declaration`s: a function, a compound and each of its own fields,
+// an enum and each of its own variants, a quirk, a plain top-level
+// global, and each impl method declared for a type in this file.
+// Mirrors `outline.fn`'s own `_collect` (same five-way node-kind
+// split, since that's the richer of the two existing walks —
+// `lookup_top_level` alone is missing fields/variants/methods
+// entirely), but builds `Declaration`s instead of `OutlineEntry`s so
+// the result carries `detail`/`is_public`, not just a name and a
+// position. Used to build the workspace symbol table; a fresh call
+// per document, not itself cached.
+pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_name && !equals(f.name, "") {
+          out.push(_declaration_vis(f.name, .Function, render_function(f), n.pos, n.flags.is_public));
+        }
+      }
+      .Compound(c) -> {
+        StringBuilder cb = string_builder_init(32);
+        cb.append("compound ");
+        cb.append(c.name);
+        out.push(_declaration_vis(c.name, .Compound, cb.build(), n.pos, n.flags.is_public));
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          StringBuilder fb = string_builder_init(32);
+          fb.append(render_type(cf.dtype));
+          fb.append(" ");
+          fb.append(cf.name);
+          Pos field_pos = n.pos;
+          if cf.has_pos {
+            field_pos = cf.pos;
+          }
+          Declaration fd = _declaration_vis(cf.name, .Field, fb.build(), field_pos, true);
+          fd.container = c.name;
+          out.push(fd);
+        }
+      }
+      .Enum(e) -> {
+        StringBuilder eb = string_builder_init(32);
+        eb.append("enum ");
+        eb.append(e.name);
+        out.push(_declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public));
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          StringBuilder vb = string_builder_init(24);
+          vb.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            vb.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                vb.append(", ");
+              }
+              vb.append(render_type(variant.payload.get(p)));
+              p = p + 1;
+            }
+            vb.append(")");
+          }
+          Declaration vd = _declaration_vis(variant.name, .Variant, vb.build(), n.pos, true);
+          vd.container = e.name;
+          out.push(vd);
+        }
+      }
+      .Quirk(q) -> {
+        StringBuilder qb = string_builder_init(32);
+        qb.append("quirk ");
+        qb.append(q.name);
+        out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
+      }
+      .Impl(im) -> {
+        num m = 0;
+        for m < im.methods.len {
+          Node* method = im.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(mf) -> {
+              if !mf.has_name || equals(mf.name, "") {
+                continue;
+              }
+              str method_name = bare_method_name(mf.name);
+              Declaration md = _declaration_vis(
+                method_name,
+                .Function,
+                render_function_named(mf, method_name, false),
+                method.pos,
+                true
+              );
+              md.container = im.type_name;
+              out.push(md);
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Variable(v) -> {
+        StringBuilder gb = string_builder_init(32);
+        if v.is_const {
+          gb.append("const ");
+        }
+        gb.append(render_type(v.var_type));
+        gb.append(" ");
+        gb.append(v.name);
+        out.push(_declaration_vis(v.name, .Global, gb.build(), n.pos, n.flags.is_public));
+      }
+      _ -> {}
+    }
+  }
+}

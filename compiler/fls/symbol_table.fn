@@ -1,0 +1,220 @@
+// Workspace symbol table.
+// 
+// workspace_symbols and definition_workspace_wide both used to re-walk
+// every document in the workspace, from scratch, on every request. This
+// keeps one Declaration per top-level name across the whole workspace,
+// built once and kept current by version, so a query is a couple of Map
+// lookups instead of a linear scan over every document's own AST.
+// 
+// Pull-based, mirroring AnalysisCache's own of(): nothing rebuilds on
+// didChange. A document's stale entry is only noticed and refreshed the
+// next time (if ever) a workspace-wide request asks for it, since the
+// hot per-keystroke paths (hover, completion, document symbols) never
+// touch this table at all.
+
+imp documents;
+imp analysis;
+imp symbols;
+imp std.map;
+imp std.vec;
+imp std.string;
+imp std.option;
+
+// One declaration as the table indexes it: the Declaration itself, plus
+// the document URI that declares it. Declaration.pos.filename is a
+// path, not a URI; storing both here avoids re-deriving one from the
+// other at every query.
+pub compound IndexedDeclaration {
+  str uri;
+  Declaration decl;
+}
+
+pub compound WorkspaceSymbolTable {
+  // Every declaration this server has indexed, by the document URI
+  // that declares it, so one edit's own before/after set is known
+  // without re-deriving which names a document used to contribute.
+  Map<str, Vec<IndexedDeclaration>> by_uri;
+  // The version by_uri[uri] was built from, keyed the same way
+  // AnalysisCache keys its own per-document cache, so a document
+  // already indexed at its current revision is never re-walked.
+  Map<str, num> versions;
+  // Every declaration, by name, across the whole workspace. The index
+  // workspace_symbols/definition_workspace_wide actually query;
+  // neither walks by_uri document-by-document.
+  Map<str, Vec<IndexedDeclaration>> by_name;
+}
+
+pub fun workspace_symbol_table_new() WorkspaceSymbolTable {
+  WorkspaceSymbolTable t;
+  t.by_uri.init(16);
+  t.versions.init(16);
+  t.by_name.init(64);
+  ret t;
+}
+
+impl WorkspaceSymbolTable {
+  // Makes sure `uri`'s own contribution matches its current document
+  // revision; a no-op when it already does.
+  pub ensure(AnalysisCache* cache, Documents* docs, str uri) {
+    let doc_opt = docs.at(uri);
+    if doc_opt.is_none() {
+      ret;
+    }
+    Document doc = doc_opt.unwrap();
+
+    let current_version = self.versions.at(uri);
+    if current_version.is_some() && current_version.unwrap() == doc.version {
+      ret;
+    }
+
+    Analyzed read = cache.of(doc);
+    if !read.parsed {
+      // Deliberate deviation from AnalysisCache.of()'s own
+      // clear-on-failure: this file's last-good declarations are left
+      // in place rather than blanked. workspace_symbols/
+      // definition_workspace_wide are lower-frequency, often
+      // keyboard-driven ("jump to X") operations; a symbol flickering
+      // out of workspace search over one unbalanced brace mid-edit
+      // elsewhere in the file is a more visible regression than
+      // hover blanking briefly at the exact edit spot. versions[uri]
+      // is left un-set too, so the next call retries the rebuild
+      // (cheaply) rather than treating this as "indexed as empty."
+      ret;
+    }
+
+    Vec<Declaration> fresh;
+    fresh.init(8);
+    _collect_declarations(&read.program.entry_nodes, doc.path, &fresh);
+
+    self._replace(uri, fresh);
+    self.versions.put(uri, doc.version);
+  }
+
+  // Makes sure every URI `docs` currently knows about is current.
+  pub ensure_all(AnalysisCache* cache, Documents* docs) {
+    Vec<str> uris = docs.all_uris();
+    defer uris.free();
+    num i = 0;
+    for i < uris.len {
+      self.ensure(cache, docs, uris.get(i));
+      i = i + 1;
+    }
+  }
+
+  // Drops what was indexed for a document a client closed. Without
+  // this, a closed document's own stale entries would keep showing up
+  // in workspace search, potentially pointing at a URI docs.at() can
+  // no longer resolve at all.
+  pub forget(str uri) {
+    let old = self.by_uri.at(uri);
+    if old.is_none() {
+      ret;
+    }
+    Vec<IndexedDeclaration> old_bucket = old.unwrap();
+    num i = 0;
+    for i < old_bucket.len {
+      self._scrub_name(old_bucket.get(i).decl.name, uri);
+      i = i + 1;
+    }
+    old_bucket.free();
+    self.by_uri.remove(uri);
+    self.versions.remove(uri);
+  }
+
+  pub free() {
+    Vec<Vec<IndexedDeclaration>> uri_buckets = self.by_uri.values();
+    num i = 0;
+    for i < uri_buckets.len {
+      Vec<IndexedDeclaration> b = uri_buckets.get(i);
+      i = i + 1;
+      b.free();
+    }
+    uri_buckets.free();
+
+    Vec<Vec<IndexedDeclaration>> name_buckets = self.by_name.values();
+    i = 0;
+    for i < name_buckets.len {
+      Vec<IndexedDeclaration> b = name_buckets.get(i);
+      i = i + 1;
+      b.free();
+    }
+    name_buckets.free();
+
+    self.by_uri.free();
+    self.versions.free();
+    self.by_name.free();
+  }
+
+  // Removes `uri`'s own entries from `by_name[name]`, freeing the old
+  // bucket and either writing back what's left or dropping the key
+  // outright when nothing does. Declaration carries no identity of
+  // its own, so entries are told apart by which document indexed
+  // them, not by structural equality.
+  _scrub_name(str name, str uri) {
+    let existing = self.by_name.at(name);
+    if existing.is_none() {
+      ret;
+    }
+    Vec<IndexedDeclaration> old_bucket = existing.unwrap();
+    Vec<IndexedDeclaration> kept;
+    kept.init(old_bucket.len);
+    num i = 0;
+    for i < old_bucket.len {
+      IndexedDeclaration e = old_bucket.get(i);
+      i = i + 1;
+      if !equals(e.uri, uri) {
+        kept.push(e);
+      }
+    }
+    old_bucket.free();
+    if kept.len == 0 {
+      kept.free();
+      self.by_name.remove(name);
+    } else {
+      self.by_name.put(name, kept);
+    }
+  }
+
+  // The incremental core: scrubs `uri`'s own prior contribution out of
+  // `by_name` (bounded by however many names that one document
+  // declares, not the whole table), then re-adds `fresh` under `uri`.
+  // Frees `fresh` itself once its contents are copied into
+  // IndexedDeclaration wrappers.
+  _replace(str uri, Vec<Declaration> fresh) {
+    let old = self.by_uri.at(uri);
+    if old.is_some() {
+      Vec<IndexedDeclaration> old_bucket = old.unwrap();
+      num i = 0;
+      for i < old_bucket.len {
+        self._scrub_name(old_bucket.get(i).decl.name, uri);
+        i = i + 1;
+      }
+      old_bucket.free();
+    }
+
+    Vec<IndexedDeclaration> wrapped;
+    wrapped.init(fresh.len);
+    num j = 0;
+    for j < fresh.len {
+      IndexedDeclaration entry;
+      entry.uri = uri;
+      entry.decl = fresh.get(j);
+      wrapped.push(entry);
+
+      let existing = self.by_name.at(entry.decl.name);
+      if existing.is_some() {
+        Vec<IndexedDeclaration> bucket = existing.unwrap();
+        bucket.push(entry);
+        self.by_name.put(entry.decl.name, bucket);
+      } else {
+        Vec<IndexedDeclaration> bucket2;
+        bucket2.init(2);
+        bucket2.push(entry);
+        self.by_name.put(entry.decl.name, bucket2);
+      }
+      j = j + 1;
+    }
+    self.by_uri.put(uri, wrapped);
+    fresh.free();
+  }
+}

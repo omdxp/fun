@@ -10,6 +10,8 @@
 
 imp documents;
 imp analysis;
+imp symbols;
+imp symbol_table;
 imp positions;
 imp protocol;
 imp uri;
@@ -86,56 +88,79 @@ pub fun document_symbols(AnalysisCache* cache, Document doc) str {
   ret b.build();
 }
 
-// Every symbol across every open document whose name contains `query`
-// (case-insensitively; an empty query matches everything), as the
-// result a client is sent. Limited to documents already open: the
-// self-hosted fls keeps no workspace-wide filesystem index of its
-// own, only what a client has actually opened, unlike a client's own
-// broader project-wide search.
-pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, str query) str {
+// `d`'s own protocol `SymbolKind`, mirroring `_collect`'s own
+// per-node-kind mapping: a `Function` with a `container` is really a
+// method, a `Global` reads `Variable`/`Constant` off its own rendered
+// `"const "` prefix (the same detail `lookup_top_level`'s own
+// Variable case writes it with).
+fun _outline_kind_for(Declaration d) OutlineKind {
+  fit d.kind {
+    .Function -> {
+      if !equals(d.container, "") {
+        ret .Method;
+      }
+      ret .Function;
+    }
+    .Compound -> { ret .Struct; }
+    .Enum -> { ret .Enumeration; }
+    .Quirk -> { ret .Interface; }
+    .Field -> { ret .Field; }
+    .Variant -> { ret .EnumMember; }
+    .Global -> {
+      if starts_with(d.detail, "const ") {
+        ret .Constant;
+      }
+      ret .Variable;
+    }
+    _ -> { ret .Variable; }
+  }
+}
+
+// Every symbol across the whole indexed workspace whose name contains
+// `query` (case-insensitively; an empty query matches everything), as
+// the result a client is sent. Queries the persistent `symbols`
+// table (kept current by `WorkspaceSymbolTable.ensure_all`) rather than
+// re-walking every document's own AST on every request.
+pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbolTable* symbols, str query) str {
+  symbols.ensure_all(cache, docs);
   str lower_query = to_lower(query);
   StringBuilder b = string_builder_init(256);
   b.append("[");
   bin any = false;
-  Vec<str> uris = docs.all_uris();
-  defer uris.free();
-  num di = 0;
-  for di < uris.len {
-    str document_uri_key = uris.get(di);
-    di = di + 1;
-    let held = docs.at(document_uri_key);
-    if held.is_none() {
+  Vec<str> names = symbols.by_name.keys();
+  defer names.free();
+  num ni = 0;
+  for ni < names.len {
+    str name = names.get(ni);
+    ni = ni + 1;
+    if !equals(lower_query, "") && !contains(to_lower(name), lower_query) {
       continue;
     }
-    Document doc = held.unwrap();
-    Analyzed read = cache.of(doc);
-    if !read.parsed {
+    let bucket_opt = symbols.by_name.at(name);
+    if bucket_opt.is_none() {
       continue;
     }
-    ProgramMergeResult program = read.program;
-    Vec<OutlineEntry> found;
-    found.init(16);
-    defer found.free();
-    _collect(&program.entry_nodes, doc.path, &found);
-    str document_uri = path_to_uri(doc.path);
+    Vec<IndexedDeclaration> bucket = bucket_opt.unwrap();
     num i = 0;
-    for i < found.len {
-      OutlineEntry s = found.get(i);
+    for i < bucket.len {
+      IndexedDeclaration entry = bucket.get(i);
       i = i + 1;
-      if !equals(lower_query, "") && !contains(to_lower(s.name), lower_query) {
+      let held = docs.at(entry.uri);
+      if held.is_none() {
         continue;
       }
+      Document doc = held.unwrap();
       if any {
         b.append(",");
       }
       any = true;
-      Span span = span_of_pos(s.pos, len(s.name), doc.text);
+      Span span = span_of_pos(entry.decl.pos, len(entry.decl.name), doc.text);
       b.append(format(
         `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
-        json_quote(s.name),
-        s.kind,
-        json_quote(s.container),
-        json_quote(document_uri),
+        json_quote(entry.decl.name),
+        _outline_kind_for(entry.decl),
+        json_quote(entry.decl.container),
+        json_quote(entry.uri),
         span.line,
         span.start,
         span.line,
