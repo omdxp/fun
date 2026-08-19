@@ -9,6 +9,7 @@ imp uri;
 imp std.string;
 imp std.map;
 imp std.option;
+imp std.fs;
 
 // One document a client has open.
 pub compound Document {
@@ -20,14 +21,22 @@ pub compound Document {
   num version;
 }
 
-// Every document a client has open, by URI.
+// Every document a client has open, by URI, plus a second store for a
+// workspace-wide scan: a file read from disk rather than told to the
+// server by the client, for a whole-workspace feature (`references`,
+// `workspace/symbol`) to see beyond what happens to be open right
+// now. An open document always wins when a URI is in both, since it
+// is the more current text; `indexed` is never version-tracked or
+// edited, only replaced wholesale by another scan.
 pub compound Documents {
   Map<str, Document> open;
+  Map<str, Document> indexed;
 }
 
 pub fun documents_new() Documents {
   Documents d;
   d.open.init(8);
+  d.indexed.init(64);
   ret d;
 }
 
@@ -94,11 +103,67 @@ impl Documents {
   }
 
   pub at(str document_uri) Option<Document> {
-    ret self.open.at(document_uri);
+    let live = self.open.at(document_uri);
+    if live.is_some() {
+      ret live;
+    }
+    ret self.indexed.at(document_uri);
+  }
+
+  // Reads `path` from disk and records it as a workspace-indexed
+  // document, unless the client already has this URI open (which
+  // stays authoritative) or the read fails (a symlink that doesn't
+  // resolve, a permissions error, gone since the scan started).
+  pub index_from_disk(str document_uri, str path) {
+    if self.open.at(document_uri).is_some() {
+      ret;
+    }
+    str text = read_to_string(path);
+    if text == nil {
+      ret;
+    }
+    Document doc;
+    doc.uri = document_uri;
+    doc.path = path;
+    doc.text = text;
+    doc.version = 0;
+    self.indexed.put(document_uri, doc);
+  }
+
+  // Every document URI this server currently knows about, open or
+  // indexed from disk, for a whole-workspace scan to walk. `indexed`'s
+  // own keys are already unique among themselves (a Map's own
+  // guarantee), so only a duplicate against the open set (typically a
+  // handful of files, however large the workspace is) is worth
+  // checking for, not against the whole growing list.
+  pub all_uris() Vec<str> {
+    Vec<str> out = self.open.keys();
+    num open_count = out.len;
+    Vec<str> from_disk = self.indexed.keys();
+    defer from_disk.free();
+    num i = 0;
+    for i < from_disk.len {
+      str u = from_disk.get(i);
+      i = i + 1;
+      bin dup = false;
+      num j = 0;
+      for j < open_count {
+        if equals(out.get(j), u) {
+          dup = true;
+          break;
+        }
+        j = j + 1;
+      }
+      if !dup {
+        out.push(u);
+      }
+    }
+    ret out;
   }
 
   pub free() {
     self.open.free();
+    self.indexed.free();
   }
 }
 

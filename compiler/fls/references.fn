@@ -172,7 +172,7 @@ pub fun is_identifier(str s) bin {
 
 // Every place `name` is written, across the documents a client holds.
 fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
-  Vec<str> uris = docs.open.keys();
+  Vec<str> uris = docs.all_uris();
   defer uris.free();
   num i = 0;
   for i < uris.len {

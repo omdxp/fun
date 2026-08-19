@@ -15,6 +15,7 @@ imp ..fls.formatting;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
+imp ..fls.uri;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.import_resolver;
@@ -632,6 +633,85 @@ test "workspace symbol search matches by name, case-insensitively, across every 
 
   assert equals(workspace_symbols(&docs, &reads, "nope_no_such_symbol"), "[]"), "expected no matches";
   assert !equals(workspace_symbols(&docs, &reads, ""), "[]"), "expected an empty query to match everything";
+}
+
+test "a workspace-indexed document is visible alongside open ones, but an open one always wins" {
+  str base = "fun-out/_workspace_index_test";
+  make_dir_all(base);
+  str disk_path = path_join(base, "disk_only.fn");
+  write_string(disk_path, "fun disk_helper() num { ret 1; }\n");
+  defer remove_file(disk_path);
+  str disk_uri = path_to_uri(disk_path);
+
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///open.fn", `fun open_helper() num { ret 1; }`, 1);
+  docs.index_from_disk(disk_uri, disk_path);
+
+  Vec<str> uris = docs.all_uris();
+  defer uris.free();
+  assert uris.len == 2, "expected both the open and the disk-indexed document counted";
+
+  let found_disk = docs.at(disk_uri);
+  assert found_disk.is_some(), "expected the disk-indexed document to resolve";
+  assert contains(found_disk.unwrap().text, "disk_helper"), "expected its own real content, read from disk";
+
+  // An open document at the same URI stays authoritative: indexing it
+  // again from disk must not clobber what the client actually holds.
+  docs.opened(disk_uri, "fun overridden() num { ret 2; }", 1);
+  docs.index_from_disk(disk_uri, disk_path);
+  let found_after = docs.at(disk_uri);
+  assert contains(found_after.unwrap().text, "overridden"), "expected the open document to stay authoritative over its own indexed copy";
+}
+
+test "references and workspace/symbol find a symbol in a document that was never opened, rename does not" {
+  str base = "fun-out/_workspace_scan_test";
+  make_dir_all(base);
+  str other_path = path_join(base, "other.fn");
+  write_string(
+    other_path,
+    `fun shared_util() num {
+    `  ret 42;
+    `}
+    `fun another_user() num {
+    `  ret shared_util();
+    `}`
+  );
+  defer remove_file(other_path);
+  str other_uri = path_to_uri(other_path);
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///main.fn", `fun main() num {
+  `  ret shared_util();
+  `}`, 1);
+  // Stands in for the server's own lazy indexWorkspace call: the
+  // server walks the real workspace root once per lifetime, but the
+  // caller-visible contract this exercises is just "an indexed
+  // document is in the store before the request runs".
+  docs.index_from_disk(other_uri, other_path);
+  let doc = docs.at("file:///main.fn").unwrap();
+
+  str found = references(&reads, &docs, doc, 1, 6);
+  assert count(found, `"uri"`) == 3, "expected all 3 occurrences across both files";
+  assert contains(found, json_quote(other_uri)), "expected the unopened file's own uri present";
+
+  str matches = workspace_symbols(&docs, &reads, "another");
+  assert contains(matches, `"name":"another_user"`), "expected the unopened file's own function found by workspace symbol search";
+
+  // Rename never scans the workspace on its own: only the already-
+  // known documents (open, or indexed by an earlier references/
+  // workspace-symbol call) are touched.
+  Documents fresh_docs = documents_new();
+  defer fresh_docs.free();
+  fresh_docs.opened("file:///main2.fn", `fun main() num {
+  `  ret shared_util();
+  `}`, 1);
+  let fresh_doc = fresh_docs.at("file:///main2.fn").unwrap();
+  str edit = rename_symbol(&reads, &fresh_docs, fresh_doc, 1, 6, "renamed_util");
+  assert count(edit, `"newText":"renamed_util"`) == 1, "expected only the open document's own occurrence renamed";
 }
 
 test "a rename is refused when the new name is not one" {

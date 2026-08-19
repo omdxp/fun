@@ -97,11 +97,17 @@ pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, str query) str 
   StringBuilder b = string_builder_init(256);
   b.append("[");
   bin any = false;
-  Vec<Document> open_docs = docs.open.values();
+  Vec<str> uris = docs.all_uris();
+  defer uris.free();
   num di = 0;
-  for di < open_docs.len {
-    Document doc = open_docs.get(di);
+  for di < uris.len {
+    str document_uri_key = uris.get(di);
     di = di + 1;
+    let held = docs.at(document_uri_key);
+    if held.is_none() {
+      continue;
+    }
+    Document doc = held.unwrap();
     Analyzed read = cache.of(doc);
     if !read.parsed {
       continue;
