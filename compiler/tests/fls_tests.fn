@@ -788,6 +788,159 @@ test "hover and completion resolve a dotted chain through its own receiver's dec
   assert !contains(out, `"label":"engine"`), "expected Car's own field excluded, one level too shallow";
 }
 
+test "hover resolves a chain ending in a call, including generic specialization threaded through it" {
+  // chain_receiver_type only ever backed off one segment short when a
+  // call sat anywhere in the chain (the token right before that dot
+  // was a ')', not a plain identifier), and even where the receiver
+  // resolved, its own generic args were computed then discarded, so a
+  // stdlib container's own method (get, is_none, ...) always returned
+  // its bare unspecialized template. User-reported, from real hovers
+  // in this very codebase's own parser.fn.
+  str src = `imp std.vec;
+  `imp std.option;
+  `compound Box {
+  `  num n;
+  `}
+  `impl Box {
+  `  peek() Box {
+  `    Box b;
+  `    ret b;
+  `  }
+  `  doubled() num {
+  `    ret self.n * 2;
+  `  }
+  `}
+  `fun main() num {
+  `  Box b;
+  `  ret b.peek().doubled();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///callchain.fn";
+  doc.path = "callchain.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // `doubled` is reached only through `peek()`'s own return type,
+  // not through `b`'s.
+  str hovered = hover(&reads, doc, 16, 15);
+  assert contains(hovered, "doubled(Box* self) num"), "expected the call-ending segment resolved through the call before it";
+
+  // A stdlib generic's own method, reached through a call in the
+  // middle of the chain (not just a plain field), specializes
+  // correctly at the very end too.
+  str src2 = `imp std.vec;
+  `compound Holder {
+  `  Vec<num> nums;
+  `}
+  `impl Holder {
+  `  own() Vec<num> {
+  `    ret self.nums;
+  `  }
+  `}
+  `fun main() num {
+  `  Holder h;
+  `  h.nums.init(4);
+  `  h.nums.push(5);
+  `  ret h.own().get(0);
+  `}`;
+  Document doc2;
+  doc2.uri = "file:///callchain2.fn";
+  doc2.path = "callchain2.fn";
+  doc2.text = src2;
+  doc2.version = 1;
+  str hovered2 = hover(&reads, doc2, 13, 14);
+  assert contains(hovered2, "get(Vec<num>* self, num i) num"), "expected get resolved and specialized past a call in the middle of the chain";
+}
+
+test "a let local's inferred type resolves through a call-ending chain, not just one hop" {
+  // _infer_type only ever handled a single receiver.member or
+  // receiver.method() hop; a longer chain (`a.b.get(...)`) fell
+  // through to the bare-read fallback and showed the raw
+  // __let_infer__ sentinel instead of a real type. User-reported.
+  str src = `imp std.vec;
+  `compound Holder {
+  `  Vec<num> nums;
+  `}
+  `fun main() num {
+  `  Holder h;
+  `  h.nums.init(4);
+  `  h.nums.push(5);
+  `  let first = h.nums.get(0);
+  `  ret first;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letchain.fn";
+  doc.path = "letchain.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 8, 6);
+  assert contains(hovered, "num first"), "expected the let local's type inferred through the full field-then-call chain, specialized to num";
+  assert !contains(hovered, "__let_infer__"), "expected the raw sentinel never shown once a real type resolves";
+}
+
+test "hover on a local shadowed by an unrelated impl method's own name resolves to the local, not the method" {
+  // lookup_field_at's own .Impl case (added earlier for hovering a
+  // method at its own declaration site) never checked whether the
+  // cursor's line actually fell inside that impl's own span, just
+  // picked the nearest impl above with a matching method name.
+  // A local later in the file, in a completely unrelated function,
+  // sharing a name with some impl's own method resolved to that
+  // method instead of the local. User-reported (a real local named
+  // 'err' in this very codebase's own parser tests, shadowed by an
+  // unrelated ParseState.err logging method declared earlier).
+  str src = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  err(str msg) {}
+  `}
+  `fun main() str {
+  `  str err = "not the method";
+  `  ret err;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shadow.fn";
+  doc.path = "shadow.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 7, 6);
+  assert contains(hovered, "str err"), "expected the local, not Widget's own unrelated 'err' method";
+  assert !contains(hovered, "msg"), "expected the method's own signature never shown here";
+}
+
+test "hover on an impl method with a trivially empty body still resolves at its own declaration" {
+  // _impl_last_line (added to fix the shadowing bug above) needed a
+  // coverage boundary for the whole impl block; a method with a
+  // one-line empty body ('demo() {}') has no statement for
+  // _last_line's own scan to seed a line from, which briefly
+  // regressed hovering a method's own name at its own declaration
+  // site back to nothing.
+  str src = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  demo() {}
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///emptybody.fn";
+  doc.path = "emptybody.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 2);
+  assert contains(hovered, "demo(Widget* self)"), "expected the method's own signature to resolve at its own declaration";
+}
+
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
   str src = `imp std.option;
   `fun main() num {

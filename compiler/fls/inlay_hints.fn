@@ -51,7 +51,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
     if line0 < start_line || line0 > end_line {
       continue;
     }
-    let name_tok_opt = _next_non_trivia(&tokens, i);
+    let name_tok_opt = token_after(&tokens, i);
     if name_tok_opt.is_none() {
       continue;
     }
@@ -61,16 +61,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       _ -> { continue; }
     }
     num name_idx = index_of_token(&tokens, name_tok);
-    let eq_tok_opt = _next_non_trivia(&tokens, name_idx + 1);
-    if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
-      continue;
-    }
-    num eq_idx = index_of_token(&tokens, eq_tok_opt.unwrap());
-    let val_tok_opt = _next_non_trivia(&tokens, eq_idx + 1);
-    if val_tok_opt.is_none() {
-      continue;
-    }
-    str type_part = _infer_type(&tokens, val_tok_opt.unwrap(), &program.nodes, doc.path, src_line);
+    str type_part = infer_let_local_type(&tokens, name_idx, &program.nodes, doc.path, src_line);
     if equals(type_part, "") {
       continue;
     }
@@ -105,7 +96,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       continue;
     }
     num name_idx = index_of_token(&tokens, t);
-    let lparen_opt = _next_non_trivia(&tokens, name_idx + 1);
+    let lparen_opt = token_after(&tokens, name_idx + 1);
     if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
       continue;
     }
@@ -210,24 +201,34 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
   ret b.build();
 }
 
-// The token right after index `from_index`, skipping what carries no
-// meaning.
-fun _next_non_trivia(Vec<Token>* tokens, num from_index) Option<Token> {
-  num i = from_index;
-  for i < tokens.len {
-    Token t = tokens.get(i);
-    if t.type != TokenType.Comment && t.type != TokenType.NewLine {
-      ret .Some(t);
-    }
-    i = i + 1;
+// The best-effort inferred type of the `let` local whose own name
+// token sits at `name_idx`, read from its initializer the same way
+// this file's own inlay hints do. Shared with `navigation.fn`, which
+// needs the same inference to show a resolved type on hover instead
+// of the raw `__let_infer__` sentinel `d.detail` otherwise carries.
+pub fun infer_let_local_type(
+  Vec<Token>* tokens,
+  num name_idx,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
+  let eq_tok_opt = token_after(tokens, name_idx + 1);
+  if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
+    ret "";
   }
-  ret .None;
+  num eq_idx = index_of_token(tokens, eq_tok_opt.unwrap());
+  let val_tok_opt = token_after(tokens, eq_idx + 1);
+  if val_tok_opt.is_none() {
+    ret "";
+  }
+  ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line);
 }
 
 // A best-effort read of `val_tok`'s own type, when it's the first
 // token of a `let`'s initializer: a literal's own type directly, or
 // (for a plain or method call) the callee's own declared return type.
-// "" for any other shape -- a binary expression, an already-typed
+// "" for any other shape: a binary expression, an already-typed
 // local read back, a compound literal, and so on aren't covered.
 fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file, num line) str {
   fit val_tok.type {
@@ -243,55 +244,54 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
     .Identifier -> {
       str name = token_word(val_tok);
       num idx = index_of_token(tokens, val_tok);
-      let next_opt = _next_non_trivia(tokens, idx + 1);
-      if next_opt.is_none() {
-        ret "";
-      }
-      Token next = next_opt.unwrap();
-      if token_is_operator(next, ".") {
-        num member_idx = index_of_token(tokens, next) + 1;
-        let member_tok_opt = _next_non_trivia(tokens, member_idx);
-        if member_tok_opt.is_none() {
-          ret "";
+
+      // Walks the whole chain forward from `val_tok` (`a.b.c()`,
+      // `a().b`, any mix, any length), tracking the last segment
+      // reached and whether it's itself a call, then hands off to
+      // chain_ending_type for the actual resolution: a receiver's
+      // own field/method, a plain top-level call, or (no chain at
+      // all) the bare read handled below.
+      Token last_tok = val_tok;
+      bin last_is_call = false;
+      num cursor_idx = idx;
+      let after0 = token_after(tokens, cursor_idx + 1);
+      if after0.is_some() && token_is_operator(after0.unwrap(), "(") {
+        last_is_call = true;
+        let rparen0 = _matching_rparen(tokens, index_of_token(tokens, after0.unwrap()));
+        if rparen0.is_some() {
+          cursor_idx = rparen0.unwrap();
         }
-        Token member_tok = member_tok_opt.unwrap();
-        fit member_tok.type {
+      }
+      for true {
+        let dot_opt = token_after(tokens, cursor_idx + 1);
+        if dot_opt.is_none() || !token_is_operator(dot_opt.unwrap(), ".") {
+          break;
+        }
+        num dot_idx = index_of_token(tokens, dot_opt.unwrap());
+        let member_opt = token_after(tokens, dot_idx + 1);
+        if member_opt.is_none() {
+          break;
+        }
+        fit member_opt.unwrap().type {
           .Identifier -> {}
-          _ -> { ret ""; }
+          _ -> { break; }
         }
-        str type_name = type_name_of_local(program, name, file, line);
-        if equals(type_name, "") {
-          ret "";
-        }
-        let after_member_opt = _next_non_trivia(tokens, index_of_token(tokens, member_tok) + 1);
-        // `receiver.method(...)`: the receiver's own declared type
-        // names which impl to look the method up on.
-        if after_member_opt.is_some() && token_is_operator(after_member_opt.unwrap(), "(") {
-          let found = lookup_method(
-            program,
-            type_name,
-            token_word(member_tok),
-            local_generic_args(program, name, file, line)
-          );
-          if found.is_none() {
-            ret "";
+        last_tok = member_opt.unwrap();
+        last_is_call = false;
+        cursor_idx = index_of_token(tokens, last_tok);
+        let after_opt = token_after(tokens, cursor_idx + 1);
+        if after_opt.is_some() && token_is_operator(after_opt.unwrap(), "(") {
+          last_is_call = true;
+          let rparen = _matching_rparen(tokens, index_of_token(tokens, after_opt.unwrap()));
+          if rparen.is_some() {
+            cursor_idx = rparen.unwrap();
           }
-          ret _return_type_from_signature(found.unwrap().detail);
         }
-        // `receiver.field`: no call following, so it's a plain read.
-        let field = lookup_field(program, type_name, token_word(member_tok));
-        if field.is_none() {
-          ret "";
-        }
-        ret _full_declared_type(field.unwrap());
       }
-      if token_is_operator(next, "(") {
-        let found = lookup_top_level(program, name);
-        if found.is_none() {
-          ret "";
-        }
-        ret _return_type_from_signature(found.unwrap().detail);
+      if index_of_token(tokens, last_tok) != idx || last_is_call {
+        ret chain_ending_type(tokens, last_tok, last_is_call, program, file, line);
       }
+
       // A bare read of an already-typed local/field/parameter/global
       // (`let c = a;`): whatever `a` itself was declared as, in full
       // (a pointer star or generic argument matters here, unlike
@@ -323,18 +323,6 @@ fun _full_declared_type(Declaration d) str {
     ret "";
   }
   ret trim(substr(d.detail, 0, len(d.detail) - name_len));
-}
-
-// `detail` (a rendered "fun name(args) RetType" signature) with only
-// the return type kept -- everything after its own closing paren.
-// "" for a declared void return, same as a caller not resolving a
-// callee at all: neither is worth showing a hint for.
-fun _return_type_from_signature(str detail) str {
-  num close = last_index_of_char(detail, ')');
-  if close < 0 {
-    ret "";
-  }
-  ret trim(substr(detail, close + 1, len(detail) - close - 1));
 }
 
 // True when `name_idx`'s own `identifier(` is a declaration rather
@@ -371,7 +359,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
     ret false;
   }
   num k_idx = rparen_opt.unwrap() + 1;
-  let k_opt = _next_non_trivia(tokens, k_idx);
+  let k_opt = token_after(tokens, k_idx);
   num steps = 0;
   for steps < 8 {
     if k_opt.is_none() {
@@ -391,7 +379,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
     if !typeish {
       ret false;
     }
-    k_opt = _next_non_trivia(tokens, index_of_token(tokens, k) + 1);
+    k_opt = token_after(tokens, index_of_token(tokens, k) + 1);
     steps = steps + 1;
   }
   ret false;

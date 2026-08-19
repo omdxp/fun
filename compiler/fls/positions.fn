@@ -55,6 +55,20 @@ pub fun token_before(Vec<Token>* tokens, num index) Option<Token> {
   ret .None;
 }
 
+// The token at or after `index`, skipping what carries no meaning.
+// `token_before`'s forward counterpart.
+pub fun token_after(Vec<Token>* tokens, num index) Option<Token> {
+  num i = index;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if !_is_trivia(t) {
+      ret .Some(t);
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
 // Where `t` sits, in the terms a client understands.
 pub fun span_of(Token t) Span {
   Span s;

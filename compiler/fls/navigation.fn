@@ -11,6 +11,7 @@ imp positions;
 imp symbols;
 imp uri;
 imp imports;
+imp inlay_hints;
 imp ..lexer.token;
 imp ..parser.datatype_defs;
 imp ..parser.import_resolver;
@@ -96,6 +97,28 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     ret NO_HOVER;
   }
   Declaration d = declared.unwrap();
+  // `let`'s own declared type never resolves in the parsed tree (see
+  // inlay_hints.fn's own file-level note on the __let_infer__
+  // sentinel), so a local's rendered detail otherwise shows that
+  // placeholder verbatim. Re-run the same best-effort inference
+  // inlayHint already does, using the declaration's own position to
+  // find the initializer, rather than showing the raw sentinel.
+  if read.parsed && starts_with(d.detail, "__let_infer__") {
+    let name_tok = token_at(&tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_some() {
+      num name_idx = index_of_token(&tokens, name_tok.unwrap());
+      str inferred = infer_let_local_type(
+        &tokens,
+        name_idx,
+        &read.program.nodes,
+        doc.path,
+        d.pos.line
+      );
+      if !equals(inferred, "") {
+        d.detail = format("{str} {str}", inferred, d.name);
+      }
+    }
+  }
   str source_text = "";
   if equals(d.pos.filename, doc.path) {
     source_text = doc.text;
@@ -260,31 +283,33 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
   num source_line = line + 1;
 
   str receiver = _receiver_of(tokens, t);
-  if !equals(receiver, "") {
-    // Walks the whole dotted chain (`a.b.c`), not just the immediate
-    // `receiver` segment: `type_name_of_local(receiver, ...)` alone
-    // would fail here whenever the receiver is itself a field access
-    // rather than a bare local, since a field name was never declared
-    // as one.
-    str type_name = chain_receiver_type(tokens, t, &program.nodes, doc.path, source_line);
+  // A plain identifier before the dot isn't the only shape a receiver
+  // takes: `a.f().g` has none (the token right before `.g` is `)`),
+  // but still needs the receiver branch below, since that's the only
+  // one that calls `chain_receiver_type` at all. `receiver` itself
+  // stays "" for this shape; `local_generic_args` below already
+  // tolerates that by finding no args, falling back to the
+  // unspecialized template the same way a deeper chain already does.
+  if !equals(receiver, "") || _preceded_by_dot(tokens, t) {
+    // Walks the whole dotted chain (`a.b.c`, `a.f().c`, any mix), not
+    // just the immediate `receiver` segment: `type_name_of_local(receiver,
+    // ...)` alone would fail here whenever the receiver is itself a
+    // field access or a call rather than a bare local, since neither
+    // was ever declared as one.
+    ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line);
+    str type_name = found_receiver.type_name;
     if !equals(type_name, "") {
       let field = lookup_field(&program.nodes, type_name, name);
       if field.is_some() {
         ret field;
       }
       // Specializes a generic method's own signature against the
-      // receiver's concrete type arguments (`o.unwrap_or` on
+      // receiver's own concrete type arguments (`o.unwrap_or` on
       // `Option<num>` shows `num`, not the bare template's own `T`),
-      // when `receiver` is itself a plain local carrying them; a
-      // receiver reached through a deeper chain falls back to the
-      // unspecialized signature rather than resolving no method at
-      // all.
-      let method = lookup_method(
-        &program.nodes,
-        type_name,
-        name,
-        local_generic_args(&program.nodes, receiver, doc.path, source_line)
-      );
+      // threaded all the way through by `chain_receiver` however deep
+      // the chain leading to the receiver is, not just for a bare
+      // local carrying them directly.
+      let method = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
       if method.is_some() {
         ret method;
       }
@@ -356,6 +381,36 @@ fun _receiver_of(Vec<Token>* tokens, Token t) str {
     _ -> {}
   }
   ret "";
+}
+
+// True when `t` sits right after a `.` that itself continues a
+// chain: a call's own closing `)` before it (`f().t`), which
+// `_receiver_of` doesn't resolve to a name the way a plain identifier
+// receiver does. Deliberately narrower than "any dot before `t`":
+// a bare `.Variant` fit-pattern shorthand also has a dot right before
+// its name, but nothing meaningful before that dot, and must fall
+// through to `_is_dot_shorthand`'s own branch instead, not be
+// swallowed here into a receiver search that finds nothing.
+fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret false;
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
+    ret false;
+  }
+  num dot_idx = index_of_token(tokens, dot.unwrap());
+  let before_dot = token_before(tokens, dot_idx);
+  if before_dot.is_none() {
+    ret false;
+  }
+  Token bd = before_dot.unwrap();
+  fit bd.type {
+    .Identifier -> { ret true; }
+    _ -> {}
+  }
+  ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']');
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
