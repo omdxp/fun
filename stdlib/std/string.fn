@@ -7,19 +7,25 @@ imp std.quirks;
 imp std.result;
 imp std.error;
 
-// String builder for efficient concatenation.
+// String builder for efficient concatenation. One growable byte
+// buffer, copied into directly on each append rather than holding a
+// list of separately-owned fragments, since a fragment's own literal
+// or allocated status can't be told apart later.
 pub compound StringBuilder {
-  // Vector of string fragments.
-  Vec<str> parts;
-  // Total length of all fragments.
+  str buf;
   num total_len;
+  num cap;
 }
 
 // Creates a string builder with the given initial capacity.
 pub fun string_builder_init(num cap) StringBuilder {
   StringBuilder b;
-  b.parts.init(cap);
+  if cap <= 0 {
+    cap = 16;
+  }
+  b.buf = malloc(cap);
   b.total_len = 0;
+  b.cap = cap;
   ret b;
 }
 
@@ -36,21 +42,60 @@ impl StringBuilder as Sized {
 }
 
 impl StringBuilder {
-  // Appends a string fragment.
+  // Grows `buf` so at least `additional` more bytes fit, doubling
+  // capacity (or exactly meeting the request, whichever is bigger)
+  // rather than growing one byte at a time. A failed `realloc` leaves
+  // the builder as it was, its existing content untouched; the append
+  // that asked for the room silently drops what it was about to add,
+  // matching every other allocation-failure path here.
+  _ensure_cap(num additional) {
+    num needed = self.total_len + additional;
+    if needed <= self.cap {
+      ret;
+    }
+    num new_cap = self.cap * 2;
+    if new_cap < needed {
+      new_cap = needed;
+    }
+    str grown = realloc(self.buf, new_cap);
+    if grown == nil {
+      ret;
+    }
+    self.buf = grown;
+    self.cap = new_cap;
+  }
+
+  // Appends a string fragment: copied byte-for-byte into this
+  // builder's own buffer, `s` itself never touched afterward, so it
+  // makes no difference whether it's a literal or something this
+  // caller owns and frees on its own.
   pub append(str s) {
-    self.parts.push(s);
-    self.total_len = self.total_len + _string_len(s);
+    if s == nil {
+      ret;
+    }
+    num n = _string_len(s);
+    if n == 0 {
+      ret;
+    }
+    self._ensure_cap(n);
+    if self.total_len + n > self.cap {
+      ret;
+    }
+    num i = 0;
+    for i < n {
+      self.buf[self.total_len + i] = s[i];
+      i = i + 1;
+    }
+    self.total_len = self.total_len + n;
   }
 
   // Appends a single character.
   pub append_char(chr c) {
-    str tmp = malloc(2);
-    if tmp == nil {
+    self._ensure_cap(1);
+    if self.total_len + 1 > self.cap {
       ret;
     }
-    tmp[0] = c;
-    tmp[1] = '\0';
-    self.parts.push(tmp);
+    self.buf[self.total_len] = c;
     self.total_len = self.total_len + 1;
   }
 
@@ -60,8 +105,8 @@ impl StringBuilder {
     if s == nil {
       ret;
     }
-    self.total_len = self.total_len + _string_len(s);
-    self.parts.push(s);
+    self.append(s);
+    free(s);
   }
 
   // Appends a decimal value with the given number of decimal places.
@@ -70,25 +115,40 @@ impl StringBuilder {
     if s == nil {
       ret;
     }
-    self.total_len = self.total_len + _string_len(s);
-    self.parts.push(s);
+    self.append(s);
+    free(s);
   }
 
-  // Remove all fragments while keeping capacity.
+  // Empties the builder while keeping its buffer's current capacity.
   pub clear() {
-    self.parts.clear();
     self.total_len = 0;
   }
 
-  // Free internal storage and reset the builder.
+  // Frees the builder's own buffer and resets it.
   pub free() {
-    self.parts.free();
+    if self.buf != nil {
+      free(self.buf);
+      self.buf = nil;
+    }
     self.total_len = 0;
+    self.cap = 0;
   }
 
-  // Builds the final joined string from every fragment.
+  // A fresh, independently-owned copy of everything appended so far.
+  // The builder's own buffer is untouched, so building again (or
+  // appending more first) still works.
   pub build() str {
-    ret self.parts.join("");
+    str out = malloc(self.total_len + 1);
+    if out == nil {
+      ret "";
+    }
+    num i = 0;
+    for i < self.total_len {
+      out[i] = self.buf[i];
+      i = i + 1;
+    }
+    out[self.total_len] = '\0';
+    ret out;
   }
 }
 
