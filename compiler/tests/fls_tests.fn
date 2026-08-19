@@ -161,6 +161,84 @@ test "byte and UTF-16 columns convert correctly across a non-ASCII line" {
   assert offset_of(text, 0, 5) == 6, "expected offset_of to land on the byte after the 2-byte character";
 }
 
+test "hover and definition resolve a method called on a let-inferred local" {
+  str src = `compound Box {
+  `  num width;
+  `}
+  `impl Box {
+  `  pub doubled() num {
+  `    ret self.width * 2;
+  `  }
+  `}
+  `fun make() Box {
+  `  Box b;
+  `  b.width = 3;
+  `  ret b;
+  `}
+  `fun use_it() num {
+  `  let box = make();
+  `  ret box.doubled();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///let_receiver.fn";
+  doc.path = "let_receiver.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // `box` is a `let`-inferred local, never explicitly typed; hovering
+  // and jumping to `doubled` needs the receiver's real type re-derived
+  // from its own initializer, not the permanent __let_infer__
+  // sentinel `box`'s own declaration detail otherwise carries.
+  str hovered = hover(&reads, doc, 15, 10);
+  assert contains(hovered, "doubled"), "expected hover to resolve the method on a let-inferred receiver";
+  assert !equals(hovered, "null"), "expected a real hover, not null";
+
+  str jumped = definition(&reads, doc, 15, 10);
+  assert contains(jumped, "let_receiver.fn"), "expected go-to-definition to resolve to the same file";
+  assert !equals(jumped, "[]"), "expected a real location, not an empty result";
+}
+
+test "diagnose caches per document revision, and drops the cache once the revision changes" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  Document doc;
+  doc.uri = "file:///diag_cache.fn";
+  doc.path = "diag_cache.fn";
+  doc.text = `fun main() num {
+  `  num unused_var = 1;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, doc);
+  num first_len = first.len;
+  assert first_len > 0, "expected an unused-variable warning";
+  first.free();
+
+  // Same revision: a second call must not crash freeing what it gets
+  // back, and must still see the same finding (the cached copy, not a
+  // fresh but broken re-typecheck).
+  Vec<Diagnostic> second = diagnose(&reads, &dcache, doc);
+  assert second.len == first_len, "expected the cached result to match";
+  second.free();
+
+  // A new revision with the warning fixed must not keep returning the
+  // stale cached diagnostics.
+  doc.version = 2;
+  doc.text = `fun main() num {
+  `  num used_var = 1;
+  `  ret used_var;
+  `}`;
+  Vec<Diagnostic> third = diagnose(&reads, &dcache, doc);
+  assert third.len == 0, "expected the stale warning to be gone once the revision changed";
+  third.free();
+}
+
 test "a non-BMP character counts as two UTF-16 units, a surrogate pair" {
   // "x\xF0\x9F\x98\x80y" - the emoji is 4 UTF-8 bytes but 2 UTF-16
   // units (a surrogate pair), so 'y' sits at UTF-16 character 3, not 2.

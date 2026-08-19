@@ -39,6 +39,10 @@ pub compound Server {
   // What each open document last read as, so one revision is read
   // once rather than once per question asked about it.
   AnalysisCache reads;
+  // What each open document's own diagnostics last computed as, so a
+  // revision already typechecked and analyzed for one report isn't
+  // redone for another that happens to ask about the same text.
+  DiagnosticsCache diagnosed;
   // Whether the client said it understands a completion written as a
   // skeleton. One that does not would insert the marks as text, so it
   // is told only plain words.
@@ -61,6 +65,7 @@ pub fun server_new() Server {
   s.running = true;
   s.docs = documents_new();
   s.reads = analysis_cache_new();
+  s.diagnosed = diagnostics_cache_new();
   s.snippets = false;
   s.workspace_root = "";
   s.has_workspace_root = false;
@@ -281,7 +286,7 @@ impl Server {
     if doc.is_none() {
       ret;
     }
-    Vec<Diagnostic> found = diagnose(&self.reads, doc.unwrap());
+    Vec<Diagnostic> found = diagnose(&self.reads, &self.diagnosed, doc.unwrap());
     defer found.free();
     write_message(publish(document_uri, doc.unwrap().text, &found));
   }
@@ -293,6 +298,7 @@ impl Server {
     if !equals(document_uri, "") {
       self.docs.closed(document_uri);
       self.reads.forget(document_uri);
+      self.diagnosed.forget(document_uri);
     }
   }
 

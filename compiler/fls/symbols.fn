@@ -831,13 +831,32 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
 }
 
 // The type a local or parameter named `name` was declared with, as
-// written. Used to resolve what a field is reached through.
-pub fun type_name_of_local(Vec<Node>* program, str name, str file, num line) str {
+// written. Used to resolve what a field is reached through. `tokens`
+// is nil where a caller has no token stream to offer (a `fit`
+// subject's own type, resolved from the AST alone); a `let`-inferred
+// local, whose `detail` otherwise carries the permanent
+// `__let_infer__` sentinel forever, only resolves to its real type
+// when `tokens` is available to re-run the same best-effort inference
+// `inlay_hints.fn` uses to display it.
+pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) str {
   let found = _lookup_local(program, name, file, line);
   if found.is_none() {
     ret "";
   }
-  ret bare_type_from_detail(found.unwrap().detail);
+  Declaration d = found.unwrap();
+  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+    let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_none() {
+      ret "";
+    }
+    num name_idx = index_of_token(tokens, name_tok.unwrap());
+    str inferred = infer_let_local_type(tokens, name_idx, program, file, d.pos.line);
+    if equals(inferred, "") {
+      ret "";
+    }
+    ret _bare_type_expr(inferred);
+  }
+  ret bare_type_from_detail(d.detail);
 }
 
 // `type_expr`'s own bare name, with any generic args or pointer
@@ -1025,7 +1044,7 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
       current_args = generic_args_of_detail(_return_type_text(f.unwrap().detail));
     }
   } else {
-    current_type = type_name_of_local(program, first.name, file, line);
+    current_type = type_name_of_local(tokens, program, first.name, file, line);
     current_args = local_generic_args(program, first.name, file, line);
   }
   num i = 1;
@@ -1090,7 +1109,7 @@ pub fun chain_ending_type(
       }
       ret _bare_return_type(f.unwrap().detail);
     }
-    ret type_name_of_local(program, name, file, line);
+    ret type_name_of_local(tokens, program, name, file, line);
   }
   if last_is_call {
     // `receiver`'s own generic args (threaded all the way through by
@@ -1108,6 +1127,151 @@ pub fun chain_ending_type(
     ret "";
   }
   ret bare_type_from_detail(field.unwrap().detail);
+}
+
+// The index of the `)` matching the `(` at `lparen_idx`, depth-tracked.
+pub fun matching_rparen(Vec<Token>* tokens, num lparen_idx) Option<num> {
+  num depth = 0;
+  num i = lparen_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_operator(t, "(") {
+      depth = depth + 1;
+    } elif token_is_symbol(t, ')') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// The best-effort inferred type of the `let` local whose own name
+// token sits at `name_idx`, read from its initializer. Shared by
+// `inlay_hints.fn` (a `let`-inferred local's own type hint) and
+// `type_name_of_local` (a chain's own receiver, when it's a
+// `let`-inferred local resolving further members needs its real
+// type, not the permanent `__let_infer__` sentinel `d.detail`
+// otherwise carries).
+pub fun infer_let_local_type(
+  Vec<Token>* tokens,
+  num name_idx,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
+  let eq_tok_opt = token_after(tokens, name_idx + 1);
+  if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
+    ret "";
+  }
+  num eq_idx = index_of_token(tokens, eq_tok_opt.unwrap());
+  let val_tok_opt = token_after(tokens, eq_idx + 1);
+  if val_tok_opt.is_none() {
+    ret "";
+  }
+  ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line);
+}
+
+// A best-effort read of `val_tok`'s own type, when it's the first
+// token of a `let`'s initializer: a literal's own type directly, or
+// (for a plain or method call) the callee's own declared return type.
+// "" for any other shape: a binary expression, an already-typed
+// local read back, a compound literal, and so on aren't covered.
+fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file, num line) str {
+  fit val_tok.type {
+    .Number -> {
+      fit val_tok.data {
+        .Dec(_) -> { ret "dec"; }
+        .Cval(_) -> { ret "chr"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String -> { ret "str"; }
+    .Boolean -> { ret "bin"; }
+    .Identifier -> {
+      str name = token_word(val_tok);
+      num idx = index_of_token(tokens, val_tok);
+
+      // Walks the whole chain forward from `val_tok` (`a.b.c()`,
+      // `a().b`, any mix, any length), tracking the last segment
+      // reached and whether it's itself a call, then hands off to
+      // chain_ending_type for the actual resolution: a receiver's
+      // own field/method, a plain top-level call, or (no chain at
+      // all) the bare read handled below.
+      Token last_tok = val_tok;
+      bin last_is_call = false;
+      num cursor_idx = idx;
+      let after0 = token_after(tokens, cursor_idx + 1);
+      if after0.is_some() && token_is_operator(after0.unwrap(), "(") {
+        last_is_call = true;
+        let rparen0 = matching_rparen(tokens, index_of_token(tokens, after0.unwrap()));
+        if rparen0.is_some() {
+          cursor_idx = rparen0.unwrap();
+        }
+      }
+      for true {
+        let dot_opt = token_after(tokens, cursor_idx + 1);
+        if dot_opt.is_none() || !token_is_operator(dot_opt.unwrap(), ".") {
+          break;
+        }
+        num dot_idx = index_of_token(tokens, dot_opt.unwrap());
+        let member_opt = token_after(tokens, dot_idx + 1);
+        if member_opt.is_none() {
+          break;
+        }
+        fit member_opt.unwrap().type {
+          .Identifier -> {}
+          _ -> { break; }
+        }
+        last_tok = member_opt.unwrap();
+        last_is_call = false;
+        cursor_idx = index_of_token(tokens, last_tok);
+        let after_opt = token_after(tokens, cursor_idx + 1);
+        if after_opt.is_some() && token_is_operator(after_opt.unwrap(), "(") {
+          last_is_call = true;
+          let rparen = matching_rparen(tokens, index_of_token(tokens, after_opt.unwrap()));
+          if rparen.is_some() {
+            cursor_idx = rparen.unwrap();
+          }
+        }
+      }
+      if index_of_token(tokens, last_tok) != idx || last_is_call {
+        ret chain_ending_type(tokens, last_tok, last_is_call, program, file, line);
+      }
+
+      // A bare read of an already-typed local/field/parameter/global
+      // (`let c = a;`): whatever `a` itself was declared as, in full
+      // (a pointer star or generic argument matters here, unlike
+      // `type_name_of_local`'s bare form, which exists for looking a
+      // further member up rather than for display). `a` may itself be
+      // a `let` local this same heuristic couldn't resolve, in which
+      // case its own recorded type is the raw sentinel rather than a
+      // real one, shown as no hint rather than leaked verbatim.
+      let existing = lookup(program, name, file, line);
+      if existing.is_none() {
+        ret "";
+      }
+      str existing_type = _full_declared_type(existing.unwrap());
+      if equals(existing_type, "__let_infer__") {
+        ret "";
+      }
+      ret existing_type;
+    }
+    _ -> { ret ""; }
+  }
+}
+
+// `d`'s own declared type, spelled in full (pointer star, generic
+// args, everything): whatever precedes `d`'s own name in its
+// rendered "Type name" detail.
+fun _full_declared_type(Declaration d) str {
+  num name_len = len(d.name);
+  if len(d.detail) <= name_len {
+    ret "";
+  }
+  ret trim(substr(d.detail, 0, len(d.detail) - name_len));
 }
 
 // A parameter or local of the function containing `line` in `file`.
@@ -1468,7 +1632,7 @@ fun _fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) str
     ret "";
   }
   fit subject.kind {
-    .Identifier(s) -> { ret type_name_of_local(program, s, file, line); }
+    .Identifier(s) -> { ret type_name_of_local(nil, program, s, file, line); }
     .Expression(e) -> {
       if !equals(e.op, "()") || !e.has_left || e.left == nil {
         ret "";

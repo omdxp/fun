@@ -566,7 +566,7 @@ fun _receiver_own_type(
 ) str {
   str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
   if equals(prefix_type, "") {
-    ret type_name_of_local(program, token_word(receiver_tok), file, line);
+    ret type_name_of_local(tokens, program, token_word(receiver_tok), file, line);
   }
   let field = lookup_field(program, prefix_type, token_word(receiver_tok));
   if field.is_none() {

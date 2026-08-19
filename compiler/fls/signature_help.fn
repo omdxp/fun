@@ -39,7 +39,7 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   // sits on rather than at `self`.
   num active_param = c.active_param;
   if !equals(c.receiver, "") {
-    str type_name = type_name_of_local(&program.nodes, c.receiver, doc.path, source_line);
+    str type_name = type_name_of_local(&tokens, &program.nodes, c.receiver, doc.path, source_line);
     if !equals(type_name, "") {
       found = lookup_method(
         &program.nodes,

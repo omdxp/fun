@@ -19,6 +19,7 @@ imp std.vec;
 imp std.option;
 imp std.result;
 imp std.io;
+imp std.map;
 
 // How seriously a client should take one finding.
 pub const num SEVERITY_ERROR = 1;
@@ -34,8 +35,80 @@ pub compound Diagnostic {
   str message;
 }
 
-// Everything wrong with `doc`, in the order a reader meets it.
-pub fun diagnose(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
+// `diagnose`'s own result for one document revision, kept until a
+// newer one arrives.
+compound DiagnosedEntry {
+  num version;
+  Vec<Diagnostic> diagnostics;
+}
+
+// Caches `diagnose`'s result per document revision. Typechecking and
+// analyzing the whole merged program is the expensive part of
+// answering a diagnostics request, unlike `AnalysisCache`'s own
+// lex/parse step; the same revision is asked about more than once
+// (`didOpen`, then every unrelated request that happens to also
+// trigger a report) without its text changing in between.
+pub compound DiagnosticsCache {
+  Map<str, DiagnosedEntry> entries;
+}
+
+pub fun diagnostics_cache_new() DiagnosticsCache {
+  DiagnosticsCache c;
+  c.entries.init(8);
+  ret c;
+}
+
+impl DiagnosticsCache {
+  // Drops what was kept for a document a client closed.
+  pub forget(str document_uri) {
+    self.entries.remove(document_uri);
+  }
+
+  pub free() {
+    self.entries.free();
+  }
+}
+
+// A shallow copy of `src`'s own elements: cheap next to a full
+// typecheck/analyze pass, and each `Diagnostic`'s own `message` is
+// never freed by `Vec.free()` (which only ever frees the backing
+// array), so sharing that string between the cached copy and what a
+// caller goes on to free carries no double-free risk.
+fun _clone_diagnostics(Vec<Diagnostic>* src) Vec<Diagnostic> {
+  Vec<Diagnostic> copy;
+  copy.init(src.len);
+  num i = 0;
+  for i < src.len {
+    copy.push(src.get(i));
+    i = i + 1;
+  }
+  ret copy;
+}
+
+// Everything wrong with `doc`, in the order a reader meets it. Cached
+// by `dcache` per document revision; a cache hit still returns an
+// independent copy, so a caller freeing what it gets back never
+// touches the cached original.
+pub fun diagnose(AnalysisCache* cache, DiagnosticsCache* dcache, Document doc) Vec<Diagnostic> {
+  let kept = dcache.entries.at(doc.uri);
+  if kept.is_some() {
+    DiagnosedEntry found = kept.unwrap();
+    if found.version == doc.version {
+      ret _clone_diagnostics(&found.diagnostics);
+    }
+  }
+
+  Vec<Diagnostic> out = _diagnose_uncached(cache, doc);
+
+  DiagnosedEntry fresh;
+  fresh.version = doc.version;
+  fresh.diagnostics = _clone_diagnostics(&out);
+  dcache.entries.put(doc.uri, fresh);
+
+  ret out;
+}
+
+fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   Vec<Diagnostic> out;
   out.init(0);
 
