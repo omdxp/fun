@@ -413,7 +413,7 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
           }
           fit method.kind {
             .Function(f) -> {
-              if equals(_bare_method_name(f.name, type_name), method_name) {
+              if equals(bare_method_name(f.name), method_name) {
                 str signature = render_function_named(f, method_name, false);
                 if im.has_type_params {
                   signature = specialize_signature(signature, im.type_params, concrete_args);
@@ -613,13 +613,20 @@ fun _is_type_param_ident_char(chr c) bin {
 // removed (an impl method's `f.name` is never the bare name a reader
 // wrote; see `completion.fn`'s own `_method_label`, the same
 // de-mangling under a different name for a different caller).
-fun _bare_method_name(str mangled, str type_name) str {
-  StringBuilder b = string_builder_init(len(type_name) + 2);
-  b.append(type_name);
-  b.append("__");
-  str prefix = b.build();
-  if starts_with(mangled, prefix) {
-    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+// A method's own written name, with whatever it was mangled with
+// removed: `Type__method` for a plain impl, `Type__Quirk__method`
+// for one conforming to a quirk (see `_parse_impl_method`'s own
+// `gen_name` construction). Either way, the real name is everything
+// after the last `__` separator, since neither a type nor a quirk
+// name is ever written with one of its own.
+pub fun bare_method_name(str mangled) str {
+  num n = len(mangled);
+  num i = n - 1;
+  for i > 0 {
+    if mangled[i] == '_' && mangled[i - 1] == '_' {
+      ret substr(mangled, i + 1, n - i - 1);
+    }
+    i = i - 1;
   }
   ret mangled;
 }
@@ -719,7 +726,7 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
           }
           fit method.kind {
             .Function(f) -> {
-              if !equals(_bare_method_name(f.name, im.type_name), name) {
+              if !equals(bare_method_name(f.name), name) {
                 continue;
               }
               if n.pos.line > best_line {

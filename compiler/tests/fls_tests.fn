@@ -854,6 +854,41 @@ test "hover resolves a chain ending in a call, including generic specialization 
   assert contains(hovered2, "get(Vec<num>* self, num i) num"), "expected get resolved and specialized past a call in the middle of the chain";
 }
 
+test "a quirk-conforming impl's own method resolves, mangled name de-mangled correctly" {
+  // A quirk-conforming impl mangles its methods Type__Quirk__method
+  // (three parts), not Type__method (two) like a plain impl; the
+  // de-mangling helper only ever stripped one Type__ prefix, leaving
+  // "Quirk__method" and never matching the bare method name a reader
+  // actually typed. Found incidentally verifying the chain fix above,
+  // via std.vec's own VecIter (impl VecIter<T> as Iterator<T>).
+  str src = `quirk Nextable<T> {
+  `  next() Option<T>;
+  `}
+  `compound Counter<T> {
+  `  T value;
+  `}
+  `impl Counter<T> as Nextable<T> {
+  `  pub next() Option<T> {
+  `    ret .Some(self.value);
+  `  }
+  `}
+  `fun main() num {
+  `  Counter<num> c;
+  `  let n = c.next();
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkimpl.fn";
+  doc.path = "quirkimpl.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 13, 12);
+  assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the quirk-conforming method's own bare name resolved and specialized, not the mangled Quirk__method form";
+}
+
 test "a let local's inferred type resolves through a call-ending chain, not just one hop" {
   // _infer_type only ever handled a single receiver.member or
   // receiver.method() hop; a longer chain (`a.b.get(...)`) fell

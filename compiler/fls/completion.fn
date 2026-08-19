@@ -609,7 +609,7 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
               if !f.has_name || equals(f.name, "") {
                 continue;
               }
-              str method_name = _method_label(f.name, type_name);
+              str method_name = bare_method_name(f.name);
               items.push(_item(method_name, .Method, render_function_named(f, method_name, false)));
             }
             _ -> {}
@@ -846,18 +846,6 @@ fun _skeleton(str word) str {
     ret "await ${0:call()}";
   }
   ret "";
-}
-
-// The method's own name, with the type it is mangled with removed.
-fun _method_label(str mangled, str type_name) str {
-  StringBuilder b = string_builder_init(len(type_name) + 2);
-  b.append(type_name);
-  b.append("__");
-  str prefix = b.build();
-  if starts_with(mangled, prefix) {
-    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
-  }
-  ret mangled;
 }
 
 fun _item(str label, ItemKind kind, str detail) Item {
