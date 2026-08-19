@@ -820,7 +820,8 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
             if variant.has_pos {
               variant_pos = variant.pos;
             }
-            best = _declaration(name, .Variant, b.build(), variant_pos);
+            str detail = format("{str} = {num}", b.build(), _variant_ordinal(e, v - 1));
+            best = _declaration(name, .Variant, detail, variant_pos);
             best.container = e.name;
             found = true;
           }

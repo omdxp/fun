@@ -1914,6 +1914,9 @@ test "hover on an enum variant shows its own tag value, auto-incrementing across
   assert contains(hover(&reads, doc, 7, 6), "Circle(num) = 0"), "expected Circle's own auto-incremented tag";
   // Square: explicit `= 5`.
   assert contains(hover(&reads, doc, 8, 6), "Square = 5"), "expected Square's own explicit tag";
+  // The same tag shows hovering the variant at its own declaration
+  // site too (lookup_field_at's own path), not just at a use site.
+  assert contains(hover(&reads, doc, 1, 2), "Circle(num) = 0"), "expected the tag hovering Circle's own declaration";
   // Empty: no explicit value of its own, continues from Square's
   // explicit 5, not from its own declaration position (2).
   assert contains(hover(&reads, doc, 9, 6), "Empty = 6"), "expected Empty's own tag to continue after Square's explicit override";
