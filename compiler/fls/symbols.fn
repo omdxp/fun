@@ -11,6 +11,7 @@ imp ..ast.ast;
 imp ..lexer.token;
 imp positions;
 imp std.string;
+imp std.io;
 imp std.vec;
 imp std.option;
 
@@ -192,6 +193,48 @@ fun _render_param(Node* arg) str {
   ret "";
 }
 
+// A constant's own literal value, spelled back the way a reader would
+// read it (a re-rendered numeric form rather than the exact source
+// text, so `0xFF` shows as `255`): "" for an initializer that isn't a
+// plain literal at all, `const`s being the only variable-shaped
+// declaration this is ever asked for.
+fun _literal_value_text(Node* val) str {
+  if val == nil {
+    ret "";
+  }
+  fit val.kind {
+    .Number(d) -> {
+      fit d {
+        .Num(n) -> { ret format_num(n); }
+        .Dec(x) -> { ret format_dec(x, 6); }
+        .Cval(c) -> { ret format("'{chr}'", c); }
+        _ -> { ret ""; }
+      }
+    }
+    .String(s) -> { ret format(`"{str}"`, s); }
+    .Character(c) -> { ret format("'{chr}'", c); }
+    .Boolean(b) -> {
+      if b {
+        ret "true";
+      }
+      ret "false";
+    }
+    .Nil -> { ret "nil"; }
+    .Unary(u) -> {
+      // A negative numeric literal (`-1`) is parsed as a unary minus
+      // over a plain Number node, not folded into the literal itself.
+      if equals(u.op, "-") {
+        str inner = _literal_value_text(u.operand);
+        if !equals(inner, "") {
+          ret format("-{str}", inner);
+        }
+      }
+      ret "";
+    }
+    _ -> { ret ""; }
+  }
+}
+
 // The contiguous `//`-prefixed comment lines immediately above
 // `decl_line` (1-indexed, as `Pos.line` reads) in `text`, with each
 // line's own `// ` prefix stripped and re-joined top to bottom. Empty
@@ -340,6 +383,13 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           b.append(render_type(v.var_type));
           b.append(" ");
           b.append(v.name);
+          if v.is_const && v.has_val {
+            str literal = _literal_value_text(v.val);
+            if !equals(literal, "") {
+              b.append(" = ");
+              b.append(literal);
+            }
+          }
           ret .Some(_declaration(name, .Global, b.build(), n.pos));
         }
       }

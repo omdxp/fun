@@ -889,6 +889,43 @@ test "a quirk-conforming impl's own method resolves, mangled name de-mangled cor
   assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the quirk-conforming method's own bare name resolved and specialized, not the mangled Quirk__method form";
 }
 
+test "hovering a constant shows its own literal value, not just its type" {
+  // User-requested: a const's rendered detail only ever showed its
+  // type and name, the same as any other global. Its own initializer
+  // is always a literal (const requires one), worth showing directly
+  // rather than making a reader go find the declaration.
+  str src = `const num LIMIT = 42;
+  `const str GREETING = "hi";
+  `const bin ENABLED = true;
+  `const num NEGATIVE = -1;
+  `fun main() num {
+  `  num a = LIMIT;
+  `  str b = GREETING;
+  `  bin c = ENABLED;
+  `  num d = NEGATIVE;
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///constval.fn";
+  doc.path = "constval.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 10);
+  assert contains(hovered, "const num LIMIT = 42"), "expected the constant's own numeric literal value shown";
+
+  str hovered_str = hover(&reads, doc, 6, 10);
+  assert contains(hovered_str, `const str GREETING = \"hi\"`), "expected the constant's own string literal value shown, quoted";
+
+  str hovered_bin = hover(&reads, doc, 7, 10);
+  assert contains(hovered_bin, "const bin ENABLED = true"), "expected the constant's own boolean literal value shown";
+
+  str hovered_neg = hover(&reads, doc, 8, 10);
+  assert contains(hovered_neg, "const num NEGATIVE = -1"), "expected a negative numeric literal (a unary minus over the literal) shown with its sign";
+}
+
 test "a let local's inferred type resolves through a call-ending chain, not just one hop" {
   // _infer_type only ever handled a single receiver.member or
   // receiver.method() hop; a longer chain (`a.b.get(...)`) fell
