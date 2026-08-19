@@ -239,6 +239,25 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   third.free();
 }
 
+test "hover documents sizeof, never a real declared symbol" {
+  // Never a lexer keyword, contextual like fork, resolved purely from
+  // the identifier's own word before ever trying ordinary name
+  // resolution.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sizeof_hover.fn";
+  doc.path = "sizeof_hover.fn";
+  doc.text = `fun main() num {
+  `  ret sizeof(num);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 8);
+  assert contains(hovered, "sizeof(Type)"), "expected the sizeof(Type) skeleton";
+  assert contains(hovered, "compile time"), "expected the doc explaining it's compile-time";
+}
+
 test "hovering a stdlib import path segment resolves at every depth" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

@@ -63,6 +63,16 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(fork_doc, span_of(t, doc.text));
         }
       }
+      // `sizeof` is recognized the same contextual way `fork` is:
+      // never a lexer keyword, just an identifier the parser treats
+      // specially at a call site, so it never resolves as a declared
+      // symbol either.
+      if equals(token_word(t), "sizeof") {
+        str sizeof_doc = keyword_doc("sizeof");
+        if !equals(sizeof_doc, "") {
+          ret _hover_result(sizeof_doc, span_of(t, doc.text));
+        }
+      }
       // A sized integer type (`i7`, `u23`, ...) is recognized the
       // same contextual way `fork` is: never a lexer keyword, just an
       // identifier shape the parser accepts wherever a type is
@@ -728,6 +738,13 @@ pub fun keyword_doc(str word) str {
       `Spawns a call as a virtual thread and carries on without its
       `result. The target must be an async fun, and main waits for every
       `fork before it exits.`
+    );
+  }
+  if equals(word, "sizeof") {
+    ret _doc(
+      `sizeof(Type)`,
+      `The size of a type in bytes, resolved at compile time. Stands for
+      `num wherever it is written.`
     );
   }
   if equals(word, "nil") {
