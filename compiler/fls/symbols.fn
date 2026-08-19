@@ -1633,15 +1633,42 @@ fun _last_line(Node* body) num {
       for i < b.statements.len {
         Node* s = b.statements.get(i);
         i = i + 1;
-        if s == nil || !s.has_pos {
+        if s == nil {
           continue;
         }
-        num reach = s.pos.end_line;
-        if reach == 0 {
-          reach = s.pos.line;
+        if s.has_pos {
+          num reach = s.pos.end_line;
+          if reach == 0 {
+            reach = s.pos.line;
+          }
+          if reach > last {
+            last = reach;
+          }
         }
-        if reach > last {
-          last = reach;
+        // A container statement's own `pos` only ever covers its
+        // leading token (see parse_if_statement/parse_fit_statement
+        // et al) - the real last line lives inside whatever body it
+        // carries, so descend into it too.
+        let nested = single_nested_body(s);
+        if nested.is_some() {
+          num nested_last = _last_line(nested.unwrap());
+          if nested_last > last {
+            last = nested_last;
+          }
+        }
+        fit s.kind {
+          .StatementFit(f) -> {
+            num bi = 0;
+            for bi < f.branches.len {
+              FitBranch br = f.branches.get(bi);
+              bi = bi + 1;
+              num branch_last = _last_line(br.body);
+              if branch_last > last {
+                last = branch_last;
+              }
+            }
+          }
+          _ -> {}
         }
       }
     }
@@ -1788,6 +1815,24 @@ pub fun fit_subject_type(Vec<Node>* program, Node* subject, str file, num line) 
     _ -> {}
   }
   ret "";
+}
+
+// `fit_subject_type`'s own concrete generic args, when the subject is
+// a bare local/parameter carrying them directly (`fit b { ... }` for
+// `b: Box<str>`) - the common case, and the one a `fit`'s own variant
+// hover most needs. "" for the field-access and channel-receive
+// shapes `fit_subject_type` also covers, matching what
+// `local_generic_args` itself only resolves for a bare identifier.
+pub fun fit_subject_generic_args(Vec<Node>* program, Node* subject, str file, num line) Vec<str> {
+  Vec<str> empty;
+  empty.init(0);
+  if subject == nil {
+    ret empty;
+  }
+  fit subject.kind {
+    .Identifier(s) -> { ret local_generic_args(nil, program, s, file, line); }
+    _ -> { ret empty; }
+  }
 }
 
 // The first generic type argument of local/parameter `name`'s own
@@ -1961,7 +2006,12 @@ pub fun single_nested_body(Node* node) Option<Node*> {
 // The declaration of `variant_name`, one of `enum_name`'s own
 // variants, rendered as a reader would write its own pattern (bare,
 // or with its payload types in parens).
-pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_name) Option<Declaration> {
+pub fun enum_variant_declaration(
+  Vec<Node>* program,
+  str enum_name,
+  str variant_name,
+  Vec<str> concrete_args
+) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1996,7 +2046,17 @@ pub fun enum_variant_declaration(Vec<Node>* program, str enum_name, str variant_
           if variant.has_pos {
             variant_pos = variant.pos;
           }
-          Declaration d = _declaration(variant_name, .Variant, b.build(), variant_pos);
+          // Substituted against the enum's own concrete generic args
+          // when the caller has them (a fit's own subject, resolved
+          // via fit_subject_generic_args), so a payload declared as a
+          // bare type param in the template (`Ok(T)`) reads as the
+          // subject's actual type (`Ok(str)`) the same way
+          // enum_variant_declaration_typed already does for a ret
+          // value's own declared type. A length mismatch (no concrete
+          // args known) leaves it as declared, template params and
+          // all, matching every existing caller's own behavior.
+          str detail = specialize_signature(b.build(), e.type_params, concrete_args);
+          Declaration d = _declaration(variant_name, .Variant, detail, variant_pos);
           d.container = enum_name;
           ret .Some(d);
         }
@@ -2098,7 +2158,12 @@ pub fun lookup_fit_variant(Vec<Node>* program, str name, str file, num line) Opt
       if equals(enum_name, "") {
         ret .None;
       }
-      ret enum_variant_declaration(program, enum_name, name);
+      ret enum_variant_declaration(
+        program,
+        enum_name,
+        name,
+        fit_subject_generic_args(program, f.exp, file, line)
+      );
     }
     _ -> {}
   }

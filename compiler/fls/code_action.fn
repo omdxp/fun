@@ -204,7 +204,11 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   if !read.lexed || !read.parsed {
     ret "";
   }
-  let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name);
+  // A stub's own shape only needs the variant's payload arity, not its
+  // concrete types, so no generic args are resolved here.
+  Vec<str> no_args;
+  no_args.init(0);
+  let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
   if variant.is_none() {
     ret "";
   }

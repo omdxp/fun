@@ -426,8 +426,12 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
     // `receiver` might not be a local at all, but an enum type named
     // directly (`OptionalInt.Some`), the qualified form of a fit
     // destructuring pattern (or an ordinary variant-constructing call
-    // outside any fit, `ret OptionalInt.Some(v);`).
-    let qualified_variant = enum_variant_declaration(&program.nodes, receiver, name);
+    // outside any fit, `ret OptionalInt.Some(v);`). A bare type name
+    // written this way carries no generic instantiation of its own to
+    // resolve, unlike a fit's own subject expression.
+    Vec<str> no_args;
+    no_args.init(0);
+    let qualified_variant = enum_variant_declaration(&program.nodes, receiver, name, no_args);
     if qualified_variant.is_some() {
       ret qualified_variant;
     }

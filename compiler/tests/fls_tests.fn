@@ -1819,6 +1819,31 @@ test "hover resolves a bare variant shorthand and its payload binding inside a f
   assert contains(variant_def, `"line":1`), "expected the variant's own declaration line";
 }
 
+test "hover on a bare variant shorthand inside a fit substitutes the subject's own concrete generic args" {
+  str src = `enum Box<T> {
+  `  Full(T),
+  `  Empty,
+  `}
+  `fun unwrap(Box<str> b) str {
+  `  fit b {
+  `    .Full(v) -> { ret v; }
+  `    .Empty -> { ret ""; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///box.fn";
+  doc.path = "box.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On `Full` in `.Full(v) ->`, substituted with `b`'s own concrete
+  // Box<str>, not the enum template's bare Full(T).
+  str variant_hover = hover(&reads, doc, 6, 6);
+  assert contains(variant_hover, "Full(str)"), "expected the variant substituted with the subject's own concrete type argument";
+}
+
 test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {
   str src = `compound Box {
   `  num width;
