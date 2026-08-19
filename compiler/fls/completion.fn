@@ -800,8 +800,16 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         }
         _collect_locals(fz.body, items);
       }
-      .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
-      .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
+      .Compound(c) -> {
+        items.push(
+          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, snippets))
+        );
+      }
+      .Enum(e) -> {
+        items.push(
+          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, snippets))
+        );
+      }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
       .Variable(v) -> {
         items.push(_item(v.name, .Variable, render_type(v.var_type)));
@@ -961,6 +969,33 @@ fun _skeleton(str word) str {
 
 fun _item(str label, ItemKind kind, str detail) Item {
   ret _snippet_item(label, kind, detail, "");
+}
+
+// A snippet for a generic compound/enum completion: `Name<${1:T},
+// ${2:E}>$0`, one tab stop per declared type parameter. "" (plain
+// label insertion) for a non-generic type, or when the client
+// wouldn't understand a snippet.
+fun _generic_type_snippet(str name, Vec<str>* type_params, bin snippets) str {
+  if !snippets || type_params.len == 0 {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(48);
+  b.append(name);
+  b.append("<");
+  num i = 0;
+  for i < type_params.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    b.append("${");
+    b.append_num(i + 1);
+    b.append(":");
+    b.append(type_params.get(i));
+    b.append("}");
+    i = i + 1;
+  }
+  b.append(">$0");
+  ret b.build();
 }
 
 // A call snippet for a function/method completion: `label(${1:arg1},

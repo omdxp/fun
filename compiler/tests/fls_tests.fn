@@ -303,6 +303,44 @@ test "compound-init literal offers only the type's own field names" {
   assert !contains(out, `"label":"make"`), "expected the surrounding scope's own declarations not to leak in here";
 }
 
+test "completion offers a generic type snippet with a tab stop per type param" {
+  str src = `compound Box<T> {
+  `  T val;
+  `}
+  `enum Result<T, E> {
+  `  Ok(T),
+  `  Err(E),
+  `}
+  `compound Point {
+  `  num x;
+  `}
+  `fun caller() num {
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic_snippet.fn";
+  doc.path = "generic_snippet.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Mid-word inside caller()'s own body, snippets on.
+  str out = completion(&reads, doc, 10, 6, true);
+  assert contains(out, `"label":"Box"`), "expected the generic compound";
+  assert contains(
+    out,
+    `"insertText":"Box<${1:T}>$0","insertTextFormat":2`
+  ), "expected one tab stop for Box's own type param";
+  assert contains(
+    out,
+    `"insertText":"Result<${1:T}, ${2:E}>$0","insertTextFormat":2`
+  ), "expected two tab stops for Result's own type params";
+
+  // A non-generic compound carries no snippet at all.
+  assert contains(out, `"label":"Point","kind":22,"detail":"compound"}`), "expected no snippet for a non-generic type";
+}
+
 test "a function completion item carries structured labelDetails" {
   str src = `fun probe(str name, num count) bin {
   `  ret true;
