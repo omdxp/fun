@@ -887,10 +887,92 @@ test "hover on a method call, a qualified variant, and a ret's own bare variant 
   // Outcome<num>'s own concrete type argument, not the template's bare T.
   str bare_ret_hover = hover(&reads, doc, 13, 7);
   assert contains(bare_ret_hover, "Ok(num)"), "expected the bare ret variant substituted with the concrete type argument";
+  // enum_variant_declaration_typed (the path a bare ret variant
+  // resolves through) never set its own container, unlike its sibling
+  // enum_variant_declaration, so a bare variant's See also footer
+  // silently dropped its own enum.
+  assert contains(bare_ret_hover, "[`Outcome`]"), "expected the bare ret variant to link back to its own enum";
 
   // On the qualified `Outcome.Ok(5)` inside `other`.
   str qualified_hover = hover(&reads, doc, 16, 15);
   assert contains(qualified_hover, "Ok("), "expected the qualified variant to resolve";
+}
+
+test "hover and completion resolve a local declared inside a fit arm, including inside an impl method" {
+  // _lookup_in_body (hover's own local search) and _declared
+  // (completion's scope walk) both had every other statement shape
+  // covered, if/else/for, but never fit, so any local declared inside
+  // a fit arm's own body was invisible to both, user-reported.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fitlocal.fn";
+  doc.path = "fitlocal.fn";
+  doc.text = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `compound Calc {
+  `  num n;
+  `}
+  `impl Calc {
+  `  area(Shape s) num {
+  `    fit s {
+  `      .Circle(r) -> {
+  `        let doubled = r * 2;
+  `        ret doubled;
+  `      }
+  `      .Square(side) -> {
+  `        ret side * side;
+  `      }
+  `    }
+  `    ret 0;
+  `  }
+  `}`;
+  doc.version = 1;
+
+  // Both the declaration and a later use resolve.
+  str decl_hover = hover(&reads, doc, 11, 12);
+  assert contains(decl_hover, "doubled"), "expected the fit-arm local to resolve at its own declaration";
+  str use_hover = hover(&reads, doc, 12, 12);
+  assert contains(use_hover, "doubled"), "expected the fit-arm local to resolve at a later use";
+
+  str completed = completion(&reads, doc, 12, 12, false);
+  assert contains(completed, `"label":"doubled"`), "expected the fit-arm local offered in scope completion";
+}
+
+test "completion offers an impl method's own parameters and body locals, scoped to that method" {
+  // _declared had no .Impl case at all, and never walked into any
+  // function's body for locals, only its own top-level args, so
+  // inside any impl method (almost this whole codebase), bare
+  // identifier completion offered nothing but keywords and other
+  // top-level names.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///scopecompl.fn";
+  doc.path = "scopecompl.fn";
+  doc.text = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  bump(num delta) num {
+  `    ret delta;
+  `  }
+  `}
+  `fun plain() num {
+  `  num total = 5;
+  `  ret total;
+  `}`;
+  doc.version = 1;
+
+  str in_method = completion(&reads, doc, 5, 8, false);
+  assert contains(in_method, `"label":"delta"`), "expected the method's own parameter offered inside its body";
+  assert !contains(in_method, `"label":"total"`), "expected the other function's local not offered here";
+
+  str in_plain = completion(&reads, doc, 10, 8, false);
+  assert contains(in_plain, `"label":"total"`), "expected the plain function's own local offered inside its body";
+  assert !contains(in_plain, `"label":"delta"`), "expected the method's parameter not offered here";
 }
 
 test "signature help shows a call's own parameters and tracks the active one, self included for a method" {

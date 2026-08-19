@@ -622,7 +622,7 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
 }
 
 // What the program declares, plus the parameters and locals of the
-// function the cursor sits in.
+// function or impl method the cursor sits in.
 fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
   num i = 0;
   for i < program.len {
@@ -630,23 +630,32 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if !f.has_name || equals(f.name, "") {
+        if f.has_name && !equals(f.name, "") {
+          items.push(_item(f.name, .Function, render_function(f)));
+        }
+        if !covers(n, f, file, line) {
           continue;
         }
-        items.push(_item(f.name, .Function, render_function(f)));
-        if !_covers_line(n, f, file, line) {
-          continue;
-        }
-        num a = 0;
-        for a < f.args.len {
-          Node* arg = f.args.get(a);
-          a = a + 1;
-          if arg == nil {
+        _collect_function_scope(f, items);
+      }
+      .Impl(im) -> {
+        // A method's own bare name is never itself a completable
+        // identifier, since it is only ever called through a
+        // receiver, but its parameters and locals are ordinary
+        // identifiers wherever the cursor sits inside its own body.
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
             continue;
           }
-          fit arg.kind {
-            .Variable(v) -> {
-              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+          fit m.kind {
+            .Function(mf) -> {
+              if !covers(*m, mf, file, line) {
+                continue;
+              }
+              _collect_function_scope(mf, items);
             }
             _ -> {}
           }
@@ -663,19 +672,60 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items) {
   }
 }
 
-// True when `line` falls within the function `f` declared by `n`.
-fun _covers_line(Node n, FunctionNode f, str file, num line) bin {
-  if !n.has_pos || !equals(n.pos.filename, file) || line < n.pos.line {
-    ret false;
+// `f`'s own parameters, plus every local declared anywhere in its
+// body, including inside a nested if/for/fit: a name is in scope for
+// the rest of the function once declared, wherever that is.
+fun _collect_function_scope(FunctionNode f, Vec<Item>* items) {
+  num a = 0;
+  for a < f.args.len {
+    Node* arg = f.args.get(a);
+    a = a + 1;
+    if arg == nil {
+      continue;
+    }
+    fit arg.kind {
+      .Variable(v) -> {
+        items.push(_item(v.name, .Variable, render_type(v.var_type)));
+      }
+      _ -> {}
+    }
   }
-  if !f.has_body || f.body == nil {
-    ret false;
+  if f.has_body {
+    _collect_locals(f.body, items);
   }
-  num last = f.body.pos.end_line;
-  if last == 0 {
-    last = f.body.pos.line;
+}
+
+// Every local declared in `body`, descending into a nested block the
+// same way `symbols.fn::_lookup_in_body` does, but collecting every
+// match instead of stopping at the first name that fits.
+fun _collect_locals(Node* body, Vec<Item>* items) {
+  if body == nil {
+    ret;
   }
-  ret line <= last;
+  fit body.kind {
+    .Variable(v) -> {
+      items.push(_item(v.name, .Variable, render_type(v.var_type)));
+    }
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        _collect_locals(block.statements.get(i), items);
+        i = i + 1;
+      }
+    }
+    .StatementIf(s) -> { _collect_locals(s.body, items); }
+    .StatementElse(inner) -> { _collect_locals(inner, items); }
+    .StatementFor(fk) -> { _collect_locals(for_body(fk), items); }
+    .StatementFit(fs) -> {
+      num i = 0;
+      for i < fs.branches.len {
+        FitBranch branch = fs.branches.get(i);
+        i = i + 1;
+        _collect_locals(branch.body, items);
+      }
+    }
+    _ -> {}
+  }
 }
 
 fun _reserved(Vec<Item>* items, bin snippets) {

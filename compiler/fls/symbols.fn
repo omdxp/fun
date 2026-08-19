@@ -828,7 +828,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if !_covers(n, f, file, line) {
+        if !covers(n, f, file, line) {
           continue;
         }
         let found = _lookup_in_function(f, name, program, file, line);
@@ -846,7 +846,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
           }
           fit m.kind {
             .Function(f) -> {
-              if !_covers(*m, f, file, line) {
+              if !covers(*m, f, file, line) {
                 continue;
               }
               let found = _lookup_in_function(f, name, program, file, line);
@@ -911,7 +911,7 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if !_covers(n, f, file, line) {
+        if !covers(n, f, file, line) {
           continue;
         }
         if !f.has_rtype {
@@ -929,7 +929,7 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
           }
           fit m.kind {
             .Function(mf) -> {
-              if !_covers(*m, mf, file, line) {
+              if !covers(*m, mf, file, line) {
                 continue;
               }
               if !mf.has_rtype {
@@ -947,9 +947,11 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
   ret .None;
 }
 
-// True when `line` falls inside the function `f` declared by `n`, in the
-// file being asked about.
-fun _covers(Node n, FunctionNode f, str file, num line) bin {
+// True when `line` falls inside the function `f` declared by `n`, in
+// the file being asked about. Shared with `completion.fn`, which
+// needs the exact same coverage test to scope what it offers to the
+// function the cursor actually sits in.
+pub fun covers(Node n, FunctionNode f, str file, num line) bin {
   if !n.has_pos || !equals(n.pos.filename, file) {
     ret false;
   }
@@ -1038,9 +1040,20 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
       }
     }
     .StatementFor(fk) -> {
-      let found = _lookup_in_body(_for_body(fk), name);
+      let found = _lookup_in_body(for_body(fk), name);
       if found.is_some() {
         ret found;
+      }
+    }
+    .StatementFit(fs) -> {
+      num i = 0;
+      for i < fs.branches.len {
+        FitBranch branch = fs.branches.get(i);
+        i = i + 1;
+        let found = _lookup_in_body(branch.body, name);
+        if found.is_some() {
+          ret found;
+        }
       }
     }
     _ -> {}
@@ -1146,7 +1159,7 @@ fun _covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if !_covers(n, f, file, line) {
+        if !covers(n, f, file, line) {
           continue;
         }
         if f.has_body {
@@ -1210,7 +1223,7 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
     }
     .StatementIf(s) -> { ret _find_covering_fit(s.body, line); }
     .StatementElse(inner) -> { ret _find_covering_fit(inner, line); }
-    .StatementFor(fk) -> { ret _find_covering_fit(_for_body(fk), line); }
+    .StatementFor(fk) -> { ret _find_covering_fit(for_body(fk), line); }
     _ -> {}
   }
   ret .None;
@@ -1219,7 +1232,11 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
 // The body of any of the three `for` loop shapes, so a caller
 // recursing through a function's statements doesn't need its own
 // three-way match just to keep descending.
-fun _for_body(ForKind fk) Node* {
+// The body of a `for` loop, whichever of the three shapes (bare
+// condition, range, or iterator) it was parsed as. Shared with
+// `completion.fn`, which needs the same descent to collect every
+// local in scope, not just look one up.
+pub fun for_body(ForKind fk) Node* {
   fit fk {
     .Cond(c) -> { ret c.body; }
     .Range(r) -> { ret r.body; }
@@ -1321,7 +1338,9 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
             }
             b.append(")");
           }
-          ret .Some(_declaration(variant_name, .Variant, b.build(), n.pos));
+          Declaration d = _declaration(variant_name, .Variant, b.build(), n.pos);
+          d.container = e.name;
+          ret .Some(d);
         }
       }
       _ -> {}
@@ -1447,7 +1466,7 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
     .StatementIf(s) -> { ret _lookup_fit_binding(s.body, name, program, file, line); }
     .StatementElse(inner) -> { ret _lookup_fit_binding(inner, name, program, file, line); }
     .StatementFor(fk) -> {
-      ret _lookup_fit_binding(_for_body(fk), name, program, file, line);
+      ret _lookup_fit_binding(for_body(fk), name, program, file, line);
     }
     .StatementFit(f) -> {
       num bi = 0;
