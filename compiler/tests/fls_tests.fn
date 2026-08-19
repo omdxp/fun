@@ -312,7 +312,16 @@ test "doc comments left-trim stray extra indentation in prose, but keep a fenced
   Document doc;
   doc.uri = "file:///docfence.fn";
   doc.path = "docfence.fn";
-  doc.text = "// A demo function.\n//\n//    Extra-indented prose, not inside a fence.\n//\n// ```fun\n// fit x {\n//   Case -> {}\n// }\n// ```\nfun demo() {}";
+  doc.text = `// A demo function.
+  `//
+  `//    Extra-indented prose, not inside a fence.
+  `//
+  `// ``````fun
+  `// fit x {
+  `//   Case -> {}
+  `// }
+  `// ``````
+  `fun demo() {}`;
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 9, 4);
