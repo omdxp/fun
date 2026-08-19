@@ -1868,6 +1868,46 @@ test "hover on a method call, a qualified variant, and a ret's own bare variant 
   assert contains(qualified_hover, "Ok("), "expected the qualified variant to resolve";
 }
 
+test "hover and completion resolve a local declared inside an elif branch" {
+  // StatementElseIf is its own NodeKind, a real parser-constructed node
+  // distinct from StatementIf/StatementElse (confirmed by how many other
+  // places in this same compiler - codegen, typecheck, warnings - handle
+  // it as its own explicit case). _lookup_in_body, _find_covering_fit,
+  // _lookup_fit_binding, and completion's own _collect_locals all had
+  // StatementIf and StatementElse covered but never StatementElseIf, so
+  // any local declared inside an elif branch's own body (a routine,
+  // common shape, not an edge case) was invisible to hover and
+  // completion alike, found while re-checking the fit-arm fixes above
+  // for other statement-kind gaps of the same shape.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///elseif.fn";
+  doc.path = "elseif.fn";
+  doc.text = `fun check(num x) num {
+  `  if x == 1 {
+  `    ret 1;
+  `  } elif x == 2 {
+  `    num doubled = x * 2;
+  `    ret doubled;
+  `  } else {
+  `    ret 0;
+  `  }
+  `}`;
+  doc.version = 1;
+
+  // At the local's own declaration inside the elif body.
+  str at_decl = hover(&reads, doc, 4, 10);
+  assert contains(at_decl, "num doubled"), "expected the elif-branch local to resolve at its own declaration";
+
+  // At a later use.
+  str at_use = hover(&reads, doc, 5, 10);
+  assert contains(at_use, "num doubled"), "expected the same local to resolve at a later use";
+
+  str completed = completion(&reads, doc, 5, 10, false);
+  assert contains(completed, `"label":"doubled"`), "expected the elif-branch local offered in scope completion";
+}
+
 test "hover and completion resolve a local declared inside a fit arm, including inside an impl method" {
   // _lookup_in_body (hover's own local search) and _declared
   // (completion's scope walk) both had every other statement shape

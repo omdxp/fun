@@ -865,6 +865,7 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
       }
     }
     .StatementIf(s) -> { _collect_locals(s.body, items, program, file, line); }
+    .StatementElseIf(ein) -> { _collect_locals(ein.body, items, program, file, line); }
     .StatementElse(inner) -> { _collect_locals(inner, items, program, file, line); }
     .StatementFor(fk) -> { _collect_locals(for_body(fk), items, program, file, line); }
     .StatementFit(fs) -> {

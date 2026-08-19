@@ -1682,6 +1682,12 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
         ret found;
       }
     }
+    .StatementElseIf(ein) -> {
+      let found = _lookup_in_body(ein.body, name);
+      if found.is_some() {
+        ret found;
+      }
+    }
     .StatementElse(inner) -> {
       let found = _lookup_in_body(inner, name);
       if found.is_some() {
@@ -1914,6 +1920,7 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
       }
     }
     .StatementIf(s) -> { ret _find_covering_fit(s.body, line); }
+    .StatementElseIf(ein) -> { ret _find_covering_fit(ein.body, line); }
     .StatementElse(inner) -> { ret _find_covering_fit(inner, line); }
     .StatementFor(fk) -> { ret _find_covering_fit(for_body(fk), line); }
     _ -> {}
@@ -2156,6 +2163,9 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
       }
     }
     .StatementIf(s) -> { ret _lookup_fit_binding(s.body, name, program, file, line); }
+    .StatementElseIf(ein) -> {
+      ret _lookup_fit_binding(ein.body, name, program, file, line);
+    }
     .StatementElse(inner) -> { ret _lookup_fit_binding(inner, name, program, file, line); }
     .StatementFor(fk) -> {
       ret _lookup_fit_binding(for_body(fk), name, program, file, line);
