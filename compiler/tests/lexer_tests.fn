@@ -150,3 +150,24 @@ test "lexes multi-character operators via maximal munch" {
   assert equals(ops.get(7), "..."), "expected '...'";
   assert equals(ops.get(8), "->"), "expected '->'";
 }
+
+test "a bare '=' followed by whitespace reports its own true end column" {
+  // The lookahead that checks for '==' written with a space in
+  // between ('x = = y') consumed the whitespace either way, but only
+  // pushed it back when that check failed to find another symbol
+  // entirely, never when it found something other than '='. A bare
+  // 'x = y' left '='s own end_col one column past where the token
+  // actually ends, bleeding the space into its reported span.
+  let toks = lex_ok("x = y;");
+  Vec<Token> ops;
+  ops.init(0);
+  defer ops.free();
+  for t : toks {
+    if t.type == TokenType.Operator && equals(tok_text(t), "=") {
+      ops.push(t);
+    }
+  }
+  assert ops.len == 1, "expected exactly one '=' operator token";
+  Token eq = ops.get(0);
+  assert eq.pos.end_col - eq.pos.start_col == 1, "expected '='s own span to be exactly one column wide";
+}

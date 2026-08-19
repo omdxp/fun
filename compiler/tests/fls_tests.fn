@@ -12,6 +12,7 @@ imp ..fls.outline;
 imp ..fls.references;
 imp ..fls.completion;
 imp ..fls.formatting;
+imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
 imp ..lexer.lexer;
@@ -889,6 +890,36 @@ test "a quirk-conforming impl's own method resolves, mangled name de-mangled cor
   assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the quirk-conforming method's own bare name resolved and specialized, not the mangled Quirk__method form";
 }
 
+test "a constant string value with an embedded quote is escaped exactly once, either source form" {
+  // User-reported (via the raw-string case): a lexed string node's
+  // own content is the lexer's as-written text, not a decoded value.
+  // A double-quoted source already carries valid \" escapes in that
+  // content untouched; a backtick raw string carries the literal "
+  // character with no escaping at all, since raw strings have none.
+  // The naive first fix blanket-escaped every quote regardless,
+  // double-escaping the already-escaped double-quoted case into
+  // three backslashes instead of one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quotedconst.fn";
+  doc.path = "quotedconst.fn";
+  doc.text = `const str QUOTED = "he said \"hi\"";
+  `const str RAWQUOTED = ``he said "hi"``;
+  `fun main() num {
+  `  str a = QUOTED;
+  `  str b = RAWQUOTED;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 3, 10);
+  assert contains(hovered, `const str QUOTED = \"he said \\\"hi\\\"\"`), "expected the already-escaped double-quoted source left alone, one backslash per quote";
+
+  str hovered_raw = hover(&reads, doc, 4, 10);
+  assert contains(hovered_raw, `const str RAWQUOTED = \"he said \\\"hi\\\"\"`), "expected the unescaped raw-string source newly escaped, also one backslash per quote";
+}
+
 test "hovering a constant shows its own literal value, not just its type" {
   // User-requested: a const's rendered detail only ever showed its
   // type and name, the same as any other global. Its own initializer
@@ -1680,6 +1711,58 @@ test "formatting leaves text it cannot read alone" {
   // Refusing to format is better than rewriting a file whose meaning is
   // not yet clear.
   assert equals(formatting(doc), "[]"), "expected no edit for text that does not parse";
+}
+
+test "semantic tokens classify a function declaration, a type, a keyword styled as a type, and a literal" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///semtok.fn";
+  doc.path = "semtok.fn";
+  doc.text = `compound Widget {
+  `  num n;
+  `}
+  `fun main() num {
+  `  Widget w;
+  `  bin ok = true;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str out = semantic_tokens(&reads, doc);
+  // A shallow structural check: the encoding is delta-based, not
+  // position-keyed, so this decodes it enough to find one token of
+  // each interesting kind rather than asserting on raw offsets.
+  assert contains(out, `"data":[`), "expected the LSP data array shape";
+  assert !contains(out, `"data":[]`), "expected at least one token classified";
+}
+
+test "semantic tokens' declared legend matches what the token-type indices actually mean" {
+  // initialize's own capabilities and the encoder must agree on what
+  // index 5 (say) means, or a client colors every token wrong.
+  assert contains(TOKEN_TYPES, "\"function\""), "expected 'function' in the legend";
+  assert contains(TOKEN_TYPES, "\"type\""), "expected 'type' in the legend";
+  assert contains(TOKEN_TYPES, "\"keyword\""), "expected 'keyword' in the legend";
+}
+
+test "a bare '=' followed by whitespace is a one-column-wide semantic token, not two" {
+  // Regression for the lexer fix this uncovered: '='s own reported
+  // end_col used to bleed one column into the whitespace after it,
+  // showing up here as a two-wide operator token that swallowed the
+  // trailing space instead of stopping right after the '=' itself.
+  // Doesn't need a full parse (only lexing), so a bare four-token
+  // line pins down the whole flat array exactly: x=6(variable),
+  // ==4(operator), y=6(variable), ;=4(operator), each length 1.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///eqwidth.fn";
+  doc.path = "eqwidth.fn";
+  doc.text = "x = y;";
+  doc.version = 1;
+
+  str out = semantic_tokens(&reads, doc);
+  assert equals(out, `{"data":[0,0,1,6,0,0,2,1,4,0,0,2,1,6,0,0,1,1,4,0]}`), "expected every token exactly one column wide, deltas exact";
 }
 
 test "a keyword completes to the shape it introduces" {

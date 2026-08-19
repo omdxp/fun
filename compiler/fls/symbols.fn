@@ -193,6 +193,36 @@ fun _render_param(Node* arg) str {
   ret "";
 }
 
+// `s`, escaped for display inside a double-quoted rendering, without
+// double-escaping content that already carries its own valid escapes.
+// A `.String` node's own content is the lexer's raw as-written text:
+// a double-quoted source string keeps every `\"`/`\\` it was written
+// with untouched, but a backtick raw string has none at all, so an
+// embedded quote there is a literal `"` character. Since the AST
+// carries no record of which one produced this value, a quote is
+// escaped only when it is not already preceded by an odd run of
+// backslashes (an escape already covering it).
+fun _quote_escaped(str s) str {
+  StringBuilder b = string_builder_init(len(s) + 4);
+  num n = len(s);
+  num i = 0;
+  bin prev_is_escaping_backslash = false;
+  for i < n {
+    chr c = s[i];
+    if c == '"' && !prev_is_escaping_backslash {
+      b.append_char('\\');
+    }
+    b.append_char(c);
+    if c == '\\' {
+      prev_is_escaping_backslash = !prev_is_escaping_backslash;
+    } else {
+      prev_is_escaping_backslash = false;
+    }
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 // A constant's own literal value, spelled back the way a reader would
 // read it (a re-rendered numeric form rather than the exact source
 // text, so `0xFF` shows as `255`): "" for an initializer that isn't a
@@ -211,7 +241,7 @@ fun _literal_value_text(Node* val) str {
         _ -> { ret ""; }
       }
     }
-    .String(s) -> { ret format(`"{str}"`, s); }
+    .String(s) -> { ret format(`"{str}"`, _quote_escaped(s)); }
     .Character(c) -> { ret format("'{chr}'", c); }
     .Boolean(b) -> {
       if b {

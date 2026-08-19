@@ -681,13 +681,26 @@ impl Lexer {
     bin skipped_space = false;
     if op0 == '=' {
       // Always treat `==` as one token, even with whitespace in between.
+      num peeked_spaces = 0;
       for self._peek() == ' ' || self._peek() == '\t' {
         self._advance();
         skipped_space = true;
+        peeked_spaces = peeked_spaces + 1;
       }
       if self._peek() == '=' {
         b.append_char(self._advance());
         skipped_space = false;
+      } elif peeked_spaces > 0 {
+        // No '=' materialized: this is a bare '=', and the whitespace
+        // just skipped ahead of it was never part of the token. Left
+        // un-consumed, it would bleed into '='s own reported end
+        // column, which is what every position-sensitive fls feature
+        // (hover, semantic tokens, ...) reads to know where a token
+        // actually ends.
+        for peeked_spaces > 0 {
+          self._push_back(' ');
+          peeked_spaces = peeked_spaces - 1;
+        }
       }
     } elif (op0 == '!' || op0 == '*') && self._peek() == '=' {
       b.append_char(self._advance());

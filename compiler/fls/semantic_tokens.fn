@@ -1,0 +1,165 @@
+// Semantic tokens.
+// 
+// A more precise layer over a client's own regex/TextMate
+// highlighting: what a token actually is (a function's own
+// declaration name, a type reference, a keyword styled like the
+// function it reads as), worked out from its own neighbors rather
+// than guessed from a pattern.
+
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp ..lexer.token;
+imp ..parser.datatype_defs;
+imp std.string;
+imp std.vec;
+imp std.ctype;
+
+// The protocol's own token-type/modifier legend, in the exact order
+// each index below refers to. `initialize`'s own capabilities must
+// declare this same legend, or a client will show the wrong colors.
+pub const str TOKEN_TYPES = `["keyword","comment","string","number","operator","function","variable","type","enumMember","boolean"]`;
+pub const str TOKEN_MODIFIERS = `["defaultLibrary"]`;
+
+// The protocol's own numbering, matching `TOKEN_TYPES`'s own order
+// (index 8, `enumMember`, is never emitted, so it's absent here).
+enum TokenKind {
+  Keyword = 0,
+  Comment = 1,
+  String = 2,
+  Number = 3,
+  Operator = 4,
+  Function = 5,
+  Variable = 6,
+  Type = 7,
+  Boolean = 9,
+}
+
+// The full-document semantic tokens for `doc`, as the LSP result a
+// client is sent: one flat array, 5 numbers per emitted token (line
+// delta from the previous one, start-character delta, length, type,
+// modifier bitmask, always 0 here), the protocol's own encoding for
+// keeping the payload small on a large file.
+pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret `{"data":[]}`;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  Vec<num> data;
+  data.init(tokens.len * 5);
+  num last_line = 0;
+  num last_start = 0;
+  bin have_last = false;
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    num idx = i;
+    i = i + 1;
+    if t.type == TokenType.NewLine {
+      continue;
+    }
+    num length = t.pos.end_col - t.pos.start_col;
+    if length <= 0 {
+      continue;
+    }
+    num ttype = _token_type_of(&tokens, idx, t);
+    if ttype < 0 {
+      continue;
+    }
+
+    num line0 = t.pos.line - 1;
+    num start0 = t.pos.start_col - 1;
+    num delta_line = line0;
+    num delta_start = start0;
+    if have_last {
+      delta_line = line0 - last_line;
+      if delta_line == 0 {
+        delta_start = start0 - last_start;
+      }
+    }
+    data.push(delta_line);
+    data.push(delta_start);
+    data.push(length);
+    data.push(ttype);
+    data.push(0);
+    last_line = line0;
+    last_start = start0;
+    have_last = true;
+  }
+
+  StringBuilder b = string_builder_init(data.len * 3);
+  b.append(`{"data":[`);
+  num j = 0;
+  for j < data.len {
+    if j > 0 {
+      b.append(",");
+    }
+    b.append(format_num(data.get(j)));
+    j = j + 1;
+  }
+  b.append("]}");
+  ret b.build();
+}
+
+// `t`'s own semantic type, or -1 for a token worth no highlight of
+// its own (a comment/string/number already read that way lexically
+// still gets one, since a client's own regex highlighting for those
+// is often less reliable than the lexer's real classification).
+fun _token_type_of(Vec<Token>* tokens, num idx, Token t) num {
+  fit t.type {
+    .Comment -> { ret TokenKind.Comment; }
+    .String -> { ret TokenKind.String; }
+    .Boolean -> { ret TokenKind.Boolean; }
+    .Number -> { ret TokenKind.Number; }
+    .Operator -> { ret TokenKind.Operator; }
+    .Symbol -> { ret TokenKind.Operator; }
+    .Keyword -> { ret _keyword_token_type(t); }
+    .Identifier -> { ret _identifier_token_type(tokens, idx, t); }
+    _ -> { ret -1; }
+  }
+}
+
+// `panic` reads as a function call (`panic("msg")`), never as a
+// control keyword, so it is styled like one rather than like `if`/
+// `ret`. A fixed-width primitive (`num`, `str`, ...) is a reserved
+// word but names a type, not a control construct, so it is styled
+// like any other type reference instead.
+fun _keyword_token_type(Token t) num {
+  str word = token_word(t);
+  if equals(word, "panic") {
+    ret TokenKind.Function;
+  }
+  if keyword_is_datatype(word) {
+    ret TokenKind.Type;
+  }
+  ret TokenKind.Keyword;
+}
+
+// An identifier's own type, read from its immediate neighbors: a
+// function's declaration name (after `fun`, or any bare name
+// immediately followed by `(`, which covers a method's own
+// declaration too, with no `fun` keyword of its own, the same way it
+// covers an ordinary call); otherwise Fun's own naming convention
+// (a type is always capitalized, a value never is) decides between a
+// type reference and a plain variable/field/parameter read.
+fun _identifier_token_type(Vec<Token>* tokens, num idx, Token t) num {
+  let prev = token_before(tokens, idx);
+  if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
+    ret TokenKind.Function;
+  }
+
+  let next = token_after(tokens, idx + 1);
+  if next.is_some() && token_is_operator(next.unwrap(), "(") {
+    ret TokenKind.Function;
+  }
+
+  str word = token_word(t);
+  if len(word) > 0 && is_upper(word[0]) {
+    ret TokenKind.Type;
+  }
+  ret TokenKind.Variable;
+}

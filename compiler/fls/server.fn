@@ -13,6 +13,7 @@ imp navigation;
 imp signature_help;
 imp inlay_hints;
 imp code_action;
+imp semantic_tokens;
 imp outline;
 imp references;
 imp completion;
@@ -128,6 +129,10 @@ impl Server {
     }
     if equals(method, "textDocument/codeAction") {
       self.answer_code_action(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/semanticTokens/full") {
+      self.answer_semantic_tokens(id, message);
       ret;
     }
     // A client asks for a declaration under three names; what it wants
@@ -315,6 +320,24 @@ impl Server {
     num start_line = _number_field(start, "line");
     num end_line = _number_field(end, "line");
     write_message(response(id, inlay_hints(&self.reads, doc.unwrap(), start_line, end_line)));
+  }
+
+  // The whole document, classified token by token: what a client
+  // colors as a keyword, a type, a function's own name, and so on.
+  answer_semantic_tokens(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, `{"data":[]}`));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, `{"data":[]}`));
+      ret;
+    }
+    write_message(response(id, semantic_tokens(&self.reads, doc.unwrap())));
   }
 
   // Offers a quick fix for each warning the client's own request
@@ -532,7 +555,11 @@ fun _number_field(JsonValue message, str name) num {
 // What the server tells a client it can do. Every capability named here
 // is one a request handler answers.
 fun _initialize_result() str {
-  ret `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true}}`;
+  ret format(
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    TOKEN_TYPES,
+    TOKEN_MODIFIERS
+  );
 }
 
 // The value of a string field, or empty when the message has none.
