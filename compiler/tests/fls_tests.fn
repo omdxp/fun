@@ -239,6 +239,28 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   third.free();
 }
 
+test "hovering a stdlib import path segment resolves at every depth" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///stdlib_hover_probe.fn";
+  doc.path = "compiler/tests/fixtures/stdlib_hover_probe.fn";
+  doc.text = "imp std.c.io;\n\nfun main() num {\n  ret 0;\n}\n";
+  doc.version = 1;
+
+  // `std` alone: the stdlib root's own README.
+  str std_hover = hover(&reads, doc, 0, 5);
+  assert !equals(std_hover, "null"), "expected std to resolve to the stdlib root's README";
+
+  // `std.c`: a real directory with no README of its own.
+  str c_hover = hover(&reads, doc, 0, 8);
+  assert contains(c_hover, "Directory:"), "expected a directory fallback for an undocumented namespace segment";
+
+  // `std.c.io`: a real module file.
+  str io_hover = hover(&reads, doc, 0, 11);
+  assert !equals(io_hover, "null"), "expected std.c.io to resolve to its own module file";
+}
+
 test "compound-init literal offers only the type's own field names" {
   str src = `compound Point {
   `  num x;

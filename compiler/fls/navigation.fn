@@ -637,6 +637,12 @@ fun _candidate_type_names(str detail, str exclude_name) Vec<str> {
 // README.md's own content verbatim, or a `.fn` module's own leading
 // doc comment.
 fun _import_hover_result(str target, Span s) str {
+  // A directory with no README of its own (a real namespace segment,
+  // just undocumented) still names something worth confirming, rather
+  // than falling through to no hover at all.
+  if is_dir(target) {
+    ret _hover_result(format("Directory: `{str}`", target), s);
+  }
   str text = read_to_string(target);
   if text == nil {
     ret NO_HOVER;

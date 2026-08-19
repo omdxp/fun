@@ -61,7 +61,11 @@ pub fun import_target(Vec<Token>* tokens, str current_file, num line, num charac
   }
   // The hovered segment may name a directory rather than a file --
   // resolve_import_path always assumes a trailing ".fn" module, so
-  // strip that back off and check.
+  // strip that back off and check. A directory with no README of its
+  // own (an intermediate namespace segment like `std.c`, real but
+  // undocumented) still names something real, so its own path is
+  // returned rather than "" -- `_import_hover_result` shows a minimal
+  // fallback for a directory target instead of trying to read it.
   if ends_with(resolved, ".fn") {
     str as_dir = substr(resolved, 0, len(resolved) - 3);
     if is_dir(as_dir) {
@@ -69,6 +73,7 @@ pub fun import_target(Vec<Token>* tokens, str current_file, num line, num charac
       if exists(readme) {
         ret readme;
       }
+      ret as_dir;
     }
   }
   ret "";
