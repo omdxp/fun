@@ -671,6 +671,42 @@ test "hover appends a 'See also' footer linking a user-defined type in the signa
   assert contains(quirk_hovered, "[`Greeter`]"), "expected a link to the quirk's own declaration";
 }
 
+test "the 'See also' footer never links a cross-file type that isn't pub" {
+  // A diamond import: the probe imports a lib file, which itself
+  // imports a private type. The probe's own merged program ends up
+  // carrying that private type's declaration even though the probe
+  // could never legitimately name it itself - `_see_also_footer`
+  // used to resolve any capitalized word in a hovered signature
+  // blind to this, so it could link straight to it anyway.
+  write_string("compiler/tests/fixtures/_see_also_priv.fn", `compound Secret {
+  `  num x;
+  `}`);
+  defer remove_file("compiler/tests/fixtures/_see_also_priv.fn");
+  write_string("compiler/tests/fixtures/_see_also_lib.fn", `imp _see_also_priv;
+  `pub fun make() Secret {
+  `  Secret s;
+  `  ret s;
+  `}`);
+  defer remove_file("compiler/tests/fixtures/_see_also_lib.fn");
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///see_also_probe.fn";
+  doc.path = "compiler/tests/fixtures/_see_also_probe.fn";
+  doc.text = `imp _see_also_lib;
+  `fun user() num {
+  `  let s = make();
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  // On `make` in `let s = make();`.
+  str hovered = hover(&reads, doc, 2, 12);
+  assert contains(hovered, "fun make() Secret"), "expected make's own signature";
+  assert !contains(hovered, "See also"), "expected no footer at all: Secret is not pub, and nothing else in the signature resolves";
+}
+
 test "hover on a primitive-typed field still links back to its own compound" {
   // A `num` field has no type name of its own in its rendered detail
   // to pull a 'See also' candidate from, but the compound it belongs

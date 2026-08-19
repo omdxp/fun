@@ -165,7 +165,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   b.append(d.detail);
   b.append("\n```");
   if read.parsed {
-    b.append(_see_also_footer(&read.program.nodes, d));
+    b.append(_see_also_footer(&read.program.nodes, d, doc.path));
   }
   ret _hover_result(b.build(), span_of(t, doc.text));
 }
@@ -593,9 +593,12 @@ fun _hover_result(str markdown, Span s) str {
 // own convention, matching every builtin/C-typedef's lowercase
 // spelling), each resolved through the program's own top-level
 // declarations and rendered as a clickable file link. Skips a name
-// that doesn't resolve to anything real, or resolves outside any
-// file (nothing to link to). "" when nothing resolves at all.
-fun _see_also_footer(Vec<Node>* program, Declaration d) str {
+// that doesn't resolve to anything real, resolves outside any file
+// (nothing to link to), or isn't visible from `current_file` (a
+// diamond import can pull a private cross-file declaration into the
+// merged program without `current_file` ever being able to name it
+// legitimately). "" when nothing resolves at all.
+fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
   Vec<str> names = _candidate_type_names(d.detail, d.name);
   defer names.free();
   // A field/method/variant's own container is worth linking even
@@ -616,6 +619,9 @@ fun _see_also_footer(Vec<Node>* program, Declaration d) str {
     }
     Declaration td = found.unwrap();
     if equals(td.pos.filename, "") {
+      continue;
+    }
+    if !declaration_visible_from(td, current_file) {
       continue;
     }
     if count > 0 {
