@@ -262,6 +262,34 @@ test "compound-init literal offers only the type's own field names" {
   assert !contains(out, `"label":"make"`), "expected the surrounding scope's own declarations not to leak in here";
 }
 
+test "dot-completion merges a method declared in a different file than the type" {
+  str helper_src = `pub compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  pub value() num {
+  `    ret self.n;
+  `  }
+  `}`;
+  write_string("compiler/tests/fixtures/_cross_method_helper.fn", helper_src);
+  defer remove_file("compiler/tests/fixtures/_cross_method_helper.fn");
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///cross_method_probe.fn";
+  doc.path = "compiler/tests/fixtures/_cross_method_probe.fn";
+  doc.text = `imp _cross_method_helper;
+  `fun use_it(Widget w) num {
+  `  ret w.value();
+  `}`;
+  doc.version = 1;
+
+  // Right after `w.`, mid-word on the line that reads it.
+  str out = completion(&reads, doc, 2, 8, false);
+  assert contains(out, `"label":"value"`), "expected a method declared in a different file (via imp) to be offered";
+}
+
 test "a bare capitalized condition isn't mistaken for a compound-init literal" {
   str src = `const bin Ready = true;
   `fun check() num {
