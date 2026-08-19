@@ -1676,30 +1676,6 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
         i = i + 1;
       }
     }
-    .StatementIf(s) -> {
-      let found = _lookup_in_body(s.body, name);
-      if found.is_some() {
-        ret found;
-      }
-    }
-    .StatementElseIf(ein) -> {
-      let found = _lookup_in_body(ein.body, name);
-      if found.is_some() {
-        ret found;
-      }
-    }
-    .StatementElse(inner) -> {
-      let found = _lookup_in_body(inner, name);
-      if found.is_some() {
-        ret found;
-      }
-    }
-    .StatementFor(fk) -> {
-      let found = _lookup_in_body(for_body(fk), name);
-      if found.is_some() {
-        ret found;
-      }
-    }
     .StatementFit(fs) -> {
       num i = 0;
       for i < fs.branches.len {
@@ -1711,7 +1687,12 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
         }
       }
     }
-    _ -> {}
+    _ -> {
+      let nested = single_nested_body(body);
+      if nested.is_some() {
+        ret _lookup_in_body(nested.unwrap(), name);
+      }
+    }
   }
   ret .None;
 }
@@ -1919,11 +1900,12 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
         i = i + 1;
       }
     }
-    .StatementIf(s) -> { ret _find_covering_fit(s.body, line); }
-    .StatementElseIf(ein) -> { ret _find_covering_fit(ein.body, line); }
-    .StatementElse(inner) -> { ret _find_covering_fit(inner, line); }
-    .StatementFor(fk) -> { ret _find_covering_fit(for_body(fk), line); }
-    _ -> {}
+    _ -> {
+      let nested = single_nested_body(body);
+      if nested.is_some() {
+        ret _find_covering_fit(nested.unwrap(), line);
+      }
+    }
   }
   ret .None;
 }
@@ -1940,6 +1922,39 @@ pub fun for_body(ForKind fk) Node* {
     .Cond(c) -> { ret c.body; }
     .Range(r) -> { ret r.body; }
     .Iter(it) -> { ret it.body; }
+  }
+}
+
+// The single nested body a statement kind recurses into, for every
+// shape that has exactly one and nothing else special about it - if,
+// elif, else, defer (the block form), for. `.Body` (many statements)
+// and `.StatementFit` (many branches, plus each one's own payload
+// bindings) need their own handling and are deliberately not folded
+// in here.
+// 
+// This is the one place that enumerates "which statement kinds carry
+// a nested body" for every fls walker that needs to recurse into a
+// function's own body looking for something (a local's own
+// declaration, a covering fit, a fit's own binding, every local in
+// scope for completion) - previously each of those four walkers
+// listed if/elif/else/defer/for by hand, and StatementElseIf/
+// StatementDefer were each missing from three of the four before
+// being found and fixed one at a time. codegen.fn's own
+// node_contains_fork enumerates this identical set of kinds for a
+// different purpose (whether a fork sits anywhere inside a body) -
+// cross-checked against it as the source of truth for what "every
+// body-carrying statement kind" actually means in this language.
+pub fun single_nested_body(Node* node) Option<Node*> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .StatementIf(s) -> { ret .Some(s.body); }
+    .StatementElseIf(ein) -> { ret .Some(ein.body); }
+    .StatementElse(inner) -> { ret .Some(inner); }
+    .StatementDefer(inner) -> { ret .Some(inner); }
+    .StatementFor(fk) -> { ret .Some(for_body(fk)); }
+    _ -> { ret .None; }
   }
 }
 
@@ -2162,14 +2177,6 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
         i = i + 1;
       }
     }
-    .StatementIf(s) -> { ret _lookup_fit_binding(s.body, name, program, file, line); }
-    .StatementElseIf(ein) -> {
-      ret _lookup_fit_binding(ein.body, name, program, file, line);
-    }
-    .StatementElse(inner) -> { ret _lookup_fit_binding(inner, name, program, file, line); }
-    .StatementFor(fk) -> {
-      ret _lookup_fit_binding(for_body(fk), name, program, file, line);
-    }
     .StatementFit(f) -> {
       num bi = 0;
       for bi < f.branches.len {
@@ -2238,7 +2245,12 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
         }
       }
     }
-    _ -> {}
+    _ -> {
+      let single = single_nested_body(body);
+      if single.is_some() {
+        ret _lookup_fit_binding(single.unwrap(), name, program, file, line);
+      }
+    }
   }
   ret .None;
 }

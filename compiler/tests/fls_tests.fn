@@ -1908,6 +1908,36 @@ test "hover and completion resolve a local declared inside an elif branch" {
   assert contains(completed, `"label":"doubled"`), "expected the elif-branch local offered in scope completion";
 }
 
+test "hover and completion resolve a local declared inside a defer block" {
+  // defer { ... } (the block form, not defer expr;) parses its own
+  // full body the same way if/else does, but StatementDefer was
+  // missing the same recursive case, found alongside the elif gap
+  // above by checking the rest of NodeKind's own body-carrying
+  // statement variants for the same omission.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///deferlocal.fn";
+  doc.path = "deferlocal.fn";
+  doc.text = `fun check() num {
+  `  defer {
+  `    num cleanup_count = 1;
+  `    ret cleanup_count;
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str at_decl = hover(&reads, doc, 2, 10);
+  assert contains(at_decl, "num cleanup_count"), "expected the defer-block local to resolve at its own declaration";
+
+  str at_use = hover(&reads, doc, 3, 10);
+  assert contains(at_use, "num cleanup_count"), "expected the same local to resolve at a later use";
+
+  str completed = completion(&reads, doc, 3, 10, false);
+  assert contains(completed, `"label":"cleanup_count"`), "expected the defer-block local offered in scope completion";
+}
+
 test "hover and completion resolve a local declared inside a fit arm, including inside an impl method" {
   // _lookup_in_body (hover's own local search) and _declared
   // (completion's scope walk) both had every other statement shape

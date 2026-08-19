@@ -864,10 +864,6 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
         i = i + 1;
       }
     }
-    .StatementIf(s) -> { _collect_locals(s.body, items, program, file, line); }
-    .StatementElseIf(ein) -> { _collect_locals(ein.body, items, program, file, line); }
-    .StatementElse(inner) -> { _collect_locals(inner, items, program, file, line); }
-    .StatementFor(fk) -> { _collect_locals(for_body(fk), items, program, file, line); }
     .StatementFit(fs) -> {
       str enum_name = fit_subject_type(program, fs.exp, file, line);
       num i = 0;
@@ -889,7 +885,12 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
         _collect_locals(branch.body, items, program, file, line);
       }
     }
-    _ -> {}
+    _ -> {
+      let nested = single_nested_body(body);
+      if nested.is_some() {
+        _collect_locals(nested.unwrap(), items, program, file, line);
+      }
+    }
   }
 }
 
