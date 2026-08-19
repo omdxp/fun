@@ -283,6 +283,44 @@ test "typeDefinition jumps to a local's declared type, and to itself when hoveri
   assert contains(from_type_name, `"line":0`), "expected Point hovered directly to resolve to itself";
 }
 
+test "hover on a method's own declaration name resolves, unlike hovering it through nothing at all before" {
+  // No path in _resolve covered a method's own name at its own
+  // declaration site (not reached through a receiver): lookup_field_at
+  // handled compound fields and enum variants there, but never an
+  // impl block's own methods.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///methodself.fn";
+  doc.path = "methodself.fn";
+  doc.text = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  demo() {}
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 2);
+  assert contains(hovered, "demo(Widget* self)"), "expected the method's own signature, self included";
+  assert contains(hovered, "[`Widget`]"), "expected a See also link back to its own compound";
+}
+
+test "doc comments left-trim stray extra indentation in prose, but keep a fenced example's own indentation" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///docfence.fn";
+  doc.path = "docfence.fn";
+  doc.text = "// A demo function.\n//\n//    Extra-indented prose, not inside a fence.\n//\n// ```fun\n// fit x {\n//   Case -> {}\n// }\n// ```\nfun demo() {}";
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 9, 4);
+  assert contains(hovered, "Extra-indented prose, not inside a fence."), "expected the stray leading spaces trimmed off";
+  assert !contains(hovered, "   Extra-indented"), "expected no residual indentation left on the prose line";
+  assert contains(hovered, "  Case -> {}"), "expected the fenced example's own inner indentation kept";
+}
+
 test "go-to-definition on a compound field or enum variant lands on its own declaration line, not the type's" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
