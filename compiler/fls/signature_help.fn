@@ -45,7 +45,7 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
         &program.nodes,
         type_name,
         c.callee,
-        local_generic_args(&program.nodes, c.receiver, doc.path, source_line)
+        local_generic_args(&tokens, &program.nodes, c.receiver, doc.path, source_line)
       );
       active_param = active_param + 1;
     }

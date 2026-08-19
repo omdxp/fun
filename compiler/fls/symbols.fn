@@ -635,15 +635,36 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
 
 // The generic type arguments of the local or parameter named `name`,
 // as declared (`["num"]` for an `Option<num>` local); empty when it
-// isn't generic, or isn't a known local at all.
-pub fun local_generic_args(Vec<Node>* program, str name, str file, num line) Vec<str> {
+// isn't generic, or isn't a known local at all. `tokens` is nil where
+// a caller has no token stream to offer, the same convention
+// `type_name_of_local` uses: a `let`-inferred local, whose own
+// declared-args-from-detail read otherwise always comes back empty
+// (the sentinel has no `<...>` to parse), only resolves its real
+// generic args when `tokens` is available to re-run the same
+// best-effort inference `type_name_of_local` already falls back to
+// for the bare type name.
+pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Vec<str> {
   let found = _lookup_local(program, name, file, line);
   if found.is_none() {
     Vec<str> empty;
     empty.init(0);
     ret empty;
   }
-  ret generic_args_of_detail(found.unwrap().detail);
+  Declaration d = found.unwrap();
+  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+    let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_none() {
+      Vec<str> empty2;
+      empty2.init(0);
+      ret empty2;
+    }
+    num name_idx = index_of_token(tokens, name_tok.unwrap());
+    Vec<str> inferred_args;
+    inferred_args.init(0);
+    infer_let_local_type_with_args(tokens, name_idx, program, file, d.pos.line, &inferred_args);
+    ret inferred_args;
+  }
+  ret generic_args_of_detail(d.detail);
 }
 
 // `s` with every whole-word occurrence of `word` replaced by
@@ -1045,7 +1066,7 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
     }
   } else {
     current_type = type_name_of_local(tokens, program, first.name, file, line);
-    current_args = local_generic_args(program, first.name, file, line);
+    current_args = local_generic_args(tokens, program, first.name, file, line);
   }
   num i = 1;
   for i < segments.len {
@@ -1097,6 +1118,25 @@ pub fun chain_ending_type(
   str file,
   num line
 ) str {
+  ret chain_ending_receiver(tokens, last_tok, last_is_call, program, file, line).type_name;
+}
+
+// `chain_ending_type`, also carrying the resolved type's own generic
+// args (mirroring `chain_receiver_type`/`chain_receiver`'s own split),
+// needed by a caller that goes on to resolve a further member against
+// the chain's own end rather than just displaying it.
+pub fun chain_ending_receiver(
+  Vec<Token>* tokens,
+  Token last_tok,
+  bin last_is_call,
+  Vec<Node>* program,
+  str file,
+  num line
+) ChainReceiver {
+  ChainReceiver empty;
+  empty.type_name = "";
+  empty.generic_args.init(0);
+
   ChainReceiver receiver = chain_receiver(tokens, last_tok, program, file, line);
   str name = token_word(last_tok);
   if equals(receiver.type_name, "") {
@@ -1105,11 +1145,15 @@ pub fun chain_ending_type(
     if last_is_call {
       let f = lookup_top_level(program, name);
       if f.is_none() {
-        ret "";
+        ret empty;
       }
-      ret _bare_return_type(f.unwrap().detail);
+      empty.type_name = _bare_return_type(f.unwrap().detail);
+      empty.generic_args = generic_args_of_detail(_return_type_text(f.unwrap().detail));
+      ret empty;
     }
-    ret type_name_of_local(tokens, program, name, file, line);
+    empty.type_name = type_name_of_local(tokens, program, name, file, line);
+    empty.generic_args = local_generic_args(tokens, program, name, file, line);
+    ret empty;
   }
   if last_is_call {
     // `receiver`'s own generic args (threaded all the way through by
@@ -1118,15 +1162,19 @@ pub fun chain_ending_type(
     // element type here, not just a bare local's.
     let m = lookup_method(program, receiver.type_name, name, receiver.generic_args);
     if m.is_none() {
-      ret "";
+      ret empty;
     }
-    ret _bare_return_type(m.unwrap().detail);
+    empty.type_name = _bare_return_type(m.unwrap().detail);
+    empty.generic_args = generic_args_of_detail(_return_type_text(m.unwrap().detail));
+    ret empty;
   }
   let field = lookup_field(program, receiver.type_name, name);
   if field.is_none() {
-    ret "";
+    ret empty;
   }
-  ret bare_type_from_detail(field.unwrap().detail);
+  empty.type_name = bare_type_from_detail(field.unwrap().detail);
+  empty.generic_args = generic_args_of_detail(field.unwrap().detail);
+  ret empty;
 }
 
 // The index of the `)` matching the `(` at `lparen_idx`, depth-tracked.
@@ -1162,6 +1210,23 @@ pub fun infer_let_local_type(
   str file,
   num line
 ) str {
+  ret infer_let_local_type_with_args(tokens, name_idx, program, file, line, nil);
+}
+
+// `infer_let_local_type`, also writing the resolved type's own generic
+// args into `out_args` when it isn't nil (a caller not needing them,
+// the overwhelming majority, passes nil and pays nothing extra).
+// Needed by `local_generic_args`'s own `__let_infer__` fallback, the
+// same way `type_name_of_local` already falls back to
+// `infer_let_local_type` itself for the bare type name.
+pub fun infer_let_local_type_with_args(
+  Vec<Token>* tokens,
+  num name_idx,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Vec<str>* out_args
+) str {
   let eq_tok_opt = token_after(tokens, name_idx + 1);
   if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
     ret "";
@@ -1171,7 +1236,7 @@ pub fun infer_let_local_type(
   if val_tok_opt.is_none() {
     ret "";
   }
-  ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line);
+  ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line, out_args);
 }
 
 // A best-effort read of `val_tok`'s own type, when it's the first
@@ -1179,7 +1244,8 @@ pub fun infer_let_local_type(
 // (for a plain or method call) the callee's own declared return type.
 // "" for any other shape: a binary expression, an already-typed
 // local read back, a compound literal, and so on aren't covered.
-fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file, num line) str {
+// `out_args`: see `infer_let_local_type_with_args`.
+fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file, num line, Vec<str>* out_args) str {
   fit val_tok.type {
     .Number -> {
       fit val_tok.data {
@@ -1238,7 +1304,11 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         }
       }
       if index_of_token(tokens, last_tok) != idx || last_is_call {
-        ret chain_ending_type(tokens, last_tok, last_is_call, program, file, line);
+        let ending = chain_ending_receiver(tokens, last_tok, last_is_call, program, file, line);
+        if out_args != nil {
+          *out_args = ending.generic_args;
+        }
+        ret ending.type_name;
       }
 
       // A bare read of an already-typed local/field/parameter/global

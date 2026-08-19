@@ -161,6 +161,38 @@ test "byte and UTF-16 columns convert correctly across a non-ASCII line" {
   assert offset_of(text, 0, 5) == 6, "expected offset_of to land on the byte after the 2-byte character";
 }
 
+test "a generic method on a let-inferred receiver specializes, not the bare template" {
+  str src = `compound Box<T> {
+  `  T val;
+  `}
+  `impl Box<T> {
+  `  pub get() T {
+  `    ret self.val;
+  `  }
+  `}
+  `fun make() Box<str> {
+  `  Box<str> b;
+  `  b.val = "x";
+  `  ret b;
+  `}
+  `fun use_it() str {
+  `  let b = make();
+  `  ret b.get();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic_let_receiver.fn";
+  doc.path = "generic_let_receiver.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Mid-word on "get".
+  str hovered = hover(&reads, doc, 15, 9);
+  assert contains(hovered, "get(Box<str>* self) str"), "expected the concrete specialized return type (str), not the bare template T";
+  assert !contains(hovered, "self) T"), "expected no unspecialized template leaking through";
+}
+
 test "hover and definition resolve a method called on a let-inferred local" {
   str src = `compound Box {
   `  num width;
