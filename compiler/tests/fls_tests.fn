@@ -1955,6 +1955,14 @@ test "hover and completion resolve a fit arm's own payload binding when the subj
   // Mid-word on "r" inside the arm's own body.
   str completed = completion(&reads, doc, 9, 10, false);
   assert contains(completed, `"label":"r","kind":6,"detail":"num"`), "expected the payload binding offered in scope completion, correctly typed";
+
+  // Go-to-definition lands on the arm's own pattern line (8, ".Circle(r)"
+  // itself), not the enclosing fit statement's own line (7) - neither
+  // AST node tracks a binding name's own exact position, but the arm's
+  // own condition expression is a much closer stand-in than the whole
+  // fit statement.
+  str def_binding = definition(&reads, doc, 8, 12);
+  assert contains(def_binding, `"line":8`), "expected the jump to land on the arm's own pattern line, not the fit statement's";
 }
 
 test "hover and completion resolve a local or parameter inside a test or fuzz block" {

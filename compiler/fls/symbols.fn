@@ -2196,14 +2196,26 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
                 b.append(payload_type.unwrap());
                 b.append(" ");
                 b.append(name);
-                // A fit arm's body block isn't always given its own
-                // position by the parser (has_pos can read false, its
-                // fields then unset stack garbage); the enclosing fit
-                // statement's own position, `body.pos`, is reliably
-                // set and close enough for a hover result to point at.
+                // Neither AST node here carries the individual binding
+                // name's own position (bindings are plain strings,
+                // Vec<str>, with nothing parallel tracking where each
+                // one was written) and a fit arm's body block isn't
+                // always given its own position by the parser either
+                // (has_pos can read false, its fields then unset stack
+                // garbage) - but the arm's own pattern expression
+                // (`.Circle(r)` itself, `condition` here despite the
+                // name, which also doubles as a boolean guard on a
+                // non-destructuring arm) reliably is, and starts right
+                // at the binding it names, close enough to be useful
+                // for a jump even without landing on `r` exactly.
+                // Falls back to the whole fit statement's own position
+                // only when neither is available.
                 Pos decl_pos = body.pos;
                 if br.body.has_pos {
                   decl_pos = br.body.pos;
+                }
+                if br.has_condition && br.condition != nil && br.condition.has_pos {
+                  decl_pos = br.condition.pos;
                 }
                 ret .Some(_declaration(name, .Local, b.build(), decl_pos));
               }
