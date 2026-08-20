@@ -1007,3 +1007,81 @@ test "a method's own generic type param constraint is still enforced against a r
     "expected the constraint violation to be rejected"
   );
 }
+
+test "format()'s own {type} placeholders are checked against the arguments passed" {
+  rejects(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  str s = "hi";
+    `  ret format("{num}", s);
+    `}`,
+    "expected a str argument to be rejected against a {num} placeholder"
+  );
+  rejects(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{num} and {str}", 1);
+    `}`,
+    "expected too few arguments for two placeholders to be rejected"
+  );
+  accepts(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{num} and {str}", 1, "two");
+    `}`,
+    "expected matching count and types to be accepted"
+  );
+  accepts(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{\"range\":{\"start\":{num}}}", 1);
+    `}`,
+    "expected a JSON-shaped format string's own literal braces not to be misread as placeholders"
+  );
+}
+
+test "printf's own %-specifiers are checked against the arguments passed, bin widened to num" {
+  rejects(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  printf("%d\n", "not a number");
+    `  ret 0;
+    `}`,
+    "expected a str argument to be rejected against a %d specifier"
+  );
+  accepts(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  bin flag = true;
+    `  printf("%d\n", flag);
+    `  ret 0;
+    `}`,
+    "expected a bin argument accepted against %d, idiomatic C usage"
+  );
+  accepts(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  printf("%s = %lld\n", "count", 3);
+    `  ret 0;
+    `}`,
+    "expected a length-modified specifier (%lld) to still be recognized correctly"
+  );
+}
+
+test "a for loop's own two-variable form types a Map's key/value pair, not an always-num index" {
+  accepts(
+    `compound Map<K, V> {
+    `  K k;
+    `  V v;
+    `}
+    `fun main() num {
+    `  Map<str, num> scores;
+    `  for name, score :: scores {
+    `    str s = name;
+    `    num n = score;
+    `  }
+    `  ret 0;
+    `}`,
+    "expected the map's own key type on the first name and value type on the second"
+  );
+}

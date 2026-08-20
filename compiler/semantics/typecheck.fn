@@ -720,10 +720,10 @@ impl Checker {
     }
     self.fail(
       format(
-        "'{str}' compares a {str} with a {str}, which share no variants",
-        e.op,
-        left.name,
-        right.name
+      "'{str}' compares a {str} with a {str}, which share no variants",
+      e.op,
+      left.name,
+      right.name
       ),
       node
     );
@@ -996,6 +996,169 @@ fun _call_args(Node* node, Vec<Node*>* out) {
   out.push(node);
 }
 
+// A format-like variadic function's own fmt-argument index
+// (`fprintf`/`sprintf`/`snprintf` carry a stream/destination before
+// it), or -1 for anything else. `scanf`/`sscanf` are deliberately
+// excluded: an input format's own specifiers name what gets written
+// through a pointer, not a value's own type - a different, riskier
+// check than this one, not attempted here.
+fun _format_fmt_arg_index(str name) num {
+  // format(fmt, ...), print_fmt(fmt, ...), println_fmt(fmt, ...),
+  // printf(fmt, ...): fmt is the first argument, nothing before it.
+  if equals(name, "format") || equals(name, "print_fmt") || equals(name, "println_fmt") || equals(name, "printf") {
+    ret 0;
+  }
+  // fprintf(stream, fmt, ...), sprintf(dst, fmt, ...): one argument
+  // (the stream/destination) comes before fmt.
+  if equals(name, "fprintf") || equals(name, "sprintf") {
+    ret 1;
+  }
+  // snprintf(dst, n, fmt, ...): two arguments (destination, then its
+  // own capacity) come before fmt.
+  if equals(name, "snprintf") {
+    ret 2;
+  }
+  ret -1;
+}
+
+fun _is_c_style_format(str name) bin {
+  ret equals(name, "printf") || equals(name, "fprintf") || equals(name, "sprintf") || equals(name, "snprintf");
+}
+
+// The `{type}` placeholders in `fmt` (Fun's own `format()` syntax),
+// in order: `""` for an untyped `{}`, or one of the 7 recognized
+// type names for a typed one. Mirrors `format_impl`'s (std/io.fn)
+// own recognition rules exactly - `{{` is a literal `{`, and `{xyz}`
+// is a placeholder only when `xyz` names one of those 7 types,
+// anything else is literal text - so this never misreads a
+// literal-brace-heavy format string (fls's own JSON-building
+// `format()` calls, throughout this very codebase) as carrying
+// placeholders it doesn't.
+fun _fun_format_specs(str fmt) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num i = 0;
+  num n = len(fmt);
+  for i < n {
+    chr c = fmt[i];
+    if c != '{' {
+      i = i + 1;
+      continue;
+    }
+    if i + 1 < n && fmt[i + 1] == '{' {
+      i = i + 2;
+      continue;
+    }
+    if i + 1 < n && fmt[i + 1] == '}' {
+      out.push("");
+      i = i + 2;
+      continue;
+    }
+    if i + 4 < n && fmt[i + 4] == '}' {
+      str word = substr(fmt, i + 1, 3);
+      if equals(word, "str") || equals(word, "num") || equals(word, "dec") || equals(word, "bin") || equals(word, "chr") || equals(word, "ptr") || equals(word, "raw") {
+        out.push(word);
+        i = i + 5;
+        continue;
+      }
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The C-style conversions in `fmt` (`printf`/`fprintf`/`sprintf`/
+// `snprintf`), as the same Fun type-name vocabulary `_fun_format_specs`
+// uses, one entry per `%`-conversion found; `%%` is a literal percent,
+// never a placeholder. `.None` (rather than an empty `Vec`) for
+// anything this parser doesn't confidently recognize - a positional
+// argument (`%1$s`), a dynamic width/precision (`%*d`), or an
+// unrecognized conversion character - so a caller skips the check
+// entirely rather than risk a false positive on a spec it doesn't
+// fully understand.
+fun _c_format_specs(str fmt) Option<Vec<str>> {
+  Vec<str> out;
+  out.init(4);
+  num i = 0;
+  num n = len(fmt);
+  for i < n {
+    chr c = fmt[i];
+    if c != '%' {
+      i = i + 1;
+      continue;
+    }
+    i = i + 1;
+    if i >= n {
+      out.free();
+      ret .None;
+    }
+    if fmt[i] == '%' {
+      i = i + 1;
+      continue;
+    }
+    for i < n && (fmt[i] == '-' || fmt[i] == '+' || fmt[i] == '0' || fmt[i] == ' ' || fmt[i] == '#') {
+      i = i + 1;
+    }
+    if i < n && fmt[i] == '*' {
+      out.free();
+      ret .None;
+    }
+    for i < n && fmt[i] >= '0' && fmt[i] <= '9' {
+      i = i + 1;
+    }
+    if i < n && fmt[i] == '.' {
+      i = i + 1;
+      if i < n && fmt[i] == '*' {
+        out.free();
+        ret .None;
+      }
+      for i < n && fmt[i] >= '0' && fmt[i] <= '9' {
+        i = i + 1;
+      }
+    }
+    for i < n && (fmt[i] == 'l' || fmt[i] == 'h' || fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't' || fmt[i] == 'L') {
+      i = i + 1;
+    }
+    if i >= n {
+      out.free();
+      ret .None;
+    }
+    chr conv = fmt[i];
+    i = i + 1;
+    if conv == 'd' || conv == 'i' || conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o' {
+      out.push("num");
+    } elif conv == 'f' || conv == 'F' || conv == 'g' || conv == 'G' || conv == 'e' || conv == 'E' {
+      out.push("dec");
+    } elif conv == 's' {
+      out.push("str");
+    } elif conv == 'c' {
+      out.push("chr");
+    } elif conv == 'p' {
+      out.push("raw");
+    } else {
+      out.free();
+      ret .None;
+    }
+  }
+  ret .Some(out);
+}
+
+fun _data_type_for(str want_name) DataTypeType {
+  if equals(want_name, "str") {
+    ret DataTypeType.Str;
+  }
+  if equals(want_name, "num") {
+    ret DataTypeType.Num;
+  }
+  if equals(want_name, "dec") {
+    ret DataTypeType.Dec;
+  }
+  if equals(want_name, "bin") {
+    ret DataTypeType.Bin;
+  }
+  ret DataTypeType.Chr;
+}
+
 impl Checker {
   // The type a literal, name, or operator expression produces. Anything
   // the checker does not model infers as unknown.
@@ -1111,9 +1274,9 @@ impl Checker {
       if !can_assign(held, element) && !can_assign(element, held) {
         self.fail(
           format(
-            "an array literal holds one type, found {str} and {str}",
-            type_name(held),
-            type_name(element)
+          "an array literal holds one type, found {str} and {str}",
+          type_name(held),
+          type_name(element)
           ),
           node
         );
@@ -1624,17 +1787,119 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-            "argument {num} of '{str}' expects {str}, found {str}",
-            i + 1,
-            name,
-            type_name(want),
-            type_name(got)
+          "argument {num} of '{str}' expects {str}, found {str}",
+          i + 1,
+          name,
+          type_name(want),
+          type_name(got)
           ),
           args.get(i)
         );
         ret;
       }
       i = i + 1;
+    }
+    num fmt_index = _format_fmt_arg_index(name);
+    if fmt_index >= 0 && fmt_index < args.len {
+      self.check_format_args(node, name, args, fmt_index, _is_c_style_format(name), env);
+    }
+  }
+
+  // Cross-checks a format-like variadic call's own trailing arguments
+  // against what its format string names, once the fixed leading
+  // arguments (a stream, a destination buffer, ...) have already
+  // passed the ordinary check above. Silently skips the check (never
+  // a false positive) when the format string isn't a literal - the
+  // usual convention every real printf-checker follows, since a
+  // format built at runtime can't be reasoned about here - or when
+  // the C-style parser meets a spec it doesn't confidently recognize.
+  check_format_args(Node* node, str name, Vec<Node*>* args, num fmt_index, bin c_style, TypeEnv* env) {
+    Node* fmt_node = args.get(fmt_index);
+    str fmt_text = "";
+    bin is_literal = false;
+    fit fmt_node.kind {
+      .String(s) -> {
+        fmt_text = s;
+        is_literal = true;
+      }
+      _ -> {}
+    }
+    if !is_literal {
+      ret;
+    }
+    Vec<str> expected;
+    if c_style {
+      let parsed = _c_format_specs(fmt_text);
+      if parsed.is_none() {
+        ret;
+      }
+      expected = parsed.unwrap();
+    } else {
+      expected = _fun_format_specs(fmt_text);
+    }
+    defer expected.free();
+
+    num variadic_start = fmt_index + 1;
+    num given = args.len - variadic_start;
+    if given != expected.len {
+      str which = "too many";
+      if given < expected.len {
+        which = "too few";
+      }
+      self.fail(
+        format(
+        "{str} arguments to '{str}': its own format string names {num}, {num} given",
+        which,
+        name,
+        expected.len,
+        given
+        ),
+        node
+      );
+      ret;
+    }
+    num k = 0;
+    for k < expected.len {
+      str want_name = expected.get(k);
+      Node* arg_node = args.get(variadic_start + k);
+      num arg_position = variadic_start + k + 1;
+      k = k + 1;
+      if equals(want_name, "") {
+        continue;
+      }
+      CheckedType got = self.infer(arg_node, env);
+      if equals(want_name, "ptr") || equals(want_name, "raw") {
+        if got.pointer_depth == 0 && got.base != DataTypeType.Raw {
+          self.fail(
+            format("argument {num} of '{str}' expects a pointer, found {str}", arg_position, name, type_name(got)),
+            arg_node
+          );
+          ret;
+        }
+        continue;
+      }
+      // A C-style `%d`/`%x`/... conversion is written for any
+      // integral value in ordinary C code, `bin` included (`0`/`1`,
+      // as idiomatic there as it is unusual in Fun's own type
+      // discipline) - widened here, and only here: `{num}`, Fun's
+      // own explicit placeholder spelling, still means exactly num.
+      if c_style && equals(want_name, "num") && got.base == DataTypeType.Bin {
+        continue;
+      }
+      CheckedType want = checked_of(_data_type_for(want_name));
+      if !self.assignable(want, got) {
+        self.fail(
+          format(
+          "argument {num} of '{str}' expects {str} (from its own format string), found {str}",
+          arg_position,
+          name,
+          want_name,
+          type_name(got)
+          ),
+          arg_node
+        );
+        ret;
+      }
     }
   }
 
@@ -1932,9 +2197,9 @@ impl Checker {
         if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
           self.fail(
             format(
-              "fit branch names '{str}' but the value being matched is a '{str}'",
-              named,
-              subject
+            "fit branch names '{str}' but the value being matched is a '{str}'",
+            named,
+            subject
             ),
             branch.condition
           );
@@ -1960,11 +2225,21 @@ impl Checker {
         self.check_statement(r.body, env);
       }
       .Iter(it) -> {
-        // What the loop walks holds values of a type the checker does
-        // not model yet.
-        env.define(it.item_name, checked_unknown());
-        if it.has_index_name {
-          env.define(it.index_name, checked_of(DataTypeType.Num));
+        CheckedType iterable_type = self.infer(it.iterable, env);
+        if it.has_index_name && equals(iterable_type.name, "Map") && iterable_type.generic_args.len == 2 {
+          // `for key, val :: someMap`: the two-variable form names a
+          // key/value pair for a Map, not an index/item pair the way
+          // it does for a Vec/array - the map's own declared key and
+          // value types, not an always-num index.
+          env.define(it.index_name, iterable_type.generic_args.get(0));
+          env.define(it.item_name, iterable_type.generic_args.get(1));
+        } else {
+          // What the loop walks holds values of a type the checker
+          // does not model yet.
+          env.define(it.item_name, checked_unknown());
+          if it.has_index_name {
+            env.define(it.index_name, checked_of(DataTypeType.Num));
+          }
         }
         self.check_statement(it.body, env);
       }
@@ -2003,9 +2278,9 @@ impl Checker {
         if !self.assignable(field, value) {
           self.fail(
             format(
-              "cannot assign {str} to a field of type {str}",
-              type_name(value),
-              type_name(field)
+            "cannot assign {str} to a field of type {str}",
+            type_name(value),
+            type_name(field)
             ),
             node
           );
@@ -2028,10 +2303,10 @@ impl Checker {
         if !self.assignable(b.type, value) {
           self.fail(
             format(
-              "cannot assign {str} to '{str}' of type {str}",
-              type_name(value),
-              name,
-              type_name(b.type)
+            "cannot assign {str} to '{str}' of type {str}",
+            type_name(value),
+            name,
+            type_name(b.type)
             ),
             node
           );
@@ -2076,8 +2351,8 @@ impl Checker {
         if value.base == DataTypeType.Void && value.pointer_depth == 0 && !value.is_array {
           self.fail(
             format(
-              "'let' variable '{str}' cannot be initialized from a value of type void",
-              v.name
+            "'let' variable '{str}' cannot be initialized from a value of type void",
+            v.name
             ),
             stmt
           );
@@ -2087,10 +2362,10 @@ impl Checker {
       } elif !self.assignable(declared, value) {
         self.fail(
           format(
-            "cannot initialize '{str}' of type {str} with {str}",
-            v.name,
-            type_name(declared),
-            type_name(value)
+          "cannot initialize '{str}' of type {str} with {str}",
+          v.name,
+          type_name(declared),
+          type_name(value)
           ),
           stmt
         );
@@ -2108,9 +2383,9 @@ impl Checker {
     if !self.assignable(self.rtype, got) {
       self.fail(
         format(
-          "cannot return {str} from a function returning {str}",
-          type_name(got),
-          type_name(self.rtype)
+        "cannot return {str} from a function returning {str}",
+        type_name(got),
+        type_name(self.rtype)
         ),
         stmt
       );
@@ -2158,10 +2433,10 @@ impl Checker {
       if supplied.is_none() {
         self.fail(
           format(
-            "'{str}' does not supply '{str}', which '{str}' requires",
-            block.type_name,
-            name,
-            block.quirk_name
+          "'{str}' does not supply '{str}', which '{str}' requires",
+          block.type_name,
+          name,
+          block.quirk_name
           ),
           node
         );
@@ -2173,10 +2448,10 @@ impl Checker {
       if promised.is_some() && promised.unwrap().is_async != supplied.unwrap().is_async {
         self.fail(
           format(
-            "'{str}' does not match how '{str}' declares '{str}'",
-            block.type_name,
-            block.quirk_name,
-            name
+          "'{str}' does not match how '{str}' declares '{str}'",
+          block.type_name,
+          block.quirk_name,
+          name
           ),
           node
         );
