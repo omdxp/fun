@@ -1187,6 +1187,32 @@ test "hover, go-to-definition, and dot-completion resolve an import alias at a u
   assert contains(alias_completion, `"label":"cos"`), "expected another of the aliased module's own functions too";
 }
 
+test "hover, go-to-definition, and completion cover a C builtin the language accepts without a declaration" {
+  str src = `fun main() num {
+  `  ret NULL;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///cbuiltin.fn";
+  doc.path = "cbuiltin.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // 'NULL' is never a declared symbol anywhere in the AST at all, the
+  // exact reason ordinary resolution has nothing to offer it.
+  str hovered = hover(&reads, doc, 1, 8);
+  assert contains(hovered, "C builtin"), "expected NULL to be recognized as a C builtin, not silently resolve to nothing";
+  assert contains(hovered, "std.c.def"), "expected the owning module named in the hover";
+
+  str def = definition(&reads, doc, 1, 8);
+  assert contains(def, "std/c/def.fn"), "expected a jump to the module that documents it";
+
+  str out = completion(&reads, doc, 1, 2, false);
+  assert contains(out, `"label":"NULL"`), "expected NULL to be offered in ordinary bare-identifier completion";
+  assert contains(out, `"label":"size_t"`), "expected a C builtin typedef to be offered too, not just macro constants";
+}
+
 test "hover shows a doc comment for a method declared in another, imported file" {
   str src = `imp std.option;
   `fun main() num {

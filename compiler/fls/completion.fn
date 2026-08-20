@@ -113,6 +113,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     }
     if equals(receiver, "") {
       _reserved(&items, snippets);
+      _c_builtin_completions(&items);
       _written_names(&tokens, _current_word(&tokens, line, character), &items);
     } else {
       // An import alias needs no tree of its own to resolve: it is
@@ -233,6 +234,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
 
   _declared(&program.nodes, doc.path, source_line, &items, snippets);
   _reserved(&items, snippets);
+  _c_builtin_completions(&items);
   _abbreviations(&items, snippets);
   ret _reply(&items);
 }
@@ -1855,6 +1857,26 @@ fun _reserved(Vec<Item>* items, bin snippets) {
       continue;
     }
     items.push(_snippet_item(word, .Keyword, "declaration", skeleton));
+  }
+}
+
+// Every C macro or typedef the language accepts without a declaration
+// of its own (`NULL`, `size_t`, `EOF`, ...), offered the same
+// unconditional way the reserved words themselves are: none of these
+// are ever declared symbols an AST could offer on its own, so nothing
+// else in this file would ever surface them.
+fun _c_builtin_completions(Vec<Item>* items) {
+  let all = c_builtins();
+  defer all.free();
+  num i = 0;
+  for i < all.len {
+    CBuiltin b = all.get(i);
+    i = i + 1;
+    ItemKind kind = .Constant;
+    if ends_with(b.name, "_t") || equals(b.name, "FILE") {
+      kind = .Struct;
+    }
+    items.push(_item(b.name, kind, format("C builtin, from {str}", b.module)));
   }
 }
 

@@ -16,6 +16,7 @@ imp imports;
 imp ..lexer.token;
 imp ..parser.datatype_defs;
 imp ..parser.import_resolver;
+imp ..semantics.warnings;
 imp std.string;
 imp std.vec;
 imp std.option;
@@ -91,6 +92,21 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           _doc(
           format("{str} x;", token_word(t)),
           format("A {num}-bit {str} integer.", dit.bits, sign_word)
+          ),
+          span_of(t, doc.text)
+        );
+      }
+      // A C macro or typedef the language accepts without a
+      // declaration of its own (`NULL`, `size_t`, `EOF`, ...): never
+      // a real declared symbol either, and never represented as one
+      // in the AST at all, so ordinary resolution below would find
+      // nothing no matter what.
+      str builtin_module = c_builtin_owner(token_word(t));
+      if !equals(builtin_module, "") {
+        ret _hover_result(
+          _doc(
+          token_word(t),
+          format("A C builtin the language accepts without a declaration of its own, documented by {str}.", builtin_module)
           ),
           span_of(t, doc.text)
         );
@@ -204,6 +220,14 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   str target = import_target(&tokens, doc.path, line, character);
   if !equals(target, "") {
     ret _file_start_location_result(target);
+  }
+
+  str builtin_module = c_builtin_owner(token_word(t));
+  if !equals(builtin_module, "") {
+    str module_path = resolve_import_path(doc.path, builtin_module);
+    if exists(module_path) {
+      ret _file_start_location_result(module_path);
+    }
   }
 
   let declared = resolve_at(cache, doc, &tokens, t, line);

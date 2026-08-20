@@ -1486,26 +1486,92 @@ impl Analysis {
   }
 }
 
+// A C macro or typedef the language accepts without a declaration of
+// its own, and the module that documents it.
+pub compound CBuiltin {
+  str name;
+  str module;
+}
+
+// Every C builtin the language recognizes this way, name paired with
+// the module that documents it. The single source of truth both
+// `c_builtin_owner` (a compiler warning: is an import earning its
+// place by naming one of these) and fls (hover/completion on one, at
+// a use site the AST never represents as a declared symbol at all)
+// read from, so the two can never drift apart from each other.
+pub fun c_builtins() Vec<CBuiltin> {
+  Vec<CBuiltin> out;
+  out.init(32);
+  out.push(.{name = "NULL", module = "std.c.def"});
+  out.push(.{name = "SIZE_MAX", module = "std.c.def"});
+  out.push(.{name = "RSIZE_MAX", module = "std.c.def"});
+  out.push(.{name = "PTRDIFF_MIN", module = "std.c.def"});
+  out.push(.{name = "PTRDIFF_MAX", module = "std.c.def"});
+  out.push(.{name = "WCHAR_MIN", module = "std.c.def"});
+  out.push(.{name = "WCHAR_MAX", module = "std.c.def"});
+  out.push(.{name = "WINT_MIN", module = "std.c.def"});
+  out.push(.{name = "WINT_MAX", module = "std.c.def"});
+  out.push(.{name = "size_t", module = "std.c.def"});
+  out.push(.{name = "ptrdiff_t", module = "std.c.def"});
+  out.push(.{name = "wchar_t", module = "std.c.def"});
+  out.push(.{name = "rsize_t", module = "std.c.def"});
+  out.push(.{name = "ssize_t", module = "std.c.def"});
+  out.push(.{name = "va_list", module = "std.c.def"});
+  out.push(.{name = "EOF", module = "std.c.io"});
+  out.push(.{name = "SEEK_SET", module = "std.c.io"});
+  out.push(.{name = "SEEK_CUR", module = "std.c.io"});
+  out.push(.{name = "SEEK_END", module = "std.c.io"});
+  out.push(.{name = "FILE", module = "std.c.io"});
+  out.push(.{name = "EXIT_SUCCESS", module = "std.c.mem"});
+  out.push(.{name = "EXIT_FAILURE", module = "std.c.mem"});
+  out.push(.{name = "CHAR_BIT", module = "std.c.limits"});
+  out.push(.{name = "MB_LEN_MAX", module = "std.c.limits"});
+  out.push(.{name = "SCHAR_MIN", module = "std.c.limits"});
+  out.push(.{name = "SCHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "UCHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "CHAR_MIN", module = "std.c.limits"});
+  out.push(.{name = "CHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "SHRT_MIN", module = "std.c.limits"});
+  out.push(.{name = "SHRT_MAX", module = "std.c.limits"});
+  out.push(.{name = "USHRT_MAX", module = "std.c.limits"});
+  out.push(.{name = "INT_MAX", module = "std.c.limits"});
+  out.push(.{name = "INT_MIN", module = "std.c.limits"});
+  out.push(.{name = "UINT_MAX", module = "std.c.limits"});
+  out.push(.{name = "LONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LONG_MIN", module = "std.c.limits"});
+  out.push(.{name = "ULONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LLONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LLONG_MIN", module = "std.c.limits"});
+  out.push(.{name = "ULLONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "CLOCKS_PER_SEC", module = "std.c.time"});
+  out.push(.{name = "time_t", module = "std.c.time"});
+  out.push(.{name = "clock_t", module = "std.c.time"});
+  out.push(.{name = "pthread_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_attr_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_mutex_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_mutexattr_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_cond_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_condattr_t", module = "std.c.thread"});
+  out.push(.{name = "pid_t", module = "std.c.process"});
+  out.push(.{name = "posix_spawn_file_actions_t", module = "std.c.process"});
+  ret out;
+}
+
 // The module that documents a C macro or typedef the language accepts
 // without a declaration of its own. Importing that module is what makes
 // the name available, so reading it is what earns the import its place.
-fun _c_builtin_owner(str name) str {
-  fit name {
-    "NULL", "SIZE_MAX", "RSIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "WCHAR_MIN", "WCHAR_MAX",
-    "WINT_MIN", "WINT_MAX", "size_t", "ptrdiff_t", "wchar_t", "rsize_t", "ssize_t", "va_list" -> {
-      ret "std.c.def";
+pub fun c_builtin_owner(str name) str {
+  let all = c_builtins();
+  defer all.free();
+  num i = 0;
+  for i < all.len {
+    CBuiltin b = all.get(i);
+    if equals(b.name, name) {
+      ret b.module;
     }
-    "EOF", "SEEK_SET", "SEEK_CUR", "SEEK_END", "FILE" -> { ret "std.c.io"; }
-    "EXIT_SUCCESS", "EXIT_FAILURE" -> { ret "std.c.mem"; }
-    "CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX",
-    "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MAX", "INT_MIN", "UINT_MAX", "LONG_MAX", "LONG_MIN",
-    "ULONG_MAX", "LLONG_MAX", "LLONG_MIN", "ULLONG_MAX" -> { ret "std.c.limits"; }
-    "CLOCKS_PER_SEC", "time_t", "clock_t" -> { ret "std.c.time"; }
-    "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
-    "pthread_condattr_t" -> { ret "std.c.thread"; }
-    "pid_t", "posix_spawn_file_actions_t" -> { ret "std.c.process"; }
-    _ -> { ret ""; }
+    i = i + 1;
   }
+  ret "";
 }
 
 // True when any name the file reads is a C builtin the imported module
@@ -1515,7 +1581,7 @@ fun _module_owns_a_read_builtin(str path, Set<str>* read) bin {
   defer names.free();
   num i = 0;
   for i < names.len {
-    if equals(_c_builtin_owner(names.get(i)), path) {
+    if equals(c_builtin_owner(names.get(i)), path) {
       ret true;
     }
     i = i + 1;
