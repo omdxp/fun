@@ -2995,6 +2995,37 @@ test "code lens skips main and impl methods, but covers compounds, enums, and qu
   assert !contains(out, `"start":{"line":10,"character":6}`), "expected no lens on free, an impl method";
 }
 
+test "code lens on a quirk shows its own implementation count, a structural scan, not a name match" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///impl_count.fn", `quirk Speaks {
+  `  say() str;
+  `}
+  `compound Dog {
+  `  num age;
+  `}
+  `impl Dog as Speaks {
+  `  say() str { ret "woof"; }
+  `}
+  `compound Cat {
+  `  num age;
+  `}
+  `impl Cat as Speaks {
+  `  say() str { ret "meow"; }
+  `}`, 1);
+  let held = docs.at("file:///impl_count.fn");
+  Document doc = held.unwrap();
+
+  str out = code_lenses(&reads, &docs, doc);
+  assert contains(out, `"title":"2 implementations"`), "expected Speaks' own implementation count";
+  // Dog/Cat each show an ordinary reference count (declaration + own
+  // impl block), not an implementation count - only a quirk gets that.
+  assert contains(out, `"title":"2 references"`), "expected Dog/Cat's own ordinary reference counts";
+  assert !contains(out, `"title":"0 implementations"`), "expected no zero-implementation lens on Dog or Cat";
+}
+
 test "selection range expands from a token through each enclosing bracket pair, outermost last" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
