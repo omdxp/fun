@@ -3298,6 +3298,93 @@ test "a bare '.Variant' shorthand as a call argument completes to only its own e
   assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 }
 
+test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a field access, and when the arm is a ret, both while the document does not parse" {
+  str src = `enum TokenKind {
+  `  Comment,
+  `  NewLine,
+  `  Ident,
+  `}
+  `
+  `compound Token {
+  `  TokenKind kind;
+  `}
+  `
+  `fun is_trivia(Token t) num {
+  `  fit t.kind {
+  `    . -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}
+  `
+  `fun find_thing() TokenKind {
+  `  if 1 == 1 {
+  `    ret .
+  `  }
+  `  ret .Ident;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldfit.fn";
+  doc.path = "fieldfit.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 12, right after the dot in 'fit t.kind { . }': the fit's own
+  // subject is a field access ('t.kind', this codebase's own
+  // dominant idiom for matching an AST node's kind), not a bare
+  // local - the earlier fix only covered a bare local subject.
+  str field_fit = completion(&reads, doc, 12, 5, false);
+  assert contains(field_fit, `"label":"Comment","kind":20`), "expected TokenKind's own variants through a field-access fit subject";
+  assert contains(field_fit, `"label":"Ident","kind":20`), "expected every variant";
+  assert !contains(field_fit, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+
+  // Line 19, right after the dot in 'ret .': the enclosing function's
+  // own declared return type, TokenKind.
+  str ret_shape = completion(&reads, doc, 19, 9, false);
+  assert contains(ret_shape, `"label":"Comment","kind":20`), "expected TokenKind's own variants after a bare 'ret .'";
+  assert !contains(ret_shape, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
+test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Rect(num, num),
+  `  Point,
+  `}
+  `
+  `fun area(Shape s) num {
+  `  fit s {
+  `    . -> { ret 0; }
+  `  }
+  `  ret 0;
+  `}
+  `
+  `fun make() Shape {
+  `  ret .
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///payload.fn";
+  doc.path = "payload.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 8, right after the dot in the fit arm: the document does
+  // not parse (the bare '.' isn't valid on its own), exercising the
+  // token-only payload renderer.
+  str fit_arm = completion(&reads, doc, 8, 5, false);
+  assert contains(fit_arm, `"label":"Circle","kind":20,"detail":"Circle(num)"`), "expected a single-payload variant's own type rendered";
+  assert contains(fit_arm, `"label":"Rect","kind":20,"detail":"Rect(num, num)"`), "expected a multi-payload variant's own types rendered, comma-separated";
+  assert contains(fit_arm, `"label":"Point","kind":20,"detail":"Point"`), "expected a payload-free variant's own detail to stay bare";
+
+  // Line 14, right after the dot in 'ret .': same token-only payload
+  // renderer, reached through the return-type path instead.
+  str ret_shape = completion(&reads, doc, 14, 7, false);
+  assert contains(ret_shape, `"label":"Circle","kind":20,"detail":"Circle(num)"`), "expected the same payload rendering through 'ret .'";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
