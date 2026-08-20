@@ -3955,6 +3955,31 @@ test "semantic tokens mark a language primitive defaultLibrary, but any declared
   assert contains(out, "3,7,0,"), "expected Vec's own token NOT marked defaultLibrary";
 }
 
+test "semantic tokens classify a C builtin correctly against its own naming convention, not by capitalization" {
+  // NULL/EOF/... are uppercase but name a value, not a type; size_t/
+  // ptrdiff_t/... are lowercase but name a type, not a value - both
+  // read backwards from the ordinary capitalization-based guess this
+  // file otherwise uses to tell the two apart.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///cbuiltintok.fn";
+  doc.path = "cbuiltintok.fn";
+  doc.text = `fun main() num {
+  `  size_t n;
+  `  ret NULL;
+  `}`;
+  doc.version = 1;
+
+  str out = semantic_tokens(&reads, doc);
+  // size_t: length 6, type 7 (type), modifier 1 (defaultLibrary) -
+  // a C typedef, the same treatment num/i7 already get.
+  assert contains(out, "6,7,1,"), "expected size_t classified as a defaultLibrary type despite being lowercase";
+  // NULL: length 4, type 6 (variable), modifier 0 - a C constant, not
+  // a type, despite being uppercase.
+  assert contains(out, "4,6,0,"), "expected NULL classified as a variable despite being uppercase";
+}
+
 test "semantic tokens classify an enum variant's own name as enumMember, not a function call, generic payload included" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
