@@ -189,31 +189,50 @@ compound EnumVariantRef {
   str variant_name;
 }
 
-// The quick fix for a `fit does not handle 'Enum.Variant'` diagnostic:
-// a stub arm (`.Variant -> {}`, or `.Variant(v0, v1) -> {}` for a
-// data-carrying variant) inserted right before the fit's own closing
-// brace. "" when the message isn't shaped that way, or the enclosing
-// fit's closing brace can't be found.
+// The quick fix for a `fit does not handle 'Enum.A', 'Enum.B', ...`
+// diagnostic: a stub arm (`.Variant -> {}`, or `.Variant(v0, v1) ->
+// {}` for a data-carrying variant) for every variant the message
+// names, inserted together right before the fit's own closing brace.
+// "" when the message names none, or the enclosing fit's closing
+// brace can't be found.
 fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
-  let parsed = _enum_and_variant_from_message(d.message);
-  if parsed.is_none() {
+  Vec<EnumVariantRef> refs = _enum_and_variants_from_message(d.message);
+  defer refs.free();
+  if refs.len == 0 {
     ret "";
   }
-  EnumVariantRef ev = parsed.unwrap();
   Analyzed read = cache.of(doc);
   if !read.lexed || !read.parsed {
     ret "";
   }
-  // A stub's own shape only needs the variant's payload arity, not its
-  // concrete types, so no generic args are resolved here.
+  // A stub's own shape only needs each variant's payload arity, not
+  // its concrete types, so no generic args are resolved here.
   Vec<str> no_args;
   no_args.init(0);
-  let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
-  if variant.is_none() {
+
+  StringBuilder arms = string_builder_init(64);
+  StringBuilder title_names = string_builder_init(32);
+  num written = 0;
+  num ri = 0;
+  for ri < refs.len {
+    EnumVariantRef ev = refs.get(ri);
+    ri = ri + 1;
+    let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
+    if variant.is_none() {
+      continue;
+    }
+    num arity = _payload_arity(variant.unwrap().detail);
+    arms.append(format("  {str}\n", _stub_arm(ev.variant_name, arity)));
+    if written > 0 {
+      title_names.append(", ");
+    }
+    title_names.append(format("'{str}.{str}'", ev.enum_name, ev.variant_name));
+    written = written + 1;
+  }
+  if written == 0 {
     ret "";
   }
-  num arity = _payload_arity(variant.unwrap().detail);
-  str arm = _stub_arm(ev.variant_name, arity);
+
   Vec<Token> tokens = read.tokens;
   let close = _find_block_close(&tokens, d.line);
   if close.is_none() {
@@ -222,9 +241,13 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   Pos p = close.unwrap();
   num line0 = p.line - 1;
   num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
+  str title = format("Fill in missing {str} arm", title_names.build());
+  if written > 1 {
+    title = format("Fill in missing {str} arms", title_names.build());
+  }
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
-  b.append(json_quote(format("Fill in missing '{str}.{str}' arm", ev.enum_name, ev.variant_name)));
+  b.append(json_quote(title));
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
   b.append(json_quote(document_uri));
   b.append(`:[{"range":{"start":{"line":`);
@@ -236,30 +259,38 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   b.append(`,"character":`);
   b.append(format_num(character));
   b.append(`}},"newText":`);
-  b.append(json_quote(format("  {str}\n", arm)));
+  b.append(json_quote(arms.build()));
   b.append(`}]}}}`);
   ret b.build();
 }
 
-fun _enum_and_variant_from_message(str message) Option<EnumVariantRef> {
-  num open_q = index_of_char(message, '\'');
-  if open_q < 0 {
-    ret .None;
+// Every `'Enum.Variant'`-shaped reference the message names, in the
+// order it lists them.
+fun _enum_and_variants_from_message(str message) Vec<EnumVariantRef> {
+  Vec<EnumVariantRef> out;
+  out.init(2);
+  str rest = message;
+  for true {
+    num open_q = index_of_char(rest, '\'');
+    if open_q < 0 {
+      break;
+    }
+    str after_open = substr(rest, open_q + 1, len(rest) - open_q - 1);
+    num close_q = index_of_char(after_open, '\'');
+    if close_q < 0 {
+      break;
+    }
+    str inner = substr(after_open, 0, close_q);
+    num dot = index_of_char(inner, '.');
+    if dot >= 0 {
+      EnumVariantRef ev;
+      ev.enum_name = substr(inner, 0, dot);
+      ev.variant_name = substr(inner, dot + 1, len(inner) - dot - 1);
+      out.push(ev);
+    }
+    rest = substr(after_open, close_q + 1, len(after_open) - close_q - 1);
   }
-  str after_open = substr(message, open_q + 1, len(message) - open_q - 1);
-  num close_q = index_of_char(after_open, '\'');
-  if close_q < 0 {
-    ret .None;
-  }
-  str inner = substr(after_open, 0, close_q);
-  num dot = index_of_char(inner, '.');
-  if dot < 0 {
-    ret .None;
-  }
-  EnumVariantRef ev;
-  ev.enum_name = substr(inner, 0, dot);
-  ev.variant_name = substr(inner, dot + 1, len(inner) - dot - 1);
-  ret .Some(ev);
+  ret out;
 }
 
 // How many payload types `detail` (a variant's own rendered

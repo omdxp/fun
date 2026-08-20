@@ -1141,14 +1141,28 @@ impl Analysis {
       ret;
     }
     Vec<str> variants = declared.unwrap();
+    // Every missing variant is named in one warning rather than
+    // stopping at the first: a reader (and the fill-in-missing-arms
+    // codeAction, which parses every 'Enum.Variant' this message
+    // names) fixes them all at once instead of rebuilding once per
+    // variant to discover the next one.
+    StringBuilder missing = string_builder_init(32);
+    num missing_count = 0;
     num i = 0;
     for i < variants.len {
       str name = variants.get(i);
       i = i + 1;
-      if !covered.has(name) {
-        self.report(.FitNonExhaustive, format("fit does not handle '{str}.{str}'", over, name), stmt);
-        ret;
+      if covered.has(name) {
+        continue;
       }
+      if missing_count > 0 {
+        missing.append(", ");
+      }
+      missing.append(format("'{str}.{str}'", over, name));
+      missing_count = missing_count + 1;
+    }
+    if missing_count > 0 {
+      self.report(.FitNonExhaustive, format("fit does not handle {str}", missing.build()), stmt);
     }
   }
 

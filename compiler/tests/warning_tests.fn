@@ -314,6 +314,26 @@ test "a fit over a function parameter is checked exactly like one over a local" 
   assert contains(found, "Shape.Square"), "expected the message to name what is missing";
 }
 
+test "a fit missing several variants names every one of them, not just the first" {
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `  Triangle,
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variants to be noticed";
+  assert contains(found, "'Shape.Square'"), "expected Square named";
+  assert contains(found, "'Shape.Triangle'"), "expected Triangle named too, in the same warning";
+  // Only one warning for the whole fit, not one per missing variant.
+  assert count(found, "fit_non_exhaustive") == 1, "expected every missing variant folded into a single warning";
+}
+
 test "a fit over num or a pointer with no catch-all is noticed" {
   // Neither has a closed value set the way bin/enum do, so a catch-all
   // is the only way to be exhaustive.

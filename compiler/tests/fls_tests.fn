@@ -3172,6 +3172,50 @@ test "code actions fill in a fit's missing arm with a correctly-sized stub" {
   assert contains(out, `"start":{"line":7,"character":2}`), "expected the insertion right before the fit's closing brace";
 }
 
+test "code actions fill in every missing arm at once, not just the first" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///nonexhaustive_multi.fn";
+  doc.path = "nonexhaustive_multi.fn";
+  doc.text = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `  Triangle,
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 6;
+  d.col = 2;
+  d.end_line = 6;
+  d.end_col = 5;
+  d.severity = SEVERITY_WARNING;
+  // The compiler itself now names every missing variant in one
+  // message, not just the first - check_fit's own list, comma-joined.
+  d.message = "fit_non_exhaustive: fit does not handle 'Shape.Square', 'Shape.Triangle'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(
+    out,
+    `"title":"Fill in missing 'Shape.Square', 'Shape.Triangle' arms"`
+  ), "expected one fix naming both missing variants, plural";
+  assert contains(out, `.Square(v0) -> {}`), "expected a stub for Square";
+  assert contains(out, `.Triangle -> {}`), "expected a stub for Triangle too, in the same fix";
+  // Both stubs land in one edit, right before the fit block's own
+  // closing brace (line 8).
+  assert contains(out, `"start":{"line":8,"character":2}`), "expected one insertion point for both stubs";
+}
+
 test "code actions implement a quirk's missing method with its exact declared signature" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
