@@ -3115,6 +3115,63 @@ test "dot-completion after an enum's own type name or an instance of it lists it
   assert contains(instance, `"label":"Red","kind":20`), "expected the same variants completing through an instance";
 }
 
+test "dot-completion scopes to a local's own declared type even while the document does not parse" {
+  str enum_src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `fun main() {
+  `  Color c = Color.Green;
+  `  c.Blue;
+  `  fi
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfenum.fn";
+  doc.path = "halfenum.fn";
+  doc.text = enum_src;
+  doc.version = 1;
+
+  // Line 8, right after 'c.'; the bare 'fi' on the next line leaves
+  // the whole document unparseable, exactly the reported scenario.
+  str out = completion(&reads, doc, 8, 4, false);
+  assert contains(out, `"label":"Red","kind":20`), "expected every variant even though the document does not parse";
+  assert contains(out, `"label":"Green","kind":20`), "expected the second variant too, not just the one immediately after the opening brace";
+  assert contains(out, `"label":"Blue","kind":20`), "expected the third variant too, not just the one immediately after a comma";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+
+  str compound_src = `compound Vec2 {
+  `  dec x;
+  `  dec y;
+  `}
+  `
+  `impl Vec2 {
+  `  pub length() dec {
+  `    ret 0.0;
+  `  }
+  `}
+  `
+  `fun main() {
+  `  Vec2 v;
+  `  v.x;
+  `  fi
+  `}`;
+  Document doc2;
+  doc2.uri = "file:///halfcompound.fn";
+  doc2.path = "halfcompound.fn";
+  doc2.text = compound_src;
+  doc2.version = 1;
+
+  // Line 13, right after 'v.'.
+  str out2 = completion(&reads, doc2, 13, 4, false);
+  assert contains(out2, `"label":"x","kind":5`), "expected the compound's own field";
+  assert contains(out2, `"label":"length","kind":2`), "expected the impl's own method too, from a separate impl block";
+  assert !contains(out2, `"detail":"in this file"`), "expected real fields/methods, not the unscoped word list";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

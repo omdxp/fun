@@ -24,6 +24,7 @@ imp std.path;
 imp std.fs;
 imp std.ctype;
 imp std.result;
+imp std.map;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -100,6 +101,20 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       str alias_target = import_alias_target_from_tokens(&tokens, doc.path, receiver);
       if !equals(alias_target, "") {
         _alias_module_completions_fresh(alias_target, cache, &items, snippets);
+      }
+      if items.len == 0 {
+        // Not an alias either: `receiver` may still be a local whose
+        // own declared type reads straight off the tokens too (the
+        // `Type name` shape a declaration or a parameter always has),
+        // or it may already be a type's own name, the same
+        // self-reference `_bare_type_name` covers once there is a
+        // tree. Either way, what that type declares is read the same
+        // token-only way an alias's module already is above.
+        str local_type = _receiver_type_from_tokens(&tokens, receiver);
+        if equals(local_type, "") {
+          local_type = receiver;
+        }
+        _members_from_tokens(&tokens, local_type, &items);
       }
       if items.len == 0 {
         _written_names(&tokens, receiver, &items);
@@ -471,6 +486,126 @@ fun _abbreviations(Vec<Item>* items, bin snippets) {
     "a vector, initialized and freed",
     "Vec<${1:num}> ${2:items};\n${2:items}.init(${3:0});\ndefer ${2:items}.free();\n$0"
   ));
+}
+
+// The token right before `i`, skipping comments and newlines.
+fun _prev_real_token(Vec<Token>* tokens, num i) Option<Token> {
+  num j = i - 1;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+      j = j - 1;
+      continue;
+    }
+    ret .Some(t);
+  }
+  ret .None;
+}
+
+// The token right after `i`, skipping comments and newlines.
+fun _next_real_token(Vec<Token>* tokens, num i) Option<Token> {
+  num j = i + 1;
+  for j < tokens.len {
+    Token t = tokens.get(j);
+    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+      j = j + 1;
+      continue;
+    }
+    ret .Some(t);
+  }
+  ret .None;
+}
+
+// `name`'s own declared type, read straight off the raw tokens rather
+// than an AST: the first place `name` sits directly after another
+// identifier is either a local's own declaration or a parameter,
+// `Type name` either way, the only shape this grammar ever puts two
+// bare identifiers back to back in. "" when no such spot exists.
+fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.Identifier && equals(token_word(t), name) {
+      let prev = _prev_real_token(tokens, i);
+      if prev.is_some() && prev.unwrap().type == TokenType.Identifier {
+        ret token_word(prev.unwrap());
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// What `type_name` declares, read the same token-only way, for every
+// `compound`/`enum`/`quirk`/`impl` block naming it: a compound's own
+// fields, an enum's own variants, a quirk's or impl's own method
+// names. Never confirms `type_name` is real before scanning for it;
+// a name that never appears this way simply adds nothing, the same
+// safe no-op `_bare_type_name` gets from an AST that resolves it.
+fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
+  if equals(type_name, "") {
+    ret;
+  }
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != TokenType.Keyword {
+      continue;
+    }
+    str kw = token_word(t);
+    bin is_compound = equals(kw, "compound");
+    bin is_enum = equals(kw, "enum");
+    bin is_methods = equals(kw, "quirk") || equals(kw, "impl");
+    if !is_compound && !is_enum && !is_methods {
+      continue;
+    }
+    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier || !equals(token_word(tokens.get(i)), type_name) {
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+      j = j + 1;
+    }
+    if j >= tokens.len {
+      continue;
+    }
+    num depth = 1;
+    j = j + 1;
+    for j < tokens.len && depth > 0 {
+      Token bt = tokens.get(j);
+      if token_is_symbol(bt, '{') {
+        depth = depth + 1;
+        j = j + 1;
+        continue;
+      }
+      if token_is_symbol(bt, '}') {
+        depth = depth - 1;
+        j = j + 1;
+        continue;
+      }
+      if depth == 1 && bt.type == TokenType.Identifier {
+        str member_name = token_word(bt);
+        if is_enum {
+          let before = _prev_real_token(tokens, j);
+          if before.is_some() && (token_is_symbol(before.unwrap(), '{') || token_is_operator(before.unwrap(), ",")) {
+            items.push(_item(member_name, .EnumMember, member_name));
+          }
+        } elif is_compound {
+          let after = _next_real_token(tokens, j);
+          if after.is_some() && token_is_symbol(after.unwrap(), ';') {
+            items.push(_item(member_name, .Field, "field"));
+          }
+        } else {
+          let after = _next_real_token(tokens, j);
+          if after.is_some() && token_is_operator(after.unwrap(), "(") {
+            items.push(_snippet_item(member_name, .Method, "method", ""));
+          }
+        }
+      }
+      j = j + 1;
+    }
+  }
 }
 
 // Every distinct name already written in the file, offered when there
