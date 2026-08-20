@@ -714,11 +714,11 @@ fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Opti
 // declaration boundary if some other position it was derived from
 // went stale, and landing mid-signature there would silently split an
 // identifier in two.
-fun is_safe_splice_boundary(str full, num pos) bin {
-  if pos <= 0 || pos >= len(full) {
+fun is_safe_splice_boundary(StringBuilder* out, num pos) bin {
+  if pos <= 0 || pos >= out.len() {
     ret true;
   }
-  ret full[pos - 1] == '\n';
+  ret out.char_at(pos - 1) == '\n';
 }
 
 // True for a character C reads as part of a `\x` escape's digits.
@@ -3991,7 +3991,7 @@ impl Codegen {
   fn_proto_splice_pos(Vec<str> type_names) ProtoSplice {
     if self.state == self.root_state && self.current_fn_body_start_pos.is_some() {
       num fp = self.current_fn_body_start_pos.unwrap();
-      if self.fn_types_declared_before(type_names, fp) && is_safe_splice_boundary(self.state.out.build(), fp) {
+      if self.fn_types_declared_before(type_names, fp) && is_safe_splice_boundary(&self.state.out, fp) {
         if self.current_stmt_start_pos.is_some() && self.current_stmt_start_pos.unwrap() < fp {
           ProtoSplice broad_stmt;
           broad_stmt.pos = self.current_stmt_start_pos;
@@ -11186,15 +11186,15 @@ impl Codegen {
     // gets its own implementation in terms of Sleep.
     self.state.write(`#ifdef _WIN32
     `#include <windows.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000));
+    `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#else
     `#include <time.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
@@ -16055,15 +16055,15 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
     `#include <windows.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000));
+    `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#else
     `#include <time.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
@@ -16308,15 +16308,15 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
     `#include <windows.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000));
+    `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#else
     `#include <time.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif
@@ -17417,15 +17417,15 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
     `#include <windows.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000));
+    `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#else
     `#include <time.h>
-    `static void __fun_sleep_seconds(long long seconds) {
+    `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = seconds; __fun_sleep_ts.tv_nsec = 0;
+    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
     `}
     `#endif

@@ -134,6 +134,20 @@ impl StringBuilder {
     self.cap = 0;
   }
 
+  // The byte already appended at `i`, read directly from this
+  // builder's own buffer with no copy - `build()` materializes the
+  // whole thing into a fresh string, O(n) every call; a caller that
+  // only needs to look at one byte (checking what sits at a candidate
+  // splice position, say) does that copy for nothing, repeatedly, and
+  // it adds up on a large buffer. Out-of-range reads a nul byte,
+  // matching how the built string's own trailing terminator reads.
+  pub char_at(num i) chr {
+    if i < 0 || i >= self.total_len {
+      ret '\0';
+    }
+    ret self.buf[i];
+  }
+
   // A fresh, independently-owned copy of everything appended so far.
   // The builder's own buffer is untouched, so building again (or
   // appending more first) still works.
