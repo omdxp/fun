@@ -3346,6 +3346,35 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
   assert !contains(ret_shape, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 }
 
+test "a bare '.Variant' shorthand resolves a field-access fit subject even when the field's own type is declared in an imported file, not the current document" {
+  str src = `imp ..ast.ast;
+  `
+  `fun probe(Node* n) num {
+  `  fit n.kind {
+  `    . -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///compiler/fls/nodeprobe.fn";
+  doc.path = "compiler/fls/nodeprobe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 4, right after the dot: 'n's own type (Node) resolves
+  // locally from its own parameter declaration, but Node itself, and
+  // its own 'kind' field's type (NodeKind), are both declared in
+  // ast.fn - reached only through the plain '..ast.ast' import, the
+  // exact real-world shape this bug reproduced on
+  // (compiler/fls/symbols.fn's own `fit body.kind { ... }`).
+  str out = completion(&reads, doc, 4, 5, false);
+  assert contains(out, `"label":"Function","kind":20`), "expected NodeKind's own variants through Node's own field, reached across the import";
+  assert contains(out, `"label":"Compound","kind":20`), "expected another real variant too";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
 test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
   str src = `enum Shape {
   `  Circle(num),

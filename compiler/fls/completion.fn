@@ -100,9 +100,12 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     // completion.
     num shorthand_dot = _bare_dot_shorthand_index(&tokens, line, character);
     if shorthand_dot >= 0 {
-      str enum_name = _dot_shorthand_enum_type_from_tokens(&tokens, shorthand_dot);
+      str enum_name = _dot_shorthand_enum_type_from_tokens(&tokens, shorthand_dot, doc.path, cache);
       if !equals(enum_name, "") {
         _members_from_tokens(&tokens, enum_name, &items);
+        if items.len == 0 {
+          _enum_variants_from_imports(&tokens, doc.path, cache, enum_name, &items);
+        }
         if items.len > 0 {
           ret _reply(&items);
         }
@@ -723,6 +726,62 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
   ret "";
 }
 
+// `_field_type_from_tokens`'s own cross-file fallback: `type_name`
+// is very often declared in an imported file, not the current
+// document (`Node`, the receiver most `fit n.kind { ... }`
+// statements in this very codebase are written against, lives in
+// `ast.fn`) - each of the document's own imports is parsed fresh,
+// the same way the ordinary receiver-completion path already
+// searches them, and the field's own declared type is read back
+// through the real AST this time (`lookup_field`), since a fresh
+// parse gives one for free.
+fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str type_name, str field_name) str {
+  Vec<str> import_paths = resolved_import_paths(tokens, current_file);
+  defer import_paths.free();
+  num k = 0;
+  for k < import_paths.len {
+    str path = import_paths.get(k);
+    k = k + 1;
+    str text = read_to_string(path);
+    if text == nil {
+      continue;
+    }
+    let merged = parse_program_cached(path, text, &cache.imports);
+    if merged.is_err() {
+      continue;
+    }
+    ProgramMergeResult target = merged.unwrap();
+    let field = lookup_field(&target.nodes, type_name, field_name);
+    if field.is_some() {
+      ret bare_type_from_detail(field.unwrap().detail);
+    }
+  }
+  ret "";
+}
+
+// The same cross-file fallback, for the final step: `type_name`
+// itself (an enum, not just one of its fields) may be declared in an
+// import rather than the current document.
+fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str type_name, Vec<Item>* items) {
+  Vec<str> import_paths = resolved_import_paths(tokens, current_file);
+  defer import_paths.free();
+  num k = 0;
+  for k < import_paths.len && items.len == 0 {
+    str path = import_paths.get(k);
+    k = k + 1;
+    str text = read_to_string(path);
+    if text == nil {
+      continue;
+    }
+    let merged = parse_program_cached(path, text, &cache.imports);
+    if merged.is_err() {
+      continue;
+    }
+    ProgramMergeResult target = merged.unwrap();
+    _enum_variant_completions(&target.nodes, type_name, items);
+  }
+}
+
 // A variant's own detail, token-only: the bare name for a plain
 // enumerator, or `Name(type, type)` when it carries a payload,
 // rendered the same shape `_enum_variant_items` (the AST-driven
@@ -986,8 +1045,8 @@ fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx
 // callee's own declared parameter type token-only would need its own
 // declaration found and parsed the same way, a bigger piece than the
 // other three share for free through `_receiver_type_from_tokens`.
-fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx) str {
-  str fit_type = _enclosing_fit_subject_type_from_tokens(tokens, dot_idx);
+fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
+  str fit_type = _enclosing_fit_subject_type_from_tokens(tokens, dot_idx, current_file, cache);
   if !equals(fit_type, "") {
     ret fit_type;
   }
@@ -1094,7 +1153,7 @@ fun _function_header_return_type(Vec<Token>* tokens, num brace_idx) str {
 // at a time (an ordinary `if`/`for`/function body along the way is
 // simply not a fit, and the search continues past it to whatever
 // encloses that instead), token-only.
-fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx) str {
+fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
   num depth = 0;
   num j = dot_idx - 1;
   for j >= 0 {
@@ -1110,7 +1169,7 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx) str
         j = j - 1;
         continue;
       }
-      str subj_type = _fit_header_subject_type(tokens, j);
+      str subj_type = _fit_header_subject_type(tokens, j, current_file, cache);
       if !equals(subj_type, "") {
         ret subj_type;
       }
@@ -1133,7 +1192,7 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx) str
 // `_expr_type_name`, the AST-driven equivalent, resolves the same
 // shape). "" when this `{` isn't a fit's own, or the subject is
 // something deeper than these two.
-fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx) str {
+fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file, AnalysisCache* cache) str {
   num a = _prev_real_index(tokens, brace_idx);
   if a < 0 || tokens.get(a).type != TokenType.Identifier {
     ret "";
@@ -1160,7 +1219,15 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx) str {
   if equals(base_type, "") {
     ret "";
   }
-  ret _field_type_from_tokens(tokens, base_type, token_word(tokens.get(a)));
+  str field_name = token_word(tokens.get(a));
+  str local_field_type = _field_type_from_tokens(tokens, base_type, field_name);
+  if !equals(local_field_type, "") {
+    ret local_field_type;
+  }
+  // `base_type` (e.g. `Node`) is very often declared in an imported
+  // file rather than the current document, this codebase's own
+  // dominant idiom for a `fit n.kind { ... }` subject.
+  ret _field_type_from_imports(tokens, current_file, cache, base_type, field_name);
 }
 
 // The name a dot immediately before the cursor is reached through, or
