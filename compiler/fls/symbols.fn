@@ -1228,12 +1228,14 @@ pub fun matching_rparen(Vec<Token>* tokens, num lparen_idx) Option<num> {
 }
 
 // The best-effort inferred type of the `let` local whose own name
-// token sits at `name_idx`, read from its initializer. Shared by
-// `inlay_hints.fn` (a `let`-inferred local's own type hint) and
-// `type_name_of_local` (a chain's own receiver, when it's a
-// `let`-inferred local resolving further members needs its real
-// type, not the permanent `__let_infer__` sentinel `d.detail`
-// otherwise carries).
+// token sits at `name_idx`, read from its initializer, generic args
+// included when it has any (`Option<num>`, not just `Option`).
+// Shared by `inlay_hints.fn` (a `let`-inferred local's own type
+// hint), hover, and `type_name_of_local` (a chain's own receiver,
+// when it's a `let`-inferred local resolving further members needs
+// its real type, not the permanent `__let_infer__` sentinel
+// `d.detail` otherwise carries; that caller strips generic args back
+// off immediately after, so carrying them here costs it nothing).
 pub fun infer_let_local_type(
   Vec<Token>* tokens,
   num name_idx,
@@ -1241,7 +1243,26 @@ pub fun infer_let_local_type(
   str file,
   num line
 ) str {
-  ret infer_let_local_type_with_args(tokens, name_idx, program, file, line, nil);
+  Vec<str> args;
+  args.init(2);
+  defer args.free();
+  str base = infer_let_local_type_with_args(tokens, name_idx, program, file, line, &args);
+  if equals(base, "") || args.len == 0 {
+    ret base;
+  }
+  StringBuilder b = string_builder_init(32);
+  b.append(base);
+  b.append("<");
+  num i = 0;
+  for i < args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    b.append(args.get(i));
+    i = i + 1;
+  }
+  b.append(">");
+  ret b.build();
 }
 
 // `infer_let_local_type`, also writing the resolved type's own generic

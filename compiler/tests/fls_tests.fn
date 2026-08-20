@@ -199,6 +199,32 @@ test "a generic method on a let-inferred receiver specializes, not the bare temp
   assert !contains(hovered, "self) T"), "expected no unspecialized template leaking through";
 }
 
+test "hover and inlay hints show a let-inferred local's own concrete generic type, not just the bare template" {
+  str src = `imp std.option;
+  `fun make() Option<num> {
+  `  Option<num> o;
+  `  ret o;
+  `}
+  `fun main() num {
+  `  let r = make();
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letgeneric.fn";
+  doc.path = "letgeneric.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Hover on 'r' (line 6, "  let r = make();", col 6).
+  str hovered = hover(&reads, doc, 6, 6);
+  assert contains(hovered, "Option<num> r"), "expected the concrete generic arg (num), not just the bare 'Option'";
+
+  str hints = inlay_hints(&reads, doc, 0, 8);
+  assert contains(hints, `": Option<num>"`), "expected the same concrete generic arg in the inlay hint";
+}
+
 test "definition_workspace_wide respects cross-file pub visibility" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
