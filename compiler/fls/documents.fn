@@ -79,6 +79,12 @@ impl Documents {
     str replacement,
     num version
   ) {
+    // A ranged edit against a document this server has no baseline
+    // for (never opened, or already closed) has nothing to apply the
+    // edit against - refusing it, rather than guessing at a baseline,
+    // is deliberate: it leaves the server's own state exactly as
+    // absent as before, matching what a client that never sent a
+    // matching didOpen should expect.
     let existing = self.open.at(document_uri);
     if existing.is_none() {
       ret;

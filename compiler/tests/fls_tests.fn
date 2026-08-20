@@ -1280,6 +1280,22 @@ test "an outline carries a location a client can jump to" {
   assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
 }
 
+test "a ranged edit against a document with no baseline is refused, not applied against a guess" {
+  Documents docs = documents_new();
+  defer docs.free();
+
+  // No didOpen for this uri at all - the ranged edit a client would
+  // send for an ordinary keystroke has nothing to apply against.
+  docs.edited("file:///never-opened.fn", 0, 0, 0, 0, "x", 2);
+  assert docs.at("file:///never-opened.fn").is_none(), "expected no document to spring into existence from a ranged edit alone";
+
+  // Same refusal once a document that *was* open is closed.
+  docs.opened("file:///closed.fn", "abc", 1);
+  docs.closed("file:///closed.fn");
+  docs.edited("file:///closed.fn", 0, 0, 0, 1, "x", 2);
+  assert docs.at("file:///closed.fn").is_none(), "expected the edit to be refused, not to reopen the document";
+}
+
 test "workspace symbol search matches by name, case-insensitively, across every open document" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
