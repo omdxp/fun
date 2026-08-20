@@ -1868,6 +1868,53 @@ test "a quirk-conforming impl's own method resolves, mangled name de-mangled cor
   assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the quirk-conforming method's own bare name resolved and specialized, not the mangled Quirk__method form";
 }
 
+test "an impl method whose own written name starts with an underscore resolves correctly, in hover, completion, and let-inference" {
+  // bare_method_name's own "everything after the last '__'" rule
+  // breaks when the method's own name starts with an underscore too:
+  // the mangled form (Widget___helper, three raw underscores where
+  // the separator's own two meet the method's own one) has its
+  // rightmost valid '__' pair sitting one character short of the
+  // true separator, silently dropping the method's own leading
+  // underscore and never matching the name a reader actually wrote.
+  // User-reported, live against compiler/lexer/lexer.fn's own
+  // self._start_pos() call inside a let.
+  str src = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  _helper() num {
+  `    ret 0;
+  `  }
+  `  _infer_me() num {
+  `    let x = self._helper();
+  `    ret x;
+  `  }
+  `}
+  `fun use_it(Widget* w) num {
+  `  ret w._helper();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///underscoremethod.fn";
+  doc.path = "underscoremethod.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Completion right after 'w.' (line 13).
+  str completed = completion(&reads, doc, 13, 8, false);
+  assert contains(completed, `"label":"_helper"`), "expected the method's own written name, leading underscore included, in completion";
+
+  // Hover on the call site (line 13).
+  str hovered = hover(&reads, doc, 13, 10);
+  assert contains(hovered, "_helper(Widget* self) num"), "expected the method's own bare name resolved, not 'helper' with the leading underscore silently dropped";
+
+  // let x = self._helper(); (line 8) should infer 'num', not fail
+  // silently because the method lookup itself never matched.
+  str inferred_hover = hover(&reads, doc, 8, 8);
+  assert contains(inferred_hover, "num x"), "expected the let-inferred type through an underscore-prefixed method call";
+}
+
 test "a constant string value with an embedded quote is escaped exactly once, either source form" {
   // User-reported (via the raw-string case): a lexed string node's
   // own content is the lexer's as-written text, not a decoded value.
@@ -2342,6 +2389,29 @@ test "hover on a function or method shows a defaulted parameter's own default va
 
   str method_hover = hover(&reads, doc, 7, 6);
   assert contains(method_hover, "num x = 10"), "expected the method's own defaulted param";
+}
+
+test "hovering a parameter shows only its own type and name, not the enclosing function's own doc comment leaked onto it" {
+  // A parameter's own line is always its enclosing function's own
+  // declaration line, never a separate one of its own - the ordinary
+  // doc-comment-above lookup found the function's own doc and
+  // attached it to the parameter's hover too, as though the parameter
+  // itself carried that doc.
+  str src = `// Greets someone by name.
+  `fun greet(str name) str {
+  `  ret name;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///paramdoc.fn";
+  doc.path = "paramdoc.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 16);
+  assert contains(hovered, "str name"), "expected the parameter's own type and name";
+  assert !contains(hovered, "Greets someone"), "expected the enclosing function's own doc comment not to leak onto its parameter's hover";
 }
 
 test "a bare variant shorthand resolves in a comparison, an assignment, and a call argument, not just a fit or a ret" {

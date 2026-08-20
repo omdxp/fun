@@ -740,22 +740,33 @@ fun _is_type_param_ident_char(chr c) bin {
   ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-// A method's own name, with the `Type__` prefix it is mangled with
-// removed (an impl method's `f.name` is never the bare name a reader
-// wrote; see `completion.fn`'s own `_method_label`, the same
-// de-mangling under a different name for a different caller).
 // A method's own written name, with whatever it was mangled with
 // removed: `Type__method` for a plain impl, `Type__Quirk__method`
 // for one conforming to a quirk (see `_parse_impl_method`'s own
-// `gen_name` construction). Either way, the real name is everything
-// after the last `__` separator, since neither a type nor a quirk
-// name is ever written with one of its own.
+// `gen_name` construction). Neither a type nor a quirk name is ever
+// written with a leading or embedded `__` of its own, but the
+// method's own name can start with one; the separator is always the
+// first two underscores of whichever run sits at that boundary, not
+// just the rightmost matching pair.
 pub fun bare_method_name(str mangled) str {
   num n = len(mangled);
   num i = n - 1;
   for i > 0 {
     if mangled[i] == '_' && mangled[i - 1] == '_' {
-      ret substr(mangled, i + 1, n - i - 1);
+      // Found the end of a run of underscores, not necessarily the
+      // mangler's own fixed two-character separator by itself: a
+      // private method's own name can start with one or more
+      // underscores of its own, immediately following the separator
+      // (`Type___method` for a `_method`, three raw underscores in a
+      // row). Walk back to the run's own start first, so only the
+      // separator's own two characters are consumed and the rest,
+      // including any leading underscore the method was actually
+      // written with, is returned intact.
+      num run_start = i;
+      for run_start > 0 && mangled[run_start - 1] == '_' {
+        run_start = run_start - 1;
+      }
+      ret substr(mangled, run_start + 2, n - run_start - 2);
     }
     i = i - 1;
   }

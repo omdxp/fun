@@ -173,7 +173,11 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     }
   }
   str doc_comment = "";
-  if !equals(source_text, "") {
+  // A parameter's own line is always its enclosing function's own
+  // declaration line, never one of its own - looking above it finds
+  // the function's own doc comment, not the parameter's, and showing
+  // it here reads as though the parameter carries a doc of its own.
+  if !equals(source_text, "") && d.kind != DeclarationKind.Parameter {
     doc_comment = doc_comment_above(source_text, d.pos.line);
     // A field or variant with no leading block of its own falls back
     // to a trailing same-line comment (`Circle(num), // meaning`),
@@ -1101,7 +1105,8 @@ pub fun keyword_doc(str word) str {
       `compound Name {
       `  num field;
       `}`,
-      `Declares a struct-like type: a fixed set of named, typed fields.`
+      `Declares a type with a fixed set of named, typed fields. Its own
+      `impl block can give it methods, and it can implement a quirk.`
     );
   }
   if equals(word, "let") {
