@@ -888,6 +888,26 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
         _collect_locals(branch.body, items, program, file, line);
       }
     }
+    // A `for`'s own loop variable, bound by the statement itself
+    // rather than declared inside its body - see symbols.fn's own
+    // `_lookup_in_body`, whose `.StatementFor` case this mirrors.
+    .StatementFor(fk) -> {
+      fit fk {
+        .Range(fr) -> {
+          items.push(_item(fr.index_name, .Variable, "num"));
+          _collect_locals(fr.body, items, program, file, line);
+        }
+        .Iter(fi) -> {
+          if fi.has_index_name {
+            items.push(_item(fi.index_name, .Variable, "num"));
+          }
+          str item_type = _for_iter_item_type(fi.iterable, program, file, line);
+          items.push(_item(fi.item_name, .Variable, item_type));
+          _collect_locals(fi.body, items, program, file, line);
+        }
+        .Cond(fc) -> { _collect_locals(fc.body, items, program, file, line); }
+      }
+    }
     _ -> {
       let nested = single_nested_body(body);
       if nested.is_some() {

@@ -1215,6 +1215,39 @@ test "workspace symbol search matches by name, case-insensitively, across every 
   assert !equals(workspace_symbols(&docs, &reads, &symbols, ""), "[]"), "expected an empty query to match everything";
 }
 
+test "workspace symbol search scores and sorts matches: exact, then prefix, then substring, then fuzzy subsequence" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+  // widget: exact match. widgetFactory: prefix match. myWidget:
+  // substring match. wgt: fuzzy subsequence match (w-g-t in order).
+  docs.opened("file:///wsort.fn", `fun widget() num { ret 1; }
+  `fun widgetFactory() num { ret 1; }
+  `fun myWidget() num { ret 1; }
+  `fun wgt() num { ret 1; }`, 1);
+
+  str matches = workspace_symbols(&docs, &reads, &symbols, "widget");
+  num exact_pos = index_of_str(matches, `"name":"widget"`);
+  num prefix_pos = index_of_str(matches, `"name":"widgetFactory"`);
+  num substr_pos = index_of_str(matches, `"name":"myWidget"`);
+  assert exact_pos >= 0 && prefix_pos >= 0 && substr_pos >= 0, "expected all three name matches present";
+  assert exact_pos < prefix_pos, "expected the exact match ranked before the prefix match";
+  assert prefix_pos < substr_pos, "expected the prefix match ranked before the plain substring match";
+  assert !contains(matches, `"name":"wgt"`), "expected wgt excluded, it doesn't contain 'widget' as a substring or subsequence";
+
+  // A genuinely fuzzy query: "wgt" is a subsequence of "widget" too,
+  // but wgt's own exact match should still rank first.
+  str fuzzy = workspace_symbols(&docs, &reads, &symbols, "wgt");
+  assert contains(fuzzy, `"name":"wgt"`), "expected wgt's own exact match";
+  num wgt_exact_pos = index_of_str(fuzzy, `"name":"wgt"`);
+  num widget_fuzzy_pos = index_of_str(fuzzy, `"name":"widget"`);
+  assert widget_fuzzy_pos >= 0, "expected widget matched as a fuzzy subsequence of wgt";
+  assert wgt_exact_pos < widget_fuzzy_pos, "expected wgt's own exact match ranked above widget's fuzzy match";
+}
+
 test "a workspace-indexed document is visible alongside open ones, but an open one always wins" {
   str base = "fun-out/_workspace_index_test";
   make_dir_all(base);
@@ -2304,6 +2337,45 @@ test "hover and completion resolve a local declared inside a defer block" {
 
   str completed = completion(&reads, doc, 3, 10, false);
   assert contains(completed, `"label":"cleanup_count"`), "expected the defer-block local offered in scope completion";
+}
+
+test "hover and completion resolve a for loop's own bound variables, item type inferred from the iterable" {
+  // A for loop's own item/index names are bound by the statement
+  // itself, not declared inside its body the way an ordinary local
+  // is - neither _lookup_in_body nor completion's own _collect_locals
+  // had a StatementFor case at all, so none of these ever resolved.
+  // User-reported.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///forlocal.fn";
+  doc.path = "forlocal.fn";
+  doc.text = `fun use_it(Vec<num> xs) num {
+  `  for v : xs {
+  `    ret v;
+  `  }
+  `  for idx, item :: xs {
+  `    ret idx + item;
+  `  }
+  `  for i : 0..10 {
+  `    ret i;
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  // `for v : xs` - the item's own type inferred from xs's own
+  // declared Vec<num>.
+  assert contains(hover(&reads, doc, 2, 8), "num v"), "expected the for-each item typed from the iterable's own element type";
+  str offered = completion(&reads, doc, 2, 8, false);
+  assert contains(offered, `"label":"v"`), "expected the for-each item offered in scope completion";
+
+  // `for idx, item :: xs` - both bound names.
+  assert contains(hover(&reads, doc, 5, 8), "num idx"), "expected the two-variable form's own index, always num";
+  assert contains(hover(&reads, doc, 5, 14), "num item"), "expected the two-variable form's own item, typed from the iterable";
+
+  // `for i : 0..10` - a range loop's own index, always num.
+  assert contains(hover(&reads, doc, 8, 8), "num i"), "expected the range loop's own index";
 }
 
 test "hover and completion resolve a local declared inside a fit arm, including inside an impl method" {

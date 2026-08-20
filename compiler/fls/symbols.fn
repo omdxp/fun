@@ -1417,7 +1417,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if !covers_body(n, td.body, file, line) {
           continue;
         }
-        let found = _lookup_in_body(td.body, name);
+        let found = _lookup_in_body(td.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -1434,7 +1434,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if param.is_some() {
           ret param;
         }
-        let found = _lookup_in_body(fz.body, name);
+        let found = _lookup_in_body(fz.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -1499,7 +1499,7 @@ fun _lookup_in_function(FunctionNode f, str name, Vec<Node>* program, str file, 
     }
   }
   if f.has_body {
-    let found = _lookup_in_body(f.body, name);
+    let found = _lookup_in_body(f.body, name, program, file, line);
     if found.is_some() {
       ret found;
     }
@@ -1692,7 +1692,7 @@ fun _last_line(Node* body) num {
 
 // A variable declared anywhere in `body`, including inside a nested
 // block, since a name is in scope for everything that follows it.
-fun _lookup_in_body(Node* body, str name) Option<Declaration> {
+fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
   if body == nil {
     ret .None;
   }
@@ -1709,7 +1709,7 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        let found = _lookup_in_body(block.statements.get(i), name);
+        let found = _lookup_in_body(block.statements.get(i), name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -1721,20 +1721,75 @@ fun _lookup_in_body(Node* body, str name) Option<Declaration> {
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
         i = i + 1;
-        let found = _lookup_in_body(branch.body, name);
+        let found = _lookup_in_body(branch.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
       }
     }
+    // A `for`'s own loop variable (`item`/`index` in `for item : xs`,
+    // `for i, item :: xs`, or `index` in `for i : a..b`) is bound by
+    // the statement itself, not declared inside its body the way an
+    // ordinary local is - checked here before recursing in, the same
+    // shape a fit's own destructuring bindings already get above.
+    .StatementFor(fk) -> {
+      fit fk {
+        .Range(fr) -> {
+          if equals(fr.index_name, name) {
+            ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
+          }
+          ret _lookup_in_body(fr.body, name, program, file, line);
+        }
+        .Iter(fi) -> {
+          if fi.has_index_name && equals(fi.index_name, name) {
+            ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
+          }
+          if equals(fi.item_name, name) {
+            str item_type = _for_iter_item_type(fi.iterable, program, file, line);
+            str detail = name;
+            if !equals(item_type, "") {
+              detail = format("{str} {str}", item_type, name);
+            }
+            ret .Some(_declaration(name, .Local, detail, body.pos));
+          }
+          ret _lookup_in_body(fi.body, name, program, file, line);
+        }
+        .Cond(fc) -> { ret _lookup_in_body(fc.body, name, program, file, line); }
+      }
+    }
     _ -> {
       let nested = single_nested_body(body);
       if nested.is_some() {
-        ret _lookup_in_body(nested.unwrap(), name);
+        ret _lookup_in_body(nested.unwrap(), name, program, file, line);
       }
     }
   }
   ret .None;
+}
+
+// A for-each loop's own iterable, best-effort: a bare local's own
+// declared generic argument (`Vec<num> nums` -> `num`), the common
+// shape. "" for anything deeper (a chain, a call), matching this
+// file's own established scope for AST-only, token-free inference
+// elsewhere (`fit_subject_type` and its own siblings).
+pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num line) str {
+  if iterable == nil {
+    ret "";
+  }
+  fit iterable.kind {
+    .Identifier(s) -> {
+      let found = _lookup_local(program, s, file, line);
+      if found.is_none() {
+        ret "";
+      }
+      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
+      if args.len == 0 {
+        ret "";
+      }
+      ret args.get(0);
+    }
+    _ -> { ret ""; }
+  }
 }
 
 // The type name of an arbitrary expression, as far as `fit_subject_type`

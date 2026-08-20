@@ -124,18 +124,51 @@ fun _outline_kind_for(Declaration d) OutlineKind {
 pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbolTable* symbols, str query) str {
   symbols.ensure_all(cache, docs);
   str lower_query = to_lower(query);
-  StringBuilder b = string_builder_init(256);
-  b.append("[");
-  bin any = false;
   Vec<str> names = symbols.by_name.keys();
   defer names.free();
+
+  // Every name worth showing, scored (exact > prefix > substring >
+  // fuzzy subsequence) and sorted best-first, rather than emitted in
+  // whatever order the table's own map happens to iterate.
+  Vec<str> matched;
+  matched.init(names.len);
+  defer matched.free();
+  Vec<num> scores;
+  scores.init(names.len);
+  defer scores.free();
   num ni = 0;
   for ni < names.len {
     str name = names.get(ni);
     ni = ni + 1;
-    if !equals(lower_query, "") && !contains(to_lower(name), lower_query) {
+    num score = _symbol_match_score(to_lower(name), lower_query);
+    if score <= 0 {
       continue;
     }
+    matched.push(name);
+    scores.push(score);
+  }
+  num si = 1;
+  for si < matched.len {
+    str name_key = matched.get(si);
+    num score_key = scores.get(si);
+    num sj = si - 1;
+    for sj >= 0 && scores.get(sj) < score_key {
+      matched.set(sj + 1, matched.get(sj));
+      scores.set(sj + 1, scores.get(sj));
+      sj = sj - 1;
+    }
+    matched.set(sj + 1, name_key);
+    scores.set(sj + 1, score_key);
+    si = si + 1;
+  }
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num mi = 0;
+  for mi < matched.len {
+    str name = matched.get(mi);
+    mi = mi + 1;
     let bucket_opt = symbols.by_name.at(name);
     if bucket_opt.is_none() {
       continue;
@@ -170,6 +203,46 @@ pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbol
   }
   b.append("]");
   ret b.build();
+}
+
+// `lower_name`'s own match strength against `lower_query` (both
+// already lowercased), higher is better: exact, then a prefix, then
+// an ordinary substring, then a fuzzy subsequence (every character of
+// the query appears in the name, in order, not necessarily
+// contiguous - "wst" matches "WorkspaceSymbolTable"). 0 for no match
+// at all. An empty query matches everything equally, the same "show
+// the whole workspace" behavior a blank search box already implies.
+fun _symbol_match_score(str lower_name, str lower_query) num {
+  if equals(lower_query, "") {
+    ret 1;
+  }
+  if equals(lower_name, lower_query) {
+    ret 1000;
+  }
+  if starts_with(lower_name, lower_query) {
+    ret 500;
+  }
+  if contains(lower_name, lower_query) {
+    ret 250;
+  }
+  if _is_subsequence(lower_query, lower_name) {
+    ret 100;
+  }
+  ret 0;
+}
+
+fun _is_subsequence(str needle, str haystack) bin {
+  num ni = 0;
+  num hi = 0;
+  num nlen = len(needle);
+  num hlen = len(haystack);
+  for ni < nlen && hi < hlen {
+    if needle[ni] == haystack[hi] {
+      ni = ni + 1;
+    }
+    hi = hi + 1;
+  }
+  ret ni == nlen;
 }
 
 // What `nodes` declares in `file`, in source order. Only the file's own
