@@ -9,9 +9,15 @@
 
 imp positions;
 imp symbols;
+imp protocol;
+imp documents;
+imp analysis;
+imp uri;
+imp ..ast.ast;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;
+imp std.io;
 imp std.vec;
 imp std.option;
 imp std.fs;
@@ -36,17 +42,25 @@ pub fun import_target(Vec<Token>* tokens, str current_file, num line, num charac
     ret "";
   }
   str specifier = _specifier_through(tokens, t);
+  ret _resolve_specifier(current_file, specifier);
+}
+
+// Where a dotted import specifier (`std.c.io`, `..lexer.lexer`, a
+// whole or partial path as a reader would write it) leads: a resolved
+// file path, a directory's own README.md when it has one, or a bare
+// directory path when it doesn't (real but undocumented, like
+// `std.c`). "" when `specifier` doesn't resolve to anything real.
+fun _resolve_specifier(str current_file, str specifier) str {
   if equals(specifier, "") {
     ret "";
   }
   // `std` alone names the stdlib's own namespace prefix, not a real
   // sibling file or subdirectory of the importing file's own
-  // directory -- resolve_import_path only recognizes a `std.`-
-  // prefixed (dotted) path as a stdlib reference, so it's resolved
-  // through a known-existing stdlib file (`std.io`, always real)
-  // instead, taking the directory two levels up from it (past `io.fn`
-  // and past `std/` itself) to reach the stdlib root, where its own
-  // README lives.
+  // directory. resolve_import_path only recognizes a `std.`-prefixed
+  // (dotted) path as a stdlib reference, so it's resolved through a
+  // known-existing stdlib file (`std.io`, always real) instead, taking
+  // the directory two levels up from it (past `io.fn` and past `std/`
+  // itself) to reach the stdlib root, where its own README lives.
   if equals(specifier, "std") {
     str anchor = resolve_import_path(current_file, "std.io");
     str root_readme = path_join(dirname(dirname(anchor)), "README.md");
@@ -59,13 +73,13 @@ pub fun import_target(Vec<Token>* tokens, str current_file, num line, num charac
   if exists(resolved) {
     ret resolved;
   }
-  // The hovered segment may name a directory rather than a file --
+  // The specifier may name a directory rather than a file.
   // resolve_import_path always assumes a trailing ".fn" module, so
   // strip that back off and check. A directory with no README of its
   // own (an intermediate namespace segment like `std.c`, real but
   // undocumented) still names something real, so its own path is
-  // returned rather than "" -- `_import_hover_result` shows a minimal
-  // fallback for a directory target instead of trying to read it.
+  // returned rather than "": callers show a minimal fallback for a
+  // directory target instead of trying to read it.
   if ends_with(resolved, ".fn") {
     str as_dir = substr(resolved, 0, len(resolved) - 3);
     if is_dir(as_dir) {
@@ -77,6 +91,103 @@ pub fun import_target(Vec<Token>* tokens, str current_file, num line, num charac
     }
   }
   ret "";
+}
+
+// What `imp path as name;` resolves to, when this document itself
+// declares that alias. Lets hovering or jumping from the alias at a
+// use site (`cmath.sqrt(...)`), not just from inside the import
+// statement that names it, lead somewhere too. Only this document's
+// own top-level statements are checked (`entry_nodes`, not the whole
+// transitively-merged program), since an alias is scoped to the file
+// that declares it. "" when `name` isn't a declared alias here.
+pub fun import_alias_target(Vec<Node>* entry_nodes, str current_file, str name) str {
+  num i = 0;
+  for i < entry_nodes.len {
+    Node n = entry_nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Import(imp_node) -> {
+        if imp_node.has_alias && equals(imp_node.alias, name) {
+          ret _resolve_specifier(current_file, imp_node.path);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
+// One link per `imp` statement's own dotted path, spanning the whole
+// specifier and pointing at what it resolves to, the same target
+// `import_target` would give for a cursor anywhere in it. A client
+// renders these as clickable/hoverable ranges up front, without a
+// cursor ever landing on the path first the way hover/go-to-definition
+// need. Specifiers that don't resolve to anything real (a typo, or
+// something the parser accepts but the filesystem doesn't have) are
+// silently skipped, not reported as broken links.
+pub fun document_links(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "[]";
+  }
+  Vec<Token>* tokens = &read.tokens;
+  str current_file = doc.path;
+  str doc_text = doc.text;
+  StringBuilder b = string_builder_init(128);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != TokenType.Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 {
+      Token first = tokens.get(i + 1);
+      Token last = tokens.get(j - 1);
+      str specifier = _specifier_through(tokens, last);
+      str resolved = _resolve_specifier(current_file, specifier);
+      if !equals(resolved, "") {
+        num start_line = first.pos.line - 1;
+        num end_line = last.pos.line - 1;
+        num start_char = byte_col_to_utf16_char(doc_text, start_line, first.pos.start_col - 1);
+        num end_char = byte_col_to_utf16_char(doc_text, end_line, last.pos.end_col - 1);
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(format(
+          `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"target":{str}}`,
+          start_line,
+          start_char,
+          end_line,
+          end_char,
+          json_quote(path_to_uri(resolved))
+        ));
+      }
+    }
+    i = j;
+  }
+  b.append("]");
+  ret b.build();
 }
 
 // True when `t` sits somewhere in an `imp path.path;` statement's own
@@ -109,7 +220,7 @@ fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
 }
 
 // The dotted specifier from the start of the import path through `t`
-// (inclusive), as a reader would write it -- hovering an intermediate
+// (inclusive), as a reader would write it. Hovering an intermediate
 // segment (`std` in `std.channel`) resolves only that much of it.
 fun _specifier_through(Vec<Token>* tokens, Token t) str {
   num end = index_of_token(tokens, t);

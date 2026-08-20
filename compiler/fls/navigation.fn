@@ -105,6 +105,17 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
 
   let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
+    // Not a declared symbol at all, but it may still be an import
+    // alias (`imp std.c.math as cmath;`) used at a call site
+    // (`cmath.sqrt(...)`) rather than in the import statement itself,
+    // the only other shape `import_target` above doesn't already
+    // cover, since the cursor here isn't on the import path.
+    if read.parsed {
+      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      if !equals(alias_target, "") {
+        ret _import_hover_result(alias_target, span_of(t, doc.text));
+      }
+    }
     ret NO_HOVER;
   }
   Declaration d = declared.unwrap();
@@ -192,21 +203,38 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
 
   str target = import_target(&tokens, doc.path, line, character);
   if !equals(target, "") {
-    StringBuilder ib = string_builder_init(96);
-    ib.append("[");
-    ib.append(format(
-      `{"uri":{str},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
-      json_quote(path_to_uri(target))
-    ));
-    ib.append("]");
-    ret ib.build();
+    ret _file_start_location_result(target);
   }
 
   let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
+    // Not a declared symbol, but possibly an import alias used at a
+    // call site (`cmath.sqrt(...)`) rather than in the import
+    // statement itself. Mirrors hover's own fallback above.
+    if read.parsed {
+      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      if !equals(alias_target, "") {
+        ret _file_start_location_result(alias_target);
+      }
+    }
     ret NO_LOCATION;
   }
   ret _location_result(doc, declared.unwrap());
+}
+
+// A jump straight to the start of `target_path` (a whole file or
+// README, not a specific declaration inside it). What an import path
+// segment or alias resolves to, which names a module, not a position
+// within one.
+fun _file_start_location_result(str target_path) str {
+  StringBuilder b = string_builder_init(96);
+  b.append("[");
+  b.append(format(
+    `{"uri":{str},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
+    json_quote(path_to_uri(target_path))
+  ));
+  b.append("]");
+  ret b.build();
 }
 
 // `definition`, extended with a last-resort fallback: when the
@@ -955,10 +983,12 @@ pub fun keyword_doc(str word) str {
   }
   if equals(word, "imp") {
     ret _doc(
-      `imp std.io;
-      `imp ..lexer.token;`,
+      `imp module.path;
+      `imp ..sibling.module;
+      `imp module.path as alias;`,
       `Imports another module. A leading run of dots steps up out of the
-      `importing file's own directory.`
+      `importing file's own directory. as gives it a shorter name to
+      `qualify its own symbols with.`
     );
   }
   if equals(word, "impl") {

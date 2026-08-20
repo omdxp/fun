@@ -8,6 +8,7 @@
 imp documents;
 imp analysis;
 imp symbols;
+imp imports;
 imp signature_help;
 imp inlay_hints;
 imp protocol;
@@ -120,6 +121,17 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     }
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items, snippets);
+    } else {
+      // `receiver` may be an import alias (`imp std.c.math as cmath;`)
+      // rather than a value at all. `cmath.` names a module, not a
+      // type, so nothing above resolves it. What the alias's own
+      // module contributes is already merged into `program.nodes`, so
+      // this offers its top-level functions the same way `cmath.sqrt`
+      // would actually resolve at compile time.
+      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, receiver);
+      if !equals(alias_target, "") {
+        _alias_module_completions(&program.nodes, alias_target, &items, snippets);
+      }
     }
     if items.len == 0 {
       _written_names(&tokens, receiver, &items);
@@ -674,6 +686,34 @@ fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
           f = f + 1;
           items.push(_item(cf.name, .Field, render_type(cf.dtype)));
         }
+      }
+      _ -> {}
+    }
+  }
+}
+
+// The top-level functions `module_path` (an aliased import's own
+// resolved file) declares, offered under its own alias the same way
+// `cmath.sqrt` actually resolves at compile time. A namespace
+// qualifier names a module, not a type, so this walks by declaring
+// file rather than by type name the way `_members_of` does. Every
+// declaration reached through the alias's own import is already
+// merged into `program`, cross-alias name collisions aside.
+fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* items, bin snippets) {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    if !equals(n.pos.filename, module_path) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if !f.has_name || equals(f.name, "") {
+          continue;
+        }
+        str fn_detail = render_function(f);
+        items.push(_snippet_item(f.name, .Function, fn_detail, _call_snippet(f.name, fn_detail, false, snippets)));
       }
       _ -> {}
     }

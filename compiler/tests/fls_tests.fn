@@ -17,6 +17,7 @@ imp ..fls.folding_range;
 imp ..fls.code_lens;
 imp ..fls.selection_range;
 imp ..fls.call_hierarchy;
+imp ..fls.imports;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
@@ -1100,6 +1101,64 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
   doc2.version = 1;
   str deep_hover = hover(&reads, doc2, 0, 23);
   assert contains(deep_hover, "Vec<Token>"), "expected the same doc comment through a four-dot path";
+}
+
+test "documentLink covers a resolvable import's own path, and silently skips one that doesn't resolve" {
+  str src = `imp std.io;
+  `imp ..lexer.lexer;
+  `imp nope.nope;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///compiler/fls/linkprobe.fn";
+  doc.path = "compiler/fls/linkprobe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_links(&reads, doc);
+  assert contains(out, `"target":"file://`), "expected at least one resolved link";
+  assert contains(out, "stdlib/std/io.fn"), "expected std.io's own link target";
+  assert contains(out, "lexer/lexer.fn"), "expected the '..' parent-traversal link target";
+  assert !contains(out, "nope"), "expected an unresolvable specifier to be skipped, not reported as a broken link";
+
+  // `imp std.io;` starts at column 0; the specifier itself ("std.io")
+  // starts right after the keyword and its trailing space, column 4,
+  // through column 10.
+  assert contains(out, `"start":{"line":0,"character":4}`), "expected the link range to start at the specifier, not the 'imp' keyword";
+  assert contains(out, `"character":10}`), "expected the link range to end at the specifier's own last character";
+}
+
+test "hover, go-to-definition, and dot-completion resolve an import alias at a use site, not just inside the imp statement" {
+  str src = `imp std.c.math as cmath;
+  `
+  `fun main() num {
+  `  ret cmath.sqrt(4.0);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliasprobe.fn";
+  doc.path = "aliasprobe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On 'cmath' at the call site (line 3), not inside the imp
+  // statement itself: the aliased module's own leading doc comment.
+  str alias_hover = hover(&reads, doc, 3, 7);
+  assert contains(alias_hover, "C math library"), "expected the aliased module's own doc comment when hovering the alias at a use site";
+
+  str alias_def = definition(&reads, doc, 3, 7);
+  assert contains(alias_def, "math.fn"), "expected a jump to the aliased module's own file";
+
+  // Right after 'cmath.': the module's own real top-level functions,
+  // not nothing and not arbitrary words already typed in the file.
+  str alias_completion = completion(&reads, doc, 3, 12, false);
+  assert contains(alias_completion, `"label":"sqrt"`), "expected the aliased module's own function in completion";
+  assert contains(alias_completion, `"label":"cos"`), "expected another of the aliased module's own functions too";
 }
 
 test "hover shows a doc comment for a method declared in another, imported file" {
