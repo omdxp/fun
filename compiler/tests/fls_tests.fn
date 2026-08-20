@@ -672,6 +672,45 @@ test "a pointer type keeps its star when spelled back" {
   assert equals(field.unwrap().detail, "Vec<str>* data"), "expected the pointer spelling kept";
 }
 
+test "an impl method's own is_public matches whether it was actually written pub" {
+  str src = `compound Widget {
+  `  num n;
+  `}
+  `impl Widget {
+  `  helper() num {
+  `    ret 1;
+  `  }
+  `  pub shown() num {
+  `    ret 2;
+  `  }
+  `}`;
+  let merged = parse_program_with_source("methodvis.fn", src);
+  assert merged.is_ok(), "expected the program to parse";
+  ProgramMergeResult program = merged.unwrap();
+
+  Vec<str> no_args;
+  no_args.init(0);
+  defer no_args.free();
+
+  // A method's own pub keyword is real, checked by the compiler
+  // (typecheck.fn's own check_visibility) exactly like a top-level
+  // function's - a hardcoded true here would let fls treat a private
+  // method as visible from anywhere, which it isn't.
+  let hidden = lookup_method(&program.nodes, "Widget", "helper", no_args);
+  assert hidden.is_some(), "expected the private method to still resolve locally";
+  assert !hidden.unwrap().is_public, "expected a method with no pub keyword to be marked private";
+
+  let shown = lookup_method(&program.nodes, "Widget", "shown", no_args);
+  assert shown.is_some(), "expected the pub method to resolve";
+  assert shown.unwrap().is_public, "expected a method written pub to be marked public";
+
+  // The declaration-site lookup (met at the method's own line, not
+  // through a receiver) carries the same real visibility.
+  let hidden_at = lookup_field_at(&program.nodes, "methodvis.fn", 5, "helper");
+  assert hidden_at.is_some(), "expected the declaration-site lookup to resolve too";
+  assert !hidden_at.unwrap().is_public, "expected the same private visibility at the declaration site";
+}
+
 test "a local name wins over a function of the same name" {
   str src = `compound Holder {
   `  num len;
@@ -1591,6 +1630,34 @@ test "a rename is refused when the new name is not one" {
   assert !is_identifier("9bad"), "expected a leading digit to be rejected";
   assert !is_identifier("has space"), "expected a space to be rejected";
   assert !is_identifier("has-dash"), "expected punctuation to be rejected";
+}
+
+test "a rename is refused when the new name already names a top-level declaration in the same merged program" {
+  str src = `fun helper(num total) num {
+  `  ret total + total;
+  `}
+  `fun taken() num {
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///collide.fn", src, 1);
+  let held = docs.at("file:///collide.fn");
+  assert held.is_some(), "expected the document to be held";
+  Document doc = held.unwrap();
+
+  // Fun resolves a private top-level name flatly across the whole
+  // merged program, so renaming a local parameter to a name a
+  // top-level function already has would break the build the moment
+  // both sit in the same program - refused rather than silently
+  // applied.
+  assert equals(rename_symbol(&reads, &docs, doc, 1, 6, "taken"), "null"), "expected the rename refused when it collides with an existing top-level name";
+
+  // A name nothing else in the program has is still renamed normally.
+  str edit = rename_symbol(&reads, &docs, doc, 1, 6, "count");
+  assert count(edit, `"newText":"count"`) == 3, "expected the rename to still work when there is no collision";
 }
 
 test "every place a name is written is found, and renamed together" {

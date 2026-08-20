@@ -89,6 +89,40 @@ pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line
   ret b.build();
 }
 
+// True when `new_name` already names a top-level declaration in the
+// merged program of any document `found` touches. Fun resolves a
+// private top-level name flatly across the whole merged program, not
+// per file, so renaming into a name already taken elsewhere in that
+// same program doesn't just shadow it, it breaks the build the moment
+// both declarations sit in one merged program together.
+fun _collides_with_existing(AnalysisCache* cache, Documents* docs, Vec<Occurrence>* found, str new_name) bin {
+  Vec<str> checked;
+  checked.init(4);
+  defer checked.free();
+  num i = 0;
+  for i < found.len {
+    str uri = found.get(i).document_uri;
+    i = i + 1;
+    if checked.contains(uri) {
+      continue;
+    }
+    checked.push(uri);
+    let doc_opt = docs.at(uri);
+    if doc_opt.is_none() {
+      continue;
+    }
+    Analyzed read = cache.of(doc_opt.unwrap());
+    if !read.parsed {
+      continue;
+    }
+    let existing = lookup_top_level(&read.program.nodes, new_name);
+    if existing.is_some() {
+      ret true;
+    }
+  }
+  ret false;
+}
+
 // The edit that renames what sits at `line`/`character` to `new_name`,
 // as the result a client is sent. A name a reader could not have written
 // is refused rather than applied.
@@ -113,6 +147,9 @@ pub fun rename_symbol(
   defer found.free();
   _collect_occurrences(cache, docs, name, &found);
   if found.len == 0 {
+    ret "null";
+  }
+  if _collides_with_existing(cache, docs, &found, new_name) {
     ret "null";
   }
 

@@ -43,12 +43,13 @@ pub compound Declaration {
   // `detail`, but "See also: its own compound" is still worth
   // showing.
   str container;
-  // Whether this declaration was written `pub`. Meaningful only for
-  // the top-level kinds a cross-file lookup can actually reach
-  // (Function, Compound, Enum, Quirk, Global); `true` for everything
-  // else (a field, a local, a parameter, a variant, an impl method),
-  // which visibility filtering doesn't apply to in the same way and
-  // is never independently gated by this field.
+  // Whether this declaration was written `pub`. Meaningful for the
+  // top-level kinds a cross-file lookup can actually reach (Function,
+  // Compound, Enum, Quirk, Global) and, matching `check_visibility`'s
+  // own per-method rule in typecheck.fn, an impl method too - `true`
+  // for everything else (a field, a local, a parameter, a variant),
+  // which this language has no independent `pub`/private concept for
+  // at all.
   bin is_public;
 }
 
@@ -528,7 +529,7 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
                 if im.has_type_params {
                   signature = specialize_signature(signature, im.type_params, concrete_args);
                 }
-                Declaration d = _declaration(method_name, .Function, signature, method.pos);
+                Declaration d = _declaration_vis(method_name, .Function, signature, method.pos, method.flags.is_public);
                 d.container = type_name;
                 ret .Some(d);
               }
@@ -889,7 +890,7 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
               if n.pos.line > best_line {
                 best_line = n.pos.line;
                 str signature = render_function_named(f, name, false);
-                best = _declaration(name, .Function, signature, method.pos);
+                best = _declaration_vis(name, .Function, signature, method.pos, method.flags.is_public);
                 best.container = im.type_name;
                 found = true;
               }
@@ -2661,7 +2662,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
                 .Function,
                 render_function_named(mf, method_name, false),
                 method.pos,
-                true
+                method.flags.is_public
               );
               md.container = im.type_name;
               out.push(md);
