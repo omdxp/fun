@@ -114,6 +114,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     if equals(receiver, "") {
       _reserved(&items, snippets);
       _c_builtin_completions(&items);
+      _abbreviations(&items, snippets);
       _written_names(&tokens, _current_word(&tokens, line, character), &items);
     } else {
       // An import alias needs no tree of its own to resolve: it is
@@ -550,6 +551,18 @@ fun _abbreviations(Vec<Item>* items, bin snippets) {
     .Snippet,
     "a vector, initialized and freed",
     "Vec<${1:num}> ${2:items};\n${2:items}.init(${3:0});\ndefer ${2:items}.free();\n$0"
+  ));
+  items.push(_snippet_item(
+    "mapnew",
+    .Snippet,
+    "a map, initialized and freed",
+    "Map<${1:str}, ${2:num}> ${3:m};\n${3:m}.init(${4:8});\ndefer ${3:m}.free();\n$0"
+  ));
+  items.push(_snippet_item(
+    "fito",
+    .Snippet,
+    "match an option",
+    "fit ${1:o} {\n  .Some(${2:value}) -> { $0 }\n  .None -> {}\n}"
   ));
 }
 
@@ -2101,6 +2114,12 @@ fun _skeleton(str word) str {
   }
   if equals(word, "test") {
     ret "test \"${1:what it does}\" {\n  $0\n}";
+  }
+  if equals(word, "fuzz") {
+    ret "fuzz \"${1:never crashes}\" (raw* ${2:data}, num ${3:len}) {\n  $0\n}";
+  }
+  if equals(word, "asm") {
+    ret "asm { $0 };";
   }
   if equals(word, "imp") {
     ret "imp ${1:std.io};";

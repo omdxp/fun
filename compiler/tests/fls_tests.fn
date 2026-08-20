@@ -4093,6 +4093,40 @@ test "a short trigger writes a whole shape" {
   assert contains(out, `"label":"iferr"`), "expected the early-return trigger";
   assert contains(out, `"label":"vecnew"`), "expected the vector trigger";
   assert contains(out, `"kind":15`), "expected them offered as snippets";
+  assert contains(out, `"label":"mapnew"`), "expected the map trigger";
+  assert contains(out, `"label":"fito"`), "expected the option-match trigger";
+}
+
+test "a keyword's own skeleton covers fuzz and asm too, not just the more common declarations" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///skel.fn";
+  doc.path = "skel.fn";
+  doc.text = "fun helper() num {\n  ret 0;\n}\n";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 1, 2, true);
+  assert contains(out, `"label":"fuzz"`), "expected the fuzz keyword itself to be offered";
+  assert contains(out, `raw* `), "expected fuzz's own skeleton with its two fixed params";
+  assert contains(out, `"label":"asm"`), "expected the asm keyword itself to be offered";
+}
+
+test "a trigger still writes its whole shape even while the document does not parse" {
+  // Snippets are only offered on the fully-parsed path; the exact
+  // moment a reader wants 'mainio' most (starting a new file, or
+  // adding to one that is mid-edit elsewhere) is often when the
+  // document does not parse at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfsnippet.fn";
+  doc.path = "halfsnippet.fn";
+  doc.text = "fun helper( {\n";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 1, 0, true);
+  assert contains(out, `"label":"mainio"`), "expected the entry-point-that-prints trigger even while the document does not parse";
 }
 
 test "a client that does not understand a skeleton is sent none" {
