@@ -3482,6 +3482,73 @@ test "a bare '.Variant' shorthand renders a payload-carrying variant's own types
   assert contains(ret_shape, `"label":"Circle","kind":20,"detail":"Circle(num)"`), "expected the same payload rendering through 'ret .'";
 }
 
+test "a bare '.Variant' shorthand as a call argument completes correctly even while the document does not parse" {
+  str src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `fun takes(Color c, num n) num {
+  `  ret n;
+  `}
+  `
+  `fun main() num {
+  `  ret takes(.
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfcallarg.fn";
+  doc.path = "halfcallarg.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 11, right after the dot in 'takes(.': the callee's own
+  // first parameter type, read token-only (no AST, since the
+  // document does not parse with a bare dot and nothing closing the
+  // call). This is the shape a reader hits every time they trigger
+  // completion by typing the dot itself, not just once the rest of
+  // the call happens to already be written.
+  str out = completion(&reads, doc, 11, 13, false);
+  assert contains(out, `"label":"Red","kind":20`), "expected the first parameter's own declared type (Color)";
+  assert contains(out, `"label":"Blue","kind":20`), "expected every variant";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
+test "a bare '.Variant' shorthand resolves correctly against a field-access operand in a comparison or assignment, not just a bare local" {
+  str src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `compound Widget {
+  `  Color c;
+  `}
+  `
+  `fun probe(Widget* w) num {
+  `  w.c = .
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldassign.fn";
+  doc.path = "fieldassign.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 11, right after the dot in 'w.c = .': the earlier assignment
+  // fix only ever resolved a bare local's own type, mistaking a
+  // field access for one (the last token before '=', 'c', treated as
+  // if it were itself a locally-declared name called 'c', which it
+  // is not).
+  str out = completion(&reads, doc, 11, 9, false);
+  assert contains(out, `"label":"Red","kind":20`), "expected Color's own variants through the field access on the assignment's own left side";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

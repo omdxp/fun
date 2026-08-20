@@ -1036,17 +1036,14 @@ fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx
   ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
 }
 
-// `_dot_shorthand_enum_type`'s own three most common shapes (a fit's
-// subject, a `ret`'s own declared return type, a comparison's or
-// assignment's other operand), worked out token-only rather than
-// from an AST: the moment a reader triggers completion right after
-// typing the dot itself, the document almost always fails to parse
-// (`if c == .` and `fit c { .` are not valid statements on their
-// own), so there is no tree to read any of them from. The call-
-// argument shape isn't covered here, a scoped gap: resolving a
-// callee's own declared parameter type token-only would need its own
-// declaration found and parsed the same way, a bigger piece than the
-// other three share for free through `_receiver_type_from_tokens`.
+// `_dot_shorthand_enum_type`'s own four shapes (a fit's subject, a
+// `ret`'s own declared return type, a comparison's or assignment's
+// other operand, a call's own expected argument type), worked out
+// token-only rather than from an AST: the moment a reader triggers
+// completion right after typing the dot itself, the document almost
+// always fails to parse (`if c == .` and `fit c { .` are not valid
+// statements on their own), so there is no tree to read any of them
+// from.
 fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
   str fit_type = _enclosing_fit_subject_type_from_tokens(tokens, dot_idx, current_file, cache);
   if !equals(fit_type, "") {
@@ -1063,9 +1060,179 @@ fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str cu
     Token op = tokens.get(op_idx);
     if token_is_operator(op, "==") || token_is_operator(op, "!=") || token_is_operator(op, "=") {
       num operand_idx = _prev_real_index(tokens, op_idx);
-      if operand_idx >= 0 && tokens.get(operand_idx).type == TokenType.Identifier {
-        ret _receiver_type_from_tokens(tokens, token_word(tokens.get(operand_idx)));
+      if operand_idx >= 0 {
+        str operand_type = _operand_type_from_tokens(tokens, operand_idx, current_file, cache);
+        if !equals(operand_type, "") {
+          ret operand_type;
+        }
       }
+    }
+    if token_is_operator(op, "(") || token_is_operator(op, ",") {
+      ret _call_arg_type_from_tokens(tokens, dot_idx, current_file, cache);
+    }
+  }
+  ret "";
+}
+
+// The declared type of whichever parameter a call's own argument at
+// `dot_idx` occupies, token-only: a plain top-level call
+// (`err_kind(.Parse, ...)`) only, not a method call, which would also
+// need the receiver's own type resolved first, a further layer of
+// the same problem `_receiver_type_from_tokens` doesn't reach.
+fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
+  num depth = 0;
+  num open_idx = -1;
+  num j = dot_idx - 1;
+  for j >= 0 {
+    if token_is_symbol(tokens.get(j), ')') {
+      depth = depth + 1;
+    } elif token_is_operator(tokens.get(j), "(") {
+      if depth == 0 {
+        open_idx = j;
+        break;
+      }
+      depth = depth - 1;
+    }
+    j = j - 1;
+  }
+  if open_idx <= 0 {
+    ret "";
+  }
+  num callee_idx = _prev_real_index(tokens, open_idx);
+  if callee_idx < 0 || tokens.get(callee_idx).type != TokenType.Identifier {
+    ret "";
+  }
+  num before_callee = _prev_real_index(tokens, callee_idx);
+  if before_callee >= 0 && token_is_operator(tokens.get(before_callee), ".") {
+    ret "";
+  }
+  str callee_name = token_word(tokens.get(callee_idx));
+
+  num arg_index = 0;
+  num pdepth = 0;
+  num k = open_idx + 1;
+  for k < dot_idx {
+    Token tk = tokens.get(k);
+    if token_is_operator(tk, "(") {
+      pdepth = pdepth + 1;
+    } elif token_is_symbol(tk, ')') {
+      pdepth = pdepth - 1;
+    } elif token_is_operator(tk, ",") && pdepth == 0 {
+      arg_index = arg_index + 1;
+    }
+    k = k + 1;
+  }
+
+  str local = _param_type_from_tokens(tokens, callee_name, arg_index);
+  if !equals(local, "") {
+    ret local;
+  }
+  ret _param_type_from_imports(tokens, current_file, cache, callee_name, arg_index);
+}
+
+// `callee_name`'s own `arg_index`-th declared parameter type,
+// token-only: the parameter's own name is the last identifier before
+// its own terminating `,`/`)` (skipping past a default value's own
+// tokens, which may contain identifiers of their own), then
+// `_base_type_before` reads the type that precedes it, the same way
+// it already does for a local's own declaration.
+fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != TokenType.Keyword || !equals(token_word(t), "fun") {
+      continue;
+    }
+    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier || !equals(token_word(tokens.get(i)), callee_name) {
+      continue;
+    }
+    num j = i + 1;
+    if j < tokens.len && token_is_operator(tokens.get(j), "<") {
+      num gdepth = 1;
+      j = j + 1;
+      for j < tokens.len && gdepth > 0 {
+        if token_is_operator(tokens.get(j), "<") {
+          gdepth = gdepth + 1;
+        } elif token_is_operator(tokens.get(j), ">") {
+          gdepth = gdepth - 1;
+        }
+        j = j + 1;
+      }
+    }
+    if j >= tokens.len || !token_is_operator(tokens.get(j), "(") {
+      continue;
+    }
+    j = j + 1;
+
+    num current_index = 0;
+    num last_name_idx = -1;
+    bin past_default = false;
+    num pdepth = 0;
+    for j < tokens.len {
+      Token pt = tokens.get(j);
+      if token_is_operator(pt, "(") || token_is_operator(pt, "<") {
+        pdepth = pdepth + 1;
+      } elif token_is_symbol(pt, ')') {
+        if pdepth == 0 {
+          break;
+        }
+        pdepth = pdepth - 1;
+      } elif token_is_operator(pt, ">") {
+        if pdepth > 0 {
+          pdepth = pdepth - 1;
+        }
+      } elif token_is_operator(pt, ",") && pdepth == 0 {
+        if current_index == arg_index && last_name_idx >= 0 {
+          ret _base_type_before(tokens, last_name_idx);
+        }
+        current_index = current_index + 1;
+        last_name_idx = -1;
+        past_default = false;
+      } elif token_is_operator(pt, "=") && pdepth == 0 {
+        past_default = true;
+      } elif pt.type == TokenType.Identifier && pdepth == 0 && !past_default {
+        last_name_idx = j;
+      }
+      j = j + 1;
+    }
+    if current_index == arg_index && last_name_idx >= 0 {
+      ret _base_type_before(tokens, last_name_idx);
+    }
+    ret "";
+  }
+  ret "";
+}
+
+// `_param_type_from_tokens`'s own cross-file fallback: `callee_name`
+// is very often declared in an imported file, not the current
+// document (`err_kind`, reached only through `imp std.result;`, the
+// exact real-world shape this reproduced on). Each import is parsed
+// fresh and searched via the real AST this time.
+fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str callee_name, num arg_index) str {
+  Vec<str> import_paths = resolved_import_paths(tokens, current_file);
+  defer import_paths.free();
+  num k = 0;
+  for k < import_paths.len {
+    str path = import_paths.get(k);
+    k = k + 1;
+    str text = read_to_string(path);
+    if text == nil {
+      continue;
+    }
+    let merged = parse_program_cached(path, text, &cache.imports);
+    if merged.is_err() {
+      continue;
+    }
+    ProgramMergeResult target = merged.unwrap();
+    let f = lookup_top_level(&target.nodes, callee_name);
+    if f.is_none() {
+      continue;
+    }
+    Vec<str> params = split_signature_params(f.unwrap().detail);
+    defer params.free();
+    if arg_index < params.len {
+      ret bare_type_from_detail(params.get(arg_index));
     }
   }
   ret "";
@@ -1203,32 +1370,50 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
   if b < 0 {
     ret "";
   }
-  if token_is_keyword(tokens.get(b), "fit") {
-    ret _receiver_type_from_tokens(tokens, token_word(tokens.get(a)));
+  num fit_kw = b;
+  if token_is_operator(tokens.get(b), ".") {
+    num base_idx = _prev_real_index(tokens, b);
+    if base_idx < 0 {
+      ret "";
+    }
+    fit_kw = _prev_real_index(tokens, base_idx);
   }
-  if !token_is_operator(tokens.get(b), ".") {
-    ret "";
-  }
-  num base_idx = _prev_real_index(tokens, b);
-  if base_idx < 0 || tokens.get(base_idx).type != TokenType.Identifier {
-    ret "";
-  }
-  num fit_kw = _prev_real_index(tokens, base_idx);
   if fit_kw < 0 || !token_is_keyword(tokens.get(fit_kw), "fit") {
+    ret "";
+  }
+  ret _operand_type_from_tokens(tokens, a, current_file, cache);
+}
+
+// The type of the (possibly dotted) operand ending at `end_idx`: a
+// bare identifier's own declared type (`c`), or a one-hop
+// `base.field` access's own field type (`n.kind`), whichever shape
+// it is. Shared by every dot-shorthand context that names an
+// existing expression as "the other side" of the shorthand - a fit's
+// own subject, a comparison's or assignment's other operand.
+fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file, AnalysisCache* cache) str {
+  if tokens.get(end_idx).type != TokenType.Identifier {
+    ret "";
+  }
+  num before = _prev_real_index(tokens, end_idx);
+  if before < 0 || !token_is_operator(tokens.get(before), ".") {
+    ret _receiver_type_from_tokens(tokens, token_word(tokens.get(end_idx)));
+  }
+  num base_idx = _prev_real_index(tokens, before);
+  if base_idx < 0 || tokens.get(base_idx).type != TokenType.Identifier {
     ret "";
   }
   str base_type = _receiver_type_from_tokens(tokens, token_word(tokens.get(base_idx)));
   if equals(base_type, "") {
     ret "";
   }
-  str field_name = token_word(tokens.get(a));
+  str field_name = token_word(tokens.get(end_idx));
   str local_field_type = _field_type_from_tokens(tokens, base_type, field_name);
   if !equals(local_field_type, "") {
     ret local_field_type;
   }
-  // `base_type` (e.g. `Node`) is very often declared in an imported
-  // file rather than the current document, this codebase's own
-  // dominant idiom for a `fit n.kind { ... }` subject.
+  // `base_type` is very often declared in an imported file rather
+  // than the current document (`fit n.kind { ... }`, this
+  // codebase's own dominant idiom for matching an AST node's kind).
   ret _field_type_from_imports(tokens, current_file, cache, base_type, field_name);
 }
 
