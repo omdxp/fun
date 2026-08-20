@@ -117,6 +117,48 @@ pub fun import_alias_target(Vec<Node>* entry_nodes, str current_file, str name) 
   ret "";
 }
 
+// The same thing `import_alias_target` answers, worked out from raw
+// tokens instead of a parsed program. A document mid-edit often fails
+// to parse at all, which is exactly when a reader is most likely to
+// be typing after an alias and wants a real answer rather than
+// nothing.
+pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != TokenType.Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 && j < tokens.len && token_is_keyword(tokens.get(j), "as") && j + 1 < tokens.len {
+      Token alias_tok = tokens.get(j + 1);
+      if alias_tok.type == TokenType.Identifier && equals(token_word(alias_tok), name) {
+        str specifier = _specifier_through(tokens, tokens.get(j - 1));
+        ret _resolve_specifier(current_file, specifier);
+      }
+    }
+    i = j;
+  }
+  ret "";
+}
+
 // One link per `imp` statement's own dotted path, spanning the whole
 // specifier and pointing at what it resolves to, the same target
 // `import_target` would give for a cursor anywhere in it. A client

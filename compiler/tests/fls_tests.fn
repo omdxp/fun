@@ -3028,6 +3028,58 @@ test "completion still answers while the text does not parse" {
   assert contains(out, `"label":"total"`), "expected a name already written in the file";
 }
 
+test "completion classifies a name's own kind from raw token shape when the text does not parse" {
+  str src = `pub fun sqrt_dec(dec x dec {
+  `  ret x;
+  `}
+  `
+  `compound Vec2 {
+  `  dec x;
+  `}
+  `
+  `enum Sign {
+  `  Negative,
+  `}
+  `
+  `fun main() num {
+  `  ret sq
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfkind.fn";
+  doc.path = "halfkind.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 13, 8, false);
+  assert contains(out, `"label":"sqrt_dec","kind":3`), "expected a name followed by '(' anywhere to read as a function";
+  assert contains(out, `"label":"Vec2","kind":22`), "expected a name declared with 'compound' to read as a struct";
+  assert contains(out, `"label":"Sign","kind":13`), "expected a name declared with 'enum' to read as an enum";
+}
+
+test "dot-completion after an import alias lists the aliased module's own functions even while the document does not parse" {
+  str src = `imp std.c.math as cmath;
+  `
+  `fun main() num {
+  `  ret cmath.sqrt(4.0
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfalias.fn";
+  doc.path = "halfalias.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 3, right after 'cmath.'; the missing ')' above leaves the
+  // document unparseable, which is exactly when a reader is typing
+  // this and needs a real answer, not the fallback word list.
+  str out = completion(&reads, doc, 3, 12, false);
+  assert contains(out, `"label":"sqrt","kind":3`), "expected the aliased module's own function even though the document does not parse";
+  assert !contains(out, `"detail":"in this file"`), "expected the real module functions, not the unparsed-fallback word list";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

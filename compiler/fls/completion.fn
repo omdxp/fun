@@ -23,6 +23,7 @@ imp std.io;
 imp std.path;
 imp std.fs;
 imp std.ctype;
+imp std.result;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -89,8 +90,20 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   if !read.parsed {
     if equals(receiver, "") {
       _reserved(&items, snippets);
+      _written_names(&tokens, receiver, &items);
+    } else {
+      // An import alias needs no tree of its own to resolve: it is
+      // read straight off this document's tokens, and the module it
+      // names is parsed fresh, independent of whatever is currently
+      // broken in the file being typed into.
+      str alias_target = import_alias_target_from_tokens(&tokens, doc.path, receiver);
+      if !equals(alias_target, "") {
+        _alias_module_completions_fresh(alias_target, cache, &items, snippets);
+      }
+      if items.len == 0 {
+        _written_names(&tokens, receiver, &items);
+      }
     }
-    _written_names(&tokens, receiver, &items);
     ret _reply(&items);
   }
   ProgramMergeResult program = read.program;
@@ -459,19 +472,53 @@ fun _abbreviations(Vec<Item>* items, bin snippets) {
   ));
 }
 
-// Every distinct name already written in the file. What a reader is
-// reaching for is usually a word they have written before, so this is
-// worth offering when the text cannot be read as a program. `skip` is
-// the receiver being completed against, which is not a member of
-// itself.
+// Every distinct name already written in the file, offered when there
+// is no AST to work from. `skip` is the receiver itself. Kind is
+// guessed from raw token shape: followed by '(' anywhere means
+// Function, preceded by compound/enum/quirk means that type.
 fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
-  Vec<str> seen;
-  seen.init(32);
-  defer seen.free();
+  Vec<str> fn_names;
+  fn_names.init(16);
+  defer fn_names.free();
+  Vec<str> struct_names;
+  struct_names.init(8);
+  defer struct_names.free();
+  Vec<str> enum_names;
+  enum_names.init(8);
+  defer enum_names.free();
+  Vec<str> quirk_names;
+  quirk_names.init(8);
+  defer quirk_names.free();
+
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
+    if t.type == TokenType.Identifier {
+      str name = token_word(t);
+      if i + 1 < tokens.len && token_is_operator(tokens.get(i + 1), "(") && !fn_names.contains(name) {
+        fn_names.push(name);
+      }
+      if i > 0 {
+        Token prev = tokens.get(i - 1);
+        if token_is_keyword(prev, "compound") && !struct_names.contains(name) {
+          struct_names.push(name);
+        } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
+          enum_names.push(name);
+        } elif token_is_keyword(prev, "quirk") && !quirk_names.contains(name) {
+          quirk_names.push(name);
+        }
+      }
+    }
     i = i + 1;
+  }
+
+  Vec<str> seen;
+  seen.init(32);
+  defer seen.free();
+  num j = 0;
+  for j < tokens.len {
+    Token t = tokens.get(j);
+    j = j + 1;
     fit t.type {
       .Identifier -> {
         str name = token_word(t);
@@ -479,7 +526,17 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
           continue;
         }
         seen.push(name);
-        items.push(_item(name, .Variable, "in this file"));
+        if struct_names.contains(name) {
+          items.push(_item(name, .Struct, "compound"));
+        } elif enum_names.contains(name) {
+          items.push(_item(name, .Enumeration, "enum"));
+        } elif quirk_names.contains(name) {
+          items.push(_item(name, .Interface, "quirk"));
+        } elif fn_names.contains(name) {
+          items.push(_item(name, .Function, "in this file"));
+        } else {
+          items.push(_item(name, .Variable, "in this file"));
+        }
       }
       _ -> {}
     }
@@ -718,6 +775,25 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
       _ -> {}
     }
   }
+}
+
+// Same as `_alias_module_completions`, but for when the *current*
+// document does not parse (common mid-edit) and so has no merged
+// `program` to walk at all. The aliased module itself is a separate
+// file, almost always still valid on its own, so it is read and
+// parsed fresh rather than giving up on alias completion entirely
+// just because the document being typed into is momentarily broken.
+fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<Item>* items, bin snippets) {
+  str text = read_to_string(module_path);
+  if text == nil {
+    ret;
+  }
+  let merged = parse_program_cached(module_path, text, &cache.imports);
+  if merged.is_err() {
+    ret;
+  }
+  ProgramMergeResult target = merged.unwrap();
+  _alias_module_completions(&target.entry_nodes, module_path, items, snippets);
 }
 
 fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippets) {
