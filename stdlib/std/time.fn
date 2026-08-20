@@ -28,6 +28,14 @@ pub fun sleep_seconds(num seconds) {
   __fun_sleep_seconds(seconds);
 }
 
+// Suspends the calling thread for `milliseconds`, sub-second
+// precision included - what a short, precise wait (a debounce timer,
+// a retry backoff) needs that `sleep_seconds`'s own whole-second
+// resolution can't give it.
+pub fun sleep_ms(num milliseconds) {
+  __fun_sleep_seconds(milliseconds / 1000.0);
+}
+
 fun _copy_str(str dst, num dst_len, str src) num {
   if dst == nil {
     ret 0;
