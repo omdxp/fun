@@ -95,6 +95,19 @@ compound GenericEnumVariantTemplate {
   Vec<bin> payload_is_pointer;
 }
 
+// Where `fn_proto_splice_pos` chose to splice a lazily-triggered
+// prototype, and whether that position is visible to every later call
+// site in the file (the enclosing function's own start, or earlier) as
+// opposed to only the one statement that triggered it. A caller must
+// not skip re-emitting for a future call site on the strength of a
+// `broad == false` splice: nothing outside that one statement's own
+// block can see it, and C would warn `-Wout-of-scope-function` on
+// every later use that relied on it anyway.
+compound ProtoSplice {
+  Option<num> pos;
+  bin broad;
+}
+
 pub compound Codegen {
   CodegenState* state;
   // Local names seen so far in the current function (reset per
@@ -2297,7 +2310,7 @@ impl Codegen {
               self.emit_hoisted(proto_text);
               self.hoist_insert_pos = saved_proto_hoist_pos;
             } else {
-              let proto_splice_pos = self.fn_proto_splice_pos(proto_type_names);
+              let proto_splice_pos = self.fn_proto_splice_pos(proto_type_names).pos;
               self.hoist_insert_pos = proto_splice_pos;
               self.emit_hoisted(proto_text);
               // A captured local, so it needs the shift `emit_hoisted`
@@ -2427,7 +2440,6 @@ impl Codegen {
       ret;
     }
 
-    self.emitted_plain_method_protos.push(pm_key);
     str pm_mangled = self.impl_method_mangled_name.get(pmi);
 
     // Pre-resolved before swapping to the scratch buffer below, so a
@@ -2481,14 +2493,24 @@ impl Codegen {
     if self.hoist_scratch_depth > 0 {
       // See the matching branch in `emit_generic_impl_method_prototype_
       // now`: `self.state` here is a nested scratch buffer, not root,
-      // so this has to route through `root_hoist_pos` instead.
+      // so this has to route through `root_hoist_pos` instead. That
+      // path always lands at file scope, so it's safe to remember for
+      // every future call site the same way the broad branches below
+      // are.
+      self.emitted_plain_method_protos.push(pm_key);
       self.hoist_insert_pos = .None;
       self.emit_hoisted(pm_text);
       self.hoist_insert_pos = saved_pm_hoist_pos;
     } else {
       // `saved_pm_hoist_pos` is a plain captured local, so it needs
-      // manual adjustment for this splice.
-      let pm_splice_pos = self.fn_proto_splice_pos(pm_type_names);
+      // manual adjustment for this splice. Only remembered for future
+      // call sites when the splice itself landed somewhere broadly
+      // visible - see `ProtoSplice`'s own doc comment.
+      let pm_splice = self.fn_proto_splice_pos(pm_type_names);
+      if pm_splice.broad {
+        self.emitted_plain_method_protos.push(pm_key);
+      }
+      let pm_splice_pos = pm_splice.pos;
       self.hoist_insert_pos = pm_splice_pos;
       self.emit_hoisted(pm_text);
       if pm_splice_pos.is_some() {
@@ -2583,8 +2605,6 @@ impl Codegen {
       ret;
     }
 
-    self.emitted_plain_function_protos.push(fn_name);
-
     // Collects each resolved name, so a splice against `current_fn_
     // body_start_pos` below can confirm they're all already declared
     // ahead of that position before trusting it.
@@ -2643,14 +2663,24 @@ impl Codegen {
     if self.hoist_scratch_depth > 0 {
       // See the matching branch in `emit_generic_impl_method_prototype_
       // now`: `self.state` here is a nested scratch buffer, not root,
-      // so this has to route through `root_hoist_pos` instead.
+      // so this has to route through `root_hoist_pos` instead. That
+      // path always lands at file scope, so it's safe to remember for
+      // every future call site the same way the broad branches below
+      // are.
+      self.emitted_plain_function_protos.push(fn_name);
       self.hoist_insert_pos = .None;
       self.emit_hoisted(pf_text);
       self.hoist_insert_pos = saved_pf_hoist_pos;
     } else {
       // `saved_pf_hoist_pos` is a captured local, so this splice needs a
-      // manual adjustment.
-      let pf_splice_pos = self.fn_proto_splice_pos(pf_type_names);
+      // manual adjustment. Only remembered for future call sites when
+      // the splice itself landed somewhere broadly visible - see
+      // `ProtoSplice`'s own doc comment.
+      let pf_splice = self.fn_proto_splice_pos(pf_type_names);
+      if pf_splice.broad {
+        self.emitted_plain_function_protos.push(fn_name);
+      }
+      let pf_splice_pos = pf_splice.pos;
       self.hoist_insert_pos = pf_splice_pos;
       self.emit_hoisted(pf_text);
       if pf_splice_pos.is_some() {
@@ -3948,17 +3978,36 @@ impl Codegen {
   // buffer, and every type the prototype names is already declared
   // ahead of that position). `type_names` is the prototype's own
   // return type plus every parameter type, in any order.
-  fn_proto_splice_pos(Vec<str> type_names) Option<num> {
+  // 
+  // `.broad` tells a caller whether the position is safe to remember
+  // as "already declared" for every future call site, not just this
+  // one: both branches inside the safety check below land somewhere a
+  // C declaration stays visible for the rest of the file (a function's
+  // own start, or an earlier splice already known to be just as safe);
+  // the plain fallback lands wherever the current statement happens to
+  // sit, which C only scopes to its own enclosing block. Treating that
+  // fallback as broad is exactly what used to make a later, unrelated
+  // call site rely on a declaration already out of scope.
+  fn_proto_splice_pos(Vec<str> type_names) ProtoSplice {
     if self.state == self.root_state && self.current_fn_body_start_pos.is_some() {
       num fp = self.current_fn_body_start_pos.unwrap();
       if self.fn_types_declared_before(type_names, fp) && is_safe_splice_boundary(self.state.out.build(), fp) {
         if self.current_stmt_start_pos.is_some() && self.current_stmt_start_pos.unwrap() < fp {
-          ret self.current_stmt_start_pos;
+          ProtoSplice broad_stmt;
+          broad_stmt.pos = self.current_stmt_start_pos;
+          broad_stmt.broad = true;
+          ret broad_stmt;
         }
-        ret self.current_fn_body_start_pos;
+        ProtoSplice broad_fn;
+        broad_fn.pos = self.current_fn_body_start_pos;
+        broad_fn.broad = true;
+        ret broad_fn;
       }
     }
-    ret self.current_stmt_start_pos;
+    ProtoSplice narrow;
+    narrow.pos = self.current_stmt_start_pos;
+    narrow.broad = false;
+    ret narrow;
   }
 
   emit_condition(Node cond) Option<CodegenErrorKind> {
