@@ -382,6 +382,38 @@ test "a fit over bin with both true and false covered is not double-flagged by t
   assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning when both truth values are covered";
 }
 
+test "a fit receiving from a channel is checked against the channel's own element type" {
+  // `fit <- ch { ... }` desugars to `ch.recv()` at parse time; the
+  // catch-all/enum check needs the channel's own generic element type,
+  // not the call's own literal return type, to notice a missing variant.
+  str src = `compound Channel<T> { T v; }
+  `impl Channel<T> { pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {
+  `  fit <- inbox {
+  `    Msg.Compute(v) -> { ret; }
+  `    Msg.Stop -> { ret; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing Msg.Result variant noticed on a channel receive";
+  assert contains(found, "Msg.Result"), "expected the message to name what is missing";
+}
+
+test "a fit receiving from a channel with every variant covered is not flagged" {
+  str src = `compound Channel<T> { T v; }
+  `impl Channel<T> { pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {
+  `  fit <- inbox {
+  `    Msg.Compute(v) -> { ret; }
+  `    Msg.Result(v) -> { ret; }
+  `    Msg.Stop -> { ret; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning once every variant is covered";
+}
+
 test "allow silences a shorthand fit's missing variant" {
   str src = `enum S { A, B }
   `fun main() num {

@@ -11,6 +11,31 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 - Output channel: **Fun Language Server** (useful for debugging startup issues)
 - Bundled color theme: **Fun Web** (matches the reference website palette)
 
+## Snippets
+
+`fls` offers these directly in completion, snippet-aware clients included (works the same in any other editor `fls` is wired into, not just VS Code). Two kinds:
+
+**Type a real keyword to write its whole shape** — accepting `fun` writes a full declaration with the places to fill marked, not just the bare word:
+
+`fun`, `compound`, `enum`, `quirk`, `impl`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `imp`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
+
+**Short triggers for a common multi-line shape**, offered alongside ordinary completions:
+
+| Trigger | Writes |
+|---|---|
+| `main` | a program's entry point |
+| `mainio` | an entry point that prints |
+| `fore` | `for` each item |
+| `fori` | `for` each item, with its index |
+| `forw` | `for` while a condition holds |
+| `implq` | implement a quirk for a type |
+| `iferr` | return early when a `Result` failed |
+| `ifnone` | return early when an `Option` is empty |
+| `fitr` | `fit` over a `Result` |
+| `fito` | `fit` over an `Option` |
+| `vecnew` | a `Vec`, initialized and freed |
+| `mapnew` | a `Map`, initialized and freed |
+
 ## Requirements
 
 You need the Fun tooling installed:

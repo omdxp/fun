@@ -62,6 +62,11 @@ compound Analysis {
   Map<str, CompoundNode> compound_decls;
   // What each local in the function being walked is declared as.
   Map<str, str> local_types;
+  // A `Channel<T>` local's own element type, by name - `local_types`
+  // itself only ever carries the bare "Channel", never its own
+  // generic argument, and a `fit <- ch { ... }` needs T to check
+  // exhaustiveness against.
+  Map<str, str> channel_element_types;
   // True while walking a function that creates a wait group with no
   // room of its own.
   bin waits_on_unsized_group;
@@ -89,6 +94,7 @@ fun _analysis_new() Analysis {
   a.functions.init(16);
   a.compound_decls.init(16);
   a.local_types.init(16);
+  a.channel_element_types.init(4);
   a.waits_on_unsized_group = false;
   a.allowed = set_init("", 8);
   a.expected.init(8);
@@ -139,6 +145,7 @@ impl Analysis {
     self.functions.free();
     self.compound_decls.free();
     self.local_types.free();
+    self.channel_element_types.free();
   }
 }
 
@@ -855,6 +862,7 @@ impl Analysis {
             vtype = format("{str}*", vtype);
           }
           self.local_types.put(v.name, vtype);
+          self._record_channel_element_type(v.name, v.var_type);
         }
         self.check_literal_range(stmt, v);
         if v.has_val {
@@ -1177,7 +1185,31 @@ impl Analysis {
       }
       _ -> {}
     }
+    // `fit <- ch { ... }` desugars to `ch.recv()` at parse time - what
+    // it matches is the channel's own element type, not the call's
+    // return value read literally.
+    str channel = _method_receiver(subject, "recv");
+    if !equals(channel, "") {
+      let elem = self.channel_element_types.at(channel);
+      if elem.is_some() {
+        ret elem.unwrap();
+      }
+    }
     ret "";
+  }
+
+  // Records `name`'s own element type when `dtype` declares it as a
+  // `Channel<T>`, so a later `fit <- name { ... }` can check
+  // exhaustiveness against T.
+  _record_channel_element_type(str name, DataType* dtype) {
+    if dtype == nil || !equals(dtype.type_str, "Channel") || dtype.generic_args.len != 1 {
+      ret;
+    }
+    DataType* elem = dtype.generic_args.get(0);
+    if elem == nil {
+      ret;
+    }
+    self.channel_element_types.put(name, elem.type_str);
   }
 
   // The enum a `fit` is matching, taken from what its subject was
@@ -1291,6 +1323,7 @@ impl Analysis {
     Set<str> locals = set_init("", 8);
     defer locals.free();
     self.local_types.clear();
+    self.channel_element_types.clear();
     // A parameter is exactly as good a `fit` subject as a `let`
     // local, but only a `.Variable` statement inside the body ever
     // registered here before this: `fit` over a plain parameter never
@@ -1310,6 +1343,7 @@ impl Analysis {
               atype = format("{str}*", atype);
             }
             self.local_types.put(av.name, atype);
+            self._record_channel_element_type(av.name, av.var_type);
           }
         }
         _ -> {}
