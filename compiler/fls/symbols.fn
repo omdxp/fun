@@ -779,6 +779,14 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
     }
     fit n.kind {
       .Compound(c) -> {
+        // A field's own name only means anything for the rest of
+        // this compound's own body - a same-named bare identifier
+        // written later in the file, in an unrelated function, must
+        // not resolve to it just because it happens to be the
+        // nearest declaration above.
+        if line > _compound_last_line(c) {
+          continue;
+        }
         num f = 0;
         for f < c.fields.len {
           CompoundField cf = c.fields.get(f);
@@ -805,6 +813,12 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
         }
       }
       .Enum(e) -> {
+        // Same reasoning as the compound case above: a variant's own
+        // name only means anything for the rest of this enum's own
+        // body.
+        if line > _enum_last_line(e) {
+          continue;
+        }
         num v = 0;
         for v < e.variants.len {
           EnumVariant variant = e.variants.get(v);
@@ -1607,6 +1621,39 @@ pub fun covers_body(Node n, Node* body, str file, num line) bin {
   }
   num last = _last_line(body);
   ret line <= last;
+}
+
+// The furthest line any of `c`'s own fields reaches, standing in for
+// where the whole compound itself ends - the same reach `im`'s own
+// methods give `_impl_last_line`, needed for the identical reason: a
+// same-named bare identifier written later in the file, in an
+// unrelated function, must not resolve to this compound's own field
+// just because it happens to be the nearest declaration above.
+fun _compound_last_line(CompoundNode c) num {
+  num last = 0;
+  num f = 0;
+  for f < c.fields.len {
+    CompoundField cf = c.fields.get(f);
+    f = f + 1;
+    if cf.has_pos && cf.pos.line > last {
+      last = cf.pos.line;
+    }
+  }
+  ret last;
+}
+
+// `_compound_last_line`'s own twin for an enum's own variants.
+fun _enum_last_line(EnumDeclNode e) num {
+  num last = 0;
+  num v = 0;
+  for v < e.variants.len {
+    EnumVariant variant = e.variants.get(v);
+    v = v + 1;
+    if variant.has_pos && variant.pos.line > last {
+      last = variant.pos.line;
+    }
+  }
+  ret last;
 }
 
 // The furthest line any of `im`'s own methods reaches, standing in

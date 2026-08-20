@@ -2022,6 +2022,60 @@ test "hover on an impl method with a trivially empty body still resolves at its 
   assert contains(hovered, "demo(Widget* self)"), "expected the method's own signature to resolve at its own declaration";
 }
 
+test "hover on a function call resolves to the function, not an unrelated compound field sharing its name" {
+  // lookup_field_at's own .Compound/.Enum cases had no coverage
+  // boundary at all, unlike .Impl (fixed above): a field's own name
+  // matched as "the nearest declaration above" for the rest of the
+  // whole file, not just its own compound's own body. User-reported,
+  // live against compiler/lexer/lexer.fn: `l.len = len(src);` hovered
+  // the stdlib len() call and got Lexer's own 'len' field back
+  // instead, since Lexer (declared earlier in the file) has a field
+  // by that same name.
+  str src = `compound Lexer {
+  `  num len;
+  `}
+  `fun len(str s) num {
+  `  ret 0;
+  `}
+  `fun make(str src) num {
+  `  ret len(src);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldfn.fn";
+  doc.path = "fieldfn.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 7, 8);
+  assert contains(hovered, "fun len(str s) num"), "expected the function, not Lexer's own unrelated field of the same name";
+  assert !contains(hovered, "Field"), "expected no field-shaped detail at all";
+}
+
+test "go-to-definition on a parameter resolves to the parameter, not an unrelated compound field sharing its name" {
+  str src = `compound Lexer {
+  `  str filename;
+  `}
+  `fun lexer_new(str src, str filename) Lexer {
+  `  Lexer l;
+  `  l.filename = filename;
+  `  ret l;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldparam.fn";
+  doc.path = "fieldparam.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // On the RHS 'filename' (line 5), the parameter, not the field on
+  // the LHS of the same assignment.
+  str def = definition(&reads, doc, 5, 21);
+  assert contains(def, `"line":3`), "expected a jump to the parameter's own declaration line, not the field's";
+}
+
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
   str src = `imp std.option;
   `fun main() num {
