@@ -1368,12 +1368,13 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str
 }
 
 // What sits between `fit` and the `{` at `brace_idx`, resolved to a
-// type: a bare identifier's own declared type (`fit c {`), or a
-// one-hop `base.field` access's own field type (`fit t.type {`, this
-// codebase's own dominant idiom for matching an AST node's kind -
-// `_expr_type_name`, the AST-driven equivalent, resolves the same
-// shape). "" when this `{` isn't a fit's own, or the subject is
-// something deeper than these two.
+// type: a bare identifier's own declared type (`fit c {`), a one-hop
+// `base.field` access's own field type (`fit t.type {`, this
+// codebase's own dominant idiom for matching an AST node's kind), or
+// a channel receive's own element type (`fit <- ch {`, desugared to
+// `ch.recv()` at parse time - `fit_subject_type`, the AST-driven
+// equivalent, resolves the same shape). "" when this `{` isn't a
+// fit's own, or the subject is something deeper than these three.
 fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file, AnalysisCache* cache) str {
   num a = _prev_real_index(tokens, brace_idx);
   if a < 0 || tokens.get(a).type != TokenType.Identifier {
@@ -1382,6 +1383,13 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
   num b = _prev_real_index(tokens, a);
   if b < 0 {
     ret "";
+  }
+  if token_is_operator(tokens.get(b), "<-") {
+    num recv_fit_kw = _prev_real_index(tokens, b);
+    if recv_fit_kw < 0 || !token_is_keyword(tokens.get(recv_fit_kw), "fit") {
+      ret "";
+    }
+    ret _first_generic_arg_of_local_from_tokens(tokens, token_word(tokens.get(a)));
   }
   num fit_kw = b;
   if token_is_operator(tokens.get(b), ".") {
@@ -1395,6 +1403,69 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
     ret "";
   }
   ret _operand_type_from_tokens(tokens, a, current_file, cache);
+}
+
+// `name`'s own declared type's first generic argument, read straight
+// off the tokens (`Msg` from `Channel<Msg>* inbox`) - what a channel
+// receive's own fit subject needs, and `_receiver_type_from_tokens`
+// itself never exposes since it deliberately returns only the base
+// type. "" when `name` isn't declared with a generic type at all.
+fun _first_generic_arg_of_local_from_tokens(Vec<Token>* tokens, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.Identifier && equals(token_word(t), name) {
+      str arg = _first_generic_arg_before(tokens, i);
+      if !equals(arg, "") {
+        ret arg;
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// Walks back from just before token `i` the same way `_base_type_before`
+// does, but returns the single generic type argument's own text
+// instead of the base type name - `Msg` from `Channel<Msg>`, not
+// `Channel`. "" when what sits there isn't a generic type at all.
+fun _first_generic_arg_before(Vec<Token>* tokens, num i) str {
+  num j = _prev_real_index(tokens, i);
+  if j < 0 {
+    ret "";
+  }
+  if token_is_operator(tokens.get(j), "*") {
+    j = _prev_real_index(tokens, j);
+    if j < 0 {
+      ret "";
+    }
+  }
+  if !token_is_operator(tokens.get(j), ">") {
+    ret "";
+  }
+  num close = j;
+  num depth = 1;
+  j = _prev_real_index(tokens, j);
+  for j >= 0 && depth > 0 {
+    if token_is_operator(tokens.get(j), ">") {
+      depth = depth + 1;
+    } elif token_is_operator(tokens.get(j), "<") {
+      depth = depth - 1;
+      if depth == 0 {
+        break;
+      }
+    }
+    j = _prev_real_index(tokens, j);
+  }
+  if depth != 0 || j < 0 {
+    ret "";
+  }
+  num open = j;
+  num arg_idx = _next_real_index(tokens, open);
+  if arg_idx < 0 || arg_idx >= close || tokens.get(arg_idx).type != TokenType.Identifier {
+    ret "";
+  }
+  ret token_word(tokens.get(arg_idx));
 }
 
 // The type of the (possibly dotted) operand ending at `end_idx`: a

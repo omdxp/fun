@@ -3567,6 +3567,33 @@ test "a bare '.Variant' shorthand resolves a field-access fit subject even when 
   assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 }
 
+test "a bare '.Variant' shorthand completes to a channel's own element type's variants, while the document does not parse" {
+  str src = `compound Channel<T> { T v; }
+  `impl Channel<T> { pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox) num {
+  `  fit <- inbox {
+  `    .
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfchannel.fn";
+  doc.path = "halfchannel.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot (line 5): 'fit <- ch { ... }' desugars to
+  // 'ch.recv()' at parse time, so this is the channel-receive
+  // shorthand shape, not a bare local or a field access - and the
+  // moment a reader triggers this by typing the dot, the document
+  // can't parse yet, exercising the token-only path specifically.
+  str out = completion(&reads, doc, 5, 5, false);
+  assert contains(out, `"label":"Compute","kind":20`), "expected Msg's own variants through the channel's own element type";
+  assert contains(out, `"label":"Stop","kind":20`), "expected every variant";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
 test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
   str src = `enum Shape {
   `  Circle(num),
