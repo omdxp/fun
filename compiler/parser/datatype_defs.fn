@@ -92,13 +92,15 @@ pub fun get_c_typedef_alias_datatype_type(str s) Option<DataTypeType> {
     // common POSIX/C extensions
     "ssize_t",
     // stdint.h
-    "intptr_t", "uintptr_t", "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t",
+    "intptr_t", "uintptr_t", "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
+    "int64_t", "uint64_t",
     // time.h
     "time_t", "clock_t",
     // spawn.h / sys/wait.h
     "pid_t" -> { ret .Some(DataTypeType.Num); }
     // stdio.h / stdarg.h / pthread.h / spawn.h: opaque handle typedefs
-    "FILE", "va_list", "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t", "pthread_condattr_t", "posix_spawn_file_actions_t", "posix_spawnattr_t" -> {
+    "FILE", "va_list", "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t",
+    "pthread_cond_t", "pthread_condattr_t", "posix_spawn_file_actions_t", "posix_spawnattr_t" -> {
       ret .Some(DataTypeType.Unknown);
     }
     _ -> { ret .None; }

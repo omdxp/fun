@@ -47,6 +47,19 @@ pub compound FmtState {
   num decl_block_depth;
   num enum_block_depth;
   num function_body_depth;
+  // How many `fit` statements' own arm lists are open.
+  num fit_block_depth;
+  bin pending_fit_block;
+  // `function_body_depth`'s own value at the moment each still-open
+  // fit's own body started, one entry per nesting level: a comma is
+  // only one of an arm's own conditions, rather than one written
+  // inside some arm's own body, when the two match - an arm's body
+  // always opens at least one deeper.
+  Vec<num> fit_body_depth_at_start;
+  // Whether the arm currently being written is long enough to need
+  // each of its own conditions on its own line, decided once per arm
+  // from a width measurement taken at its own first token.
+  bin fit_arm_wrap;
   // True when the token just written was a prefix operator.
   bin prev_unary;
   // A space owed to the previous token, written only if the line
@@ -82,6 +95,10 @@ pub fun fmt_state_new() FmtState {
   s.decl_block_depth = 0;
   s.enum_block_depth = 0;
   s.function_body_depth = 0;
+  s.fit_block_depth = 0;
+  s.pending_fit_block = false;
+  s.fit_body_depth_at_start.init(4);
+  s.fit_arm_wrap = false;
   s.prev_unary = false;
   s.pending_space = false;
   s.stmt_first = "";
@@ -547,9 +564,8 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, bin in_decl_only) bin {
 // brace is a block rather than a compound literal.
 fun _is_block_keyword(str text) bin {
   fit text {
-    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
-      ret true;
-    }
+    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for",
+    "fit", "defer", "asm" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -821,6 +837,81 @@ fun _inline_width(Vec<Token>* tokens, num from, num to) num {
     i = i + 1;
   }
   ret width;
+}
+
+// The index of the `->` ending the arm whose own conditions start at
+// `from` (the arm's own first token, right after the fit's own `{`
+// or a previous arm's own closing `}`), tracking paren depth so a
+// destructuring payload's own commas (`.Circle(r, g, b)`) are never
+// mistaken for the boundary. -1 for a shape this doesn't recognize
+// (no `->` found before a bare `{` would have to be a body already,
+// meaning something is not a normal arm at all).
+fun _fit_arm_end(Vec<Token>* tokens, num from) num {
+  num depth = 0;
+  num i = from;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      i = i + 1;
+      continue;
+    }
+    str text = token_text(t);
+    if equals(text, "(") {
+      depth = depth + 1;
+    } elif equals(text, ")") {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+    } elif depth == 0 && equals(text, "->") {
+      ret i;
+    } elif depth == 0 && (equals(text, "{") || equals(text, "}")) {
+      ret -1;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// The index just past the single condition starting at `from`: the
+// next top-level comma, or the arm's own `->` when this is its last
+// condition, paren depth tracked so a destructuring payload's own
+// comma (`.Circle(r, g, b)`) is never mistaken for the boundary
+// between two conditions.
+fun _fit_condition_end(Vec<Token>* tokens, num from) num {
+  num depth = 0;
+  num i = from;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      i = i + 1;
+      continue;
+    }
+    str text = token_text(t);
+    if equals(text, "(") {
+      depth = depth + 1;
+    } elif equals(text, ")") {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+    } elif depth == 0 && (equals(text, ",") || equals(text, "->")) {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret i;
+}
+
+// Whether the arm whose own conditions start at `from` needs each of
+// them on its own line: true when the whole condition list, written
+// starting at `start_col`, would run past `MAX_LINE_WIDTH`. False for
+// a shape `_fit_arm_end` doesn't recognize, the same "don't guess"
+// stance every other width check here takes.
+fun _measure_fit_arm_wrap(Vec<Token>* tokens, num from, num start_col) bin {
+  num arm_end = _fit_arm_end(tokens, from);
+  if arm_end < 0 {
+    ret false;
+  }
+  ret start_col + _inline_width(tokens, from, arm_end) > MAX_LINE_WIDTH;
 }
 
 // Byte offsets where each line of `src` begins.
@@ -1378,6 +1469,14 @@ pub fun format_source(str src, str filename) Result<str, str> {
           s.force_break = true;
           s.pending_newlines = 0;
           i = close + 1;
+          // This whole arm was written as opaque verbatim text above,
+          // bypassing the general `{`/`}` handling `fit_arm_wrap`
+          // normally gets recomputed from - do it here too, or the
+          // next arm keeps whichever wrap decision happened to be
+          // left over from before this one.
+          if s.fit_block_depth > 0 {
+            s.fit_arm_wrap = _measure_fit_arm_wrap(&tokens, i, s.indent * 2);
+          }
           continue;
         }
       }
@@ -1417,14 +1516,23 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A closing brace dedents before it is written, and always starts
     // its own line.
     if equals(text, "}") {
+      bin closed_arm_body = false;
       if s.brace_kinds.len > 0 {
         let kind = s.brace_kinds.pop();
         if kind == 2 && s.function_body_depth > 0 {
           s.function_body_depth = s.function_body_depth - 1;
+          closed_arm_body = s.fit_block_depth > 0 && s.fit_body_depth_at_start.len > 0 && s.function_body_depth == s.fit_body_depth_at_start.get(
+            s.fit_body_depth_at_start.len - 1
+          );
         } elif kind == 3 && s.decl_block_depth > 0 {
           s.decl_block_depth = s.decl_block_depth - 1;
         } elif kind == 4 && s.enum_block_depth > 0 {
           s.enum_block_depth = s.enum_block_depth - 1;
+        } elif kind == 5 && s.fit_block_depth > 0 {
+          s.fit_block_depth = s.fit_block_depth - 1;
+          if s.fit_body_depth_at_start.len > 0 {
+            s.fit_body_depth_at_start.pop();
+          }
         }
       }
       if s.indent > 0 {
@@ -1441,6 +1549,13 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.has_prev = true;
       s.prev = t;
       i = i + 1;
+      // A closed arm body, still inside the same fit, means the very
+      // next token (past the separating comment/newline this loop
+      // will skip on its own) starts a fresh arm - measured the same
+      // way the first arm already was.
+      if closed_arm_body {
+        s.fit_arm_wrap = _measure_fit_arm_wrap(&tokens, i, s.indent * 2);
+      }
       continue;
     }
 
@@ -1475,11 +1590,25 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.open_delims = s.open_delims + 1;
     }
     // A separator carries its own spacing: one space after it, except
-    // between enum variants, which take a line each.
+    // between enum variants, which take a line each, and between an
+    // over-long fit arm's own conditions, which fill each line up to
+    // the width budget instead of one condition per line, the same
+    // way a long function call's own wrapped arguments do.
+    bin fit_condition_comma = s.fit_block_depth > 0 && s.open_delims == 0 && !equals(prev_text, "}") && s.fit_body_depth_at_start.len > 0 && s.function_body_depth == s.fit_body_depth_at_start.get(
+      s.fit_body_depth_at_start.len - 1
+    );
     if equals(text, ",") {
-      if s.enum_block_depth > 0 && s.function_body_depth == 0 && s.open_delims == 0 {
-        // Each variant takes a line, but a comment written after one
-        // stays with it.
+      bin fit_fill_break = false;
+      if fit_condition_comma && s.fit_arm_wrap {
+        num next_end = _fit_condition_end(&tokens, i + 1);
+        num next_width = _inline_width(&tokens, i + 1, next_end - 1);
+        fit_fill_break = s.col + 1 + next_width > MAX_LINE_WIDTH;
+      }
+      if (s.enum_block_depth > 0 && s.function_body_depth == 0 && s.open_delims == 0) || fit_fill_break {
+        // Each variant takes a line; an over-long fit arm's own
+        // conditions break only once the next one would not fit,
+        // packing as many per line as the width allows. A comment
+        // written after either stays with it.
         s.force_break = true;
         s.pending_newlines = 0;
       } else {
@@ -1511,6 +1640,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.pending_enum_block = false;
         s.enum_block_depth = s.enum_block_depth + 1;
         kind = 4;
+      } elif s.pending_fit_block {
+        s.pending_fit_block = false;
+        s.fit_block_depth = s.fit_block_depth + 1;
+        s.fit_body_depth_at_start.push(s.function_body_depth);
+        kind = 5;
       } elif s.function_body_depth > 0 {
         s.function_body_depth = s.function_body_depth + 1;
         kind = 2;
@@ -1519,6 +1653,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.indent = s.indent + 1;
       s.force_break = true;
       s.pending_newlines = 0;
+      if kind == 5 {
+        s.fit_arm_wrap = _measure_fit_arm_wrap(&tokens, i + 1, s.indent * 2);
+      }
     }
     if equals(text, ";") {
       s.force_break = true;
@@ -1549,6 +1686,8 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.pending_decl_block = true;
       } elif equals(text, "enum") {
         s.pending_enum_block = true;
+      } elif equals(text, "fit") {
+        s.pending_fit_block = true;
       }
     }
     if equals(text, ";") {

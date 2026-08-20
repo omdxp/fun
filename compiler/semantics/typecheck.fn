@@ -799,9 +799,8 @@ impl Checker {
 // Calls the language supplies rather than a program declaring them.
 fun _is_builtin_call(str name) bin {
   fit name {
-    "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin", "va_arg_chr", "va_arg_str", "va_arg_raw" -> {
-      ret true;
-    }
+    "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
+    "va_arg_chr", "va_arg_str", "va_arg_raw" -> { ret true; }
     _ -> { ret false; }
   }
 }

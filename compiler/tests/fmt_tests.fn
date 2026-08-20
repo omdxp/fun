@@ -305,3 +305,55 @@ test "reports the stage that rejected the input" {
   let out = format_source("fun main() num {\n  /* never closed\n", "t.fn");
   assert out.is_err(), "expected a lex failure to be reported";
 }
+
+test "wraps an over-long fit arm's own conditions, filling each line rather than one per line" {
+  str src = `fun classify(str text) bin {
+  `  fit text {
+  `    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
+  `      ret true;
+  `    }
+  `    _ -> { ret false; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  // Wrapped onto more than one line, but packed rather than one
+  // condition per line: several conditions still share a line.
+  assert contains(got, `"fun", "compound"`), "expected consecutive short conditions to stay packed on one line, not each on its own";
+  assert !contains(
+    got,
+    `"fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm"`
+  ), "expected the whole list not to still be on one line";
+}
+
+test "a fit arm's own conditions that already fit stay on one line" {
+  str src = `fun classify(str text) bin {
+  `  fit text {
+  `    "fun", "enum" -> { ret true; }
+  `    _ -> { ret false; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, `"fun", "enum" -> { ret true; }`), "expected a short condition list to stay exactly as written, unwrapped";
+}
+
+test "an over-long fit arm still wraps after an earlier arm's own body collapsed to one line" {
+  // A short arm's own body ("EOF", ... -> { ret "std.c.io"; }) is
+  // written as opaque verbatim text on its own fast path, bypassing
+  // the general brace handling the wrap decision is normally
+  // recomputed from - this arm's own over-long conditions must still
+  // wrap, not silently reuse a short earlier arm's own decision.
+  str src = `fun classify(str name) str {
+  `  fit name {
+  `    "a" -> { ret "x"; }
+  `    "CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MAX", "INT_MIN", "UINT_MAX", "LONG_MAX", "LONG_MIN", "ULONG_MAX", "LLONG_MAX", "LLONG_MIN", "ULLONG_MAX" -> {
+  `      ret "std.c.limits";
+  `    }
+  `    _ -> { ret ""; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert !contains(
+    got,
+    `"CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN"`
+  ), "expected the over-long arm to wrap even though the arm before it collapsed to one line";
+}

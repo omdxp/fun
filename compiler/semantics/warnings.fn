@@ -1491,18 +1491,18 @@ impl Analysis {
 // the name available, so reading it is what earns the import its place.
 fun _c_builtin_owner(str name) str {
   fit name {
-    "NULL", "SIZE_MAX", "RSIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX", "size_t", "ptrdiff_t", "wchar_t", "rsize_t", "ssize_t", "va_list" -> {
+    "NULL", "SIZE_MAX", "RSIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "WCHAR_MIN", "WCHAR_MAX",
+    "WINT_MIN", "WINT_MAX", "size_t", "ptrdiff_t", "wchar_t", "rsize_t", "ssize_t", "va_list" -> {
       ret "std.c.def";
     }
     "EOF", "SEEK_SET", "SEEK_CUR", "SEEK_END", "FILE" -> { ret "std.c.io"; }
     "EXIT_SUCCESS", "EXIT_FAILURE" -> { ret "std.c.mem"; }
-    "CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MAX", "INT_MIN", "UINT_MAX", "LONG_MAX", "LONG_MIN", "ULONG_MAX", "LLONG_MAX", "LLONG_MIN", "ULLONG_MAX" -> {
-      ret "std.c.limits";
-    }
+    "CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX",
+    "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MAX", "INT_MIN", "UINT_MAX", "LONG_MAX", "LONG_MIN",
+    "ULONG_MAX", "LLONG_MAX", "LLONG_MIN", "ULLONG_MAX" -> { ret "std.c.limits"; }
     "CLOCKS_PER_SEC", "time_t", "clock_t" -> { ret "std.c.time"; }
-    "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t", "pthread_condattr_t" -> {
-      ret "std.c.thread";
-    }
+    "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
+    "pthread_condattr_t" -> { ret "std.c.thread"; }
     "pid_t", "posix_spawn_file_actions_t" -> { ret "std.c.process"; }
     _ -> { ret ""; }
   }
@@ -1527,9 +1527,8 @@ fun _module_owns_a_read_builtin(str path, Set<str>* read) bin {
 // language accepts without a declaration.
 fun _module_documents_builtins(str path) bin {
   fit path {
-    "std.c.def", "std.c.io", "std.c.mem", "std.c.limits", "std.c.time", "std.c.thread", "std.c.process" -> {
-      ret true;
-    }
+    "std.c.def", "std.c.io", "std.c.mem", "std.c.limits", "std.c.time", "std.c.thread",
+    "std.c.process" -> { ret true; }
     _ -> { ret false; }
   }
 }

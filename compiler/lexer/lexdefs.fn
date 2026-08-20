@@ -12,9 +12,10 @@ imp std.vec;
 // True if `s` is a reserved word.
 pub fun is_keyword(str s) bin {
   fit s {
-    "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const", "defer", "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif", "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue", "allow", "expect", "assert", "panic", "test", "fuzz" -> {
-      ret true;
-    }
+    "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const", "defer",
+    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif",
+    "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue",
+    "allow", "expect", "assert", "panic", "test", "fuzz" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -100,9 +101,9 @@ pub fun is_single_operator(chr op) bin {
 // checks a single character that may be part of one).
 pub fun op_valid(str op) bin {
   fit op {
-    "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=", "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(", "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$" -> {
-      ret true;
-    }
+    "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=",
+    "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(",
+    "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$" -> { ret true; }
     _ -> { ret false; }
   }
 }

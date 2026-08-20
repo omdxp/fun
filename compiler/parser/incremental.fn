@@ -185,9 +185,8 @@ fun _starts_declaration(Token t) bin {
   fit t.data {
     .Sval(word) -> {
       fit word {
-        "imp", "pub", "fun", "async", "compound", "enum", "quirk", "impl", "const", "test", "fuzz" -> {
-          ret true;
-        }
+        "imp", "pub", "fun", "async", "compound", "enum", "quirk", "impl", "const", "test",
+        "fuzz" -> { ret true; }
         _ -> { ret false; }
       }
     }
