@@ -3080,6 +3080,41 @@ test "dot-completion after an import alias lists the aliased module's own functi
   assert !contains(out, `"detail":"in this file"`), "expected the real module functions, not the unparsed-fallback word list";
 }
 
+test "dot-completion after an enum's own type name or an instance of it lists its variants, not the whole file" {
+  str src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `fun main() num {
+  `  Color c = Color.Green;
+  `  c.Blue;
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///colors.fn";
+  doc.path = "colors.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 7, right after 'Color.': the enum names itself as its own
+  // receiver, the same way an alias names a module.
+  str type_qualified = completion(&reads, doc, 7, 18, false);
+  assert contains(type_qualified, `"label":"Red","kind":20`), "expected Color's own variants after the type name itself";
+  assert contains(type_qualified, `"label":"Blue","kind":20`), "expected every variant, not just the one already written";
+  assert !contains(type_qualified, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+
+  // Line 8, right after 'c.': not real Fun syntax (variants are
+  // reached through the enum's own name, not an instance), but the
+  // receiver resolves to the same type either way, so this completes
+  // the same way rather than falling back to the whole file.
+  str instance = completion(&reads, doc, 8, 4, false);
+  assert contains(instance, `"label":"Red","kind":20`), "expected the same variants completing through an instance";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
