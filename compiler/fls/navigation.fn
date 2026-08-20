@@ -10,6 +10,7 @@ imp analysis;
 imp positions;
 imp symbols;
 imp symbol_table;
+imp signature_help;
 imp uri;
 imp imports;
 imp ..lexer.token;
@@ -454,6 +455,17 @@ fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, nu
         }
       }
     }
+    // Every other shape a bare variant is legitimately written in:
+    // compared, assigned, or passed as a call argument.
+    str context_type = _dot_shorthand_context_type(tokens, &program.nodes, t, doc.path, source_line);
+    if !equals(context_type, "") {
+      Vec<str> no_args;
+      no_args.init(0);
+      let cv = enum_variant_declaration(&program.nodes, context_type, name, no_args);
+      if cv.is_some() {
+        ret cv;
+      }
+    }
   }
 
   let declared_field = lookup_field_at(&program.nodes, doc.path, source_line, name);
@@ -574,6 +586,146 @@ fun _is_return_value(Vec<Token>* tokens, Token t) bin {
     i = i - 1;
   }
   ret false;
+}
+
+// The enum type a bare `.Variant` at `t` reads against, for every
+// shape besides a fit's own branch or a bare `ret` value (both
+// already resolved by the caller before this is ever reached): the
+// other side of an `==`/`!=` comparison or a plain `=` assignment
+// (`c == .Red`, `c = .Green`), or the declared parameter type at
+// whichever position it occupies in an enclosing call's own argument
+// list (`takesColor(.Red)`, `p.new(..., .Blue)`) - every context a
+// reader could write a bare variant shorthand in without it being
+// ambiguous, matching the language's own idiom (`enum_showcase.fn`
+// demonstrates every one of these as a headline feature). "" when
+// none of them apply.
+fun _dot_shorthand_context_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Token t,
+  str file,
+  num line
+) str {
+  num dot_idx = index_of_token(tokens, t) - 1;
+  for dot_idx >= 0 && !token_is_operator(tokens.get(dot_idx), ".") {
+    dot_idx = dot_idx - 1;
+  }
+  num i = dot_idx - 1;
+  for i >= 0 && tokens.get(i).type == TokenType.NewLine {
+    i = i - 1;
+  }
+  if i < 0 {
+    ret "";
+  }
+  Token prev = tokens.get(i);
+
+  if token_is_operator(prev, "==") || token_is_operator(prev, "!=") || token_is_operator(prev, "=") {
+    let operand = token_before(tokens, i);
+    if operand.is_none() {
+      ret "";
+    }
+    Token last = operand.unwrap();
+    ret chain_ending_type(tokens, last, token_is_symbol(last, ')'), program, file, line);
+  }
+
+  if token_is_operator(prev, "(") || token_is_operator(prev, ",") {
+    ret _call_arg_expected_type(tokens, program, dot_idx, file, line);
+  }
+
+  ret "";
+}
+
+// The declared type of whichever parameter the argument starting at
+// `dot_idx` occupies, in the call whose own opening `(` is found by
+// walking backward from it depth-tracked (so a nested call inside an
+// earlier argument is never mistaken for the enclosing one). Reuses
+// the callee's own already-rendered "name(Type name, ...)" signature
+// (a plain function via `lookup_top_level`, a method through its own
+// receiver's type via `lookup_method`) rather than reading `DataType*`
+// params directly, the same string-based approach signature_help.fn
+// and inlay_hints.fn already share for this exact job.
+fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx, str file, num line) str {
+  num depth = 0;
+  num i = dot_idx - 1;
+  num open_idx = -1;
+  for i >= 0 {
+    Token tk = tokens.get(i);
+    if token_is_symbol(tk, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(tk, "(") {
+      if depth == 0 {
+        open_idx = i;
+        break;
+      }
+      depth = depth - 1;
+    }
+    i = i - 1;
+  }
+  if open_idx <= 0 {
+    ret "";
+  }
+
+  let callee_tok = token_before(tokens, open_idx);
+  if callee_tok.is_none() {
+    ret "";
+  }
+  Token callee = callee_tok.unwrap();
+  if callee.type != TokenType.Identifier {
+    ret "";
+  }
+  str callee_name = token_word(callee);
+
+  num arg_index = 0;
+  num pdepth = 0;
+  num j = open_idx + 1;
+  for j < dot_idx {
+    Token tk = tokens.get(j);
+    if token_is_operator(tk, "(") {
+      pdepth = pdepth + 1;
+    } elif token_is_symbol(tk, ')') {
+      pdepth = pdepth - 1;
+    } elif token_is_operator(tk, ",") && pdepth == 0 {
+      arg_index = arg_index + 1;
+    }
+    j = j + 1;
+  }
+
+  num callee_idx = index_of_token(tokens, callee);
+  let before_callee = token_before(tokens, callee_idx);
+  str signature = "";
+  if before_callee.is_some() && token_is_operator(before_callee.unwrap(), ".") {
+    // A method call: written arguments never include `self`, but the
+    // callee's own rendered signature does - shift the index to match.
+    arg_index = arg_index + 1;
+    let recv = token_before(tokens, callee_idx - 1);
+    if recv.is_none() {
+      ret "";
+    }
+    str receiver_type = chain_ending_type(tokens, recv.unwrap(), token_is_symbol(recv.unwrap(), ')'), program, file, line);
+    if equals(receiver_type, "") {
+      ret "";
+    }
+    Vec<str> no_args;
+    no_args.init(0);
+    let method = lookup_method(program, receiver_type, callee_name, no_args);
+    if method.is_none() {
+      ret "";
+    }
+    signature = method.unwrap().detail;
+  } else {
+    let f = lookup_top_level(program, callee_name);
+    if f.is_none() {
+      ret "";
+    }
+    signature = f.unwrap().detail;
+  }
+
+  Vec<str> params = split_signature_params(signature);
+  defer params.free();
+  if arg_index >= params.len {
+    ret "";
+  }
+  ret bare_type_from_detail(params.get(arg_index));
 }
 
 fun _hover_result(str markdown, Span s) str {

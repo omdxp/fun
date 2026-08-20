@@ -3,8 +3,11 @@
 // One "N references" lens per top-level function this document
 // declares, its own count reusing references.fn's workspace-wide
 // occurrence scan rather than re-implementing name matching. Clicking
-// it runs VS Code's own built-in "show references" command, which
-// needs no extension-side wiring of its own to work.
+// it runs `fun.showReferences`, a thin extension-side wrapper
+// (editors/vscode/src/extension.ts) that converts these plain JSON
+// arguments into real Uri/Position/Location instances before handing
+// off to VS Code's own built-in show-references command, which
+// validates its own arguments by type and rejects a plain object.
 
 imp documents;
 imp analysis;
@@ -16,8 +19,16 @@ imp ..ast.ast;
 imp std.vec;
 imp std.string;
 
-// Every function's own reference-count lens in `doc`, as the result a
-// client is sent.
+// Every top-level function/compound/enum/quirk's own reference-count
+// lens in `doc`, as the result a client is sent. Skips `main` and an
+// impl's own methods: `main` is an entry point invoked by the
+// runtime, never really "called" by other code the way an ordinary
+// function is, and a naive whole-name occurrence count would still
+// count an unrelated file's own same-named `main` as a reference to
+// this one (every example in this repo declares its own). A method
+// name is skipped for the same reason but far more often: `free`,
+// `get`, `init` and the like are shared across many unrelated types,
+// so the count would mostly measure name collisions, not real calls.
 pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
   Analyzed read = cache.of(doc);
   if !read.parsed {
@@ -34,7 +45,14 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
     i = i + 1;
     str name = "";
     fit n.kind {
-      .Function(f) -> { name = f.name; }
+      .Function(f) -> {
+        if !equals(f.name, "main") {
+          name = f.name;
+        }
+      }
+      .Compound(c) -> { name = c.name; }
+      .Enum(e) -> { name = e.name; }
+      .Quirk(q) -> { name = q.name; }
       _ -> {}
     }
     if equals(name, "") || !n.has_pos {
@@ -83,7 +101,7 @@ fun _references_lens(
     plural = "";
   }
   ret format(
-    `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"command":{"title":"{num} reference{str}","command":"editor.action.showReferences","arguments":[{str},{"line":{num},"character":{num}},{str}]}}`,
+    `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"command":{"title":"{num} reference{str}","command":"fun.showReferences","arguments":[{str},{"line":{num},"character":{num}},{str}]}}`,
     span.line,
     span.start,
     span.line,

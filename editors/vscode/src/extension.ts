@@ -1019,6 +1019,54 @@ export function activate(context: vscode.ExtensionContext) {
     ),
   );
 
+  // Bridges the "N references" code lens to the built-in references
+  // view. fls's own arguments are plain JSON (an LSP Command carries
+  // no richer shape than that), but editor.action.showReferences
+  // validates its own arguments by type (instanceof Uri/Position) and
+  // rejects a plain object outright -- this wrapper is what actually
+  // constructs those before handing off to it.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.showReferences",
+      async (
+        uriStr: string,
+        position: { line: number; character: number },
+        locations: {
+          uri: string;
+          range: {
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+          };
+        }[],
+      ) => {
+        const uri = vscode.Uri.parse(uriStr);
+        const pos = new vscode.Position(position.line, position.character);
+        const vsLocations = locations.map(
+          (loc) =>
+            new vscode.Location(
+              vscode.Uri.parse(loc.uri),
+              new vscode.Range(
+                new vscode.Position(
+                  loc.range.start.line,
+                  loc.range.start.character,
+                ),
+                new vscode.Position(
+                  loc.range.end.line,
+                  loc.range.end.character,
+                ),
+              ),
+            ),
+        );
+        await vscode.commands.executeCommand(
+          "editor.action.showReferences",
+          uri,
+          pos,
+          vsLocations,
+        );
+      },
+    ),
+  );
+
   // ⚙ Debug — compile with -g, then launch native debugger
   context.subscriptions.push(
     vscode.commands.registerCommand(

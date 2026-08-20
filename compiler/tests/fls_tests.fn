@@ -2129,6 +2129,63 @@ test "hover on a function or method shows a defaulted parameter's own default va
   assert contains(method_hover, "num x = 10"), "expected the method's own defaulted param";
 }
 
+test "a bare variant shorthand resolves in a comparison, an assignment, and a call argument, not just a fit or a ret" {
+  // Every one of these is a real, common shape a bare `.Variant` is
+  // written in outside a fit statement's own branches or a bare
+  // `ret` value - user-reported, none of them resolved before.
+  str src = `enum Color {
+  `  Red = 1,
+  `  Green,
+  `  Blue,
+  `}
+  `compound Person {
+  `  Color favoriteColor;
+  `}
+  `impl Person {
+  `  setColor(Color c) {
+  `    self.favoriteColor = c;
+  `  }
+  `}
+  `fun takesColor(Color c) num {
+  `  ret 0;
+  `}
+  `fun use_it() num {
+  `  Color c = Color.Red;
+  `  if c == .Red {
+  `    ret 1;
+  `  }
+  `  c = .Green;
+  `  takesColor(.Blue);
+  `  Person p;
+  `  p.setColor(.Red);
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shorthand_ctx.fn";
+  doc.path = "shorthand_ctx.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // `if c == .Red` - the comparison's other operand.
+  str cmp = hover(&reads, doc, 18, 11);
+  assert contains(cmp, "Red = 1"), "expected the comparison's own operand to resolve .Red";
+
+  // `c = .Green;` - a plain assignment.
+  str assign = hover(&reads, doc, 21, 7);
+  assert contains(assign, "Green = 2"), "expected the assignment target's own type to resolve .Green";
+
+  // `takesColor(.Blue);` - a bare function call argument.
+  str call_arg = hover(&reads, doc, 22, 14);
+  assert contains(call_arg, "Blue = 3"), "expected the callee's own declared parameter type to resolve .Blue";
+
+  // `p.setColor(.Red);` - a method call argument, self excluded from
+  // the written argument count.
+  str method_arg = hover(&reads, doc, 24, 14);
+  assert contains(method_arg, "Red = 1"), "expected the method's own declared parameter type to resolve .Red";
+}
+
 test "hover on a method call, a qualified variant, and a ret's own bare variant (with generic substitution)" {
   str src = `compound Box {
   `  num width;
@@ -2904,7 +2961,38 @@ test "code lens shows a reference count per function, correctly pluralized" {
   assert contains(out, `"title":"3 references"`), "expected add's own count, plural";
   // use_it: declared, never called.
   assert contains(out, `"title":"1 reference"`), "expected use_it's own count, singular";
-  assert contains(out, `"command":"editor.action.showReferences"`), "expected the built-in show-references command";
+  assert contains(out, `"command":"fun.showReferences"`), "expected the extension-side wrapper command, not the raw built-in one";
+}
+
+test "code lens skips main and impl methods, but covers compounds, enums, and quirks" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///scope.fn", `compound Widget {
+  `  num n;
+  `}
+  `enum Shape {
+  `  Circle(num),
+  `}
+  `quirk Speaks {
+  `  say() str;
+  `}
+  `impl Widget {
+  `  pub free() {}
+  `}
+  `fun main() num {
+  `  ret 0;
+  `}`, 1);
+  let held = docs.at("file:///scope.fn");
+  Document doc = held.unwrap();
+
+  str out = code_lenses(&reads, &docs, doc);
+  assert contains(out, `"start":{"line":0,"character":9}`), "expected a lens on Widget";
+  assert contains(out, `"start":{"line":3,"character":5}`), "expected a lens on Shape";
+  assert contains(out, `"start":{"line":6,"character":6}`), "expected a lens on Speaks";
+  assert !contains(out, "main"), "expected no lens on main, an entry point invoked by the runtime";
+  assert !contains(out, `"start":{"line":10,"character":6}`), "expected no lens on free, an impl method";
 }
 
 test "selection range expands from a token through each enclosing bracket pair, outermost last" {
