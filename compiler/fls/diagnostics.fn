@@ -9,6 +9,7 @@
 imp protocol;
 imp documents;
 imp analysis;
+imp ..ast.ast;
 imp ..parser.parse_state;
 imp ..parser.parser;
 imp ..parser.import_resolver;
@@ -129,7 +130,14 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   state.tokens = read.tokens;
   state.emit_stderr = false;
   Parser p = parser_new(&state);
+  // This parse exists only to localize a parse error's own position
+  // (below); the real analysis further down reads `read.program`
+  // instead, already parsed and cached by `AnalysisCache.of()`. Freed
+  // on every exit from here, or every diagnose() call - one per edit,
+  // for as long as the server keeps running - leaks a whole discarded
+  // parse tree nothing ever looks at again.
   let parse_failed = p.parse();
+  defer free_node_tree(&state.nodes);
   if parse_failed.is_some() {
     str message = "this file could not be read";
     if state.has_error {

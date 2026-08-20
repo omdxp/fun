@@ -10,6 +10,7 @@
 // still current. An edit raises it, and the next question re-reads.
 
 imp documents;
+imp ..ast.ast;
 imp ..lexer.lexer;
 imp ..lexer.token;
 imp ..parser.import_resolver;
@@ -54,6 +55,20 @@ impl AnalysisCache {
       if found.version == doc.version {
         ret found;
       }
+      // A stale revision is about to be replaced below - freed first,
+      // or every edit leaks the whole previous parse for as long as
+      // the server keeps running. Only `tokens` and `entry_nodes` are
+      // safe to free this deeply: both come from a parse of this
+      // document alone, touching no shared cache, unlike `program.
+      // nodes` (the transitively merged cross-file program), whose
+      // nodes are reached through `self.imports` and may still be
+      // referenced by another document's own merge.
+      if found.lexed {
+        found.tokens.free();
+      }
+      if found.parsed {
+        free_node_tree(&found.program.entry_nodes);
+      }
     }
 
     Analyzed fresh;
@@ -82,6 +97,16 @@ impl AnalysisCache {
 
   // Drops what was kept for a document a client closed.
   pub forget(str document_uri) {
+    let found = self.entries.at(document_uri);
+    if found.is_some() {
+      Analyzed a = found.unwrap();
+      if a.lexed {
+        a.tokens.free();
+      }
+      if a.parsed {
+        free_node_tree(&a.program.entry_nodes);
+      }
+    }
     self.entries.remove(document_uri);
   }
 

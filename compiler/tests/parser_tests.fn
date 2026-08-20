@@ -512,6 +512,67 @@ test "an unchanged declaration reads as the same text" {
   assert !equals(second_before, second_after), "expected the edited declaration to differ";
 }
 
+test "free_node_tree frees a tree touching every major node shape without corrupting anything else" {
+  // No leak-detection tool runs inside the test harness, so this
+  // can't assert bytes reclaimed - what it can assert is that freeing
+  // a tree built from a wide variety of node shapes at once (an
+  // impl's own generic method, a fit with a data-carrying enum, a
+  // for-each loop, a compound literal, nested calls, a quirk, a
+  // constant) doesn't corrupt anything: parsing a second, unrelated
+  // program right after still succeeds and reads back correctly, and
+  // the whole test suite already runs this same free path under
+  // MallocScribble/MallocGuardEdges/MallocErrorAbort in CI-equivalent
+  // verification, which would abort on the first bad write or read a
+  // free left behind.
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `compound Box<T> {
+  `  T value;
+  `}
+  `quirk Greeter {
+  `  greet() str;
+  `}
+  `impl Box<T> {
+  `  pub wrap<U>(U x) Box<U> {
+  `    ret Box<U>{ value = x };
+  `  }
+  `}
+  `impl Shape as Greeter {
+  `  pub greet() str {
+  `    fit self {
+  `      .Circle(r) -> { ret "circle"; }
+  `      .Square(s) -> { ret "square"; }
+  `    }
+  `  }
+  `}
+  `fun area(Shape s) num {
+  `  num total = 0;
+  `  for i : 0..3 {
+  `    fit s {
+  `      .Circle(r) -> { total = total + (r * r); }
+  `      _ -> { total = total + i; }
+  `    }
+  `  }
+  `  ret total;
+  `}`;
+  ParseState st = parse_ok(src);
+  free_node_tree(&st.nodes);
+
+  // A completely separate, later parse must still work correctly -
+  // proof nothing shared with the freed tree was corrupted.
+  str other_src = `fun add(num a, num b) num { ret a + b; }`;
+  ParseState other = parse_ok(other_src);
+  assert other.nodes.len == 1, "expected the unrelated program to still parse correctly";
+  fit other.nodes.get(0).kind {
+    .Function(f) -> {
+      assert equals(f.name, "add"), "expected its own name read back correctly";
+    }
+    _ -> { assert false, "expected a function declaration"; }
+  }
+}
+
 test "generic-heavy source parses whole" {
   // What the original's timing assertion guarded was that nesting
   // generics does not make the parser lose its place. Stated as

@@ -15,6 +15,7 @@ imp std.vec;
 imp std.string;
 imp std.option;
 imp std.quirks;
+imp std.c.mem;
 
 // ===== Data types =====
 
@@ -865,4 +866,305 @@ pub fun node_is_expression(Node n, str op) bin {
 // AST-level array-ness here.
 fun is_array_operator(str op) bin {
   ret equals(op, "[]");
+}
+
+// ===== Freeing a tree =====
+// 
+// Only safe on a tree with no aliasing into anything else still alive:
+// a document's own `entry_nodes` (an independent parse touching no
+// shared import cache) and a `ParseState`'s own scratch `nodes`
+// discarded without being handed anywhere else, never the transitively
+// merged cross-file program (`ProgramMergeResult.nodes`), whose nodes
+// are reached through a shared `ImportCache` and may still be
+// referenced by another document's own merge.
+// 
+// Frees every `Node*`/`DataType*` this tree owns and every `Vec<T>`'s
+// own backing storage, but never a `str` field's own character data:
+// the parser commonly hands a node a token's own already-owned string
+// pointer directly rather than copying it (`token_word`'s own
+// contract), so a node's string fields and its source token's string
+// data are frequently the same allocation - freeing both would double-
+// free. `BindedNode.owner`/`.function` (see `Parser.create_node`) are
+// each a separately `malloc`'d shallow copy of whatever enclosing
+// body/function node was active at construction time - the copy's own
+// `kind` shares every nested `Node*`/`Vec<T>` pointer the real node
+// still owns (a shallow struct copy copies the pointer values, not
+// what they point to), so only the copy's own outer struct is ever
+// freed here, never anything reachable through it.
+
+fun _free_node_vec(Vec<Node*>* v) {
+  num i = 0;
+  for i < v.len {
+    node_free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
+fun _free_dtype_vec(Vec<DataType*>* v) {
+  num i = 0;
+  for i < v.len {
+    dtype_free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
+fun _free_str_str_vec(Vec<Vec<str>>* v) {
+  num i = 0;
+  for i < v.len {
+    Vec<str> inner = v.get(i);
+    inner.free();
+    i = i + 1;
+  }
+  v.free();
+}
+
+pub fun dtype_free(DataType* dt) {
+  if dt == nil {
+    ret;
+  }
+  _free_node_vec(&dt.array_brackets);
+  _free_dtype_vec(&dt.generic_args);
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    _free_dtype_vec(&dt.fn_sig.params);
+    if dt.fn_sig.rtype != nil {
+      dtype_free(dt.fn_sig.rtype);
+    }
+    free(dt.fn_sig);
+  }
+  free(dt);
+}
+
+fun _free_if_stmt(IfStmtNode s) {
+  node_free(s.condition);
+  node_free(s.body);
+}
+
+fun _free_fit_branches(Vec<FitBranch>* branches) {
+  num i = 0;
+  for i < branches.len {
+    FitBranch b = branches.get(i);
+    if b.has_condition {
+      node_free(b.condition);
+    }
+    node_free(b.body);
+    b.bindings.free();
+    i = i + 1;
+  }
+  branches.free();
+}
+
+fun _free_asm_operands(Vec<AsmOperand>* ops) {
+  num i = 0;
+  for i < ops.len {
+    AsmOperand o = ops.get(i);
+    node_free(o.expr);
+    i = i + 1;
+  }
+  ops.free();
+}
+
+fun _free_compound_fields(Vec<CompoundField>* fields) {
+  num i = 0;
+  for i < fields.len {
+    CompoundField f = fields.get(i);
+    dtype_free(f.dtype);
+    i = i + 1;
+  }
+  fields.free();
+}
+
+fun _free_compound_init_fields(Vec<CompoundInitField>* fields) {
+  num i = 0;
+  for i < fields.len {
+    CompoundInitField f = fields.get(i);
+    node_free(f.value);
+    i = i + 1;
+  }
+  fields.free();
+}
+
+fun _free_quirk_methods(Vec<QuirkMethodSig>* methods) {
+  num i = 0;
+  for i < methods.len {
+    QuirkMethodSig m = methods.get(i);
+    dtype_free(m.rtype);
+    num j = 0;
+    for j < m.args.len {
+      QuirkArg a = m.args.get(j);
+      dtype_free(a.dtype);
+      j = j + 1;
+    }
+    m.args.free();
+    i = i + 1;
+  }
+  methods.free();
+}
+
+fun _free_enum_variants(Vec<EnumVariant>* variants) {
+  num i = 0;
+  for i < variants.len {
+    EnumVariant v = variants.get(i);
+    _free_dtype_vec(&v.payload);
+    i = i + 1;
+  }
+  variants.free();
+}
+
+// Frees everything a node owns *through* its fields (recursing into
+// child nodes/types), but not the node struct pointed at by `n`
+// itself - shared by `node_free` (an individually `malloc`'d child
+// node) and `free_node_tree` (a top-level node living inline in a
+// `Vec<Node>`'s own backing array, never separately `malloc`'d).
+fun _free_node_contents(Node* n) {
+  fit n.kind {
+    .ExpressionParenthesis(inner) -> { node_free(inner); }
+    .Panic(inner) -> { node_free(inner); }
+    .Expression(e) -> {
+      if e.has_left {
+        node_free(e.left);
+      }
+      if e.has_right {
+        node_free(e.right);
+      }
+      _free_dtype_vec(&e.generic_args);
+    }
+    .Variable(v) -> {
+      dtype_free(v.var_type);
+      if v.has_val {
+        node_free(v.val);
+      }
+    }
+    .Function(f) -> {
+      if f.has_rtype {
+        dtype_free(f.rtype);
+      }
+      f.type_params.free();
+      _free_str_str_vec(&f.type_param_forced_insts);
+      if f.has_args {
+        _free_node_vec(&f.args);
+      }
+      if f.has_body {
+        node_free(f.body);
+      }
+    }
+    .Body(b) -> { _free_node_vec(&b.statements); }
+    .StatementReturn(inner) -> { node_free(inner); }
+    .StatementDefer(inner) -> { node_free(inner); }
+    .StatementIf(s) -> { _free_if_stmt(s); }
+    .StatementElseIf(s) -> { _free_if_stmt(s); }
+    .StatementElse(inner) -> { node_free(inner); }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(c) -> {
+          if c.has_condition {
+            node_free(c.condition);
+          }
+          node_free(c.body);
+        }
+        .Range(r) -> {
+          node_free(r.range_expr);
+          node_free(r.body);
+        }
+        .Iter(it) -> {
+          node_free(it.iterable);
+          node_free(it.body);
+        }
+      }
+    }
+    .StatementAssert(a) -> {
+      node_free(a.condition);
+      if a.has_message {
+        node_free(a.message);
+      }
+    }
+    .StatementFit(f) -> {
+      node_free(f.exp);
+      _free_fit_branches(&f.branches);
+    }
+    .StatementFork(inner) -> { node_free(inner); }
+    .StatementAsm(a) -> {
+      _free_asm_operands(&a.outputs);
+      _free_asm_operands(&a.inputs);
+      a.clobbers.free();
+    }
+    .Unary(u) -> { node_free(u.operand); }
+    .Tenary(t) -> {
+      node_free(t.cond);
+      node_free(t.then_val);
+      node_free(t.else_val);
+    }
+    .Bracket(inner) -> { node_free(inner); }
+    .CompoundInit(ci) -> {
+      if ci.has_dtype {
+        dtype_free(ci.init_dtype);
+      }
+      _free_compound_init_fields(&ci.fields);
+    }
+    .Compound(c) -> {
+      _free_compound_fields(&c.fields);
+      c.type_params.free();
+      _free_str_str_vec(&c.type_param_forced_insts);
+    }
+    .Quirk(q) -> {
+      _free_quirk_methods(&q.methods);
+      q.type_params.free();
+    }
+    .Enum(e) -> {
+      _free_enum_variants(&e.variants);
+      e.type_params.free();
+    }
+    .Impl(im) -> {
+      im.type_params.free();
+      _free_str_str_vec(&im.type_param_forced_insts);
+      if im.has_concrete_dtype {
+        dtype_free(im.concrete_dtype);
+      }
+      _free_node_vec(&im.methods);
+    }
+    .Test(t) -> { node_free(t.body); }
+    .Fuzz(fz) -> {
+      node_free(fz.data_param);
+      node_free(fz.len_param);
+      node_free(fz.body);
+    }
+    _ -> {}
+  }
+  if n.has_binded && n.binded != nil {
+    if n.binded.has_owner && n.binded.owner != nil {
+      free(n.binded.owner);
+    }
+    if n.binded.has_function && n.binded.function != nil {
+      free(n.binded.function);
+    }
+    free(n.binded);
+  }
+}
+
+// Frees an individually `malloc`'d child node - every `Node*` field
+// throughout this file - contents included.
+pub fun node_free(Node* n) {
+  if n == nil {
+    ret;
+  }
+  _free_node_contents(n);
+  free(n);
+}
+
+// Frees a top-level node list a caller owns outright and nothing else
+// aliases (a document's own `entry_nodes`, or a `ParseState.nodes`
+// discarded without being handed to anything else) - see the file-level
+// note above `_free_node_contents` for exactly what "owns outright"
+// rules out. Each element lives inline in `nodes`'s own backing array,
+// never separately `malloc`'d, so only its contents are freed before
+// the whole backing array goes in one call.
+pub fun free_node_tree(Vec<Node>* nodes) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    _free_node_contents(&n);
+    i = i + 1;
+  }
+  nodes.free();
 }
