@@ -8,6 +8,7 @@
 imp std.string;
 imp std.option;
 imp std.io;
+imp std.c.mem;
 
 // The largest header line worth reading. A header far longer than this
 // is a client fault rather than something to grow a buffer for.
@@ -71,12 +72,20 @@ fun to_lower_char(chr c) chr {
   ret c;
 }
 
-// Writes `json` as one message, headers included. A client reads by
-// length, so the message is flushed rather than left in a buffer.
+// Writes `json` as one message, headers included, then frees it. A
+// client reads by length, so the message is flushed rather than left
+// in a buffer. Every one of this server's own call sites builds
+// `json` fresh right at the call (`response`/`error_response`/
+// `publish`/`notification`/`request_to_client`, each a `format(...)`
+// underneath, never a pass-through of something already owned
+// elsewhere) - the last thing done with it, so freeing it here rather
+// than asking every caller to remember to is what actually happens
+// consistently, not just what's supposed to.
 pub fun write_message(str json) {
   Sink out = Sink.Stdout;
   out.write(format("Content-Length: {num}\r\n\r\n{str}", len(json), json));
   out.flush();
+  free(json);
 }
 
 // The reply to a request that succeeded.

@@ -32,6 +32,7 @@ imp std.json;
 imp std.math;
 imp std.io;
 imp std.fs;
+imp std.c.mem;
 
 // What the server carries between messages.
 pub compound Server {
@@ -134,7 +135,9 @@ impl Server {
         self.workspace_root = root;
         self.has_workspace_root = true;
       }
-      write_message(response(id, _initialize_result()));
+      str init_result = _initialize_result();
+      write_message(response(id, init_result));
+      free(init_result);
       ret;
     }
     if equals(method, "initialized") {
@@ -266,11 +269,9 @@ impl Server {
       ret;
     }
     if is_request {
-      write_message(error_response(
-        id,
-        METHOD_NOT_FOUND,
-        format("unsupported request '{str}'", method)
-      ));
+      str unsupported_msg = format("unsupported request '{str}'", method);
+      write_message(error_response(id, METHOD_NOT_FOUND, unsupported_msg));
+      free(unsupported_msg);
     }
   }
 }
@@ -414,7 +415,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, hover(&self.reads, r.doc, r.line, r.character)));
+    str hover_result = hover(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, hover_result));
+    _free_result(hover_result, "null");
   }
 
   // Shows a call's own signature and which parameter the cursor sits
@@ -426,7 +429,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, signature_help(&self.reads, r.doc, r.line, r.character)));
+    str sig_result = signature_help(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, sig_result));
+    _free_result(sig_result, "null");
   }
 
   // Shows a `let`-inferred local's own resolved type as inline text
@@ -449,7 +454,9 @@ impl Server {
     JsonValue end = _field(range, "end");
     num start_line = _number_field(start, "line");
     num end_line = _number_field(end, "line");
-    write_message(response(id, inlay_hints(&self.reads, doc.unwrap(), start_line, end_line)));
+    str hints_result = inlay_hints(&self.reads, doc.unwrap(), start_line, end_line);
+    write_message(response(id, hints_result));
+    _free_result(hints_result, "[]");
   }
 
   // The whole document, classified token by token: what a client
@@ -467,7 +474,9 @@ impl Server {
       write_message(response(id, `{"data":[]}`));
       ret;
     }
-    write_message(response(id, semantic_tokens(&self.reads, doc.unwrap())));
+    str tokens_result = semantic_tokens(&self.reads, doc.unwrap());
+    write_message(response(id, tokens_result));
+    free(tokens_result);
   }
 
   // Offers a quick fix for each warning the client's own request
@@ -507,7 +516,9 @@ impl Server {
         diags.push(d);
       }
     }
-    write_message(response(id, code_actions(&self.reads, doc.unwrap(), document_uri, &diags)));
+    str actions_result = code_actions(&self.reads, doc.unwrap(), document_uri, &diags);
+    write_message(response(id, actions_result));
+    free(actions_result);
   }
 
   // Says where the name under the cursor was declared.
@@ -519,10 +530,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(
-      id,
-      definition_workspace_wide(&self.reads, &self.docs, &self.symbols, r.doc, r.line, r.character)
-    ));
+    str def_result = definition_workspace_wide(&self.reads, &self.docs, &self.symbols, r.doc, r.line, r.character);
+    write_message(response(id, def_result));
+    _free_result(def_result, "[]");
   }
 
   // Says where the *type* of the name under the cursor was declared.
@@ -533,7 +543,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, type_definition(&self.reads, r.doc, r.line, r.character)));
+    str type_def_result = type_definition(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, type_def_result));
+    _free_result(type_def_result, "[]");
   }
 
   // Formats the whole document.
@@ -550,7 +562,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, formatting(doc.unwrap())));
+    str formatting_result = formatting(doc.unwrap());
+    write_message(response(id, formatting_result));
+    _free_result(formatting_result, "[]");
   }
 
   // Offers what a reader could type where the cursor sits.
@@ -561,7 +575,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, completion(&self.reads, r.doc, r.line, r.character, self.snippets)));
+    str completion_result = completion(&self.reads, r.doc, r.line, r.character, self.snippets);
+    write_message(response(id, completion_result));
+    _free_result(completion_result, "[]");
   }
 
   // Lists every place the name under the cursor is written.
@@ -573,7 +589,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, references(&self.reads, &self.docs, r.doc, r.line, r.character)));
+    str references_result = references(&self.reads, &self.docs, r.doc, r.line, r.character);
+    write_message(response(id, references_result));
+    _free_result(references_result, "[]");
   }
 
   // Highlights every place the name under the cursor is written,
@@ -585,7 +603,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, document_highlights(&self.reads, r.doc, r.line, r.character)));
+    str highlights_result = document_highlights(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, highlights_result));
+    _free_result(highlights_result, "[]");
   }
 
   // Renames the name under the cursor everywhere it is written.
@@ -598,10 +618,9 @@ impl Server {
     Request r = asked.unwrap();
     JsonValue params = _field(message, "params");
     str new_name = _string_field(params, "newName");
-    write_message(response(
-      id,
-      rename_symbol(&self.reads, &self.docs, r.doc, r.line, r.character, new_name)
-    ));
+    str rename_result = rename_symbol(&self.reads, &self.docs, r.doc, r.line, r.character, new_name);
+    write_message(response(id, rename_result));
+    _free_result(rename_result, "null");
   }
 
   // Lists what the document declares, for an outline.
@@ -618,7 +637,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, document_symbols(&self.reads, doc.unwrap())));
+    str symbols_result = document_symbols(&self.reads, doc.unwrap());
+    write_message(response(id, symbols_result));
+    _free_result(symbols_result, "[]");
   }
 
   // Every foldable `{`...`}` block in the document.
@@ -635,7 +656,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, folding_ranges(&self.reads, doc.unwrap())));
+    str folding_result = folding_ranges(&self.reads, doc.unwrap());
+    write_message(response(id, folding_result));
+    _free_result(folding_result, "[]");
   }
 
   // One link per `imp` statement's own dotted path, pointing at the
@@ -653,7 +676,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, document_links(&self.reads, doc.unwrap())));
+    str links_result = document_links(&self.reads, doc.unwrap());
+    write_message(response(id, links_result));
+    _free_result(links_result, "[]");
   }
 
   // One "N references" lens per function the document declares.
@@ -670,7 +695,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, code_lenses(&self.reads, &self.docs, doc.unwrap())));
+    str lenses_result = code_lenses(&self.reads, &self.docs, doc.unwrap());
+    write_message(response(id, lenses_result));
+    _free_result(lenses_result, "[]");
   }
 
   // One expanding selection-range chain per requested position.
@@ -706,7 +733,9 @@ impl Server {
       }
       _ -> {}
     }
-    write_message(response(id, selection_ranges(&self.reads, doc.unwrap(), &lines, &chars)));
+    str selection_result = selection_ranges(&self.reads, doc.unwrap(), &lines, &chars);
+    write_message(response(id, selection_result));
+    _free_result(selection_result, "[]");
   }
 
   // The top-level function at a position, as prepareCallHierarchy's
@@ -718,7 +747,9 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    write_message(response(id, prepare_call_hierarchy(&self.reads, r.doc, r.line, r.character)));
+    str prepare_result = prepare_call_hierarchy(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, prepare_result));
+    _free_result(prepare_result, "[]");
   }
 
   // Every top-level function calling the item's own name, workspace
@@ -731,7 +762,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, incoming_calls(&self.reads, &self.docs, name)));
+    str incoming_result = incoming_calls(&self.reads, &self.docs, name);
+    write_message(response(id, incoming_result));
+    free(incoming_result);
   }
 
   // Every top-level function the item's own name calls, from its own
@@ -750,7 +783,9 @@ impl Server {
       write_message(response(id, "[]"));
       ret;
     }
-    write_message(response(id, outgoing_calls(&self.reads, doc.unwrap(), name)));
+    str outgoing_result = outgoing_calls(&self.reads, doc.unwrap(), name);
+    write_message(response(id, outgoing_result));
+    _free_result(outgoing_result, "[]");
   }
 
   // Every symbol matching `query`, across every document this server
@@ -759,7 +794,9 @@ impl Server {
     self._ensure_workspace_symbols_current();
     JsonValue params = _field(message, "params");
     str query = _string_field(params, "query");
-    write_message(response(id, workspace_symbols(&self.docs, &self.reads, &self.symbols, query)));
+    str wsym_result = workspace_symbols(&self.docs, &self.reads, &self.symbols, query);
+    write_message(response(id, wsym_result));
+    free(wsym_result);
   }
 
   // Walks every `.fn` file under the workspace root and records it,
@@ -888,6 +925,19 @@ fun _watch_registration_request() str {
     "client/registerCapability",
     `{"registrations":[{"id":"fun-watch-fn-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.fn"}]}}]}`
   );
+}
+
+// Frees `result` unless it's exactly `sentinel`'s own content - a
+// handler answering "nothing to say" commonly returns a plain literal
+// (`"null"`, `"[]"`) rather than building one fresh, and freeing a
+// literal crashes. A real, freshly built result that happens to equal
+// the sentinel's own text (an empty list built fresh rather than
+// returned as the shortcut) is left unfreed too, safe to get wrong in
+// this direction - a handful of missed frees, never a freed literal.
+fun _free_result(str result, str sentinel) {
+  if !equals(result, sentinel) {
+    free(result);
+  }
 }
 
 // A nested value, or null when the message has no such field.
