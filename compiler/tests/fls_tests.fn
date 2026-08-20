@@ -3220,6 +3220,84 @@ test "an identifier being typed does not suggest itself back while the document 
   assert !contains(out, `"label":"bloater"`), "expected the word being typed not to suggest itself";
 }
 
+test "a bare '.Variant' shorthand completes to only its own enum's variants, in a fit arm, a comparison, and an assignment, even while the document does not parse" {
+  str src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `fun takes(Color c) {
+  `  fit c {
+  `    . -> {}
+  `  }
+  `}
+  `
+  `fun main() {
+  `  Color c = .
+  `  if c == . {
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfshorthand.fn";
+  doc.path = "halfshorthand.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot in a fit arm's own pattern (line 8): the fit
+  // statement's own subject, 'c', names Color, read token-only.
+  str fit_arm = completion(&reads, doc, 8, 5, false);
+  assert contains(fit_arm, `"label":"Red","kind":20`), "expected Color's own variants in a fit arm";
+  assert contains(fit_arm, `"label":"Blue","kind":20`), "expected every variant, not just one";
+  assert !contains(fit_arm, `"label":"fun"`), "expected only variants, not keywords too";
+  assert !contains(fit_arm, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+
+  // Right after the dot in a typed declaration's own RHS (line 13):
+  // the declared LHS type, Color.
+  str assignment = completion(&reads, doc, 13, 13, false);
+  assert contains(assignment, `"label":"Green","kind":20`), "expected Color's own variants after a declaration's '='";
+
+  // Right after the dot in a comparison (line 14): the other
+  // operand's own declared type.
+  str comparison = completion(&reads, doc, 14, 11, false);
+  assert contains(comparison, `"label":"Red","kind":20`), "expected Color's own variants after '=='";
+}
+
+test "a bare '.Variant' shorthand as a call argument completes to only its own enum's variants" {
+  str src = `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `
+  `fun takes(Color c) num {
+  `  ret 0;
+  `}
+  `
+  `fun main() num {
+  `  takes(.Red);
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shortharg.fn";
+  doc.path = "shortharg.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot in 'takes(.Red)' (line 11): the callee's own
+  // declared parameter type. The document parses cleanly here (unlike
+  // the other three shapes above), so this exercises the AST-driven
+  // path rather than the token-only one.
+  str out = completion(&reads, doc, 11, 9, false);
+  assert contains(out, `"label":"Red","kind":20`), "expected Color's own variants as a call argument";
+  assert contains(out, `"label":"Blue","kind":20`), "expected every variant";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

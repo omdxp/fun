@@ -474,7 +474,7 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     // instantiation's concrete type arguments so a payload declared
     // as a bare type param in the template (`Ok(T)`) reads as the
     // caller's actual type (`Ok(str)`).
-    if _is_return_value(tokens, t) {
+    if is_return_value(tokens, t) {
       let rdt = enclosing_return_dtype(&program.nodes, doc.path, source_line);
       if rdt.is_some() {
         let rv = enum_variant_declaration_typed(&program.nodes, rdt.unwrap(), name);
@@ -599,7 +599,7 @@ fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
 // True when the nearest preceding token that could start a new
 // statement, walked back from `t`, is the `ret` keyword: `t` is (or
 // begins) a `ret`'s own value expression.
-fun _is_return_value(Vec<Token>* tokens, Token t) bin {
+pub fun is_return_value(Vec<Token>* tokens, Token t) bin {
   num index = index_of_token(tokens, t);
   num i = index - 1;
   for i >= 0 {
@@ -638,6 +638,20 @@ fun _dot_shorthand_context_type(
   for dot_idx >= 0 && !token_is_operator(tokens.get(dot_idx), ".") {
     dot_idx = dot_idx - 1;
   }
+  ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
+}
+
+// `_dot_shorthand_context_type`'s own logic, taking the dot's index
+// directly rather than deriving it by walking back from a variant
+// name token - what a caller needs when completing right after the
+// dot itself, before any of the variant's own name has been typed.
+pub fun dot_shorthand_context_type_at(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  num dot_idx,
+  str file,
+  num line
+) str {
   num i = dot_idx - 1;
   for i >= 0 && tokens.get(i).type == TokenType.NewLine {
     i = i - 1;

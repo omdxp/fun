@@ -1996,7 +1996,7 @@ pub fun enclosing_body(Vec<Node>* program, str file, num line) Option<Node*> {
 // (not just a plain function's - an impl method's, a test's, or a
 // fuzz block's own body can carry one just as well), whose braces
 // cover `line` in `file`.
-fun _covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
+pub fun covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
   let body = enclosing_body(program, file, line);
   if body.is_none() {
     ret .None;
@@ -2284,7 +2284,7 @@ fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataT
 // `file`, resolved against the enclosing `fit` statement's subject
 // type.
 pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
-  let found = _covering_fit(program, file, line);
+  let found = covering_fit(program, file, line);
   if found.is_none() {
     ret .None;
   }

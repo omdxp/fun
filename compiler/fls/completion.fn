@@ -9,6 +9,7 @@ imp documents;
 imp analysis;
 imp symbols;
 imp imports;
+imp navigation;
 imp signature_help;
 imp inlay_hints;
 imp protocol;
@@ -90,6 +91,23 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   // is offered when there is a tree, and the words already in the file
   // are offered when there is not, rather than answering with nothing.
   if !read.parsed {
+    // A bare `.Variant` shorthand has nothing after the dot yet the
+    // instant a reader triggers completion by typing it, which is
+    // exactly what makes the document fail to parse in the first
+    // place - `if c == .` and `fit c { .` are not valid statements on
+    // their own. Checked token-only, the same way an alias's own type
+    // already is, before falling through to ordinary bare-identifier
+    // completion.
+    num shorthand_dot = _bare_dot_shorthand_index(&tokens, line, character);
+    if shorthand_dot >= 0 {
+      str enum_name = _dot_shorthand_enum_type_from_tokens(&tokens, shorthand_dot);
+      if !equals(enum_name, "") {
+        _members_from_tokens(&tokens, enum_name, &items);
+        if items.len > 0 {
+          ret _reply(&items);
+        }
+      }
+    }
     if equals(receiver, "") {
       _reserved(&items, snippets);
       _written_names(&tokens, _current_word(&tokens, line, character), &items);
@@ -148,6 +166,23 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     ret _reply(&items);
   }
   ProgramMergeResult program = read.program;
+
+  // A bare `.Variant` shorthand (`fit c { . }`, `c == .`, `takes(.)`,
+  // `ret .`) has no receiver at all for `_receiver_before` to find,
+  // so it always reads as `receiver == ""` and falls through to
+  // ordinary top-level completion otherwise - every keyword and every
+  // declared name, not just the handful of variants that could
+  // actually be written there. Checked first, before that fallback.
+  num shorthand_dot = _bare_dot_shorthand_index(&tokens, line, character);
+  if shorthand_dot >= 0 {
+    str enum_name = _dot_shorthand_enum_type(&tokens, &program.nodes, shorthand_dot, doc.path, source_line);
+    if !equals(enum_name, "") {
+      _enum_variant_completions(&program.nodes, enum_name, &items);
+      if items.len > 0 {
+        ret _reply(&items);
+      }
+    }
+  }
 
   if equals(receiver, "") {
     str init_type = _compound_init_type_at(&tokens, &program.nodes, line, character);
@@ -765,6 +800,147 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
   }
 }
 
+// The index of a bare `.` (a fit-pattern/comparison/assignment/call-
+// argument shorthand, not ordinary member access) that the cursor
+// sits right after, or -1. Mirrors `_is_dot_shorthand`
+// (navigation.fn) - not preceded by an identifier or a `)`/`]`, which
+// would make it a real receiver instead - but position-based, since
+// completion fires with nothing yet typed after the dot at all, so
+// there is no variant-name token to check that logic against.
+fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num dot_idx = -1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      i = i + 1;
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      i = i + 1;
+      continue;
+    }
+    if token_is_operator(t, ".") {
+      dot_idx = i;
+    } else {
+      dot_idx = -1;
+    }
+    i = i + 1;
+  }
+  if dot_idx < 0 {
+    ret -1;
+  }
+  let before = _prev_real_token(tokens, dot_idx);
+  if before.is_none() {
+    ret dot_idx;
+  }
+  Token b = before.unwrap();
+  if b.type == TokenType.Identifier || token_is_symbol(b, ')') || token_is_symbol(b, ']') {
+    ret -1;
+  }
+  ret dot_idx;
+}
+
+// The enum type a bare `.Variant` shorthand at `dot_idx` reads
+// against: a fit's own subject first (the most common shape a reader
+// writes this in), then a `ret`'s own declared return type, then
+// every other shape (comparison, assignment, call argument)
+// `dot_shorthand_context_type_at` already covers for hover. "" when
+// none apply.
+fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx, str file, num line) str {
+  let fit_node = covering_fit(program, file, line);
+  if fit_node.is_some() {
+    fit fit_node.unwrap().kind {
+      .StatementFit(f) -> {
+        str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
+        if !equals(enum_name, "") {
+          ret enum_name;
+        }
+      }
+      _ -> {}
+    }
+  }
+  if is_return_value(tokens, tokens.get(dot_idx)) {
+    let rdt = enclosing_return_dtype(program, file, line);
+    if rdt.is_some() {
+      ret rdt.unwrap().type_str;
+    }
+  }
+  ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
+}
+
+// `_dot_shorthand_enum_type`'s own two most common shapes (a fit's
+// subject, a comparison's or assignment's other operand), worked out
+// token-only rather than from an AST: the moment a reader triggers
+// completion right after typing the dot itself, the document almost
+// always fails to parse (`if c == .` and `fit c { .` are not valid
+// statements on their own), so there is no tree to read either one
+// from. The call-argument shape isn't covered here, a scoped gap:
+// resolving a callee's own declared parameter type token-only would
+// need its own declaration found and parsed the same way, a bigger
+// piece than the other two share for free through
+// `_receiver_type_from_tokens`.
+fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx) str {
+  num subj_idx = _enclosing_fit_subject_token(tokens, dot_idx);
+  if subj_idx >= 0 {
+    str t = _receiver_type_from_tokens(tokens, token_word(tokens.get(subj_idx)));
+    if !equals(t, "") {
+      ret t;
+    }
+  }
+  num op_idx = _prev_real_index(tokens, dot_idx);
+  if op_idx >= 0 {
+    Token op = tokens.get(op_idx);
+    if token_is_operator(op, "==") || token_is_operator(op, "!=") || token_is_operator(op, "=") {
+      num operand_idx = _prev_real_index(tokens, op_idx);
+      if operand_idx >= 0 && tokens.get(operand_idx).type == TokenType.Identifier {
+        ret _receiver_type_from_tokens(tokens, token_word(tokens.get(operand_idx)));
+      }
+    }
+  }
+  ret "";
+}
+
+// The fit statement's own subject, for whichever `fit ... { ... }`
+// most tightly encloses `dot_idx` - walked outward one block at a
+// time (an ordinary `if`/`for`/function body along the way is simply
+// not a fit, and the search continues past it to whatever encloses
+// that instead), token-only. Scoped to a bare identifier subject
+// (`fit c { ... }`), the dominant shape; a subject with its own
+// `.field`/`<-` shape returns -1 rather than guessing.
+fun _enclosing_fit_subject_token(Vec<Token>* tokens, num dot_idx) num {
+  num depth = 0;
+  num j = dot_idx - 1;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+      j = j - 1;
+      continue;
+    }
+    if token_is_symbol(t, '{') {
+      if depth > 0 {
+        depth = depth - 1;
+        j = j - 1;
+        continue;
+      }
+      num subj = _prev_real_index(tokens, j);
+      if subj >= 0 && tokens.get(subj).type == TokenType.Identifier {
+        num fit_kw = _prev_real_index(tokens, subj);
+        if fit_kw >= 0 && token_is_keyword(tokens.get(fit_kw), "fit") {
+          ret subj;
+        }
+      }
+      j = j - 1;
+      continue;
+    }
+    j = j - 1;
+  }
+  ret -1;
+}
+
 // The name a dot immediately before the cursor is reached through, or
 // empty when the cursor does not follow a dot. For a chain
 // (`a.b.c|`), this is `c`'s own dot, reached through `b`, not `a`:
@@ -1081,6 +1257,54 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   _alias_module_completions(&target.entry_nodes, module_path, items, snippets);
 }
 
+// `e`'s own variants, when it is the enum `type_name` names, rendered
+// with their own payload the same way hover already does. Shared by
+// `_members_of` (an ordinary receiver, methods included alongside
+// this) and the bare `.Variant` shorthand path (nothing but this,
+// since a method is never valid there).
+fun _enum_variant_items(EnumDeclNode e, str type_name, Vec<Item>* items) {
+  if !equals(e.name, type_name) {
+    ret;
+  }
+  num v = 0;
+  for v < e.variants.len {
+    EnumVariant variant = e.variants.get(v);
+    v = v + 1;
+    str detail = variant.name;
+    if variant.has_payload && variant.payload.len > 0 {
+      StringBuilder b = string_builder_init(24);
+      b.append(variant.name);
+      b.append("(");
+      num p = 0;
+      for p < variant.payload.len {
+        if p > 0 {
+          b.append(", ");
+        }
+        b.append(render_type(variant.payload.get(p)));
+        p = p + 1;
+      }
+      b.append(")");
+      detail = b.build();
+    }
+    items.push(_item(variant.name, .EnumMember, detail));
+  }
+}
+
+// Every variant of the enum named `type_name`, wherever in `program`
+// it's declared - the whole of what a bare `.Variant` shorthand can
+// legally be, no methods or anything else alongside it.
+fun _enum_variant_completions(Vec<Node>* program, str type_name, Vec<Item>* items) {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> { _enum_variant_items(e, type_name, items); }
+      _ -> {}
+    }
+  }
+}
+
 fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippets) {
   num i = 0;
   for i < program.len {
@@ -1105,33 +1329,7 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippet
       // also completes after an instance of the enum, which is not
       // real Fun syntax but a harmless suggestion next to nothing at
       // all.
-      .Enum(e) -> {
-        if !equals(e.name, type_name) {
-          continue;
-        }
-        num v = 0;
-        for v < e.variants.len {
-          EnumVariant variant = e.variants.get(v);
-          v = v + 1;
-          str detail = variant.name;
-          if variant.has_payload && variant.payload.len > 0 {
-            StringBuilder b = string_builder_init(24);
-            b.append(variant.name);
-            b.append("(");
-            num p = 0;
-            for p < variant.payload.len {
-              if p > 0 {
-                b.append(", ");
-              }
-              b.append(render_type(variant.payload.get(p)));
-              p = p + 1;
-            }
-            b.append(")");
-            detail = b.build();
-          }
-          items.push(_item(variant.name, .EnumMember, detail));
-        }
-      }
+      .Enum(e) -> { _enum_variant_items(e, type_name, items); }
       .Impl(block) -> {
         if !equals(block.type_name, type_name) {
           continue;
