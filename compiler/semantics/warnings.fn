@@ -1115,11 +1115,11 @@ impl Analysis {
       over = self._fit_subject_enum(f);
     }
     if equals(over, "") {
-      // Not a truth value and not an enum: a `num` or pointer subject has
-      // no fixed value set to enumerate, so the only way to be exhaustive
-      // is a catch-all `_` branch, already ruled out above.
+      // No fixed value set to enumerate, so a catch-all is the only
+      // way to be exhaustive. `bin` is excluded: the `truths` counter
+      // above already covers it correctly.
       str subj_type = self._fit_subject_type(f);
-      if equals(subj_type, "num") || ends_with(subj_type, "*") {
+      if equals(subj_type, "num") || equals(subj_type, "str") || equals(subj_type, "chr") || equals(subj_type, "dec") || ends_with(subj_type, "*") {
         self.report(
           .FitNonExhaustive,
           "fit does not handle every value (missing catch-all '_' branch)",

@@ -337,6 +337,51 @@ test "a fit over num or a pointer with no catch-all is noticed" {
   assert contains(notice(ptr_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for a pointer";
 }
 
+test "a fit over chr, str, or dec with no catch-all is noticed too, not just num and pointers" {
+  // Same reasoning as num/pointer above: none of these three have a
+  // closed value set either, so the same check applies.
+  str chr_src = `fun main() num {
+  `  chr c = 'a';
+  `  fit c {
+  `    'a', 'b' -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(chr_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for chr";
+
+  str str_src = `fun main() num {
+  `  str s = "x";
+  `  fit s {
+  `    "x" -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(str_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for str";
+
+  str dec_src = `fun main() num {
+  `  dec d = 1.0;
+  `  fit d {
+  `    1.0 -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(dec_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for dec";
+}
+
+test "a fit over bin with both true and false covered is not double-flagged by the catch-all check" {
+  // bin's own exhaustiveness is already decided by the truths counter
+  // above this check; bin falls through to here too once it passes
+  // (it names no enum), so the catch-all check must not re-flag it.
+  str src = `fun main() num {
+  `  bin b = true;
+  `  fit b {
+  `    true -> { ret 1; }
+  `    false -> { ret 0; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning when both truth values are covered";
+}
+
 test "allow silences a shorthand fit's missing variant" {
   str src = `enum S { A, B }
   `fun main() num {
