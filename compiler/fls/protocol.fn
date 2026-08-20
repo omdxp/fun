@@ -94,6 +94,17 @@ pub fun error_response(str id, num code, str message) str {
   );
 }
 
+// A request the server sends without being asked, expecting a reply -
+// registering a dynamic capability (workspace file-watching) is the
+// only place fls sends one of these. `id` is a raw already-quoted
+// JSON id token (a fixed string literal works fine; nothing else the
+// server sends ever needs to correlate a reply back to it). The
+// client's own response arrives as an ordinary message with no
+// "method" field, which `handle` already ignores.
+pub fun request_to_client(str id, str method, str params_json) str {
+  ret format(`{"jsonrpc":"2.0","id":{str},"method":{str},"params":{str}}`, id, json_quote(method), params_json);
+}
+
 // A message the server sends without being asked, such as diagnostics.
 pub fun notification(str method, str params_json) str {
   ret format(`{"jsonrpc":"2.0","method":{str},"params":{str}}`, json_quote(method), params_json);

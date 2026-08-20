@@ -1443,6 +1443,46 @@ test "a workspace-indexed document is visible alongside open ones, but an open o
   assert contains(found_after.unwrap().text, "overridden"), "expected the open document to stay authoritative over its own indexed copy";
 }
 
+test "a disk-indexed document's own content refreshes on re-index, and forget_indexed drops it on delete" {
+  // The two Documents-level operations watched_files_changed
+  // (server.fn) performs for a Changed/Created and a Deleted
+  // FileChangeType respectively - re-indexing the changed file on
+  // disk, or dropping it outright, is what keeps a workspace-wide
+  // feature from serving a file's own stale content or a deleted
+  // file's ghost entry once the client notifies this server a
+  // watched .fn file changed on disk.
+  str base = "fun-out/_watch_reindex_test";
+  make_dir_all(base);
+  str path = path_join(base, "watched.fn");
+  write_string(path, "fun original() num { ret 1; }\n");
+  defer remove_file(path);
+  str uri = path_to_uri(path);
+
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.index_from_disk(uri, path);
+  assert contains(docs.at(uri).unwrap().text, "original"), "expected the first read's own content";
+
+  // Simulates the file changing on disk, then the client's own
+  // watched-files notification triggering a re-read.
+  write_string(path, "fun changed() num { ret 2; }\n");
+  docs.index_from_disk(uri, path);
+  assert contains(docs.at(uri).unwrap().text, "changed"), "expected the re-index to pick up the file's own new content";
+  assert !contains(docs.at(uri).unwrap().text, "original"), "expected the old content gone, not merged with the new";
+
+  // Simulates the file being deleted on disk, then the client's own
+  // Deleted notification.
+  docs.forget_indexed(uri);
+  assert docs.at(uri).is_none(), "expected the deleted file's entry gone";
+
+  // An open document's own buffer stays authoritative regardless -
+  // watched_files_changed still forwards to index_from_disk for a
+  // Changed event on an open URI, and it must remain a no-op.
+  docs.opened(uri, "fun from_editor() num { ret 3; }", 1);
+  docs.index_from_disk(uri, path);
+  assert contains(docs.at(uri).unwrap().text, "from_editor"), "expected the open buffer to stay authoritative over a disk re-read";
+}
+
 test "references and workspace/symbol find a symbol in a document that was never opened, rename does not" {
   str base = "fun-out/_workspace_scan_test";
   make_dir_all(base);

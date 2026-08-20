@@ -53,6 +53,11 @@ pub compound Server {
   // skeleton. One that does not would insert the marks as text, so it
   // is told only plain words.
   bin snippets;
+  // Whether the client said it can dynamically register interest in
+  // `workspace/didChangeWatchedFiles`. Registration is requested only
+  // when this is true; a client that never says so never gets asked,
+  // and never sends the notification either.
+  bin watch_registration_supported;
   // The workspace root `initialize` was told, as a filesystem path
   // ready to walk. Absent for a single-file client with no folder
   // open, in which case a whole-workspace feature only ever sees
@@ -78,6 +83,7 @@ pub fun server_new() Server {
   s.diagnosed = diagnostics_cache_new();
   s.symbols = workspace_symbol_table_new();
   s.snippets = false;
+  s.watch_registration_supported = false;
   s.workspace_root = "";
   s.has_workspace_root = false;
   s.workspace_indexed = false;
@@ -122,6 +128,7 @@ impl Server {
 
     if equals(method, "initialize") {
       self.snippets = _snippets_supported(message);
+      self.watch_registration_supported = _watch_registration_supported(message);
       str root = _workspace_root(message);
       if !equals(root, "") {
         self.workspace_root = root;
@@ -131,6 +138,13 @@ impl Server {
       ret;
     }
     if equals(method, "initialized") {
+      if self.watch_registration_supported {
+        write_message(_watch_registration_request());
+      }
+      ret;
+    }
+    if equals(method, "workspace/didChangeWatchedFiles") {
+      self.watched_files_changed(message);
       ret;
     }
     if equals(method, "textDocument/didOpen") {
@@ -349,6 +363,46 @@ impl Server {
       Vec<Diagnostic> none;
       none.init(0);
       write_message(publish(document_uri, "", &none));
+    }
+  }
+
+  // A `.fn` file changed, created, or deleted on disk by something
+  // other than this client itself - a different tool, a `git
+  // checkout`, a formatter run outside the editor. Only ever fires
+  // once `initialized` registered for it, so an unregistered client
+  // never sends this at all. An open document's own buffer stays
+  // authoritative either way (`index_from_disk` already skips it),
+  // matching the reference's own mtime-checked-on-lazy-re-access
+  // freshness model but pushed by the client instead of pulled.
+  watched_files_changed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue changes = _field(params, "changes");
+    fit changes {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue change = items.get(i);
+          i = i + 1;
+          str document_uri = _string_field(change, "uri");
+          if equals(document_uri, "") {
+            continue;
+          }
+          self.reads.forget(document_uri);
+          self.diagnosed.forget(document_uri);
+          self.symbols.forget(document_uri);
+          // FileChangeType: 1 Created, 2 Changed, 3 Deleted.
+          num change_type = _number_field(change, "type");
+          if change_type == 3 {
+            self.docs.forget_indexed(document_uri);
+            continue;
+          }
+          let resolved = uri_to_path(document_uri);
+          if resolved.is_some() {
+            self.docs.index_from_disk(document_uri, resolved.unwrap());
+          }
+        }
+      }
+      _ -> {}
     }
   }
 
@@ -806,6 +860,34 @@ fun _snippets_supported(JsonValue message) bin {
     _ -> {}
   }
   ret false;
+}
+
+// Whether the client's own `initialize` said it can dynamically
+// register `workspace/didChangeWatchedFiles`. A client that can't is
+// never asked, and never sends the notification either.
+fun _watch_registration_supported(JsonValue message) bin {
+  JsonValue params = _field(message, "params");
+  JsonValue capabilities = _field(params, "capabilities");
+  JsonValue workspace = _field(capabilities, "workspace");
+  JsonValue watched = _field(workspace, "didChangeWatchedFiles");
+  JsonValue supported = _field(watched, "dynamicRegistration");
+  fit supported {
+    .Bool(yes) -> { ret yes; }
+    _ -> {}
+  }
+  ret false;
+}
+
+// Asks the client to notify this server of any `.fn` file changed,
+// created, or deleted on disk - the counterpart to `initialize`'s own
+// lazy workspace scan, which otherwise only ever sees a file's state
+// as of whenever that one-time walk ran.
+fun _watch_registration_request() str {
+  ret request_to_client(
+    `"fun-watch-fn-files"`,
+    "client/registerCapability",
+    `{"registrations":[{"id":"fun-watch-fn-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.fn"}]}}]}`
+  );
 }
 
 // A nested value, or null when the message has no such field.

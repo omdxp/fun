@@ -136,6 +136,13 @@ impl Documents {
     self.indexed.put(document_uri, doc);
   }
 
+  // Drops a workspace-indexed document deleted on disk. A no-op for a
+  // URI that's open (it stays whatever the client tells it, not
+  // filesystem state) or was never indexed in the first place.
+  pub forget_indexed(str document_uri) {
+    self.indexed.remove(document_uri);
+  }
+
   // Every document URI this server currently knows about, open or
   // indexed from disk, for a whole-workspace scan to walk. `indexed`'s
   // own keys are already unique among themselves (a Map's own
