@@ -3172,6 +3172,54 @@ test "dot-completion scopes to a local's own declared type even while the docume
   assert !contains(out2, `"detail":"in this file"`), "expected real fields/methods, not the unscoped word list";
 }
 
+test "dot-completion on a generic-typed local reaches a stdlib type through a plain import, even while the document does not parse" {
+  str src = `imp std.vec;
+  `imp std.string;
+  `
+  `fun main() {
+  `  Vec<str> lines = split_lines("a\nb");
+  `  lines.
+  `  fi
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfvec.fn";
+  doc.path = "halfvec.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 5, right after 'lines.'. 'Vec' is never declared in this
+  // document at all, only reached through a plain (unaliased) `imp
+  // std.vec;` - the receiver's own generic type annotation (the `<`/
+  // `>` between the base type and the name) also has to be walked
+  // past correctly to find 'Vec' in the first place.
+  str out = completion(&reads, doc, 5, 8, false);
+  assert contains(out, `"label":"push","kind":2`), "expected Vec's own real method through the plain import";
+  assert contains(out, `"label":"len","kind":5`), "expected Vec's own real field too";
+  assert !contains(out, `"detail":"in this file"`), "expected real members, not the unscoped word list";
+}
+
+test "an identifier being typed does not suggest itself back while the document does not parse" {
+  str src = `fun main() {
+  `  bloater
+  `  fi
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///halfword.fn";
+  doc.path = "halfword.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Line 1, right after typing 'bloater': it is already a real token
+  // in the buffer the instant it exists, but it isn't a declared
+  // name, and offering it back as its own suggestion is misleading.
+  str out = completion(&reads, doc, 1, 9, false);
+  assert !contains(out, `"label":"bloater"`), "expected the word being typed not to suggest itself";
+}
+
 test "formatting replaces the document with what the formatter produces" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

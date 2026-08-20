@@ -159,6 +159,52 @@ pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, st
   ret "";
 }
 
+// Every `imp` statement's own dotted path in this document, resolved
+// to a real file, aliased or not, deduplicated. What a plain `imp
+// std.vec;` (no `as`) brings into scope unqualified can't be reached
+// through `import_alias_target`/`import_alias_target_from_tokens` at
+// all, since there's no alias name to look up by; a caller wanting
+// "everywhere this document could have gotten a name from" needs the
+// whole list instead.
+pub fun resolved_import_paths(Vec<Token>* tokens, str current_file) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != TokenType.Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 {
+      str specifier = _specifier_through(tokens, tokens.get(j - 1));
+      str resolved = _resolve_specifier(current_file, specifier);
+      if !equals(resolved, "") && !out.contains(resolved) {
+        out.push(resolved);
+      }
+    }
+    i = j;
+  }
+  ret out;
+}
+
 // One link per `imp` statement's own dotted path, spanning the whole
 // specifier and pointing at what it resolves to, the same target
 // `import_target` would give for a cursor anywhere in it. A client

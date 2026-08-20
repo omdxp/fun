@@ -92,7 +92,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   if !read.parsed {
     if equals(receiver, "") {
       _reserved(&items, snippets);
-      _written_names(&tokens, receiver, &items);
+      _written_names(&tokens, _current_word(&tokens, line, character), &items);
     } else {
       // An import alias needs no tree of its own to resolve: it is
       // read straight off this document's tokens, and the module it
@@ -115,6 +115,31 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
           local_type = receiver;
         }
         _members_from_tokens(&tokens, local_type, &items);
+        if items.len == 0 {
+          // Not declared in this file either: the type may be a
+          // stdlib/imported one (`Vec`, `Map`, `Option`, ...), reached
+          // through one of this document's own plain imports rather
+          // than an alias. Each is parsed fresh, the same way an
+          // alias's module already is, and searched the same way a
+          // fully-parsed document's own `_members_of` would.
+          Vec<str> import_paths = resolved_import_paths(&tokens, doc.path);
+          defer import_paths.free();
+          num k = 0;
+          for k < import_paths.len && items.len == 0 {
+            str path = import_paths.get(k);
+            k = k + 1;
+            str text = read_to_string(path);
+            if text == nil {
+              continue;
+            }
+            let merged = parse_program_cached(path, text, &cache.imports);
+            if merged.is_err() {
+              continue;
+            }
+            ProgramMergeResult target = merged.unwrap();
+            _members_of(&target.nodes, local_type, &items, snippets);
+          }
+        }
       }
       if items.len == 0 {
         _written_names(&tokens, receiver, &items);
@@ -516,22 +541,83 @@ fun _next_real_token(Vec<Token>* tokens, num i) Option<Token> {
   ret .None;
 }
 
+// `_prev_real_token`'s own index, or -1 when there is none. Needed
+// wherever more than one step back is taken (walking past a generic
+// argument list), where an `Option<Token>` alone would lose the
+// position to keep stepping from.
+fun _prev_real_index(Vec<Token>* tokens, num i) num {
+  num j = i - 1;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+      j = j - 1;
+      continue;
+    }
+    ret j;
+  }
+  ret -1;
+}
+
 // `name`'s own declared type, read straight off the raw tokens rather
-// than an AST: the first place `name` sits directly after another
-// identifier is either a local's own declaration or a parameter,
-// `Type name` either way, the only shape this grammar ever puts two
-// bare identifiers back to back in. "" when no such spot exists.
+// than an AST: the first place `name` sits directly after a type is
+// either a local's own declaration or a parameter, `Type name` at
+// heart, with an optional pointer star (`Node* n`) or a balanced
+// generic argument list (`Vec<str> lines`, nesting included) sitting
+// between the two. "" when no such spot exists.
 fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
     if t.type == TokenType.Identifier && equals(token_word(t), name) {
-      let prev = _prev_real_token(tokens, i);
-      if prev.is_some() && prev.unwrap().type == TokenType.Identifier {
-        ret token_word(prev.unwrap());
+      str base = _base_type_before(tokens, i);
+      if !equals(base, "") {
+        ret base;
       }
     }
     i = i + 1;
+  }
+  ret "";
+}
+
+// Walks back from just before token `i` over an optional pointer
+// star and an optional balanced `<...>` generic argument list, to
+// the base type identifier that starts it. "" when what sits there
+// isn't shaped like a type at all.
+fun _base_type_before(Vec<Token>* tokens, num i) str {
+  num j = _prev_real_index(tokens, i);
+  if j < 0 {
+    ret "";
+  }
+  if token_is_operator(tokens.get(j), "*") {
+    j = _prev_real_index(tokens, j);
+    if j < 0 {
+      ret "";
+    }
+  }
+  if token_is_operator(tokens.get(j), ">") {
+    num depth = 1;
+    j = _prev_real_index(tokens, j);
+    for j >= 0 && depth > 0 {
+      if token_is_operator(tokens.get(j), ">") {
+        depth = depth + 1;
+      } elif token_is_operator(tokens.get(j), "<") {
+        depth = depth - 1;
+        if depth == 0 {
+          break;
+        }
+      }
+      j = _prev_real_index(tokens, j);
+    }
+    if depth != 0 || j < 0 {
+      ret "";
+    }
+    j = _prev_real_index(tokens, j);
+    if j < 0 {
+      ret "";
+    }
+  }
+  if tokens.get(j).type == TokenType.Identifier {
+    ret token_word(tokens.get(j));
   }
   ret "";
 }
@@ -723,6 +809,34 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
     ret "";
   }
   ret receiver;
+}
+
+// The identifier touching `line`/`character`, dot or no dot before it
+// - the word a reader is presently typing, if any. Used to keep that
+// word from suggesting itself back: the moment even one character of
+// a new name exists, it is already a real token in the buffer, and
+// `_written_names` would otherwise offer it right alongside every
+// name actually declared, with nothing to tell them apart.
+fun _current_word(Vec<Token>* tokens, num line, num character) str {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  str word = "";
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    fit t.type {
+      .Identifier -> { word = token_word(t); }
+      _ -> { word = ""; }
+    }
+  }
+  ret word;
 }
 
 // The token the receiver before `line`/`character` was written as,
