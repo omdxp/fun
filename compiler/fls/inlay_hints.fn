@@ -263,14 +263,22 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
 // A parameter's own name from one rendered piece of a split signature
 // (`"str name"` -> `"name"`, `"Vec<T>* data"` -> `"data"`): the
 // trailing run of identifier characters, since a parameter's name is
-// always what a rendered "Type name" piece ends with. Shared with
+// always what a rendered "Type name" piece ends with - once a
+// defaulted parameter's own trailing " = value" is stripped first
+// (`"num cap = 8"` -> `"num cap"` -> `"cap"`), or the last run of
+// digits in a numeric default reads as the name instead. Shared with
 // `completion.fn`, which needs the same names to build a call
 // snippet's own tab stops.
 pub fun param_name_from_piece(str piece) str {
-  num end = len(piece);
+  str name_part = piece;
+  num eq = index_of_str(piece, " = ");
+  if eq >= 0 {
+    name_part = substr(piece, 0, eq);
+  }
+  num end = len(name_part);
   num start = end;
-  for start > 0 && (is_alnum(piece[start - 1]) || piece[start - 1] == '_') {
+  for start > 0 && (is_alnum(name_part[start - 1]) || name_part[start - 1] == '_') {
     start = start - 1;
   }
-  ret substr(piece, start, end - start);
+  ret substr(name_part, start, end - start);
 }

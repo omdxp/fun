@@ -1,0 +1,326 @@
+// Call hierarchy.
+// 
+// prepareCallHierarchy finds the top-level function at a position;
+// incomingCalls answers "who calls this" by reusing the same
+// workspace-wide occurrence scan references.fn/code_lens.fn already
+// share, filtered down to occurrences shaped like an actual call and
+// grouped by whichever function encloses each one. outgoingCalls
+// answers "what does this call" from a single walk of the target's
+// own body, no workspace scan needed. Scoped to top-level functions
+// only, not impl methods - the same call it was for code_lens.fn's
+// own reference counts: a method name collides across too many
+// unrelated types for a naive name match to mean anything there.
+
+imp documents;
+imp analysis;
+imp positions;
+imp references;
+imp navigation;
+imp symbols;
+imp protocol;
+imp uri;
+imp ..ast.ast;
+imp ..lexer.token;
+imp std.vec;
+imp std.string;
+imp std.fs;
+imp std.option;
+
+// The top-level function at `line`/`character`, as the result a
+// client is sent: prepareCallHierarchy's own CallHierarchyItem[],
+// always at most one entry (Fun has no overloading, so a name
+// resolves to one declaration). Empty for anything else (a method, a
+// local, a type) - not a function this feature covers.
+pub fun prepare_call_hierarchy(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "[]";
+  }
+  let found = token_at(&read.tokens, line, character);
+  if found.is_none() {
+    ret "[]";
+  }
+  Token t = found.unwrap();
+  let declared = resolve_at(cache, doc, &read.tokens, t, line);
+  if declared.is_none() {
+    ret "[]";
+  }
+  Declaration d = declared.unwrap();
+  if d.kind != DeclarationKind.Function || !equals(d.container, "") {
+    ret "[]";
+  }
+  str text = _text_of(d.pos.filename, doc);
+  if equals(text, "") {
+    ret "[]";
+  }
+  ret format(`[{str}]`, _call_hierarchy_item(d.name, d.pos, text));
+}
+
+// Every top-level function that calls `name`, as the result a
+// client is sent for `callHierarchy/incomingCalls`. `name` is the
+// requested item's own name, matched the same naive whole-word way
+// `code_lens.fn`'s own reference counts already are.
+pub fun incoming_calls(AnalysisCache* cache, Documents* docs, str name) str {
+  Vec<Occurrence> found;
+  found.init();
+  defer found.free();
+  _collect_occurrences(cache, docs, name, &found);
+
+  Vec < _CallerGroup > groups;
+  groups.init(4);
+  defer groups.free();
+
+  num i = 0;
+  for i < found.len {
+    Occurrence o = found.get(i);
+    i = i + 1;
+    let held = docs.at(o.document_uri);
+    if held.is_none() {
+      continue;
+    }
+    Document d = held.unwrap();
+    Analyzed read = cache.of(d);
+    if !read.parsed {
+      continue;
+    }
+    let tok = token_at(&read.tokens, o.span.line, o.span.start);
+    if tok.is_none() {
+      continue;
+    }
+    Token call_tok = tok.unwrap();
+    num idx = index_of_token(&read.tokens, call_tok);
+    let next = token_after(&read.tokens, idx + 1);
+    if next.is_none() || !token_is_operator(next.unwrap(), "(") {
+      continue;
+    }
+    let prev = token_before(&read.tokens, idx);
+    if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
+      continue;
+    }
+
+    let caller = _enclosing_function(&read.program.entry_nodes, d.path, o.span.line + 1);
+    if caller.is_none() {
+      continue;
+    }
+    Declaration cd = caller.unwrap();
+    _group_call(&groups, o.document_uri, cd, o.span, d.text);
+  }
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num g = 0;
+  for g < groups.len {
+    if g > 0 {
+      b.append(",");
+    }
+    _CallerGroup grp = groups.get(g);
+    StringBuilder ranges = string_builder_init(64);
+    ranges.append("[");
+    num r = 0;
+    for r < grp.call_sites.len {
+      if r > 0 {
+        ranges.append(",");
+      }
+      ranges.append(_span_json(grp.call_sites.get(r)));
+      r = r + 1;
+    }
+    ranges.append("]");
+    b.append(format(
+      `{"from":{str},"fromRanges":{str}}`,
+      _call_hierarchy_item(grp.name, grp.pos, grp.text),
+      ranges.build()
+    ));
+    g = g + 1;
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// Every top-level function `name` (the requested item's own name)
+// calls, as the result a client is sent for
+// `callHierarchy/outgoingCalls`. A single walk of `name`'s own body,
+// no workspace scan: every call-shaped identifier found, resolved
+// against the current document's own merged program and deduplicated
+// by callee name (repeated calls to the same function share one
+// entry, `fromRanges` listing every call site).
+pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
+    ret "[]";
+  }
+  num i = 0;
+  Node target_node = node_new(NodeKind.Blank);
+  FunctionNode f = function_node_new();
+  bin found_target = false;
+  for i < read.program.entry_nodes.len {
+    Node n = read.program.entry_nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(fn) -> {
+        if equals(fn.name, name) && fn.has_body {
+          target_node = n;
+          f = fn;
+          found_target = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  if !found_target {
+    ret "[]";
+  }
+
+  Vec < _CallerGroup > groups;
+  groups.init(4);
+  defer groups.free();
+
+  Vec<Token> tokens = read.tokens;
+  num k = 0;
+  for k < tokens.len {
+    Token t = tokens.get(k);
+    num idx = k;
+    k = k + 1;
+    if t.type != TokenType.Identifier || !covers(target_node, f, doc.path, t.pos.line) {
+      continue;
+    }
+    let next = token_after(&tokens, idx + 1);
+    if next.is_none() || !token_is_operator(next.unwrap(), "(") {
+      continue;
+    }
+    let prev = token_before(&tokens, idx);
+    if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
+      continue;
+    }
+    str callee_name = token_word(t);
+    let callee = lookup_top_level(&read.program.nodes, callee_name);
+    if callee.is_none() {
+      continue;
+    }
+    Declaration cd = callee.unwrap();
+    if cd.kind != DeclarationKind.Function {
+      continue;
+    }
+    Span span = span_of(t, doc.text);
+    _group_call(&groups, path_to_uri(cd.pos.filename), cd, span, _text_of(cd.pos.filename, doc));
+  }
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num g = 0;
+  for g < groups.len {
+    if g > 0 {
+      b.append(",");
+    }
+    _CallerGroup grp = groups.get(g);
+    StringBuilder ranges = string_builder_init(64);
+    ranges.append("[");
+    num r = 0;
+    for r < grp.call_sites.len {
+      if r > 0 {
+        ranges.append(",");
+      }
+      ranges.append(_span_json(grp.call_sites.get(r)));
+      r = r + 1;
+    }
+    ranges.append("]");
+    b.append(format(
+      `{"to":{str},"fromRanges":{str}}`,
+      _call_hierarchy_item(grp.name, grp.pos, grp.text),
+      ranges.build()
+    ));
+    g = g + 1;
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// One caller/callee grouped with every call site found for it so
+// far - incomingCalls/outgoingCalls each build one of these per
+// distinct function, not one per occurrence.
+compound _CallerGroup {
+  str name;
+  Pos pos;
+  str uri;
+  str text;
+  Vec<Span> call_sites;
+}
+
+fun _group_call(Vec < _CallerGroup >* groups, str uri, Declaration d, Span site, str site_text) {
+  num i = 0;
+  for i < groups.len {
+    _CallerGroup * g = &groups.data[i];
+    i = i + 1;
+    if equals(g.name, d.name) && equals(g.uri, uri) {
+      g.call_sites.push(site);
+      ret;
+    }
+  }
+  _CallerGroup fresh;
+  fresh.name = d.name;
+  fresh.pos = d.pos;
+  fresh.uri = uri;
+  fresh.text = site_text;
+  fresh.call_sites.init(2);
+  fresh.call_sites.push(site);
+  groups.push(fresh);
+}
+
+// The top-level function declaration covering `line` in `file`, or
+// `.None`.
+fun _enclosing_function(Vec<Node>* entry_nodes, str file, num line) Option<Declaration> {
+  num i = 0;
+  for i < entry_nodes.len {
+    Node n = entry_nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if covers(n, f, file, line) {
+          ret .Some(_declaration(f.name, .Function, render_function(f), n.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `filename`'s own text: the current document's, when it is the one
+// being edited, or read fresh from disk otherwise (a cross-file
+// caller/callee is not something the client necessarily has open).
+fun _text_of(str filename, Document doc) str {
+  if equals(filename, doc.path) {
+    ret doc.text;
+  }
+  str text = read_to_string(filename);
+  if text == nil {
+    ret "";
+  }
+  ret text;
+}
+
+fun _span_json(Span s) str {
+  ret format(
+    `{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}`,
+    s.line,
+    s.start,
+    s.line,
+    s.end
+  );
+}
+
+// One `CallHierarchyItem`. `range`/`selectionRange` are both the
+// declaration's own name span - Fun's own declarations don't carry a
+// separately-tracked "whole body" span the way some other languages'
+// symbol tables do, and a name-sized selection is what every client
+// actually highlights regardless.
+fun _call_hierarchy_item(str name, Pos pos, str text) str {
+  Span span = span_of_pos(pos, len(name), text);
+  str span_json = _span_json(span);
+  ret format(
+    `{"name":{str},"kind":12,"uri":{str},"range":{str},"selectionRange":{str}}`,
+    json_quote(name),
+    json_quote(path_to_uri(pos.filename)),
+    span_json,
+    span_json
+  );
+}

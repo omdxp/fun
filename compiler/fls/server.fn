@@ -22,6 +22,7 @@ imp formatting;
 imp folding_range;
 imp code_lens;
 imp selection_range;
+imp call_hierarchy;
 imp uri;
 imp std.string;
 imp std.option;
@@ -222,6 +223,18 @@ impl Server {
     }
     if equals(method, "textDocument/selectionRange") {
       self.answer_selection_range(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/prepareCallHierarchy") {
+      self.answer_prepare_call_hierarchy(id, message);
+      ret;
+    }
+    if equals(method, "callHierarchy/incomingCalls") {
+      self.answer_incoming_calls(id, message);
+      ret;
+    }
+    if equals(method, "callHierarchy/outgoingCalls") {
+      self.answer_outgoing_calls(id, message);
       ret;
     }
     if equals(method, "shutdown") {
@@ -619,6 +632,50 @@ impl Server {
     write_message(response(id, selection_ranges(&self.reads, doc.unwrap(), &lines, &chars)));
   }
 
+  // The top-level function at a position, as prepareCallHierarchy's
+  // own single-item starting point.
+  answer_prepare_call_hierarchy(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    write_message(response(id, prepare_call_hierarchy(&self.reads, r.doc, r.line, r.character)));
+  }
+
+  // Every top-level function calling the item's own name, workspace
+  // -wide.
+  answer_incoming_calls(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue item = _field(params, "item");
+    str name = _string_field(item, "name");
+    if equals(name, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    write_message(response(id, incoming_calls(&self.reads, &self.docs, name)));
+  }
+
+  // Every top-level function the item's own name calls, from its own
+  // body alone.
+  answer_outgoing_calls(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue item = _field(params, "item");
+    str name = _string_field(item, "name");
+    str item_uri = _string_field(item, "uri");
+    if equals(name, "") || equals(item_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(item_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    write_message(response(id, outgoing_calls(&self.reads, doc.unwrap(), name)));
+  }
+
   // Every symbol matching `query`, across every document this server
   // holds open.
   answer_workspace_symbols(str id, JsonValue message) {
@@ -757,7 +814,7 @@ fun _number_field(JsonValue message, str name) num {
 // is one a request handler answers.
 fun _initialize_result() str {
   ret format(
-    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"codeLensProvider":{"resolveProvider":false},"selectionRangeProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"codeLensProvider":{"resolveProvider":false},"selectionRangeProvider":true,"callHierarchyProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
     TOKEN_TYPES,
     TOKEN_MODIFIERS
   );

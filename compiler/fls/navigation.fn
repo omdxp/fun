@@ -103,7 +103,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     _ -> { ret NO_HOVER; }
   }
 
-  let declared = _resolve(cache, doc, &tokens, t, line);
+  let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
     ret NO_HOVER;
   }
@@ -202,7 +202,7 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
     ret ib.build();
   }
 
-  let declared = _resolve(cache, doc, &tokens, t, line);
+  let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
     ret NO_LOCATION;
   }
@@ -341,7 +341,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
     _ -> { ret NO_LOCATION; }
   }
 
-  let declared = _resolve(cache, doc, &tokens, t, line);
+  let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
     ret NO_LOCATION;
   }
@@ -378,7 +378,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
 // What the name `t` refers to, judged from where it sits: a field when
 // it is reached through a dot, and otherwise a local, a parameter, or
 // something the program declares.
-fun _resolve(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
+pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
   str name = token_word(t);
   if equals(name, "") {
     ret .None;

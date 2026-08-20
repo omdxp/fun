@@ -2406,7 +2406,7 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
   ret .None;
 }
 
-fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaration {
+pub fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaration {
   ret _declaration_vis(name, kind, detail, pos, true);
 }
 

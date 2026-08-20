@@ -16,6 +16,7 @@ imp ..fls.formatting;
 imp ..fls.folding_range;
 imp ..fls.code_lens;
 imp ..fls.selection_range;
+imp ..fls.call_hierarchy;
 imp ..fls.semantic_tokens;
 imp ..fls.analysis;
 imp ..fls.documents;
@@ -2610,6 +2611,29 @@ test "inlay hints don't chase a bare copy through another unresolved let, only a
   assert !contains(hints, `"position":{"line":3`), "expected no hint at all for the chained copy";
 }
 
+test "inlay hints name a call argument correctly even when the parameter has a default value" {
+  // param_name_from_piece's own trailing-identifier walk used to read
+  // a numeric default's own digits as the name ("num cap = 8" ->
+  // "8"), since hover's own defaulted-param fix appended " = 8" to
+  // the exact same rendered signature this shares. User-reported.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///defhint.fn";
+  doc.path = "defhint.fn";
+  doc.text = `fun make(num cap = 8) num {
+  `  ret cap;
+  `}
+  `fun use_it() num {
+  `  ret make(3);
+  `}`;
+  doc.version = 1;
+
+  str out = inlay_hints(&reads, doc, 0, 100);
+  assert contains(out, `"label":"cap:"`), "expected the parameter's own name, not its default value's digits";
+  assert !contains(out, `"label":"8:"`), "expected no digit-shaped label leaking from the default value";
+}
+
 test "inlay hints name each call argument, skip declarations, skip redundant matches, and skip self on a method" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -3055,6 +3079,47 @@ test "selection range expands from a token through each enclosing bracket pair, 
   assert contains(out, `{"line":1,"character":7}`), "expected the call's own opening paren as the next range out";
   // The enclosing function body, outermost.
   assert contains(out, `{"line":0,"character":26}`), "expected the function body as the outermost range";
+}
+
+test "call hierarchy: prepare finds the function, incoming/outgoing calls group multiple call sites into one entry" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///ch.fn", `fun helper(num a, num b) num {
+  `  ret a + b;
+  `}
+  `fun add(num a, num b) num {
+  `  ret helper(a, b);
+  `}
+  `fun use_it() num {
+  `  ret add(1, 2) + add(3, 4);
+  `}`, 1);
+  let held = docs.at("file:///ch.fn");
+  Document doc = held.unwrap();
+
+  // Prepare on `add`'s own declaration name.
+  str prepared = prepare_call_hierarchy(&reads, doc, 3, 4);
+  assert contains(prepared, `"name":"add"`), "expected add's own item";
+  assert contains(prepared, `"kind":12`), "expected the function symbol kind";
+
+  // Incoming: use_it calls add twice, grouped into one entry with
+  // two fromRanges, not two separate entries.
+  str incoming = incoming_calls(&reads, &docs, "add");
+  assert contains(incoming, `"name":"use_it"`), "expected use_it as add's own caller";
+  num from_count = count(incoming, `"name":"use_it"`);
+  assert from_count == 1, "expected use_it grouped into a single entry despite two call sites";
+  assert contains(incoming, `{"start":{"line":7,"character":6}`), "expected the first call site";
+  assert contains(incoming, `{"start":{"line":7,"character":18}`), "expected the second call site";
+
+  // Outgoing: add calls helper once.
+  str outgoing_add = outgoing_calls(&reads, doc, "add");
+  assert contains(outgoing_add, `"name":"helper"`), "expected add's own callee";
+
+  // Outgoing: use_it calls add twice, grouped the same way.
+  str outgoing_use_it = outgoing_calls(&reads, doc, "use_it");
+  num to_count = count(outgoing_use_it, `"name":"add"`);
+  assert to_count == 1, "expected add grouped into a single outgoing entry despite two call sites";
 }
 
 test "semantic tokens classify a function declaration, a type, a keyword styled as a type, and a literal" {
