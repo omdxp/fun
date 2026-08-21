@@ -43,6 +43,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
         }
         any = true;
         b.append(error_fix);
+        free(error_fix);
       }
       continue;
     }
@@ -58,7 +59,9 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
         b.append(",");
       }
       any = true;
-      b.append(_remove_line_action(document_uri, "Remove unused import", d.line));
+      str remove_line_text = _remove_line_action(document_uri, "Remove unused import", d.line);
+      b.append(remove_line_text);
+      free(remove_line_text);
     }
     if equals(id_name, "fit_non_exhaustive") {
       str fit_fix = _fit_arm_action(cache, doc, document_uri, d);
@@ -68,13 +71,17 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
         }
         any = true;
         b.append(fit_fix);
+        free(fit_fix);
       }
     }
     if any {
       b.append(",");
     }
     any = true;
-    b.append(_allow_action(document_uri, d, id_name));
+    str allow_text = _allow_action(document_uri, d, id_name);
+    b.append(allow_text);
+    free(allow_text);
+    free(id_name);
   }
   b.append("]");
   ret b.build();

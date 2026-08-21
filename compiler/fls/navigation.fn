@@ -197,7 +197,11 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   b.append(d.detail);
   b.append("\n```");
   if read.parsed {
-    b.append(_see_also_footer(&read.program.nodes, d, doc.path));
+    str footer_text = _see_also_footer(&read.program.nodes, d, doc.path);
+    b.append(footer_text);
+    if !equals(footer_text, "") {
+      free(footer_text);
+    }
   }
   ret _hover_result(b.build(), span_of(t, doc.text));
 }
@@ -794,7 +798,7 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
   }
 
   Vec<str> params = split_signature_params(signature);
-  defer params.free();
+  defer free_params_vec(&params);
   if arg_index >= params.len {
     ret "";
   }

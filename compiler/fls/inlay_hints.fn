@@ -131,7 +131,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       _ -> { continue; }
     }
     Vec<str> params = split_signature_params(d.detail);
-    defer params.free();
+    defer free_params_vec(&params);
     if params.len == 0 {
       continue;
     }
@@ -181,10 +181,12 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       }
       str pname = param_name_from_piece(params.get(param_index));
       if equals(pname, "") {
+        free(pname);
         continue;
       }
       bin redundant = at.type == TokenType.Identifier && equals(token_word(at), pname);
       if redundant {
+        free(pname);
         continue;
       }
       if any {
@@ -199,6 +201,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       str param_label = format("{str}:", pname);
       json_quote_into(&b, param_label);
       free(param_label);
+      free(pname);
       b.append(`,"kind":2,"paddingRight":true}`);
     }
   }
@@ -279,13 +282,19 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
 pub fun param_name_from_piece(str piece) str {
   str name_part = piece;
   num eq = index_of_str(piece, " = ");
+  bin name_part_owned = false;
   if eq >= 0 {
     name_part = substr(piece, 0, eq);
+    name_part_owned = true;
   }
   num end = len(name_part);
   num start = end;
   for start > 0 && (is_alnum(name_part[start - 1]) || name_part[start - 1] == '_') {
     start = start - 1;
   }
-  ret substr(name_part, start, end - start);
+  str result = substr(name_part, start, end - start);
+  if name_part_owned {
+    free(name_part);
+  }
+  ret result;
 }

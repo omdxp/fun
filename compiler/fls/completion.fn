@@ -1244,7 +1244,7 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
       continue;
     }
     Vec<str> params = split_signature_params(f.unwrap().detail);
-    defer params.free();
+    defer free_params_vec(&params);
     if arg_index < params.len {
       ret bare_type_from_detail(params.get(arg_index));
     }
@@ -1707,7 +1707,7 @@ fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num
         fit prev.unwrap().type {
           .Identifier -> {
             str name = token_word(prev.unwrap());
-            if len(name) > 0 && is_upper(name[0]) {
+            if looks_like_type_name(name) {
               ctx = name;
             }
           }
@@ -1848,7 +1848,9 @@ fun _enum_variant_items(EnumDeclNode e, str type_name, Vec<Item>* items) {
         if p > 0 {
           b.append(", ");
         }
-        b.append(render_type(variant.payload.get(p)));
+        str payload_type_text = render_type(variant.payload.get(p));
+        b.append(payload_type_text);
+        free(payload_type_text);
         p = p + 1;
       }
       b.append(")");
@@ -1887,7 +1889,9 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippet
         for f < c.fields.len {
           CompoundField cf = c.fields.get(f);
           f = f + 1;
-          items.push(_item(cf.name, .Field, render_type(cf.dtype)));
+          str field_type_text2 = render_type(cf.dtype);
+          items.push(_item(cf.name, .Field, field_type_text2));
+          free(field_type_text2);
         }
       }
       // `Color.Green`, not `some_color_value.Green`: a variant is
@@ -1986,7 +1990,9 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if fz.data_param != nil {
           fit fz.data_param.kind {
             .Variable(v) -> {
-              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+              str data_type_text = render_type(v.var_type);
+              items.push(_item(v.name, .Variable, data_type_text));
+              free(data_type_text);
             }
             _ -> {}
           }
@@ -1994,7 +2000,9 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if fz.len_param != nil {
           fit fz.len_param.kind {
             .Variable(v) -> {
-              items.push(_item(v.name, .Variable, render_type(v.var_type)));
+              str len_type_text = render_type(v.var_type);
+              items.push(_item(v.name, .Variable, len_type_text));
+              free(len_type_text);
             }
             _ -> {}
           }
@@ -2013,7 +2021,9 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
       }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
       .Variable(v) -> {
-        items.push(_item(v.name, .Variable, render_type(v.var_type)));
+        str decl_type_text = render_type(v.var_type);
+        items.push(_item(v.name, .Variable, decl_type_text));
+        free(decl_type_text);
       }
       _ -> {}
     }
@@ -2033,7 +2043,9 @@ fun _collect_function_scope(FunctionNode f, Vec<Item>* items, Vec<Node>* program
     }
     fit arg.kind {
       .Variable(v) -> {
-        items.push(_item(v.name, .Variable, render_type(v.var_type)));
+        str arg_type_text = render_type(v.var_type);
+        items.push(_item(v.name, .Variable, arg_type_text));
+        free(arg_type_text);
       }
       _ -> {}
     }
@@ -2056,7 +2068,9 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
   }
   fit body.kind {
     .Variable(v) -> {
-      items.push(_item(v.name, .Variable, render_type(v.var_type)));
+      str local_type_text = render_type(v.var_type);
+      items.push(_item(v.name, .Variable, local_type_text));
+      free(local_type_text);
     }
     .Body(block) -> {
       num i = 0;
@@ -2284,6 +2298,7 @@ fun _call_snippet(str label, str signature, bin is_method, bin snippets) str {
     ret "";
   }
   Vec<str> params = split_signature_params(signature);
+  defer free_params_vec(&params);
   StringBuilder b = string_builder_init(64);
   b.append(label);
   b.append("(");
@@ -2300,7 +2315,9 @@ fun _call_snippet(str label, str signature, bin is_method, bin snippets) str {
     b.append("${");
     b.append_num(stop);
     b.append(":");
-    b.append(param_name_from_piece(params.get(i)));
+    str param_name_text = param_name_from_piece(params.get(i));
+    b.append(param_name_text);
+    free(param_name_text);
     b.append("}");
     i = i + 1;
     stop = stop + 1;
@@ -2340,6 +2357,7 @@ fun _label_details_json(str detail, ItemKind kind) str {
     ret "";
   }
   Vec<str> params = split_signature_params(detail);
+  defer free_params_vec(&params);
   num start = 0;
   if kind == .Method && params.len > 0 {
     start = 1;

@@ -14,6 +14,7 @@ imp positions;
 imp ..lexer.token;
 imp std.vec;
 imp std.string;
+imp std.c.mem;
 
 // A range that may cross lines, unlike `Span` (which assumes its own
 // start and end share one line - true of a single token, never true
@@ -51,7 +52,9 @@ pub fun selection_ranges(AnalysisCache* cache, Document doc, Vec<num>* lines, Ve
     if i > 0 {
       b.append(",");
     }
-    b.append(_chain_at(&tokens, lines.get(i), chars.get(i), doc.text));
+    str chain_text = _chain_at(&tokens, lines.get(i), chars.get(i), doc.text);
+    b.append(chain_text);
+    free(chain_text);
     i = i + 1;
   }
   b.append("]");
@@ -61,7 +64,7 @@ pub fun selection_ranges(AnalysisCache* cache, Document doc, Vec<num>* lines, Ve
 // The token at `line`/`character`, then every bracket pair enclosing
 // it, outermost last, rendered as one nested `SelectionRange` object.
 fun _chain_at(Vec<Token>* tokens, num line, num character, str text) str {
-  Vec < _Range > chain;
+  Vec<_Range> chain;
   chain.init(4);
   defer chain.free();
 
@@ -76,7 +79,7 @@ fun _chain_at(Vec<Token>* tokens, num line, num character, str text) str {
     chain.push(r);
   }
 
-  Vec < _OpenBracket > stack;
+  Vec<_OpenBracket> stack;
   stack.init(8);
   defer stack.free();
 
@@ -159,7 +162,7 @@ fun _matches(chr open, chr close) bin {
 // nesting each subsequent entry as its own `parent`. Empty when
 // nothing at all was found at the position (a client reads that as
 // "nothing to select here").
-fun _render_chain(Vec < _Range > chain) str {
+fun _render_chain(Vec<_Range> chain) str {
   if chain.len == 0 {
     ret `{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`;
   }
@@ -174,11 +177,15 @@ fun _render_chain(Vec < _Range > chain) str {
       r.end_line,
       r.end_char
     );
+    str next_inner;
     if equals(inner, "") {
-      inner = format(`{"range":{str}}`, range);
+      next_inner = format(`{"range":{str}}`, range);
     } else {
-      inner = format(`{"range":{str},"parent":{str}}`, range, inner);
+      next_inner = format(`{"range":{str},"parent":{str}}`, range, inner);
+      free(inner);
     }
+    free(range);
+    inner = next_inner;
     i = i - 1;
   }
   ret inner;

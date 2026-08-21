@@ -12,6 +12,7 @@ imp ..lexer.token;
 imp std.string;
 imp std.vec;
 imp std.option;
+imp std.c.mem;
 
 // What a client is told when the cursor isn't inside a resolvable call.
 const str NO_SIGNATURE = "null";
@@ -186,9 +187,13 @@ pub fun split_signature_params(str signature) Vec<str> {
       depth_paren = depth_paren + 1;
     } elif c == ')' {
       if depth_paren == 0 {
-        str piece = trim(substr(signature, start, i - start));
+        str raw_piece = substr(signature, start, i - start);
+        str piece = trim(raw_piece);
+        free(raw_piece);
         if !equals(piece, "") {
           out.push(piece);
+        } else {
+          free(piece);
         }
         ret out;
       }
@@ -200,9 +205,13 @@ pub fun split_signature_params(str signature) Vec<str> {
         depth_angle = depth_angle - 1;
       }
     } elif c == ',' && depth_paren == 0 && depth_angle == 0 {
-      str piece = trim(substr(signature, start, i - start));
+      str raw_piece2 = substr(signature, start, i - start);
+      str piece = trim(raw_piece2);
+      free(raw_piece2);
       if !equals(piece, "") {
         out.push(piece);
+      } else {
+        free(piece);
       }
       start = i + 1;
     }
@@ -211,11 +220,24 @@ pub fun split_signature_params(str signature) Vec<str> {
   ret out;
 }
 
+// Frees a `Vec<str>` `split_signature_params` returned: each piece is
+// its own `substr`/`trim` allocation, so the plain `Vec<str>.free()`
+// house style (backing array only) leaves every piece leaked.
+pub fun free_params_vec(Vec<str>* params) {
+  num i = 0;
+  for i < params.len {
+    free(params.get(i));
+    i = i + 1;
+  }
+  params.free();
+}
+
 // The LSP `SignatureHelp` result: `signature`'s own parameters broken
 // out individually, with `active_param` (clamped into range) marking
 // which one the cursor sits on.
 fun _signature_result(str signature, num active_param) str {
   Vec<str> params = split_signature_params(signature);
+  defer free_params_vec(&params);
   StringBuilder b = string_builder_init(128);
   b.append(`{"signatures":[{"label":`);
   json_quote_into(&b, signature);

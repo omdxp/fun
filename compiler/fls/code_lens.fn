@@ -71,9 +71,13 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
     }
     any = true;
     if is_quirk {
-      b.append(_implementations_lens(cache, docs, name, n.pos, document_uri, doc.text));
+      str impl_lens_text = _implementations_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      b.append(impl_lens_text);
+      free(impl_lens_text);
     } else {
-      b.append(_references_lens(cache, docs, name, n.pos, document_uri, doc.text));
+      str ref_lens_text = _references_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      b.append(ref_lens_text);
+      free(ref_lens_text);
     }
   }
   b.append("]");
