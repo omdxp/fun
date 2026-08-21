@@ -978,6 +978,10 @@ impl Codegen {
         rrebuilt.append(rhead);
         rrebuilt.append(text);
         rrebuilt.append(rtail);
+        free(rfull);
+        free(rhead);
+        free(rtail);
+        self.root_state.out.free();
         self.root_state.out = rrebuilt;
         self.root_hoist_pos = .Some(rpos + len(text));
         self.root_stmt_start_pos = adjust_pos_after_splice(
@@ -999,6 +1003,10 @@ impl Codegen {
     rebuilt.append(head);
     rebuilt.append(text);
     rebuilt.append(tail);
+    free(full);
+    free(head);
+    free(tail);
+    self.state.out.free();
     self.state.out = rebuilt;
     self.hoist_insert_pos = .Some(pos + len(text));
     // Tracked independently of `hoist_insert_pos`, so it needs the same
@@ -3987,7 +3995,9 @@ impl Codegen {
         // `peek()`: a read-only check of what's already in the live
         // buffer, not the end of it - `build()` here would silently
         // wipe everything written so far on the very next `write`.
-        head = substr(self.state.out.peek(), 0, pos);
+        str out_so_far = self.state.out.peek();
+        head = substr(out_so_far, 0, pos);
+        free(out_so_far);
         head_built = true;
       }
       StringBuilder struct_needle_sb = string_builder_init(20);
@@ -3996,9 +4006,20 @@ impl Codegen {
       StringBuilder enum_needle_sb = string_builder_init(20);
       enum_needle_sb.append("typedef enum ");
       enum_needle_sb.append(name);
-      if !contains(head, struct_needle_sb.build()) && !contains(head, enum_needle_sb.build()) {
+      str struct_needle = struct_needle_sb.build();
+      str enum_needle = enum_needle_sb.build();
+      bin found = contains(head, struct_needle) || contains(head, enum_needle);
+      free(struct_needle);
+      free(enum_needle);
+      if !found {
+        if head_built {
+          free(head);
+        }
         ret false;
       }
+    }
+    if head_built {
+      free(head);
     }
     ret true;
   }
