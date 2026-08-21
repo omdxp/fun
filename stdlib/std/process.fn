@@ -118,6 +118,60 @@ async fun _drain_pipe(num fd, Channel<str>* out) {
   b.free();
 }
 
+// True for an env var name naming a memory-debugging knob meant for
+// the process that reads it, never a child spawned from it: Apple's
+// own `Malloc*` family (MallocScribble, MallocGuardEdges,
+// MallocStackLogging, MallocErrorAbort, ...), glibc's `MALLOC_*`
+// family (MALLOC_CHECK_, MALLOC_PERTURB_, MALLOC_ARENA_MAX, ...), and
+// the sanitizer `*_OPTIONS` family (ASAN_OPTIONS, UBSAN_OPTIONS,
+// TSAN_OPTIONS, MSAN_OPTIONS, LSAN_OPTIONS - identical across
+// macOS/Linux/Windows under clang/gcc). Every one of these adds real
+// per-allocation overhead (a guard page, a poisoned-redzone check, a
+// shadow-memory write); a concurrency-heavy child (real OS threads,
+// real allocations) inheriting one just because its parent happened
+// to be run under it can balloon memory catastrophically for no
+// benefit to anyone debugging the parent.
+fun _is_memory_debug_env_name(str name) bin {
+  if starts_with(name, "Malloc") || starts_with(name, "MALLOC_") {
+    ret true;
+  }
+  ret ends_with(name, "SAN_OPTIONS");
+}
+
+// The parent's own environment, minus every memory-debugging variable
+// (see `_is_memory_debug_env_name`), for passing to `posix_spawnp`
+// instead of `environ_ptr()` directly. Free the result once the spawn
+// call is done with it; its own entries are borrowed from
+// `environ_ptr()`; only the array itself is this function's own allocation.
+fun _child_env() str[] {
+  str[] full = environ_ptr();
+  num n = 0;
+  for full[n] != nil {
+    n = n + 1;
+  }
+  str[] out = malloc(sizeof(str) * (n + 1));
+  num i = 0;
+  num j = 0;
+  for i < n {
+    str entry = full[i];
+    num eq = index_of_char(entry, '=');
+    str name = entry;
+    if eq > 0 {
+      name = substr(entry, 0, eq);
+    }
+    if !_is_memory_debug_env_name(name) {
+      out[j] = entry;
+      j = j + 1;
+    }
+    if eq > 0 {
+      free(name);
+    }
+    i = i + 1;
+  }
+  out[j] = nil;
+  ret out;
+}
+
 // Spawns `argv[0]` (searched via PATH) with the given NULL-terminated
 // argument vector (argv[0] is both the program to run and, conventionally,
 // the first element of its own argv), capturing its stdout and stderr
@@ -149,7 +203,9 @@ pub fun run(str[] argv) Result<ProcessResult, Error> {
   posix_spawn_file_actions_addclose(&fa, err_write);
 
   pid_t pid = 0;
-  let spawn_rc = posix_spawnp(&pid, argv[0], &fa, nil, argv, environ_ptr());
+  str[] envp = _child_env();
+  let spawn_rc = posix_spawnp(&pid, argv[0], &fa, nil, argv, envp);
+  free(envp);
   posix_spawn_file_actions_destroy(&fa);
   close(out_write);
   close(err_write);
@@ -189,7 +245,9 @@ pub fun run(str[] argv) Result<ProcessResult, Error> {
 // diagnostic output.
 pub fun spawn_inherited(str[] argv) num {
   pid_t pid = 0;
-  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, environ_ptr());
+  str[] envp = _child_env();
+  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, envp);
+  free(envp);
   if spawn_rc != 0 {
     ret -1;
   }
@@ -204,7 +262,9 @@ pub fun spawn_inherited(str[] argv) num {
 // which `spawn_inherited`'s own blocking wait doesn't allow.
 pub fun spawn_background(str[] argv) Result<num, Error> {
   pid_t pid = 0;
-  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, environ_ptr());
+  str[] envp = _child_env();
+  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, envp);
+  free(envp);
   if spawn_rc != 0 {
     ret err_kind(.System, "process.spawn_background: spawn failed", 0);
   }
