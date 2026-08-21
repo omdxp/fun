@@ -1763,7 +1763,9 @@ fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
         for f < c.fields.len {
           CompoundField cf = c.fields.get(f);
           f = f + 1;
-          items.push(_item(cf.name, .Field, render_type(cf.dtype)));
+          str field_type_text = render_type(cf.dtype);
+          items.push(_item(cf.name, .Field, field_type_text));
+          free(field_type_text);
         }
       }
       _ -> {}
@@ -1792,7 +1794,12 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
           continue;
         }
         str fn_detail = render_function(f);
-        items.push(_snippet_item(f.name, .Function, fn_detail, _call_snippet(f.name, fn_detail, false, snippets)));
+        str call_snippet = _call_snippet(f.name, fn_detail, false, snippets);
+        items.push(_snippet_item(f.name, .Function, fn_detail, call_snippet));
+        free(fn_detail);
+        if !equals(call_snippet, "") {
+          free(call_snippet);
+        }
       }
       _ -> {}
     }
@@ -1909,12 +1916,12 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippet
               }
               str method_name = bare_method_name(f.name);
               str method_detail = render_function_named(f, method_name, false);
-              items.push(_snippet_item(
-                method_name,
-                .Method,
-                method_detail,
-                _call_snippet(method_name, method_detail, true, snippets)
-              ));
+              str method_snippet = _call_snippet(method_name, method_detail, true, snippets);
+              items.push(_snippet_item(method_name, .Method, method_detail, method_snippet));
+              free(method_detail);
+              if !equals(method_snippet, "") {
+                free(method_snippet);
+              }
             }
             _ -> {}
           }
