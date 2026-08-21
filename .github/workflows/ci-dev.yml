@@ -47,10 +47,11 @@ jobs:
         run: echo "FUN_CC=clang" >> "$GITHUB_ENV"
       - name: Build fun and fls
         timeout-minutes: 10
-        run: fun build
+        run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
       - name: Run the test suite on ${{ matrix.lane }}
         timeout-minutes: 20
         run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ./fun-out/bin/fun.exe test compiler/tests
           else
@@ -59,6 +60,7 @@ jobs:
       - name: Validate examples/
         timeout-minutes: 20
         run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
           else
@@ -77,5 +79,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build fun
         timeout-minutes: 10
-        run: fun build
-      - run: ./fun-out/bin/fun -fmt-check-all
+        run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
+      - run: FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun -fmt-check-all
