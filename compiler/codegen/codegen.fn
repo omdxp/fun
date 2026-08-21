@@ -966,7 +966,10 @@ impl Codegen {
           ret;
         }
         num rpos = self.root_hoist_pos.unwrap();
-        str rfull = self.root_state.out.build();
+        // `peek()`, not `build()`: this is the true root buffer, still
+        // being written to for the rest of the program after this
+        // splice, not a throwaway scratch one.
+        str rfull = self.root_state.out.peek();
         str rhead = substr(rfull, 0, rpos);
         str rtail = substr(rfull, rpos, len(rfull) - rpos);
         StringBuilder rrebuilt = string_builder_init(len(rfull) + len(text) + 16);
@@ -986,7 +989,8 @@ impl Codegen {
       ret;
     }
     num pos = self.hoist_insert_pos.unwrap();
-    str full = self.state.out.build();
+    // `peek()`, not `build()`, same reason as the root-buffer branch above.
+    str full = self.state.out.peek();
     str head = substr(full, 0, pos);
     str tail = substr(full, pos, len(full) - pos);
     StringBuilder rebuilt = string_builder_init(len(full) + len(text) + 16);
@@ -3948,7 +3952,10 @@ impl Codegen {
         continue;
       }
       if !head_built {
-        head = substr(self.state.out.build(), 0, pos);
+        // `peek()`: a read-only check of what's already in the live
+        // buffer, not the end of it - `build()` here would silently
+        // wipe everything written so far on the very next `write`.
+        head = substr(self.state.out.peek(), 0, pos);
         head_built = true;
       }
       StringBuilder struct_needle_sb = string_builder_init(20);
@@ -8997,16 +9004,10 @@ impl Codegen {
           vargs_dt.generic_args.push(vargs_str_arg);
           self.resolve_type_name(vargs_dt);
           self.record_local_typed("vargs", "Vec__str", false, vargs_dt);
-          // `vargs.data` (the backing array malloc'd above) and every
-          // non-`'s'`-tagged element in it (a fresh `fmt_num`/`fmt_dec`/
-          // `fmt_bin`/`fmt_chr`/`fmt_raw` allocation - `'s'` elements are
-          // borrowed straight from the caller's own argument, never
-          // owned here) are otherwise never freed. Registered as a
-          // synthetic `defer __fun_free_vargs(vargs.data, __fun_vtags,
-          // vargs.len);`, the same mechanism a user-written `defer` uses,
-          // so cleanup replays at every one of this function's own
-          // return points rather than needing one written by hand at
-          // each.
+          // `vargs.data` and every non-`'s'`-tagged element it holds
+          // (a fresh `fmt_*` allocation) are otherwise never freed.
+          // Registered as a synthetic `defer`, replaying through the
+          // same mechanism a user-written one uses at every return.
           Node* vargs_ident_a = malloc(sizeof(Node));
           *vargs_ident_a = node_new(NodeKind.Identifier("vargs"));
           Node* data_ident = malloc(sizeof(Node));

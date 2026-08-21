@@ -148,10 +148,10 @@ impl StringBuilder {
     ret self.buf[i];
   }
 
-  // A fresh, independently-owned copy of everything appended so far.
-  // The builder's own buffer is untouched, so building again (or
-  // appending more first) still works.
-  pub build() str {
+  // A fresh copy of everything appended so far, with this builder
+  // untouched. For a caller still using it afterward; everyone else
+  // wants `build()` below.
+  pub peek() str {
     str out = malloc(self.total_len + 1);
     if out == nil {
       ret "";
@@ -162,6 +162,16 @@ impl StringBuilder {
       i = i + 1;
     }
     out[self.total_len] = '\0';
+    ret out;
+  }
+
+  // A fresh copy of everything appended so far, and the last use of
+  // this builder: its own buffer is freed here rather than left for
+  // the caller to remember (a redundant explicit `free()` after is a
+  // harmless no-op).
+  pub build() str {
+    str out = self.peek();
+    self.free();
     ret out;
   }
 }
