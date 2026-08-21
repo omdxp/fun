@@ -116,6 +116,7 @@ impl Server {
   // notification carries none and expects none.
   handle(str body) {
     let parsed = parse(body);
+    free(body);
     if parsed.is_err() {
       ret;
     }
@@ -126,6 +127,7 @@ impl Server {
       ret;
     }
     str id = _raw_field(message, "id");
+    defer free(id);
     bin is_request = !equals(id, "");
 
     if equals(method, "initialize") {
@@ -1013,7 +1015,7 @@ fun _raw_field(JsonValue message, str name) str {
     .Object(fields) -> {
       let found = fields.at(name);
       if found.is_none() {
-        ret "";
+        ret substr("", 0, 0);
       }
       JsonValue value = found.unwrap();
       fit value {
@@ -1022,10 +1024,10 @@ fun _raw_field(JsonValue message, str name) str {
           // An id written as a number is echoed as one.
           ret format_num(dec_to_num(n));
         }
-        _ -> { ret ""; }
+        _ -> { ret substr("", 0, 0); }
       }
     }
-    _ -> { ret ""; }
+    _ -> { ret substr("", 0, 0); }
   }
   ret "";
 }

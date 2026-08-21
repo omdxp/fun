@@ -29,14 +29,20 @@ pub fun read_message(Sink* input) Option<Message> {
       ret .None;
     }
     str trimmed = trim(line);
+    free(line);
     if equals(trimmed, "") {
       // The blank line ends the headers; the body follows.
+      free(trimmed);
       break;
     }
     if starts_with_ignore_case(trimmed, "content-length:") {
-      str value = trim(substr(trimmed, 15, len(trimmed) - 15));
+      str raw_value = substr(trimmed, 15, len(trimmed) - 15);
+      str value = trim(raw_value);
+      free(raw_value);
       length = parse_int(value);
+      free(value);
     }
+    free(trimmed);
   }
   if length < 0 {
     ret .None;
