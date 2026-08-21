@@ -15,6 +15,7 @@ imp std.io;
 imp std.vec;
 imp std.c.mem;
 imp std.option;
+imp std.ctype;
 
 // What a name turned out to be.
 pub enum DeclarationKind {
@@ -937,6 +938,24 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
     ret .None;
   }
   ret .Some(best);
+}
+
+// True when `name` reads as a type by Fun's own naming convention: a
+// type is always capitalized, checked after skipping any leading
+// underscores - not a language rule of its own, just this codebase's
+// house style of also prefixing a non-`pub` declaration with one
+// (`_Range`, `_OpenBracket`), the same convention a private function
+// follows. A non-`pub` value (function/variable) never has an
+// uppercase letter right after its own leading underscore though, so
+// this stays false for those. Shared by every classifier that tells a
+// type reference apart from an ordinary name by capitalization alone.
+pub fun looks_like_type_name(str name) bin {
+  num i = 0;
+  num n = len(name);
+  for i < n && name[i] == '_' {
+    i = i + 1;
+  }
+  ret i < n && is_upper(name[i]);
 }
 
 // The type a local or parameter named `name` was declared with, as
@@ -2375,11 +2394,15 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
               if p > 0 {
                 b.append(", ");
               }
-              b.append(_substituted_payload_type(
+              str subst_type_text = _substituted_payload_type(
                 variant.payload.get(p),
                 e.type_params,
                 dt.generic_args
-              ));
+              );
+              b.append(subst_type_text);
+              if !equals(subst_type_text, "") {
+                free(subst_type_text);
+              }
               p = p + 1;
             }
             b.append(")");

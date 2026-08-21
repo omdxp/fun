@@ -73,7 +73,7 @@ pub fun incoming_calls(AnalysisCache* cache, Documents* docs, str name) str {
   defer found.free();
   _collect_occurrences(cache, docs, name, &found);
 
-  Vec < _CallerGroup > groups;
+  Vec<_CallerGroup> groups;
   groups.init(4);
   defer groups.free();
 
@@ -182,7 +182,7 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
     ret "[]";
   }
 
-  Vec < _CallerGroup > groups;
+  Vec<_CallerGroup> groups;
   groups.init(4);
   defer groups.free();
 
@@ -262,10 +262,10 @@ compound _CallerGroup {
   Vec<Span> call_sites;
 }
 
-fun _group_call(Vec < _CallerGroup >* groups, str uri, Declaration d, Span site, str site_text) {
+fun _group_call(Vec<_CallerGroup>* groups, str uri, Declaration d, Span site, str site_text) {
   num i = 0;
   for i < groups.len {
-    _CallerGroup * g = &groups.data[i];
+    _CallerGroup* g = &groups.data[i];
     i = i + 1;
     if equals(g.name, d.name) && equals(g.uri, uri) {
       g.call_sites.push(site);

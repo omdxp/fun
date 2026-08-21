@@ -289,7 +289,17 @@ fun _is_type_token(Token t) bin {
   if t.type != TokenType.Identifier {
     ret false;
   }
-  if len(text) > 0 && text[0] >= 'A' && text[0] <= 'Z' {
+  // A non-`pub` type still reads as one - checked after skipping any
+  // leading underscores, this codebase's own house style for a
+  // non-`pub` declaration of any kind (`_Range`, `_OpenBracket`, same
+  // convention a private function follows) - a non-`pub` value
+  // (function/variable) never has an uppercase letter there though.
+  num ti = 0;
+  num tn = len(text);
+  for ti < tn && text[ti] == '_' {
+    ti = ti + 1;
+  }
+  if ti < tn && text[ti] >= 'A' && text[ti] <= 'Z' {
     ret true;
   }
   ret keyword_is_datatype(text);

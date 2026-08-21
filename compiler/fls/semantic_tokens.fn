@@ -17,7 +17,6 @@ imp ..semantics.warnings;
 imp std.string;
 imp std.vec;
 imp std.map;
-imp std.ctype;
 
 // The protocol's own token-type/modifier legend, in the exact order
 // each index below refers to. `initialize`'s own capabilities must
@@ -303,7 +302,7 @@ fun _identifier_token_type(
     ret TokenKind.EnumMember;
   }
   str word = token_word(t);
-  if prev.is_some() && token_is_operator(prev.unwrap(), ".") && len(word) > 0 && is_upper(word[0]) {
+  if prev.is_some() && token_is_operator(prev.unwrap(), ".") && looks_like_type_name(word) {
     ret TokenKind.EnumMember;
   }
 
@@ -335,7 +334,7 @@ fun _identifier_token_type(
   if const_names.at(word).is_some() {
     ret TokenKind.Variable;
   }
-  if keyword_is_datatype(word) || (len(word) > 0 && is_upper(word[0])) {
+  if keyword_is_datatype(word) || looks_like_type_name(word) {
     ret TokenKind.Type;
   }
   ret TokenKind.Variable;
