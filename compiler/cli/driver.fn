@@ -1246,7 +1246,9 @@ fun _declares_top_level_block(str path, str keyword) bin {
     ret false;
   }
   Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  // Deep: returns a plain `bin`, nothing aliasing these tokens' own
+  // strings escapes this function.
+  defer free_token_vec(&tokens);
 
   num i = 0;
   for i + 1 < tokens.len {
@@ -1318,7 +1320,10 @@ fun _imported_paths(str src, str filename) Vec<str> {
     ret out;
   }
   Vec<Token> tokens = lexed.unwrap();
-  defer tokens.free();
+  // Deep: every path pushed to `out` below is a fresh StringBuilder
+  // copy (`b.build()`), never a token's own `Sval` directly, so
+  // nothing in the returned `Vec<str>` aliases these tokens.
+  defer free_token_vec(&tokens);
 
   num i = 0;
   for i < tokens.len {

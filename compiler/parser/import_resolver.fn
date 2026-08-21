@@ -193,6 +193,11 @@ fun _entry_nodes(str path, str source) Vec<Node> {
   state.emit_stderr = false;
   Parser p = parser_new(&state);
   let failed = p.parse();
+  // Just the backing array: the AST reuses each token's own `Sval`
+  // string directly, so only the `Token` array itself is ours to free.
+  state.tokens.free();
+  state.global_symbols.free();
+  free_parse_state_internal(&state);
   if failed.is_some() {
     // A file whose syntax leans on what it imports is read as the merge
     // read it; only its own import statements are recovered here.
@@ -721,6 +726,11 @@ fun _parse_and_merge_source(
     state.global_symbols = *global_symbols;
     Parser p = parser_new(&state);
     let perr = p.parse();
+    // Just the backing array - see the identical note in `_entry_nodes`.
+    state.tokens.free();
+    // Not `global_symbols.free()`: it's `*global_symbols` above, the
+    // caller's own map, not this call's to free.
+    free_parse_state_internal(&state);
     if perr.is_some() {
       ret .Some(format("parse error in {str}", path));
     }

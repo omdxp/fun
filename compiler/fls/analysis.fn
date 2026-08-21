@@ -63,7 +63,10 @@ impl AnalysisCache {
       // node it pulls from `self.imports` rather than sharing it, so
       // this document's own copy is exclusively its own.
       if found.lexed {
-        found.tokens.free();
+        // Deep: this is AnalysisCache's own independent tokenize()
+        // call below, not the tokens a parse ran against, so nothing
+        // aliases these strings.
+        free_token_vec(&found.tokens);
       }
       if found.parsed {
         free_node_tree(&found.program.entry_nodes);
@@ -104,7 +107,7 @@ impl AnalysisCache {
     if found.is_some() {
       Analyzed a = found.unwrap();
       if a.lexed {
-        a.tokens.free();
+        free_token_vec(&a.tokens);
       }
       if a.parsed {
         free_node_tree(&a.program.entry_nodes);

@@ -4,6 +4,7 @@
 // variant it carries (`Num` vs `Dec`).
 
 imp std.string;
+imp std.c.mem;
 
 // The kind of lexical token.
 pub enum TokenType {
@@ -59,6 +60,31 @@ pub compound Token {
   // formatter must reproduce the backtick spelling verbatim rather than
   // requoting the buffer.
   bin is_raw_string;
+}
+
+// Frees `t`'s own heap-allocated content: `Sval`'s string, the only
+// per-token allocation the lexer makes (`Pos.filename` is always the
+// same shared path string handed to `tokenize()`, borrowed by every
+// token in the file - not owned by any single one of them).
+fun free_token_contents(Token* t) {
+  fit t.data {
+    .Sval(s) -> { free(s); }
+    _ -> {}
+  }
+}
+
+// Frees a `Vec<Token>` this caller owns outright. Not safe on tokens a
+// parse ran against: the AST reuses their `Sval` strings directly
+// (`token_word`, the parser's own `name = s`), so freeing those here
+// would free strings the AST still needs.
+pub fun free_token_vec(Vec<Token>* tokens) {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    free_token_contents(&t);
+    i = i + 1;
+  }
+  tokens.free();
 }
 
 // Returns true if `t` is an `Operator` token whose text equals `val`.

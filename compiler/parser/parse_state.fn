@@ -128,3 +128,34 @@ pub fun parse_state_new(str input_file_path, str input_source) ParseState {
   p.has_error = false;
   ret p;
 }
+
+// Frees everything a completed parse owns except `.tokens`/`.nodes`,
+// which transfer to the caller. Not `global_symbols`: aliased from an
+// outer caller in `_parse_and_merge_source`, freed there directly
+// instead wherever it does own it.
+pub fun free_parse_state_internal(ParseState* state) {
+  if state.has_scope_current {
+    Scope* cur = state.scope_current;
+    for cur != nil {
+      bin has_next = cur.has_parent;
+      Scope* next = cur.parent;
+      free_scope(cur);
+      if !has_next {
+        break;
+      }
+      cur = next;
+    }
+  }
+  state.forward_type_names.free();
+  num ti = 0;
+  for ti < state.tables.len {
+    SymbolTable* t = state.tables.get(ti);
+    t.symbols.free();
+    free(t);
+    ti = ti + 1;
+  }
+  state.tables.free();
+  if state.has_error {
+    free(state.error_message);
+  }
+}

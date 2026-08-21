@@ -1290,7 +1290,10 @@ pub fun format_source(str src, str filename) Result<str, str> {
     ret .Err("lex error");
   }
   let raw_tokens = lexed.unwrap();
-  defer raw_tokens.free();
+  // Deep: no AST is built here. `tokens` below only rearranges copies
+  // of these same structs, sharing every string, so it stays a
+  // shallow free.
+  defer free_token_vec(&raw_tokens);
   Vec<Token> tokens = _group_top_level(&raw_tokens);
   defer tokens.free();
 
