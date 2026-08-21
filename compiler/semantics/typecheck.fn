@@ -403,10 +403,74 @@ compound MethodTable {
   Map<str, FnSig> methods;
 }
 
+// Frees a compound's own scratch: `.fields`'s own CheckedType values
+// alias the declaring CompoundNode's own AST fields, so only the map
+// itself needs freeing, the same shallow convention as `_free_fn_sig`.
+fun _free_compound_info(CompoundInfo* info) {
+  info.fields.free();
+  info.type_params.free();
+  info.bounds.free();
+}
+
+// Frees every compound's own scratch (`_free_compound_info`), then
+// the map itself.
+fun _free_compound_info_map(Map<str, CompoundInfo>* compounds) {
+  Vec<str> names = compounds.keys();
+  defer names.free();
+  num i = 0;
+  for i < names.len {
+    CompoundInfo info = compounds.at(names.get(i)).unwrap();
+    _free_compound_info(&info);
+    i = i + 1;
+  }
+  compounds.free();
+}
+
 fun _method_table_new() MethodTable {
   MethodTable t;
   t.methods.init(8);
   ret t;
+}
+
+// Frees a signature's own scratch. Shallow throughout: `.args`'s own
+// CheckedType values, `.type_params`'s own strings, and each inner
+// Vec `.bounds` holds all alias the declaring FunctionNode's own AST
+// fields (or a token's text, transitively) rather than owning fresh
+// copies - only the four Vec containers themselves are this call's
+// own to free, never what's inside them.
+fun _free_fn_sig(FnSig* sig) {
+  sig.args.free();
+  sig.type_params.free();
+  sig.bounds.free();
+  sig.arg_params.free();
+}
+
+// Frees a whole `Map<str, FnSig>`: every signature's own scratch
+// (`_free_fn_sig`), then the map itself.
+fun _free_fn_sig_map(Map<str, FnSig>* fns) {
+  Vec<str> names = fns.keys();
+  defer names.free();
+  num i = 0;
+  for i < names.len {
+    FnSig sig = fns.at(names.get(i)).unwrap();
+    _free_fn_sig(&sig);
+    i = i + 1;
+  }
+  fns.free();
+}
+
+// Frees every method table's own signature map, then the table of
+// tables itself.
+fun _free_method_tables(Map<str, MethodTable>* methods) {
+  Vec<str> names = methods.keys();
+  defer names.free();
+  num i = 0;
+  for i < names.len {
+    MethodTable t = methods.at(names.get(i)).unwrap();
+    _free_fn_sig_map(&t.methods);
+    i = i + 1;
+  }
+  methods.free();
 }
 
 // The bare name of a method whose declared name carries the type it
@@ -2545,11 +2609,14 @@ impl Checker {
 // Checks a whole program, reporting the first type error it finds.
 pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
   Checker checker = _checker_new();
-  defer checker.fns.free();
+  defer _free_fn_sig_map(&checker.fns);
   defer checker.quirks.free();
   defer checker.plain_enums.free();
-  defer checker.compounds.free();
-  defer checker.methods.free();
+  defer checker.globals.free();
+  defer checker.enum_names.free();
+  defer _free_compound_info_map(&checker.compounds);
+  defer _free_method_tables(&checker.methods);
+  defer checker.active_type_params.free();
 
   num i = 0;
   for i < nodes.len {
