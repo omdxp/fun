@@ -8,7 +8,7 @@
 imp std.string;
 imp std.option;
 imp std.runtime_backend;
-imp std.io;
+imp std.c.mem;
 
 // The path a `file://` URI names, or nothing when the URI names
 // something else.
@@ -56,7 +56,20 @@ pub fun path_to_uri(str path) str {
       continue;
     }
     num code = c;
-    b.append(format("%{str}", to_hex_upper(code, 2)));
+    // `chr` is a signed C char, so any UTF-8 lead/continuation byte
+    // (>= 0x80) reads negative here; normalizing to its true 0-255
+    // value first is what `to_hex_upper` needs to produce real digits
+    // instead of silently returning "" for a negative input, which
+    // would have percent-escaped a non-ASCII path byte as a bare "%"
+    // with no hex code following it - the same class of bug already
+    // fixed once for json_quote_into's own escaping.
+    if code < 0 {
+      code = code + 256;
+    }
+    b.append("%");
+    str hex = to_hex_upper(code, 2);
+    b.append(hex);
+    free(hex);
   }
   ret b.build();
 }

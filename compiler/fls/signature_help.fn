@@ -238,7 +238,7 @@ fun _signature_result(str signature, num active_param) str {
     clamped = 0;
   }
   b.append(`]}],"activeSignature":0,"activeParameter":`);
-  b.append(format_num(clamped));
+  b.append_num(clamped);
   b.append("}");
   ret b.build();
 }

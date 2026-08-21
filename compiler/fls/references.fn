@@ -16,7 +16,6 @@ imp ..lexer.token;
 imp std.string;
 imp std.vec;
 imp std.option;
-imp std.io;
 imp std.c.mem;
 
 // One place a name is written.
@@ -50,13 +49,15 @@ pub fun document_highlights(AnalysisCache* cache, Document doc, num line, num ch
       b.append(",");
     }
     i = i + 1;
-    b.append(format(
-      `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
-      o.span.line,
-      o.span.start,
-      o.span.line,
-      o.span.end
-    ));
+    b.append(`{"range":{"start":{"line":`);
+    b.append_num(o.span.line);
+    b.append(`,"character":`);
+    b.append_num(o.span.start);
+    b.append(`},"end":{"line":`);
+    b.append_num(o.span.line);
+    b.append(`,"character":`);
+    b.append_num(o.span.end);
+    b.append("}}}");
   }
   b.append("]");
   ret b.build();

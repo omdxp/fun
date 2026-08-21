@@ -51,6 +51,19 @@ test "a string with non-ASCII UTF-8 bytes is passed through unescaped" {
   assert !contains(q, "\\u"), "expected no \\u escape for a non-control byte";
 }
 
+test "path_to_uri percent-encodes a non-ASCII byte with real hex digits, not a bare '%'" {
+  // Same root cause as json_quote's own already-fixed bug above:
+  // `chr` is a signed C char, so a UTF-8 lead/continuation byte (>=
+  // 0x80) reads as negative here too. to_hex_upper returns "" for a
+  // negative input, so without normalizing first, every non-ASCII
+  // path byte percent-encoded as a bare "%" with no hex code
+  // following it - a malformed URI for any file path with a non-ASCII
+  // character in it.
+  str uri = path_to_uri("/tmp/caf\xC3\xA9.fn");
+  assert contains(uri, "%C3%A9"), "expected real hex digits for the non-ASCII byte";
+  assert !contains(uri, "%.fn") && !contains(uri, "% "), "expected no bare '%' with nothing after it";
+}
+
 test "a header name is read whatever case it is written in" {
   assert starts_with_ignore_case("Content-Length: 5", "content-length:"), "expected the header to be recognized";
   assert starts_with_ignore_case("content-length: 5", "Content-Length:"), "expected either case to match";

@@ -837,6 +837,7 @@ fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
     names.push(d.container);
   }
   StringBuilder links = string_builder_init(64);
+  defer links.free();
   num count = 0;
   num i = 0;
   for i < names.len && count < 8 {
@@ -856,13 +857,27 @@ fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
     if count > 0 {
       links.append(", ");
     }
-    links.append(format("[`{str}`]({str}#L{num})", name, path_to_uri(td.pos.filename), td.pos.line));
+    links.append("[`");
+    links.append(name);
+    links.append("`](");
+    str target_uri = path_to_uri(td.pos.filename);
+    links.append(target_uri);
+    free(target_uri);
+    links.append("#L");
+    links.append_num(td.pos.line);
+    links.append(")");
     count = count + 1;
   }
   if count == 0 {
     ret "";
   }
-  ret format("\n\n---\n\nSee also: {str}\n", links.build());
+  str links_text = links.build();
+  StringBuilder footer = string_builder_init(len(links_text) + 32);
+  footer.append("\n\n---\n\nSee also: ");
+  footer.append(links_text);
+  footer.append("\n");
+  free(links_text);
+  ret footer.build();
 }
 
 // The capitalized, identifier-shaped words in `detail` (a rendered

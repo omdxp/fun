@@ -49,11 +49,11 @@ pub fun folding_ranges(AnalysisCache* cache, Document doc) str {
       b.append(",");
     }
     any = true;
-    b.append(format(
-      `{"startLine":{num},"endLine":{num}}`,
-      open_line - 1,
-      t.pos.line - 1
-    ));
+    b.append(`{"startLine":`);
+    b.append_num(open_line - 1);
+    b.append(`,"endLine":`);
+    b.append_num(t.pos.line - 1);
+    b.append("}");
   }
   b.append("]");
   ret b.build();

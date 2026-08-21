@@ -135,7 +135,7 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     if j > 0 {
       b.append(",");
     }
-    b.append(format_num(data.get(j)));
+    b.append_num(data.get(j));
     j = j + 1;
   }
   b.append("]}");
