@@ -166,6 +166,15 @@ impl Set<T> as Clearable {
   }
 }
 
+impl Set<T> as Clonable<Set<T>> {
+  // Returns a shallow copy with independent backing storage.
+  pub clone() Set<T> {
+    Set<T> out;
+    out.map = self.map.clone();
+    ret out;
+  }
+}
+
 impl Set<num> as Display {
   // Render as `{1, 2, 3}` (elements are unordered).
   pub to_string() str {

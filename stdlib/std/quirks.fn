@@ -84,3 +84,20 @@ pub quirk From<T> {
   // Apply state to this value from a `T` (best-effort; missing data takes defaults).
   from(T value);
 }
+
+// A shallow copy with independent backing storage: implementers own
+// their own container (array, slots, ...) after cloning, but an
+// element that itself holds a pointer (a `str` key, a nested `Vec`)
+// still aliases whatever it originally pointed to, exactly as an
+// ordinary value copy of that element would.
+// 
+// ```
+// impl Vec<T> as Clonable<Vec<T>> {
+//   pub clone() Vec<T> { ... }
+// }
+// let copy = original.clone();
+// ```
+pub quirk Clonable<T> {
+  // Returns an independent copy of this value.
+  clone() T;
+}

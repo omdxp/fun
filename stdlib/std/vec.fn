@@ -286,18 +286,6 @@ impl Vec<T> {
     self.cap = self.len;
   }
 
-  // Returns a shallow copy with independent backing storage.
-  pub clone() Vec<T> {
-    Vec<T> out;
-    out.init(self.len);
-    num i = 0;
-    for i < self.len {
-      out.push(self.data[i]);
-      i = i + 1;
-    }
-    ret out;
-  }
-
   // Returns a new vector holding the elements in `[start, end)`, with both
   // indices clamped to the valid range.
   pub slice(num start, num end) Vec<T> {
@@ -370,6 +358,20 @@ impl Vec<T> as Clearable {
   // Removes all elements without freeing capacity.
   pub clear() {
     self.len = 0;
+  }
+}
+
+impl Vec<T> as Clonable<Vec<T>> {
+  // Returns a shallow copy with independent backing storage.
+  pub clone() Vec<T> {
+    Vec<T> out;
+    out.init(self.len);
+    num i = 0;
+    for i < self.len {
+      out.push(self.data[i]);
+      i = i + 1;
+    }
+    ret out;
   }
 }
 
