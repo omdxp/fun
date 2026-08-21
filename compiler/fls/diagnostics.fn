@@ -63,6 +63,10 @@ pub fun diagnostics_cache_new() DiagnosticsCache {
 impl DiagnosticsCache {
   // Drops what was kept for a document a client closed.
   pub forget(str document_uri) {
+    let found = self.entries.at(document_uri);
+    if found.is_some() {
+      found.unwrap().diagnostics.free();
+    }
     self.entries.remove(document_uri);
   }
 
@@ -98,6 +102,10 @@ pub fun diagnose(AnalysisCache* cache, DiagnosticsCache* dcache, Document doc) V
     if found.version == doc.version {
       ret _clone_diagnostics(&found.diagnostics);
     }
+    // A stale revision, about to be replaced below - freed first, or
+    // every edit leaks the whole previous diagnostics list for as
+    // long as the server keeps running.
+    found.diagnostics.free();
   }
 
   Vec<Diagnostic> out = _diagnose_uncached(cache, doc);
@@ -146,6 +154,11 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   let parse_failed = p.parse();
   defer free_node_tree(&state.nodes);
   defer state.tokens.free();
+  // Shallow only, matching `_entry_nodes`'s own cleanup of the same
+  // field: `GlobalSymbolInfo.symbol_name`/`.file_path` alias token
+  // text, not their own copies. `free_parse_state_internal` below
+  // doesn't touch this map at all.
+  defer state.global_symbols.free();
   // `state`'s own scratch (scope chain, symbol tables, forward-type
   // names) is never read past this function, so it is safe to free on
   // every exit the same way `state.nodes` already is above - except
