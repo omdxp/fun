@@ -76,6 +76,7 @@ pub fun _normalize_path(str path) str {
   // would turn it into a relative one.
   bin absolute = len(slashed) > 0 && slashed[0] == '/';
   Vec<str> segs = split(slashed, '/');
+  free(slashed);
   Vec<str> parts;
   parts.init(8);
   for seg : segs {
@@ -103,6 +104,14 @@ pub fun _normalize_path(str path) str {
     first = false;
     sb.append(p);
   }
+  // `parts`'s own elements alias a subset of `segs`'s (pushed by
+  // reference, not copied), so freeing every element of `segs` alone
+  // covers both - `sb` already copied their bytes above.
+  for seg : segs {
+    free(seg);
+  }
+  segs.free();
+  parts.free();
   ret sb.build();
 }
 
@@ -553,6 +562,10 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   // `state.tokens`, registered above.
   defer free_node_tree(&state.nodes);
   defer free_parse_state_internal(&state);
+  // Never aliased to anything here (`_scan_compound_names` below
+  // writes straight into `shared.out`, not through this field), so
+  // the default map `parse_state_new` constructs is ours alone.
+  defer state.global_symbols.free();
 
   for state.next_token_is_keyword("imp") {
     let ierr = p.parse_import();

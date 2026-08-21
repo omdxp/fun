@@ -76,6 +76,7 @@ pub fun path_to_uri(str path) str {
     b.append(hex);
     free(hex);
   }
+  free(normalized);
   ret b.build();
 }
 
