@@ -134,7 +134,8 @@ pub fun notification(str method, str params_json) str {
 pub fun json_quote_into(StringBuilder* out, str s) {
   out.append_char('"');
   num i = 0;
-  for i < len(s) {
+  num n = len(s);
+  for i < n {
     let c = s[i];
     i = i + 1;
     num code = c;
