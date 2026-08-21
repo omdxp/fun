@@ -833,7 +833,19 @@ fun _hover_result(str markdown, Span s) str {
 // legitimately). "" when nothing resolves at all.
 fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
   Vec<str> names = _candidate_type_names(d.detail, d.name);
-  defer names.free();
+  // Only the first `owned_count` elements are this call's own to
+  // free - every one `_candidate_type_names` itself produced. A
+  // possible extra entry below is `d.container`, which aliases the
+  // declaration's own field rather than a fresh copy.
+  num owned_count = names.len;
+  defer {
+    num fi = 0;
+    for fi < owned_count {
+      free(names.get(fi));
+      fi = fi + 1;
+    }
+    names.free();
+  }
   // A field/method/variant's own container is worth linking even
   // when its detail carries no type name of its own (a `num` field
   // has nowhere else useful to point).
@@ -907,6 +919,7 @@ fun _candidate_type_names(str detail, str exclude_name) Vec<str> {
     }
     str word = substr(detail, start, i - start);
     if equals(word, exclude_name) || out.contains(word) {
+      free(word);
       continue;
     }
     out.push(word);
