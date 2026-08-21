@@ -916,7 +916,17 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
           }
           fit method.kind {
             .Function(f) -> {
-              if !equals(bare_method_name(f.name), name) {
+              // Not just "same name, somewhere in this impl's own
+              // span" - that also matches a bare call to an unrelated
+              // same-named function written anywhere inside the
+              // method's own body (free(x) inside JsonValue's own
+              // free() method resolving to itself instead of
+              // std.c.mem's free, the real bug this line exists to
+              // rule out). Only the method's own declaration line is
+              // a real match; a plain reference falls through to
+              // ordinary lookup() below instead, same as it would
+              // anywhere outside this impl.
+              if !equals(bare_method_name(f.name), name) || line != method.pos.line {
                 continue;
               }
               if n.pos.line > best_line {
@@ -2056,6 +2066,21 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
           }
         }
         _ -> {}
+      }
+    }
+    // `fit *self { ... }`, a method fitting over its own dereferenced
+    // pointer receiver rather than a field or a bare value - common
+    // for a method whose type is itself the enum being matched
+    // (`impl JsonValue { pub free() { fit *self { ... } } }`).
+    // type_name_of_local already returns a bare, pointer-stripped type
+    // name, the same one `self`'s own declared `JsonValue*` reduces to
+    // once dereferenced, so no separate stripping is needed here.
+    .Unary(u) -> {
+      if u.has_indirection && u.operand != nil {
+        fit u.operand.kind {
+          .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
+          _ -> {}
+        }
       }
     }
     _ -> {}
