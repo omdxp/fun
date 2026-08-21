@@ -2146,7 +2146,9 @@ fun _c_builtin_completions(Vec<Item>* items) {
     if ends_with(b.name, "_t") || equals(b.name, "FILE") {
       kind = .Struct;
     }
-    items.push(_item(b.name, kind, format("C builtin, from {str}", b.module)));
+    str detail = format("C builtin, from {str}", b.module);
+    items.push(_item(b.name, kind, detail));
+    free(detail);
   }
 }
 
@@ -2300,12 +2302,18 @@ fun _call_snippet(str label, str signature, bin is_method, bin snippets) str {
   ret b.build();
 }
 
+// Every field copied fresh, whether the caller handed in a literal or
+// something it just built with `format`: some of `_item`'s own ~50
+// call sites pass one, some the other, and there is no telling which
+// from here. Owning every field unconditionally is what lets
+// `_reply` free every item's own label/detail/snippet unconditionally
+// too, rather than needing to know each field's own origin to decide.
 fun _snippet_item(str label, ItemKind kind, str detail, str snippet) Item {
   Item it;
-  it.label = label;
+  it.label = substr(label, 0, len(label));
   it.kind = kind;
-  it.detail = detail;
-  it.snippet = snippet;
+  it.detail = substr(detail, 0, len(detail));
+  it.snippet = substr(snippet, 0, len(snippet));
   ret it;
 }
 
@@ -2386,6 +2394,9 @@ fun _reply(Vec<Item>* items) str {
       if !equals(extra, "") {
         free(extra);
       }
+      free(it.label);
+      free(it.detail);
+      free(it.snippet);
       continue;
     }
     // Format 2 is the protocol's snippet format: `$1` and the rest are
@@ -2404,6 +2415,9 @@ fun _reply(Vec<Item>* items) str {
     if !equals(extra, "") {
       free(extra);
     }
+    free(it.label);
+    free(it.detail);
+    free(it.snippet);
   }
   b.append("]");
   ret b.build();

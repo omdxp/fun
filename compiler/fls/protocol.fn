@@ -83,8 +83,10 @@ fun to_lower_char(chr c) chr {
 // consistently, not just what's supposed to.
 pub fun write_message(str json) {
   Sink out = Sink.Stdout;
-  out.write(format("Content-Length: {num}\r\n\r\n{str}", len(json), json));
+  str wire = format("Content-Length: {num}\r\n\r\n{str}", len(json), json);
+  out.write(wire);
   out.flush();
+  free(wire);
   free(json);
 }
 
@@ -150,7 +152,10 @@ pub fun json_quote_into(StringBuilder* out, str s) {
     } elif c == '\t' {
       out.append("\\t");
     } elif code < 32 {
-      out.append(format("\\u{str}", to_hex(code, 4)));
+      out.append("\\u");
+      str hex = to_hex(code, 4);
+      out.append(hex);
+      free(hex);
     } else {
       out.append_char(c);
     }
