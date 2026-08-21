@@ -18,6 +18,7 @@ imp uri;
 imp ..ast.ast;
 imp std.vec;
 imp std.string;
+imp std.c.mem;
 
 // Every top-level function/compound/enum/quirk's own code lens in
 // `doc`, as the result a client is sent: "N references" for a
@@ -164,13 +165,16 @@ fun _collect_quirk_implementations(AnalysisCache* cache, Documents* docs, str na
 // client - a location list to jump through).
 fun _lens(Vec<Occurrence> found, str noun, Pos decl_pos, num name_len, str document_uri, str decl_text) str {
   StringBuilder locs = string_builder_init(128);
+  defer locs.free();
   locs.append("[");
   num i = 0;
   for i < found.len {
     if i > 0 {
       locs.append(",");
     }
-    locs.append(_occurrence_location(found.get(i)));
+    str loc = _occurrence_location(found.get(i));
+    locs.append(loc);
+    free(loc);
     i = i + 1;
   }
   locs.append("]");
@@ -180,18 +184,30 @@ fun _lens(Vec<Occurrence> found, str noun, Pos decl_pos, num name_len, str docum
   if found.len == 1 {
     plural = "";
   }
-  ret format(
-    `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"command":{"title":"{num} {str}{str}","command":"fun.showReferences","arguments":[{str},{"line":{num},"character":{num}},{str}]}}`,
-    span.line,
-    span.start,
-    span.line,
-    span.end,
-    found.len,
-    noun,
-    plural,
-    json_quote(document_uri),
-    span.line,
-    span.start,
-    locs.build()
-  );
+  str locs_text = locs.build();
+  StringBuilder b = string_builder_init(len(locs_text) + 160);
+  b.append(`{"range":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"command":{"title":"`);
+  b.append_num(found.len);
+  b.append(" ");
+  b.append(noun);
+  b.append(plural);
+  b.append(`","command":"fun.showReferences","arguments":[`);
+  json_quote_into(&b, document_uri);
+  b.append(`,{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append("},");
+  b.append(locs_text);
+  b.append("]}}");
+  free(locs_text);
+  ret b.build();
 }

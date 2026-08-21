@@ -21,6 +21,7 @@ imp std.option;
 imp std.result;
 imp std.io;
 imp std.map;
+imp std.c.mem;
 
 // How seriously a client should take one finding.
 pub const num SEVERITY_ERROR = 1;
@@ -246,7 +247,9 @@ fun _at_start(num severity, str message) Diagnostic {
 // itself reports.
 pub fun publish(str document_uri, str text, Vec<Diagnostic>* found) str {
   StringBuilder b = string_builder_init(256);
-  b.append(format(`{"uri":{str},"diagnostics":[`, json_quote(document_uri)));
+  b.append(`{"uri":`);
+  json_quote_into(&b, document_uri);
+  b.append(`,"diagnostics":[`);
   num i = 0;
   for i < found.len {
     Diagnostic d = found.get(i);
@@ -254,16 +257,23 @@ pub fun publish(str document_uri, str text, Vec<Diagnostic>* found) str {
       b.append(",");
     }
     i = i + 1;
-    b.append(format(
-      `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"severity":{num},"source":"fun","message":{str}}`,
-      d.line,
-      byte_col_to_utf16_char(text, d.line, d.col),
-      d.end_line,
-      byte_col_to_utf16_char(text, d.end_line, d.end_col),
-      d.severity,
-      json_quote(d.message)
-    ));
+    b.append(`{"range":{"start":{"line":`);
+    b.append_num(d.line);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(text, d.line, d.col));
+    b.append(`},"end":{"line":`);
+    b.append_num(d.end_line);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(text, d.end_line, d.end_col));
+    b.append(`}},"severity":`);
+    b.append_num(d.severity);
+    b.append(`,"source":"fun","message":`);
+    json_quote_into(&b, d.message);
+    b.append("}");
   }
   b.append("]}");
-  ret notification("textDocument/publishDiagnostics", b.build());
+  str params_json = b.build();
+  str result = notification("textDocument/publishDiagnostics", params_json);
+  free(params_json);
+  ret result;
 }

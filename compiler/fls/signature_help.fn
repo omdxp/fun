@@ -218,7 +218,7 @@ fun _signature_result(str signature, num active_param) str {
   Vec<str> params = split_signature_params(signature);
   StringBuilder b = string_builder_init(128);
   b.append(`{"signatures":[{"label":`);
-  b.append(json_quote(signature));
+  json_quote_into(&b, signature);
   b.append(`,"parameters":[`);
   num i = 0;
   for i < params.len {
@@ -226,7 +226,7 @@ fun _signature_result(str signature, num active_param) str {
       b.append(",");
     }
     b.append(`{"label":`);
-    b.append(json_quote(params.get(i)));
+    json_quote_into(&b, params.get(i));
     b.append("}");
     i = i + 1;
   }

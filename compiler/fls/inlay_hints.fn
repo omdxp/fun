@@ -23,6 +23,7 @@ imp std.string;
 imp std.vec;
 imp std.option;
 imp std.ctype;
+imp std.c.mem;
 
 // Every `let name = value;` local within lines `start_line` through
 // `end_line` (both 0-indexed, inclusive) of `doc`, each as a type
@@ -68,12 +69,15 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       b.append(",");
     }
     any = true;
-    b.append(format(
-      `{"position":{"line":{num},"character":{num}},"label":{str},"kind":1,"paddingLeft":true}`,
-      line0,
-      byte_col_to_utf16_char(doc.text, line0, name_tok.pos.end_col - 1),
-      json_quote(format(": {str}", type_part))
-    ));
+    b.append(`{"position":{"line":`);
+    b.append_num(line0);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(doc.text, line0, name_tok.pos.end_col - 1));
+    b.append(`},"label":`);
+    str let_label = format(": {str}", type_part);
+    json_quote_into(&b, let_label);
+    free(let_label);
+    b.append(`,"kind":1,"paddingLeft":true}`);
   }
 
   // Parameter-name hints at call sites: `f(name: value)`. Every
@@ -187,12 +191,15 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
         b.append(",");
       }
       any = true;
-      b.append(format(
-        `{"position":{"line":{num},"character":{num}},"label":{str},"kind":2,"paddingRight":true}`,
-        at.pos.line - 1,
-        byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1),
-        json_quote(format("{str}:", pname))
-      ));
+      b.append(`{"position":{"line":`);
+      b.append_num(at.pos.line - 1);
+      b.append(`,"character":`);
+      b.append_num(byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1));
+      b.append(`},"label":`);
+      str param_label = format("{str}:", pname);
+      json_quote_into(&b, param_label);
+      free(param_label);
+      b.append(`,"kind":2,"paddingRight":true}`);
     }
   }
 

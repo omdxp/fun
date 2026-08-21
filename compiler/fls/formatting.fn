@@ -11,7 +11,7 @@ imp protocol;
 imp ..cli.fmt;
 imp std.string;
 imp std.result;
-imp std.io;
+imp std.c.mem;
 
 // The edits that format `doc`, as the result a client is sent. Text that
 // cannot be read is left alone: refusing to format is better than
@@ -25,6 +25,7 @@ pub fun formatting(Document doc) str {
   if equals(out, doc.text) {
     // Nothing to do, and an empty list says exactly that without
     // touching the client's undo history.
+    free(out);
     ret "[]";
   }
 
@@ -32,11 +33,14 @@ pub fun formatting(Document doc) str {
   // zero, which is how the protocol spells "to the end of the document"
   // without needing to know the last line's length.
   num lines = _line_count(doc.text);
-  ret format(
-    `[{"range":{"start":{"line":0,"character":0},"end":{"line":{num},"character":0}},"newText":{str}}]`,
-    lines,
-    json_quote(out)
-  );
+  StringBuilder b = string_builder_init(len(out) + 80);
+  b.append(`[{"range":{"start":{"line":0,"character":0},"end":{"line":`);
+  b.append_num(lines);
+  b.append(`,"character":0}},"newText":`);
+  json_quote_into(&b, out);
+  b.append("}]");
+  free(out);
+  ret b.build();
 }
 
 // How many lines `text` holds, counting a trailing newline as ending the

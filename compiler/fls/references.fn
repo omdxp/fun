@@ -17,6 +17,7 @@ imp std.string;
 imp std.vec;
 imp std.option;
 imp std.io;
+imp std.c.mem;
 
 // One place a name is written.
 pub compound Occurrence {
@@ -83,7 +84,9 @@ pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line
       b.append(",");
     }
     i = i + 1;
-    b.append(_occurrence_location(o));
+    str loc = _occurrence_location(o);
+    b.append(loc);
+    free(loc);
   }
   b.append("]");
   ret b.build();
@@ -171,7 +174,8 @@ pub fun rename_symbol(
       b.append(",");
     }
     written.push(document_uri);
-    b.append(format("{str}:[", json_quote(document_uri)));
+    json_quote_into(&b, document_uri);
+    b.append(":[");
     num j = 0;
     num emitted = 0;
     for j < found.len {
@@ -184,14 +188,17 @@ pub fun rename_symbol(
         b.append(",");
       }
       emitted = emitted + 1;
-      b.append(format(
-        `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"newText":{str}}`,
-        o.span.line,
-        o.span.start,
-        o.span.line,
-        o.span.end,
-        json_quote(new_name)
-      ));
+      b.append(`{"range":{"start":{"line":`);
+      b.append_num(o.span.line);
+      b.append(`,"character":`);
+      b.append_num(o.span.start);
+      b.append(`},"end":{"line":`);
+      b.append_num(o.span.line);
+      b.append(`,"character":`);
+      b.append_num(o.span.end);
+      b.append(`}},"newText":`);
+      json_quote_into(&b, new_name);
+      b.append("}");
     }
     b.append("]");
   }
@@ -286,12 +293,17 @@ fun _occurrences_in_doc(AnalysisCache* cache, Document d, str document_uri, str 
 }
 
 pub fun _occurrence_location(Occurrence o) str {
-  ret format(
-    `{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
-    json_quote(o.document_uri),
-    o.span.line,
-    o.span.start,
-    o.span.line,
-    o.span.end
-  );
+  StringBuilder b = string_builder_init(96);
+  b.append(`{"uri":`);
+  json_quote_into(&b, o.document_uri);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(o.span.line);
+  b.append(`,"character":`);
+  b.append_num(o.span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(o.span.line);
+  b.append(`,"character":`);
+  b.append_num(o.span.end);
+  b.append("}}}");
+  ret b.build();
 }

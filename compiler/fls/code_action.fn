@@ -16,6 +16,7 @@ imp ..lexer.token;
 imp std.string;
 imp std.vec;
 imp std.option;
+imp std.c.mem;
 
 // The quick fixes available for `diags`, as the result a client is
 // sent.
@@ -94,13 +95,13 @@ fun _warning_id_from_message(str message) str {
 fun _remove_line_action(str document_uri, str title, num line) str {
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":`);
-  b.append(json_quote(title));
+  json_quote_into(&b, title);
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(line));
+  b.append_num(line);
   b.append(`,"character":0},"end":{"line":`);
-  b.append(format_num(line + 1));
+  b.append_num(line + 1);
   b.append(`,"character":0}},"newText":""}]}}}`);
   ret b.build();
 }
@@ -110,15 +111,19 @@ fun _remove_line_action(str document_uri, str title, num line) str {
 fun _allow_action(str document_uri, Diagnostic d, str id_name) str {
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":`);
-  b.append(json_quote(format("Silence with 'allow {str};'", id_name)));
+  str allow_title = format("Silence with 'allow {str};'", id_name);
+  json_quote_into(&b, allow_title);
+  free(allow_title);
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(d.line));
+  b.append_num(d.line);
   b.append(`,"character":0},"end":{"line":`);
-  b.append(format_num(d.line));
+  b.append_num(d.line);
   b.append(`,"character":0}},"newText":`);
-  b.append(json_quote(format("allow {str};\n", id_name)));
+  str allow_stmt = format("allow {str};\n", id_name);
+  json_quote_into(&b, allow_stmt);
+  free(allow_stmt);
   b.append(`}]}}}`);
   ret b.build();
 }
@@ -133,15 +138,15 @@ fun _insert_await_action(str document_uri, str text, Diagnostic d) str {
   num character = byte_col_to_utf16_char(text, d.line, d.col);
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":"Insert 'await'","kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(d.line));
+  b.append_num(d.line);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`},"end":{"line":`);
-  b.append(format_num(d.line));
+  b.append_num(d.line);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`}},"newText":"await "}]}}}`);
   ret b.build();
 }
@@ -168,15 +173,15 @@ fun _mark_async_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(160);
   b.append(`{"title":"Mark enclosing function async","kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`},"end":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`}},"newText":"async "}]}}}`);
   ret b.build();
 }
@@ -211,7 +216,9 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   no_args.init(0);
 
   StringBuilder arms = string_builder_init(64);
+  defer arms.free();
   StringBuilder title_names = string_builder_init(32);
+  defer title_names.free();
   num written = 0;
   num ri = 0;
   for ri < refs.len {
@@ -222,11 +229,15 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
       continue;
     }
     num arity = _payload_arity(variant.unwrap().detail);
-    arms.append(format("  {str}\n", _stub_arm(ev.variant_name, arity)));
+    str arm_line = format("  {str}\n", _stub_arm(ev.variant_name, arity));
+    arms.append(arm_line);
+    free(arm_line);
     if written > 0 {
       title_names.append(", ");
     }
-    title_names.append(format("'{str}.{str}'", ev.enum_name, ev.variant_name));
+    str name_ref = format("'{str}.{str}'", ev.enum_name, ev.variant_name);
+    title_names.append(name_ref);
+    free(name_ref);
     written = written + 1;
   }
   if written == 0 {
@@ -241,25 +252,31 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   Pos p = close.unwrap();
   num line0 = p.line - 1;
   num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
-  str title = format("Fill in missing {str} arm", title_names.build());
+  str names_text = title_names.build();
+  str title = format("Fill in missing {str} arm", names_text);
   if written > 1 {
-    title = format("Fill in missing {str} arms", title_names.build());
+    free(title);
+    title = format("Fill in missing {str} arms", names_text);
   }
+  free(names_text);
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
-  b.append(json_quote(title));
+  json_quote_into(&b, title);
+  free(title);
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`},"end":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`}},"newText":`);
-  b.append(json_quote(arms.build()));
+  str arms_text = arms.build();
+  json_quote_into(&b, arms_text);
+  free(arms_text);
   b.append(`}]}}}`);
   ret b.build();
 }
@@ -339,7 +356,7 @@ fun _stub_arm(str variant_name, num arity) str {
         b.append(", ");
       }
       b.append("v");
-      b.append(format_num(i));
+      b.append_num(i);
       i = i + 1;
     }
     b.append(")");
@@ -386,22 +403,26 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
-  b.append(json_quote(format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name)));
+  str impl_title = format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name);
+  json_quote_into(&b, impl_title);
+  free(impl_title);
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
-  b.append(json_quote(document_uri));
+  json_quote_into(&b, document_uri);
   b.append(`:[{"range":{"start":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`},"end":{"line":`);
-  b.append(format_num(line0));
+  b.append_num(line0);
   b.append(`,"character":`);
-  b.append(format_num(character));
+  b.append_num(character);
   b.append(`}},"newText":`);
-  b.append(json_quote(format(
+  str stub_text = format(
     "  pub {str} {\n    // TODO: implement\n  }\n",
     method.unwrap().detail
-  )));
+  );
+  json_quote_into(&b, stub_text);
+  free(stub_text);
   b.append(`}]}}}`);
   ret b.build();
 }

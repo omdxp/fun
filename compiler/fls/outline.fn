@@ -19,7 +19,7 @@ imp ..ast.ast;
 imp ..parser.import_resolver;
 imp std.string;
 imp std.vec;
-imp std.io;
+imp std.c.mem;
 
 // What a client is told a symbol is. The values are the protocol's own
 // numbering, which is why they are written out rather than counted from
@@ -72,19 +72,26 @@ pub fun document_symbols(AnalysisCache* cache, Document doc) str {
     }
     i = i + 1;
     Span span = span_of_pos(s.pos, len(s.name), doc.text);
-    b.append(format(
-      `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
-      json_quote(s.name),
-      s.kind,
-      json_quote(s.container),
-      json_quote(document_uri),
-      span.line,
-      span.start,
-      span.line,
-      span.end
-    ));
+    b.append(`{"name":`);
+    json_quote_into(&b, s.name);
+    b.append(`,"kind":`);
+    b.append_num(s.kind);
+    b.append(`,"containerName":`);
+    json_quote_into(&b, s.container);
+    b.append(`,"location":{"uri":`);
+    json_quote_into(&b, document_uri);
+    b.append(`,"range":{"start":{"line":`);
+    b.append_num(span.line);
+    b.append(`,"character":`);
+    b.append_num(span.start);
+    b.append(`},"end":{"line":`);
+    b.append_num(span.line);
+    b.append(`,"character":`);
+    b.append_num(span.end);
+    b.append("}}}}");
   }
   b.append("]");
+  free(document_uri);
   ret b.build();
 }
 
@@ -188,17 +195,23 @@ pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbol
       }
       any = true;
       Span span = span_of_pos(entry.decl.pos, len(entry.decl.name), doc.text);
-      b.append(format(
-        `{"name":{str},"kind":{num},"containerName":{str},"location":{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}}`,
-        json_quote(entry.decl.name),
-        _outline_kind_for(entry.decl),
-        json_quote(entry.decl.container),
-        json_quote(entry.uri),
-        span.line,
-        span.start,
-        span.line,
-        span.end
-      ));
+      b.append(`{"name":`);
+      json_quote_into(&b, entry.decl.name);
+      b.append(`,"kind":`);
+      b.append_num(_outline_kind_for(entry.decl));
+      b.append(`,"containerName":`);
+      json_quote_into(&b, entry.decl.container);
+      b.append(`,"location":{"uri":`);
+      json_quote_into(&b, entry.uri);
+      b.append(`,"range":{"start":{"line":`);
+      b.append_num(span.line);
+      b.append(`,"character":`);
+      b.append_num(span.start);
+      b.append(`},"end":{"line":`);
+      b.append_num(span.line);
+      b.append(`,"character":`);
+      b.append_num(span.end);
+      b.append("}}}}");
     }
   }
   b.append("]");

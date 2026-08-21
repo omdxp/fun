@@ -26,6 +26,7 @@ imp std.fs;
 imp std.ctype;
 imp std.result;
 imp std.map;
+imp std.c.mem;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -2348,10 +2349,12 @@ fun _label_details_json(str detail, ItemKind kind) str {
 
   StringBuilder b = string_builder_init(96);
   b.append(`,"labelDetails":{"detail":`);
-  b.append(json_quote(pd.build()));
+  str params_text = pd.build();
+  json_quote_into(&b, params_text);
+  free(params_text);
   if !equals(return_type, "") {
     b.append(`,"description":`);
-    b.append(json_quote(return_type));
+    json_quote_into(&b, return_type);
   }
   b.append("}");
   ret b.build();
@@ -2367,29 +2370,40 @@ fun _reply(Vec<Item>* items) str {
       b.append(",");
     }
     i = i + 1;
+    // "" for most items (not a call-shaped function/method), freshly
+    // built only for the rest - freed after appending unless it's
+    // that shared "" literal, which isn't this call's to free.
     str extra = _label_details_json(it.detail, it.kind);
     if equals(it.snippet, "") {
-      b.append(format(
-        `{"label":{str},"kind":{num},"detail":{str}`,
-        json_quote(it.label),
-        it.kind,
-        json_quote(it.detail)
-      ));
+      b.append(`{"label":`);
+      json_quote_into(&b, it.label);
+      b.append(`,"kind":`);
+      b.append_num(it.kind);
+      b.append(`,"detail":`);
+      json_quote_into(&b, it.detail);
       b.append(extra);
       b.append("}");
+      if !equals(extra, "") {
+        free(extra);
+      }
       continue;
     }
     // Format 2 is the protocol's snippet format: `$1` and the rest are
     // where the cursor stops, `$0` where it ends up.
-    b.append(format(
-      `{"label":{str},"kind":{num},"detail":{str},"insertText":{str},"insertTextFormat":2`,
-      json_quote(it.label),
-      it.kind,
-      json_quote(it.detail),
-      json_quote(it.snippet)
-    ));
+    b.append(`{"label":`);
+    json_quote_into(&b, it.label);
+    b.append(`,"kind":`);
+    b.append_num(it.kind);
+    b.append(`,"detail":`);
+    json_quote_into(&b, it.detail);
+    b.append(`,"insertText":`);
+    json_quote_into(&b, it.snippet);
+    b.append(`,"insertTextFormat":2`);
     b.append(extra);
     b.append("}");
+    if !equals(extra, "") {
+      free(extra);
+    }
   }
   b.append("]");
   ret b.build();

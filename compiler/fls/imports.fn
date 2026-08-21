@@ -17,11 +17,11 @@ imp ..ast.ast;
 imp ..lexer.token;
 imp ..parser.import_resolver;
 imp std.string;
-imp std.io;
 imp std.vec;
 imp std.option;
 imp std.fs;
 imp std.path;
+imp std.c.mem;
 
 // Where an `imp`-path segment at `line`/`character` (in a document
 // whose own path is `current_file`) leads: a resolved file path (a
@@ -262,14 +262,20 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
           b.append(",");
         }
         any = true;
-        b.append(format(
-          `{"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}},"target":{str}}`,
-          start_line,
-          start_char,
-          end_line,
-          end_char,
-          json_quote(path_to_uri(resolved))
-        ));
+        b.append(`{"range":{"start":{"line":`);
+        b.append_num(start_line);
+        b.append(`,"character":`);
+        b.append_num(start_char);
+        b.append(`},"end":{"line":`);
+        b.append_num(end_line);
+        b.append(`,"character":`);
+        b.append_num(end_char);
+        b.append(`}},"target":`);
+        str target_uri = path_to_uri(resolved);
+        json_quote_into(&b, target_uri);
+        free(target_uri);
+        b.append("}");
+        free(resolved);
       }
     }
     i = j;

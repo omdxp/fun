@@ -25,6 +25,7 @@ imp std.vec;
 imp std.string;
 imp std.fs;
 imp std.option;
+imp std.c.mem;
 
 // The top-level function at `line`/`character`, as the result a
 // client is sent: prepareCallHierarchy's own CallHierarchyItem[],
@@ -53,7 +54,13 @@ pub fun prepare_call_hierarchy(AnalysisCache* cache, Document doc, num line, num
   if equals(text, "") {
     ret "[]";
   }
-  ret format(`[{str}]`, _call_hierarchy_item(d.name, d.pos, text));
+  str item = _call_hierarchy_item(d.name, d.pos, text);
+  StringBuilder b = string_builder_init(len(item) + 2);
+  b.append("[");
+  b.append(item);
+  b.append("]");
+  free(item);
+  ret b.build();
 }
 
 // Every top-level function that calls `name`, as the result a
@@ -115,21 +122,26 @@ pub fun incoming_calls(AnalysisCache* cache, Documents* docs, str name) str {
     }
     _CallerGroup grp = groups.get(g);
     StringBuilder ranges = string_builder_init(64);
+    defer ranges.free();
     ranges.append("[");
     num r = 0;
     for r < grp.call_sites.len {
       if r > 0 {
         ranges.append(",");
       }
-      ranges.append(_span_json(grp.call_sites.get(r)));
+      _span_json_into(&ranges, grp.call_sites.get(r));
       r = r + 1;
     }
     ranges.append("]");
-    b.append(format(
-      `{"from":{str},"fromRanges":{str}}`,
-      _call_hierarchy_item(grp.name, grp.pos, grp.text),
-      ranges.build()
-    ));
+    b.append(`{"from":`);
+    str from_item = _call_hierarchy_item(grp.name, grp.pos, grp.text);
+    b.append(from_item);
+    free(from_item);
+    b.append(`,"fromRanges":`);
+    str ranges_text = ranges.build();
+    b.append(ranges_text);
+    free(ranges_text);
+    b.append("}");
     g = g + 1;
   }
   b.append("]");
@@ -213,21 +225,26 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
     }
     _CallerGroup grp = groups.get(g);
     StringBuilder ranges = string_builder_init(64);
+    defer ranges.free();
     ranges.append("[");
     num r = 0;
     for r < grp.call_sites.len {
       if r > 0 {
         ranges.append(",");
       }
-      ranges.append(_span_json(grp.call_sites.get(r)));
+      _span_json_into(&ranges, grp.call_sites.get(r));
       r = r + 1;
     }
     ranges.append("]");
-    b.append(format(
-      `{"to":{str},"fromRanges":{str}}`,
-      _call_hierarchy_item(grp.name, grp.pos, grp.text),
-      ranges.build()
-    ));
+    b.append(`{"to":`);
+    str to_item = _call_hierarchy_item(grp.name, grp.pos, grp.text);
+    b.append(to_item);
+    free(to_item);
+    b.append(`,"fromRanges":`);
+    str ranges_text = ranges.build();
+    b.append(ranges_text);
+    free(ranges_text);
+    b.append("}");
     g = g + 1;
   }
   b.append("]");
@@ -298,14 +315,16 @@ fun _text_of(str filename, Document doc) str {
   ret text;
 }
 
-fun _span_json(Span s) str {
-  ret format(
-    `{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}`,
-    s.line,
-    s.start,
-    s.line,
-    s.end
-  );
+fun _span_json_into(StringBuilder* b, Span s) {
+  b.append(`{"start":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.end);
+  b.append("}}");
 }
 
 // One `CallHierarchyItem`. `range`/`selectionRange` are both the
@@ -315,12 +334,17 @@ fun _span_json(Span s) str {
 // actually highlights regardless.
 fun _call_hierarchy_item(str name, Pos pos, str text) str {
   Span span = span_of_pos(pos, len(name), text);
-  str span_json = _span_json(span);
-  ret format(
-    `{"name":{str},"kind":12,"uri":{str},"range":{str},"selectionRange":{str}}`,
-    json_quote(name),
-    json_quote(path_to_uri(pos.filename)),
-    span_json,
-    span_json
-  );
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"name":`);
+  json_quote_into(&b, name);
+  b.append(`,"kind":12,"uri":`);
+  str item_uri = path_to_uri(pos.filename);
+  json_quote_into(&b, item_uri);
+  free(item_uri);
+  b.append(`,"range":`);
+  _span_json_into(&b, span);
+  b.append(`,"selectionRange":`);
+  _span_json_into(&b, span);
+  b.append("}");
+  ret b.build();
 }

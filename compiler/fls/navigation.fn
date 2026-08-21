@@ -23,6 +23,7 @@ imp std.option;
 imp std.io;
 imp std.fs;
 imp std.ctype;
+imp std.c.mem;
 
 // What a client is told when there is nothing to say.
 const str NO_HOVER = "null";
@@ -256,12 +257,11 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
 // within one.
 fun _file_start_location_result(str target_path) str {
   StringBuilder b = string_builder_init(96);
-  b.append("[");
-  b.append(format(
-    `{"uri":{str},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
-    json_quote(path_to_uri(target_path))
-  ));
-  b.append("]");
+  b.append("[{\"uri\":");
+  str target_uri = path_to_uri(target_path);
+  json_quote_into(&b, target_uri);
+  free(target_uri);
+  b.append(`,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]`);
   ret b.build();
 }
 
@@ -360,16 +360,19 @@ fun _location_result(Document doc, Declaration d) str {
   }
   Span s = span_of_pos(d.pos, len(d.name), target_text);
   StringBuilder b = string_builder_init(160);
-  b.append("[");
-  b.append(format(
-    `{"uri":{str},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
-    json_quote(path_to_uri(d.pos.filename)),
-    s.line,
-    s.start,
-    s.line,
-    s.end
-  ));
-  b.append("]");
+  b.append("[{\"uri\":");
+  str decl_uri = path_to_uri(d.pos.filename);
+  json_quote_into(&b, decl_uri);
+  free(decl_uri);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.end);
+  b.append(`}}}]`);
   ret b.build();
 }
 
@@ -799,14 +802,19 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
 }
 
 fun _hover_result(str markdown, Span s) str {
-  ret format(
-    `{"contents":{"kind":"markdown","value":{str}},"range":{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}}`,
-    json_quote(markdown),
-    s.line,
-    s.start,
-    s.line,
-    s.end
-  );
+  StringBuilder b = string_builder_init(len(markdown) + 96);
+  b.append(`{"contents":{"kind":"markdown","value":`);
+  json_quote_into(&b, markdown);
+  b.append(`},"range":{"start":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.end);
+  b.append(`}}}`);
+  ret b.build();
 }
 
 // A "See also" footer linking the user-defined types mentioned in
