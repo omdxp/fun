@@ -21,6 +21,7 @@ imp std.result;
 imp std.task;
 imp std.sync;
 imp std.channel;
+imp std.c.mem;
 
 // Converts one `imp`-statement's dotted `path` into an actual `.fn` file
 // path under `root`: segments join with `/`, and a run of N consecutive
@@ -267,6 +268,24 @@ fun _symbols_key(Map<str, GlobalSymbolInfo>* symbols) str {
   ret b.build();
 }
 
+// Frees every one of `s`'s own keys before freeing `s` itself. Safe
+// only where every key is independently owned and nothing else still
+// references it - checked per call site, not a blanket rule for every
+// `Set<str>` in this codebase (a set's own keys are frequently
+// borrowed from elsewhere, like `_parse_and_merge_source`'s own
+// `visited`, whose normalized path doubles as `Pos.filename` on every
+// node it goes on to parse).
+fun _free_str_set(Set<str>* s) {
+  Vec<str> ks = s.keys();
+  num i = 0;
+  for i < ks.len {
+    free(ks.get(i));
+    i = i + 1;
+  }
+  ks.free();
+  s.free();
+}
+
 pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
   ret parse_program_with_source(entry_path, nil);
 }
@@ -286,12 +305,40 @@ pub fun parse_program_with_source(str entry_path, str entry_source) Result<Progr
 pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
+  // Shallow only: every GlobalSymbolInfo is a value copy, and its own
+  // symbol_name/file_path are aliases into `all_tokens` below (from
+  // the preload scan) or into the real parse's own AST/token content
+  // - global_symbols itself owns none of that, just points at it.
+  defer global_symbols.free();
   Set<str> preload_visited = set_init("", 8);
+  // Deep: every key here is this function's own _normalize_path
+  // result, added only during the preload pass and never read again
+  // once it finishes, so nothing outside this set still points at it -
+  // unlike `visited` below, whose own keys double as `Pos.filename` on
+  // every node the real parse that follows goes on to build.
+  defer _free_str_set(&preload_visited);
+  // Every preloaded file's own tokens, handed off by _preload_one_file
+  // instead of freed there or left untracked (see PreloadShared.all_tokens'
+  // own note): global_symbols' own entries alias their Sval strings,
+  // and global_symbols is read again by the real parse below, so
+  // these need to outlive that too.
+  Vec<Vec<Token>> all_tokens;
+  all_tokens.init(8);
+  defer {
+    num ati = 0;
+    for ati < all_tokens.len {
+      Vec<Token> one = all_tokens.get(ati);
+      free_token_vec(&one);
+      ati = ati + 1;
+    }
+    all_tokens.free();
+  }
   let preload_err = _preload_and_collect_source(
     entry_path,
     entry_source,
     &global_symbols,
-    &preload_visited
+    &preload_visited,
+    &all_tokens
   );
   if preload_err.is_some() {
     ret .Err(preload_err.unwrap());
@@ -306,7 +353,20 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
   Vec<str> rename_targets;
   rename_targets.init(0);
   Set<str> visited = set_init("", 8);
+  // Shallow only, unlike preload_visited above: `_parse_and_merge_source`
+  // reassigns its own `path` parameter to this exact normalized string
+  // before parsing, so it becomes every resulting node's own
+  // `Pos.filename` too - still referenced by `merged`, part of what
+  // this function returns, long after `visited` itself is done with it.
+  defer visited.free();
   str symbols_key = _symbols_key(&global_symbols);
+  // Deliberately never freed: on the path where a file's own parse
+  // gets cached (see _parse_and_merge_source's own ParsedFile.symbols_key
+  // assignment), this exact string is handed to ImportCache and
+  // outlives this whole call, for as long as the server keeps running.
+  // Nothing at this level can tell which of the (possibly many) files
+  // touched by this call that happened for, so it can't be freed here
+  // even on the paths where it safely could be.
   let err = _parse_and_merge_source(
     entry_path,
     entry_source,
@@ -382,6 +442,13 @@ compound PreloadShared {
   Mutex mu;
   Map<str, GlobalSymbolInfo>* out;
   Set<str>* visited;
+  // Every preloaded file's own tokens, owned by `parse_program_cached`
+  // (the caller several frames up, past this whole pass and its own
+  // teardown) - `out`'s own `GlobalSymbolInfo.symbol_name` entries
+  // alias these tokens' `Sval` strings directly, and `out` itself
+  // stays alive and gets read again during the real parse that
+  // follows preloading, so these can't be freed until that's done too.
+  Vec<Vec<Token>>* all_tokens;
   Channel<str> queue;
   num pending;
   bin has_error;
@@ -461,19 +528,29 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
 
   ParseState state = parse_state_new(path, src);
   state.tokens = tok_result.unwrap();
+  // Handed to `shared.all_tokens` rather than freed here or left
+  // untracked: `_scan_compound_names` below aliases its own Sval
+  // strings directly into `shared.out`'s `GlobalSymbolInfo.symbol_name`
+  // entries, and `out` outlives this whole preload pass (read again
+  // during the real parse that follows it, back in
+  // `parse_program_cached`), so these tokens need to live at least
+  // that long too. `parse_program_cached` frees every entry once it's
+  // truly done with `out`. Registered under the same lock
+  // `_scan_compound_names` itself takes below, since `all_tokens` is
+  // shared the same way `out` is.
+  shared.mu.lock();
+  shared.all_tokens.push(state.tokens);
+  shared.mu.unlock();
   state.emit_stderr = false;
   Parser p = parser_new(&state);
   // `state.nodes` (the handful of Import nodes parsed below) and
   // `state`'s own scratch (scope chain, symbol tables, forward-type
   // names) are never read past this function - freed on every exit,
-  // the same reasoning as diagnose()'s own discarded parse. NOT
-  // `state.tokens`: `_scan_compound_names` below aliases its Sval
-  // strings directly into `shared.out`, which outlives this call, so
-  // those (and the array itself) are left for `PreloadShared`'s own
-  // teardown to free once the whole preload pass is done with them.
+  // the same reasoning as diagnose()'s own discarded parse.
   // `free_node_tree` never touches `str` fields either way (see its
   // own file-level note in ast.fn), so freeing `state.nodes` here
-  // can't touch the aliased strings `shared.out` still needs.
+  // can't touch the Sval strings `shared.out` still needs through
+  // `state.tokens`, registered above.
   defer free_node_tree(&state.nodes);
   defer free_parse_state_internal(&state);
 
@@ -544,7 +621,8 @@ fun _preload_and_collect_source(
   str path,
   str source,
   Map<str, GlobalSymbolInfo>* out,
-  Set<str>* visited
+  Set<str>* visited,
+  Vec<Vec<Token>>* all_tokens
 ) Option<str> {
   str norm = _normalize_path(path);
   if visited.has(norm) {
@@ -556,6 +634,7 @@ fun _preload_and_collect_source(
   shared.mu = mutex_new();
   shared.out = out;
   shared.visited = visited;
+  shared.all_tokens = all_tokens;
   shared.queue = channel_new_cap("", 64);
   shared.pending = 1;
   shared.has_error = false;
