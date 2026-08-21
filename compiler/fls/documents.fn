@@ -42,17 +42,33 @@ pub fun documents_new() Documents {
 
 impl Documents {
   // Records a document the client opened, or replaces one it reopened.
+  // Keeps its own copy of `document_uri`/`text` rather than aliasing
+  // the caller's - both typically come from a request's own parsed
+  // JSON, freed once the request finishes, while this entry outlives
+  // the request.
   pub opened(str document_uri, str text, num version) {
+    let existing = self.open.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      free(doc.text);
+      doc.text = substr(text, 0, len(text));
+      doc.version = version;
+      self.open.put(doc.uri, doc);
+      ret;
+    }
     Document doc;
-    doc.uri = document_uri;
-    doc.path = "";
+    doc.uri = substr(document_uri, 0, len(document_uri));
+    // A real, freeable allocation even when unset, not the "" literal
+    // - closed()/forget_indexed() free doc.path unconditionally.
+    doc.path = substr("", 0, 0);
     let resolved = uri_to_path(document_uri);
     if resolved.is_some() {
+      free(doc.path);
       doc.path = resolved.unwrap();
     }
-    doc.text = text;
+    doc.text = substr(text, 0, len(text));
     doc.version = version;
-    self.open.put(document_uri, doc);
+    self.open.put(doc.uri, doc);
   }
 
   // Replaces the whole text of an open document.
@@ -63,7 +79,8 @@ impl Documents {
       ret;
     }
     Document doc = existing.unwrap();
-    doc.text = text;
+    free(doc.text);
+    doc.text = substr(text, 0, len(text));
     doc.version = version;
     self.open.put(document_uri, doc);
   }
@@ -95,16 +112,28 @@ impl Documents {
     if from < 0 || to < from {
       ret;
     }
+    str before = substr(doc.text, 0, from);
+    str after = substr(doc.text, to, len(doc.text) - to);
     StringBuilder b = string_builder_init(len(doc.text) + len(replacement));
-    b.append(substr(doc.text, 0, from));
+    b.append(before);
     b.append(replacement);
-    b.append(substr(doc.text, to, len(doc.text) - to));
+    b.append(after);
+    free(before);
+    free(after);
+    free(doc.text);
     doc.text = b.build();
     doc.version = version;
     self.open.put(document_uri, doc);
   }
 
   pub closed(str document_uri) {
+    let existing = self.open.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      free(doc.uri);
+      free(doc.path);
+      free(doc.text);
+    }
     self.open.remove(document_uri);
   }
 
@@ -140,6 +169,13 @@ impl Documents {
   // URI that's open (it stays whatever the client tells it, not
   // filesystem state) or was never indexed in the first place.
   pub forget_indexed(str document_uri) {
+    let existing = self.indexed.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      free(doc.uri);
+      free(doc.path);
+      free(doc.text);
+    }
     self.indexed.remove(document_uri);
   }
 

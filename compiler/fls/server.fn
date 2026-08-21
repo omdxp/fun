@@ -120,6 +120,7 @@ impl Server {
       ret;
     }
     JsonValue message = parsed.unwrap();
+    defer message.free();
     str method = _string_field(message, "method");
     if equals(method, "") {
       ret;
@@ -399,7 +400,10 @@ impl Server {
           }
           let resolved = uri_to_path(document_uri);
           if resolved.is_some() {
-            self.docs.index_from_disk(document_uri, resolved.unwrap());
+            // index_from_disk takes ownership of the URI it's given;
+            // `document_uri` itself aliases `message`'s own text, so
+            // it hands over a copy rather than the field itself.
+            self.docs.index_from_disk(substr(document_uri, 0, len(document_uri)), resolved.unwrap());
           }
         }
       }
@@ -882,7 +886,14 @@ fun _workspace_root(JsonValue message) str {
       ret resolved.unwrap();
     }
   }
-  ret _string_field(params, "rootPath");
+  // A fresh copy, not the raw field - `message` is freed once `handle`
+  // returns, but this becomes `self.workspace_root`, kept for the
+  // server's whole lifetime.
+  str root_path = _string_field(params, "rootPath");
+  if equals(root_path, "") {
+    ret "";
+  }
+  ret substr(root_path, 0, len(root_path));
 }
 
 fun _snippets_supported(JsonValue message) bin {

@@ -16,17 +16,21 @@ pub fun uri_to_path(str uri) Option<str> {
   if !starts_with(uri, "file://") {
     ret .None;
   }
-  str rest = substr(uri, 7, len(uri) - 7);
+  str after_scheme = substr(uri, 7, len(uri) - 7);
+  str rest;
   // Some clients spell the local host explicitly.
-  if starts_with(rest, "localhost/") {
-    rest = substr(rest, 10, len(rest) - 10);
-  } elif len(rest) > 0 && rest[0] == '/' {
-    rest = substr(rest, 1, len(rest) - 1);
+  if starts_with(after_scheme, "localhost/") {
+    rest = substr(after_scheme, 10, len(after_scheme) - 10);
+  } elif len(after_scheme) > 0 && after_scheme[0] == '/' {
+    rest = substr(after_scheme, 1, len(after_scheme) - 1);
   } else {
+    free(after_scheme);
     ret .None;
   }
+  free(after_scheme);
 
   str decoded = _percent_decode(rest);
+  free(rest);
   // A drive letter means the path is already rooted; anything else is
   // rooted by the separator the URI dropped.
   if _has_drive_letter(decoded) {
@@ -35,6 +39,7 @@ pub fun uri_to_path(str uri) Option<str> {
   StringBuilder b = string_builder_init(len(decoded) + 1);
   b.append("/");
   b.append(decoded);
+  free(decoded);
   ret .Some(b.build());
 }
 
