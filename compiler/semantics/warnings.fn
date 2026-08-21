@@ -1880,7 +1880,6 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
     if !state.met.has(name) {
       Vec<Warning> empty = state.found;
       empty.free();
-      state.allowed.free();
       UnmetExpectation err;
       err.message = format("expected warning '{str}' was not emitted", name);
       err.has_pos = false;
@@ -1895,17 +1894,43 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
         err.pos = at.unwrap();
         err.has_pos = true;
       }
-      state.expected.free();
-      state.met.free();
+      _free_analysis_scratch(&state);
       ret .Err(err);
     }
   }
 
   Vec<Warning> out = state.found;
+  _free_analysis_scratch(&state);
+  ret .Ok(out);
+}
+
+// Everything `Analysis` owns except `.found`, which each of `analyze`'s
+// own two exit paths above already carries out on its own. Shallow
+// only for `.functions`/`.compound_decls`/`.local_types`/
+// `.channel_element_types`: their values alias the AST `nodes`/
+// `program` (borrowed parameters, not this call's to free) or its own
+// token text, the same convention as everywhere else a Declaration or
+// its own fields get reused rather than copied. `.enum_variants`
+// values are the one exception - each `Vec<str>` is this call's own,
+// built fresh in the walk above - so those get freed individually
+// before the map itself.
+fun _free_analysis_scratch(Analysis* state) {
+  Vec<str> enum_names = state.enum_variants.keys();
+  defer enum_names.free();
+  num ei = 0;
+  for ei < enum_names.len {
+    Vec<str> variants = state.enum_variants.at(enum_names.get(ei)).unwrap();
+    variants.free();
+    ei = ei + 1;
+  }
+  state.enum_variants.free();
+  state.functions.free();
+  state.compound_decls.free();
+  state.local_types.free();
+  state.channel_element_types.free();
   state.allowed.free();
   state.expected.free();
   state.met.free();
-  ret .Ok(out);
 }
 
 // Collects every name an expression or statement reads, so a declaration
