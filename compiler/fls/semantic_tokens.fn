@@ -308,7 +308,15 @@ fun _identifier_token_type(
   }
 
   let next = token_after(tokens, idx + 1);
-  if next.is_some() && token_is_operator(next.unwrap(), "(") {
+  bin next_is_paren = next.is_some() && token_is_operator(next.unwrap(), "(");
+  // `fork` is a contextual keyword, lexed as a plain identifier like
+  // any other: `fork some_call(...)` is the statement, `fork(...)` is
+  // an ordinary call to a function literally named "fork" - the same
+  // lookahead the parser itself uses to tell them apart.
+  if equals(word, "fork") && !next_is_paren {
+    ret TokenKind.Keyword;
+  }
+  if next_is_paren {
     ret TokenKind.Function;
   }
 
