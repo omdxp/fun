@@ -57,17 +57,20 @@ impl AnalysisCache {
       }
       // A stale revision is about to be replaced below - freed first,
       // or every edit leaks the whole previous parse for as long as
-      // the server keeps running. Only `tokens` and `entry_nodes` are
-      // safe to free this deeply: both come from a parse of this
-      // document alone, touching no shared cache, unlike `program.
-      // nodes` (the transitively merged cross-file program), whose
-      // nodes are reached through `self.imports` and may still be
-      // referenced by another document's own merge.
+      // the server keeps running. `program.nodes` (the transitively
+      // merged cross-file program) is safe to free this deeply too,
+      // not just `entry_nodes`: `_parse_and_merge_source` clones every
+      // node it pulls from `self.imports` rather than sharing it, so
+      // this document's own copy is exclusively its own.
       if found.lexed {
         found.tokens.free();
       }
       if found.parsed {
         free_node_tree(&found.program.entry_nodes);
+        free_node_tree(&found.program.nodes);
+        found.program.aliases.free();
+        found.program.alias_rename_keys.free();
+        found.program.alias_rename_targets.free();
       }
     }
 
@@ -105,6 +108,10 @@ impl AnalysisCache {
       }
       if a.parsed {
         free_node_tree(&a.program.entry_nodes);
+        free_node_tree(&a.program.nodes);
+        a.program.aliases.free();
+        a.program.alias_rename_keys.free();
+        a.program.alias_rename_targets.free();
       }
     }
     self.entries.remove(document_uri);

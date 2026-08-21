@@ -726,6 +726,16 @@ fun _parse_and_merge_source(
     }
     parsed_nodes = state.nodes;
     if cacheable {
+      // Replaces whatever was cached for `path` before, if anything -
+      // freed first: every consumer of a cached entry's own `nodes`
+      // clones it rather than borrowing (`_parse_and_merge_source`'s
+      // own push loop below), so nothing outside this cache still
+      // points into the entry being replaced.
+      let stale = cache.files.at(path);
+      if stale.is_some() {
+        ParsedFile old = stale.unwrap();
+        free_node_tree(&old.nodes);
+      }
       ParsedFile fresh;
       fresh.source = src;
       fresh.symbols_key = symbols_key;
@@ -773,11 +783,17 @@ fun _parse_and_merge_source(
     _rename_colliding_functions(&parsed_nodes, merged, current_alias, rename_keys, rename_targets);
   }
 
-  // Pass 3: push every non-import node, now settled.
+  // Pass 3: push every non-import node, now settled. Cloned, not
+  // pushed directly: `parsed_nodes` is `cache.files[path].nodes`
+  // itself (just cached above, or reused from an earlier cache hit),
+  // shared with every other document that also imports `path` and
+  // with whatever the next re-parse of `path` replaces it with -
+  // `merged` needs its own independent copy to ever be safely
+  // freeable on this document's own next edit.
   for n : parsed_nodes {
     fit n.kind {
       .Import(_) -> {}
-      _ -> { merged.push(n); }
+      _ -> { merged.push(node_clone(n)); }
     }
   }
   ret .None;

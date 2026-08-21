@@ -1168,3 +1168,389 @@ pub fun free_node_tree(Vec<Node>* nodes) {
   }
   nodes.free();
 }
+
+// ===== Cloning a tree =====
+// 
+// A deep, independently-owned copy of a node: every `Node*`/`DataType*`
+// it owns is itself cloned (a fresh `malloc`, never the original
+// pointer), and every `Vec<T>` gets its own fresh backing array. `str`
+// fields are the one exception - copied as plain pointer values, never
+// duplicated - which is safe both directions: neither `node_free` nor
+// this clone ever frees a node's own string content (see
+// `_free_node_contents`'s own note on why), so the clone and the
+// original can freely share every string between them regardless of
+// which one (or both) eventually gets freed.
+// 
+// This is what makes a document's own transitively-merged program
+// safe to free at all: `_parse_and_merge_source` clones every node it
+// pulls from `ImportCache` before handing it to a document's own
+// `program.nodes`, so freeing that document's own copy on the next
+// edit never touches what `ImportCache` (or another document's own
+// merge) still holds.
+
+fun _clone_str_vec(Vec<str>* v) Vec<str> {
+  Vec<str> out;
+  out.init(v.len);
+  num i = 0;
+  for i < v.len {
+    out.push(v.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_str_str_vec(Vec<Vec<str>>* v) Vec<Vec<str>> {
+  Vec<Vec<str>> out;
+  out.init(v.len);
+  num i = 0;
+  for i < v.len {
+    Vec<str> inner = v.get(i);
+    out.push(_clone_str_vec(&inner));
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_node_vec(Vec<Node*>* v) Vec<Node*> {
+  Vec<Node*> out;
+  out.init(v.len);
+  num i = 0;
+  for i < v.len {
+    out.push(node_clone_ptr(v.get(i)));
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_dtype_vec(Vec<DataType*>* v) Vec<DataType*> {
+  Vec<DataType*> out;
+  out.init(v.len);
+  num i = 0;
+  for i < v.len {
+    out.push(dtype_clone(v.get(i)));
+    i = i + 1;
+  }
+  ret out;
+}
+
+pub fun dtype_clone(DataType* dt) DataType* {
+  if dt == nil {
+    ret nil;
+  }
+  DataType* c = malloc(sizeof(DataType));
+  *c = *dt;
+  c.array_brackets = _clone_node_vec(&dt.array_brackets);
+  c.generic_args = _clone_dtype_vec(&dt.generic_args);
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    FnTypeSig* fs = malloc(sizeof(FnTypeSig));
+    fs.params = _clone_dtype_vec(&dt.fn_sig.params);
+    fs.rtype = dtype_clone(dt.fn_sig.rtype);
+    c.fn_sig = fs;
+  }
+  ret c;
+}
+
+fun _clone_if_stmt(IfStmtNode s) IfStmtNode {
+  IfStmtNode c = s;
+  c.condition = node_clone_ptr(s.condition);
+  c.body = node_clone_ptr(s.body);
+  ret c;
+}
+
+fun _clone_fit_branches(Vec<FitBranch>* branches) Vec<FitBranch> {
+  Vec<FitBranch> out;
+  out.init(branches.len);
+  num i = 0;
+  for i < branches.len {
+    FitBranch b = branches.get(i);
+    FitBranch c = b;
+    if b.has_condition {
+      c.condition = node_clone_ptr(b.condition);
+    }
+    c.body = node_clone_ptr(b.body);
+    c.bindings = _clone_str_vec(&b.bindings);
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_asm_operands(Vec<AsmOperand>* ops) Vec<AsmOperand> {
+  Vec<AsmOperand> out;
+  out.init(ops.len);
+  num i = 0;
+  for i < ops.len {
+    AsmOperand o = ops.get(i);
+    AsmOperand c = o;
+    c.expr = node_clone_ptr(o.expr);
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_compound_fields(Vec<CompoundField>* fields) Vec<CompoundField> {
+  Vec<CompoundField> out;
+  out.init(fields.len);
+  num i = 0;
+  for i < fields.len {
+    CompoundField f = fields.get(i);
+    CompoundField c = f;
+    c.dtype = dtype_clone(f.dtype);
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_compound_init_fields(Vec<CompoundInitField>* fields) Vec<CompoundInitField> {
+  Vec<CompoundInitField> out;
+  out.init(fields.len);
+  num i = 0;
+  for i < fields.len {
+    CompoundInitField f = fields.get(i);
+    CompoundInitField c = f;
+    c.value = node_clone_ptr(f.value);
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_quirk_methods(Vec<QuirkMethodSig>* methods) Vec<QuirkMethodSig> {
+  Vec<QuirkMethodSig> out;
+  out.init(methods.len);
+  num i = 0;
+  for i < methods.len {
+    QuirkMethodSig m = methods.get(i);
+    QuirkMethodSig c = m;
+    c.rtype = dtype_clone(m.rtype);
+    Vec<QuirkArg> cargs;
+    cargs.init(m.args.len);
+    num j = 0;
+    for j < m.args.len {
+      QuirkArg a = m.args.get(j);
+      QuirkArg ca = a;
+      ca.dtype = dtype_clone(a.dtype);
+      cargs.push(ca);
+      j = j + 1;
+    }
+    c.args = cargs;
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_enum_variants(Vec<EnumVariant>* variants) Vec<EnumVariant> {
+  Vec<EnumVariant> out;
+  out.init(variants.len);
+  num i = 0;
+  for i < variants.len {
+    EnumVariant v = variants.get(i);
+    EnumVariant c = v;
+    c.payload = _clone_dtype_vec(&v.payload);
+    out.push(c);
+    i = i + 1;
+  }
+  ret out;
+}
+
+// A deep, independently-owned copy of `n`'s own contents - every
+// `Vec<T>`/`Node*`/`DataType*` field freshly built, string fields
+// shared with the original (see the file-level note above). `binded`
+// is dropped rather than cloned: it's a later pass's own bookkeeping
+// (`Parser.create_node`'s own shallow snapshot of enclosing context),
+// meaningless once detached into an independently-merged program, and
+// its own `owner`/`function` are themselves non-owning references
+// `node_free` already treats specially for the same reason.
+pub fun node_clone(Node n) Node {
+  Node c = n;
+  c.has_binded = false;
+  c.binded = nil;
+  fit n.kind {
+    .ExpressionParenthesis(inner) -> {
+      c.kind = .ExpressionParenthesis(node_clone_ptr(inner));
+    }
+    .Panic(inner) -> { c.kind = .Panic(node_clone_ptr(inner)); }
+    .Expression(e) -> {
+      ExprNode ce = e;
+      if e.has_left {
+        ce.left = node_clone_ptr(e.left);
+      }
+      if e.has_right {
+        ce.right = node_clone_ptr(e.right);
+      }
+      ce.generic_args = _clone_dtype_vec(&e.generic_args);
+      c.kind = .Expression(ce);
+    }
+    .Variable(v) -> {
+      VariableNode cv = v;
+      cv.var_type = dtype_clone(v.var_type);
+      if v.has_val {
+        cv.val = node_clone_ptr(v.val);
+      }
+      c.kind = .Variable(cv);
+    }
+    .Function(f) -> {
+      FunctionNode cf = f;
+      if f.has_rtype {
+        cf.rtype = dtype_clone(f.rtype);
+      }
+      cf.type_params = _clone_str_vec(&f.type_params);
+      cf.type_param_forced_insts = _clone_str_str_vec(&f.type_param_forced_insts);
+      if f.has_args {
+        cf.args = _clone_node_vec(&f.args);
+      }
+      if f.has_body {
+        cf.body = node_clone_ptr(f.body);
+      }
+      c.kind = .Function(cf);
+    }
+    .Body(b) -> {
+      BodyNode cb = b;
+      cb.statements = _clone_node_vec(&b.statements);
+      c.kind = .Body(cb);
+    }
+    .StatementReturn(inner) -> { c.kind = .StatementReturn(node_clone_ptr(inner)); }
+    .StatementDefer(inner) -> { c.kind = .StatementDefer(node_clone_ptr(inner)); }
+    .StatementIf(s) -> { c.kind = .StatementIf(_clone_if_stmt(s)); }
+    .StatementElseIf(s) -> { c.kind = .StatementElseIf(_clone_if_stmt(s)); }
+    .StatementElse(inner) -> { c.kind = .StatementElse(node_clone_ptr(inner)); }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(cond) -> {
+          ForCondNode cc = cond;
+          if cond.has_condition {
+            cc.condition = node_clone_ptr(cond.condition);
+          }
+          cc.body = node_clone_ptr(cond.body);
+          c.kind = .StatementFor(.Cond(cc));
+        }
+        .Range(r) -> {
+          ForRangeNode cr = r;
+          cr.range_expr = node_clone_ptr(r.range_expr);
+          cr.body = node_clone_ptr(r.body);
+          c.kind = .StatementFor(.Range(cr));
+        }
+        .Iter(it) -> {
+          ForIterNode ci = it;
+          ci.iterable = node_clone_ptr(it.iterable);
+          ci.body = node_clone_ptr(it.body);
+          c.kind = .StatementFor(.Iter(ci));
+        }
+      }
+    }
+    .StatementAssert(a) -> {
+      AssertNode ca = a;
+      ca.condition = node_clone_ptr(a.condition);
+      if a.has_message {
+        ca.message = node_clone_ptr(a.message);
+      }
+      c.kind = .StatementAssert(ca);
+    }
+    .StatementFit(f) -> {
+      FitStmtNode cf = f;
+      cf.exp = node_clone_ptr(f.exp);
+      cf.branches = _clone_fit_branches(&f.branches);
+      c.kind = .StatementFit(cf);
+    }
+    .StatementFork(inner) -> { c.kind = .StatementFork(node_clone_ptr(inner)); }
+    .StatementAsm(a) -> {
+      AsmStmtNode ca = a;
+      ca.outputs = _clone_asm_operands(&a.outputs);
+      ca.inputs = _clone_asm_operands(&a.inputs);
+      ca.clobbers = _clone_str_vec(&a.clobbers);
+      c.kind = .StatementAsm(ca);
+    }
+    .Unary(u) -> {
+      UnaryNode cu = u;
+      cu.operand = node_clone_ptr(u.operand);
+      c.kind = .Unary(cu);
+    }
+    .Tenary(t) -> {
+      TenaryNode ct = t;
+      ct.cond = node_clone_ptr(t.cond);
+      ct.then_val = node_clone_ptr(t.then_val);
+      ct.else_val = node_clone_ptr(t.else_val);
+      c.kind = .Tenary(ct);
+    }
+    .Bracket(inner) -> { c.kind = .Bracket(node_clone_ptr(inner)); }
+    .CompoundInit(ci) -> {
+      CompoundInitNode cc = ci;
+      if ci.has_dtype {
+        cc.init_dtype = dtype_clone(ci.init_dtype);
+      }
+      cc.fields = _clone_compound_init_fields(&ci.fields);
+      c.kind = .CompoundInit(cc);
+    }
+    .Compound(cn) -> {
+      CompoundNode cc = cn;
+      cc.fields = _clone_compound_fields(&cn.fields);
+      cc.type_params = _clone_str_vec(&cn.type_params);
+      cc.type_param_forced_insts = _clone_str_str_vec(&cn.type_param_forced_insts);
+      c.kind = .Compound(cc);
+    }
+    .Quirk(q) -> {
+      QuirkNode cq = q;
+      cq.methods = _clone_quirk_methods(&q.methods);
+      cq.type_params = _clone_str_vec(&q.type_params);
+      c.kind = .Quirk(cq);
+    }
+    .Enum(e) -> {
+      EnumDeclNode ce = e;
+      ce.variants = _clone_enum_variants(&e.variants);
+      ce.type_params = _clone_str_vec(&e.type_params);
+      c.kind = .Enum(ce);
+    }
+    .Impl(im) -> {
+      ImplNode ci = im;
+      ci.type_params = _clone_str_vec(&im.type_params);
+      ci.type_param_forced_insts = _clone_str_str_vec(&im.type_param_forced_insts);
+      if im.has_concrete_dtype {
+        ci.concrete_dtype = dtype_clone(im.concrete_dtype);
+      }
+      ci.methods = _clone_node_vec(&im.methods);
+      c.kind = .Impl(ci);
+    }
+    .Test(t) -> {
+      TestDeclNode ct = t;
+      ct.body = node_clone_ptr(t.body);
+      c.kind = .Test(ct);
+    }
+    .Fuzz(fz) -> {
+      FuzzDeclNode cf = fz;
+      cf.data_param = node_clone_ptr(fz.data_param);
+      cf.len_param = node_clone_ptr(fz.len_param);
+      cf.body = node_clone_ptr(fz.body);
+      c.kind = .Fuzz(cf);
+    }
+    _ -> {}
+  }
+  ret c;
+}
+
+// Clones an individually `malloc`'d child node; nil in, nil out.
+pub fun node_clone_ptr(Node* n) Node* {
+  if n == nil {
+    ret nil;
+  }
+  Node* c = malloc(sizeof(Node));
+  *c = node_clone(*n);
+  ret c;
+}
+
+// Clones a top-level node list into a fresh, independently-owned one
+// - the counterpart to `free_node_tree`, for handing a shared cache's
+// own nodes to a consumer that needs its own exclusively-owned copy
+// rather than a borrow.
+pub fun clone_node_tree(Vec<Node>* nodes) Vec<Node> {
+  Vec<Node> out;
+  out.init(nodes.len);
+  num i = 0;
+  for i < nodes.len {
+    out.push(node_clone(nodes.get(i)));
+    i = i + 1;
+  }
+  ret out;
+}
