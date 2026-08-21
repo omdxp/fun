@@ -3,6 +3,7 @@
 imp ..ast.ast;
 imp std.vec;
 imp std.string;
+imp std.c.mem;
 
 // A single declared name (variable, parameter, loop binding, ...) visible
 // within a Scope.
@@ -47,6 +48,29 @@ pub fun scope_new() Scope {
   s.parent = nil;
   s.has_parent = false;
   ret s;
+}
+
+// Frees just the struct itself: `.node`/`.name`/`.multidim_root` are
+// all borrowed from the AST/tokens, owned elsewhere.
+fun free_scope_entity(ScopeEntity* e) {
+  if e == nil {
+    ret;
+  }
+  free(e);
+}
+
+// Frees `s`'s own entities and backing storage, never `.parent`.
+pub fun free_scope(Scope* s) {
+  if s == nil {
+    ret;
+  }
+  num i = 0;
+  for i < s.entities.len {
+    free_scope_entity(s.entities.get(i));
+    i = i + 1;
+  }
+  s.entities.free();
+  free(s);
 }
 
 impl Scope {

@@ -517,8 +517,9 @@ impl ParseState {
     self.has_scope_current = true;
   }
 
-  // Pops back to the enclosing scope (e.g. leaving a function/block body).
-  // A no-op past the root scope.
+  // Pops back to the enclosing scope. A no-op past the root scope. The
+  // popped scope is freed here, not collected to free later: once
+  // `scope_current` moves past it, nothing can reach it again.
   pub finish_scope() {
     if !self.has_scope_current {
       ret;
@@ -529,6 +530,7 @@ impl ParseState {
     } else {
       self.has_scope_current = false;
     }
+    free_scope(cur);
   }
 
   // Parses `<T>` or `<T: a | b, U: c>` generic type parameters in a
