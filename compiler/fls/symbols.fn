@@ -13,6 +13,7 @@ imp positions;
 imp std.string;
 imp std.io;
 imp std.vec;
+imp std.c.mem;
 imp std.option;
 
 // What a name turned out to be.
@@ -91,7 +92,9 @@ pub fun render_type(DataType* dt) str {
       if i > 0 {
         b.append(", ");
       }
-      b.append(render_type(dt.generic_args.get(i)));
+      str arg_type = render_type(dt.generic_args.get(i));
+      b.append(arg_type);
+      free(arg_type);
       i = i + 1;
     }
     b.append(">");
@@ -175,7 +178,9 @@ pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
       b.append(", ");
     }
     Node* arg = f.args.get(i);
-    b.append(_render_param(arg));
+    str param_text = _render_param(arg);
+    b.append(param_text);
+    free(param_text);
     i = i + 1;
   }
   if f.is_variadic {
@@ -191,6 +196,7 @@ pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
       b.append(" ");
       b.append(rendered);
     }
+    free(rendered);
   }
   ret b.build();
 }
@@ -202,7 +208,9 @@ fun _render_param(Node* arg) str {
   fit arg.kind {
     .Variable(v) -> {
       StringBuilder b = string_builder_init(24);
-      b.append(render_type(v.var_type));
+      str type_text = render_type(v.var_type);
+      b.append(type_text);
+      free(type_text);
       b.append(" ");
       b.append(v.name);
       if v.has_val {
@@ -210,6 +218,7 @@ fun _render_param(Node* arg) str {
         if !equals(default_text, "") {
           b.append(" = ");
           b.append(default_text);
+          free(default_text);
         }
       }
       ret b.build();
@@ -263,7 +272,10 @@ fun _literal_value_text(Node* val) str {
     ret "";
   }
   fit val.kind {
-    .Identifier(s) -> { ret s; }
+    // Copied, not returned directly: every other arm here returns an
+    // owned string, so a caller can free this function's result
+    // uniformly regardless of which arm produced it.
+    .Identifier(s) -> { ret substr(s, 0, len(s)); }
     .Number(d) -> {
       fit d {
         .Num(n) -> { ret format_num(n); }
@@ -272,22 +284,29 @@ fun _literal_value_text(Node* val) str {
         _ -> { ret ""; }
       }
     }
-    .String(s) -> { ret format(`"{str}"`, _quote_escaped(s)); }
+    .String(s) -> {
+      str escaped = _quote_escaped(s);
+      str result = format(`"{str}"`, escaped);
+      free(escaped);
+      ret result;
+    }
     .Character(c) -> { ret format("'{chr}'", c); }
     .Boolean(b) -> {
       if b {
-        ret "true";
+        ret substr("true", 0, 4);
       }
-      ret "false";
+      ret substr("false", 0, 5);
     }
-    .Nil -> { ret "nil"; }
+    .Nil -> { ret substr("nil", 0, 3); }
     .Unary(u) -> {
       // A negative numeric literal (`-1`) is parsed as a unary minus
       // over a plain Number node, not folded into the literal itself.
       if equals(u.op, "-") {
         str inner = _literal_value_text(u.operand);
         if !equals(inner, "") {
-          ret format("-{str}", inner);
+          str result = format("-{str}", inner);
+          free(inner);
+          ret result;
         }
       }
       ret "";
@@ -441,7 +460,9 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           if v.is_const {
             b.append("const ");
           }
-          b.append(render_type(v.var_type));
+          str global_type_text = render_type(v.var_type);
+          b.append(global_type_text);
+          free(global_type_text);
           b.append(" ");
           b.append(v.name);
           if v.is_const && v.has_val {
@@ -449,6 +470,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
             if !equals(literal, "") {
               b.append(" = ");
               b.append(literal);
+              free(literal);
             }
           }
           ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
@@ -479,7 +501,9 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field) Option<Declar
             continue;
           }
           StringBuilder b = string_builder_init(32);
-          b.append(render_type(cf.dtype));
+          str field_type_text = render_type(cf.dtype);
+          b.append(field_type_text);
+          free(field_type_text);
           b.append(" ");
           b.append(cf.name);
           Pos field_pos = n.pos;
@@ -590,7 +614,9 @@ fun _render_quirk_method(QuirkMethodSig m) str {
       b.append(", ");
     }
     QuirkArg a = m.args.get(i);
-    b.append(render_type(a.dtype));
+    str arg_type_text = render_type(a.dtype);
+    b.append(arg_type_text);
+    free(arg_type_text);
     b.append(" ");
     b.append(a.name);
     i = i + 1;
@@ -601,6 +627,7 @@ fun _render_quirk_method(QuirkMethodSig m) str {
     b.append(" ");
     b.append(rendered);
   }
+  free(rendered);
   ret b.build();
 }
 
@@ -811,7 +838,9 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
           if n.pos.line > best_line {
             best_line = n.pos.line;
             StringBuilder b = string_builder_init(32);
-            b.append(render_type(cf.dtype));
+            str decl_field_type_text = render_type(cf.dtype);
+            b.append(decl_field_type_text);
+            free(decl_field_type_text);
             b.append(" ");
             b.append(cf.name);
             Pos field_pos = n.pos;
@@ -849,7 +878,9 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
                 if p > 0 {
                   b.append(", ");
                 }
-                b.append(render_type(variant.payload.get(p)));
+                str payload_type_text = render_type(variant.payload.get(p));
+                b.append(payload_type_text);
+                free(payload_type_text);
                 p = p + 1;
               }
               b.append(")");
@@ -1812,7 +1843,9 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
     .Variable(v) -> {
       if equals(v.name, name) {
         StringBuilder b = string_builder_init(32);
-        b.append(render_type(v.var_type));
+        str local_type_text = render_type(v.var_type);
+        b.append(local_type_text);
+        free(local_type_text);
         b.append(" ");
         b.append(v.name);
         ret .Some(_declaration(name, .Local, b.build(), body.pos));
@@ -1833,6 +1866,20 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
         i = i + 1;
+        // Only a branch `line` actually falls within: a name declared
+        // in one arm (a for-loop counter, say) is not in scope in a
+        // sibling arm reusing the same name for something else
+        // entirely, even though both live in the same fit statement.
+        num start = 0;
+        if branch.has_condition && branch.condition != nil && branch.condition.has_pos {
+          start = branch.condition.pos.line;
+        } elif branch.body != nil && branch.body.has_pos {
+          start = branch.body.pos.line;
+        }
+        num last = _last_line(branch.body);
+        if start > 0 && !(line >= start && line <= last) {
+          continue;
+        }
         let found = _lookup_in_body(branch.body, name, program, file, line);
         if found.is_some() {
           ret found;
@@ -2259,7 +2306,9 @@ pub fun enum_variant_declaration(
               if p > 0 {
                 b.append(", ");
               }
-              b.append(render_type(variant.payload.get(p)));
+              str variant_type_text = render_type(variant.payload.get(p));
+              b.append(variant_type_text);
+              free(variant_type_text);
               p = p + 1;
             }
             b.append(")");
@@ -2629,7 +2678,9 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
           CompoundField cf = c.fields.get(f);
           f = f + 1;
           StringBuilder fb = string_builder_init(32);
-          fb.append(render_type(cf.dtype));
+          str fb_type_text = render_type(cf.dtype);
+          fb.append(fb_type_text);
+          free(fb_type_text);
           fb.append(" ");
           fb.append(cf.name);
           Pos field_pos = n.pos;
@@ -2659,7 +2710,9 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
               if p > 0 {
                 vb.append(", ");
               }
-              vb.append(render_type(variant.payload.get(p)));
+              str vb_type_text = render_type(variant.payload.get(p));
+              vb.append(vb_type_text);
+              free(vb_type_text);
               p = p + 1;
             }
             vb.append(")");
@@ -2708,7 +2761,9 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         if v.is_const {
           gb.append("const ");
         }
-        gb.append(render_type(v.var_type));
+        str gb_type_text = render_type(v.var_type);
+        gb.append(gb_type_text);
+        free(gb_type_text);
         gb.append(" ");
         gb.append(v.name);
         out.push(_declaration_vis(v.name, .Global, gb.build(), n.pos, n.flags.is_public));
