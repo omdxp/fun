@@ -23,6 +23,7 @@ imp std.error;
 imp std.string;
 imp std.math;
 imp std.quirks;
+imp std.c.mem;
 
 // Any JSON value. Arrays and objects nest recursively.
 pub enum JsonValue {
@@ -166,6 +167,37 @@ impl JsonValue {
       _ -> { ret 0; }
     }
     ret 0;
+  }
+
+  // Frees everything this value owns: a Str's own text, or (recursively)
+  // every Array element or Object key and value. Safe unconditionally -
+  // parse() never produces a Str whose text is a slice of the original
+  // source or a literal, always a fresh StringBuilder.build() copy, and
+  // the same is true of every Object key.
+  pub free() {
+    fit *self {
+      .Str(s) -> { free(s); }
+      .Array(a) -> {
+        for v : a {
+          v.free();
+        }
+        a.free();
+      }
+      .Object(o) -> {
+        Vec<str> ks = o.keys();
+        for k : ks {
+          let v = o.at(k);
+          if v.is_some() {
+            JsonValue vv = v.unwrap();
+            vv.free();
+          }
+          free(k);
+        }
+        ks.free();
+        o.free();
+      }
+      _ -> {}
+    }
   }
 }
 
@@ -431,7 +463,9 @@ impl JsonParser {
     }
     if _json_is_digit(c) || c == '-' {
       let numtext = self.parse_number_text();
-      ret .Ok(JsonValue.Num(parse_dec(numtext)));
+      let n = parse_dec(numtext);
+      free(numtext);
+      ret .Ok(JsonValue.Num(n));
     }
     ret err_kind(.Parse, "unexpected character in JSON", JsonValue.Null);
   }
