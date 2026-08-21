@@ -8997,6 +8997,76 @@ impl Codegen {
           vargs_dt.generic_args.push(vargs_str_arg);
           self.resolve_type_name(vargs_dt);
           self.record_local_typed("vargs", "Vec__str", false, vargs_dt);
+          // `vargs.data` (the backing array malloc'd above) and every
+          // non-`'s'`-tagged element in it (a fresh `fmt_num`/`fmt_dec`/
+          // `fmt_bin`/`fmt_chr`/`fmt_raw` allocation - `'s'` elements are
+          // borrowed straight from the caller's own argument, never
+          // owned here) are otherwise never freed. Registered as a
+          // synthetic `defer __fun_free_vargs(vargs.data, __fun_vtags,
+          // vargs.len);`, the same mechanism a user-written `defer` uses,
+          // so cleanup replays at every one of this function's own
+          // return points rather than needing one written by hand at
+          // each.
+          Node* vargs_ident_a = malloc(sizeof(Node));
+          *vargs_ident_a = node_new(NodeKind.Identifier("vargs"));
+          Node* data_ident = malloc(sizeof(Node));
+          *data_ident = node_new(NodeKind.Identifier("data"));
+          ExprNode vargs_data_e = expr_node_new();
+          vargs_data_e.left = vargs_ident_a;
+          vargs_data_e.has_left = true;
+          vargs_data_e.right = data_ident;
+          vargs_data_e.has_right = true;
+          vargs_data_e.op = ".";
+          Node* vargs_data_node = malloc(sizeof(Node));
+          *vargs_data_node = node_new(NodeKind.Expression(vargs_data_e));
+
+          Node* vtags_ident = malloc(sizeof(Node));
+          *vtags_ident = node_new(NodeKind.Identifier("__fun_vtags"));
+
+          Node* vargs_ident_b = malloc(sizeof(Node));
+          *vargs_ident_b = node_new(NodeKind.Identifier("vargs"));
+          Node* len_ident = malloc(sizeof(Node));
+          *len_ident = node_new(NodeKind.Identifier("len"));
+          ExprNode vargs_len_e = expr_node_new();
+          vargs_len_e.left = vargs_ident_b;
+          vargs_len_e.has_left = true;
+          vargs_len_e.right = len_ident;
+          vargs_len_e.has_right = true;
+          vargs_len_e.op = ".";
+          Node* vargs_len_node = malloc(sizeof(Node));
+          *vargs_len_node = node_new(NodeKind.Expression(vargs_len_e));
+
+          ExprNode free_args_tail = expr_node_new();
+          free_args_tail.left = vtags_ident;
+          free_args_tail.has_left = true;
+          free_args_tail.right = vargs_len_node;
+          free_args_tail.has_right = true;
+          free_args_tail.op = ",";
+          Node* free_args_tail_node = malloc(sizeof(Node));
+          *free_args_tail_node = node_new(NodeKind.Expression(free_args_tail));
+
+          ExprNode free_args_e = expr_node_new();
+          free_args_e.left = vargs_data_node;
+          free_args_e.has_left = true;
+          free_args_e.right = free_args_tail_node;
+          free_args_e.has_right = true;
+          free_args_e.op = ",";
+          Node* free_args_comma = malloc(sizeof(Node));
+          *free_args_comma = node_new(NodeKind.Expression(free_args_e));
+          Node* free_args_node = malloc(sizeof(Node));
+          *free_args_node = node_new(NodeKind.ExpressionParenthesis(free_args_comma));
+
+          Node* free_callee = malloc(sizeof(Node));
+          *free_callee = node_new(NodeKind.Identifier("__fun_free_vargs"));
+          ExprNode free_call_e = expr_node_new();
+          free_call_e.left = free_callee;
+          free_call_e.has_left = true;
+          free_call_e.right = free_args_node;
+          free_call_e.has_right = true;
+          free_call_e.op = "()";
+          Node* free_call_node = malloc(sizeof(Node));
+          *free_call_node = node_new(NodeKind.Expression(free_call_e));
+          self.defer_stack.push(free_call_node);
         }
         let saved_in_main = self.in_main;
         self.in_main = is_main;
@@ -11208,6 +11278,11 @@ impl Codegen {
     // `emit_call` embeds in `__fun_vtags`, which the callee-side
     // unpacking in `emit_function_named` reads back.
     self.state.write("#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n");
+    // Frees a variadic function's own `vargs` unpacking: `data` itself
+    // (the backing array `emit_function_named` mallocs above), plus
+    // every element `tags[i] != 's'` marks as an owned `fmt_*` string
+    // rather than an argument borrowed straight through.
+    self.state.write("static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }\n");
     // Directory helpers for `std.c.dirent`, backing `std.fs`'s
     // `list_dir`/`walk_dir`/`is_dir`/`make_dir`. Platform directory APIs
     // differ too much (POSIX `opendir`/`readdir` versus Win32
@@ -16070,6 +16145,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
     `#include <windows.h>
     `#include <direct.h>
@@ -16323,6 +16399,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
     `#include <windows.h>
     `#include <direct.h>
@@ -17432,6 +17509,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
     `#include <windows.h>
     `#include <direct.h>
