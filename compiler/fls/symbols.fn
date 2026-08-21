@@ -975,6 +975,17 @@ pub fun return_type_from_detail(str signature) str {
   ret _bare_type_expr(trim(substr(signature, close + 1, len(signature) - close - 1)));
 }
 
+// `return_type_from_detail`, but keeping the pointer star and any
+// generic args written out - the "full" half of the bare/full split
+// `ChainReceiver.full_type_name` documents.
+fun full_return_type_from_detail(str signature) str {
+  num close = last_index_of_char(signature, ')');
+  if close < 0 {
+    ret "";
+  }
+  ret trim(substr(signature, close + 1, len(signature) - close - 1));
+}
+
 // One segment of a dotted chain, closest-to-the-cursor first until
 // reversed: a plain field/local name, or a call (`name(...)`, its
 // own arguments skipped over), whose type comes from the callee's
@@ -1037,6 +1048,14 @@ fun _bare_return_type(str detail) str {
 pub compound ChainReceiver {
   str type_name;
   Vec<str> generic_args;
+  // `type_name`, but with a pointer star kept when the resolved
+  // field/return type has one. `type_name` itself must stay bare,
+  // since `chain_ending_type`'s own callers use it as a lookup key
+  // against a registered type name ("Scope", never "Scope*"); a caller
+  // that wants to display the type instead (an inlay hint, a hover)
+  // wants this one. Equal to `type_name` everywhere the two don't
+  // differ.
+  str full_type_name;
 }
 
 // The type at the end of a dotted chain leading up to (but not
@@ -1192,6 +1211,7 @@ pub fun chain_ending_receiver(
 ) ChainReceiver {
   ChainReceiver empty;
   empty.type_name = "";
+  empty.full_type_name = "";
   empty.generic_args.init(0);
 
   ChainReceiver receiver = chain_receiver(tokens, last_tok, program, file, line);
@@ -1205,10 +1225,12 @@ pub fun chain_ending_receiver(
         ret empty;
       }
       empty.type_name = _bare_return_type(f.unwrap().detail);
+      empty.full_type_name = full_return_type_from_detail(f.unwrap().detail);
       empty.generic_args = generic_args_of_detail(_return_type_text(f.unwrap().detail));
       ret empty;
     }
     empty.type_name = type_name_of_local(tokens, program, name, file, line);
+    empty.full_type_name = empty.type_name;
     empty.generic_args = local_generic_args(tokens, program, name, file, line);
     ret empty;
   }
@@ -1222,6 +1244,7 @@ pub fun chain_ending_receiver(
       ret empty;
     }
     empty.type_name = _bare_return_type(m.unwrap().detail);
+    empty.full_type_name = full_return_type_from_detail(m.unwrap().detail);
     empty.generic_args = generic_args_of_detail(_return_type_text(m.unwrap().detail));
     ret empty;
   }
@@ -1230,6 +1253,7 @@ pub fun chain_ending_receiver(
     ret empty;
   }
   empty.type_name = bare_type_from_detail(field.unwrap().detail);
+  empty.full_type_name = _full_declared_type(field.unwrap());
   empty.generic_args = generic_args_of_detail(field.unwrap().detail);
   ret empty;
 }
@@ -1273,7 +1297,11 @@ pub fun infer_let_local_type(
   args.init(2);
   defer args.free();
   str base = infer_let_local_type_with_args(tokens, name_idx, program, file, line, &args);
-  if equals(base, "") || args.len == 0 {
+  // `base` already carries its own generic args verbatim when it has
+  // any (a field/return type resolved through `ChainReceiver.full_type_name`
+  // keeps everything written, `<...>` included) - only append `args`
+  // when it doesn't, or they'd double up.
+  if equals(base, "") || args.len == 0 || index_of_char(base, '<') >= 0 {
     ret base;
   }
   StringBuilder b = string_builder_init(32);
@@ -1386,7 +1414,11 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         if out_args != nil {
           *out_args = ending.generic_args;
         }
-        ret ending.type_name;
+        // `full_type_name`, not `type_name`: this is the last hop, so
+        // what gets displayed, not a lookup key for a further one -
+        // `let cur = self.scope_current;` should hint `Scope*`, not
+        // `Scope`.
+        ret ending.full_type_name;
       }
 
       // A bare read of an already-typed local/field/parameter/global
