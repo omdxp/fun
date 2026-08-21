@@ -143,6 +143,7 @@ pub compound Codegen {
   Vec<str> enum_variant_payload_variant;
   Vec<Vec<str>> enum_variant_payload_type_names;
   Vec<Vec<bin>> enum_variant_payload_is_pointer;
+  Vec<Vec<Option<DataType>>> enum_variant_payload_dtype;
   // The current function's declared return type name, refreshed at the
   // start of every `emit_function`; feeds `expected_enum_type` for a
   // bare-shorthand `ret`.
@@ -472,6 +473,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.enum_variant_payload_variant.init(0);
   g.enum_variant_payload_type_names.init(0);
   g.enum_variant_payload_is_pointer.init(0);
+  g.enum_variant_payload_dtype.init(0);
   g.compound_names.init(0);
   g.compound_field_names.init(0);
   g.compound_field_type_names.init(0);
@@ -3501,10 +3503,39 @@ impl Codegen {
     Vec<str> type_names,
     Vec<bin> is_pointer
   ) {
+    Vec<Option<DataType>> dtypes;
+    dtypes.init(0);
+    num k = 0;
+    for k < type_names.len {
+      dtypes.push(.None);
+      k = k + 1;
+    }
     self.enum_variant_payload_owner.push(enum_name);
     self.enum_variant_payload_variant.push(variant_name);
     self.enum_variant_payload_type_names.push(type_names);
     self.enum_variant_payload_is_pointer.push(is_pointer);
+    self.enum_variant_payload_dtype.push(dtypes);
+  }
+
+  // Like `record_enum_variant_payload`, but for a call site that has
+  // each payload field's real, resolved `DataType` on hand.
+  record_enum_variant_payload_typed(
+    str enum_name,
+    str variant_name,
+    Vec<str> type_names,
+    Vec<bin> is_pointer,
+    Vec<DataType> dtypes_raw
+  ) {
+    Vec<Option<DataType>> dtypes;
+    dtypes.init(0);
+    for d : dtypes_raw {
+      dtypes.push(.Some(d));
+    }
+    self.enum_variant_payload_owner.push(enum_name);
+    self.enum_variant_payload_variant.push(variant_name);
+    self.enum_variant_payload_type_names.push(type_names);
+    self.enum_variant_payload_is_pointer.push(is_pointer);
+    self.enum_variant_payload_dtype.push(dtypes);
   }
 
   // Looks up `variant_name`'s payload field type at `position` (0-based)
@@ -3522,10 +3553,11 @@ impl Codegen {
           ret .None;
         }
         let is_pointers = self.enum_variant_payload_is_pointer.get(i);
+        let dtypes = self.enum_variant_payload_dtype.get(i);
         FieldTypeInfo info;
         info.type_name = type_names.get(position);
         info.is_pointer = is_pointers.get(position);
-        info.dtype = .None;
+        info.dtype = dtypes.get(position);
         ret .Some(info);
       }
       i = i + 1;
@@ -7617,7 +7649,11 @@ impl Codegen {
         let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, bi);
         if payload_info.is_some() {
           let info = payload_info.unwrap();
-          self.record_local(bname, info.type_name, info.is_pointer);
+          if info.dtype.is_some() {
+            self.record_local_typed(bname, info.type_name, info.is_pointer, info.dtype.unwrap());
+          } else {
+            self.record_local(bname, info.type_name, info.is_pointer);
+          }
         }
         bi = bi + 1;
       }
@@ -9379,6 +9415,8 @@ impl Codegen {
         payload_type_names.init(0);
         Vec<bin> payload_is_pointer;
         payload_is_pointer.init(0);
+        Vec<DataType> payload_dtypes;
+        payload_dtypes.init(0);
         for pt : v.payload {
           let wt = self.write_type(*pt);
           if wt.is_some() {
@@ -9386,7 +9424,9 @@ impl Codegen {
           } else {
             payload_type_names.push("");
           }
-          payload_is_pointer.push(dtype_is_pointer(self.resolve_type_subst(*pt)));
+          let resolved_pt = self.resolve_type_subst(*pt);
+          payload_is_pointer.push(dtype_is_pointer(resolved_pt));
+          payload_dtypes.push(resolved_pt);
           self.state.write(" _");
           self.state.write(format_num(i));
           self.state.write("; ");
@@ -9395,7 +9435,13 @@ impl Codegen {
         self.state.write("} ");
         self.state.write(v.name);
         self.state.write(";\n");
-        self.record_enum_variant_payload(e.name, v.name, payload_type_names, payload_is_pointer);
+        self.record_enum_variant_payload_typed(
+          e.name,
+          v.name,
+          payload_type_names,
+          payload_is_pointer,
+          payload_dtypes
+        );
       }
     }
     self.state.write("  } payload;\n} ");
