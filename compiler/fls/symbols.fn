@@ -219,8 +219,8 @@ fun _render_param(Node* arg) str {
         if !equals(default_text, "") {
           b.append(" = ");
           b.append(default_text);
-          free(default_text);
         }
+        free(default_text);
       }
       ret b.build();
     }
@@ -270,7 +270,7 @@ fun _quote_escaped(str s) str {
 // a qualified or dot-shorthand variant construction.
 fun _literal_value_text(Node* val) str {
   if val == nil {
-    ret "";
+    ret substr("", 0, 0);
   }
   fit val.kind {
     // Copied, not returned directly: every other arm here returns an
@@ -282,7 +282,7 @@ fun _literal_value_text(Node* val) str {
         .Num(n) -> { ret format_num(n); }
         .Dec(x) -> { ret format_dec(x, 6); }
         .Cval(c) -> { ret format("'{chr}'", c); }
-        _ -> { ret ""; }
+        _ -> { ret substr("", 0, 0); }
       }
     }
     .String(s) -> {
@@ -309,10 +309,11 @@ fun _literal_value_text(Node* val) str {
           free(inner);
           ret result;
         }
+        free(inner);
       }
-      ret "";
+      ret substr("", 0, 0);
     }
-    _ -> { ret ""; }
+    _ -> { ret substr("", 0, 0); }
   }
 }
 
@@ -323,6 +324,18 @@ fun _literal_value_text(Node* val) str {
 // non-comment line breaks the search, so a doc block separated from
 // the declaration by a blank line (or an unrelated trailing comment
 // on the previous declaration) is never mistaken for this one's own.
+// Frees every element of a `Vec<str>` whose own elements are this
+// call's to free (each an independent allocation, none aliased
+// elsewhere), then the vector itself.
+fun _free_str_vec_deep(Vec<str>* v) {
+  num i = 0;
+  for i < v.len {
+    free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
 pub fun doc_comment_above(str text, num decl_line) str {
   if decl_line <= 1 {
     ret "";
@@ -335,6 +348,7 @@ pub fun doc_comment_above(str text, num decl_line) str {
   // has no bounds check of its own, so a mismatch here would read out
   // of bounds rather than just finding no comment.
   if idx >= src_lines.len {
+    _free_str_vec_deep(&src_lines);
     ret "";
   }
   Vec<str> collected;
@@ -343,19 +357,26 @@ pub fun doc_comment_above(str text, num decl_line) str {
     str line_text = src_lines.get(idx);
     str t = trim(line_text);
     if equals(t, "") {
+      free(t);
       break;
     }
     if !starts_with(t, "//") {
+      free(t);
       break;
     }
     str content = substr(t, 2, len(t) - 2);
+    free(t);
     if len(content) > 0 && content[0] == ' ' {
-      content = substr(content, 1, len(content) - 1);
+      str trimmed_leading = substr(content, 1, len(content) - 1);
+      free(content);
+      content = trimmed_leading;
     }
     collected.push(content);
     idx = idx - 1;
   }
+  _free_str_vec_deep(&src_lines);
   if collected.len == 0 {
+    collected.free();
     ret "";
   }
   // Rendered top-to-bottom (`collected` was built bottom-to-top),
@@ -376,6 +397,7 @@ pub fun doc_comment_above(str text, num decl_line) str {
     } else {
       b.append(trimmed_content);
     }
+    free(trimmed_content);
     if is_fence {
       in_fence = !in_fence;
     }
@@ -383,6 +405,7 @@ pub fun doc_comment_above(str text, num decl_line) str {
       b.append("\n");
     }
   }
+  _free_str_vec_deep(&collected);
   ret b.build();
 }
 
@@ -397,14 +420,19 @@ pub fun doc_comment_trailing(str text, num decl_line) str {
   Vec<str> src_lines = split_lines(text);
   num idx = decl_line - 1;
   if idx >= src_lines.len {
+    _free_str_vec_deep(&src_lines);
     ret "";
   }
   str line_text = src_lines.get(idx);
   num slashes = index_of_str(line_text, "//");
   if slashes < 0 {
+    _free_str_vec_deep(&src_lines);
     ret "";
   }
-  str content = trim(substr(line_text, slashes + 2, len(line_text) - slashes - 2));
+  str raw_content = substr(line_text, slashes + 2, len(line_text) - slashes - 2);
+  str content = trim(raw_content);
+  free(raw_content);
+  _free_str_vec_deep(&src_lines);
   ret content;
 }
 
@@ -471,8 +499,8 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
             if !equals(literal, "") {
               b.append(" = ");
               b.append(literal);
-              free(literal);
             }
+            free(literal);
           }
           ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
         }
@@ -1003,11 +1031,19 @@ pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str
 // `bare_type_from_detail` for that shape).
 fun _bare_type_expr(str type_expr) str {
   str written = type_expr;
+  bin owned = false;
   num cut = index_of_char(written, '<');
   if cut > 0 {
     written = substr(written, 0, cut);
+    owned = true;
   }
-  ret trim(replace_char(written, '*', ' '));
+  str spaced = replace_char(written, '*', ' ');
+  if owned {
+    free(written);
+  }
+  str out = trim(spaced);
+  free(spaced);
+  ret out;
 }
 
 // The bare declared type of a rendered "Type name" declaration
@@ -1081,7 +1117,7 @@ fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
 fun _return_type_text(str detail) str {
   num close = last_index_of_char(detail, ')');
   if close < 0 {
-    ret "";
+    ret substr("", 0, 0);
   }
   ret trim(substr(detail, close + 1, len(detail) - close - 1));
 }
@@ -1093,9 +1129,15 @@ fun _bare_return_type(str detail) str {
   str rtype = _return_type_text(detail);
   num cut = index_of_char(rtype, '<');
   if cut > 0 {
-    rtype = substr(rtype, 0, cut);
+    str cut_rtype = substr(rtype, 0, cut);
+    free(rtype);
+    rtype = cut_rtype;
   }
-  ret trim(replace_char(rtype, '*', ' '));
+  str spaced = replace_char(rtype, '*', ' ');
+  free(rtype);
+  str out = trim(spaced);
+  free(spaced);
+  ret out;
 }
 
 // `chain_receiver`'s own result: the type everything before some
@@ -1198,7 +1240,9 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
     let f = lookup_top_level(program, first.name);
     if f.is_some() {
       current_type = _bare_return_type(f.unwrap().detail);
-      current_args = generic_args_of_detail(_return_type_text(f.unwrap().detail));
+      str first_rtype_text = _return_type_text(f.unwrap().detail);
+      current_args = generic_args_of_detail(first_rtype_text);
+      free(first_rtype_text);
     }
   } else {
     current_type = type_name_of_local(tokens, program, first.name, file, line);
@@ -1222,7 +1266,9 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
         ret empty;
       }
       current_type = _bare_return_type(m.unwrap().detail);
-      current_args = generic_args_of_detail(_return_type_text(m.unwrap().detail));
+      str seg_rtype_text = _return_type_text(m.unwrap().detail);
+      current_args = generic_args_of_detail(seg_rtype_text);
+      free(seg_rtype_text);
       i = i + 1;
       continue;
     }
@@ -1286,7 +1332,9 @@ pub fun chain_ending_receiver(
       }
       empty.type_name = _bare_return_type(f.unwrap().detail);
       empty.full_type_name = full_return_type_from_detail(f.unwrap().detail);
-      empty.generic_args = generic_args_of_detail(_return_type_text(f.unwrap().detail));
+      str base_rtype_text = _return_type_text(f.unwrap().detail);
+      empty.generic_args = generic_args_of_detail(base_rtype_text);
+      free(base_rtype_text);
       ret empty;
     }
     empty.type_name = type_name_of_local(tokens, program, name, file, line);
@@ -1305,7 +1353,9 @@ pub fun chain_ending_receiver(
     }
     empty.type_name = _bare_return_type(m.unwrap().detail);
     empty.full_type_name = full_return_type_from_detail(m.unwrap().detail);
-    empty.generic_args = generic_args_of_detail(_return_type_text(m.unwrap().detail));
+    str tail_rtype_text = _return_type_text(m.unwrap().detail);
+    empty.generic_args = generic_args_of_detail(tail_rtype_text);
+    free(tail_rtype_text);
     ret empty;
   }
   let field = lookup_field(program, receiver.type_name, name);
