@@ -463,6 +463,19 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   state.tokens = tok_result.unwrap();
   state.emit_stderr = false;
   Parser p = parser_new(&state);
+  // `state.nodes` (the handful of Import nodes parsed below) and
+  // `state`'s own scratch (scope chain, symbol tables, forward-type
+  // names) are never read past this function - freed on every exit,
+  // the same reasoning as diagnose()'s own discarded parse. NOT
+  // `state.tokens`: `_scan_compound_names` below aliases its Sval
+  // strings directly into `shared.out`, which outlives this call, so
+  // those (and the array itself) are left for `PreloadShared`'s own
+  // teardown to free once the whole preload pass is done with them.
+  // `free_node_tree` never touches `str` fields either way (see its
+  // own file-level note in ast.fn), so freeing `state.nodes` here
+  // can't touch the aliased strings `shared.out` still needs.
+  defer free_node_tree(&state.nodes);
+  defer free_parse_state_internal(&state);
 
   for state.next_token_is_keyword("imp") {
     let ierr = p.parse_import();

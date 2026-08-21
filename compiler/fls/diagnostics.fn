@@ -139,10 +139,18 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // parse tree nothing ever looks at again.
   let parse_failed = p.parse();
   defer free_node_tree(&state.nodes);
+  // `state`'s own scratch (scope chain, symbol tables, forward-type
+  // names) is never read past this function, so it is safe to free on
+  // every exit the same way `state.nodes` already is above - except
+  // `state.error_message`, which `free_parse_state_internal` also
+  // frees, and which the diagnostic built just below would otherwise
+  // still be pointing at. Copied into its own allocation first, so
+  // freeing `state` afterward can never leave `d.message` dangling.
+  defer free_parse_state_internal(&state);
   if parse_failed.is_some() {
     str message = "this file could not be read";
     if state.has_error {
-      message = state.error_message;
+      message = substr(state.error_message, 0, len(state.error_message));
     }
     Diagnostic d = _at_start(SEVERITY_ERROR, message);
     if state.has_error {
