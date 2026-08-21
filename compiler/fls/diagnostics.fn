@@ -128,7 +128,13 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   }
 
   ParseState state = parse_state_new(path, doc.text);
-  state.tokens = read.tokens;
+  // A clone, not the cache's own tokens directly: this parse mutates
+  // its own token list in place (splitting a nested-generic `>>` into
+  // two `>` tokens grows and shifts it via Vec.insert), and aliasing
+  // the cache's buffer here was corrupting every other reader's view
+  // of it - hover, semantic tokens, everything sharing the same
+  // AnalysisCache entry - for as long as the server kept running.
+  state.tokens = read.tokens.clone();
   state.emit_stderr = false;
   Parser p = parser_new(&state);
   // This parse exists only to localize a parse error's own position
@@ -139,6 +145,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // parse tree nothing ever looks at again.
   let parse_failed = p.parse();
   defer free_node_tree(&state.nodes);
+  defer state.tokens.free();
   // `state`'s own scratch (scope chain, symbol tables, forward-type
   // names) is never read past this function, so it is safe to free on
   // every exit the same way `state.nodes` already is above - except
