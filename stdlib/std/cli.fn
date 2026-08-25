@@ -13,6 +13,10 @@ pub compound CliArgs {
   Map<str, str> opts;
   // non-flag arguments
   Vec<str> positionals;
+  // Set by cli_parse_flags when a value flag was the last argument, with
+  // nothing following it to take as its value.
+  bin missing_value;
+  str missing_value_flag;
 }
 
 // Parses argv-style `args` (args[0] is program name) into options and positionals.
@@ -20,6 +24,8 @@ pub fun cli_parse(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);
   out.positionals.init(8);
+  out.missing_value = false;
+  out.missing_value_flag = "";
 
   num i = 1;
   for args[i] != 0 {
@@ -54,6 +60,8 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);
   out.positionals.init(8);
+  out.missing_value = false;
+  out.missing_value_flag = "";
 
   num i = 1;
   bin end_opts = false;
@@ -123,15 +131,19 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   ret out;
 }
 
-// Parses single-dash flags: `-name value`, `-name=value`, and
-// bare `-name` switches. `value_flags` names the flags that take a
-// separate value, since `-name value` is otherwise indistinguishable
-// from a switch followed by a positional. Everything after `--` is a
-// positional.
+// Parses single- or double-dash flags: `-name value`, `--name value`,
+// `-name=value`, and bare `-name`/`--name` switches, all equivalent.
+// `value_flags` names the flags that take a separate value, since
+// `-name value` is otherwise indistinguishable from a switch followed by
+// a positional. Everything after `--` on its own is a positional. A
+// value flag with nothing following it sets `missing_value` instead of
+// silently taking `"1"` as its value.
 pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
   CliArgs out;
   out.opts.init(8);
   out.positionals.init(8);
+  out.missing_value = false;
+  out.missing_value_flag = "";
 
   num i = 1;
   bin rest_are_positional = false;
@@ -148,13 +160,18 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
       i = i + 1;
       continue;
     }
-    if len(arg) < 2 || arg[0] != '-' {
+
+    num dashes = 0;
+    for dashes < len(arg) && arg[dashes] == '-' {
+      dashes = dashes + 1;
+    }
+    if dashes == 0 || dashes == len(arg) {
       out.positionals.push(arg);
       i = i + 1;
       continue;
     }
 
-    let body = substr(arg, 1, len(arg) - 1);
+    let body = substr(arg, dashes, len(arg) - dashes);
     let eq = index_of_char(body, '=');
     if eq != -1 {
       out.opts.put(substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
@@ -162,9 +179,15 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
       continue;
     }
 
-    if value_flags.contains(body) && args[i + 1] != 0 {
-      out.opts.put(body, args[i + 1]);
-      i = i + 2;
+    if value_flags.contains(body) {
+      if args[i + 1] != 0 {
+        out.opts.put(body, args[i + 1]);
+        i = i + 2;
+        continue;
+      }
+      out.missing_value = true;
+      out.missing_value_flag = body;
+      i = i + 1;
       continue;
     }
     out.opts.put(body, "1");

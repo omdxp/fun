@@ -29,6 +29,15 @@ fun package_version() str {
 }
 
 fun main(str[] args) num {
+  // A totally bare invocation is a request for usage, not an error --
+  // anything past the program name that still fails to resolve an input
+  // falls through to the `opts.input == ""` case below instead, which is
+  // a real error.
+  if args[1] == 0 {
+    println(help_text());
+    ret 0;
+  }
+
   Options opts = parse_args(args);
   defer opts.free();
 
@@ -44,7 +53,7 @@ fun main(str[] args) num {
     ret 0;
   }
   if equals(opts.subcommand, "build") {
-    ret build_project();
+    ret build_project(opts.debug_info);
   }
   if equals(opts.subcommand, "init") {
     ret init_project(opts.input);
@@ -60,9 +69,9 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_test_suite(root);
+      ret run_test_suite(root, opts.debug_info);
     }
-    ret run_tests(opts.input, &opts.program_args);
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info);
   }
   if equals(opts.subcommand, "fuzz") {
     // No path, or a path that names a directory rather than a `.fn`
@@ -76,9 +85,17 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_fuzz_suite(root);
+      ret run_fuzz_suite(root, opts.debug_info);
     }
-    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args);
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info);
+  }
+  // `-test`/`-fuzz` given directly alongside `-in`, rather than through
+  // the `test`/`fuzz` subcommand spellings above.
+  if opts.test_flag {
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info);
+  }
+  if opts.fuzz_flag {
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info);
   }
   // Scanning a tree needs no input file: the working directory is the
   // root when none is named.
@@ -99,6 +116,9 @@ fun main(str[] args) num {
   if equals(opts.input, "") {
     println(help_text());
     ret 1;
+  }
+  if !ends_with(opts.input, ".fn") {
+    ret _fail(format("input file must have a .fn extension: {str}", opts.input));
   }
   if !exists(opts.input) {
     ret _fail(format("no such file: {str}", opts.input));
