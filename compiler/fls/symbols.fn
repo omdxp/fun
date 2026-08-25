@@ -436,6 +436,34 @@ pub fun doc_comment_trailing(str text, num decl_line) str {
   ret content;
 }
 
+// Best-effort literal type for a global const's own initializer, when
+// its declared type is the `__let_infer__` sentinel (`const x = 5;`,
+// no type written): the same handful of literal shapes
+// `_literal_value_text` already recognizes for rendering the value
+// itself, just the type instead. A local's own `let`/`const` resolves
+// this the same way through token-based inference elsewhere (hover's
+// own re-inference, `infer_let_local_type`); a global has no token
+// stream on hand here, so this stays AST-only and narrower - "" for
+// anything past a plain literal, matching what a caller already does
+// with an unresolved type name.
+fun _infer_global_const_type(Node* val) str {
+  if val == nil {
+    ret "";
+  }
+  fit val.kind {
+    .Number(d) -> {
+      fit d {
+        .Dec(_) -> { ret "dec"; }
+        .Cval(_) -> { ret "chr"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String(_) -> { ret "str"; }
+    .Boolean(_) -> { ret "bin"; }
+    _ -> { ret ""; }
+  }
+}
+
 // The declaration of `name` as seen from `file` at `line`: a parameter
 // or local of the function that line sits in, before anything the whole
 // program shares.
@@ -490,6 +518,11 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
             b.append("const ");
           }
           str global_type_text = render_type(v.var_type);
+          if equals(global_type_text, "__let_infer__") && v.has_val {
+            free(global_type_text);
+            str inferred = _infer_global_const_type(v.val);
+            global_type_text = substr(inferred, 0, len(inferred));
+          }
           b.append(global_type_text);
           free(global_type_text);
           b.append(" ");
@@ -1475,6 +1508,29 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
     .Identifier -> {
       str name = token_word(val_tok);
       num idx = index_of_token(tokens, val_tok);
+
+      // `name[...]`: a str indexes to a chr, an array's own bracket
+      // pair strips down one level - resolved from name's own
+      // declared type before the dot/call chain walk below, which
+      // has no notion of `[` at all. Anything the declared type
+      // can't resolve to falls through unchanged.
+      let bracket_opt = token_after(tokens, idx + 1);
+      if bracket_opt.is_some() && token_is_operator(bracket_opt.unwrap(), "[") {
+        let base_decl = lookup(program, name, file, line);
+        if base_decl.is_some() {
+          str base_type = bare_type_from_detail(base_decl.unwrap().detail);
+          if equals(base_type, "str") {
+            free(base_type);
+            ret substr("chr", 0, 3);
+          }
+          if ends_with(base_type, "[]") {
+            str elem = substr(base_type, 0, len(base_type) - 2);
+            free(base_type);
+            ret elem;
+          }
+          free(base_type);
+        }
+      }
 
       // Walks the whole chain forward from `val_tok` (`a.b.c()`,
       // `a().b`, any mix, any length), tracking the last segment
