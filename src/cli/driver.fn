@@ -730,7 +730,7 @@ pub fun help_text() str {
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
-  `  fun init [library|executable|both]   scaffolds fun.toml and src/ (default executable)
+  `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
   `  fun -fmt-check-all [-in <file_or_dir>]
   `  fun -version
   `
@@ -835,10 +835,10 @@ test "recognizes an init subcommand and its kind positional" {
   a.init(0);
   defer a.free();
   a.push("init");
-  a.push("library");
+  a.push("lib");
   let o = parse_args(_argv(&a));
   assert equals(o.subcommand, "init"), "expected the init subcommand";
-  assert equals(o.input, "library"), "expected the project kind as the positional";
+  assert equals(o.input, "lib"), "expected the project kind as the positional";
 }
 
 test "init with no positional leaves the kind empty" {
@@ -1069,20 +1069,25 @@ fun _init_lib_source() str {
   `}`;
 }
 
-// `fun init [library|executable|both]`: writes a `fun.toml` and a `src/`
-// directory for a new package in the working directory. `kind` is one of
-// `library`, `executable`, or `both`; empty defaults to `executable`.
+// The starter `.gitignore` an `init`ed project gets.
+fun _init_gitignore_source() str {
+  ret `/fun-out/`;
+}
+
+// `fun init [lib|exe|mix]`: writes a `fun.toml`, a `src/` directory, and
+// a `.gitignore` for a new package in the working directory. `kind` is
+// one of `lib`, `exe`, or `mix`; empty defaults to `exe`.
 pub fun init_project(str kind) num {
   str resolved_kind = kind;
   if equals(resolved_kind, "") {
-    resolved_kind = "executable";
+    resolved_kind = "exe";
   }
-  bin wants_lib = equals(resolved_kind, "library") || equals(resolved_kind, "both");
-  bin wants_bin = equals(resolved_kind, "executable") || equals(resolved_kind, "both");
+  bin wants_lib = equals(resolved_kind, "lib") || equals(resolved_kind, "mix");
+  bin wants_bin = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
   if !wants_lib && !wants_bin {
     writeln_to(
       Sink.Stderr,
-      format("[Error]\nunknown project kind `{str}` (expected `library`, `executable`, or `both`)", resolved_kind)
+      format("[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)", resolved_kind)
     );
     ret 1;
   }
@@ -1115,6 +1120,11 @@ pub fun init_project(str kind) num {
 
   write_string("fun.toml", toml.build());
   println("created fun.toml");
+
+  if !exists(".gitignore") {
+    write_string(".gitignore", _init_gitignore_source());
+    println("created .gitignore");
+  }
   ret 0;
 }
 
