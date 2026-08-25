@@ -2,7 +2,7 @@
 
 imp std.map;
 imp std.vec;
-imp std.c.io;
+imp std.string;
 imp std.quirks;
 imp std.option;
 
@@ -196,13 +196,14 @@ impl Set<num> as Display {
             out[pos + 1] = ' ';
             pos = pos + 2;
           }
-          chr[24] cell;
-          let c = snprintf(cell, 24, "%lld", x);
+          str cell = format_num(x);
+          num c = len(cell);
           num k = 0;
           for k < c {
             out[pos + k] = cell[k];
             k = k + 1;
           }
+          free(cell);
           pos = pos + c;
           written = written + 1;
         }

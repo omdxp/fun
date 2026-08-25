@@ -19,7 +19,9 @@ pub fun println(str s) {
 
 // Print a number to stdout (no newline).
 pub fun print_num(num n) {
-  printf("%lld", n);
+  str s = format_num(n);
+  printf("%s", s);
+  free(s);
 }
 
 // Print a decimal to stdout (no newline).
@@ -54,12 +56,7 @@ fun _dup_str(str s) str {
 
 // Format a number into a new string buffer.
 pub fun fmt_num(num n) str {
-  str buf = malloc(32);
-  if buf == nil {
-    ret nil;
-  }
-  snprintf(buf, 32, "%lld", n);
-  ret buf;
+  ret format_num(n);
 }
 
 // Format a decimal into a new string buffer.
