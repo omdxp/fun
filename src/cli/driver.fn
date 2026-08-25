@@ -666,6 +666,9 @@ pub fun help_text() str {
   `  -warn-unused      Report unused imports, variables, functions, and compounds.
   `  -warn-unused-lenient  Like -warn-unused, but keeps reporting them past an unrelated type error.
   `  -D name=value     Inject a constant the program can read.
+  `  -test             Run -in's own test blocks, in place of a plain compile.
+  `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
+  `  -fuzz-target <name>  Which target, when -in declares more than one.
   `  -fmt              Format the input file in place.
   `  -fmt-all          Format the input file and the modules it imports.
   `  -fmt-diag         Format the input file in place, then still run diagnostics.
