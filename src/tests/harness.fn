@@ -102,7 +102,7 @@ pub fun emit_file(str path, str label) str {
 // since the file is removed again once the C is in hand.
 pub fun emit_c_with_imports(str src, str name, str label) str {
   StringBuilder pb = string_builder_init(32);
-  pb.append("compiler/tests/fixtures/");
+  pb.append("src/tests/fixtures/");
   pb.append(name);
   pb.append(".fn");
   str path = pb.build();
@@ -133,7 +133,7 @@ pub fun run_source(str src, str name, str label) str {
 // being stopped rather than about what it printed.
 pub fun run_source_result(str src, str name, str label) ProcessResult {
   StringBuilder sb = string_builder_init(64);
-  sb.append("compiler/tests/fixtures/");
+  sb.append("src/tests/fixtures/");
   sb.append(name);
   str base = sb.build();
 

@@ -4,8 +4,8 @@ version = "0.50.0"
 
 [[bin]]
 name = "fun"
-path = "compiler/cli/main.fn"
+path = "src/cli/main.fn"
 
 [[bin]]
 name = "fls"
-path = "compiler/fls/main.fn"
+path = "src/fls/main.fn"

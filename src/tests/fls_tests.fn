@@ -415,7 +415,7 @@ test "hovering a stdlib import path segment resolves at every depth" {
   defer reads.free();
   Document doc;
   doc.uri = "file:///stdlib_hover_probe.fn";
-  doc.path = "compiler/tests/fixtures/stdlib_hover_probe.fn";
+  doc.path = "src/tests/fixtures/stdlib_hover_probe.fn";
   doc.text = "imp std.c.io;\n\nfun main() num {\n  ret 0;\n}\n";
   doc.version = 1;
 
@@ -608,14 +608,14 @@ test "dot-completion merges a method declared in a different file than the type"
   `    ret self.n;
   `  }
   `}`;
-  write_string("compiler/tests/fixtures/_cross_method_helper.fn", helper_src);
-  defer remove_file("compiler/tests/fixtures/_cross_method_helper.fn");
+  write_string("src/tests/fixtures/_cross_method_helper.fn", helper_src);
+  defer remove_file("src/tests/fixtures/_cross_method_helper.fn");
 
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///cross_method_probe.fn";
-  doc.path = "compiler/tests/fixtures/_cross_method_probe.fn";
+  doc.path = "src/tests/fixtures/_cross_method_probe.fn";
   doc.text = `imp _cross_method_helper;
   `fun use_it(Widget w) num {
   `  ret w.value();
@@ -796,22 +796,22 @@ test "the 'See also' footer never links a cross-file type that isn't pub" {
   // could never legitimately name it itself - `_see_also_footer`
   // used to resolve any capitalized word in a hovered signature
   // blind to this, so it could link straight to it anyway.
-  write_string("compiler/tests/fixtures/_see_also_priv.fn", `compound Secret {
+  write_string("src/tests/fixtures/_see_also_priv.fn", `compound Secret {
   `  num x;
   `}`);
-  defer remove_file("compiler/tests/fixtures/_see_also_priv.fn");
-  write_string("compiler/tests/fixtures/_see_also_lib.fn", `imp _see_also_priv;
+  defer remove_file("src/tests/fixtures/_see_also_priv.fn");
+  write_string("src/tests/fixtures/_see_also_lib.fn", `imp _see_also_priv;
   `pub fun make() Secret {
   `  Secret s;
   `  ret s;
   `}`);
-  defer remove_file("compiler/tests/fixtures/_see_also_lib.fn");
+  defer remove_file("src/tests/fixtures/_see_also_lib.fn");
 
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///see_also_probe.fn";
-  doc.path = "compiler/tests/fixtures/_see_also_probe.fn";
+  doc.path = "src/tests/fixtures/_see_also_probe.fn";
   doc.text = `imp _see_also_lib;
   `fun user() num {
   `  let s = make();
@@ -1156,8 +1156,8 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///compiler/fls/importprobe.fn";
-  doc.path = "compiler/fls/importprobe.fn";
+  doc.uri = "file:///src/fls/importprobe.fn";
+  doc.path = "src/fls/importprobe.fn";
   doc.text = src;
   doc.version = 1;
 
@@ -1173,11 +1173,11 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
   // splits into '...' + '.'), which the fix has to re-concatenate
   // rather than assume a single '..' token.
   Document doc2;
-  doc2.uri = "file:///compiler/parser/importprobe.fn";
-  doc2.path = "compiler/parser/importprobe.fn";
-  doc2.text = "imp ....compiler.lexer.lexer;\n";
+  doc2.uri = "file:///src/parser/importprobe.fn";
+  doc2.path = "src/parser/importprobe.fn";
+  doc2.text = "imp ....src.lexer.lexer;\n";
   doc2.version = 1;
-  str deep_hover = hover(&reads, doc2, 0, 23);
+  str deep_hover = hover(&reads, doc2, 0, 18);
   assert contains(deep_hover, "Vec<Token>"), "expected the same doc comment through a four-dot path";
 }
 
@@ -1192,8 +1192,8 @@ test "documentLink covers a resolvable import's own path, and silently skips one
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///compiler/fls/linkprobe.fn";
-  doc.path = "compiler/fls/linkprobe.fn";
+  doc.uri = "file:///src/fls/linkprobe.fn";
+  doc.path = "src/fls/linkprobe.fn";
   doc.text = src;
   doc.version = 1;
 
@@ -1996,7 +1996,7 @@ test "an impl method whose own written name starts with an underscore resolves c
   // rightmost valid '__' pair sitting one character short of the
   // true separator, silently dropping the method's own leading
   // underscore and never matching the name a reader actually wrote.
-  // User-reported, live against compiler/lexer/lexer.fn's own
+  // User-reported, live against src/lexer/lexer.fn's own
   // self._start_pos() call inside a let.
   str src = `compound Widget {
   `  num n;
@@ -2194,7 +2194,7 @@ test "hover on a function call resolves to the function, not an unrelated compou
   // boundary at all, unlike .Impl (fixed above): a field's own name
   // matched as "the nearest declaration above" for the rest of the
   // whole file, not just its own compound's own body. User-reported,
-  // live against compiler/lexer/lexer.fn: `l.len = len(src);` hovered
+  // live against src/lexer/lexer.fn: `l.len = len(src);` hovered
   // the stdlib len() call and got Lexer's own 'len' field back
   // instead, since Lexer (declared earlier in the file) has a field
   // by that same name.
@@ -3714,8 +3714,8 @@ test "a bare '.Variant' shorthand resolves a field-access fit subject even when 
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///compiler/fls/nodeprobe.fn";
-  doc.path = "compiler/fls/nodeprobe.fn";
+  doc.uri = "file:///src/fls/nodeprobe.fn";
+  doc.path = "src/fls/nodeprobe.fn";
   doc.text = src;
   doc.version = 1;
 
@@ -3724,7 +3724,7 @@ test "a bare '.Variant' shorthand resolves a field-access fit subject even when 
   // its own 'kind' field's type (NodeKind), are both declared in
   // ast.fn - reached only through the plain '..ast.ast' import, the
   // exact real-world shape this bug reproduced on
-  // (compiler/fls/symbols.fn's own `fit body.kind { ... }`).
+  // (src/fls/symbols.fn's own `fit body.kind { ... }`).
   str out = completion(&reads, doc, 4, 5, false);
   assert contains(out, `"label":"Function","kind":20`), "expected NodeKind's own variants through Node's own field, reached across the import";
   assert contains(out, `"label":"Compound","kind":20`), "expected another real variant too";

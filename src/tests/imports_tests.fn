@@ -58,7 +58,7 @@ test "two aliases exporting the same name are disambiguated" {
 
 test "aliased std.io import: print_fmt emits its helpers" {
   let out = emit_file(
-    "compiler/tests/fixtures/alias_io_print.fn",
+    "src/tests/fixtures/alias_io_print.fn",
     "aliased std.io import: print_fmt emits its helpers"
   );
   assert contains(out, "format_impl"), "expected the format helper to be emitted";
@@ -67,7 +67,7 @@ test "aliased std.io import: print_fmt emits its helpers" {
 
 test "aliased std.io import: format emits its helpers" {
   let out = emit_file(
-    "compiler/tests/fixtures/alias_io_format.fn",
+    "src/tests/fixtures/alias_io_format.fn",
     "aliased std.io import: format emits its helpers"
   );
   assert contains(out, "format_impl"), "expected the format helper to be emitted";
@@ -76,7 +76,7 @@ test "aliased std.io import: format emits its helpers" {
 
 test "aliased std.log import: emits its level helper" {
   let out = emit_file(
-    "compiler/tests/fixtures/alias_log_levels.fn",
+    "src/tests/fixtures/alias_log_levels.fn",
     "aliased std.log import: emits its level helper"
   );
   assert contains(out, "level_name"), "expected the level helper to be emitted";
@@ -84,7 +84,7 @@ test "aliased std.log import: emits its level helper" {
 
 test "a user module imported under an alias is emitted under that alias" {
   let out = emit_file(
-    "compiler/tests/fixtures/alias_stub_main.fn",
+    "src/tests/fixtures/alias_stub_main.fn",
     "a user module imported under an alias is emitted under that alias"
   );
   assert contains(out, "say_hello"), "expected the imported function to be emitted";
@@ -92,7 +92,7 @@ test "a user module imported under an alias is emitted under that alias" {
 
 test "the same module imported without an alias uses bare function names" {
   let out = emit_file(
-    "compiler/tests/fixtures/no_alias_io.fn",
+    "src/tests/fixtures/no_alias_io.fn",
     "the same module imported without an alias uses bare function names"
   );
   assert contains(out, "format_impl"), "expected the bare format helper";
@@ -112,7 +112,7 @@ test "diamond import: the shared module is emitted exactly once" {
 
 test "an aliased generic function call is monomorphized" {
   let out = emit_file(
-    "compiler/tests/fixtures/agc_main.fn",
+    "src/tests/fixtures/agc_main.fn",
     "an aliased generic function call is monomorphized"
   );
   assert contains(out, "ident__num"), "expected the monomorphized instance";
@@ -144,14 +144,14 @@ test "an alias-qualified call to a private function is rejected" {
   // A call written `one.secret()` reaches a function in the file that
   // alias stands for. The merge flattens both files into one program, so
   // what is left to say is whether that file offers the name at all.
-  str found = check_file("compiler/tests/fixtures/privalias_main_bad.fn");
+  str found = check_file("src/tests/fixtures/privalias_main_bad.fn");
   assert contains(found, "not public"), "expected the private function refused through its alias";
-  assert equals(check_file("compiler/tests/fixtures/privalias_main_ok.fn"), ""), "expected the public one still reachable";
+  assert equals(check_file("src/tests/fixtures/privalias_main_ok.fn"), ""), "expected the public one still reachable";
 }
 
 test "an alias-qualified call to a public function compiles" {
   let out = emit_file(
-    "compiler/tests/fixtures/privalias_main_ok.fn",
+    "src/tests/fixtures/privalias_main_ok.fn",
     "an alias-qualified call to a public function compiles"
   );
   assert contains(out, "visible"), "expected the public function to be emitted";
@@ -160,13 +160,13 @@ test "an alias-qualified call to a public function compiles" {
 test "an alias-qualified read of a private global is rejected" {
   // A read written `one.secret_g` reaches a variable in the file that
   // alias stands for, the same way a call reaches a function there.
-  assert contains(check_file("compiler/tests/fixtures/privglob_main_bad.fn"), "not public"), "expected the private global refused through its alias";
-  assert equals(check_file("compiler/tests/fixtures/privglob_main_ok.fn"), ""), "expected the public global still reachable";
+  assert contains(check_file("src/tests/fixtures/privglob_main_bad.fn"), "not public"), "expected the private global refused through its alias";
+  assert equals(check_file("src/tests/fixtures/privglob_main_ok.fn"), ""), "expected the public global still reachable";
 }
 
 test "an alias-qualified read of a public global compiles" {
   let out = emit_file(
-    "compiler/tests/fixtures/privglob_main_ok.fn",
+    "src/tests/fixtures/privglob_main_ok.fn",
     "an alias-qualified read of a public global compiles"
   );
   assert contains(out, "shared_g"), "expected the public global to be emitted";
@@ -176,15 +176,15 @@ test "a leading-underscore field is private to the file that declares it" {
   // The type may be offered publicly while some of what it holds stays
   // its own business, which is what the leading underscore says.
   assert contains(
-    check_file("compiler/tests/fixtures/privfield_main_bad.fn"),
+    check_file("src/tests/fixtures/privfield_main_bad.fn"),
     "is private to the file"
   ), "expected the underscore field refused from another file";
-  assert equals(check_file("compiler/tests/fixtures/privfield_main_ok.fn"), ""), "expected an accessor in the declaring file to still reach it";
+  assert equals(check_file("src/tests/fixtures/privfield_main_ok.fn"), ""), "expected an accessor in the declaring file to still reach it";
 }
 
 test "a public accessor reaching a leading-underscore field compiles" {
   let out = emit_file(
-    "compiler/tests/fixtures/privfield_main_ok.fn",
+    "src/tests/fixtures/privfield_main_ok.fn",
     "a public accessor reaching a leading-underscore field compiles"
   );
   assert contains(out, "balance"), "expected the accessor method to be emitted";

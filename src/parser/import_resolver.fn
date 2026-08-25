@@ -64,7 +64,7 @@ fun _convert_dotted_path(str root, str import_path) str {
 }
 
 // Collapses every `seg/../` pair in `path` (and drops bare `.`/empty
-// segments), e.g. `"compiler/parser/../ast/ast.fn"` -> `"compiler/ast/
+// segments), e.g. `"src/parser/../ast/ast.fn"` -> `"src/ast/
 // ast.fn"`. Needed because the same file reached via two different
 // importing directories would otherwise dedup as two distinct raw
 // strings in `_preload_and_collect_source`/`_parse_and_merge`'s visited sets.
@@ -1130,18 +1130,18 @@ fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
 }
 
 test "resolve_import_path converts a same-directory dotted path" {
-  let resolved = resolve_import_path("compiler/codegen/codegen.fn", "codegen_state");
-  assert equals(resolved, "compiler/codegen/codegen_state.fn"), "expected the sibling file resolved relative to the importing file's own directory";
+  let resolved = resolve_import_path("src/codegen/codegen.fn", "codegen_state");
+  assert equals(resolved, "src/codegen/codegen_state.fn"), "expected the sibling file resolved relative to the importing file's own directory";
 }
 
 test "resolve_import_path converts a nested dotted path (single '.' as separator)" {
-  let resolved = resolve_import_path("compiler/parser/parser.fn", "datatype_defs");
-  assert equals(resolved, "compiler/parser/datatype_defs.fn"), "expected a bare sibling name to resolve with no extra traversal";
+  let resolved = resolve_import_path("src/parser/parser.fn", "datatype_defs");
+  assert equals(resolved, "src/parser/datatype_defs.fn"), "expected a bare sibling name to resolve with no extra traversal";
 }
 
 test "resolve_import_path handles one leading '..' parent-traversal segment" {
-  let resolved = resolve_import_path("compiler/parser/parser.fn", "..ast.ast");
-  assert equals(resolved, "compiler/parser/../ast/ast.fn"), "expected '..' (2 dots) to become one '../' parent step, then '.' between 'ast' and 'ast' to become '/'";
+  let resolved = resolve_import_path("src/parser/parser.fn", "..ast.ast");
+  assert equals(resolved, "src/parser/../ast/ast.fn"), "expected '..' (2 dots) to become one '../' parent step, then '.' between 'ast' and 'ast' to become '/'";
 }
 
 test "resolve_import_path handles an input file with no directory component" {
@@ -1150,18 +1150,18 @@ test "resolve_import_path handles an input file with no directory component" {
 }
 
 test "resolve_import_path resolves a 'std.' import against the stdlib root, not the importing file's own directory" {
-  let resolved = resolve_import_path("compiler/lexer/lexer.fn", "std.string");
+  let resolved = resolve_import_path("src/lexer/lexer.fn", "std.string");
   assert ends_with(resolved, "std/string.fn"), "expected a stdlib import to land under the stdlib root";
-  assert !contains(resolved, "compiler/lexer"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
+  assert !contains(resolved, "src/lexer"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
 }
 
 test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib root" {
-  let resolved = resolve_import_path("compiler/lexer/lexer.fn", "std.c.io");
+  let resolved = resolve_import_path("src/lexer/lexer.fn", "std.c.io");
   assert ends_with(resolved, "std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
 }
 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
-  let result = parse_program_with_imports("compiler/parser/import_resolver_fixtures/two_file_main.fn");
+  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/two_file_main.fn");
   assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;
   bin saw_main = false;
@@ -1184,7 +1184,7 @@ test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
 }
 
 test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {
-  let result = parse_program_with_imports("compiler/parser/import_resolver_fixtures/diamond_a.fn");
+  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/diamond_a.fn");
   assert result.is_ok(), "expected the diamond import graph to resolve cleanly";
   let nodes = result.unwrap().nodes;
   num shared_count = 0;
@@ -1202,7 +1202,7 @@ test "parse_program_with_imports terminates on a diamond import instead of dupli
 }
 
 test "parse_program_with_imports reports an error for a missing import rather than guessing" {
-  let result = parse_program_with_imports("compiler/parser/import_resolver_fixtures/missing_import.fn");
+  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/missing_import.fn");
   assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
 }
 
@@ -1211,7 +1211,7 @@ test "parse_program_with_imports resolves a compound-literal expression whose ty
   // before its real parse begins, so `is_known_compound_symbol` can
   // recognize a compound-literal's type even when it's declared in an
   // imported file rather than the current one.
-  let result = parse_program_with_imports("compiler/parser/import_resolver_fixtures/cross_file_compound_main.fn");
+  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/cross_file_compound_main.fn");
   assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;
   bin saw_main = false;
@@ -1234,6 +1234,6 @@ test "an absolute path keeps its root through normalization" {
 }
 
 test "a relative path stays relative through normalization" {
-  str got = _normalize_path("compiler/parser/../ast/ast.fn");
-  assert equals(got, "compiler/ast/ast.fn"), "expected the collapsed relative path";
+  str got = _normalize_path("src/parser/../ast/ast.fn");
+  assert equals(got, "src/ast/ast.fn"), "expected the collapsed relative path";
 }

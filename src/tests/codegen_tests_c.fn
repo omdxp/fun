@@ -627,17 +627,17 @@ test "a private name in one file does not collide with the same name in another"
   // Sibling files on disk, which is the only way a cross-file collision
   // can happen at all.
   assert write_string(
-    "compiler/tests/fixtures/priv_sibling_a.fn",
+    "src/tests/fixtures/priv_sibling_a.fn",
     `fun _helper() num { ret 1; }
     `pub fun from_a() num { ret _helper(); }`
   ), "expected to stage the first file";
-  defer remove_file("compiler/tests/fixtures/priv_sibling_a.fn");
+  defer remove_file("src/tests/fixtures/priv_sibling_a.fn");
   assert write_string(
-    "compiler/tests/fixtures/priv_sibling_b.fn",
+    "src/tests/fixtures/priv_sibling_b.fn",
     `fun _helper() num { ret 2; }
     `pub fun from_b() num { ret _helper(); }`
   ), "expected to stage the second file";
-  defer remove_file("compiler/tests/fixtures/priv_sibling_b.fn");
+  defer remove_file("src/tests/fixtures/priv_sibling_b.fn");
 
   str src = `imp priv_sibling_a;
   `imp priv_sibling_b;
@@ -680,19 +680,19 @@ test "fit statement with an explicit catch-all branch compiles and evaluates cor
 
 test "a program spread over several files merges into one" {
   assert write_string(
-    "compiler/tests/fixtures/spread_types.fn",
+    "src/tests/fixtures/spread_types.fn",
     `pub compound Point {
     `  num x;
     `  num y;
     `}`
   ), "expected to stage the types";
-  defer remove_file("compiler/tests/fixtures/spread_types.fn");
+  defer remove_file("src/tests/fixtures/spread_types.fn");
   assert write_string(
-    "compiler/tests/fixtures/spread_ops.fn",
+    "src/tests/fixtures/spread_ops.fn",
     `imp spread_types;
     `pub fun area(Point p) num { ret p.x * p.y; }`
   ), "expected to stage the operations";
-  defer remove_file("compiler/tests/fixtures/spread_ops.fn");
+  defer remove_file("src/tests/fixtures/spread_ops.fn");
 
   str src = `imp spread_types;
   `imp spread_ops;
