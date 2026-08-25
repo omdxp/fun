@@ -11563,6 +11563,18 @@ impl Codegen {
     `static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
     `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
     `static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
+    `static long long clock_gettime(long long clk_id, void* tp) {
+    `  (void)clk_id;
+    `  if (!tp) return -1;
+    `  long long* __fun_cgt_out = (long long*)tp;
+    `  FILETIME __fun_cgt_ft;
+    `  GetSystemTimeAsFileTime(&__fun_cgt_ft);
+    `  unsigned long long __fun_cgt_t = ((unsigned long long)__fun_cgt_ft.dwHighDateTime << 32) | __fun_cgt_ft.dwLowDateTime;
+    `  __fun_cgt_t -= 116444736000000000ULL;
+    `  __fun_cgt_out[0] = (long long)(__fun_cgt_t / 10000000ULL);
+    `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
+    `  return 0;
+    `}
     `#else
     `#include <unistd.h>
     `#include <time.h>
