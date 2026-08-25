@@ -4,6 +4,7 @@ imp ..cli.fmt;
 imp std.string;
 imp std.result;
 imp std.io;
+imp std.vec;
 
 test "formats file in-place" {
   str src = `fun  add(num a,num b) num{ret a+b;}
@@ -356,4 +357,70 @@ test "an over-long fit arm still wraps after an earlier arm's own body collapsed
     got,
     `"CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN"`
   ), "expected the over-long arm to wrap even though the arm before it collapsed to one line";
+}
+
+test "wraps an over-long boolean chain, filling each line rather than one operand per line" {
+  str src = `fun is_typed(chr a, chr b2, chr d) bin {
+  `  ret (a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c') || (a == 'b' && b2 == 'i' && d == 'n') || (a == 'c' && b2 == 'h' && d == 'r');
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  // Wrapped onto more than one line, but packed rather than one
+  // operand per line: several operands still share a line.
+  assert contains(
+    got,
+    `(a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm')`
+  ), "expected consecutive short operands to stay packed on one line, not each on its own";
+  assert !contains(
+    got,
+    `(a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c')`
+  ), "expected the whole chain not to still be on one line";
+  num i = 0;
+  bin over_width = false;
+  Vec<str> lines = split(got, '\n');
+  defer lines.free();
+  for i < lines.len {
+    if len(lines.get(i)) > 100 {
+      over_width = true;
+    }
+    i = i + 1;
+  }
+  assert !over_width, "expected every wrapped line to stay within the width budget";
+}
+
+test "a boolean chain that already fits stays on one line" {
+  str src = `fun f(bin a, bin b) bin {
+  `  ret a || b;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "ret a || b;"), "expected a short chain to stay exactly as written, unwrapped";
+}
+
+test "a boolean chain nested inside a call's own parens defers to the call's own wrapping" {
+  // The chain itself sits inside an already-open paren (the call), so
+  // it must not force its own extra continuation indent on top of
+  // whatever the call's own argument wrapping already does.
+  str src = `fun f(bin a, bin b, bin c, bin d, bin e, bin g, bin h, bin j, bin k, bin l) bin {
+  `  ret takes(a == true && b == true && c == true && d == true && e == true && g == true && h == true, j, k, l);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert !contains(got, "\n\n"), "expected no blank line introduced by the nested chain";
+}
+
+test "a wrapped chain followed by an already-multi-line nested call keeps the call's own closer at base indent" {
+  // Regression: `bool_chain_wrap` staying set for the rest of the
+  // statement once leaked into a LATER, unrelated nested call whose
+  // own arguments were already written across multiple lines, pushing
+  // its closing paren one level too deep instead of back to the
+  // statement's own indent.
+  str src = `fun f(bin a, bin b) bin {
+  `  if a == true && b == true && a == true && b == true && a == true && b == true || takes(
+  `    a,
+  `    b
+  `  ) {
+  `    ret true;
+  `  }
+  `  ret false;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n  ) {"), "expected the nested call's own closing paren back at the if's own indent, not one level deeper";
 }

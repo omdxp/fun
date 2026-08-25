@@ -466,7 +466,8 @@ impl Channel<T> {
       ret CHANNEL_RC_ALLOC_FAILED;
     }
 
-    if self.mu.initialized == true && self.can_send.initialized == true && self.can_recv.initialized == true {
+    if self.mu.initialized == true && self.can_send.initialized == true &&
+      self.can_recv.initialized == true {
       self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
       self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
       ret CHANNEL_RC_OK;

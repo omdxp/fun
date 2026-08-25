@@ -727,7 +727,8 @@ fun _is_assignment_op(str op) bin {
     ret false;
   }
   str head = substr(op, 0, len(op) - 1);
-  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") || equals(
+  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") ||
+    equals(
     head,
     "%"
   );
@@ -1127,7 +1128,8 @@ impl Analysis {
       // way to be exhaustive. `bin` is excluded: the `truths` counter
       // above already covers it correctly.
       str subj_type = self._fit_subject_type(f);
-      if equals(subj_type, "num") || equals(subj_type, "str") || equals(subj_type, "chr") || equals(subj_type, "dec") || ends_with(subj_type, "*") {
+      if equals(subj_type, "num") || equals(subj_type, "str") || equals(subj_type, "chr") ||
+        equals(subj_type, "dec") || ends_with(subj_type, "*") {
         self.report(
           .FitNonExhaustive,
           "fit does not handle every value (missing catch-all '_' branch)",
@@ -1498,12 +1500,14 @@ impl Analysis {
           if module.has_alias {
             used_as = module.alias;
           }
-          bin earned = _import_is_read(used_as, &read) || _module_is_read(
+          bin earned = _import_is_read(used_as, &read) ||
+            _module_is_read(
             module.path,
             self.file,
             program,
             &read
-          ) || _module_owns_a_read_builtin(module.path, &read) || _is_reexport_passthrough(
+          ) || _module_owns_a_read_builtin(module.path, &read) ||
+            _is_reexport_passthrough(
             module.path,
             self.file,
             program
@@ -1516,7 +1520,8 @@ impl Analysis {
           // A function with no body declares something that exists
           // elsewhere, a C binding among them. Nothing here can be
           // deleted by not calling it, so there is nothing to report.
-          if !node.flags.is_public && f.has_name && f.has_body && !read.has(f.name) && !equals(
+          if !node.flags.is_public && f.has_name && f.has_body && !read.has(f.name) &&
+            !equals(
             f.name,
             "main"
           ) {
@@ -1739,7 +1744,8 @@ fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) 
           }
           fit m.kind {
             .Function(f) -> {
-              if f.has_name && read.has(_unmangled_method_name(f.name, block.type_name)) {
+              if f.has_name &&
+                read.has(_unmangled_method_name(f.name, block.type_name)) {
                 ret true;
               }
             }

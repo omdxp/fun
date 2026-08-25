@@ -53,7 +53,8 @@ fun main(str[] args) num {
     // file, runs every `test` block found under that root instead of a
     // single file. `fun test some_file.fn` keeps compiling and running
     // just that one file.
-    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") || is_dir(opts.input);
+    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") ||
+      is_dir(opts.input);
     if is_dir_form {
       str root = opts.input;
       if equals(root, "") {
@@ -69,7 +70,8 @@ fun main(str[] args) num {
     // single file, each bounded to a short default budget rather than
     // fuzzing's normal open-ended campaign. A target name only makes
     // sense alongside a specific file, so this form never takes one.
-    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") || is_dir(opts.input);
+    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") ||
+      is_dir(opts.input);
     if is_dir_form {
       str root = opts.input;
       if equals(root, "") {

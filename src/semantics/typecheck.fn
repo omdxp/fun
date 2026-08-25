@@ -195,17 +195,20 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   }
   // `nil`, and the zero it is written as, stand for any pointer, and
   // for a string, which is one. Zero remains a number besides.
-  if from.is_null_literal && (to.pointer_depth > 0 || to.base == DataTypeType.Str || to.base == DataTypeType.Raw) {
+  if from.is_null_literal &&
+    (to.pointer_depth > 0 || to.base == DataTypeType.Str || to.base == DataTypeType.Raw) {
     ret true;
   }
   // A raw pointer stands for any pointer, in either direction, and a
   // string is a pointer.
-  if to.base == DataTypeType.Raw && (from.pointer_depth > 0 || from.base == DataTypeType.Str) {
+  if to.base == DataTypeType.Raw &&
+    (from.pointer_depth > 0 || from.base == DataTypeType.Str) {
     ret true;
   }
   // A raw pointer stands for any pointer, and for the array storage a
   // pointer is how you allocate.
-  if from.base == DataTypeType.Raw && (to.pointer_depth > 0 || to.is_array || to.base == DataTypeType.Str) {
+  if from.base == DataTypeType.Raw &&
+    (to.pointer_depth > 0 || to.is_array || to.base == DataTypeType.Str) {
     ret true;
   }
   // An array stands for a pointer to what it holds, as it does in C,
@@ -696,7 +699,8 @@ impl Checker {
     }
     // A value of that name, or a type of that name, means this is not an
     // alias at all.
-    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() || self.quirks.has(alias) || self.enum_names.has(alias) {
+    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() ||
+      self.quirks.has(alias) || self.enum_names.has(alias) {
       ret false;
     }
     let known = self.globals.at(name);
@@ -750,7 +754,8 @@ impl Checker {
     if equals(bare, "") || keyword_is_datatype(bare) {
       ret;
     }
-    if self.compounds.at(bare).is_some() || self.quirks.has(bare) || self.plain_enums.has(bare) {
+    if self.compounds.at(bare).is_some() || self.quirks.has(bare) ||
+      self.plain_enums.has(bare) {
       ret;
     }
     if self.enum_names.has(bare) {
@@ -832,7 +837,8 @@ impl Checker {
       ret true;
     }
     str name = self.canonical_type_name(t.name);
-    if self.compounds.at(name).is_some() || self.quirks.has(name) || self.plain_enums.has(name) {
+    if self.compounds.at(name).is_some() || self.quirks.has(name) ||
+      self.plain_enums.has(name) {
       ret true;
     }
     ret self.methods.at(name).is_some();
@@ -1068,7 +1074,8 @@ fun _call_args(Node* node, Vec<Node*>* out) {
 fun _format_fmt_arg_index(str name) num {
   // format(fmt, ...), print_fmt(fmt, ...), println_fmt(fmt, ...),
   // printf(fmt, ...): fmt is the first argument, nothing before it.
-  if equals(name, "format") || equals(name, "print_fmt") || equals(name, "println_fmt") || equals(name, "printf") {
+  if equals(name, "format") || equals(name, "print_fmt") || equals(name, "println_fmt") ||
+    equals(name, "printf") {
     ret 0;
   }
   // fprintf(stream, fmt, ...), sprintf(dst, fmt, ...): one argument
@@ -1085,8 +1092,9 @@ fun _format_fmt_arg_index(str name) num {
 }
 
 fun _is_c_style_format(str name) bin {
-  ret equals(name, "printf") || equals(name, "fprintf") || equals(name, "sprintf") || equals(name, "snprintf");
-}
+  ret equals(name, "printf") || equals(name, "fprintf") || equals(name, "sprintf") ||
+    equals(name, "snprintf");
+  }
 
 // The `{type}` placeholders in `fmt` (Fun's own `format()` syntax),
 // in order: `""` for an untyped `{}`, or one of the 7 recognized
@@ -1119,7 +1127,9 @@ fun _fun_format_specs(str fmt) Vec<str> {
     }
     if i + 4 < n && fmt[i + 4] == '}' {
       str word = substr(fmt, i + 1, 3);
-      if equals(word, "str") || equals(word, "num") || equals(word, "dec") || equals(word, "bin") || equals(word, "chr") || equals(word, "ptr") || equals(word, "raw") {
+      if equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
+        equals(word, "bin") || equals(word, "chr") || equals(word, "ptr") ||
+        equals(word, "raw") {
         out.push(word);
         i = i + 5;
         continue;
@@ -1159,7 +1169,8 @@ fun _c_format_specs(str fmt) Option<Vec<str>> {
       i = i + 1;
       continue;
     }
-    for i < n && (fmt[i] == '-' || fmt[i] == '+' || fmt[i] == '0' || fmt[i] == ' ' || fmt[i] == '#') {
+    for i < n &&
+      (fmt[i] == '-' || fmt[i] == '+' || fmt[i] == '0' || fmt[i] == ' ' || fmt[i] == '#') {
       i = i + 1;
     }
     if i < n && fmt[i] == '*' {
@@ -1179,7 +1190,8 @@ fun _c_format_specs(str fmt) Option<Vec<str>> {
         i = i + 1;
       }
     }
-    for i < n && (fmt[i] == 'l' || fmt[i] == 'h' || fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't' || fmt[i] == 'L') {
+    for i < n &&
+      (fmt[i] == 'l' || fmt[i] == 'h' || fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't' || fmt[i] == 'L') {
       i = i + 1;
     }
     if i >= n {
@@ -1507,7 +1519,8 @@ impl Checker {
   // actually helps, and leaves anything else (a generic mangled name, a
   // genuinely unknown type) untouched.
   canonical_type_name(str name) str {
-    if self.compounds.at(name).is_some() || self.methods.at(name).is_some() || self.quirks.has(name) || self.plain_enums.has(name) {
+    if self.compounds.at(name).is_some() || self.methods.at(name).is_some() ||
+      self.quirks.has(name) || self.plain_enums.has(name) {
       ret name;
     }
     num sep = index_of_str(name, "__");
@@ -1675,7 +1688,8 @@ impl Checker {
       for b < holder.bounds.len {
         Vec<str> combination = holder.bounds.get(b);
         b = b + 1;
-        if at_param < combination.len && equals(combination.get(at_param), supplied_name) {
+        if at_param < combination.len &&
+          equals(combination.get(at_param), supplied_name) {
           listed = true;
         }
       }
@@ -1779,7 +1793,8 @@ impl Checker {
     }
     // A value of that name, or a type of that name, means this is not an
     // alias at all.
-    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() || self.quirks.has(alias) || self.plain_enums.has(alias) {
+    if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() ||
+      self.quirks.has(alias) || self.plain_enums.has(alias) {
       ret false;
     }
     let known = self.fns.at(method);
@@ -2104,10 +2119,12 @@ fun _is_assignment(str op) bin {
     ret false;
   }
   str head = substr(op, 0, len(op) - 1);
-  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") || equals(
+  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") ||
+    equals(
     head,
     "%"
-  ) || equals(head, "&") || equals(head, "|") || equals(head, "^") || equals(head, "<<") || equals(
+  ) || equals(head, "&") || equals(head, "|") || equals(head, "^") || equals(head, "<<") ||
+    equals(
     head,
     ">>"
   );
@@ -2187,7 +2204,8 @@ fun _branch_enum_name(Node* condition) str {
 }
 
 fun _is_comparison(str op) bin {
-  ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") || equals(
+  ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") ||
+    equals(
     op,
     "<="
   ) || equals(op, ">=");
@@ -2293,7 +2311,8 @@ impl Checker {
       }
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
-        if it.has_index_name && equals(iterable_type.name, "Map") && iterable_type.generic_args.len == 2 {
+        if it.has_index_name && equals(iterable_type.name, "Map") &&
+          iterable_type.generic_args.len == 2 {
           // `for key, val :: someMap`: the two-variable form names a
           // key/value pair for a Map, not an index/item pair the way
           // it does for a Vec/array - the map's own declared key and
@@ -2512,7 +2531,8 @@ impl Checker {
       // A method that must be awaited is not interchangeable with one
       // that must not be.
       let promised = required.methods.at(name);
-      if promised.is_some() && promised.unwrap().is_async != supplied.unwrap().is_async {
+      if promised.is_some() &&
+        promised.unwrap().is_async != supplied.unwrap().is_async {
         self.fail(
           format(
           "'{str}' does not match how '{str}' declares '{str}'",

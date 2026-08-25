@@ -103,7 +103,8 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     // name-based check, so this applies regardless of which token
     // kind carried it.
     num modifier = 0;
-    if ttype == TokenKind.Type && (keyword_is_datatype(token_word(t)) || !equals(c_builtin_owner(token_word(t)), "")) {
+    if ttype == TokenKind.Type &&
+      (keyword_is_datatype(token_word(t)) || !equals(c_builtin_owner(token_word(t)), "")) {
       modifier = 1;
     }
 

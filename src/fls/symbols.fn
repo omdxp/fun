@@ -2129,7 +2129,8 @@ fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file
   fit expr.kind {
     .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
     .Expression(fe) -> {
-      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right || fe.right == nil {
+      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
+        fe.right == nil {
         ret "";
       }
       str base_type = _expr_type_name(tokens, program, fe.left, file, line);

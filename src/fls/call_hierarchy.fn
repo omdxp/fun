@@ -192,7 +192,8 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
     Token t = tokens.get(k);
     num idx = k;
     k = k + 1;
-    if t.type != TokenType.Identifier || !covers(target_node, f, doc.path, t.pos.line) {
+    if t.type != TokenType.Identifier ||
+      !covers(target_node, f, doc.path, t.pos.line) {
       continue;
     }
     let next = token_after(&tokens, idx + 1);

@@ -843,10 +843,12 @@ pub fun node_is_array(Node n) bin {
 pub fun node_is_assignment(Node n) bin {
   fit n.kind {
     .Expression(e) -> {
-      ret equals(e.op, "=") || equals(e.op, "+=") || equals(e.op, "-=") || equals(e.op, "*=") || equals(
+      ret equals(e.op, "=") || equals(e.op, "+=") || equals(e.op, "-=") ||
+        equals(e.op, "*=") || equals(
         e.op,
         "/="
-      ) || equals(e.op, "%=") || equals(e.op, "&=") || equals(e.op, "|=") || equals(e.op, "^=") || equals(
+      ) || equals(e.op, "%=") || equals(e.op, "&=") || equals(e.op, "|=") ||
+        equals(e.op, "^=") || equals(
         e.op,
         "<<="
       ) || equals(e.op, ">>=");

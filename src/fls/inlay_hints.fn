@@ -220,7 +220,8 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
   let prev = token_before(tokens, name_idx);
   if prev.is_some() {
     Token p = prev.unwrap();
-    if p.type == TokenType.Keyword && (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
+    if p.type == TokenType.Keyword &&
+      (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
       token_word(p),
       "async"
     )) {
@@ -230,7 +231,8 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
   bin at_stmt_boundary = prev.is_none();
   if prev.is_some() {
     Token p = prev.unwrap();
-    at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') || token_is_symbol(
+    at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') ||
+      token_is_symbol(
       p,
       ';'
     );
@@ -254,10 +256,12 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
     if token_is_symbol(k, '{') {
       ret true;
     }
-    bin typeish = k.type == TokenType.Identifier || k.type == TokenType.Keyword || token_is_operator(
+    bin typeish = k.type == TokenType.Identifier || k.type == TokenType.Keyword ||
+      token_is_operator(
       k,
       "*"
-    ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') || token_is_operator(
+    ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||
+      token_is_operator(
       k,
       "<"
     ) || token_is_operator(k, ">") || token_is_operator(k, ",");

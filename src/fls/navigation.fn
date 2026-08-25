@@ -187,7 +187,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // to a trailing same-line comment (`Circle(num), // meaning`),
     // scoped to these two kinds since a trailing comment on a
     // function/compound/etc. is rarely meant as its doc.
-    if equals(doc_comment, "") && (d.kind == DeclarationKind.Field || d.kind == DeclarationKind.Variant) {
+    if equals(doc_comment, "") &&
+      (d.kind == DeclarationKind.Field || d.kind == DeclarationKind.Variant) {
       doc_comment = doc_comment_trailing(source_text, d.pos.line);
     }
   }
@@ -325,7 +326,8 @@ pub fun definition_workspace_wide(
     // Restrict to true top-level declarations only (what
     // lookup_top_level itself would have matched), not a field,
     // variant, or method the table also indexes.
-    bin is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) && equals(
+    bin is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) &&
+      equals(
       d.container,
       ""
     );
@@ -699,7 +701,8 @@ pub fun dot_shorthand_context_type_at(
   }
   Token prev = tokens.get(i);
 
-  if token_is_operator(prev, "==") || token_is_operator(prev, "!=") || token_is_operator(prev, "=") {
+  if token_is_operator(prev, "==") || token_is_operator(prev, "!=") ||
+    token_is_operator(prev, "=") {
     let operand = token_before(tokens, i);
     if operand.is_none() {
       ret "";
@@ -852,7 +855,8 @@ fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
   // A field/method/variant's own container is worth linking even
   // when its detail carries no type name of its own (a `num` field
   // has nowhere else useful to point).
-  if !equals(d.container, "") && !equals(d.container, d.name) && !names.contains(d.container) {
+  if !equals(d.container, "") && !equals(d.container, d.name) &&
+    !names.contains(d.container) {
     names.push(d.container);
   }
   StringBuilder links = string_builder_init(64);

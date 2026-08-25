@@ -108,7 +108,8 @@ fun _chain_at(Vec<Token>* tokens, num line, num character, str text) str {
       continue;
     }
     num close_char = byte_col_to_utf16_char(text, tok_line, t.pos.end_col - 1);
-    bin at_or_after_open = line > opened.line || (line == opened.line && character >= opened.col);
+    bin at_or_after_open = line > opened.line ||
+      (line == opened.line && character >= opened.col);
     bin at_or_before_close = line < tok_line || (line == tok_line && character <= close_char);
     if at_or_after_open && at_or_before_close {
       _Range r;
@@ -135,7 +136,8 @@ fun _bracket_kind_of(Token t) chr {
   if token_is_operator(t, "[") {
     ret '[';
   }
-  if token_is_symbol(t, ')') || token_is_symbol(t, ']') || token_is_symbol(t, '{') || token_is_symbol(t, '}') {
+  if token_is_symbol(t, ')') || token_is_symbol(t, ']') || token_is_symbol(t, '{') ||
+    token_is_symbol(t, '}') {
     fit t.data {
       .Cval(c) -> { ret c; }
       _ -> {}

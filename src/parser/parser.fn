@@ -940,7 +940,8 @@ impl ParseState {
           off = off + 1;
           continue;
         }
-        if token_is_operator(after, ">") || token_is_operator(after, ">>") || token_is_symbol(
+        if token_is_operator(after, ">") || token_is_operator(after, ">>") ||
+          token_is_symbol(
           after,
           '>'
         ) {
@@ -1091,7 +1092,8 @@ impl ParseState {
         continue;
       }
       num j = i;
-      for j < self.tokens.len && token_is_nl_or_comment_or_newline_separator(self.tokens.get(j)) {
+      for j < self.tokens.len &&
+        token_is_nl_or_comment_or_newline_separator(self.tokens.get(j)) {
         j = j + 1;
       }
       if j >= self.tokens.len {
@@ -1368,10 +1370,12 @@ impl Parser {
         if !equals(name, "_") {
           if !is_member_access {
             if !is_sizeof_type_operand && self.state.get_scope_entity(name) == nil {
-              if self.state.get_symbol(name).is_none() && !self.state.global_symbols.has(name) {
+              if self.state.get_symbol(name).is_none() &&
+                !self.state.global_symbols.has(name) {
                 if !_is_c_macro_ident(name) {
                   bin is_possible_enum_member_access = self.state.next_token_is_operator(".");
-                  if !self.state.next_token_is_operator("(") && !is_possible_enum_member_access && !self.in_fit_condition {
+                  if !self.state.next_token_is_operator("(") && !is_possible_enum_member_access &&
+                    !self.in_fit_condition {
                     let msg = format("unknown identifier '{str}'", name);
                     defer free(msg);
                     self.state.err(msg);
@@ -1699,7 +1703,8 @@ impl Parser {
           .Expression(exp2) -> {
             bin left_is_array = node_is_array(*exp2.left);
             bin right_is_assign = node_is_assignment(*exp2.right);
-            bin left_is_call_or_index = node_is_expression(*exp2.left, "()") || node_is_expression(
+            bin left_is_call_or_index = node_is_expression(*exp2.left, "()") ||
+              node_is_expression(
               *exp2.left,
               "[]"
             );
@@ -1755,7 +1760,8 @@ impl Parser {
         // A `fit` arm's comma-separated multi-pattern list only supports
         // string-literal patterns, not bare enum-variant shorthand
         // (`.A, .B -> {}` fails to parse where `"a", "b" -> {}` works).
-        if t.type == TokenType.Number || t.type == TokenType.Boolean || t.type == TokenType.String {
+        if t.type == TokenType.Number || t.type == TokenType.Boolean ||
+          t.type == TokenType.String {
           ret self.parse_single_token_to_node();
         }
         if t.type == TokenType.Identifier {
@@ -1776,8 +1782,10 @@ impl Parser {
             .None -> {}
           }
           bin is_value_in_scope = self.state.get_scope_entity(name) != nil;
-          bin is_known_or_forward_type = self.state.is_known_compound_symbol(name) || self.state.is_forward_declared_type(name);
-          if !after_member_access && !is_value_in_scope && is_known_or_forward_type && self.state.looks_like_compound_init() {
+          bin is_known_or_forward_type = self.state.is_known_compound_symbol(name) ||
+            self.state.is_forward_declared_type(name);
+          if !after_member_access && !is_value_in_scope && is_known_or_forward_type &&
+            self.state.looks_like_compound_init() {
             DataType* dt = malloc(sizeof(DataType));
             *dt = dtype_new();
             let dterr = self.state.parse_datatype(dt);
@@ -1811,7 +1819,8 @@ impl Parser {
             }
             .None -> {}
           }
-          if !after_member_access && in_sizeof_ctx && self.state.looks_like_sizeof_generic_type() {
+          if !after_member_access && in_sizeof_ctx &&
+            self.state.looks_like_sizeof_generic_type() {
             DataType* sdt = malloc(sizeof(DataType));
             *sdt = dtype_new();
             let sderr = self.state.parse_datatype(sdt);
@@ -1839,13 +1848,15 @@ impl Parser {
           // that can run the length of the file when there's no closing
           // `>` nearby, so it must not run for every ordinary identifier,
           // only the rare ones that are already known functions.
-          bin could_be_generic_call = !after_member_access && !is_value_in_scope && self.state.is_known_function(name);
+          bin could_be_generic_call = !after_member_access && !is_value_in_scope &&
+            self.state.is_known_function(name);
           bin looks_like_generic_call = false;
           if could_be_generic_call {
             num after_generic = self.state.skip_generic_args_tokens(1);
             if after_generic != 1 {
               let next_after_generic = self.state.token_peek_n(after_generic);
-              if next_after_generic.is_some() && token_is_operator(
+              if next_after_generic.is_some() &&
+                token_is_operator(
                 next_after_generic.unwrap(),
                 "("
               ) {
@@ -1890,7 +1901,8 @@ impl Parser {
           // continuations (`(`, `[`, `.`) and the `<-` receive prefix
           // aren't binary-only, so they still continue the primary. See
           // `Parser.stop_at_binary_op`'s doc comment.
-          if self.stop_at_binary_op && is_binary_only_operator(t) && self.node_peek_expressionable().is_some() {
+          if self.stop_at_binary_op && is_binary_only_operator(t) &&
+            self.node_peek_expressionable().is_some() {
             ret .None;
           }
           ret self.parse_expression();
@@ -4660,7 +4672,8 @@ impl Parser {
     if arch_kw_tok.is_some() && token_is_keyword(arch_kw_tok.unwrap(), "arch") {
       self.state.token_next();
       let arch_val_tok = self.state.token_next();
-      if arch_val_tok.is_none() || (arch_val_tok.unwrap().type != TokenType.Identifier && arch_val_tok.unwrap().type != TokenType.Keyword) {
+      if arch_val_tok.is_none() ||
+        (arch_val_tok.unwrap().type != TokenType.Identifier && arch_val_tok.unwrap().type != TokenType.Keyword) {
         self.state.err("expected architecture name after 'arch'");
         ret .Some(ParseErrorKind.InvalidIdentifier);
       }
@@ -4679,7 +4692,8 @@ impl Parser {
     clobbers.init(0);
 
     let open_paren_tok = self.state.token_peek_next();
-    if open_paren_tok.is_some() && (token_is_symbol(open_paren_tok.unwrap(), '(') || token_is_operator(
+    if open_paren_tok.is_some() &&
+      (token_is_symbol(open_paren_tok.unwrap(), '(') || token_is_operator(
       open_paren_tok.unwrap(),
       "("
     )) {
@@ -4697,7 +4711,8 @@ impl Parser {
           break;
         }
         let section_tok = self.state.token_next();
-        if section_tok.is_none() || (section_tok.unwrap().type != TokenType.Identifier && section_tok.unwrap().type != TokenType.Keyword) {
+        if section_tok.is_none() ||
+          (section_tok.unwrap().type != TokenType.Identifier && section_tok.unwrap().type != TokenType.Keyword) {
           self.state.err("expected asm operand section");
           ret .Some(ParseErrorKind.InvalidKeyword);
         }
@@ -4856,7 +4871,8 @@ impl Parser {
   _check_fuzz_param_shape(Node* param, str expected_type_name, num expected_pointer_depth) Option<ParseErrorKind> {
     fit param.kind {
       .Variable(v) -> {
-        if !equals(v.var_type.type_str, expected_type_name) || v.var_type.pointer_depth != expected_pointer_depth {
+        if !equals(v.var_type.type_str, expected_type_name) ||
+          v.var_type.pointer_depth != expected_pointer_depth {
           self.state.err("'fuzz' parameter has the wrong type -- expected 'raw* data, num len'");
           ret .Some(ParseErrorKind.InvalidStatement);
         }
@@ -5009,7 +5025,8 @@ impl Parser {
     }
     WarningId warning_id = maybe_id.unwrap();
 
-    if !self.has_current_function && !self._warning_control_is_valid_in_module_scope(warning_id) {
+    if !self.has_current_function &&
+      !self._warning_control_is_valid_in_module_scope(warning_id) {
       self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, and unused_compound may be controlled at module scope");
       ret .Some(ParseErrorKind.InvalidStatement);
     }
@@ -5209,7 +5226,8 @@ impl Parser {
           if dot_tok.is_none() {
             break;
           }
-          bin is_dot = token_is_operator(dot_tok.unwrap(), ".") || token_is_symbol(
+          bin is_dot = token_is_operator(dot_tok.unwrap(), ".") ||
+            token_is_symbol(
             dot_tok.unwrap(),
             '.'
           );
@@ -5982,7 +6000,8 @@ impl Parser {
           has_quirk_concrete_instantiation = true;
         }
       }
-    } elif peek_after_type.is_some() && peek_after_type.unwrap().type == TokenType.Identifier {
+    } elif peek_after_type.is_some() &&
+      peek_after_type.unwrap().type == TokenType.Identifier {
       self.state.err("expected 'as' before quirk name in impl header");
       ret .Some(ParseErrorKind.InvalidIdentifier);
     } elif peek_after_type.is_none() || !token_is_symbol(peek_after_type.unwrap(), '{') {

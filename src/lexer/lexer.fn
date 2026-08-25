@@ -582,7 +582,8 @@ impl Lexer {
       self._advance(); // consume the newline ending the previous segment
 
       num lookahead = self.pos;
-      for lookahead < self.len && (self.src[lookahead] == ' ' || self.src[lookahead] == '\t') {
+      for lookahead < self.len &&
+        (self.src[lookahead] == ' ' || self.src[lookahead] == '\t') {
         lookahead = lookahead + 1;
       }
       if lookahead >= self.len || self.src[lookahead] != '`' {

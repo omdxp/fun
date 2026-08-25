@@ -942,7 +942,8 @@ fun _rename_colliding_functions(
         // exact name, so renaming it would break the linkage. Codegen
         // renames the colliding Fun-defined side instead; see
         // `Codegen.c_shadow_names`.
-        if !fnv.has_type_params && fnv.has_name && fnv.has_body && _merged_has_function_name(
+        if !fnv.has_type_params && fnv.has_name && fnv.has_body &&
+          _merged_has_function_name(
           merged,
           fnv.name
         ) {

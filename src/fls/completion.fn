@@ -439,7 +439,8 @@ fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num charac
   // Only for the first argument, before any comma, closing quote, or
   // the statement's own semicolon, past any of which the id is
   // already written, and a reader is typing the reason instead.
-  if index_of_char(after_kw, ',') >= 0 || index_of_char(after_kw, ';') >= 0 || index_of_char(
+  if index_of_char(after_kw, ',') >= 0 || index_of_char(after_kw, ';') >= 0 ||
+    index_of_char(
     after_kw,
     '"'
   ) >= 0 {
@@ -706,7 +707,8 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
     if t.type != TokenType.Keyword || !equals(token_word(t), "compound") {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier || !equals(token_word(tokens.get(i)), type_name) {
+    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+      !equals(token_word(tokens.get(i)), type_name) {
       continue;
     }
     num j = i + 1;
@@ -730,7 +732,8 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
         j = j + 1;
         continue;
       }
-      if depth == 1 && bt.type == TokenType.Identifier && equals(token_word(bt), field_name) {
+      if depth == 1 && bt.type == TokenType.Identifier &&
+        equals(token_word(bt), field_name) {
         let after = _next_real_token(tokens, j);
         if after.is_some() && token_is_symbol(after.unwrap(), ';') {
           ret _base_type_before(tokens, j);
@@ -860,7 +863,8 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
     if !is_compound && !is_enum && !is_methods {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier || !equals(token_word(tokens.get(i)), type_name) {
+    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+      !equals(token_word(tokens.get(i)), type_name) {
       continue;
     }
     num j = i + 1;
@@ -888,7 +892,8 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
         str member_name = token_word(bt);
         if is_enum {
           let before = _prev_real_token(tokens, j);
-          if before.is_some() && (token_is_symbol(before.unwrap(), '{') || token_is_operator(before.unwrap(), ",")) {
+          if before.is_some() &&
+            (token_is_symbol(before.unwrap(), '{') || token_is_operator(before.unwrap(), ",")) {
             items.push(_item(member_name, .EnumMember, _variant_detail_from_tokens(tokens, j, member_name)));
           }
         } elif is_compound {
@@ -931,7 +936,8 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
     Token t = tokens.get(i);
     if t.type == TokenType.Identifier {
       str name = token_word(t);
-      if i + 1 < tokens.len && token_is_operator(tokens.get(i + 1), "(") && !fn_names.contains(name) {
+      if i + 1 < tokens.len && token_is_operator(tokens.get(i + 1), "(") &&
+        !fn_names.contains(name) {
         fn_names.push(name);
       }
       if i > 0 {
@@ -1072,7 +1078,8 @@ fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str cu
   num op_idx = _prev_real_index(tokens, dot_idx);
   if op_idx >= 0 {
     Token op = tokens.get(op_idx);
-    if token_is_operator(op, "==") || token_is_operator(op, "!=") || token_is_operator(op, "=") {
+    if token_is_operator(op, "==") || token_is_operator(op, "!=") ||
+      token_is_operator(op, "=") {
       num operand_idx = _prev_real_index(tokens, op_idx);
       if operand_idx >= 0 {
         str operand_type = _operand_type_from_tokens(tokens, operand_idx, current_file, cache);
@@ -1158,7 +1165,8 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
     if t.type != TokenType.Keyword || !equals(token_word(t), "fun") {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier || !equals(token_word(tokens.get(i)), callee_name) {
+    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+      !equals(token_word(tokens.get(i)), callee_name) {
       continue;
     }
     num j = i + 1;
@@ -1698,7 +1706,8 @@ fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num
     if t.type == TokenType.NewLine || t.type == TokenType.Comment {
       continue;
     }
-    if t.pos.line > source_line || (t.pos.line == source_line && t.pos.start_col >= source_col) {
+    if t.pos.line > source_line ||
+      (t.pos.line == source_line && t.pos.start_col >= source_col) {
       break;
     }
     if token_is_symbol(t, '{') {

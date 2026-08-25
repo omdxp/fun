@@ -195,7 +195,9 @@ impl Server {
     // back is the same place. `typeDefinition` asks a different
     // question (what a value's type is, not where the value itself
     // was declared) and gets its own handler.
-    if equals(method, "textDocument/definition") || equals(method, "textDocument/declaration") || equals(
+    if equals(method, "textDocument/definition") ||
+      equals(method, "textDocument/declaration") ||
+      equals(
       method,
       "textDocument/implementation"
     ) {
