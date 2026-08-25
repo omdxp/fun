@@ -455,16 +455,11 @@ pub fun compile_to_c_mode(
   ret .Ok(true);
 }
 
-// Builds `c_path` into `exe_path`. Returns the compiler's exit code.
-// MSVC spells its arguments differently and links the C runtime itself,
-// so the thread and math flags apply only to gcc-style compilers.
-pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
-  str cc = c_compiler();
-  Vec<str> argv_args;
-  argv_args.init(0);
-  defer argv_args.free();
-  argv_args.push(cc);
-
+// Appends the arguments a compile of `c_path` into `exe_path` needs,
+// after `cc`'s own name is already in `argv_args`. MSVC spells its
+// arguments differently and links the C runtime itself, so the thread
+// and math flags apply only to gcc-style compilers.
+fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, bin debug_info) {
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
     argv_args.push(c_path);
@@ -484,11 +479,94 @@ pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
     argv_args.push("-pthread");
     argv_args.push("-lm");
   }
+}
+
+// The C compilers tried, in order, when `FUN_CC` names none.
+fun _default_cc_candidates() Vec<str> {
+  Vec<str> out;
+  out.init(3);
+  out.push("clang");
+  out.push("gcc");
+  if runtime_backend_is_windows() {
+    out.push("cl");
+  } else {
+    out.push("cc");
+  }
+  ret out;
+}
+
+// Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
+// arguments appended after the usual defaults (a user override is
+// trusted to know what it's asking for, so this streams the
+// compiler's own output live rather than capturing it).
+fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(cc);
+  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+
+  str extra = env_or("FUN_CC_ARGS", "");
+  if !equals(extra, "") {
+    Vec<str> extra_parts = split(extra, ' ');
+    defer extra_parts.free();
+    num j = 0;
+    for j < extra_parts.len {
+      str part = extra_parts.get(j);
+      if !equals(part, "") {
+        argv_args.push(part);
+      }
+      j = j + 1;
+    }
+  }
 
   str[] argv = argv_from(&argv_args);
   let code = spawn_inherited(argv);
   free_argv(argv);
   ret code;
+}
+
+// Builds `c_path` into `exe_path`. Returns the compiler's exit code.
+// `FUN_CC`, when set, is used exactly as given. Otherwise, each of
+// `_default_cc_candidates` is tried in turn until one is actually found
+// on `PATH`; a candidate that's found but fails to compile stops the
+// search there rather than trying the next one, since a real compile
+// error is never solved by switching compilers.
+pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret _compile_with_cc(override_cc, c_path, exe_path, debug_info);
+  }
+
+  Vec<str> candidates = _default_cc_candidates();
+  defer candidates.free();
+  num i = 0;
+  for i < candidates.len {
+    str cc = candidates.get(i);
+    i = i + 1;
+
+    Vec<str> argv_args;
+    argv_args.init(0);
+    defer argv_args.free();
+    argv_args.push(cc);
+    _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+
+    str[] argv = argv_from(&argv_args);
+    let result = run(argv);
+    free_argv(argv);
+    if result.is_err() {
+      // Not installed; try the next candidate.
+      continue;
+    }
+    ProcessResult r = result.unwrap();
+    if r.exit_code != 0 {
+      writeln_to(Sink.Stderr, r.stderr_text);
+    }
+    ret r.exit_code;
+  }
+
+  writeln_to(Sink.Stderr, "no C compiler found (tried clang, gcc, cc); set FUN_CC to override");
+  ret 1;
 }
 
 // The C compilers this tries, in order, for building a fuzz harness:
