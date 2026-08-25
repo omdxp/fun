@@ -146,7 +146,7 @@ fun _token_index_at_or_before(Vec<Token>* tokens, num line, num character) Optio
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+    if t.type == .Comment || t.type == .NewLine {
       continue;
     }
     if t.pos.line > source_line {

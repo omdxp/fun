@@ -124,9 +124,9 @@ pub fun left_has_priority(str op_left, str op_right) bin {
   let left = op_precedence_for(op_left);
   let right = op_precedence_for(op_right);
   if equals(op_left, op_right) {
-    ret left.assoc == Associativity.LeftToRight;
+    ret left.assoc == .LeftToRight;
   }
-  if left.assoc == Associativity.RightToLeft {
+  if left.assoc == .RightToLeft {
     ret false;
   }
   ret left.rank <= right.rank;
@@ -163,7 +163,7 @@ pub fun is_left_operanded_unary_operator(str op) bin {
 // (`if`/`elif`) needs to keep parsing a following binary operator, e.g.
 // the `&&` in `if (a || b) && c`.
 pub fun is_binary_only_operator(Token t) bin {
-  if t.type != TokenType.Operator {
+  if t.type != .Operator {
     ret false;
   }
   str op = "";
@@ -188,8 +188,8 @@ test "op_precedence_for ranks multiplication tighter than addition" {
 test "op_precedence_for reports RightToLeft for assignment, LeftToRight for arithmetic" {
   let assign = op_precedence_for("=");
   let plus = op_precedence_for("+");
-  assert assign.assoc == Associativity.RightToLeft, "expected '=' to be right-associative";
-  assert plus.assoc == Associativity.LeftToRight, "expected '+' to be left-associative";
+  assert assign.assoc == .RightToLeft, "expected '=' to be right-associative";
+  assert plus.assoc == .LeftToRight, "expected '+' to be left-associative";
 }
 
 test "op_precedence_for reports not-found for an unrecognized string" {
@@ -245,22 +245,22 @@ test "is_left_operanded_unary_operator only matches ++/--" {
 
 test "is_binary_only_operator recognizes infix operators, rejects postfix continuations" {
   Token and_tok;
-  and_tok.type = TokenType.Operator;
-  and_tok.data = TokenData.Sval("&&");
+  and_tok.type = .Operator;
+  and_tok.data = .Sval("&&");
   assert is_binary_only_operator(and_tok), "'&&' should be a binary-only operator";
 
   Token dot_tok;
-  dot_tok.type = TokenType.Operator;
-  dot_tok.data = TokenData.Sval(".");
+  dot_tok.type = .Operator;
+  dot_tok.data = .Sval(".");
   assert !is_binary_only_operator(dot_tok), "'.' should not be binary-only (postfix continuation)";
 
   Token lparen_tok;
-  lparen_tok.type = TokenType.Operator;
-  lparen_tok.data = TokenData.Sval("(");
+  lparen_tok.type = .Operator;
+  lparen_tok.data = .Sval("(");
   assert !is_binary_only_operator(lparen_tok), "'(' should not be binary-only (postfix continuation)";
 
   Token ident_tok;
-  ident_tok.type = TokenType.Identifier;
-  ident_tok.data = TokenData.Sval("x");
+  ident_tok.type = .Identifier;
+  ident_tok.data = .Sval("x");
   assert !is_binary_only_operator(ident_tok), "a non-operator token should not be binary-only";
 }

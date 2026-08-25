@@ -72,7 +72,7 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   if dt.flags.is_pointer && t.pointer_depth == 0 {
     t.pointer_depth = 1;
   }
-  if t.base == DataTypeType.Unknown {
+  if t.base == .Unknown {
     t.name = dt.type_str;
   }
   num i = 0;
@@ -110,7 +110,7 @@ pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) Chec
 // A name the checker cannot resolve stands for any type, so it never
 // rejects what it does not understand.
 pub fun is_unknown(CheckedType t) bin {
-  if t.base != DataTypeType.Unknown {
+  if t.base != .Unknown {
     ret false;
   }
   // A `let` carries a placeholder until its value is known, which is
@@ -196,30 +196,30 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   // `nil`, and the zero it is written as, stand for any pointer, and
   // for a string, which is one. Zero remains a number besides.
   if from.is_null_literal &&
-    (to.pointer_depth > 0 || to.base == DataTypeType.Str || to.base == DataTypeType.Raw) {
+    (to.pointer_depth > 0 || to.base == .Str || to.base == .Raw) {
     ret true;
   }
   // A raw pointer stands for any pointer, in either direction, and a
   // string is a pointer.
-  if to.base == DataTypeType.Raw &&
-    (from.pointer_depth > 0 || from.base == DataTypeType.Str) {
+  if to.base == .Raw &&
+  (from.pointer_depth > 0 || from.base == .Str) {
     ret true;
   }
   // A raw pointer stands for any pointer, and for the array storage a
   // pointer is how you allocate.
-  if from.base == DataTypeType.Raw &&
-    (to.pointer_depth > 0 || to.is_array || to.base == DataTypeType.Str) {
+  if from.base == .Raw &&
+  (to.pointer_depth > 0 || to.is_array || to.base == .Str) {
     ret true;
   }
   // An array stands for a pointer to what it holds, as it does in C,
   // and an array of characters is what a string is.
   if from.is_array && !to.is_array {
-    if to.base == DataTypeType.Str && from.base == DataTypeType.Chr {
+    if to.base == .Str && from.base == .Chr {
       ret true;
     }
     // An array of depth N stands for a pointer of depth N.
     if to.pointer_depth == from.array_depth + from.pointer_depth {
-      if to.base == DataTypeType.Raw {
+      if to.base == .Raw {
         ret true;
       }
       ret to.base == from.base && equals(to.name, from.name);
@@ -234,12 +234,12 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   // A whole number widens into a decimal, but a decimal does not narrow
   // back into one without being asked to.
   if _is_numeric(to) && _is_numeric(from) {
-    ret to.base == DataTypeType.Dec || from.base != DataTypeType.Dec;
+    ret to.base == .Dec || from.base != .Dec;
   }
   if to.base != from.base {
     ret false;
   }
-  if to.base == DataTypeType.Unknown {
+  if to.base == .Unknown {
     ret equals(to.name, from.name);
   }
   ret true;
@@ -251,7 +251,7 @@ fun _is_numeric(CheckedType t) bin {
   }
   // A truth value is not a number: it neither widens into one nor
   // stands for one.
-  ret t.base == DataTypeType.Num || t.base == DataTypeType.Dec || t.base == DataTypeType.Chr;
+  ret t.base == .Num || t.base == .Dec || t.base == .Chr;
 }
 
 // What a function accepts and returns.
@@ -830,7 +830,7 @@ impl Checker {
   // True when a type names something the program declares, as opposed to
   // a parameter standing in for whatever an instantiation supplies.
   names_a_declared_type(CheckedType t) bin {
-    if t.base != DataTypeType.Unknown {
+    if t.base != .Unknown {
       ret true;
     }
     if equals(t.name, "") {
@@ -850,8 +850,8 @@ impl Checker {
     if t.pointer_depth > 0 || t.is_array {
       ret false;
     }
-    if t.base != DataTypeType.Unknown {
-      ret t.base == DataTypeType.Num || t.base == DataTypeType.Chr;
+    if t.base != .Unknown {
+      ret t.base == .Num || t.base == .Chr;
     }
     ret self.plain_enums.has(t.name);
   }
@@ -1220,18 +1220,18 @@ fun _c_format_specs(str fmt) Option<Vec<str>> {
 
 fun _data_type_for(str want_name) DataTypeType {
   if equals(want_name, "str") {
-    ret DataTypeType.Str;
+    ret .Str;
   }
   if equals(want_name, "num") {
-    ret DataTypeType.Num;
+    ret .Num;
   }
   if equals(want_name, "dec") {
-    ret DataTypeType.Dec;
+    ret .Dec;
   }
   if equals(want_name, "bin") {
-    ret DataTypeType.Bin;
+    ret .Bin;
   }
-  ret DataTypeType.Chr;
+  ret .Chr;
 }
 
 impl Checker {
@@ -1244,22 +1244,22 @@ impl Checker {
     fit node.kind {
       .Number(data) -> {
         fit data {
-          .Dec(_) -> { ret checked_of(DataTypeType.Dec); }
-          .Cval(_) -> { ret checked_of(DataTypeType.Chr); }
+          .Dec(_) -> { ret checked_of(.Dec); }
+          .Cval(_) -> { ret checked_of(.Chr); }
           .Num(value) -> {
-            CheckedType t = checked_of(DataTypeType.Num);
+            CheckedType t = checked_of(.Num);
             // Zero is how a null pointer is written.
             t.is_null_literal = value == 0;
             ret t;
           }
-          _ -> { ret checked_of(DataTypeType.Num); }
+          _ -> { ret checked_of(.Num); }
         }
       }
-      .String(_) -> { ret checked_of(DataTypeType.Str); }
-      .Character(_) -> { ret checked_of(DataTypeType.Chr); }
-      .Boolean(_) -> { ret checked_of(DataTypeType.Bin); }
+      .String(_) -> { ret checked_of(.Str); }
+      .Character(_) -> { ret checked_of(.Chr); }
+      .Boolean(_) -> { ret checked_of(.Bin); }
       .Nil -> {
-        CheckedType t = checked_of(DataTypeType.Raw);
+        CheckedType t = checked_of(.Raw);
         t.is_null_literal = true;
         ret t;
       }
@@ -1386,7 +1386,7 @@ impl Checker {
       ret t;
     }
     if equals(u.op, "!") {
-      ret checked_of(DataTypeType.Bin);
+      ret checked_of(.Bin);
     }
     ret operand;
   }
@@ -1405,7 +1405,7 @@ impl Checker {
     if equals(e.op, "%") && e.has_left && e.has_right {
       CheckedType left = self.infer(e.left, env);
       CheckedType right = self.infer(e.right, env);
-      if left.base == DataTypeType.Dec || right.base == DataTypeType.Dec {
+      if left.base == .Dec || right.base == .Dec {
         self.fail("the remainder operator does not apply to a decimal", node);
         ret checked_unknown();
       }
@@ -1432,8 +1432,8 @@ impl Checker {
         ret checked_unknown();
       }
       CheckedType base = self.infer(e.left, env);
-      if base.base == DataTypeType.Str && !base.is_array {
-        ret checked_of(DataTypeType.Chr);
+      if base.base == .Str && !base.is_array {
+        ret checked_of(.Chr);
       }
       if !base.is_array {
         ret checked_unknown();
@@ -1448,7 +1448,7 @@ impl Checker {
     }
     if _is_comparison(e.op) || _is_logical(e.op) {
       self.check_comparison(node, e, env);
-      ret checked_of(DataTypeType.Bin);
+      ret checked_of(.Bin);
     }
     if !e.has_left {
       ret checked_unknown();
@@ -1459,7 +1459,7 @@ impl Checker {
     }
     CheckedType right = self.infer(e.right, env);
     // Arithmetic on two numeric kinds widens to the wider one.
-    if right.base == DataTypeType.Dec && left.base == DataTypeType.Num {
+    if right.base == .Dec && left.base == .Num {
       ret right;
     }
     if is_unknown(left) {
@@ -1835,7 +1835,7 @@ impl Checker {
         // known: seeing an impl for it is what says they are, and a type
         // whose impls the checker never saw is left alone rather than
         // reported on a guess.
-        if receiver.base == DataTypeType.Unknown && !self.knows_methods_of(receiver) {
+        if receiver.base == .Unknown && !self.knows_methods_of(receiver) {
           ret;
         }
         self.fail(format("{str} has no method '{str}'", type_name(receiver), method), node);
@@ -1951,7 +1951,7 @@ impl Checker {
       }
       CheckedType got = self.infer(arg_node, env);
       if equals(want_name, "ptr") || equals(want_name, "raw") {
-        if got.pointer_depth == 0 && got.base != DataTypeType.Raw {
+        if got.pointer_depth == 0 && got.base != .Raw {
           self.fail(
             format("argument {num} of '{str}' expects a pointer, found {str}", arg_position, name, type_name(got)),
             arg_node
@@ -1965,7 +1965,7 @@ impl Checker {
       // as idiomatic there as it is unusual in Fun's own type
       // discipline) - widened here, and only here: `{num}`, Fun's
       // own explicit placeholder spelling, still means exactly num.
-      if c_style && equals(want_name, "num") && got.base == DataTypeType.Bin {
+      if c_style && equals(want_name, "num") && got.base == .Bin {
         continue;
       }
       CheckedType want = checked_of(_data_type_for(want_name));
@@ -2077,10 +2077,10 @@ impl Checker {
       if equals(name, "sizeof") {
         if args.len != 1 || !_names_a_type(args.get(0)) {
           self.fail("sizeof measures a type", node);
-          ret checked_of(DataTypeType.Num);
+          ret checked_of(.Num);
         }
         self.check_sizeof_operand(node, args.get(0));
-        ret checked_of(DataTypeType.Num);
+        ret checked_of(.Num);
       }
       ret checked_unknown();
     }
@@ -2220,7 +2220,7 @@ impl Checker {
   // something that merely stands in for one.
   check_condition(Node* condition, TypeEnv* env) {
     CheckedType t = self.infer(condition, env);
-    if is_unknown(t) || t.base == DataTypeType.Bin {
+    if is_unknown(t) || t.base == .Bin {
       ret;
     }
     self.fail(format("a condition expects bin, found {str}", type_name(t)), condition);
@@ -2306,7 +2306,7 @@ impl Checker {
         self.check_statement(c.body, env);
       }
       .Range(r) -> {
-        env.define(r.index_name, checked_of(DataTypeType.Num));
+        env.define(r.index_name, checked_of(.Num));
         self.check_statement(r.body, env);
       }
       .Iter(it) -> {
@@ -2324,7 +2324,7 @@ impl Checker {
           // does not model yet.
           env.define(it.item_name, checked_unknown());
           if it.has_index_name {
-            env.define(it.index_name, checked_of(DataTypeType.Num));
+            env.define(it.index_name, checked_of(.Num));
           }
         }
         self.check_statement(it.body, env);
@@ -2434,7 +2434,7 @@ impl Checker {
         }
         // A void-returning call has no value to bind: `let x = noop();`
         // would declare a variable of a type that holds nothing.
-        if value.base == DataTypeType.Void && value.pointer_depth == 0 && !value.is_array {
+        if value.base == .Void && value.pointer_depth == 0 && !value.is_array {
           self.fail(
             format(
             "'let' variable '{str}' cannot be initialized from a value of type void",
@@ -2765,10 +2765,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
 }
 
 test "a value stands for a type it can be assigned to" {
-  CheckedType num_t = checked_of(DataTypeType.Num);
-  CheckedType dec_t = checked_of(DataTypeType.Dec);
-  CheckedType str_t = checked_of(DataTypeType.Str);
-  CheckedType bin_t = checked_of(DataTypeType.Bin);
+  CheckedType num_t = checked_of(.Num);
+  CheckedType dec_t = checked_of(.Dec);
+  CheckedType str_t = checked_of(.Str);
+  CheckedType bin_t = checked_of(.Bin);
   assert can_assign(dec_t, num_t), "expected a whole number to widen into a decimal";
   assert !can_assign(num_t, dec_t), "expected a decimal not to narrow on its own";
   assert !can_assign(num_t, str_t), "expected a string not to stand for a number";
@@ -2777,24 +2777,24 @@ test "a value stands for a type it can be assigned to" {
 }
 
 test "nil and zero stand for a pointer, and zero stays a number" {
-  CheckedType raw_t = checked_of(DataTypeType.Raw);
+  CheckedType raw_t = checked_of(.Raw);
   raw_t.pointer_depth = 1;
-  CheckedType zero = checked_of(DataTypeType.Num);
+  CheckedType zero = checked_of(.Num);
   zero.is_null_literal = true;
   assert can_assign(raw_t, zero), "expected zero to stand for a null pointer";
-  assert can_assign(checked_of(DataTypeType.Num), zero), "expected zero to remain a number";
+  assert can_assign(checked_of(.Num), zero), "expected zero to remain a number";
 }
 
 test "an array stands for a pointer to what it holds" {
   CheckedType chars;
-  chars = checked_of(DataTypeType.Chr);
+  chars = checked_of(.Chr);
   chars.is_array = true;
   chars.array_depth = 1;
-  assert can_assign(checked_of(DataTypeType.Str), chars), "expected characters to stand for a string";
+  assert can_assign(checked_of(.Str), chars), "expected characters to stand for a string";
 }
 
 test "a written type reads back as what it was written as" {
-  CheckedType pointer = checked_of(DataTypeType.Num);
+  CheckedType pointer = checked_of(.Num);
   pointer.pointer_depth = 1;
   assert equals(type_name(pointer), "num*"), "expected the pointer spelling";
   CheckedType named = checked_unknown();
@@ -2806,13 +2806,13 @@ test "a scope hides an outer binding of the same name" {
   TypeEnv env = type_env_new();
   defer env.free();
   env.push();
-  env.define("x", checked_of(DataTypeType.Num));
+  env.define("x", checked_of(.Num));
   env.push();
-  env.define("x", checked_of(DataTypeType.Str));
+  env.define("x", checked_of(.Str));
   let inner = env.lookup("x");
   assert inner.is_some(), "expected the name to resolve";
-  assert inner.unwrap().base == DataTypeType.Str, "expected the inner binding";
+  assert inner.unwrap().base == .Str, "expected the inner binding";
   env.pop();
   let outer = env.lookup("x");
-  assert outer.unwrap().base == DataTypeType.Num, "expected the outer binding to return";
+  assert outer.unwrap().base == .Num, "expected the outer binding to return";
 }

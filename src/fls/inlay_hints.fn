@@ -43,7 +43,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword || !equals(token_word(t), "let") {
+    if t.type != .Keyword || !equals(token_word(t), "let") {
       continue;
     }
     num src_line = t.pos.line;
@@ -171,7 +171,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       if depth != 1 || !expecting_arg {
         continue;
       }
-      if at.type == TokenType.Comment || at.type == TokenType.NewLine {
+      if at.type == .Comment || at.type == .NewLine {
         continue;
       }
       expecting_arg = false;
@@ -184,7 +184,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
         free(pname);
         continue;
       }
-      bin redundant = at.type == TokenType.Identifier && equals(token_word(at), pname);
+      bin redundant = at.type == .Identifier && equals(token_word(at), pname);
       if redundant {
         free(pname);
         continue;
@@ -220,7 +220,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
   let prev = token_before(tokens, name_idx);
   if prev.is_some() {
     Token p = prev.unwrap();
-    if p.type == TokenType.Keyword &&
+    if p.type == .Keyword &&
       (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
       token_word(p),
       "async"
@@ -256,8 +256,8 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
     if token_is_symbol(k, '{') {
       ret true;
     }
-    bin typeish = k.type == TokenType.Identifier || k.type == TokenType.Keyword ||
-      token_is_operator(
+    bin typeish = k.type == .Identifier || k.type == .Keyword ||
+    token_is_operator(
       k,
       "*"
     ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||

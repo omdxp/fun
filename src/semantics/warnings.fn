@@ -1370,7 +1370,7 @@ impl Analysis {
     self.walk_body(f.body, &locals);
     // A function that names a return type promises a value on every
     // path, and a void one promises nothing.
-    if f.has_rtype && f.rtype != nil && f.rtype.kind != DataTypeType.Void {
+    if f.has_rtype && f.rtype != nil && f.rtype.kind != .Void {
       if !_always_returns(f.body) {
         self.report(
           .MissingReturn,

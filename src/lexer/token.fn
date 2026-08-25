@@ -7,7 +7,7 @@ imp std.string;
 imp std.c.mem;
 
 // The kind of lexical token.
-pub enum TokenType {
+pub enum TokKind {
   Identifier,
   Keyword,
   Operator,
@@ -45,7 +45,7 @@ pub compound Pos {
 
 // A single lexical token: its kind, value, and source span.
 pub compound Token {
-  TokenType type;
+  TokKind type;
   TokenData data;
   Pos pos;
   // True when whitespace (space/tab) follows the token, as opposed to the
@@ -90,7 +90,7 @@ pub fun free_token_vec(Vec<Token>* tokens) {
 // Returns true if `t` is an `Operator` token whose text equals `val`.
 pub fun token_is_operator(Token t, str val) bin {
   fit t.data {
-    .Sval(s) -> { ret t.type == TokenType.Operator && equals(s, val); }
+    .Sval(s) -> { ret t.type == .Operator && equals(s, val); }
     _ -> { ret false; }
   }
 }
@@ -98,7 +98,7 @@ pub fun token_is_operator(Token t, str val) bin {
 // Returns true if `t` is a `Keyword` token whose text equals `val`.
 pub fun token_is_keyword(Token t, str val) bin {
   fit t.data {
-    .Sval(s) -> { ret t.type == TokenType.Keyword && equals(s, val); }
+    .Sval(s) -> { ret t.type == .Keyword && equals(s, val); }
     _ -> { ret false; }
   }
 }
@@ -106,7 +106,7 @@ pub fun token_is_keyword(Token t, str val) bin {
 // Returns true if `t` is a `Symbol` token whose character equals `val`.
 pub fun token_is_symbol(Token t, chr val) bin {
   fit t.data {
-    .Cval(c) -> { ret t.type == TokenType.Symbol && c == val; }
+    .Cval(c) -> { ret t.type == .Symbol && c == val; }
     _ -> { ret false; }
   }
 }
@@ -114,7 +114,7 @@ pub fun token_is_symbol(Token t, chr val) bin {
 // Returns true if `t` is a newline, a comment, or the `\` newline-separator
 // symbol (used to continue a logical line across a physical one).
 pub fun token_is_nl_or_comment_or_newline_separator(Token t) bin {
-  if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+  if t.type == .NewLine || t.type == .Comment {
     ret true;
   }
   ret token_is_symbol(t, '\\');

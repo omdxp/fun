@@ -86,7 +86,7 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
     Token t = tokens.get(i);
     num idx = i;
     i = i + 1;
-    if t.type == TokenType.NewLine {
+    if t.type == .NewLine {
       continue;
     }
     num length = t.pos.end_col - t.pos.start_col;
@@ -214,7 +214,7 @@ fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<bin> {
         k = k + 1;
         continue;
       }
-      if paren_depth == 0 && expect_name && tk.type == TokenType.Identifier {
+      if paren_depth == 0 && expect_name && tk.type == .Identifier {
         flags.set(k, true);
         expect_name = false;
       }

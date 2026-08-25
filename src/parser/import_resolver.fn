@@ -717,7 +717,7 @@ fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, Gl
       for j < tokens.len && token_is_nl_or_comment_or_newline_separator(tokens.get(j)) {
         j = j + 1;
       }
-      if j < tokens.len && tokens.get(j).type == TokenType.Identifier {
+      if j < tokens.len && tokens.get(j).type == .Identifier {
         str name = "";
         fit tokens.get(j).data {
           .Sval(s) -> { name = s; }
@@ -733,7 +733,7 @@ fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, Gl
       for k < tokens.len && token_is_nl_or_comment_or_newline_separator(tokens.get(k)) {
         k = k + 1;
       }
-      if k < tokens.len && tokens.get(k).type == TokenType.Identifier {
+      if k < tokens.len && tokens.get(k).type == .Identifier {
         str fname = "";
         fit tokens.get(k).data {
           .Sval(s) -> { fname = s; }
@@ -1015,7 +1015,7 @@ fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
         fit e.left.kind {
           .Identifier(callee_name) -> {
             if equals(callee_name, old_name) {
-              *e.left = node_new(NodeKind.Identifier(new_name));
+              *e.left = node_new(.Identifier(new_name));
             }
           }
           _ -> { _rewrite_calls_in_node(e.left, old_name, new_name); }
@@ -1049,7 +1049,7 @@ fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
     .Function(fnv) -> {
       if equals(fnv.name, old_name) {
         fnv.name = new_name;
-        n.kind = NodeKind.Function(fnv);
+        n.kind = .Function(fnv);
       }
       if fnv.has_body {
         _rewrite_calls_in_node(fnv.body, old_name, new_name);

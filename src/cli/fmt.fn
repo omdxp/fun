@@ -196,7 +196,7 @@ fun _number_text(Token t) str {
 // True for a character literal, which is a number-kind token carrying a
 // char rather than a numeric value.
 pub fun is_char_literal(Token t) bin {
-  if t.type != TokenType.Number {
+  if t.type != .Number {
     ret false;
   }
   fit t.data {
@@ -279,9 +279,9 @@ impl FmtState {
 
 // Tokens that carry a word: a space always separates two of them.
 fun _is_word_like(Token t) bin {
-  ret t.type == TokenType.Identifier || t.type == TokenType.Keyword ||
-    t.type == TokenType.Number || t.type == TokenType.String || t.type == TokenType.Boolean;
-  }
+  ret t.type == .Identifier || t.type == .Keyword ||
+  t.type == .Number || t.type == .String || t.type == .Boolean;
+}
 
 fun _is_closing(str text) bin {
   ret equals(text, ")") || equals(text, "]");
@@ -291,10 +291,10 @@ fun _is_closing(str text) bin {
 // name written in the leading-capital style types are written in.
 fun _is_type_token(Token t) bin {
   str text = token_text(t);
-  if t.type == TokenType.Keyword {
+  if t.type == .Keyword {
     ret keyword_is_datatype(text);
   }
-  if t.type != TokenType.Identifier {
+  if t.type != .Identifier {
     ret false;
   }
   // A non-`pub` type still reads as one - checked after skipping any
@@ -358,7 +358,7 @@ fun _prev_significant(Vec<Token>* tokens, num idx) num {
   num i = idx - 1;
   for i >= 0 {
     Token t = tokens.get(i);
-    if t.type != TokenType.NewLine && t.type != TokenType.Comment {
+    if t.type != .NewLine && t.type != .Comment {
       ret i;
     }
     i = i - 1;
@@ -370,7 +370,7 @@ fun _next_significant(Vec<Token>* tokens, num idx) num {
   num i = idx;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != TokenType.NewLine && t.type != TokenType.Comment {
+    if t.type != .NewLine && t.type != .Comment {
       ret i;
     }
     i = i + 1;
@@ -385,16 +385,16 @@ fun _is_for_colon(Vec<Token>* tokens, num idx) bin {
   for i > 0 {
     i = i - 1;
     Token t = tokens.get(i);
-    if t.type == TokenType.Comment {
+    if t.type == .Comment {
       continue;
     }
-    if t.type == TokenType.NewLine {
+    if t.type == .NewLine {
       ret false;
     }
-    if t.type == TokenType.Keyword && equals(token_text(t), "for") {
+    if t.type == .Keyword && equals(token_text(t), "for") {
       ret true;
     }
-    if t.type == TokenType.Symbol {
+    if t.type == .Symbol {
       let c = _cval_of(t);
       if c == ';' || c == '{' || c == '}' {
         ret false;
@@ -457,7 +457,7 @@ fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, bin in_decl_only) 
   }
   // A declaration, field, or parameter names what it points at, and the
   // name is followed by a delimiter rather than an operand.
-  if next.type == TokenType.Identifier {
+  if next.type == .Identifier {
     num after_idx = _next_significant(tokens, next_idx + 1);
     if after_idx < 0 {
       ret false;
@@ -485,7 +485,7 @@ fun _looks_like_call_generic_open(Vec<Token>* tokens, num idx) bin {
     ret false;
   }
   Token prev = tokens.get(prev_idx);
-  if prev.type != TokenType.Identifier {
+  if prev.type != .Identifier {
     ret false;
   }
   // A field/method name (`a.b < c`) is never a call-site generic open.
@@ -551,7 +551,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, bin in_decl_only) bin {
   Token prev = tokens.get(prev_idx);
   Token next = tokens.get(next_idx);
   if !_is_type_token(prev) {
-    if !(in_decl_only && prev.type == TokenType.Identifier) {
+    if !(in_decl_only && prev.type == .Identifier) {
       ret false;
     }
   }
@@ -567,7 +567,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, bin in_decl_only) bin {
   }
   Token before = tokens.get(before_idx);
   str bt = token_text(before);
-  if before.type == TokenType.Keyword {
+  if before.type == .Keyword {
     ret equals(bt, "impl") || equals(bt, "compound") || equals(bt, "fun") ||
       equals(bt, "pub") || equals(
       bt,
@@ -669,8 +669,8 @@ fun _needs_space_at(
   }
   // A leading dot opens an enum shorthand, which is a value, not a
   // member access.
-  if _is_dot_run(c) && prev.type == TokenType.Keyword &&
-    (equals(p, "ret") || equals(p, "for")) {
+  if _is_dot_run(c) && prev.type == .Keyword &&
+  (equals(p, "ret") || equals(p, "for")) {
     ret true;
   }
   if equals(c, "*") && _is_pointer_star(tokens, idx, prev, in_decl_only) {
@@ -698,17 +698,17 @@ fun _needs_space_at(
     if _is_close_run(p) > 0 {
       ret false;
     }
-    if prev.type == TokenType.String {
+    if prev.type == .String {
       ret true;
     }
-    if prev.type == TokenType.Keyword {
+    if prev.type == .Keyword {
       ret equals(p, "ret") || equals(p, "if") || equals(p, "elif") || equals(p, "for") ||
         equals(
         p,
         "fit"
       ) || equals(p, "assert") || equals(p, "await");
     }
-    if prev.type == TokenType.Operator && _operator_needs_spaces(p) {
+    if prev.type == .Operator && _operator_needs_spaces(p) {
       ret true;
     }
     ret false;
@@ -731,17 +731,17 @@ fun _needs_space_at(
     if _is_closing(p) {
       ret false;
     }
-    if prev.type == TokenType.Operator || prev.type == TokenType.Symbol {
+    if prev.type == .Operator || prev.type == .Symbol {
       ret _operator_needs_spaces(p);
     }
     ret false;
   }
-  if cur.type == TokenType.Operator || cur.type == TokenType.Symbol {
+  if cur.type == .Operator || cur.type == .Symbol {
     if _operator_needs_spaces(c) {
       ret true;
     }
   }
-  if prev.type == TokenType.Operator || prev.type == TokenType.Symbol {
+  if prev.type == .Operator || prev.type == .Symbol {
     if _operator_needs_spaces(p) {
       ret true;
     }
@@ -770,7 +770,7 @@ fun _is_unary_prefix(Vec<Token>* tokens, num idx, Token prev, bin has_prev) bin 
     ret true;
   }
   str p = token_text(prev);
-  if prev.type == TokenType.Keyword {
+  if prev.type == .Keyword {
     if equals(p, "ret") || equals(p, "if") || equals(p, "elif") || equals(p, "for") ||
       equals(
       p,
@@ -799,10 +799,10 @@ fun _simple_block_end(Vec<Token>* tokens, num open) num {
   num semicolons = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.Comment {
+    if t.type == .Comment {
       ret open;
     }
-    if t.type == TokenType.Symbol {
+    if t.type == .Symbol {
       let c = _cval_of(t);
       if c == '{' {
         ret open;
@@ -828,7 +828,7 @@ fun _leading_closers(Vec<Token>* tokens, num i) num {
   num j = i;
   for j < tokens.len {
     Token t = tokens.get(j);
-    if t.type != TokenType.Symbol {
+    if t.type != .Symbol {
       ret n;
     }
     let c = _cval_of(t);
@@ -848,11 +848,11 @@ fun _inline_width(Vec<Token>* tokens, num from, num to) num {
   num i = from;
   for i <= to {
     Token t = tokens.get(i);
-    if t.type == TokenType.NewLine {
+    if t.type == .NewLine {
       i = i + 1;
       continue;
     }
-    if t.type == TokenType.Symbol {
+    if t.type == .Symbol {
       let c = _cval_of(t);
       if c == '{' || c == '}' || c == ';' {
         i = i + 1;
@@ -877,7 +877,7 @@ fun _fit_arm_end(Vec<Token>* tokens, num from) num {
   num i = from;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       i = i + 1;
       continue;
     }
@@ -908,7 +908,7 @@ fun _fit_condition_end(Vec<Token>* tokens, num from) num {
   num i = from;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       i = i + 1;
       continue;
     }
@@ -944,7 +944,7 @@ fun _bool_chain_operand_end(Vec<Token>* tokens, num from) num {
   num i = from;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       i = i + 1;
       continue;
     }
@@ -1014,7 +1014,7 @@ fun _source_span(str src, Vec<num>* starts, Pos p) str {
 // literal come from source: one is verbatim by definition, and the
 // other keeps the precision, base, and spelling it was written with.
 fun _written_text(str src, Vec<num>* starts, Token t) str {
-  if (t.type == TokenType.String && t.is_raw_string) || t.type == TokenType.Number {
+  if (t.type == .String && t.is_raw_string) || t.type == .Number {
     let verbatim = _source_span(src, starts, t.pos);
     if !equals(verbatim, "") {
       ret verbatim;
@@ -1175,7 +1175,7 @@ fun _asm_statement_end(Vec<Token>* tokens, num i) num {
   num j = i;
   for j < tokens.len {
     Token t = tokens.get(j);
-    if t.type == TokenType.Symbol {
+    if t.type == .Symbol {
       let c = _cval_of(t);
       if c == '(' || c == '{' || c == '[' {
         depth = depth + 1;
@@ -1212,7 +1212,7 @@ fun _chunk_keyword(Vec<Token>* tokens, num from, num end) str {
   num i = from;
   for i <= end {
     Token t = tokens.get(i);
-    if t.type != TokenType.Comment && t.type != TokenType.NewLine {
+    if t.type != .Comment && t.type != .NewLine {
       ret token_text(t);
     }
     i = i + 1;
@@ -1231,7 +1231,7 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
   for i < tokens.len {
     Token t = tokens.get(i);
     bin ends = false;
-    if t.type == TokenType.Symbol {
+    if t.type == .Symbol {
       let c = _cval_of(t);
       if c == '{' {
         depth = depth + 1;
@@ -1248,7 +1248,7 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
       // to it rather than to what follows.
       if last + 1 < tokens.len {
         Token next = tokens.get(last + 1);
-        if next.type == TokenType.Comment {
+        if next.type == .Comment {
           last = last + 1;
         }
       }
@@ -1370,7 +1370,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
   for i < tokens.len {
     Token t = tokens.get(i);
 
-    if t.type == TokenType.NewLine {
+    if t.type == .NewLine {
       // A newline written inside an open generic argument list (e.g. a
       // parameter type like `Map<str,\nGlobalSymbolInfo>`) splits a type
       // expression that should read as one atomic unit; collapse it away
@@ -1383,7 +1383,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
 
     str text = _written_text(src, &starts, t);
-    if t.type == TokenType.Comment {
+    if t.type == .Comment {
       text = _comment_line(_sval_of(t), s.in_doc_fence);
     }
 
@@ -1425,7 +1425,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         }
         continue;
       }
-      bin trailing = t.type == TokenType.Comment && s.pending_newlines == 0;
+      bin trailing = t.type == .Comment && s.pending_newlines == 0;
       if trailing {
         s.space();
         s.write(text);
@@ -1446,7 +1446,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A brace that binds to the name before it opens a compound
     // literal rather than a block, so it stays on its own line only
     // when it does not fit.
-    if t.type == TokenType.Keyword && equals(text, "asm") {
+    if t.type == .Keyword && equals(text, "asm") {
       let close = _asm_statement_end(&tokens, i);
       if close > i {
         Token last = tokens.get(close);
@@ -1473,7 +1473,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A literal follows the name of its type, or the generic arguments
     // of that name, as in `Box<T>{value = x}`. The statement it sits in
     // is what separates it from a declaration's block.
-    bin literal_lead = s.prev.type == TokenType.Identifier || _is_dot_run(prev_text) ||
+    bin literal_lead = s.prev.type == .Identifier || _is_dot_run(prev_text) ||
       _is_close_run(prev_text) > 0;
     // A return type written after a parameter list also introduces a
     // body, as a method inside an impl block does.
@@ -1507,7 +1507,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
           bin arm_unary = false;
           for j <= close {
             Token it = tokens.get(j);
-            if it.type == TokenType.NewLine {
+            if it.type == .NewLine {
               j = j + 1;
               continue;
             }
@@ -1769,7 +1769,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.force_break = true;
       s.pending_newlines = 0;
     }
-    if t.type == TokenType.Comment {
+    if t.type == .Comment {
       if _is_fence_marker(_sval_of(t)) {
         s.in_doc_fence = !s.in_doc_fence;
       }
@@ -1788,7 +1788,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.angle_depth = 0;
       }
     }
-    if t.type == TokenType.Keyword {
+    if t.type == .Keyword {
       if equals(text, "fun") {
         s.in_fun_signature = true;
       } elif equals(text, "compound") || equals(text, "quirk") || equals(text, "impl") {
@@ -1813,12 +1813,12 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.stmt_first = "";
       s.at_stmt_start = true;
       s.bool_chain_wrap = false;
-    } elif t.type != TokenType.Comment && equals(s.stmt_first, "") && !equals(text, "pub") {
+    } elif t.type != .Comment && equals(s.stmt_first, "") && !equals(text, "pub") {
       // `pub` only marks visibility, so the word after it is what says
       // what the statement declares.
       s.stmt_first = text;
     }
-    if t.type != TokenType.Comment {
+    if t.type != .Comment {
       s.at_stmt_start = equals(text, ";") || equals(text, "{") || equals(text, "}");
     }
 

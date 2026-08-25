@@ -298,7 +298,7 @@ fun _const_string_node(str name, str value) Node {
   dt.type_str = "str";
 
   Node* val = malloc(sizeof(Node));
-  *val = node_new(NodeKind.String(value));
+  *val = node_new(.String(value));
 
   VariableNode v;
   v.var_type = dt;
@@ -306,7 +306,7 @@ fun _const_string_node(str name, str value) Node {
   v.val = val;
   v.has_val = true;
   v.is_const = true;
-  ret node_new(NodeKind.Variable(v));
+  ret node_new(.Variable(v));
 }
 
 // Lowers `input` to C at `out_path`, with `defines` available to the
@@ -1006,7 +1006,7 @@ pub fun build_project(bin debug_info) num {
   Manifest m = loaded.unwrap();
   defer m.free();
 
-  if m.kind() == PackageKind.Empty {
+  if m.kind() == .Empty {
     writeln_to(
       Sink.Stderr,
       format("[Error]\npackage `{str}` declares no [lib] or [[bin]] target", m.package_name)
@@ -1366,11 +1366,11 @@ fun _collect_fuzz_targets(str path) Vec<str> {
   for i + 1 < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword || !equals(token_text(t), "fuzz") {
+    if t.type != .Keyword || !equals(token_text(t), "fuzz") {
       continue;
     }
     Token next = tokens.get(i);
-    if next.type == TokenType.String {
+    if next.type == .String {
       // Not `token_text`: for a `.String` token that returns the value
       // re-quoted for source reproduction (`fmt.fn`'s own job), not the
       // decoded name a target was declared with.
@@ -1505,10 +1505,10 @@ fun _declares_top_level_block(str path, str keyword) bin {
   for i + 1 < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword || !equals(token_text(t), keyword) {
+    if t.type != .Keyword || !equals(token_text(t), keyword) {
       continue;
     }
-    if tokens.get(i).type == TokenType.String {
+    if tokens.get(i).type == .String {
       ret true;
     }
   }
@@ -1579,7 +1579,7 @@ fun _imported_paths(str src, str filename) Vec<str> {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != TokenType.Keyword || !equals(token_text(t), "imp") {
+    if t.type != .Keyword || !equals(token_text(t), "imp") {
       i = i + 1;
       continue;
     }
@@ -1587,7 +1587,7 @@ fun _imported_paths(str src, str filename) Vec<str> {
     num j = i + 1;
     for j < tokens.len {
       Token it = tokens.get(j);
-      if it.type == TokenType.NewLine || it.type == TokenType.Comment {
+      if it.type == .NewLine || it.type == .Comment {
         j = j + 1;
         continue;
       }
@@ -1596,7 +1596,7 @@ fun _imported_paths(str src, str filename) Vec<str> {
         break;
       }
       // An alias renames the import; the path is what precedes it.
-      if it.type == TokenType.Keyword && equals(text, "as") {
+      if it.type == .Keyword && equals(text, "as") {
         break;
       }
       b.append(text);

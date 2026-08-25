@@ -622,14 +622,14 @@ pub fun impl_node_new() ImplNode {
   ret i;
 }
 
-// A `test "name" { body }` declaration (see NodeKind.Test).
+// A `test "name" { body }` declaration (see .Test).
 pub compound TestDeclNode {
   str name;
   Node* body;
 }
 
 // A `fuzz "name" (raw* data, num len) { body }` declaration (see
-// NodeKind.Fuzz). `data_param`/`len_param` are `Variable` nodes for the
+// .Fuzz). `data_param`/`len_param` are `Variable` nodes for the
 // two user-chosen names; their types parse like ordinary parameters but
 // must match the fixed `raw*`/`num` fuzzing shape, enforced by
 // `parser._check_fuzz_param_shape`.
@@ -649,7 +649,7 @@ pub compound AsmOperand {
   Node* expr;
 }
 
-// An `asm` statement (see NodeKind.StatementAsm). `template` is the raw
+// An `asm` statement (see .StatementAsm). `template` is the raw
 // assembly text: a decoded string literal when `is_string_literal`, or
 // the exact source bytes between `{`/`}` (including whitespace, newlines,
 // and comments) for the block form.

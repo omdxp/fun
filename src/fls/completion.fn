@@ -573,7 +573,7 @@ fun _prev_real_token(Vec<Token>* tokens, num i) Option<Token> {
   num j = i - 1;
   for j >= 0 {
     Token t = tokens.get(j);
-    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+    if t.type == .Comment || t.type == .NewLine {
       j = j - 1;
       continue;
     }
@@ -587,7 +587,7 @@ fun _next_real_token(Vec<Token>* tokens, num i) Option<Token> {
   num j = i + 1;
   for j < tokens.len {
     Token t = tokens.get(j);
-    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+    if t.type == .Comment || t.type == .NewLine {
       j = j + 1;
       continue;
     }
@@ -604,7 +604,7 @@ fun _prev_real_index(Vec<Token>* tokens, num i) num {
   num j = i - 1;
   for j >= 0 {
     Token t = tokens.get(j);
-    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+    if t.type == .Comment || t.type == .NewLine {
       j = j - 1;
       continue;
     }
@@ -618,7 +618,7 @@ fun _next_real_index(Vec<Token>* tokens, num i) num {
   num j = i + 1;
   for j < tokens.len {
     Token t = tokens.get(j);
-    if t.type == TokenType.Comment || t.type == TokenType.NewLine {
+    if t.type == .Comment || t.type == .NewLine {
       j = j + 1;
       continue;
     }
@@ -637,7 +637,7 @@ fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.Identifier && equals(token_word(t), name) {
+    if t.type == .Identifier && equals(token_word(t), name) {
       str base = _base_type_before(tokens, i);
       if !equals(base, "") {
         ret base;
@@ -685,7 +685,7 @@ fun _base_type_before(Vec<Token>* tokens, num i) str {
       ret "";
     }
   }
-  if tokens.get(j).type == TokenType.Identifier {
+  if tokens.get(j).type == .Identifier {
     ret token_word(tokens.get(j));
   }
   ret "";
@@ -704,10 +704,10 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword || !equals(token_word(t), "compound") {
+    if t.type != .Keyword || !equals(token_word(t), "compound") {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+    if i >= tokens.len || tokens.get(i).type != .Identifier ||
       !equals(token_word(tokens.get(i)), type_name) {
       continue;
     }
@@ -732,8 +732,8 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
         j = j + 1;
         continue;
       }
-      if depth == 1 && bt.type == TokenType.Identifier &&
-        equals(token_word(bt), field_name) {
+      if depth == 1 && bt.type == .Identifier &&
+      equals(token_word(bt), field_name) {
         let after = _next_real_token(tokens, j);
         if after.is_some() && token_is_symbol(after.unwrap(), ';') {
           ret _base_type_before(tokens, j);
@@ -853,7 +853,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword {
+    if t.type != .Keyword {
       continue;
     }
     str kw = token_word(t);
@@ -863,7 +863,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
     if !is_compound && !is_enum && !is_methods {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+    if i >= tokens.len || tokens.get(i).type != .Identifier ||
       !equals(token_word(tokens.get(i)), type_name) {
       continue;
     }
@@ -888,7 +888,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
         j = j + 1;
         continue;
       }
-      if depth == 1 && bt.type == TokenType.Identifier {
+      if depth == 1 && bt.type == .Identifier {
         str member_name = token_word(bt);
         if is_enum {
           let before = _prev_real_token(tokens, j);
@@ -934,7 +934,7 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.Identifier {
+    if t.type == .Identifier {
       str name = token_word(t);
       if i + 1 < tokens.len && token_is_operator(tokens.get(i + 1), "(") &&
         !fn_names.contains(name) {
@@ -999,7 +999,7 @@ fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       i = i + 1;
       continue;
     }
@@ -1022,7 +1022,7 @@ fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
     ret dot_idx;
   }
   Token b = before.unwrap();
-  if b.type == TokenType.Identifier || token_is_symbol(b, ')') || token_is_symbol(b, ']') {
+  if b.type == .Identifier || token_is_symbol(b, ')') || token_is_symbol(b, ']') {
     ret -1;
   }
   ret dot_idx;
@@ -1120,7 +1120,7 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
     ret "";
   }
   num callee_idx = _prev_real_index(tokens, open_idx);
-  if callee_idx < 0 || tokens.get(callee_idx).type != TokenType.Identifier {
+  if callee_idx < 0 || tokens.get(callee_idx).type != .Identifier {
     ret "";
   }
   num before_callee = _prev_real_index(tokens, callee_idx);
@@ -1162,10 +1162,10 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != TokenType.Keyword || !equals(token_word(t), "fun") {
+    if t.type != .Keyword || !equals(token_word(t), "fun") {
       continue;
     }
-    if i >= tokens.len || tokens.get(i).type != TokenType.Identifier ||
+    if i >= tokens.len || tokens.get(i).type != .Identifier ||
       !equals(token_word(tokens.get(i)), callee_name) {
       continue;
     }
@@ -1213,7 +1213,7 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
         past_default = false;
       } elif token_is_operator(pt, "=") && pdepth == 0 {
         past_default = true;
-      } elif pt.type == TokenType.Identifier && pdepth == 0 && !past_default {
+      } elif pt.type == .Identifier && pdepth == 0 && !past_default {
         last_name_idx = j;
       }
       j = j + 1;
@@ -1329,7 +1329,7 @@ fun _function_header_return_type(Vec<Token>* tokens, num brace_idx) str {
       ret "";
     }
   }
-  if tokens.get(j).type != TokenType.Identifier {
+  if tokens.get(j).type != .Identifier {
     ret "";
   }
   num before = _prev_real_index(tokens, j);
@@ -1386,7 +1386,7 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str
 // fit's own, or the subject is something deeper than these three.
 fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file, AnalysisCache* cache) str {
   num a = _prev_real_index(tokens, brace_idx);
-  if a < 0 || tokens.get(a).type != TokenType.Identifier {
+  if a < 0 || tokens.get(a).type != .Identifier {
     ret "";
   }
   num b = _prev_real_index(tokens, a);
@@ -1423,7 +1423,7 @@ fun _first_generic_arg_of_local_from_tokens(Vec<Token>* tokens, str name) str {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == TokenType.Identifier && equals(token_word(t), name) {
+    if t.type == .Identifier && equals(token_word(t), name) {
       str arg = _first_generic_arg_before(tokens, i);
       if !equals(arg, "") {
         ret arg;
@@ -1471,7 +1471,7 @@ fun _first_generic_arg_before(Vec<Token>* tokens, num i) str {
   }
   num open = j;
   num arg_idx = _next_real_index(tokens, open);
-  if arg_idx < 0 || arg_idx >= close || tokens.get(arg_idx).type != TokenType.Identifier {
+  if arg_idx < 0 || arg_idx >= close || tokens.get(arg_idx).type != .Identifier {
     ret "";
   }
   ret token_word(tokens.get(arg_idx));
@@ -1484,7 +1484,7 @@ fun _first_generic_arg_before(Vec<Token>* tokens, num i) str {
 // existing expression as "the other side" of the shorthand - a fit's
 // own subject, a comparison's or assignment's other operand.
 fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file, AnalysisCache* cache) str {
-  if tokens.get(end_idx).type != TokenType.Identifier {
+  if tokens.get(end_idx).type != .Identifier {
     ret "";
   }
   num before = _prev_real_index(tokens, end_idx);
@@ -1492,7 +1492,7 @@ fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file,
     ret _receiver_type_from_tokens(tokens, token_word(tokens.get(end_idx)));
   }
   num base_idx = _prev_real_index(tokens, before);
-  if base_idx < 0 || tokens.get(base_idx).type != TokenType.Identifier {
+  if base_idx < 0 || tokens.get(base_idx).type != .Identifier {
     ret "";
   }
   str base_type = _receiver_type_from_tokens(tokens, token_word(tokens.get(base_idx)));
@@ -1529,7 +1529,7 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
     // rather than continuing the line's own column count, which would
     // otherwise slip it past the position filter below and reset
     // `receiver` right as the scan reaches the cursor.
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       continue;
     }
     if t.pos.line != source_line || t.pos.end_col > source_col {
@@ -1570,7 +1570,7 @@ fun _current_word(Vec<Token>* tokens, num line, num character) str {
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       continue;
     }
     if t.pos.line != source_line || t.pos.end_col > source_col {
@@ -1598,7 +1598,7 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       continue;
     }
     if t.pos.line != source_line || t.pos.end_col > source_col {
@@ -1703,7 +1703,7 @@ fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type == TokenType.NewLine || t.type == TokenType.Comment {
+    if t.type == .NewLine || t.type == .Comment {
       continue;
     }
     if t.pos.line > source_line ||

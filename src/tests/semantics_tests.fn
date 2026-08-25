@@ -9,12 +9,12 @@ imp std.vec;
 imp std.option;
 
 test "ast predicates classify nodes correctly" {
-  Node num_node = node_new(NodeKind.Number(TokenData.Num(1)));
-  Node id_node = node_new(NodeKind.Identifier("x"));
-  Node str_node = node_new(NodeKind.String("s"));
-  Node bool_node = node_new(NodeKind.Boolean(true));
+  Node num_node = node_new(.Number(.Num(1)));
+  Node id_node = node_new(.Identifier("x"));
+  Node str_node = node_new(.String("s"));
+  Node bool_node = node_new(.Boolean(true));
 
-  Node paren_node = node_new(NodeKind.ExpressionParenthesis(&num_node));
+  Node paren_node = node_new(.ExpressionParenthesis(&num_node));
 
   UnaryNode un;
   un.is_left_operanded_unary = false;
@@ -22,7 +22,7 @@ test "ast predicates classify nodes correctly" {
   un.operand = &num_node;
   un.has_indirection = false;
   un.indirection_depth = 0;
-  Node unary_node = node_new(NodeKind.Unary(un));
+  Node unary_node = node_new(.Unary(un));
 
   ExprNode assign;
   assign.left = &id_node;
@@ -30,7 +30,7 @@ test "ast predicates classify nodes correctly" {
   assign.right = &num_node;
   assign.has_right = true;
   assign.op = "=";
-  Node assign_node = node_new(NodeKind.Expression(assign));
+  Node assign_node = node_new(.Expression(assign));
 
   ExprNode eq;
   eq.left = &id_node;
@@ -38,16 +38,16 @@ test "ast predicates classify nodes correctly" {
   eq.right = &num_node;
   eq.has_right = true;
   eq.op = "==";
-  Node eq_node = node_new(NodeKind.Expression(eq));
+  Node eq_node = node_new(.Expression(eq));
 
-  Node index_inner = node_new(NodeKind.Bracket(&num_node));
+  Node index_inner = node_new(.Bracket(&num_node));
   ExprNode index;
   index.left = &id_node;
   index.has_left = true;
   index.right = &index_inner;
   index.has_right = true;
   index.op = "[]";
-  Node index_node = node_new(NodeKind.Expression(index));
+  Node index_node = node_new(.Expression(index));
 
   assert node_is_expressionable(num_node), "a number is expressionable";
   assert node_is_expressionable(id_node), "an identifier is expressionable";
@@ -114,10 +114,10 @@ test "a scope resolves the last-declared entity and lookups by name" {
 // get_entity_by_name are checked for above.
 
 test "get_node_symbol returns a node only for node symbols" {
-  Node n = node_new(NodeKind.Number(TokenData.Num(1)));
+  Node n = node_new(.Number(.Num(1)));
 
   Symbol s_node = symbol_new("x");
-  s_node.kind = SymbolKind.NodeSym(n);
+  s_node.kind = .NodeSym(n);
   Symbol s_unknown = symbol_new("y");
 
   let got = get_node_symbol(s_node);

@@ -97,11 +97,11 @@ pub fun get_c_typedef_alias_datatype_type(str s) Option<DataTypeType> {
     // time.h
     "time_t", "clock_t",
     // spawn.h / sys/wait.h
-    "pid_t" -> { ret .Some(DataTypeType.Num); }
+    "pid_t" -> { ret .Some(.Num); }
     // stdio.h / stdarg.h / pthread.h / spawn.h: opaque handle typedefs
     "FILE", "va_list", "pthread_t", "pthread_attr_t", "pthread_mutex_t", "pthread_mutexattr_t",
     "pthread_cond_t", "pthread_condattr_t", "posix_spawn_file_actions_t", "posix_spawnattr_t" -> {
-      ret .Some(DataTypeType.Unknown);
+      ret .Some(.Unknown);
     }
     _ -> { ret .None; }
   }
@@ -135,19 +135,19 @@ test "keyword_is_datatype recognizes builtins and sized ints, not identifiers" {
 }
 
 test "get_datatype_type maps builtins and sized ints, else Unknown" {
-  assert get_datatype_type("num") == DataTypeType.Num, "num maps to Num";
-  assert get_datatype_type("f32") == DataTypeType.Dec, "f32 maps to Dec";
-  assert get_datatype_type("u16") == DataTypeType.Num, "u16 maps to Num";
-  assert get_datatype_type("MyCompound") == DataTypeType.Unknown, "unknown name maps to Unknown";
+  assert get_datatype_type("num") == .Num, "num maps to Num";
+  assert get_datatype_type("f32") == .Dec, "f32 maps to Dec";
+  assert get_datatype_type("u16") == .Num, "u16 maps to Num";
+  assert get_datatype_type("MyCompound") == .Unknown, "unknown name maps to Unknown";
 }
 
 test "get_c_typedef_alias_datatype_type recognizes common C typedefs" {
   fit get_c_typedef_alias_datatype_type("size_t") {
-    .Some(t) -> { assert t == DataTypeType.Num, "size_t is numeric"; }
+    .Some(t) -> { assert t == .Num, "size_t is numeric"; }
     .None -> { panic("size_t should be recognized"); }
   }
   fit get_c_typedef_alias_datatype_type("FILE") {
-    .Some(t) -> { assert t == DataTypeType.Unknown, "FILE is an opaque handle"; }
+    .Some(t) -> { assert t == .Unknown, "FILE is an opaque handle"; }
     .None -> { panic("FILE should be recognized"); }
   }
   assert get_c_typedef_alias_datatype_type("not_a_typedef").is_none(), "unrecognized name returns None";

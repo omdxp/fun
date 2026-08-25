@@ -264,7 +264,7 @@ impl ParseState {
   pub split_angle_closer_token_if_needed() {
     fit self.tokens_peek_no_increment() {
       .Some(t) -> {
-        if t.type != TokenType.Operator {
+        if t.type != .Operator {
           ret;
         }
         bin is_shr = false;
@@ -276,10 +276,10 @@ impl ParseState {
           ret;
         }
         Token first = t;
-        first.data = TokenData.Sval(">");
+        first.data = .Sval(">");
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = TokenData.Sval(">");
+        second.data = .Sval(">");
         self.tokens.insert(self.pindex + 1, second);
       }
       .None -> {}
@@ -294,7 +294,7 @@ impl ParseState {
   pub split_angle_opener_token_if_needed() {
     fit self.tokens_peek_no_increment() {
       .Some(t) -> {
-        if t.type != TokenType.Operator {
+        if t.type != .Operator {
           ret;
         }
         bin is_shl = false;
@@ -306,10 +306,10 @@ impl ParseState {
           ret;
         }
         Token first = t;
-        first.data = TokenData.Sval("<");
+        first.data = .Sval("<");
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = TokenData.Sval("<");
+        second.data = .Sval("<");
         self.tokens.insert(self.pindex + 1, second);
       }
       .None -> {}
@@ -376,7 +376,7 @@ impl ParseState {
     bin matched = false;
     fit self.token_next() {
       .Some(t) -> {
-        if t.type == TokenType.Symbol {
+        if t.type == .Symbol {
           fit t.data {
             .Cval(v) -> { matched = v == c; }
             _ -> {}
@@ -391,7 +391,7 @@ impl ParseState {
     let msg = format("expected symbol '{chr}'", c);
     defer free(msg);
     self.err(msg);
-    ret .Some(ParseErrorKind.InvalidSymbol);
+    ret .Some(.InvalidSymbol);
   }
 
   // Expects the next significant token to be the operator `op`. Reports and
@@ -408,7 +408,7 @@ impl ParseState {
     let msg = format("expected operator '{str}'", op);
     defer free(msg);
     self.err(msg);
-    ret .Some(ParseErrorKind.InvalidOperand);
+    ret .Some(.InvalidOperand);
   }
 
   // Expects the next significant token to be the keyword `keyword`. Reports
@@ -425,7 +425,7 @@ impl ParseState {
     let msg = format("expected keyword '{str}'", keyword);
     defer free(msg);
     self.err(msg);
-    ret .Some(ParseErrorKind.InvalidKeyword);
+    ret .Some(.InvalidKeyword);
   }
 
   // Retrieves a symbol by name from the active symbol table.
@@ -555,9 +555,9 @@ impl ParseState {
 
     for true {
       let tok = self.token_next();
-      if tok.is_none() || tok.unwrap().type != TokenType.Identifier {
+      if tok.is_none() || tok.unwrap().type != .Identifier {
         self.err("expected generic parameter name");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str name = "";
       fit tok.unwrap().data {
@@ -575,12 +575,12 @@ impl ParseState {
           let ct = self.token_next();
           if ct.is_none() {
             self.err("expected type name in constraint after ':'");
-            ret .Some(ParseErrorKind.InvalidIdentifier);
+            ret .Some(.InvalidIdentifier);
           }
           let ctok = ct.unwrap();
-          if ctok.type != TokenType.Keyword && ctok.type != TokenType.Identifier {
+          if ctok.type != .Keyword && ctok.type != .Identifier {
             self.err("expected type name in constraint");
-            ret .Some(ParseErrorKind.InvalidIdentifier);
+            ret .Some(.InvalidIdentifier);
           }
           str cname = "";
           fit ctok.data {
@@ -738,10 +738,10 @@ impl ParseState {
     bin has_rtype_tok = false;
     fit self.token_peek_next() {
       .Some(t) -> {
-        if t.type == TokenType.Identifier {
+        if t.type == .Identifier {
           has_rtype_tok = true;
         } else {
-          if t.type == TokenType.Keyword {
+          if t.type == .Keyword {
             fit t.data {
               .Sval(s) -> {
                 if keyword_is_datatype(s) {
@@ -761,7 +761,7 @@ impl ParseState {
         ret rerr;
       }
     } else {
-      rtype.kind = DataTypeType.Void;
+      rtype.kind = .Void;
       rtype.type_str = "void";
     }
 
@@ -771,7 +771,7 @@ impl ParseState {
     FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
     *sig_ptr = sig;
 
-    dt.kind = DataTypeType.Unknown;
+    dt.kind = .Unknown;
     dt.fn_sig = sig_ptr;
     dt.has_fn_sig = true;
     dt.type_str = "fun(...)";
@@ -793,12 +793,12 @@ impl ParseState {
     let tok = self.token_next();
     if tok.is_none() {
       self.err("expected datatype, got end of input");
-      ret .Some(ParseErrorKind.InvalidDataType);
+      ret .Some(.InvalidDataType);
     }
     let dt_token = tok.unwrap();
-    if dt_token.type != TokenType.Keyword && dt_token.type != TokenType.Identifier {
+    if dt_token.type != .Keyword && dt_token.type != .Identifier {
       self.err("expected datatype");
-      ret .Some(ParseErrorKind.InvalidDataType);
+      ret .Some(.InvalidDataType);
     }
 
     str name = "";
@@ -809,15 +809,15 @@ impl ParseState {
 
     // Builtins use `dt.kind`; user-defined types keep `.Unknown` and rely
     // on `type_str`.
-    if dt_token.type == TokenType.Keyword {
+    if dt_token.type == .Keyword {
       if !keyword_is_datatype(name) {
         self.err(format("unexpected keyword '{str}' in datatype position", name));
-        ret .Some(ParseErrorKind.InvalidDataType);
+        ret .Some(.InvalidDataType);
       }
       dt.kind = get_datatype_type(name);
-      if dt.kind == DataTypeType.Unknown {
+      if dt.kind == .Unknown {
         self.err("unknown datatype");
-        ret .Some(ParseErrorKind.InvalidDataType);
+        ret .Some(.InvalidDataType);
       }
     } else {
       // Identifier-based types (e.g. platform typedefs like `size_t`, or
@@ -826,7 +826,7 @@ impl ParseState {
       // arithmetic/comparisons typecheck, while still emitting the
       // original identifier via `type_str`.
       let builtin_kind = get_datatype_type(name);
-      if builtin_kind != DataTypeType.Unknown {
+      if builtin_kind != .Unknown {
         dt.kind = builtin_kind;
       } else {
         fit get_c_typedef_alias_datatype_type(name) {
@@ -839,13 +839,13 @@ impl ParseState {
 
     // Qualified user-defined types via module alias (`imp mod as m; m.Type`).
     // Mangled internally as `a__b` to match symbol/type naming.
-    if dt_token.type == TokenType.Identifier {
+    if dt_token.type == .Identifier {
       for self.next_token_is_operator(".") || self.next_token_is_symbol('.') {
         self.token_next();
         let seg = self.token_next();
-        if seg.is_none() || seg.unwrap().type != TokenType.Identifier {
+        if seg.is_none() || seg.unwrap().type != .Identifier {
           self.err("expected identifier after '.' in qualified datatype");
-          ret .Some(ParseErrorKind.InvalidDataType);
+          ret .Some(.InvalidDataType);
         }
         str seg_name = "";
         fit seg.unwrap().data {
@@ -896,7 +896,7 @@ impl ParseState {
       if tok_opt.is_none() {
         ret false;
       }
-      if tok_opt.unwrap().type != TokenType.Identifier {
+      if tok_opt.unwrap().type != .Identifier {
         ret false;
       }
       saw_any = true;
@@ -916,7 +916,7 @@ impl ParseState {
             ret false;
           }
           let ct = ct_opt.unwrap();
-          if ct.type == TokenType.Keyword || ct.type == TokenType.Identifier {
+          if ct.type == .Keyword || ct.type == .Identifier {
             off = off + 1;
           } else {
             ret false;
@@ -1100,7 +1100,7 @@ impl ParseState {
         continue;
       }
       let name_tok = self.tokens.get(j);
-      if name_tok.type != TokenType.Identifier {
+      if name_tok.type != .Identifier {
         continue;
       }
       fit name_tok.data {
@@ -1292,20 +1292,20 @@ impl Parser {
     let tok = self.state.token_next();
     if tok.is_none() {
       self.state.err("expected token, got eof");
-      ret .Some(ParseErrorKind.InvalidToken);
+      ret .Some(.InvalidToken);
     }
     let t = tok.unwrap();
     fit t.type {
       .Number -> {
         fit t.data {
           .Num(n) -> {
-            Node node = node_new(NodeKind.Number(TokenData.Num(n)));
+            Node node = node_new(.Number(.Num(n)));
             node.pos = t.pos;
             node.has_pos = true;
             self.create_node(&node);
           }
           .Dec(d) -> {
-            Node node = node_new(NodeKind.Number(TokenData.Dec(d)));
+            Node node = node_new(.Number(.Dec(d)));
             node.pos = t.pos;
             node.has_pos = true;
             self.create_node(&node);
@@ -1314,14 +1314,14 @@ impl Parser {
           // `Cval` data (see lexer.fn's `_read_char`); it becomes a
           // `Character` AST node here, not a `Number` one.
           .Cval(c) -> {
-            Node node = node_new(NodeKind.Character(c));
+            Node node = node_new(.Character(c));
             node.pos = t.pos;
             node.has_pos = true;
             self.create_node(&node);
           }
           _ -> {
             self.state.err("invalid number token");
-            ret .Some(ParseErrorKind.InvalidToken);
+            ret .Some(.InvalidToken);
           }
         }
       }
@@ -1347,7 +1347,7 @@ impl Parser {
             if token_is_operator(p, "(") {
               fit self.state.token_peek_prev_n(1) {
                 .Some(p2) -> {
-                  if p2.type == TokenType.Identifier {
+                  if p2.type == .Identifier {
                     fit p2.data {
                       .Sval(s2) -> { is_sizeof_type_operand = equals(s2, "sizeof"); }
                       _ -> {}
@@ -1379,7 +1379,7 @@ impl Parser {
                     let msg = format("unknown identifier '{str}'", name);
                     defer free(msg);
                     self.state.err(msg);
-                    ret .Some(ParseErrorKind.InvalidIdentifier);
+                    ret .Some(.InvalidIdentifier);
                   }
                 }
               }
@@ -1396,7 +1396,7 @@ impl Parser {
           name = named.build();
         }
 
-        Node node = node_new(NodeKind.Identifier(name));
+        Node node = node_new(.Identifier(name));
         node.pos = t.pos;
         node.has_pos = true;
         self.create_node(&node);
@@ -1404,7 +1404,7 @@ impl Parser {
       .String -> {
         fit t.data {
           .Sval(s) -> {
-            Node node = node_new(NodeKind.String(s));
+            Node node = node_new(.String(s));
             node.pos = t.pos;
             node.has_pos = true;
             node.flags.is_raw_string = t.is_raw_string;
@@ -1416,7 +1416,7 @@ impl Parser {
       .Boolean -> {
         fit t.data {
           .Bval(b) -> {
-            Node node = node_new(NodeKind.Boolean(b));
+            Node node = node_new(.Boolean(b));
             node.pos = t.pos;
             node.has_pos = true;
             self.create_node(&node);
@@ -1426,7 +1426,7 @@ impl Parser {
       }
       _ -> {
         self.state.err("expected single token");
-        ret .Some(ParseErrorKind.InvalidToken);
+        ret .Some(.InvalidToken);
       }
     }
     ret .None;
@@ -1448,7 +1448,7 @@ impl Parser {
     e.has_right = true;
     e.op = op;
 
-    Node node = node_new(NodeKind.Expression(e));
+    Node node = node_new(.Expression(e));
     node.pos = op_pos;
     node.has_pos = true;
     self.create_node(&node);
@@ -1460,19 +1460,19 @@ impl Parser {
   // true`). Builds `(recv.method)(arg)`, a `.` dot-expression wrapped in a
   // `()` call, the same AST shape a method call already has.
   _push_channel_method_call(Node* recv, str method_name, Node* arg, bin has_arg, Pos op_pos) {
-    Node method_ident = node_new(NodeKind.Identifier(method_name));
+    Node method_ident = node_new(.Identifier(method_name));
     method_ident.pos = op_pos;
     method_ident.has_pos = true;
     method_ident.flags.inside_expression = true;
 
     self.make_expression_node(recv, &method_ident, ".", op_pos);
-    Node dot = node_new(NodeKind.Blank);
+    Node dot = node_new(.Blank);
     fit self.state.node_pop() {
       .Some(built) -> { dot = built; }
       .None -> { ret; }
     }
 
-    Node call_arg = node_new(NodeKind.Blank);
+    Node call_arg = node_new(.Blank);
     if has_arg {
       call_arg = *arg;
     }
@@ -1499,9 +1499,9 @@ impl Parser {
 
     for !self.state.next_token_is_symbol('}') {
       let field_tok = self.state.token_next();
-      if field_tok.is_none() || field_tok.unwrap().type != TokenType.Identifier {
+      if field_tok.is_none() || field_tok.unwrap().type != .Identifier {
         self.state.err("expected field name in compound initializer");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str fname = "";
       fit field_tok.unwrap().data {
@@ -1528,7 +1528,7 @@ impl Parser {
       let maybe_val = self.state.node_pop();
       if maybe_val.is_none() {
         self.state.err("expected field value in compound initializer");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
       Node* val = malloc(sizeof(Node));
       *val = maybe_val.unwrap();
@@ -1558,7 +1558,7 @@ impl Parser {
     ci.has_dtype = has_dt;
     ci.fields = fields;
 
-    Node node = node_new(NodeKind.CompoundInit(ci));
+    Node node = node_new(.CompoundInit(ci));
     if has_pos {
       node.pos = pos;
       node.has_pos = true;
@@ -1602,14 +1602,14 @@ impl Parser {
             new_left_e.op = exp.op;
 
             Node* new_left = malloc(sizeof(Node));
-            *new_left = node_new(NodeKind.Expression(new_left_e));
+            *new_left = node_new(.Expression(new_left_e));
             new_left.pos = node.pos;
             new_left.has_pos = true;
 
             exp.left = new_left;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
-            node.kind = NodeKind.Expression(exp);
+            node.kind = .Expression(exp);
           }
           _ -> {}
         }
@@ -1641,14 +1641,14 @@ impl Parser {
             completed_e.op = exp.op;
 
             Node* completed = malloc(sizeof(Node));
-            *completed = node_new(NodeKind.Expression(completed_e));
+            *completed = node_new(.Expression(completed_e));
             completed.pos = node.pos;
             completed.has_pos = true;
 
             exp.left = completed;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
-            node.kind = NodeKind.Expression(exp);
+            node.kind = .Expression(exp);
           }
           _ -> {}
         }
@@ -1751,7 +1751,7 @@ impl Parser {
     // otherwise overflow the stack instead of reporting an error.
     if self.expr_depth >= max_parse_expr_depth {
       self.state.err("expression nests too deeply to parse");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     self.expr_depth = self.expr_depth + 1;
     defer self.expr_depth = self.expr_depth - 1;
@@ -1760,16 +1760,16 @@ impl Parser {
         // A `fit` arm's comma-separated multi-pattern list only supports
         // string-literal patterns, not bare enum-variant shorthand
         // (`.A, .B -> {}` fails to parse where `"a", "b" -> {}` works).
-        if t.type == TokenType.Number || t.type == TokenType.Boolean ||
-          t.type == TokenType.String {
+        if t.type == .Number || t.type == .Boolean ||
+        t.type == .String {
           ret self.parse_single_token_to_node();
         }
-        if t.type == TokenType.Identifier {
+        if t.type == .Identifier {
           // Named compound-literal initializer: `Point{...}`/`Box<num>{...}`.
           // Requires the identifier to resolve to a known `Compound`
           // symbol, to not be a value already in scope (a local shadowing
           // a compound name), and to not follow a `.`, since a qualified
-          // reference like `TokenType.Symbol` is never a compound-init
+          // reference like `.Symbol` is never a compound-init
           // target.
           str name = "";
           fit t.data {
@@ -1806,7 +1806,7 @@ impl Parser {
               if token_is_operator(p, "(") {
                 fit self.state.token_peek_prev_stream_n(1) {
                   .Some(p2) -> {
-                    if p2.type == TokenType.Identifier {
+                    if p2.type == .Identifier {
                       fit p2.data {
                         .Sval(s2) -> { in_sizeof_ctx = equals(s2, "sizeof"); }
                         _ -> {}
@@ -1830,7 +1830,7 @@ impl Parser {
             CompoundInitNode ci = compound_init_node_new();
             ci.init_dtype = sdt;
             ci.has_dtype = true;
-            Node ci_node = node_new(NodeKind.CompoundInit(ci));
+            Node ci_node = node_new(.CompoundInit(ci));
             ci_node.pos = t.pos;
             ci_node.has_pos = true;
             self.create_node(&ci_node);
@@ -1881,7 +1881,7 @@ impl Parser {
           }
           ret self.parse_single_token_to_node();
         }
-        if t.type == TokenType.Operator {
+        if t.type == .Operator {
           // A top-level comma stops a bounded value expression (a
           // compound-literal field's value) rather than being treated as
           // the comma operator. See `Parser.stop_at_comma`'s doc comment.
@@ -1907,7 +1907,7 @@ impl Parser {
           }
           ret self.parse_expression();
         }
-        if t.type == TokenType.Keyword {
+        if t.type == .Keyword {
           str kw = "";
           fit t.data {
             .Sval(s) -> { kw = s; }
@@ -1919,7 +1919,7 @@ impl Parser {
           // f();`), not just as their own bare statement.
           if equals(kw, "nil") {
             self.state.token_next(); // consume 'nil'
-            Node node = node_new(NodeKind.Nil);
+            Node node = node_new(.Nil);
             node.pos = t.pos;
             node.has_pos = true;
             self.create_node(&node);
@@ -1949,7 +1949,7 @@ impl Parser {
                 if token_is_operator(p, "(") {
                   fit self.state.token_peek_prev_stream_n(1) {
                     .Some(p2) -> {
-                      if p2.type == TokenType.Identifier {
+                      if p2.type == .Identifier {
                         fit p2.data {
                           .Sval(s2) -> { in_sizeof = equals(s2, "sizeof"); }
                           _ -> {}
@@ -1968,7 +1968,7 @@ impl Parser {
               named.append(kw);
               named.append(self.state.take_sizeof_pointer_stars());
               str operand = named.build();
-              Node node = node_new(NodeKind.Identifier(operand));
+              Node node = node_new(.Identifier(operand));
               node.pos = t.pos;
               node.has_pos = true;
               self.create_node(&node);
@@ -2008,7 +2008,7 @@ impl Parser {
     }
     if self.state.nodes.len == before {
       self.state.err("expected expression");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     ret .None;
   }
@@ -2019,7 +2019,7 @@ impl Parser {
   pub parse_additional_expression() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
-        if t.type == TokenType.Operator {
+        if t.type == .Operator {
           ret self.parse_expressionable();
         }
         ret .None;
@@ -2041,7 +2041,7 @@ impl Parser {
       ret lparen_err;
     }
 
-    Node left_node = node_new(NodeKind.Blank);
+    Node left_node = node_new(.Blank);
     bin has_left_node = false;
     fit self.state.node_peek_last() {
       .Some(n) -> {
@@ -2054,7 +2054,7 @@ impl Parser {
       .None -> {}
     }
 
-    Node exp_node = node_new(NodeKind.Blank);
+    Node exp_node = node_new(.Blank);
     if !self.state.next_token_is_symbol(')') {
       // A parenthesized sub-expression is a fresh context: an inner
       // binary operator or comma is never bounded by an enclosing
@@ -2084,7 +2084,7 @@ impl Parser {
 
     Node* exp = malloc(sizeof(Node));
     *exp = exp_node;
-    Node paren_node = node_new(NodeKind.ExpressionParenthesis(exp));
+    Node paren_node = node_new(.ExpressionParenthesis(exp));
     self.create_node(&paren_node);
 
     if has_left_node {
@@ -2111,7 +2111,7 @@ impl Parser {
             call_e.has_generic_args = true;
             self.has_pending_call_generic_args = false;
           }
-          Node call_node = node_new(NodeKind.Expression(call_e));
+          Node call_node = node_new(.Expression(call_e));
           call_node.pos = left_node.pos;
           call_node.has_pos = left_node.has_pos;
           self.create_node(&call_node);
@@ -2128,7 +2128,7 @@ impl Parser {
   // Bracket(i), op = "[]" }`), or an array literal otherwise (just the
   // bare `Bracket` node, e.g. `[1, 2, 3]`).
   pub parse_for_bracket() Option<ParseErrorKind> {
-    Node left_node = node_new(NodeKind.Blank);
+    Node left_node = node_new(.Blank);
     bin has_left_node = false;
     fit self.node_peek_expressionable() {
       .Some(n) -> {
@@ -2169,12 +2169,12 @@ impl Parser {
     let maybe_inner = self.state.node_pop();
     if maybe_inner.is_none() {
       self.state.err("expected an expression inside '[...]'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* inner = malloc(sizeof(Node));
     *inner = maybe_inner.unwrap();
 
-    Node bracket_node = node_new(NodeKind.Bracket(inner));
+    Node bracket_node = node_new(.Bracket(inner));
     let lb = lbracket_tok.unwrap();
     bracket_node.pos = lb.pos;
     bracket_node.has_pos = true;
@@ -2216,7 +2216,7 @@ impl Parser {
     let maybe_operand = self.state.node_pop();
     if maybe_operand.is_none() {
       self.state.err("expected operand for pointer indirection");
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     Node operand_val = maybe_operand.unwrap();
     Node* operand = malloc(sizeof(Node));
@@ -2229,7 +2229,7 @@ impl Parser {
     u.has_indirection = true;
     u.indirection_depth = depth;
 
-    Node unode = node_new(NodeKind.Unary(u));
+    Node unode = node_new(.Unary(u));
     fit star_tok {
       .Some(t) -> {
         unode.pos = t.pos;
@@ -2248,7 +2248,7 @@ impl Parser {
     let tok = self.state.token_next();
     if tok.is_none() {
       self.state.err("expected unary operator");
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     let unary_tok = tok.unwrap();
     str unary_op = "";
@@ -2273,7 +2273,7 @@ impl Parser {
       let msg = format("expected operand for unary operator '{str}'", unary_op);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     Node operand_val = maybe_operand.unwrap();
     Node* operand = malloc(sizeof(Node));
@@ -2286,7 +2286,7 @@ impl Parser {
     u.has_indirection = false;
     u.indirection_depth = 0;
 
-    Node unode = node_new(NodeKind.Unary(u));
+    Node unode = node_new(.Unary(u));
     unode.pos = unary_tok.pos;
     unode.has_pos = true;
     self.create_node(&unode);
@@ -2301,7 +2301,7 @@ impl Parser {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
       self.state.err("expected unary operator");
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     str unary_op = "";
     fit tok.unwrap().data {
@@ -2332,7 +2332,7 @@ impl Parser {
     u.has_indirection = false;
     u.indirection_depth = 0;
 
-    Node unode = node_new(NodeKind.Unary(u));
+    Node unode = node_new(.Unary(u));
     unode.pos = op_pos;
     unode.has_pos = true;
     self.create_node(&unode);
@@ -2387,7 +2387,7 @@ impl Parser {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
       self.state.err("expected operator in expression");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     let t = tok.unwrap();
     str op = "";
@@ -2421,9 +2421,9 @@ impl Parser {
       if equals(op, ".") {
         self.state.token_next(); // consume '.'
         let idtok = self.state.token_next();
-        if idtok.is_none() || idtok.unwrap().type != TokenType.Identifier {
+        if idtok.is_none() || idtok.unwrap().type != .Identifier {
           self.state.err("expected identifier after '.'");
-          ret .Some(ParseErrorKind.InvalidIdentifier);
+          ret .Some(.InvalidIdentifier);
         }
         let idt = idtok.unwrap();
         str variant_name = "";
@@ -2431,12 +2431,12 @@ impl Parser {
           .Sval(s) -> { variant_name = s; }
           _ -> {}
         }
-        Node right = node_new(NodeKind.Identifier(variant_name));
+        Node right = node_new(.Identifier(variant_name));
         right.pos = idt.pos;
         right.has_pos = true;
         right.flags.inside_expression = true;
 
-        Node left = node_new(NodeKind.Blank);
+        Node left = node_new(.Blank);
         left.pos = op_pos;
         left.has_pos = true;
         left.flags.inside_expression = true;
@@ -2450,7 +2450,7 @@ impl Parser {
           }
           .None -> {
             self.state.err("expected expression node");
-            ret .Some(ParseErrorKind.InvalidExpression);
+            ret .Some(.InvalidExpression);
           }
         }
         ret self.parse_additional_expression();
@@ -2470,15 +2470,15 @@ impl Parser {
         }
         if self.state.nodes.len == before {
           self.state.err("expected a channel after '<-'");
-          ret .Some(ParseErrorKind.InvalidExpression);
+          ret .Some(.InvalidExpression);
         }
         let maybe_ch = self.state.node_pop();
         if maybe_ch.is_none() {
           self.state.err("expected a channel after '<-'");
-          ret .Some(ParseErrorKind.InvalidExpression);
+          ret .Some(.InvalidExpression);
         }
         Node ch_node = maybe_ch.unwrap();
-        Node no_arg = node_new(NodeKind.Blank);
+        Node no_arg = node_new(.Blank);
         self._push_channel_method_call(&ch_node, "recv", &no_arg, false, op_pos);
         ret .None;
       }
@@ -2488,7 +2488,7 @@ impl Parser {
       let msg = format("expected left operand for '{str}' operator", op);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     Node node_left = maybe_left.unwrap();
 
@@ -2506,10 +2506,10 @@ impl Parser {
       let msg = format("expected expressionable for '{str}' operator", op);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     let t2 = tok2.unwrap();
-    if t2.type == TokenType.Operator {
+    if t2.type == .Operator {
       bin is_lparen = false;
       bin is_lbracket = false;
       bin is_dot_recv_or_unary = false;
@@ -2549,7 +2549,7 @@ impl Parser {
         let msg = format("expected expressionable for '{str}' operator", op);
         defer free(msg);
         self.state.err(msg);
-        ret .Some(ParseErrorKind.InvalidOperand);
+        ret .Some(.InvalidOperand);
       }
     } else {
       let err = self.parse_expressionable();
@@ -2563,7 +2563,7 @@ impl Parser {
       let msg = format("expected expressionable for '{str}' operator", op);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidOperand);
+      ret .Some(.InvalidOperand);
     }
     Node node_right = maybe_right.unwrap();
 
@@ -2584,7 +2584,7 @@ impl Parser {
       }
       .None -> {
         self.state.err("expected expression node");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
     }
     ret .None;
@@ -2611,7 +2611,7 @@ impl Parser {
   // parsing finishes) via `create_node`, so it picks up `binded` context
   // from whatever body/function currently encloses it.
   pub make_body_node() {
-    Node body_node = node_new(NodeKind.Blank);
+    Node body_node = node_new(.Blank);
     self.create_node(&body_node);
   }
 
@@ -2628,7 +2628,7 @@ impl Parser {
     let popped = self.state.node_pop();
     if popped.is_none() {
       self.state.err("expected body node");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* bnode_ptr = malloc(sizeof(Node));
     *bnode_ptr = popped.unwrap();
@@ -2647,7 +2647,7 @@ impl Parser {
       let peeked = self.state.token_peek_next();
       if peeked.is_none() {
         self.state.err("unexpected end of file (expected '}' to close body)");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       if token_is_symbol(peeked.unwrap(), '}') {
         break;
@@ -2659,7 +2659,7 @@ impl Parser {
       let maybe_stmt = self.state.node_pop();
       if maybe_stmt.is_none() {
         self.state.err("expected statement");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* stmt = malloc(sizeof(Node));
       *stmt = maybe_stmt.unwrap();
@@ -2676,7 +2676,7 @@ impl Parser {
 
     BodyNode bn;
     bn.statements = stmts;
-    bnode_ptr.kind = NodeKind.Body(bn);
+    bnode_ptr.kind = .Body(bn);
     self.state.nodes.push(*bnode_ptr);
     ret .None;
   }
@@ -2727,12 +2727,12 @@ impl Parser {
       let maybe_exp = self.state.node_pop();
       if maybe_exp.is_none() {
         self.state.err("expected array size expression");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
       Node* exp = malloc(sizeof(Node));
       *exp = maybe_exp.unwrap();
 
-      Node bracket_node = node_new(NodeKind.Bracket(exp));
+      Node bracket_node = node_new(.Bracket(exp));
       fit lbracket_tok {
         .Some(t) -> {
           bracket_node.pos = t.pos;
@@ -2768,12 +2768,12 @@ impl Parser {
     let tok = self.state.token_next();
     if tok.is_none() {
       self.state.err("expected identifier");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     let ident_tok = tok.unwrap();
-    if ident_tok.type != TokenType.Identifier {
+    if ident_tok.type != .Identifier {
       self.state.err("expected identifier");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str name = "";
     fit ident_tok.data {
@@ -2785,13 +2785,13 @@ impl Parser {
       let msg = format("variable '{str}' already declared", name);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     bin has_value = self.state.next_token_is_operator("=");
     if !has_value && require_initializer {
       self.state.err("'let' declarations require an initializer");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     VariableNode v;
@@ -2820,7 +2820,7 @@ impl Parser {
       let maybe_val = self.state.node_pop();
       if maybe_val.is_none() {
         self.state.err("expected initializer expression");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* val = malloc(sizeof(Node));
       *val = maybe_val.unwrap();
@@ -2828,7 +2828,7 @@ impl Parser {
       v.has_val = true;
     }
 
-    Node node = node_new(NodeKind.Variable(v));
+    Node node = node_new(.Variable(v));
     node.pos = ident_tok.pos;
     node.has_pos = true;
     node.flags.is_public = is_public;
@@ -2877,18 +2877,18 @@ impl Parser {
     let peeked = self.state.token_peek_next();
     if peeked.is_none() {
       self.state.err("expected identifier or type after 'const'");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let t = peeked.unwrap();
     str kw = "";
-    if t.type == TokenType.Keyword {
+    if t.type == .Keyword {
       fit t.data {
         .Sval(s) -> { kw = s; }
         _ -> {}
       }
     }
 
-    if t.type == TokenType.Keyword && keyword_is_datatype(kw) {
+    if t.type == .Keyword && keyword_is_datatype(kw) {
       DataType* dt = malloc(sizeof(DataType));
       *dt = dtype_new();
       let derr = self.state.parse_datatype(dt);
@@ -2923,7 +2923,7 @@ impl Parser {
       if serr.is_some() {
         ret serr;
       }
-      Node node = node_new(NodeKind.StatementReturn(nil));
+      Node node = node_new(.StatementReturn(nil));
       fit ret_tok {
         .Some(t) -> {
           node.pos = t.pos;
@@ -2942,12 +2942,12 @@ impl Parser {
     let maybe_exp = self.state.node_pop();
     if maybe_exp.is_none() {
       self.state.err("expected return value");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* exp = malloc(sizeof(Node));
     *exp = maybe_exp.unwrap();
 
-    Node node = node_new(NodeKind.StatementReturn(exp));
+    Node node = node_new(.StatementReturn(exp));
     fit ret_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -2975,7 +2975,7 @@ impl Parser {
     let maybe_exp = self.state.node_pop();
     if maybe_exp.is_none() {
       self.state.err("expected assert condition");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node exp_val = maybe_exp.unwrap();
 
@@ -3015,7 +3015,7 @@ impl Parser {
         let maybe_msg = self.state.node_pop();
         if maybe_msg.is_none() {
           self.state.err("expected assert message");
-          ret .Some(ParseErrorKind.InvalidExpression);
+          ret .Some(.InvalidExpression);
         }
         msg_ptr = malloc(sizeof(Node));
         *msg_ptr = maybe_msg.unwrap();
@@ -3028,7 +3028,7 @@ impl Parser {
     an.message = msg_ptr;
     an.has_message = has_msg;
 
-    Node node = node_new(NodeKind.StatementAssert(an));
+    Node node = node_new(.StatementAssert(an));
     fit assert_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -3050,7 +3050,7 @@ impl Parser {
   // `(a || b) && c` would otherwise emit as `a || b && c`.
   _parse_if_or_elif_condition() Option<ParseErrorKind> {
     bin had_leading_paren = false;
-    Node cond = node_new(NodeKind.Blank);
+    Node cond = node_new(.Blank);
 
     if self.state.next_token_is_operator("(") {
       had_leading_paren = true;
@@ -3065,7 +3065,7 @@ impl Parser {
       let maybe_cond = self.state.node_pop();
       if maybe_cond.is_none() {
         self.state.err("expected condition");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
       cond = maybe_cond.unwrap();
       let cerr = self.state.expect_sym(')');
@@ -3080,7 +3080,7 @@ impl Parser {
       let maybe_cond = self.state.node_pop();
       if maybe_cond.is_none() {
         self.state.err("expected condition");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
       cond = maybe_cond.unwrap();
     }
@@ -3091,7 +3091,7 @@ impl Parser {
           if had_leading_paren {
             Node* inner = malloc(sizeof(Node));
             *inner = cond;
-            Node wrapped = node_new(NodeKind.ExpressionParenthesis(inner));
+            Node wrapped = node_new(.ExpressionParenthesis(inner));
             wrapped.pos = inner.pos;
             wrapped.has_pos = inner.has_pos;
             cond = wrapped;
@@ -3104,7 +3104,7 @@ impl Parser {
           let maybe_cond2 = self.state.node_pop();
           if maybe_cond2.is_none() {
             self.state.err("expected condition");
-            ret .Some(ParseErrorKind.InvalidExpression);
+            ret .Some(.InvalidExpression);
           }
           cond = maybe_cond2.unwrap();
         }
@@ -3123,7 +3123,7 @@ impl Parser {
     }
     if is_assignment {
       self.state.err("expected expression, got assignment");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     self.state.nodes.push(cond);
@@ -3148,7 +3148,7 @@ impl Parser {
     }
     if !self.has_current_function {
       self.state.err("if statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     let cerr = self._parse_if_or_elif_condition();
@@ -3158,7 +3158,7 @@ impl Parser {
     let maybe_cond = self.state.node_pop();
     if maybe_cond.is_none() {
       self.state.err("expected if condition");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* condition = malloc(sizeof(Node));
     *condition = maybe_cond.unwrap();
@@ -3170,7 +3170,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected if body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -3179,7 +3179,7 @@ impl Parser {
     ifn.condition = condition;
     ifn.body = body;
 
-    Node node = node_new(NodeKind.StatementIf(ifn));
+    Node node = node_new(.StatementIf(ifn));
     fit if_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -3202,7 +3202,7 @@ impl Parser {
     let elif_tok = self.state.token_peek_next();
     if !self.has_current_function {
       self.state.err("elif statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     self.state.token_next();
 
@@ -3213,7 +3213,7 @@ impl Parser {
     let maybe_cond = self.state.node_pop();
     if maybe_cond.is_none() {
       self.state.err("expected elif condition");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* condition = malloc(sizeof(Node));
     *condition = maybe_cond.unwrap();
@@ -3225,7 +3225,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected elif body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -3234,7 +3234,7 @@ impl Parser {
     ifn.condition = condition;
     ifn.body = body;
 
-    Node node = node_new(NodeKind.StatementElseIf(ifn));
+    Node node = node_new(.StatementElseIf(ifn));
     fit elif_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -3255,7 +3255,7 @@ impl Parser {
     let else_tok = self.state.token_peek_next();
     if !self.has_current_function {
       self.state.err("else statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     self.state.token_next();
 
@@ -3266,12 +3266,12 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected else body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
 
-    Node node = node_new(NodeKind.StatementElse(body));
+    Node node = node_new(.StatementElse(body));
     fit else_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -3314,7 +3314,7 @@ impl Parser {
       let maybe_arg = self.state.node_pop();
       if maybe_arg.is_none() {
         self.state.err("expected argument");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       Node* arg = malloc(sizeof(Node));
       *arg = maybe_arg.unwrap();
@@ -3343,12 +3343,12 @@ impl Parser {
     let tok = self.state.token_next();
     if tok.is_none() {
       self.state.err("expected identifier after 'fun'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     let ident_tok = tok.unwrap();
-    if ident_tok.type != TokenType.Identifier {
+    if ident_tok.type != .Identifier {
       self.state.err("expected identifier after 'fun'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str fname = "";
     fit ident_tok.data {
@@ -3361,7 +3361,7 @@ impl Parser {
     fnv.has_name = true;
     fnv.is_async = is_async;
 
-    Node fn_node = node_new(NodeKind.Function(fnv));
+    Node fn_node = node_new(.Function(fnv));
     fn_node.pos = ident_tok.pos;
     fn_node.has_pos = true;
     fn_node.flags.is_public = is_public;
@@ -3378,7 +3378,7 @@ impl Parser {
     // snapshot, which is fine since only `get_symbol(name).is_none()` is
     // ever checked for it.
     Symbol fn_sym = symbol_new(fname);
-    fn_sym.kind = SymbolKind.NodeSym(*fn_node_ptr);
+    fn_sym.kind = .NodeSym(*fn_node_ptr);
     self.state.push_symbol(fn_sym);
 
     Vec<str> type_params;
@@ -3398,7 +3398,7 @@ impl Parser {
         curtp.has_type_params = type_params.len > 0;
         curtp.type_param_forced_insts = type_param_forced_insts;
         curtp.has_type_param_forced_insts = type_param_forced_insts.len > 0;
-        fn_node_ptr.kind = NodeKind.Function(curtp);
+        fn_node_ptr.kind = .Function(curtp);
       }
       _ -> {}
     }
@@ -3424,7 +3424,7 @@ impl Parser {
         cur.args = args;
         cur.has_args = true;
         cur.is_variadic = is_variadic;
-        fn_node_ptr.kind = NodeKind.Function(cur);
+        fn_node_ptr.kind = .Function(cur);
       }
       _ -> {}
     }
@@ -3436,7 +3436,7 @@ impl Parser {
     if is_variadic {
       DataType* vdt = malloc(sizeof(DataType));
       *vdt = dtype_new();
-      vdt.kind = DataTypeType.Unknown;
+      vdt.kind = .Unknown;
       vdt.type_str = "Vec";
 
       VariableNode vv;
@@ -3446,7 +3446,7 @@ impl Parser {
       vv.has_val = false;
       vv.is_const = false;
 
-      Node vnode = node_new(NodeKind.Variable(vv));
+      Node vnode = node_new(.Variable(vv));
       vnode.pos = fn_node_ptr.pos;
       vnode.has_pos = fn_node_ptr.has_pos;
 
@@ -3461,10 +3461,10 @@ impl Parser {
     fit self.state.token_peek_next() {
       .Some(rt) -> {
         bin looks_like_type = false;
-        if rt.type == TokenType.Identifier {
+        if rt.type == .Identifier {
           looks_like_type = true;
         }
-        if rt.type == TokenType.Keyword {
+        if rt.type == .Keyword {
           fit rt.data {
             .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
             _ -> {}
@@ -3489,7 +3489,7 @@ impl Parser {
     }
     if !has_explicit_rtype {
       *rtype = dtype_new();
-      rtype.kind = DataTypeType.Void;
+      rtype.kind = .Void;
       rtype.type_str = "void";
     }
 
@@ -3497,7 +3497,7 @@ impl Parser {
       .Function(cur2) -> {
         cur2.rtype = rtype;
         cur2.has_rtype = true;
-        fn_node_ptr.kind = NodeKind.Function(cur2);
+        fn_node_ptr.kind = .Function(cur2);
       }
       _ -> {}
     }
@@ -3510,7 +3510,7 @@ impl Parser {
       let maybe_body = self.state.node_pop();
       if maybe_body.is_none() {
         self.state.err("expected function body");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* body = malloc(sizeof(Node));
       *body = maybe_body.unwrap();
@@ -3518,7 +3518,7 @@ impl Parser {
         .Function(cur3) -> {
           cur3.body = body;
           cur3.has_body = true;
-          fn_node_ptr.kind = NodeKind.Function(cur3);
+          fn_node_ptr.kind = .Function(cur3);
         }
         _ -> {}
       }
@@ -3537,8 +3537,8 @@ impl Parser {
 
   // Parses the range/iterator loop-variable forms, once `parse_for_statement`
   // has determined (via lookahead) that's what follows `for`: `for i :
-  // start..end { ... }` for `ForKind.Range`, or `for item : arr { ... }` /
-  // `for i, item :: arr { ... }` for `ForKind.Iter` with optional index
+  // start..end { ... }` for `.Range`, or `for item : arr { ... }` /
+  // `for i, item :: arr { ... }` for `.Iter` with optional index
   // tracking. The loop variables are registered as on-stack scope entities
   // with no backing declaration `Node`, in a scope opened before the body
   // and closed after it. The one hard error here (range form with the
@@ -3546,9 +3546,9 @@ impl Parser {
   // a parse error aborts the whole parse anyway.
   _parse_for_range_or_iter(Option<Token> for_tok) Option<ParseErrorKind> {
     let first = self.state.token_next();
-    if first.is_none() || first.unwrap().type != TokenType.Identifier {
+    if first.is_none() || first.unwrap().type != .Identifier {
       self.state.err("expected identifier after 'for'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str index_name = "";
     bin has_index_name = false;
@@ -3564,9 +3564,9 @@ impl Parser {
       has_index_name = true;
       self.state.token_next(); // skip ','
       let second = self.state.token_next();
-      if second.is_none() || second.unwrap().type != TokenType.Identifier {
+      if second.is_none() || second.unwrap().type != .Identifier {
         self.state.err("expected identifier after ',' in for loop");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       fit second.unwrap().data {
         .Sval(s) -> { item_name = s; }
@@ -3591,7 +3591,7 @@ impl Parser {
     let maybe_iterable = self.state.node_pop();
     if maybe_iterable.is_none() {
       self.state.err("expected for iterable/range expression");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node iterable_node = maybe_iterable.unwrap();
 
@@ -3610,7 +3610,7 @@ impl Parser {
     if is_range {
       if used_double_colon {
         self.state.err("range for loop does not support 'i, item ::' form");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       ScopeEntity item_entity = scope_entity_new(item_name);
       item_entity.on_stack = true;
@@ -3640,12 +3640,12 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected for body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
 
-    Node node = node_new(NodeKind.Blank);
+    Node node = node_new(.Blank);
     if is_range {
       Node* range_ptr = malloc(sizeof(Node));
       *range_ptr = iterable_node;
@@ -3653,7 +3653,7 @@ impl Parser {
       fr.index_name = item_name;
       fr.range_expr = range_ptr;
       fr.body = body;
-      node.kind = NodeKind.StatementFor(ForKind.Range(fr));
+      node.kind = .StatementFor(.Range(fr));
     } else {
       Node* iterable_ptr = malloc(sizeof(Node));
       *iterable_ptr = iterable_node;
@@ -3663,7 +3663,7 @@ impl Parser {
       fi.item_name = item_name;
       fi.iterable = iterable_ptr;
       fi.body = body;
-      node.kind = NodeKind.StatementFor(ForKind.Iter(fi));
+      node.kind = .StatementFor(.Iter(fi));
     }
     fit for_tok {
       .Some(t) -> {
@@ -3691,7 +3691,7 @@ impl Parser {
     }
     if !self.has_current_function {
       self.state.err("for statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     if self.state.next_token_is_symbol('{') {
@@ -3702,7 +3702,7 @@ impl Parser {
       let maybe_body = self.state.node_pop();
       if maybe_body.is_none() {
         self.state.err("expected for body");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* body = malloc(sizeof(Node));
       *body = maybe_body.unwrap();
@@ -3712,7 +3712,7 @@ impl Parser {
       fc.has_condition = false;
       fc.body = body;
 
-      Node node = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+      Node node = node_new(.StatementFor(.Cond(fc)));
       fit for_tok {
         .Some(t) -> {
           node.pos = t.pos;
@@ -3727,7 +3727,7 @@ impl Parser {
     bin is_legacy = false;
     fit self.state.token_peek_next() {
       .Some(nt) -> {
-        if nt.type == TokenType.Identifier {
+        if nt.type == .Identifier {
           fit self.state.token_peek_n(1) {
             .Some(after) -> {
               is_legacy = token_is_operator(after, ",") || token_is_operator(after, ":");
@@ -3749,7 +3749,7 @@ impl Parser {
     let maybe_cond = self.state.node_pop();
     if maybe_cond.is_none() {
       self.state.err("expected for condition");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* cond_ptr = malloc(sizeof(Node));
     *cond_ptr = maybe_cond.unwrap();
@@ -3761,7 +3761,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected for body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -3771,7 +3771,7 @@ impl Parser {
     fc.has_condition = true;
     fc.body = body;
 
-    Node node = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+    Node node = node_new(.StatementFor(.Cond(fc)));
     fit for_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -3802,10 +3802,10 @@ impl Parser {
     let p0 = p0_opt.unwrap();
     let p1 = p1_opt.unwrap();
 
-    bin is_shorthand = token_is_operator(p0, ".") && p1.type == TokenType.Identifier;
+    bin is_shorthand = token_is_operator(p0, ".") && p1.type == .Identifier;
     bin is_qualified = false;
     if !is_shorthand {
-      is_qualified = p0.type == TokenType.Identifier && token_is_operator(p1, ".");
+      is_qualified = p0.type == .Identifier && token_is_operator(p1, ".");
     }
     if !is_shorthand && !is_qualified {
       ret .None;
@@ -3821,7 +3821,7 @@ impl Parser {
       }
     } else {
       let p2_opt = self.state.token_peek_n(2);
-      if p2_opt.is_some() && p2_opt.unwrap().type == TokenType.Identifier {
+      if p2_opt.is_some() && p2_opt.unwrap().type == .Identifier {
         let p3_opt = self.state.token_peek_n(3);
         if p3_opt.is_some() && token_is_operator(p3_opt.unwrap(), "(") {
           variant_tok = p2_opt.unwrap();
@@ -3834,7 +3834,7 @@ impl Parser {
     }
 
     // Commit: consume the path tokens.
-    Node left = node_new(NodeKind.Blank);
+    Node left = node_new(.Blank);
     if is_shorthand {
       self.state.token_next(); // '.'
       self.state.token_next(); // Variant
@@ -3846,7 +3846,7 @@ impl Parser {
         .Sval(s) -> { enum_name = s; }
         _ -> {}
       }
-      left = node_new(NodeKind.Identifier(enum_name));
+      left = node_new(.Identifier(enum_name));
       left.pos = p0.pos;
       left.has_pos = true;
       self.state.token_next(); // Enum
@@ -3860,7 +3860,7 @@ impl Parser {
       .Sval(s) -> { variant_name = s; }
       _ -> {}
     }
-    Node right = node_new(NodeKind.Identifier(variant_name));
+    Node right = node_new(.Identifier(variant_name));
     right.pos = variant_tok.pos;
     right.has_pos = true;
     right.flags.inside_expression = true;
@@ -3874,9 +3874,9 @@ impl Parser {
     binds.init(0);
     for !self.state.next_token_is_symbol(')') {
       let bt = self.state.token_next();
-      if bt.is_none() || bt.unwrap().type != TokenType.Identifier {
+      if bt.is_none() || bt.unwrap().type != .Identifier {
         self.state.err("expected binding name in fit destructuring pattern");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str bname = "";
       fit bt.unwrap().data {
@@ -3895,7 +3895,7 @@ impl Parser {
     }
     if binds.len == 0 {
       self.state.err("fit destructuring pattern '()' must bind at least one field");
-      ret .Some(ParseErrorKind.InvalidToken);
+      ret .Some(.InvalidToken);
     }
 
     self.make_expression_node(&left, &right, ".", variant_tok.pos);
@@ -3903,7 +3903,7 @@ impl Parser {
       .Some(built) -> { *out_condition = built; }
       .None -> {
         self.state.err("failed to build fit destructuring variant path");
-        ret .Some(ParseErrorKind.InvalidExpression);
+        ret .Some(.InvalidExpression);
       }
     }
     *out_bindings = binds;
@@ -3921,12 +3921,12 @@ impl Parser {
   // recognize as a complete expression on its own; and an ordinary
   // expression pattern via `parse_expressionable_root`.
   _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
-    Node arm_condition = node_new(NodeKind.Blank);
+    Node arm_condition = node_new(.Blank);
     Vec<str> bindings;
     bindings.init(0);
 
     bin destructure_matched = false;
-    Node destructure_condition = node_new(NodeKind.Blank);
+    Node destructure_condition = node_new(.Blank);
     Vec<str> destructure_bindings;
     destructure_bindings.init(0);
     let dxerr = self._try_parse_fit_destructure(
@@ -3947,7 +3947,7 @@ impl Parser {
       fit self.state.token_peek_next() {
         .Some(t) -> {
           op_pos = t.pos;
-          if t.type == TokenType.Operator {
+          if t.type == .Operator {
             str op = "";
             fit t.data {
               .Sval(s) -> { op = s; }
@@ -3968,12 +3968,12 @@ impl Parser {
         let maybe_right = self.state.node_pop();
         if maybe_right.is_none() {
           self.state.err("expected identifier after '.' in fit pattern");
-          ret .Some(ParseErrorKind.InvalidExpression);
+          ret .Some(.InvalidExpression);
         }
         Node node_right = maybe_right.unwrap();
         node_right.flags.inside_expression = true;
 
-        Node blank_left = node_new(NodeKind.Blank);
+        Node blank_left = node_new(.Blank);
         blank_left.pos = op_pos;
         blank_left.has_pos = true;
         blank_left.flags.inside_expression = true;
@@ -3986,7 +3986,7 @@ impl Parser {
           }
           .None -> {
             self.state.err("expected fit branch condition expression");
-            ret .Some(ParseErrorKind.InvalidExpression);
+            ret .Some(.InvalidExpression);
           }
         }
       } else {
@@ -3997,7 +3997,7 @@ impl Parser {
         let maybe_cond = self.state.node_pop();
         if maybe_cond.is_none() {
           self.state.err("expected fit branch condition expression");
-          ret .Some(ParseErrorKind.InvalidExpression);
+          ret .Some(.InvalidExpression);
         }
         arm_condition = maybe_cond.unwrap();
       }
@@ -4014,7 +4014,7 @@ impl Parser {
     }
     if is_assignment {
       self.state.err("expected expression, got assignment");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     bin is_wildcard = false;
@@ -4062,7 +4062,7 @@ impl Parser {
         bv.has_val = false;
         bv.is_const = false;
 
-        Node bvar = node_new(NodeKind.Variable(bv));
+        Node bvar = node_new(.Variable(bv));
         Node* bvar_ptr = malloc(sizeof(Node));
         *bvar_ptr = bvar;
         ScopeEntity* bentity = self.new_scope_entity(bvar_ptr);
@@ -4079,7 +4079,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected fit branch body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -4129,7 +4129,7 @@ impl Parser {
     fitn.branches = branches;
     fitn.has_default_branch = has_default_branch;
 
-    Node node = node_new(NodeKind.StatementFit(fitn));
+    Node node = node_new(.StatementFit(fitn));
     if has_fit_pos {
       node.pos = fit_pos;
       node.has_pos = true;
@@ -4160,7 +4160,7 @@ impl Parser {
     let maybe_cond = self.state.node_pop();
     if maybe_cond.is_none() {
       self.state.err("expected fit condition");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* condition = malloc(sizeof(Node));
     *condition = maybe_cond.unwrap();
@@ -4192,7 +4192,7 @@ impl Parser {
   // Parses `break;`.
   pub parse_break_statement() Option<ParseErrorKind> {
     let tok = self.state.token_next(); // consume 'break'
-    Node node = node_new(NodeKind.StatementBreak);
+    Node node = node_new(.StatementBreak);
     fit tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4207,7 +4207,7 @@ impl Parser {
   // Parses `continue;`.
   pub parse_continue_statement() Option<ParseErrorKind> {
     let tok = self.state.token_next(); // consume 'continue'
-    Node node = node_new(NodeKind.StatementContinue);
+    Node node = node_new(.StatementContinue);
     fit tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4235,7 +4235,7 @@ impl Parser {
     let maybe_msg = self.state.node_pop();
     if maybe_msg.is_none() {
       self.state.err("expected message expression after 'panic('");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     let rperr = self.state.expect_sym(')');
     if rperr.is_some() {
@@ -4244,7 +4244,7 @@ impl Parser {
     Node* msg = malloc(sizeof(Node));
     *msg = maybe_msg.unwrap();
 
-    Node node = node_new(NodeKind.Panic(msg));
+    Node node = node_new(.Panic(msg));
     fit panic_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4265,16 +4265,16 @@ impl Parser {
     let await_tok = self.state.token_next(); // consume 'await'
     if !self.has_current_function {
       self.state.err("await statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let next_tok = self.state.token_peek_next();
     if next_tok.is_none() {
       self.state.err("expected expression after 'await'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     if token_is_symbol(next_tok.unwrap(), ';') {
       self.state.err("expected expression after 'await'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     num before = self.state.nodes.len;
@@ -4287,13 +4287,13 @@ impl Parser {
     }
     if self.state.nodes.len == before {
       self.state.err("expected expression after 'await'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     let maybe_operand = self.state.node_pop();
     if maybe_operand.is_none() {
       self.state.err("expected expression after 'await'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* operand = malloc(sizeof(Node));
     *operand = maybe_operand.unwrap();
@@ -4305,7 +4305,7 @@ impl Parser {
     un.has_indirection = false;
     un.indirection_depth = 0;
 
-    Node node = node_new(NodeKind.Unary(un));
+    Node node = node_new(.Unary(un));
     fit await_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4326,16 +4326,16 @@ impl Parser {
     let fork_tok = self.state.token_next(); // consume 'fork'
     if !self.has_current_function {
       self.state.err("fork statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let next_tok = self.state.token_peek_next();
     if next_tok.is_none() {
       self.state.err("expected a function call after 'fork'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     if token_is_symbol(next_tok.unwrap(), ';') {
       self.state.err("expected a function call after 'fork'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     num before = self.state.nodes.len;
@@ -4348,18 +4348,18 @@ impl Parser {
     }
     if self.state.nodes.len == before {
       self.state.err("expected a function call after 'fork'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
 
     let maybe_call = self.state.node_pop();
     if maybe_call.is_none() {
       self.state.err("expected a function call after 'fork'");
-      ret .Some(ParseErrorKind.InvalidExpression);
+      ret .Some(.InvalidExpression);
     }
     Node* expr = malloc(sizeof(Node));
     *expr = maybe_call.unwrap();
 
-    Node node = node_new(NodeKind.StatementFork(expr));
+    Node node = node_new(.StatementFork(expr));
     fit fork_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4378,14 +4378,14 @@ impl Parser {
     let defer_tok = self.state.token_peek_next();
     if !self.has_current_function {
       self.state.err("defer statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     self.state.token_next(); // consume 'defer'
 
     let next_tok = self.state.token_peek_next();
     if next_tok.is_none() {
       self.state.err("expected expression or body after 'defer'");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     Node* body;
@@ -4397,7 +4397,7 @@ impl Parser {
       let maybe_body = self.state.node_pop();
       if maybe_body.is_none() {
         self.state.err("expected body after 'defer'");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       body = malloc(sizeof(Node));
       *body = maybe_body.unwrap();
@@ -4409,7 +4409,7 @@ impl Parser {
       let maybe_expr = self.state.node_pop();
       if maybe_expr.is_none() {
         self.state.err("expected expression after 'defer'");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       body = malloc(sizeof(Node));
       *body = maybe_expr.unwrap();
@@ -4419,7 +4419,7 @@ impl Parser {
       }
     }
 
-    Node node = node_new(NodeKind.StatementDefer(body));
+    Node node = node_new(.StatementDefer(body));
     fit defer_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4440,9 +4440,9 @@ impl Parser {
     for true {
       self.state.skip_nl_or_comment();
       let name_tok = self.state.token_next();
-      if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+      if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
         self.state.err("expected operand name");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str name = "";
       fit name_tok.unwrap().data {
@@ -4458,13 +4458,13 @@ impl Parser {
       }
       if !colon_ok {
         self.state.err("expected ':' after operand name");
-        ret .Some(ParseErrorKind.InvalidSymbol);
+        ret .Some(.InvalidSymbol);
       }
 
       let constraint_tok = self.state.token_next();
-      if constraint_tok.is_none() || constraint_tok.unwrap().type != TokenType.String {
+      if constraint_tok.is_none() || constraint_tok.unwrap().type != .String {
         self.state.err("expected constraint string");
-        ret .Some(ParseErrorKind.InvalidString);
+        ret .Some(.InvalidString);
       }
       str constraint = "";
       fit constraint_tok.unwrap().data {
@@ -4483,7 +4483,7 @@ impl Parser {
       let maybe_expr = self.state.node_pop();
       if maybe_expr.is_none() {
         self.state.err("expected operand expression");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* expr = malloc(sizeof(Node));
       *expr = maybe_expr.unwrap();
@@ -4511,7 +4511,7 @@ impl Parser {
         ret .None;
       }
       self.state.err("expected ',', ';', or ')' after operand");
-      ret .Some(ParseErrorKind.InvalidSymbol);
+      ret .Some(.InvalidSymbol);
     }
     ret .None;
   }
@@ -4522,9 +4522,9 @@ impl Parser {
     for true {
       self.state.skip_nl_or_comment();
       let ctok = self.state.token_next();
-      if ctok.is_none() || ctok.unwrap().type != TokenType.String {
+      if ctok.is_none() || ctok.unwrap().type != .String {
         self.state.err("expected clobber string");
-        ret .Some(ParseErrorKind.InvalidString);
+        ret .Some(.InvalidString);
       }
       str cname = "";
       fit ctok.unwrap().data {
@@ -4550,7 +4550,7 @@ impl Parser {
         ret .None;
       }
       self.state.err("expected ',', ';', or ')' after clobber");
-      ret .Some(ParseErrorKind.InvalidSymbol);
+      ret .Some(.InvalidSymbol);
     }
     ret .None;
   }
@@ -4595,10 +4595,10 @@ impl Parser {
     for true {
       if self.state.pindex >= self.state.tokens.len {
         self.state.err("unexpected end of file in asm block");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       let t = self.state.tokens.get(self.state.pindex);
-      if t.type == TokenType.Symbol {
+      if t.type == .Symbol {
         fit t.data {
           .Cval(c) -> {
             if c == '{' {
@@ -4619,7 +4619,7 @@ impl Parser {
     }
     if close_brace_tok.is_none() {
       self.state.err("unexpected end of file in asm block");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let close_tok = close_brace_tok.unwrap();
 
@@ -4635,13 +4635,13 @@ impl Parser {
     );
     if start_idx_opt.is_none() || end_idx_opt.is_none() {
       self.state.err("internal parser error: invalid asm block span");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     num start_idx = start_idx_opt.unwrap();
     num end_idx = end_idx_opt.unwrap();
     if end_idx < start_idx || end_idx > len(self.state.input_source) {
       self.state.err("internal parser error: malformed asm block span");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     out.append(substr(self.state.input_source, start_idx, end_idx - start_idx));
     ret .None;
@@ -4655,7 +4655,7 @@ impl Parser {
     let asm_tok = self.state.token_peek_next();
     if !self.has_current_function {
       self.state.err("asm statement outside of function");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     self.state.token_next(); // consume 'asm'
 
@@ -4673,9 +4673,9 @@ impl Parser {
       self.state.token_next();
       let arch_val_tok = self.state.token_next();
       if arch_val_tok.is_none() ||
-        (arch_val_tok.unwrap().type != TokenType.Identifier && arch_val_tok.unwrap().type != TokenType.Keyword) {
+        (arch_val_tok.unwrap().type != .Identifier && arch_val_tok.unwrap().type != .Keyword) {
         self.state.err("expected architecture name after 'arch'");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       fit arch_val_tok.unwrap().data {
         .Sval(s) -> { arch_name = s; }
@@ -4703,7 +4703,7 @@ impl Parser {
         let peek_tok = self.state.token_peek_next();
         if peek_tok.is_none() {
           self.state.err("expected ')' to close asm operands");
-          ret .Some(ParseErrorKind.InvalidStatement);
+          ret .Some(.InvalidStatement);
         }
         let pt = peek_tok.unwrap();
         if token_is_symbol(pt, ')') || token_is_operator(pt, ")") {
@@ -4712,9 +4712,9 @@ impl Parser {
         }
         let section_tok = self.state.token_next();
         if section_tok.is_none() ||
-          (section_tok.unwrap().type != TokenType.Identifier && section_tok.unwrap().type != TokenType.Keyword) {
+          (section_tok.unwrap().type != .Identifier && section_tok.unwrap().type != .Keyword) {
           self.state.err("expected asm operand section");
-          ret .Some(ParseErrorKind.InvalidKeyword);
+          ret .Some(.InvalidKeyword);
         }
         str section = "";
         fit section_tok.unwrap().data {
@@ -4740,7 +4740,7 @@ impl Parser {
           let msg = format("unknown asm section '{str}'", section);
           defer free(msg);
           self.state.err(msg);
-          ret .Some(ParseErrorKind.InvalidKeyword);
+          ret .Some(.InvalidKeyword);
         }
       }
     }
@@ -4752,10 +4752,10 @@ impl Parser {
     let body_tok = self.state.token_peek_next();
     if body_tok.is_none() {
       self.state.err("expected asm body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let bt = body_tok.unwrap();
-    if bt.type == TokenType.String {
+    if bt.type == .String {
       self.state.token_next();
       fit bt.data {
         .Sval(s) -> { template = s; }
@@ -4766,7 +4766,7 @@ impl Parser {
       let open_brace_tok = self.state.token_next();
       if open_brace_tok.is_none() {
         self.state.err("expected '{' to start asm block");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       StringBuilder tmpl_sb = string_builder_init(32);
       let berr = self._append_raw_asm_block_template(&tmpl_sb, open_brace_tok.unwrap());
@@ -4776,7 +4776,7 @@ impl Parser {
       template = tmpl_sb.build();
     } else {
       self.state.err("expected asm body (string or block)");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     let serr = self.state.expect_sym(';');
@@ -4794,7 +4794,7 @@ impl Parser {
     a.clobbers = clobbers;
     a.is_string_literal = is_string_literal;
 
-    Node node = node_new(NodeKind.StatementAsm(a));
+    Node node = node_new(.StatementAsm(a));
     fit asm_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4815,9 +4815,9 @@ impl Parser {
     let test_tok = self.state.token_next(); // consume 'test'
 
     let name_tok = self.state.token_next();
-    if name_tok.is_none() || name_tok.unwrap().type != TokenType.String {
+    if name_tok.is_none() || name_tok.unwrap().type != .String {
       self.state.err("expected a string name after 'test'");
-      ret .Some(ParseErrorKind.InvalidString);
+      ret .Some(.InvalidString);
     }
     str name = "";
     fit name_tok.unwrap().data {
@@ -4829,7 +4829,7 @@ impl Parser {
 
     let prev_fn = self.current_function;
     let prev_has_fn = self.has_current_function;
-    Node fn_stub = node_new(NodeKind.Function(function_node_new()));
+    Node fn_stub = node_new(.Function(function_node_new()));
     self.current_function = &fn_stub;
     self.has_current_function = true;
 
@@ -4843,7 +4843,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected test body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -4852,7 +4852,7 @@ impl Parser {
     td.name = name;
     td.body = body;
 
-    Node node = node_new(NodeKind.Test(td));
+    Node node = node_new(.Test(td));
     fit test_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4874,13 +4874,13 @@ impl Parser {
         if !equals(v.var_type.type_str, expected_type_name) ||
           v.var_type.pointer_depth != expected_pointer_depth {
           self.state.err("'fuzz' parameter has the wrong type -- expected 'raw* data, num len'");
-          ret .Some(ParseErrorKind.InvalidStatement);
+          ret .Some(.InvalidStatement);
         }
         ret .None;
       }
       _ -> {
         self.state.err("invalid 'fuzz' parameter");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
     }
   }
@@ -4894,9 +4894,9 @@ impl Parser {
     let fuzz_tok = self.state.token_next(); // consume 'fuzz'
 
     let name_tok = self.state.token_next();
-    if name_tok.is_none() || name_tok.unwrap().type != TokenType.String {
+    if name_tok.is_none() || name_tok.unwrap().type != .String {
       self.state.err("expected a string name after 'fuzz'");
-      ret .Some(ParseErrorKind.InvalidString);
+      ret .Some(.InvalidString);
     }
     str name = "";
     fit name_tok.unwrap().data {
@@ -4930,7 +4930,7 @@ impl Parser {
     if is_variadic || args.len != 2 {
       self.state.err("'fuzz' requires exactly two explicitly-typed parameters: 'raw* data, num len'");
       self.state.finish_scope();
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     Node* data_param = args.get(0);
@@ -4948,7 +4948,7 @@ impl Parser {
 
     let prev_fn = self.current_function;
     let prev_has_fn = self.has_current_function;
-    Node fn_stub = node_new(NodeKind.Function(function_node_new()));
+    Node fn_stub = node_new(.Function(function_node_new()));
     self.current_function = &fn_stub;
     self.has_current_function = true;
 
@@ -4962,7 +4962,7 @@ impl Parser {
     let maybe_body = self.state.node_pop();
     if maybe_body.is_none() {
       self.state.err("expected fuzz body");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     Node* body = malloc(sizeof(Node));
     *body = maybe_body.unwrap();
@@ -4973,7 +4973,7 @@ impl Parser {
     fd.len_param = len_param;
     fd.body = body;
 
-    Node node = node_new(NodeKind.Fuzz(fd));
+    Node node = node_new(.Fuzz(fd));
     fit fuzz_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -5004,9 +5004,9 @@ impl Parser {
     self.state.token_next(); // consume 'allow'/'expect'
 
     let id_tok = self.state.token_next();
-    if id_tok.is_none() || id_tok.unwrap().type != TokenType.Identifier {
+    if id_tok.is_none() || id_tok.unwrap().type != .Identifier {
       self.state.err("expected warning id after 'allow'/'expect'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str id_name = "";
     fit id_tok.unwrap().data {
@@ -5021,14 +5021,14 @@ impl Parser {
       );
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     WarningId warning_id = maybe_id.unwrap();
 
     if !self.has_current_function &&
       !self._warning_control_is_valid_in_module_scope(warning_id) {
       self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, and unused_compound may be controlled at module scope");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
     let commaerr = self.state.expect_op(",");
@@ -5037,9 +5037,9 @@ impl Parser {
     }
 
     let reason_tok = self.state.token_next();
-    if reason_tok.is_none() || reason_tok.unwrap().type != TokenType.String {
+    if reason_tok.is_none() || reason_tok.unwrap().type != .String {
       self.state.err("expected string reason after warning id");
-      ret .Some(ParseErrorKind.InvalidString);
+      ret .Some(.InvalidString);
     }
     str reason = "";
     fit reason_tok.unwrap().data {
@@ -5052,7 +5052,7 @@ impl Parser {
     wc.id = warning_id;
     wc.reason = reason;
 
-    Node node = node_new(NodeKind.StatementWarningControl(wc));
+    Node node = node_new(.StatementWarningControl(wc));
     fit ctrl_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -5123,11 +5123,11 @@ impl Parser {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
       self.state.err("unexpected end of file");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let t = tok.unwrap();
 
-    if t.type == TokenType.Keyword {
+    if t.type == .Keyword {
       str kw = "";
       fit t.data {
         .Sval(s) -> { kw = s; }
@@ -5173,10 +5173,10 @@ impl Parser {
         ret self.parse_continue_statement();
       }
       if equals(kw, "allow") {
-        ret self.parse_warning_control(WarningControlAction.Allow);
+        ret self.parse_warning_control(.Allow);
       }
       if equals(kw, "expect") {
-        ret self.parse_warning_control(WarningControlAction.Expect);
+        ret self.parse_warning_control(.Expect);
       }
       if equals(kw, "nil") || equals(kw, "panic") || equals(kw, "await") {
         let eerr = self.parse_expressionable_root();
@@ -5191,10 +5191,10 @@ impl Parser {
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
       self.state.err(msg);
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
 
-    if t.type == TokenType.Identifier {
+    if t.type == .Identifier {
       str name = "";
       fit t.data {
         .Sval(s) -> { name = s; }
@@ -5235,7 +5235,7 @@ impl Parser {
             break;
           }
           let seg_tok = self.state.token_peek_n(off + 1);
-          if seg_tok.is_none() || seg_tok.unwrap().type != TokenType.Identifier {
+          if seg_tok.is_none() || seg_tok.unwrap().type != .Identifier {
             break;
           }
           off = off + 2;
@@ -5286,7 +5286,7 @@ impl Parser {
           }
         }
         let t1 = self.state.token_peek_n(off);
-        if t1.is_some() && t1.unwrap().type == TokenType.Identifier {
+        if t1.is_some() && t1.unwrap().type == .Identifier {
           ret self._parse_bare_type_variable_declaration(false);
         }
       }
@@ -5333,13 +5333,13 @@ impl Parser {
     }
     if leading_dots % 2 != 0 {
       self.state.err("invalid import path: expected '.' after '.'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
 
     let folder_tok = self.state.token_next();
-    if folder_tok.is_none() || folder_tok.unwrap().type != TokenType.Identifier {
+    if folder_tok.is_none() || folder_tok.unwrap().type != .Identifier {
       self.state.err("expected folder identifier after import");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str folder_name = "";
     fit folder_tok.unwrap().data {
@@ -5365,9 +5365,9 @@ impl Parser {
       }
       let dot_tok = self.state.token_next().unwrap();
       let part_tok = self.state.token_next();
-      if part_tok.is_none() || part_tok.unwrap().type != TokenType.Identifier {
+      if part_tok.is_none() || part_tok.unwrap().type != .Identifier {
         self.state.err("expected identifier after '.' in import path");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str dot_op = "";
       fit dot_tok.data {
@@ -5387,9 +5387,9 @@ impl Parser {
     if self.state.next_token_is_keyword("as") {
       self.state.token_next(); // consume 'as'
       let alias_tok = self.state.token_next();
-      if alias_tok.is_none() || alias_tok.unwrap().type != TokenType.Identifier {
+      if alias_tok.is_none() || alias_tok.unwrap().type != .Identifier {
         self.state.err("expected alias identifier after 'as'");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       fit alias_tok.unwrap().data {
         .Sval(s) -> { alias = s; }
@@ -5408,7 +5408,7 @@ impl Parser {
     imp_node_data.alias = alias;
     imp_node_data.has_alias = has_alias;
 
-    Node node = node_new(NodeKind.Import(imp_node_data));
+    Node node = node_new(.Import(imp_node_data));
     fit imp_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -5434,9 +5434,9 @@ impl Parser {
     }
 
     let name_tok = self.state.token_next();
-    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
       self.state.err("expected identifier after 'compound'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str name = "";
     fit name_tok.unwrap().data {
@@ -5481,9 +5481,9 @@ impl Parser {
       num field_count = 0;
       for true {
         let field_tok = self.state.token_next();
-        if field_tok.is_none() || field_tok.unwrap().type != TokenType.Identifier {
+        if field_tok.is_none() || field_tok.unwrap().type != .Identifier {
           self.state.err("expected field name");
-          ret .Some(ParseErrorKind.InvalidIdentifier);
+          ret .Some(.InvalidIdentifier);
         }
         str fname = "";
         fit field_tok.unwrap().data {
@@ -5496,7 +5496,7 @@ impl Parser {
         // name isn't supported.
         if field_count > 0 && dt.is_array {
           self.state.err("array fields cannot be declared in a combined list; declare them separately");
-          ret .Some(ParseErrorKind.InvalidDataType);
+          ret .Some(.InvalidDataType);
         }
 
         DataType* field_dt = malloc(sizeof(DataType));
@@ -5535,13 +5535,13 @@ impl Parser {
     cn.type_param_forced_insts = type_param_forced_insts;
     cn.has_type_param_forced_insts = type_param_forced_insts.len > 0;
 
-    Node node = node_new(NodeKind.Compound(cn));
+    Node node = node_new(.Compound(cn));
     node.pos = name_tok.unwrap().pos;
     node.has_pos = true;
     node.flags.is_public = is_public;
 
     Symbol sym = symbol_new(name);
-    sym.kind = SymbolKind.NodeSym(node);
+    sym.kind = .NodeSym(node);
     self.state.push_symbol(sym);
 
     self.state.nodes.push(node);
@@ -5562,9 +5562,9 @@ impl Parser {
     }
 
     let name_tok = self.state.token_next();
-    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
       self.state.err("expected identifier after 'enum'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str name = "";
     fit name_tok.unwrap().data {
@@ -5591,9 +5591,9 @@ impl Parser {
 
     for !self.state.next_token_is_symbol('}') {
       let vtok = self.state.token_next();
-      if vtok.is_none() || vtok.unwrap().type != TokenType.Identifier {
+      if vtok.is_none() || vtok.unwrap().type != .Identifier {
         self.state.err("expected enum variant name");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str vname = "";
       fit vtok.unwrap().data {
@@ -5637,7 +5637,7 @@ impl Parser {
         }
         if ptypes.len == 0 {
           self.state.err("enum variant payload '()' must list at least one type");
-          ret .Some(ParseErrorKind.InvalidToken);
+          ret .Some(.InvalidToken);
         }
         variant.payload = ptypes;
         variant.has_payload = true;
@@ -5652,9 +5652,9 @@ impl Parser {
           negate = true;
         }
         let ntok = self.state.token_next();
-        if ntok.is_none() || ntok.unwrap().type != TokenType.Number {
+        if ntok.is_none() || ntok.unwrap().type != .Number {
           self.state.err("expected integer literal after '='");
-          ret .Some(ParseErrorKind.InvalidToken);
+          ret .Some(.InvalidToken);
         }
         num v = 0;
         bin got_num = false;
@@ -5667,7 +5667,7 @@ impl Parser {
         }
         if !got_num {
           self.state.err("enum variant value must be an integer literal");
-          ret .Some(ParseErrorKind.InvalidToken);
+          ret .Some(.InvalidToken);
         }
         if negate {
           v = -v;
@@ -5682,7 +5682,7 @@ impl Parser {
         self.state.token_next();
       } elif !self.state.next_token_is_symbol('}') {
         self.state.err("expected ',' or ';' after enum variant");
-        ret .Some(ParseErrorKind.InvalidToken);
+        ret .Some(.InvalidToken);
       }
 
       variants.push(variant);
@@ -5699,13 +5699,13 @@ impl Parser {
     en.type_params = type_params;
     en.has_type_params = type_params.len > 0;
 
-    Node node = node_new(NodeKind.Enum(en));
+    Node node = node_new(.Enum(en));
     node.pos = name_tok.unwrap().pos;
     node.has_pos = true;
     node.flags.is_public = is_public;
 
     Symbol sym = symbol_new(name);
-    sym.kind = SymbolKind.NodeSym(node);
+    sym.kind = .NodeSym(node);
     self.state.push_symbol(sym);
 
     self.state.nodes.push(node);
@@ -5725,9 +5725,9 @@ impl Parser {
     }
 
     let name_tok = self.state.token_next();
-    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
       self.state.err("expected identifier after 'quirk'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str name = "";
     fit name_tok.unwrap().data {
@@ -5761,9 +5761,9 @@ impl Parser {
       }
 
       let mname_tok = self.state.token_next();
-      if mname_tok.is_none() || mname_tok.unwrap().type != TokenType.Identifier {
+      if mname_tok.is_none() || mname_tok.unwrap().type != .Identifier {
         self.state.err("expected method name");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str mname = "";
       fit mname_tok.unwrap().data {
@@ -5793,9 +5793,9 @@ impl Parser {
         }
 
         let aname_tok = self.state.token_next();
-        if aname_tok.is_none() || aname_tok.unwrap().type != TokenType.Identifier {
+        if aname_tok.is_none() || aname_tok.unwrap().type != .Identifier {
           self.state.err("expected argument name");
-          ret .Some(ParseErrorKind.InvalidIdentifier);
+          ret .Some(.InvalidIdentifier);
         }
         str aname = "";
         fit aname_tok.unwrap().data {
@@ -5824,10 +5824,10 @@ impl Parser {
       fit self.state.token_peek_next() {
         .Some(rt) -> {
           bin looks_like_type = false;
-          if rt.type == TokenType.Identifier {
+          if rt.type == .Identifier {
             looks_like_type = true;
           }
-          if rt.type == TokenType.Keyword {
+          if rt.type == .Keyword {
             fit rt.data {
               .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
               _ -> {}
@@ -5850,7 +5850,7 @@ impl Parser {
         .None -> {}
       }
       if !has_explicit_rtype {
-        rtype.kind = DataTypeType.Void;
+        rtype.kind = .Void;
         rtype.type_str = "void";
       }
 
@@ -5879,13 +5879,13 @@ impl Parser {
     qn.type_params = type_params;
     qn.has_type_params = type_params.len > 0;
 
-    Node node = node_new(NodeKind.Quirk(qn));
+    Node node = node_new(.Quirk(qn));
     node.pos = name_tok.unwrap().pos;
     node.has_pos = true;
     node.flags.is_public = is_public;
 
     Symbol sym = symbol_new(name);
-    sym.kind = SymbolKind.NodeSym(node);
+    sym.kind = .NodeSym(node);
     self.state.push_symbol(sym);
 
     self.state.nodes.push(node);
@@ -5909,9 +5909,9 @@ impl Parser {
       ret kwerr;
     }
     let type_tok = self.state.token_next();
-    if type_tok.is_none() || type_tok.unwrap().type != TokenType.Identifier {
+    if type_tok.is_none() || type_tok.unwrap().type != .Identifier {
       self.state.err("expected type name after 'impl'");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str base_type_name = "";
     fit type_tok.unwrap().data {
@@ -5970,9 +5970,9 @@ impl Parser {
     if peek_after_type.is_some() && token_is_keyword(peek_after_type.unwrap(), "as") {
       self.state.token_next(); // consume 'as'
       let quirk_tok = self.state.token_next();
-      if quirk_tok.is_none() || quirk_tok.unwrap().type != TokenType.Identifier {
+      if quirk_tok.is_none() || quirk_tok.unwrap().type != .Identifier {
         self.state.err("expected quirk name after 'as'");
-        ret .Some(ParseErrorKind.InvalidIdentifier);
+        ret .Some(.InvalidIdentifier);
       }
       str qname = "";
       fit quirk_tok.unwrap().data {
@@ -6001,12 +6001,12 @@ impl Parser {
         }
       }
     } elif peek_after_type.is_some() &&
-      peek_after_type.unwrap().type == TokenType.Identifier {
+    peek_after_type.unwrap().type == .Identifier {
       self.state.err("expected 'as' before quirk name in impl header");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     } elif peek_after_type.is_none() || !token_is_symbol(peek_after_type.unwrap(), '{') {
       self.state.err("expected 'as <Quirk>' or '{' after type name");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
 
     let lberr = self.state.expect_sym('{');
@@ -6050,7 +6050,7 @@ impl Parser {
     impln.has_concrete_dtype = has_impl_concrete_dt;
     impln.methods = methods;
 
-    Node node = node_new(NodeKind.Impl(impln));
+    Node node = node_new(.Impl(impln));
     node.pos = type_tok.unwrap().pos;
     node.has_pos = true;
     node.flags.is_public = is_public;
@@ -6076,7 +6076,7 @@ impl Parser {
 
     for true {
       let peek = self.state.token_peek_next();
-      if peek.is_none() || peek.unwrap().type != TokenType.Keyword {
+      if peek.is_none() || peek.unwrap().type != .Keyword {
         break;
       }
       let pk = peek.unwrap();
@@ -6094,9 +6094,9 @@ impl Parser {
     }
 
     let mname_tok = self.state.token_next();
-    if mname_tok.is_none() || mname_tok.unwrap().type != TokenType.Identifier {
+    if mname_tok.is_none() || mname_tok.unwrap().type != .Identifier {
       self.state.err("expected method name in impl");
-      ret .Some(ParseErrorKind.InvalidIdentifier);
+      ret .Some(.InvalidIdentifier);
     }
     str mname = "";
     fit mname_tok.unwrap().data {
@@ -6116,7 +6116,7 @@ impl Parser {
     fnv.has_name = true;
     fnv.is_async = method_is_async;
 
-    Node fn_node = node_new(NodeKind.Function(fnv));
+    Node fn_node = node_new(.Function(fnv));
     fn_node.pos = mname_tok.unwrap().pos;
     fn_node.has_pos = true;
     fn_node.flags.is_public = method_is_public;
@@ -6148,7 +6148,7 @@ impl Parser {
         curmtp.has_type_params = method_type_params.len > 0;
         curmtp.type_param_forced_insts = method_type_param_forced_insts;
         curmtp.has_type_param_forced_insts = method_type_param_forced_insts.len > 0;
-        fn_node_ptr.kind = NodeKind.Function(curmtp);
+        fn_node_ptr.kind = .Function(curmtp);
       }
       _ -> {}
     }
@@ -6186,7 +6186,7 @@ impl Parser {
     selfv.has_val = false;
     selfv.is_const = false;
 
-    Node self_node = node_new(NodeKind.Variable(selfv));
+    Node self_node = node_new(.Variable(selfv));
     self_node.pos = mname_tok.unwrap().pos;
     self_node.has_pos = true;
 
@@ -6213,7 +6213,7 @@ impl Parser {
       .Function(curargs) -> {
         curargs.args = margs;
         curargs.has_args = true;
-        fn_node_ptr.kind = NodeKind.Function(curargs);
+        fn_node_ptr.kind = .Function(curargs);
       }
       _ -> {}
     }
@@ -6223,10 +6223,10 @@ impl Parser {
     fit self.state.token_peek_next() {
       .Some(rt) -> {
         bin looks_like_type = false;
-        if rt.type == TokenType.Identifier {
+        if rt.type == .Identifier {
           looks_like_type = true;
         }
-        if rt.type == TokenType.Keyword {
+        if rt.type == .Keyword {
           fit rt.data {
             .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
             _ -> {}
@@ -6251,14 +6251,14 @@ impl Parser {
     }
     if !has_explicit_rtype {
       *rtype = dtype_new();
-      rtype.kind = DataTypeType.Void;
+      rtype.kind = .Void;
       rtype.type_str = "void";
     }
     fit fn_node_ptr.kind {
       .Function(currt) -> {
         currt.rtype = rtype;
         currt.has_rtype = true;
-        fn_node_ptr.kind = NodeKind.Function(currt);
+        fn_node_ptr.kind = .Function(currt);
       }
       _ -> {}
     }
@@ -6271,7 +6271,7 @@ impl Parser {
       let maybe_body = self.state.node_pop();
       if maybe_body.is_none() {
         self.state.err("expected method body");
-        ret .Some(ParseErrorKind.InvalidStatement);
+        ret .Some(.InvalidStatement);
       }
       Node* body = malloc(sizeof(Node));
       *body = maybe_body.unwrap();
@@ -6279,7 +6279,7 @@ impl Parser {
         .Function(curbody) -> {
           curbody.body = body;
           curbody.has_body = true;
-          fn_node_ptr.kind = NodeKind.Function(curbody);
+          fn_node_ptr.kind = .Function(curbody);
         }
         _ -> {}
       }
@@ -6309,11 +6309,11 @@ impl Parser {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
       self.state.err("unexpected end of file");
-      ret .Some(ParseErrorKind.InvalidStatement);
+      ret .Some(.InvalidStatement);
     }
     let t = tok.unwrap();
 
-    if t.type == TokenType.Keyword {
+    if t.type == .Keyword {
       str kw = "";
       fit t.data {
         .Sval(s) -> { kw = s; }
@@ -6353,11 +6353,11 @@ impl Parser {
         let next_tok = self.state.token_peek_next();
         if next_tok.is_none() {
           self.state.err("expected a declaration after 'pub'");
-          ret .Some(ParseErrorKind.InvalidStatement);
+          ret .Some(.InvalidStatement);
         }
         let nt = next_tok.unwrap();
         str nkw = "";
-        bin nt_is_keyword = nt.type == TokenType.Keyword;
+        bin nt_is_keyword = nt.type == .Keyword;
         if nt_is_keyword {
           fit nt.data {
             .Sval(s) -> { nkw = s; }
@@ -6389,7 +6389,7 @@ impl Parser {
             let fun_tok = self.state.token_peek_next();
             if fun_tok.is_none() || !token_is_keyword(fun_tok.unwrap(), "fun") {
               self.state.err("expected 'fun' after 'async'");
-              ret .Some(ParseErrorKind.InvalidKeyword);
+              ret .Some(.InvalidKeyword);
             }
             ret self.parse_function(true, true);
           }
@@ -6404,7 +6404,7 @@ impl Parser {
         } else {
           self.state.err("expected a declaration after 'pub'");
         }
-        ret .Some(ParseErrorKind.InvalidKeyword);
+        ret .Some(.InvalidKeyword);
       }
 
       if equals(kw, "async") {
@@ -6412,7 +6412,7 @@ impl Parser {
         let fun_tok = self.state.token_peek_next();
         if fun_tok.is_none() || !token_is_keyword(fun_tok.unwrap(), "fun") {
           self.state.err("expected 'fun' after 'async'");
-          ret .Some(ParseErrorKind.InvalidKeyword);
+          ret .Some(.InvalidKeyword);
         }
         ret self.parse_function(false, true);
       }
@@ -6612,14 +6612,14 @@ test "create_node stamps binded owner/function context" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
 
-  Node body_node = node_new(NodeKind.Blank);
-  Node fn_node = node_new(NodeKind.Blank);
+  Node body_node = node_new(.Blank);
+  Node fn_node = node_new(.Blank);
   p.current_body = &body_node;
   p.has_current_body = true;
   p.current_function = &fn_node;
   p.has_current_function = true;
 
-  Node n = node_new(NodeKind.Blank);
+  Node n = node_new(.Blank);
   p.create_node(&n);
 
   assert n.has_binded, "expected create_node to stamp binded context";
@@ -6632,7 +6632,7 @@ test "create_node leaves binded unset with no active body/function" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
 
-  Node n = node_new(NodeKind.Blank);
+  Node n = node_new(.Blank);
   p.create_node(&n);
 
   assert !n.has_binded, "expected no binded context outside any body/function";
@@ -6643,11 +6643,11 @@ test "new_scope_entity derives its name from the node kind" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
 
-  Node id_node = node_new(NodeKind.Identifier("foo"));
+  Node id_node = node_new(.Identifier("foo"));
   ScopeEntity* e = p.new_scope_entity(&id_node);
   assert equals(e.name, "foo"), "expected entity name derived from Identifier payload";
 
-  Node blank_node = node_new(NodeKind.Blank);
+  Node blank_node = node_new(.Blank);
   ScopeEntity* blank_entity = p.new_scope_entity(&blank_node);
   assert equals(blank_entity.name, ""), "expected empty name for a non-nameable node kind";
 }
@@ -6656,7 +6656,7 @@ test "parse_datatype reads a builtin scalar keyword" {
   ParseState st = _state_from("num");
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected num to parse";
-  assert dt.kind == DataTypeType.Num, "expected kind Num";
+  assert dt.kind == .Num, "expected kind Num";
   assert equals(dt.type_str, "num"), "expected type_str 'num'";
   assert dt.pointer_depth == 0, "expected no pointer depth";
 }
@@ -6665,7 +6665,7 @@ test "parse_datatype reads trailing pointer-depth markers" {
   ParseState st = _state_from("num**");
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected num** to parse";
-  assert dt.kind == DataTypeType.Num, "expected kind Num";
+  assert dt.kind == .Num, "expected kind Num";
   assert dt.flags.is_pointer, "expected is_pointer flag set";
   assert dt.pointer_depth == 2, "expected pointer depth 2";
 }
@@ -6674,7 +6674,7 @@ test "parse_datatype reads a user-defined identifier type" {
   ParseState st = _state_from("MyCompound");
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected MyCompound to parse";
-  assert dt.kind == DataTypeType.Unknown, "user types stay Unknown";
+  assert dt.kind == .Unknown, "user types stay Unknown";
   assert equals(dt.type_str, "MyCompound"), "expected type_str 'MyCompound'";
 }
 
@@ -6682,7 +6682,7 @@ test "parse_datatype recognizes a known C typedef alias" {
   ParseState st = _state_from("size_t");
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected size_t to parse";
-  assert dt.kind == DataTypeType.Num, "size_t should be tagged numeric";
+  assert dt.kind == .Num, "size_t should be tagged numeric";
   assert equals(dt.type_str, "size_t"), "expected the original identifier preserved in type_str";
 }
 
@@ -6713,9 +6713,9 @@ test "parse_datatype reads a function-type parameter with two params and a retur
   assert dt.fn_sig.params.len == 2, "expected two params";
   let p0 = dt.fn_sig.params.get(0);
   let p1 = dt.fn_sig.params.get(1);
-  assert p0.kind == DataTypeType.Num, "expected the first param typed num";
-  assert p1.kind == DataTypeType.Num, "expected the second param typed num";
-  assert dt.fn_sig.rtype.kind == DataTypeType.Num, "expected the return type num";
+  assert p0.kind == .Num, "expected the first param typed num";
+  assert p1.kind == .Num, "expected the second param typed num";
+  assert dt.fn_sig.rtype.kind == .Num, "expected the return type num";
 }
 
 test "parse_datatype reads a zero-arg function-type parameter" {
@@ -6724,7 +6724,7 @@ test "parse_datatype reads a zero-arg function-type parameter" {
   assert st.parse_datatype(&dt).is_none(), "expected 'fun() bin' to parse";
   assert dt.has_fn_sig, "expected has_fn_sig set";
   assert dt.fn_sig.params.len == 0, "expected no params";
-  assert dt.fn_sig.rtype.kind == DataTypeType.Bin, "expected the return type bin";
+  assert dt.fn_sig.rtype.kind == .Bin, "expected the return type bin";
 }
 
 test "parse_datatype defaults an omitted function-type return type to void" {
@@ -6736,7 +6736,7 @@ test "parse_datatype defaults an omitted function-type return type to void" {
   DataType dt = dtype_new();
   assert st.parse_datatype(&dt).is_none(), "expected 'fun(chr)' with nothing after it to parse";
   assert dt.has_fn_sig, "expected has_fn_sig set";
-  assert dt.fn_sig.rtype.kind == DataTypeType.Void, "expected the omitted return type to default to void";
+  assert dt.fn_sig.rtype.kind == .Void, "expected the omitted return type to default to void";
 }
 
 test "parse_datatype reads a user-defined type as a function-type parameter's own param/return type" {
@@ -6756,7 +6756,7 @@ test "parse_generic_type_args reads a single generic argument" {
   assert equals(dt.type_str, "Vec"), "expected base type_str 'Vec'";
   assert dt.generic_args.len == 1, "expected 1 generic arg";
   let arg0 = dt.generic_args.get(0);
-  assert arg0.kind == DataTypeType.Num, "expected generic arg Num";
+  assert arg0.kind == .Num, "expected generic arg Num";
 }
 
 test "parse_generic_type_args reads multiple comma-separated arguments" {
@@ -6766,8 +6766,8 @@ test "parse_generic_type_args reads multiple comma-separated arguments" {
   assert dt.generic_args.len == 2, "expected 2 generic args";
   let arg0 = dt.generic_args.get(0);
   let arg1 = dt.generic_args.get(1);
-  assert arg0.kind == DataTypeType.Str, "expected first arg Str";
-  assert arg1.kind == DataTypeType.Num, "expected second arg Num";
+  assert arg0.kind == .Str, "expected first arg Str";
+  assert arg1.kind == .Num, "expected second arg Num";
 }
 
 test "parse_generic_type_args splits a lexed '>>' for nested generics" {
@@ -6780,7 +6780,7 @@ test "parse_generic_type_args splits a lexed '>>' for nested generics" {
   assert equals(inner.type_str, "Vec"), "expected inner type_str 'Vec'";
   assert inner.generic_args.len == 1, "expected 1 inner generic arg";
   let innermost = inner.generic_args.get(0);
-  assert innermost.kind == DataTypeType.Num, "expected innermost arg Num";
+  assert innermost.kind == .Num, "expected innermost arg Num";
 }
 
 test "parse_generic_type_args pointer-typed generic argument" {
@@ -6915,8 +6915,8 @@ test "parse_single_token_to_node reports an error for an unknown plain identifie
 test "make_expression_node builds a binary Expression node from two operands" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
-  Node a = node_new(NodeKind.Identifier("a"));
-  Node b = node_new(NodeKind.Identifier("b"));
+  Node a = node_new(.Identifier("a"));
+  Node b = node_new(.Identifier("b"));
   Pos p0;
   p0.line = 1;
   p.make_expression_node(&a, &b, "+", p0);
@@ -6945,9 +6945,9 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
   // the RHS parse is greedy and swallows the rest of the expression
   // regardless of precedence) builds the right-heavy `(a * (b + c))`
   // instead of the precedence-correct `((a * b) + c)`.
-  Node a = node_new(NodeKind.Identifier("a"));
-  Node b = node_new(NodeKind.Identifier("b"));
-  Node c = node_new(NodeKind.Identifier("c"));
+  Node a = node_new(.Identifier("a"));
+  Node b = node_new(.Identifier("b"));
+  Node c = node_new(.Identifier("c"));
 
   ExprNode inner_e = expr_node_new();
   inner_e.left = &b;
@@ -6955,7 +6955,7 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
   inner_e.right = &c;
   inner_e.has_right = true;
   inner_e.op = "+";
-  Node inner = node_new(NodeKind.Expression(inner_e));
+  Node inner = node_new(.Expression(inner_e));
 
   ExprNode outer_e = expr_node_new();
   outer_e.left = &a;
@@ -6963,7 +6963,7 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
   outer_e.right = &inner;
   outer_e.has_right = true;
   outer_e.op = "*";
-  Node outer = node_new(NodeKind.Expression(outer_e));
+  Node outer = node_new(.Expression(outer_e));
 
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
@@ -7000,9 +7000,9 @@ test "parse_reorder_expression leaves an already-correct right-heavy shape untou
   // Simulates the naive parse of `a + b * c`: `(a + (b * c))`, which is
   // already the precedence-correct shape ('*' binds tighter than '+'), so
   // no rotation should happen.
-  Node a = node_new(NodeKind.Identifier("a"));
-  Node b = node_new(NodeKind.Identifier("b"));
-  Node c = node_new(NodeKind.Identifier("c"));
+  Node a = node_new(.Identifier("a"));
+  Node b = node_new(.Identifier("b"));
+  Node c = node_new(.Identifier("c"));
 
   ExprNode inner_e = expr_node_new();
   inner_e.left = &b;
@@ -7010,7 +7010,7 @@ test "parse_reorder_expression leaves an already-correct right-heavy shape untou
   inner_e.right = &c;
   inner_e.has_right = true;
   inner_e.op = "*";
-  Node inner = node_new(NodeKind.Expression(inner_e));
+  Node inner = node_new(.Expression(inner_e));
 
   ExprNode outer_e = expr_node_new();
   outer_e.left = &a;
@@ -7018,7 +7018,7 @@ test "parse_reorder_expression leaves an already-correct right-heavy shape untou
   outer_e.right = &inner;
   outer_e.has_right = true;
   outer_e.op = "+";
-  Node outer = node_new(NodeKind.Expression(outer_e));
+  Node outer = node_new(.Expression(outer_e));
 
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
@@ -7043,10 +7043,10 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   // parsed and reordered first, so an outer node's right child is already
   // a fully reordered sub-expression. `parse_reorder_expression` runs
   // bottom-up, once per level, never on a raw multi-level chain.
-  Node a = node_new(NodeKind.Identifier("a"));
-  Node b = node_new(NodeKind.Identifier("b"));
-  Node c = node_new(NodeKind.Identifier("c"));
-  Node d = node_new(NodeKind.Identifier("d"));
+  Node a = node_new(.Identifier("a"));
+  Node b = node_new(.Identifier("b"));
+  Node c = node_new(.Identifier("c"));
+  Node d = node_new(.Identifier("d"));
 
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
@@ -7058,7 +7058,7 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   e_cd.right = &d;
   e_cd.has_right = true;
   e_cd.op = "*";
-  Node cd = node_new(NodeKind.Expression(e_cd));
+  Node cd = node_new(.Expression(e_cd));
   p.parse_reorder_expression(&cd);
 
   // Then (b * (c * d)) -> rotates to ((b * c) * d).
@@ -7068,7 +7068,7 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   e_bcd.right = &cd;
   e_bcd.has_right = true;
   e_bcd.op = "*";
-  Node bcd = node_new(NodeKind.Expression(e_bcd));
+  Node bcd = node_new(.Expression(e_bcd));
   p.parse_reorder_expression(&bcd);
 
   // Then (a * ((b * c) * d)) -> rotates to (((a * b) * c) * d).
@@ -7078,7 +7078,7 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   e_top.right = &bcd;
   e_top.has_right = true;
   e_top.op = "*";
-  Node n1 = node_new(NodeKind.Expression(e_top));
+  Node n1 = node_new(.Expression(e_top));
   p.parse_reorder_expression(&n1);
 
   // Expect (((a * b) * c) * d): top op '*', right = d, left = ((a*b)*c).
@@ -7120,25 +7120,25 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
 }
 
 test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
-  Node callee = node_new(NodeKind.Identifier("foo"));
-  Node blank = node_new(NodeKind.Blank);
+  Node callee = node_new(.Identifier("foo"));
+  Node blank = node_new(.Blank);
   ExprNode call_e = expr_node_new();
   call_e.left = &callee;
   call_e.has_left = true;
   call_e.right = &blank;
   call_e.has_right = true;
   call_e.op = "()";
-  Node call_node = node_new(NodeKind.Expression(call_e));
+  Node call_node = node_new(.Expression(call_e));
 
-  Node x = node_new(NodeKind.Identifier("x"));
-  Node y = node_new(NodeKind.Identifier("y"));
+  Node x = node_new(.Identifier("x"));
+  Node y = node_new(.Identifier("y"));
   ExprNode comma_e = expr_node_new();
   comma_e.left = &x;
   comma_e.has_left = true;
   comma_e.right = &y;
   comma_e.has_right = true;
   comma_e.op = ",";
-  Node comma_node = node_new(NodeKind.Expression(comma_e));
+  Node comma_node = node_new(.Expression(comma_e));
 
   // The rotation carries the top node's own op onto the new left child,
   // not `call_node`'s, so `top`'s own op must be "()" for the new left
@@ -7149,7 +7149,7 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
   top_e.right = &comma_node;
   top_e.has_right = true;
   top_e.op = "()";
-  Node top = node_new(NodeKind.Expression(top_e));
+  Node top = node_new(.Expression(top_e));
 
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
@@ -8203,7 +8203,7 @@ test "parse_if_statement parses a simple condition and block body" {
   names.push("b");
   ParseState st = _state_with_declared("if a { b; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8231,7 +8231,7 @@ test "parse_if_statement parses a single-statement body without braces" {
   names.push("b");
   ParseState st = _state_with_declared("if a ret b;", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8264,7 +8264,7 @@ test "parse_if_statement rejects an assignment used as the condition" {
   ParseState st = _state_with_declared("if a = b { }", names);
   st.emit_stderr = false;
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8283,7 +8283,7 @@ test "parse_if_statement preserves explicit grouping through a following binary 
   names.push("c");
   ParseState st = _state_with_declared("if (a || b) && c { }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8339,7 +8339,7 @@ test "parse_elif_statement parses a condition and block body" {
   names.push("b");
   ParseState st = _state_with_declared("elif a { b; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8369,7 +8369,7 @@ test "parse_else_statement parses a block body" {
   names.push("b");
   ParseState st = _state_with_declared("else { b; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8561,7 +8561,7 @@ test "parse_function defaults to a void return type with no args" {
       assert equals(f.rtype.type_str, "void"), "expected the default rtype 'void'";
       fit f.rtype.kind {
         .Void -> {}
-        _ -> { panic("expected DataTypeType.Void"); }
+        _ -> { panic("expected .Void"); }
       }
     }
     _ -> { panic("expected a Function node"); }
@@ -8831,7 +8831,7 @@ test "parse_for_statement parses an infinite loop with no condition" {
   names.push("a");
   ParseState st = _state_with_declared("for { a; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8847,7 +8847,7 @@ test "parse_for_statement parses an infinite loop with no condition" {
             _ -> { panic("expected a Body node"); }
           }
         }
-        _ -> { panic("expected ForKind.Cond"); }
+        _ -> { panic("expected .Cond"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }
@@ -8861,7 +8861,7 @@ test "parse_for_statement parses a condition loop" {
   names.push("n");
   ParseState st = _state_with_declared("for i < n { i; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8877,7 +8877,7 @@ test "parse_for_statement parses a condition loop" {
             _ -> { panic("expected an Expression condition"); }
           }
         }
-        _ -> { panic("expected ForKind.Cond"); }
+        _ -> { panic("expected .Cond"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }
@@ -8890,7 +8890,7 @@ test "parse_for_statement parses a range loop" {
   names.push("n");
   ParseState st = _state_with_declared("for i : 0..n { i; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8910,7 +8910,7 @@ test "parse_for_statement parses a range loop" {
             _ -> { panic("expected a Body node"); }
           }
         }
-        _ -> { panic("expected ForKind.Range"); }
+        _ -> { panic("expected .Range"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }
@@ -8923,7 +8923,7 @@ test "parse_for_statement parses an iterator loop with no index" {
   names.push("arr");
   ParseState st = _state_with_declared("for item : arr { item; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8940,7 +8940,7 @@ test "parse_for_statement parses an iterator loop with no index" {
             _ -> { panic("expected Identifier 'arr'"); }
           }
         }
-        _ -> { panic("expected ForKind.Iter"); }
+        _ -> { panic("expected .Iter"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }
@@ -8953,7 +8953,7 @@ test "parse_for_statement parses an iterator loop with an index" {
   names.push("arr");
   ParseState st = _state_with_declared("for i, item :: arr { i; item; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -8967,7 +8967,7 @@ test "parse_for_statement parses an iterator loop with an index" {
           assert equals(fi.index_name, "i"), "expected index name 'i'";
           assert equals(fi.item_name, "item"), "expected item name 'item'";
         }
-        _ -> { panic("expected ForKind.Iter"); }
+        _ -> { panic("expected .Iter"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }
@@ -8981,7 +8981,7 @@ test "parse_for_statement rejects a range loop written with the 'i, item ::' for
   ParseState st = _state_with_declared("for i, item :: 0..n { }", names);
   st.emit_stderr = false;
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9003,7 +9003,7 @@ test "parse_statement dispatches 'for' to parse_for_statement" {
   names.push("a");
   ParseState st = _state_with_declared("for { a; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9043,7 +9043,7 @@ test "parse_defer_statement parses a deferred expression" {
   names.push("cleanup");
   ParseState st = _state_with_declared("defer cleanup();", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9066,7 +9066,7 @@ test "parse_defer_statement parses a deferred block" {
   names.push("a");
   ParseState st = _state_with_declared("defer { a; }", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9172,7 +9172,7 @@ test "parse_await_operand parses an awaited call, bounded at a following binary 
   names.push("f");
   ParseState st = _state_with_declared("await f() + 1", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9211,7 +9211,7 @@ test "parse_fork_statement parses a fire-and-forget spawn" {
   names.push("worker");
   ParseState st = _state_with_declared("fork worker();", names);
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
@@ -9313,12 +9313,12 @@ test "parse_normal_expression desugars a channel send to '.send(v)'" {
 test "parse_warning_control parses 'allow ..., \"reason\";' at module scope" {
   ParseState st = _state_from("allow unused_variable, \"kept for clarity\";");
   Parser p = parser_new(&st);
-  assert p.parse_warning_control(WarningControlAction.Allow).is_none(), "expected the warning control statement to parse";
+  assert p.parse_warning_control(.Allow).is_none(), "expected the warning control statement to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .StatementWarningControl(wc) -> {
-      assert wc.action == WarningControlAction.Allow, "expected action Allow";
-      assert wc.id == WarningId.UnusedVariable, "expected id UnusedVariable";
+      assert wc.action == .Allow, "expected action Allow";
+      assert wc.id == .UnusedVariable, "expected id UnusedVariable";
       assert equals(wc.reason, "kept for clarity"), "expected the reason string";
     }
     _ -> { panic("expected a StatementWarningControl node"); }
@@ -9329,23 +9329,23 @@ test "parse_warning_control rejects a function-only warning id at module scope" 
   ParseState st = _state_from("allow return_local_ptr, \"reason\";");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
-  let err = p.parse_warning_control(WarningControlAction.Allow);
+  let err = p.parse_warning_control(.Allow);
   assert err.is_some(), "expected an error for a function-only warning id at module scope";
 }
 
 test "parse_warning_control parses 'expect ...' inside a function" {
   ParseState st = _state_from("expect fit_non_exhaustive, \"reason\";");
   Parser p = parser_new(&st);
-  Node fn_stub = node_new(NodeKind.Blank);
+  Node fn_stub = node_new(.Blank);
   p.current_function = &fn_stub;
   p.has_current_function = true;
 
-  assert p.parse_warning_control(WarningControlAction.Expect).is_none(), "expected the warning control statement to parse inside a function";
+  assert p.parse_warning_control(.Expect).is_none(), "expected the warning control statement to parse inside a function";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .StatementWarningControl(wc) -> {
-      assert wc.action == WarningControlAction.Expect, "expected action Expect";
-      assert wc.id == WarningId.FitNonExhaustive, "expected id FitNonExhaustive";
+      assert wc.action == .Expect, "expected action Expect";
+      assert wc.id == .FitNonExhaustive, "expected id FitNonExhaustive";
     }
     _ -> { panic("expected a StatementWarningControl node"); }
   }
@@ -9355,7 +9355,7 @@ test "parse_warning_control rejects an unknown warning id" {
   ParseState st = _state_from("allow not_a_real_id, \"reason\";");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
-  let err = p.parse_warning_control(WarningControlAction.Allow);
+  let err = p.parse_warning_control(.Allow);
   assert err.is_some(), "expected an error for an unknown warning id";
 }
 
@@ -9365,9 +9365,7 @@ test "parse_statement dispatches 'allow' and 'expect'" {
   assert p.parse_statement().is_none(), "expected the first 'allow' to dispatch";
   assert p.parse_statement().is_none(), "expected the second 'allow' to dispatch";
   fit st.nodes.get(0).kind {
-    .StatementWarningControl(wc) -> {
-      assert wc.id == WarningId.UnusedImport, "expected id UnusedImport";
-    }
+    .StatementWarningControl(wc) -> { assert wc.id == .UnusedImport, "expected id UnusedImport"; }
     _ -> { panic("expected a StatementWarningControl node"); }
   }
 }
@@ -9426,7 +9424,7 @@ test "parse_fuzz_declaration parses a named fuzz body with its two fixed-type pa
       fit fd.len_param.kind {
         .Variable(lv) -> {
           assert equals(lv.name, "len"), "expected the len param named 'len'";
-          assert lv.var_type.kind == DataTypeType.Num, "expected the len param typed num";
+          assert lv.var_type.kind == .Num, "expected the len param typed num";
         }
         _ -> { panic("expected a Variable node for len_param"); }
       }
@@ -10074,7 +10072,7 @@ fun _scope_entity_name(Node* node) str {
 // path-segment separators and leading `..` parent-directory markers from
 // any other operator.
 fun _is_dot_run_operator(Token t) bin {
-  if t.type != TokenType.Operator {
+  if t.type != .Operator {
     ret false;
   }
   str s = "";
@@ -10114,7 +10112,7 @@ fun _mangled_dtype_name_depth(DataType* dt, num depth) str {
 // type param) from a concrete one (`impl Point as To<num>`), which is a
 // distinct quirk identity needing its own mangled name to dispatch.
 fun _dtype_references_any_param(DataType* dt, Vec<str> params) bin {
-  if dt.kind == DataTypeType.Unknown && len(dt.type_str) > 0 {
+  if dt.kind == .Unknown && len(dt.type_str) > 0 {
     for p : params {
       if equals(p, dt.type_str) {
         ret true;

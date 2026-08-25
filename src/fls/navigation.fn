@@ -181,14 +181,14 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   // declaration line, never one of its own - looking above it finds
   // the function's own doc comment, not the parameter's, and showing
   // it here reads as though the parameter carries a doc of its own.
-  if !equals(source_text, "") && d.kind != DeclarationKind.Parameter {
+  if !equals(source_text, "") && d.kind != .Parameter {
     doc_comment = doc_comment_above(source_text, d.pos.line);
     // A field or variant with no leading block of its own falls back
     // to a trailing same-line comment (`Circle(num), // meaning`),
     // scoped to these two kinds since a trailing comment on a
     // function/compound/etc. is rarely meant as its doc.
     if equals(doc_comment, "") &&
-      (d.kind == DeclarationKind.Field || d.kind == DeclarationKind.Variant) {
+    (d.kind == .Field || d.kind == .Variant) {
       doc_comment = doc_comment_trailing(source_text, d.pos.line);
     }
   }
@@ -428,7 +428,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
   // whatever `bare_type_from_detail`'s "Type name" splitting would
   // make of a whole signature.
   str type_name = "";
-  if d.kind == DeclarationKind.Function {
+  if d.kind == .Function {
     type_name = return_type_from_detail(d.detail);
   } else {
     type_name = bare_type_from_detail(d.detail);
@@ -693,7 +693,7 @@ pub fun dot_shorthand_context_type_at(
   num line
 ) str {
   num i = dot_idx - 1;
-  for i >= 0 && tokens.get(i).type == TokenType.NewLine {
+  for i >= 0 && tokens.get(i).type == .NewLine {
     i = i - 1;
   }
   if i < 0 {
@@ -753,7 +753,7 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     ret "";
   }
   Token callee = callee_tok.unwrap();
-  if callee.type != TokenType.Identifier {
+  if callee.type != .Identifier {
     ret "";
   }
   str callee_name = token_word(callee);
@@ -981,11 +981,11 @@ fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
   i = i - 1;
   for i >= 0 {
     Token tok = tokens.get(i);
-    if tok.type == TokenType.Comment || tok.type == TokenType.NewLine {
+    if tok.type == .Comment || tok.type == .NewLine {
       i = i - 1;
       continue;
     }
-    if tok.type == TokenType.Identifier || token_is_operator(tok, ".") {
+    if tok.type == .Identifier || token_is_operator(tok, ".") {
       i = i - 1;
       continue;
     }

@@ -47,7 +47,7 @@ pub fun prepare_call_hierarchy(AnalysisCache* cache, Document doc, num line, num
     ret "[]";
   }
   Declaration d = declared.unwrap();
-  if d.kind != DeclarationKind.Function || !equals(d.container, "") {
+  if d.kind != .Function || !equals(d.container, "") {
     ret "[]";
   }
   str text = _text_of(d.pos.filename, doc);
@@ -161,7 +161,7 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
     ret "[]";
   }
   num i = 0;
-  Node target_node = node_new(NodeKind.Blank);
+  Node target_node = node_new(.Blank);
   FunctionNode f = function_node_new();
   bin found_target = false;
   for i < read.program.entry_nodes.len {
@@ -192,8 +192,8 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
     Token t = tokens.get(k);
     num idx = k;
     k = k + 1;
-    if t.type != TokenType.Identifier ||
-      !covers(target_node, f, doc.path, t.pos.line) {
+    if t.type != .Identifier ||
+    !covers(target_node, f, doc.path, t.pos.line) {
       continue;
     }
     let next = token_after(&tokens, idx + 1);
@@ -210,7 +210,7 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
       continue;
     }
     Declaration cd = callee.unwrap();
-    if cd.kind != DeclarationKind.Function {
+    if cd.kind != .Function {
       continue;
     }
     Span span = span_of(t, doc.text);

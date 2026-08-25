@@ -3696,7 +3696,7 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
   assert !contains(field_fit, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 
   // Line 19, right after the dot in 'ret .': the enclosing function's
-  // own declared return type, TokenKind.
+  // own declared return type, .
   str ret_shape = completion(&reads, doc, 19, 9, false);
   assert contains(ret_shape, `"label":"Comment","kind":20`), "expected TokenKind's own variants after a bare 'ret .'";
   assert !contains(ret_shape, `"detail":"in this file"`), "expected real variants, not the unscoped word list";

@@ -207,7 +207,7 @@ test "parses a package with a single binary" {
   assert m.bins.len == 1, "expected one binary target";
   assert equals(m.bins.get(0).name, "app"), "expected the binary's name";
   assert equals(m.bins.get(0).path, "src/main.fn"), "expected the binary's path";
-  assert m.kind() == PackageKind.Bin, "expected a binary-only package";
+  assert m.kind() == .Bin, "expected a binary-only package";
 }
 
 test "parses several binaries" {
@@ -235,7 +235,7 @@ test "parses a library-only package" {
   let m = parse_manifest(text).unwrap();
   assert m.has_lib, "expected a library target";
   assert equals(m.lib.path, "src/lib.fn"), "expected the library path";
-  assert m.kind() == PackageKind.Lib, "expected a library-only package";
+  assert m.kind() == .Lib, "expected a library-only package";
 }
 
 test "parses a package building both a library and a binary" {
@@ -249,7 +249,7 @@ test "parses a package building both a library and a binary" {
   `name = "cli"
   `path = "src/main.fn"`;
   let m = parse_manifest(text).unwrap();
-  assert m.kind() == PackageKind.Mixed, "expected a mixed package";
+  assert m.kind() == .Mixed, "expected a mixed package";
   assert m.has_lib, "expected the library target";
   assert m.bins.len == 1, "expected the binary target";
 }
@@ -259,7 +259,7 @@ test "a version left out defaults to 0.0.0" {
   `name = "demo"`;
   let m = parse_manifest(text).unwrap();
   assert equals(m.version, "0.0.0"), "expected the default version";
-  assert m.kind() == PackageKind.Empty, "expected no targets before resolution";
+  assert m.kind() == .Empty, "expected no targets before resolution";
 }
 
 test "comments and blank lines are ignored" {
