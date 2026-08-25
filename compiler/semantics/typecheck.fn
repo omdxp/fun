@@ -1412,13 +1412,17 @@ impl Checker {
     if equals(e.op, ".") {
       ret self.infer_field(node, e, env);
     }
-    // An index reads what the sequence holds, which the checker follows
-    // only through an array.
+    // An index reads what the sequence holds: an array's own element
+    // type one level shallower, or (a `str` has no array flag of its
+    // own, C string semantics) a single `chr`.
     if equals(e.op, "[]") {
       if !e.has_left {
         ret checked_unknown();
       }
       CheckedType base = self.infer(e.left, env);
+      if base.base == DataTypeType.Str && !base.is_array {
+        ret checked_of(DataTypeType.Chr);
+      }
       if !base.is_array {
         ret checked_unknown();
       }
