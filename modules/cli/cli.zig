@@ -4131,7 +4131,39 @@ pub fn run_build_in(allocator: mem.Allocator, io: std.Io, root: []const u8, debu
         const src_path = try std.fs.path.join(allocator, &.{ root, b.path });
         defer allocator.free(src_path);
 
-        var tp = try codegen.TranspileProcess.init(allocator, src_path, out_c_path, .{
+        // A target can reference `PACKAGE_NAME`/`PACKAGE_VERSION` as
+        // ordinary top-level consts, taken from this manifest, without
+        // declaring them itself. Implemented at the source-text level --
+        // prepended ahead of the real file's own text, into a sibling
+        // temp file in the same directory so the target's own relative
+        // imports keep resolving -- rather than as an AST-level
+        // injection, since this compiler otherwise never synthesizes AST
+        // nodes outside of parsing real source.
+        const original_text = try std.Io.Dir.cwd().readFileAlloc(io, src_path, allocator, .limited(4 * 1024 * 1024));
+        defer allocator.free(original_text);
+        const prelude = try std.fmt.allocPrint(
+            allocator,
+            "pub const str PACKAGE_NAME = \"{s}\";\npub const str PACKAGE_VERSION = \"{s}\";\n",
+            .{ m.package_name, m.version },
+        );
+        defer allocator.free(prelude);
+        const injected_text = try std.mem.concat(allocator, u8, &.{ prelude, original_text });
+        defer allocator.free(injected_text);
+
+        const src_dir = std.fs.path.dirname(src_path) orelse ".";
+        const tmp_leaf = try std.fmt.allocPrint(allocator, ".{s}.fun-build-defines.fn", .{b.name});
+        defer allocator.free(tmp_leaf);
+        const tmp_path = try std.fs.path.join(allocator, &.{ src_dir, tmp_leaf });
+        defer allocator.free(tmp_path);
+        defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+
+        {
+            const tmp_file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+            try tmp_file.writeStreamingAll(io, injected_text);
+            tmp_file.close(io);
+        }
+
+        var tp = try codegen.TranspileProcess.init(allocator, tmp_path, out_c_path, .{
             .exec = false,
             .outf = true,
             .debug_info = debug_info,
