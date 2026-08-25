@@ -46,6 +46,9 @@ fun main(str[] args) num {
   if equals(opts.subcommand, "build") {
     ret build_project();
   }
+  if equals(opts.subcommand, "init") {
+    ret init_project(opts.input);
+  }
   if equals(opts.subcommand, "test") {
     // No path, or a path that names a directory rather than a `.fn`
     // file, runs every `test` block found under that root instead of a

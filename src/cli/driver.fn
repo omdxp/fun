@@ -42,7 +42,7 @@ pub compound Define {
 
 // What the arguments asked for.
 pub compound Options {
-  // `build`, `test`, `fuzz`, or "" for a plain compile.
+  // `build`, `test`, `fuzz`, `init`, or "" for a plain compile.
   str subcommand;
   str input;
   str output;
@@ -141,7 +141,7 @@ pub fun parse_args(str[] argv) Options {
   let leading = parsed.at_positional(0);
   if leading.is_some() {
     str head = leading.unwrap();
-    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") {
+    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") || equals(head, "init") {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -626,6 +626,7 @@ pub fun help_text() str {
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
+  `  fun init [library|executable|both]   scaffolds fun.toml and src/ (default executable)
   `  fun -fmt-check-all [-in <file_or_dir>]
   `  fun -version
   `
@@ -719,6 +720,27 @@ test "recognizes a build subcommand" {
   a.push("build");
   let o = parse_args(_argv(&a));
   assert equals(o.subcommand, "build"), "expected the build subcommand";
+}
+
+test "recognizes an init subcommand and its kind positional" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("init");
+  a.push("library");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "init"), "expected the init subcommand";
+  assert equals(o.input, "library"), "expected the project kind as the positional";
+}
+
+test "init with no positional leaves the kind empty" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("init");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "init"), "expected the init subcommand";
+  assert equals(o.input, ""), "expected no kind, defaulted later by init_project";
 }
 
 test "reads a -D define" {
@@ -864,6 +886,71 @@ pub fun build_project() num {
     println(format("built {str} -> {str}", b.name, exe));
     i = i + 1;
   }
+  ret 0;
+}
+
+// The starter `src/main.fn` an `init`ed executable target gets.
+fun _init_main_source() str {
+  ret `imp std.io;
+  `
+  `fun main(str[] args) {
+  `  println("Hello, World!");
+  `}`;
+}
+
+// The starter `src/lib.fn` an `init`ed library target gets.
+fun _init_lib_source() str {
+  ret `pub fun hello() str {
+  `  ret "Hello, World!";
+  `}`;
+}
+
+// `fun init [library|executable|both]`: writes a `fun.toml` and a `src/`
+// directory for a new package in the working directory. `kind` is one of
+// `library`, `executable`, or `both`; empty defaults to `executable`.
+pub fun init_project(str kind) num {
+  str resolved_kind = kind;
+  if equals(resolved_kind, "") {
+    resolved_kind = "executable";
+  }
+  bin wants_lib = equals(resolved_kind, "library") || equals(resolved_kind, "both");
+  bin wants_bin = equals(resolved_kind, "executable") || equals(resolved_kind, "both");
+  if !wants_lib && !wants_bin {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\nunknown project kind `{str}` (expected `library`, `executable`, or `both`)", resolved_kind)
+    );
+    ret 1;
+  }
+  if exists("fun.toml") {
+    writeln_to(Sink.Stderr, "[Error]\nfun.toml already exists in this directory");
+    ret 1;
+  }
+
+  str name = "app";
+
+  let made_dir = make_dir_all("src");
+  if made_dir.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", made_dir.unwrap_err().message));
+    ret 1;
+  }
+
+  StringBuilder toml = string_builder_init(64);
+  toml.append(format("[package]\nname = \"{str}\"\nversion = \"0.1.0\"\n", name));
+
+  if wants_lib {
+    toml.append("\n[lib]\npath = \"src/lib.fn\"\n");
+    write_string("src/lib.fn", _init_lib_source());
+    println("created src/lib.fn");
+  }
+  if wants_bin {
+    toml.append(format("\n[[bin]]\nname = \"{str}\"\npath = \"src/main.fn\"\n", name));
+    write_string("src/main.fn", _init_main_source());
+    println("created src/main.fn");
+  }
+
+  write_string("fun.toml", toml.build());
+  println("created fun.toml");
   ret 0;
 }
 
