@@ -14019,13 +14019,32 @@ pub const TranspileProcess = struct {
                     }
                     return null;
                 }
+                // A call expression (`recv.unwrap()`, `make()`, ...) reached as a link
+                // in a longer chain (`recv.unwrap().field.method()`): its named type is
+                // the call's return type, resolved the same way a call-rooted receiver
+                // is resolved elsewhere (`expr_compound_return_type_name` handles both
+                // free-function and method calls, including generic monomorphization).
+                // Without this, only a chain rooted at a plain identifier/field access
+                // was ever recognized here -- a call in the MIDDLE of the chain broke
+                // resolution for every link after it.
+                if (mem.eql(u8, exp.op, "()")) {
+                    return self.expr_compound_return_type_name(node);
+                }
                 if (!mem.eql(u8, exp.op, ".")) return null;
 
                 const left = exp.left orelse return null;
                 const right = exp.right orelse return null;
                 if (right.*.type != .Identifier or right.*.data == null) return null;
 
-                const left_name = self.expr_named_type_from_scope(left.*) orelse return null;
+                // `left` may itself be a call expression in the middle of the chain
+                // (e.g. `found.unwrap().diagnostics`, where `found.unwrap()` is a
+                // plain/method call). `expr_resolved_compound_type_name` combines
+                // this scope-based lookup with `expr_compound_return_type_name` (call
+                // results), so it resolves both a named value AND a call's return
+                // type -- recursing through it here (instead of back into this
+                // narrower function) lets a call-rooted chain resolve at every hop,
+                // not just a single field before the terminal method call.
+                const left_name = self.expr_resolved_compound_type_name(left.*) orelse return null;
                 const left_name_canon = self.canonical_compound_name(left_name);
                 const fdt = self.lookup_compound_field(left_name_canon, right.*.data.?.sval.items) orelse return null;
                 if (fdt.type != .Unknown) return null;
@@ -14038,6 +14057,65 @@ pub const TranspileProcess = struct {
     fn expr_is_quirk_typed_from_scope(self: *Self, node: ast.Node) bool {
         const tname = self.expr_named_type_from_scope(node) orelse return false;
         return self.is_quirk_name(tname);
+    }
+
+    /// True when `node` is an addressable C lvalue: a named identifier, or a
+    /// field/index access chain rooted in one. False for a call expression (its
+    /// result is a C rvalue -- `&(call())` is invalid) and anything else this
+    /// function can't prove is addressable. Used to decide whether a receiver
+    /// reached through a field access (`x.field.method()`) can have `&(...)`
+    /// taken directly, or must first be materialized into a temp (see
+    /// `emit_materialized_field_method_call`).
+    fn expr_is_addressable_lvalue(self: *Self, node: ast.Node) bool {
+        return switch (node.type) {
+            .Identifier => true,
+            .ExpressionParenthesis => if (node.node_variant) |nv| self.expr_is_addressable_lvalue(nv.paren.exp.*) else false,
+            .Expression => blk: {
+                const exp = (node.node_variant orelse break :blk false).exp;
+                if (!mem.eql(u8, exp.op, ".") and !mem.eql(u8, exp.op, "[]")) break :blk false;
+                const left = exp.left orelse break :blk false;
+                break :blk self.expr_is_addressable_lvalue(left.*);
+            },
+            else => false,
+        };
+    }
+
+    /// Emits a full method-call expression for a receiver reached through
+    /// `fbase.field_name` where `fbase` is NOT an addressable lvalue (e.g. a
+    /// call in the middle of the chain, like `found.unwrap().diagnostics.free()`
+    /// -- `found.unwrap()` is a plain function call, so its result is a C
+    /// rvalue and `&(fbase.field_name)` would be invalid). Materializes `fbase`
+    /// into a temp local of type `fbase_type_name` once, then addresses (or
+    /// passes directly, if the field is itself a pointer) the temp's field --
+    /// evaluating `fbase` exactly once: `({ T __t = fbase; (fn(&(__t.field), args)); })`.
+    fn emit_materialized_field_method_call(self: *Self, fbase: ast.Node, fbase_type_name: []const u8, field_name: []const u8, field_is_pointer: bool, fn_name: []const u8, args_node: ?*ast.Node) TranspileError!void {
+        const tmp = try self.next_tmp_name("frecv");
+        defer self.allocator.free(tmp);
+        try self.write("({ ");
+        try self.write(self.canonical_compound_name(fbase_type_name));
+        try self.write(" ");
+        try self.write(tmp);
+        try self.write(" = ");
+        try self.transpile_node(fbase);
+        try self.write("; (");
+        try self.write_module_impl_method_ref(fn_name);
+        try self.write("(");
+        if (!field_is_pointer) try self.write("&(");
+        try self.write(tmp);
+        try self.write(".");
+        try self.write(field_name);
+        if (!field_is_pointer) try self.write(")");
+        if (args_node) |right| {
+            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                right.node_variant.?.paren.exp.*
+            else
+                right.*;
+            if (inner.type != .Blank) {
+                try self.write(", ");
+                try self.transpile_node(inner);
+            }
+        }
+        try self.write(")); })");
     }
 
     /// Classifies a `fit` subject expression so codegen can choose a lowering:
@@ -20610,7 +20688,18 @@ pub const TranspileProcess = struct {
                                                     }
                                                     const type_name_canon = self.canonical_compound_name(type_name);
                                                     const mname = member.?.data.?.sval.items;
+                                                    // `fbase` may itself be an rvalue (e.g. a call in the
+                                                    // middle of the chain: `found.unwrap().diagnostics`).
+                                                    // `&(fbase.field)` is invalid C when `fbase` isn't an
+                                                    // addressable lvalue, so materialize it into a temp first.
+                                                    const fbase_addressable = self.expr_is_addressable_lvalue(fbase.?.*);
+
                                                     if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
+                                                        if (!fbase_addressable) {
+                                                            try self.emit_materialized_field_method_call(fbase.?.*, base_owner_type_name.?, field_name, field_type.pointer_depth != 0, fn_name, exp.right);
+                                                            if (owned_name) self.allocator.free(@constCast(type_name));
+                                                            return;
+                                                        }
                                                         try self.write("(");
                                                         try self.write_module_impl_method_ref(fn_name);
                                                         try self.write("(");
@@ -20644,6 +20733,10 @@ pub const TranspileProcess = struct {
                                                     if (owned_name) self.allocator.free(@constCast(type_name));
                                                     if (!qres.ambiguous) {
                                                         if (qres.fn_name) |qfn_name| {
+                                                            if (!fbase_addressable) {
+                                                                try self.emit_materialized_field_method_call(fbase.?.*, base_owner_type_name.?, field_name, field_type.pointer_depth != 0, qfn_name, exp.right);
+                                                                return;
+                                                            }
                                                             try self.write("(");
                                                             try self.write_module_impl_method_ref(qfn_name);
                                                             try self.write("(");
