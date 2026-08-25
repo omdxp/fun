@@ -19806,6 +19806,22 @@ pub const TranspileProcess = struct {
             try self.write("  if (seconds < 0) seconds = 0;\n");
             try self.write("  Sleep((DWORD)(seconds * 1000));\n");
             try self.write("}\n");
+            // `clock_gettime` is POSIX-only; UCRT never had one at all.
+            // std.channel's own deadline math calls it directly (not
+            // gated on `fork`), so this needs a real definition here
+            // too, not just in emit_scheduler_runtime's own copy.
+            try self.write("static long long clock_gettime(long long clk_id, void* tp) {\n");
+            try self.write("  (void)clk_id;\n");
+            try self.write("  if (!tp) return -1;\n");
+            try self.write("  long long* __fun_cgt_out = (long long*)tp;\n");
+            try self.write("  FILETIME __fun_cgt_ft;\n");
+            try self.write("  GetSystemTimeAsFileTime(&__fun_cgt_ft);\n");
+            try self.write("  unsigned long long __fun_cgt_t = ((unsigned long long)__fun_cgt_ft.dwHighDateTime << 32) | __fun_cgt_ft.dwLowDateTime;\n");
+            try self.write("  __fun_cgt_t -= 116444736000000000ULL;\n");
+            try self.write("  __fun_cgt_out[0] = (long long)(__fun_cgt_t / 10000000ULL);\n");
+            try self.write("  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);\n");
+            try self.write("  return 0;\n");
+            try self.write("}\n");
             try self.write("#else\n");
             // Not covered by `std.c.time`'s own conditional `#include
             // <time.h>` (this helper is unconditional, unlike that
