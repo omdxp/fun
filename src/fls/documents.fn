@@ -157,12 +157,34 @@ impl Documents {
     if text == nil {
       ret;
     }
+    // Keeps its own copies rather than aliasing the caller's, the
+    // same as opened() - a re-index (the file changed on disk again)
+    // must not leave this entry's own uri/path pointing at whatever
+    // the caller's own strings happen to be, since those can be freed
+    // out from under it once the caller returns.
+    let existing = self.indexed.at(document_uri);
+    if existing.is_some() {
+      // put() never replaces an existing key, only the value it maps
+      // to - freeing old.uri here would leave the map's own key slot
+      // dangling. Reuse it instead of allocating a new one, and only
+      // free/replace what this update actually changes.
+      Document old = existing.unwrap();
+      free(old.path);
+      free(old.text);
+      Document doc;
+      doc.uri = old.uri;
+      doc.path = substr(path, 0, len(path));
+      doc.text = text;
+      doc.version = 0;
+      self.indexed.put(old.uri, doc);
+      ret;
+    }
     Document doc;
-    doc.uri = document_uri;
-    doc.path = path;
+    doc.uri = substr(document_uri, 0, len(document_uri));
+    doc.path = substr(path, 0, len(path));
     doc.text = text;
     doc.version = 0;
-    self.indexed.put(document_uri, doc);
+    self.indexed.put(doc.uri, doc);
   }
 
   // Drops a workspace-indexed document deleted on disk. A no-op for a
