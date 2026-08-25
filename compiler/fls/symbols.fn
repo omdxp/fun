@@ -2006,10 +2006,12 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
 }
 
 // A for-each loop's own iterable, best-effort: a bare local's own
-// declared generic argument (`Vec<num> nums` -> `num`), the common
-// shape. "" for anything deeper (a chain, a call), matching this
-// file's own established scope for AST-only, token-free inference
-// elsewhere (`fit_subject_type` and its own siblings).
+// declared generic argument (`Vec<num> nums` -> `num`), or one
+// bracket pair stripped off a raw array's own declared type
+// (`num[] arr` -> `num`, `num[][][] tensor` -> `num[][]`). "" for
+// anything deeper (a chain, a call), matching this file's own
+// established scope for AST-only, token-free inference elsewhere
+// (`fit_subject_type` and its own siblings).
 pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num line) str {
   if iterable == nil {
     ret "";
@@ -2020,11 +2022,22 @@ pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num li
       if found.is_none() {
         ret "";
       }
+      str declared = bare_type_from_detail(found.unwrap().detail);
+      if ends_with(declared, "[]") {
+        str elem = substr(declared, 0, len(declared) - 2);
+        free(declared);
+        ret elem;
+      }
+      free(declared);
       Vec<str> args = generic_args_of_detail(found.unwrap().detail);
       if args.len == 0 {
+        _free_str_vec_deep(&args);
         ret "";
       }
-      ret args.get(0);
+      str first = args.get(0);
+      str out = substr(first, 0, len(first));
+      _free_str_vec_deep(&args);
+      ret out;
     }
     _ -> { ret ""; }
   }
