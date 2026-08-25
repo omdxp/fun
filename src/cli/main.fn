@@ -2,7 +2,6 @@
 // then builds and runs it unless asked not to.
 
 imp driver;
-imp manifest;
 imp std.string;
 imp std.io;
 imp std.fs;
@@ -12,20 +11,6 @@ fun _fail(str msg) num {
   writeln_to(Sink.Stderr, format(`[Error]
   `{str}`, msg));
   ret 1;
-}
-
-// The version of the package in the working directory. `fun build`
-// injects this into a program it builds, so a compiled program reads its
-// own version as a constant instead of reading the manifest at runtime.
-fun package_version() str {
-  if !exists("fun.toml") {
-    ret "0.0.0";
-  }
-  let parsed = parse_manifest(read_to_string("fun.toml"));
-  if parsed.is_err() {
-    ret "0.0.0";
-  }
-  ret parsed.unwrap().version;
 }
 
 fun main(str[] args) num {
@@ -45,7 +30,12 @@ fun main(str[] args) num {
     ret _fail(opts.error_text);
   }
   if opts.show_version {
-    println(package_version());
+    // `PACKAGE_VERSION` is not declared in this file: `fun build` injects
+    // it as a top-level const ahead of every target it compiles, taken
+    // from this repository's own fun.toml, so the compiled binary
+    // reports its own release version rather than re-reading a
+    // manifest at runtime (which could be some unrelated project's).
+    println(PACKAGE_VERSION);
     ret 0;
   }
   if opts.show_help {
