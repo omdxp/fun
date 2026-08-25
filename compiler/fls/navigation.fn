@@ -143,6 +143,9 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   // inlayHint already does, using the declaration's own position to
   // find the initializer, rather than showing the raw sentinel.
   if read.parsed && starts_with(d.detail, "__let_infer__") {
+    // No type shown at all, rather than the internal sentinel leaked
+    // verbatim, when nothing below manages to resolve it either.
+    d.detail = d.name;
     let name_tok = token_at(&tokens, d.pos.line - 1, d.pos.col - 1);
     if name_tok.is_some() {
       num name_idx = index_of_token(&tokens, name_tok.unwrap());

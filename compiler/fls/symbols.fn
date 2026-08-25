@@ -1587,6 +1587,19 @@ fun _infer_type(Vec<Token>* tokens, Token val_tok, Vec<Node>* program, str file,
         ret ending.full_type_name;
       }
 
+      // `Name{...}`, a compound-init literal (`let b = Box{value = 7};`):
+      // not a bare read of `Name` as a value at all, so falling through
+      // to the lookup below would resolve `Name` as its own compound
+      // declaration and, worse, render its "compound Name" detail as
+      // though "compound" were a real type - the concrete instantiation
+      // a generic compound's own field values would infer isn't
+      // resolved here yet, so this stays no hint rather than a wrong
+      // one.
+      let brace_opt = token_after(tokens, cursor_idx + 1);
+      if brace_opt.is_some() && token_is_symbol(brace_opt.unwrap(), '{') {
+        ret "";
+      }
+
       // A bare read of an already-typed local/field/parameter/global
       // (`let c = a;`): whatever `a` itself was declared as, in full
       // (a pointer star or generic argument matters here, unlike
