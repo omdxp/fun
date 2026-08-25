@@ -19806,10 +19806,14 @@ pub const TranspileProcess = struct {
             try self.write("  if (seconds < 0) seconds = 0;\n");
             try self.write("  Sleep((DWORD)(seconds * 1000));\n");
             try self.write("}\n");
-            // `clock_gettime` is POSIX-only; UCRT never had one at all.
-            // std.channel's own deadline math calls it directly (not
-            // gated on `fork`), so this needs a real definition here
-            // too, not just in emit_scheduler_runtime's own copy.
+            // `clock_gettime` is missing from UCRT (real MSVC/clang-cl
+            // builds) entirely, but MinGW's own headers already declare
+            // a real one with the standard POSIX signature - defining
+            // ours unconditionally conflicts with that declaration
+            // there. std.channel's own deadline math calls this
+            // directly (not gated on `fork`), so it still needs a
+            // definition on UCRT, just not on MinGW.
+            try self.write("#ifndef __MINGW32__\n");
             try self.write("static long long clock_gettime(long long clk_id, void* tp) {\n");
             try self.write("  (void)clk_id;\n");
             try self.write("  if (!tp) return -1;\n");
@@ -19822,6 +19826,7 @@ pub const TranspileProcess = struct {
             try self.write("  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);\n");
             try self.write("  return 0;\n");
             try self.write("}\n");
+            try self.write("#endif\n");
             try self.write("#else\n");
             // Not covered by `std.c.time`'s own conditional `#include
             // <time.h>` (this helper is unconditional, unlike that
