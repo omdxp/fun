@@ -53,9 +53,9 @@ jobs:
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./fun-out/bin/fun.exe test compiler/tests
+            ./fun-out/bin/fun.exe test src/tests
           else
-            ./fun-out/bin/fun test compiler/tests
+            ./fun-out/bin/fun test src/tests
           fi
       - name: Validate examples/
         timeout-minutes: 20

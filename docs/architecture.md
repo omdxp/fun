@@ -23,14 +23,14 @@ The language model includes default 64-bit numeric types (`num`, `dec`), fixed-w
 
 ## Repository Layout
 
-- `compiler/ast/`: the shared AST node types every other stage reads and produces
-- `compiler/lexer/`: tokenizes source input
-- `compiler/parser/`: builds the AST, resolves imports, and formats source
-- `compiler/semantics/`: type checking and warning analysis
-- `compiler/codegen/`: lowers a checked program to C
-- `compiler/cli/`: the `fun` command-line driver
-- `compiler/fls/`: the language server
-- `compiler/tests/`: parser, typecheck, code generation, CLI, warning, and end-to-end coverage
+- `src/ast/`: the shared AST node types every other stage reads and produces
+- `src/lexer/`: tokenizes source input
+- `src/parser/`: builds the AST, resolves imports, and formats source
+- `src/semantics/`: type checking and warning analysis
+- `src/codegen/`: lowers a checked program to C
+- `src/cli/`: the `fun` command-line driver
+- `src/fls/`: the language server
+- `src/tests/`: parser, typecheck, code generation, CLI, warning, and end-to-end coverage
 - `stdlib/`: standard library source
 - `examples/`: runnable language and standard-library examples
 

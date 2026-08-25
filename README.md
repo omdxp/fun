@@ -198,7 +198,7 @@ jobs:
 
 ## Repository Layout
 
-- `compiler/`: the compiler, language server, and their own test suites, written in Fun
+- `src/`: the compiler, language server, and their own test suites, written in Fun
 - `stdlib/`: standard library source and documentation
 - `examples/`: sample Fun programs
 - `docs/`: source Markdown that feeds the published documentation site

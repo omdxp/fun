@@ -15,7 +15,7 @@
       "label": "test",
       "type": "shell",
       "command": "${workspaceFolder}/fun-out/bin/fun",
-      "args": ["test", "compiler/tests"],
+      "args": ["test", "src/tests"],
       "isBackground": false,
       "problemMatcher": [],
       "group": {
