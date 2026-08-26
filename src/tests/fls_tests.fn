@@ -480,14 +480,8 @@ test "completion offers a generic type snippet with a tab stop per type param" {
   // Mid-word inside caller()'s own body, snippets on.
   str out = completion(&reads, doc, 10, 6, true);
   assert contains(out, `"label":"Box"`), "expected the generic compound";
-  assert contains(
-    out,
-    `"insertText":"Box<${1:T}>$0","insertTextFormat":2`
-  ), "expected one tab stop for Box's own type param";
-  assert contains(
-    out,
-    `"insertText":"Result<${1:T}, ${2:E}>$0","insertTextFormat":2`
-  ), "expected two tab stops for Result's own type params";
+  assert contains(out, `"insertText":"Box<${1:T}>$0","insertTextFormat":2`), "expected one tab stop for Box's own type param";
+  assert contains(out, `"insertText":"Result<${1:T}, ${2:E}>$0","insertTextFormat":2`), "expected two tab stops for Result's own type params";
 
   // A non-generic compound carries no snippet at all.
   assert contains(out, `"label":"Point","kind":22,"detail":"compound"}`), "expected no snippet for a non-generic type";
@@ -510,10 +504,7 @@ test "a function completion item carries structured labelDetails" {
 
   // Params dimmed, return type right-aligned.
   str out = completion(&reads, doc, 4, 8, true);
-  assert contains(
-    out,
-    `"labelDetails":{"detail":"(str name, num count)","description":"bin"}`
-  ), "expected structured labelDetails for the function";
+  assert contains(out, `"labelDetails":{"detail":"(str name, num count)","description":"bin"}`), "expected structured labelDetails for the function";
 
   // Reserved words carry no labelDetails at all.
   assert !contains(out, `"label":"ret","kind":14,"detail":"declaration","labelDetails"`), "expected no labelDetails on a keyword";
@@ -539,10 +530,7 @@ test "a method completion item's own labelDetails excludes the implicit self" {
 
   // Right after `b.re`.
   str out = completion(&reads, doc, 7, 10, true);
-  assert contains(
-    out,
-    `"labelDetails":{"detail":"(num n)","description":"bin"}`
-  ), "expected self excluded from the method's own labelDetails, matching its snippet";
+  assert contains(out, `"labelDetails":{"detail":"(num n)","description":"bin"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
 }
 
 test "completion offers a call snippet with one tab stop per parameter" {
@@ -563,10 +551,7 @@ test "completion offers a call snippet with one tab stop per parameter" {
   // Mid-word on "probe", snippets on.
   str out = completion(&reads, doc, 4, 8, true);
   assert contains(out, `"label":"probe"`), "expected the function itself";
-  assert contains(
-    out,
-    `"insertText":"probe(${1:name}, ${2:count})$0","insertTextFormat":2`
-  ), "expected a snippet with one tab stop per parameter";
+  assert contains(out, `"insertText":"probe(${1:name}, ${2:count})$0","insertTextFormat":2`), "expected a snippet with one tab stop per parameter";
 
   // Same position, snippets off: plain label insertion, no snippet.
   str out_plain = completion(&reads, doc, 4, 8, false);
@@ -800,11 +785,14 @@ test "the 'See also' footer never links a cross-file type that isn't pub" {
   `  num x;
   `}`);
   defer remove_file("src/tests/fixtures/_see_also_priv.fn");
-  write_string("src/tests/fixtures/_see_also_lib.fn", `imp _see_also_priv;
-  `pub fun make() Secret {
-  `  Secret s;
-  `  ret s;
-  `}`);
+  write_string(
+    "src/tests/fixtures/_see_also_lib.fn",
+    `imp _see_also_priv;
+    `pub fun make() Secret {
+    `  Secret s;
+    `  ret s;
+    `}`
+  );
   defer remove_file("src/tests/fixtures/_see_also_lib.fn");
 
   AnalysisCache reads = analysis_cache_new();
@@ -1403,10 +1391,14 @@ test "workspace symbol search scores and sorts matches: exact, then prefix, then
   defer symbols.free();
   // widget: exact match. widgetFactory: prefix match. myWidget:
   // substring match. wgt: fuzzy subsequence match (w-g-t in order).
-  docs.opened("file:///wsort.fn", `fun widget() num { ret 1; }
-  `fun widgetFactory() num { ret 1; }
-  `fun myWidget() num { ret 1; }
-  `fun wgt() num { ret 1; }`, 1);
+  docs.opened(
+    "file:///wsort.fn",
+    `fun widget() num { ret 1; }
+    `fun widgetFactory() num { ret 1; }
+    `fun myWidget() num { ret 1; }
+    `fun wgt() num { ret 1; }`,
+    1
+  );
 
   str matches = workspace_symbols(&docs, &reads, &symbols, "widget");
   num exact_pos = index_of_str(matches, `"name":"widget"`);
@@ -3258,10 +3250,7 @@ test "code actions fill in every missing arm at once, not just the first" {
   diags.push(d);
 
   str out = code_actions(&reads, doc, doc.uri, &diags);
-  assert contains(
-    out,
-    `"title":"Fill in missing 'Shape.Square', 'Shape.Triangle' arms"`
-  ), "expected one fix naming both missing variants, plural";
+  assert contains(out, `"title":"Fill in missing 'Shape.Square', 'Shape.Triangle' arms"`), "expected one fix naming both missing variants, plural";
   assert contains(out, `.Square(v0) -> {}`), "expected a stub for Square";
   assert contains(out, `.Triangle -> {}`), "expected a stub for Triangle too, in the same fix";
   // Both stubs land in one edit, right before the fit block's own
@@ -3938,12 +3927,16 @@ test "code lens shows a reference count per function, correctly pluralized" {
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
-  docs.opened("file:///cl.fn", `fun add(num a, num b) num {
-  `  ret a + b;
-  `}
-  `fun use_it() num {
-  `  ret add(1, 2) + add(3, 4);
-  `}`, 1);
+  docs.opened(
+    "file:///cl.fn",
+    `fun add(num a, num b) num {
+    `  ret a + b;
+    `}
+    `fun use_it() num {
+    `  ret add(1, 2) + add(3, 4);
+    `}`,
+    1
+  );
   let held = docs.at("file:///cl.fn");
   Document doc = held.unwrap();
 
@@ -3960,21 +3953,25 @@ test "code lens skips main and impl methods, but covers compounds, enums, and qu
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
-  docs.opened("file:///scope.fn", `compound Widget {
-  `  num n;
-  `}
-  `enum Shape {
-  `  Circle(num),
-  `}
-  `quirk Speaks {
-  `  say() str;
-  `}
-  `impl Widget {
-  `  pub free() {}
-  `}
-  `fun main() num {
-  `  ret 0;
-  `}`, 1);
+  docs.opened(
+    "file:///scope.fn",
+    `compound Widget {
+    `  num n;
+    `}
+    `enum Shape {
+    `  Circle(num),
+    `}
+    `quirk Speaks {
+    `  say() str;
+    `}
+    `impl Widget {
+    `  pub free() {}
+    `}
+    `fun main() num {
+    `  ret 0;
+    `}`,
+    1
+  );
   let held = docs.at("file:///scope.fn");
   Document doc = held.unwrap();
 
@@ -3991,21 +3988,25 @@ test "code lens on a quirk shows its own implementation count, a structural scan
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
-  docs.opened("file:///impl_count.fn", `quirk Speaks {
-  `  say() str;
-  `}
-  `compound Dog {
-  `  num age;
-  `}
-  `impl Dog as Speaks {
-  `  say() str { ret "woof"; }
-  `}
-  `compound Cat {
-  `  num age;
-  `}
-  `impl Cat as Speaks {
-  `  say() str { ret "meow"; }
-  `}`, 1);
+  docs.opened(
+    "file:///impl_count.fn",
+    `quirk Speaks {
+    `  say() str;
+    `}
+    `compound Dog {
+    `  num age;
+    `}
+    `impl Dog as Speaks {
+    `  say() str { ret "woof"; }
+    `}
+    `compound Cat {
+    `  num age;
+    `}
+    `impl Cat as Speaks {
+    `  say() str { ret "meow"; }
+    `}`,
+    1
+  );
   let held = docs.at("file:///impl_count.fn");
   Document doc = held.unwrap();
 
@@ -4053,15 +4054,19 @@ test "call hierarchy: prepare finds the function, incoming/outgoing calls group 
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
-  docs.opened("file:///ch.fn", `fun helper(num a, num b) num {
-  `  ret a + b;
-  `}
-  `fun add(num a, num b) num {
-  `  ret helper(a, b);
-  `}
-  `fun use_it() num {
-  `  ret add(1, 2) + add(3, 4);
-  `}`, 1);
+  docs.opened(
+    "file:///ch.fn",
+    `fun helper(num a, num b) num {
+    `  ret a + b;
+    `}
+    `fun add(num a, num b) num {
+    `  ret helper(a, b);
+    `}
+    `fun use_it() num {
+    `  ret add(1, 2) + add(3, 4);
+    `}`,
+    1
+  );
   let held = docs.at("file:///ch.fn");
   Document doc = held.unwrap();
 

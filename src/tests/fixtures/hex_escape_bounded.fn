@@ -1,0 +1,6 @@
+imp std.c.io;
+fun main() num {
+  str s = "\x42C";
+  printf("%s\n", s);
+  ret 0;
+}

@@ -17,6 +17,7 @@ imp std.fs;
 imp std.process;
 imp std.vec;
 imp std.option;
+imp std.runtime_backend;
 
 // Transpiles `src` and returns the emitted C, or an error describing the
 // stage that rejected it. Imports are not resolved: `src` is compiled on
@@ -165,10 +166,27 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   Vec<str> build;
   build.init(8);
   defer build.free();
-  build.push("cc");
+  str cc = env_or("FUN_CC", "cc");
+  build.push(cc);
+  str cc_extra = env_or("FUN_CC_ARGS", "");
+  if !equals(cc_extra, "") {
+    Vec<str> cc_parts = split(cc_extra, ' ');
+    defer cc_parts.free();
+    num ci = 0;
+    for ci < cc_parts.len {
+      str part = cc_parts.get(ci);
+      if !equals(part, "") {
+        build.push(part);
+      }
+      ci = ci + 1;
+    }
+  }
   build.push("-O0");
   build.push("-pthread");
   build.push("-lm");
+  if runtime_backend_is_windows() {
+    build.push("-lws2_32");
+  }
   build.push("-o");
   build.push(base);
   build.push(c_path);
@@ -179,12 +197,18 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
     label,
     built.unwrap().stderr_text
   );
-  defer remove_file(base);
+
+  // On Windows, zig cc appends .exe; posix_spawnp also needs backslashes.
+  str exe_path = base;
+  if runtime_backend_is_windows() {
+    exe_path = replace_char(format("{str}.exe", base), '/', '\\');
+  }
+  defer remove_file(exe_path);
 
   Vec<str> invocation;
   invocation.init(2);
   defer invocation.free();
-  invocation.push(base);
+  invocation.push(exe_path);
   let ran = run(argv_from(&invocation));
   assert ran.is_ok(), format("{str}: could not run the built program", label);
   ret ran.unwrap();

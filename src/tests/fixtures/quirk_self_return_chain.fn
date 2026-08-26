@@ -1,0 +1,19 @@
+imp std.c.io;
+compound Item { num v; }
+quirk Chain { self_ref() Chain; getV() num; }
+impl Item as Chain { self_ref() Chain { ret self; } getV() num { ret self.v; } }
+compound C { num val; }
+quirk QC { gv() num; }
+impl C as QC { gv() num { ret self.val; } }
+compound B { C c; }
+quirk QB { to_c() QC; }
+impl B as QB { to_c() QC { ret &self.c; } }
+fun main() num {
+  Item a = Item{v = 5};
+  Chain c = &a;
+  B b;
+  b.c.val = 42;
+  QB qb = &b;
+  printf("%lld %lld\n", c.self_ref().getV(), qb.to_c().gv());
+  ret 0;
+}

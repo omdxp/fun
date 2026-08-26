@@ -175,10 +175,7 @@ test "an alias-qualified read of a public global compiles" {
 test "a leading-underscore field is private to the file that declares it" {
   // The type may be offered publicly while some of what it holds stays
   // its own business, which is what the leading underscore says.
-  assert contains(
-    check_file("src/tests/fixtures/privfield_main_bad.fn"),
-    "is private to the file"
-  ), "expected the underscore field refused from another file";
+  assert contains(check_file("src/tests/fixtures/privfield_main_bad.fn"), "is private to the file"), "expected the underscore field refused from another file";
   assert equals(check_file("src/tests/fixtures/privfield_main_ok.fn"), ""), "expected an accessor in the declaring file to still reach it";
 }
 

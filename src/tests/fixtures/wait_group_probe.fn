@@ -1,0 +1,17 @@
+imp std.c.io;
+imp std.task;
+async fun worker(WaitGroup* wg, num i) {
+  printf("task %lld\n", i);
+  wg.done();
+}
+fun main() num {
+  WaitGroup wg = wait_group_new(3);
+  num i = 0;
+  for i < 3 {
+    fork worker(&wg, i);
+    i = i + 1;
+  }
+  wg.wait();
+  printf("all done\n");
+  ret 0;
+}

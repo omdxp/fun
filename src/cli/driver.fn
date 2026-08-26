@@ -154,8 +154,10 @@ pub fun parse_args(str[] argv) Options {
   let leading = parsed.at_positional(0);
   if leading.is_some() {
     str head = leading.unwrap();
-    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
-      equals(head, "init") {
+    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") || equals(
+      head,
+      "init"
+    ) {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -418,6 +420,7 @@ pub fun compile_to_c_mode(
   cg.test_mode = test_mode;
   cg.fuzz_mode = fuzz_mode;
   cg.fuzz_target = fuzz_target;
+  cg.msvc_mode = compiler_is_msvc(c_compiler());
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -463,6 +466,7 @@ pub fun compile_to_c_mode(
 fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, bin debug_info) {
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
+    argv_args.push("/std:c17");
     argv_args.push(c_path);
     if debug_info {
       argv_args.push("/Zi");
@@ -479,6 +483,9 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     }
     argv_args.push("-pthread");
     argv_args.push("-lm");
+    if runtime_backend_is_windows() {
+      argv_args.push("-lws2_32");
+    }
   }
 }
 
@@ -497,15 +504,15 @@ fun _default_cc_candidates() Vec<str> {
 }
 
 // Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
-// arguments appended after the usual defaults (a user override is
-// trusted to know what it's asking for, so this streams the
-// compiler's own output live rather than capturing it).
+// arguments inserted right after `cc` itself and before the source
+// file — this lets e.g. FUN_CC=zig FUN_CC_ARGS=cc work (a user
+// override is trusted to know what it's asking for, so this streams
+// the compiler's own output live rather than capturing it).
 fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
   argv_args.push(cc);
-  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
 
   str extra = env_or("FUN_CC_ARGS", "");
   if !equals(extra, "") {
@@ -520,6 +527,8 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
       j = j + 1;
     }
   }
+
+  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
 
   str[] argv = argv_from(&argv_args);
   let code = spawn_inherited(argv);
@@ -692,7 +701,8 @@ pub fun compile_c_to_object(str c_path, str obj_path) num {
 // the current directory, so only POSIX needs the prefix.
 pub fun executable_path(str path) str {
   if runtime_backend_is_windows() {
-    ret path;
+    // posix_spawnp on MinGW fails with forward-slash relative paths; use backslashes.
+    ret replace_char(path, '/', '\\');
   }
   if contains(path, "/") || contains(path, "\\") {
     ret path;
@@ -1087,7 +1097,10 @@ pub fun init_project(str kind) num {
   if !wants_lib && !wants_bin {
     writeln_to(
       Sink.Stderr,
-      format("[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)", resolved_kind)
+      format(
+        "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
+        resolved_kind
+      )
     );
     ret 1;
   }

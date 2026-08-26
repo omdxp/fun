@@ -38,12 +38,15 @@ jobs:
       - name: Build fun and fls
         timeout-minutes: 10
         run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
+      - name: Set up MSVC for Windows
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Run the test suite on ${{ matrix.lane }}
         timeout-minutes: 20
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./fun-out/bin/fun.exe test src/tests
+            FUN_CC=cl ./fun-out/bin/fun.exe test src/tests
           else
             ./fun-out/bin/fun test src/tests
           fi
@@ -52,7 +55,7 @@ jobs:
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
+            FUN_CC=cl FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
           else
             FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
           fi

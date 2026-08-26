@@ -446,6 +446,10 @@ pub compound Codegen {
   str last_where;
   // Emit test blocks and a runner in place of the program's own `main`.
   bin test_mode;
+  // Emit MSVC-compatible C: hoist vararg temps before the enclosing
+  // statement instead of using GNU `({...})`, replace `__auto_type` with
+  // explicit C types wherever they can be inferred at transpile time.
+  bin msvc_mode;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
   bin fuzz_mode;
@@ -561,6 +565,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.error_note = "";
   g.last_where = "";
   g.test_mode = false;
+  g.msvc_mode = false;
   g.fuzz_mode = false;
   g.fuzz_target = "";
   g.in_main = false;
@@ -2797,12 +2802,12 @@ impl Codegen {
   // passes `""`, resolved against the real target impl below rather
   // than trusted as-is, so it can't disagree with a quirk-qualified
   // call site over the identity of a quirk-only method.
-  ensure_generic_impl_method_emitted(
-    str owner_type,
-    str bare_name,
-    str quirk_name
-  ) Option<CodegenErrorKind> {
-    str resolved_quirk = self.resolve_generic_impl_quirk_for_bare(owner_type, bare_name, quirk_name);
+  ensure_generic_impl_method_emitted(str owner_type, str bare_name, str quirk_name) Option<CodegenErrorKind> {
+    str resolved_quirk = self.resolve_generic_impl_quirk_for_bare(
+      owner_type,
+      bare_name,
+      quirk_name
+    );
     StringBuilder key_sb = string_builder_init(16);
     key_sb.append(owner_type);
     key_sb.append("::");
@@ -2871,11 +2876,7 @@ impl Codegen {
   // that specific quirk, so a plain method and a same-named quirk
   // method on the same type (`Vec<T>`'s own `clear()` next to its
   // `Clearable` quirk's `clear()`) can't shadow each other.
-  emit_one_generic_impl_method(
-    str owner_type,
-    str bare_name,
-    str quirk_name
-  ) Option<CodegenErrorKind> {
+  emit_one_generic_impl_method(str owner_type, str bare_name, str quirk_name) Option<CodegenErrorKind> {
     num ii = 0;
     bin found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -4069,7 +4070,10 @@ impl Codegen {
     if self.state == self.root_state && self.current_fn_body_start_pos.is_some() {
       num fp = self.current_fn_body_start_pos.unwrap();
       if self.fn_types_declared_before(type_names, fp) &&
-        is_safe_splice_boundary(&self.state.out, fp) {
+        is_safe_splice_boundary(
+        &self.state.out,
+        fp
+      ) {
         if self.current_stmt_start_pos.is_some() &&
           self.current_stmt_start_pos.unwrap() < fp {
           ProtoSplice broad_stmt;
@@ -4099,7 +4103,10 @@ impl Codegen {
         // reaching the flag check below, which would leak the flag,
         // set but never consumed, into whatever gets emitted next.
         if !equals(ce.op, "()") && !equals(ce.op, ".") && !equals(ce.op, "[]") &&
-          !equals(ce.op, ",") && !equals(ce.op, "=") {
+          !equals(
+          ce.op,
+          ","
+        ) && !equals(ce.op, "=") {
           is_plain_binary = true;
         }
       }
@@ -4910,45 +4917,133 @@ impl Codegen {
         vd_i = vd_i + 1;
       }
 
-      self.state.write("({ ");
-      num va_i = 0;
-      for va_i < var_len {
-        Node* va_arg = args.get(fixed_len + va_i);
-        // A bare character literal has type `int` in C, so `__auto_type`
-        // would infer `int`, `__fun_tag`'s `_Generic` dispatch would take
-        // the `int` case, and the callee's shim would stringify the ASCII
-        // code instead of the character. An explicit `(char)` cast forces
-        // the right inference; a `chr`-typed variable is already `char`.
-        bin va_is_chr_literal = false;
-        fit va_arg.kind {
-          .Character(_) -> { va_is_chr_literal = true; }
-          _ -> {}
+      // MSVC has no GNU statement expressions (`({...})`). When msvc_mode
+      // and a statement-start position is tracked, hoist each va temp as a
+      // plain declaration before the enclosing statement and emit the
+      // callee call directly. Falls back to the GNU form otherwise (e.g.
+      // when emitting top-level initializers where no statement context
+      // exists).
+      bin va_use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+      if va_use_hoist {
+        num va_i = 0;
+        for va_i < var_len {
+          Node* va_arg = args.get(fixed_len + va_i);
+          bin va_is_chr_literal = false;
+          fit va_arg.kind {
+            .Character(_) -> { va_is_chr_literal = true; }
+            _ -> {}
+          }
+          // Capture the expression text into a scratch buffer so we can
+          // splice the declaration before the enclosing statement.
+          CodegenState va_scratch = codegen_state_new();
+          CodegenState* va_saved_state = self.state;
+          let va_saved_hoist_pos = self.hoist_insert_pos;
+          let va_saved_stmt_pos = self.current_stmt_start_pos;
+          self.state = &va_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          let va_err = self.emit_expr(*va_arg);
+          self.state = va_saved_state;
+          self.hoist_insert_pos = va_saved_hoist_pos;
+          self.current_stmt_start_pos = va_saved_stmt_pos;
+          if va_err.is_some() {
+            ret va_err;
+          }
+          str va_expr_text = va_scratch.out.build();
+          let va_type_opt = self.infer_arg_type_name(va_arg);
+          str va_c_type = "int64_t";
+          if va_type_opt.is_some() {
+            va_c_type = map_type_to_c(va_type_opt.unwrap());
+          }
+          StringBuilder va_decl_sb = string_builder_init(64);
+          num va_indent_ii = 0;
+          for va_indent_ii < self.state.indent_level {
+            va_decl_sb.append("    ");
+            va_indent_ii = va_indent_ii + 1;
+          }
+          va_decl_sb.append(va_c_type);
+          va_decl_sb.append(" __fun_va_");
+          va_decl_sb.append(format_num(va_i));
+          va_decl_sb.append(" = ");
+          if va_is_chr_literal {
+            va_decl_sb.append("(char)");
+          }
+          va_decl_sb.append(va_expr_text);
+          va_decl_sb.append(";\n");
+          if va_is_display.get(va_i) {
+            num va_disp_indent_ii = 0;
+            for va_disp_indent_ii < self.state.indent_level {
+              va_decl_sb.append("    ");
+              va_disp_indent_ii = va_disp_indent_ii + 1;
+            }
+            va_decl_sb.append("char* __fun_disp_");
+            va_decl_sb.append(format_num(va_i));
+            va_decl_sb.append(" = ");
+            va_decl_sb.append(va_disp_fn.get(va_i));
+            va_decl_sb.append("(");
+            if va_disp_by_ref.get(va_i) {
+              va_decl_sb.append("&");
+            }
+            va_decl_sb.append("__fun_va_");
+            va_decl_sb.append(format_num(va_i));
+            va_decl_sb.append(");\n");
+          }
+          str va_decl_text = va_decl_sb.build();
+          let va_hoist_save = self.hoist_insert_pos;
+          let va_splice_pos = self.current_stmt_start_pos;
+          self.hoist_insert_pos = va_splice_pos;
+          self.emit_hoisted(va_decl_text);
+          if va_splice_pos.is_some() {
+            va_hoist_save = adjust_pos_after_splice(
+              va_hoist_save,
+              va_splice_pos.unwrap(),
+              len(va_decl_text)
+            );
+          }
+          self.hoist_insert_pos = va_hoist_save;
+          va_i = va_i + 1;
         }
-        self.state.write("__auto_type __fun_va_");
-        self.state.write(format_num(va_i));
-        self.state.write(" = ");
-        if va_is_chr_literal {
-          self.state.write("(char)");
-        }
-        let va_err = self.emit_expr(*va_arg);
-        if va_err.is_some() {
-          ret va_err;
-        }
-        self.state.write("; ");
-        if va_is_display.get(va_i) {
-          self.state.write("char* __fun_disp_");
+      } else {
+        self.state.write("({ ");
+        num va_i = 0;
+        for va_i < var_len {
+          Node* va_arg = args.get(fixed_len + va_i);
+          // A bare character literal has type `int` in C, so `__auto_type`
+          // would infer `int`, `__fun_tag`'s `_Generic` dispatch would take
+          // the `int` case, and the callee's shim would stringify the ASCII
+          // code instead of the character. An explicit `(char)` cast forces
+          // the right inference; a `chr`-typed variable is already `char`.
+          bin va_is_chr_literal = false;
+          fit va_arg.kind {
+            .Character(_) -> { va_is_chr_literal = true; }
+            _ -> {}
+          }
+          self.state.write("__auto_type __fun_va_");
           self.state.write(format_num(va_i));
           self.state.write(" = ");
-          self.state.write(va_disp_fn.get(va_i));
-          self.state.write("(");
-          if va_disp_by_ref.get(va_i) {
-            self.state.write("&");
+          if va_is_chr_literal {
+            self.state.write("(char)");
           }
-          self.state.write("__fun_va_");
-          self.state.write(format_num(va_i));
-          self.state.write("); ");
+          let va_err = self.emit_expr(*va_arg);
+          if va_err.is_some() {
+            ret va_err;
+          }
+          self.state.write("; ");
+          if va_is_display.get(va_i) {
+            self.state.write("char* __fun_disp_");
+            self.state.write(format_num(va_i));
+            self.state.write(" = ");
+            self.state.write(va_disp_fn.get(va_i));
+            self.state.write("(");
+            if va_disp_by_ref.get(va_i) {
+              self.state.write("&");
+            }
+            self.state.write("__fun_va_");
+            self.state.write(format_num(va_i));
+            self.state.write("); ");
+          }
+          va_i = va_i + 1;
         }
-        va_i = va_i + 1;
       }
       self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
       self.state.write("(");
@@ -4996,7 +5091,11 @@ impl Codegen {
         self.state.write(format_num(vp_i));
         vp_i = vp_i + 1;
       }
-      self.state.write("); })");
+      if va_use_hoist {
+        self.state.write(")");
+      } else {
+        self.state.write("); })");
+      }
       ret .None;
     }
 
@@ -5351,13 +5450,15 @@ impl Codegen {
   }
 
   // Hoists a call expression's rendered text (`recv_r.text`, an rvalue)
-  // into a fresh `__auto_type` temp spliced right before the current
-  // statement, returning the temp's name. Shared by `emit_method_call`
-  // (which needs `&<rvalue>`, invalid C without this) and
+  // into a fresh temp spliced right before the current statement,
+  // returning the temp's name. Shared by `emit_method_call` (which
+  // needs `&<rvalue>`, invalid C without this) and
   // `emit_quirk_dispatch_call` (which reads the same rvalue twice, once
   // for `.vtable` and once for `.self`; without hoisting it, that
   // silently runs the call twice at runtime).
-  hoist_call_result_to_temp(str call_text) str {
+  // `recv_type_name`/`recv_is_pointer`: when non-empty and
+  // `self.msvc_mode`, emits an explicit C type instead of `__auto_type`.
+  hoist_call_result_to_temp(str call_text, str recv_type_name, bin recv_is_pointer) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -5370,7 +5471,15 @@ impl Codegen {
       recv_tmp_stmt_sb.append("    ");
       recv_tmp_ii = recv_tmp_ii + 1;
     }
-    recv_tmp_stmt_sb.append("__auto_type ");
+    if self.msvc_mode && !equals(recv_type_name, "") {
+      recv_tmp_stmt_sb.append(map_type_to_c(recv_type_name));
+      if recv_is_pointer {
+        recv_tmp_stmt_sb.append("*");
+      }
+    } else {
+      recv_tmp_stmt_sb.append("__auto_type");
+    }
+    recv_tmp_stmt_sb.append(" ");
     recv_tmp_stmt_sb.append(recv_tmp_name);
     recv_tmp_stmt_sb.append(" = ");
     recv_tmp_stmt_sb.append(call_text);
@@ -5436,7 +5545,7 @@ impl Codegen {
   emit_quirk_dispatch_call(ChainResolution recv_r, str method_name, Node* args_node) Option<CodegenErrorKind> {
     str recv_text = recv_r.text;
     if recv_r.is_call_result {
-      recv_text = self.hoist_call_result_to_temp(recv_r.text);
+      recv_text = self.hoist_call_result_to_temp(recv_r.text, recv_r.type_name, recv_r.is_pointer);
     }
     str sep = ".";
     if recv_r.is_pointer {
@@ -5605,7 +5714,11 @@ impl Codegen {
       // `&<rvalue>` is invalid C. It is hoisted into a fresh
       // `__auto_type` temp spliced right before the current statement,
       // and the temp's address is taken instead.
-      str recv_tmp_name = self.hoist_call_result_to_temp(recv_r.text);
+      str recv_tmp_name = self.hoist_call_result_to_temp(
+        recv_r.text,
+        recv_r.type_name,
+        recv_r.is_pointer
+      );
       self.state.write("&");
       self.state.write(recv_tmp_name);
     } else {
@@ -5845,7 +5958,11 @@ impl Codegen {
             str callee_name = name;
             Vec<DataType*> no_explicit_gargs_a;
             no_explicit_gargs_a.init(0);
-            let generic_inst = self.maybe_instantiate_generic_function(name, args, no_explicit_gargs_a);
+            let generic_inst = self.maybe_instantiate_generic_function(
+              name,
+              args,
+              no_explicit_gargs_a
+            );
             if generic_inst.is_some() {
               callee_name = generic_inst.unwrap().mangled_name;
             }
@@ -5882,7 +5999,11 @@ impl Codegen {
             }
             // A generic impl method's first call site for this
             // instantiation; see `emit_method_call`.
-            let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name, "");
+            let emit_err = self.ensure_generic_impl_method_emitted(
+              recv_r.type_name,
+              method_name,
+              ""
+            );
             if emit_err.is_some() {
               ret emit_err;
             }
@@ -6640,7 +6761,16 @@ impl Codegen {
         }
         if exp != nil {
           self.state.write_indent();
-          self.state.write("__auto_type __fun_defer_ret = ");
+          if self.msvc_mode && self.current_fn_rtype_dt.is_some() {
+            let defer_rdt = self.current_fn_rtype_dt.unwrap();
+            let defer_wt = self.write_type(defer_rdt);
+            if defer_wt.is_none() {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" __fun_defer_ret = ");
           if ret_did_quirk_coerce {
             self.state.write("__fun_coerce_");
             self.state.write(ret_quirk_concrete);
@@ -6737,9 +6867,11 @@ impl Codegen {
         // char*`, incompatible with the plain `char*` every ordinary
         // `str` value uses, which is what every str-returning function
         // and str-taking parameter expects.
-        bin const_is_ptr_binding =
-        !is_let &&
-          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(v.var_type.type_str, "str"));
+        bin const_is_ptr_binding = !is_let &&
+          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
+          v.var_type.type_str,
+          "str"
+        ));
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
@@ -6766,7 +6898,26 @@ impl Codegen {
         if let_is_bracket_literal {
           self.state.write(let_lit_elem_c_type);
         } elif is_let {
-          self.state.write("__auto_type");
+          if self.msvc_mode && v.has_val {
+            let msvc_idt_opt = self.infer_let_expr_type(v.val);
+            if msvc_idt_opt.is_some() {
+              let msvc_idt = msvc_idt_opt.unwrap();
+              let msvc_wt = self.write_type(msvc_idt);
+              if msvc_wt.is_some() {
+                let msvc_subst = self.resolve_type_subst(msvc_idt);
+                resolved_name = msvc_wt.unwrap();
+                resolved_ptr = dtype_is_pointer(msvc_subst);
+                resolved_dtype = .Some(msvc_subst);
+                have_resolved = true;
+              } else {
+                self.state.write("int64_t");
+              }
+            } else {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
         } else {
           let wt = self.write_type(*v.var_type);
           if wt.is_none() {
@@ -7323,13 +7474,30 @@ impl Codegen {
         self.state.write("_None) break;\n");
         self.state.write_indent();
         if is_map && fi.has_index_name {
-          self.state.write("__auto_type ");
+          if self.msvc_mode {
+            let idx_wt = self.write_type(elem_key_dt);
+            if idx_wt.is_none() {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
           self.state.write(fi.index_name);
           self.state.write(" = ");
           self.state.write(opt_tmp);
           self.state.write(".payload.Some._0;\n");
           self.state.write_indent();
-          self.state.write("__auto_type ");
+          let val_dt2 = *coll_dt.generic_args.get(1);
+          if self.msvc_mode {
+            let val_wt = self.write_type(val_dt2);
+            if val_wt.is_none() {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
           self.state.write(fi.item_name);
           self.state.write(" = ");
           self.state.write(coll_name);
@@ -7347,7 +7515,6 @@ impl Codegen {
               elem_key_dt
             );
           }
-          let val_dt2 = *coll_dt.generic_args.get(1);
           let val_name = self.resolve_type_name(val_dt2);
           if val_name.is_some() {
             self.record_local_typed(
@@ -7358,7 +7525,15 @@ impl Codegen {
             );
           }
         } else {
-          self.state.write("__auto_type ");
+          if self.msvc_mode {
+            let elem_wt = self.write_type(elem_key_dt);
+            if elem_wt.is_none() {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
           self.state.write(fi.item_name);
           self.state.write(" = ");
           self.state.write(opt_tmp);
@@ -7466,7 +7641,15 @@ impl Codegen {
         self.state.write(opt_name);
         self.state.write("_None) break;\n");
         self.state.write_indent();
-        self.state.write("__auto_type ");
+        if self.msvc_mode {
+          let uiter_wt = self.write_type(elem_dt2);
+          if uiter_wt.is_none() {
+            self.state.write("int64_t");
+          }
+        } else {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
         self.state.write(fi.item_name);
         self.state.write(" = ");
         self.state.write(uopt_tmp);
@@ -7519,7 +7702,15 @@ impl Codegen {
       self.state.write("{\n");
       self.state.indent_level = self.state.indent_level + 1;
       self.state.write_indent();
-      self.state.write("__auto_type ");
+      if self.msvc_mode && arr_dtype.is_some() {
+        let vsrc_wt = self.write_type(arr_dtype.unwrap());
+        if vsrc_wt.is_none() {
+          self.state.write("int64_t");
+        }
+      } else {
+        self.state.write("__auto_type");
+      }
+      self.state.write(" ");
       self.state.write(vec_src_text);
       self.state.write(" = ");
       self.state.write(arr_text);
@@ -7586,8 +7777,20 @@ impl Codegen {
     // (`int64_t (*)[4]`); a naive pointer-star expansion would give a
     // flat double pointer, losing the inner dimension's stride. A 1D
     // array or a 2D row takes `elem_c_type` plus stars.
+    // MSVC mode: use explicit element type when available.
     if is_vec || element_depth >= 2 {
-      self.state.write("__auto_type ");
+      if self.msvc_mode && is_vec && elem_dt.is_some() {
+        let elem_wt = self.write_type(elem_dt.unwrap());
+        if elem_wt.is_none() {
+          self.state.write("int64_t");
+        }
+        self.state.write(" ");
+      } elif self.msvc_mode {
+        // element_depth >= 2 or Vec with unknown elem: best-effort fallback.
+        self.state.write("int64_t ");
+      } else {
+        self.state.write("__auto_type ");
+      }
     } else {
       self.state.write(elem_c_type);
       num star_i = 0;
@@ -7687,7 +7890,20 @@ impl Codegen {
       num bi = 0;
       for bname : br.bindings {
         self.state.write_indent();
-        self.state.write("__auto_type ");
+        // A known payload field type registers `bname` as a known local,
+        // so further access on it inside the branch resolves. An
+        // unresolvable payload type leaves `bname` unregistered.
+        let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, bi);
+        if self.msvc_mode && payload_info.is_some() {
+          let fb_info = payload_info.unwrap();
+          self.state.write(map_type_to_c(fb_info.type_name));
+          if fb_info.is_pointer {
+            self.state.write("*");
+          }
+        } else {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
         self.state.write(bname);
         self.state.write(" = ");
         self.state.write(subj_name);
@@ -7701,16 +7917,17 @@ impl Codegen {
         self.state.write("._");
         self.state.write(format_num(bi));
         self.state.write(";\n");
-        // A known payload field type registers `bname` as a known local,
-        // so further access on it inside the branch resolves. An
-        // unresolvable payload type leaves `bname` unregistered.
-        let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, bi);
         if payload_info.is_some() {
-          let info = payload_info.unwrap();
-          if info.dtype.is_some() {
-            self.record_local_typed(bname, info.type_name, info.is_pointer, info.dtype.unwrap());
+          let fb_info2 = payload_info.unwrap();
+          if fb_info2.dtype.is_some() {
+            self.record_local_typed(
+              bname,
+              fb_info2.type_name,
+              fb_info2.is_pointer,
+              fb_info2.dtype.unwrap()
+            );
           } else {
-            self.record_local(bname, info.type_name, info.is_pointer);
+            self.record_local(bname, fb_info2.type_name, fb_info2.is_pointer);
           }
         }
         bi = bi + 1;
@@ -7842,7 +8059,12 @@ impl Codegen {
             ret .Some(.UnsupportedNode);
           }
           let fit_subj_name1 = self.next_fit_subj_name();
-          self.state.write("__auto_type ");
+          if self.msvc_mode {
+            self.state.write(map_type_to_c(resolved_await_rtype.unwrap()));
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
           self.state.write(fit_subj_name1);
           self.state.write(" = ");
           let awerr = self.emit_await(u.operand);
@@ -7915,7 +8137,12 @@ impl Codegen {
               ret .Some(.UnsupportedNode);
             }
             let fit_subj_name2 = self.next_fit_subj_name();
-            self.state.write("__auto_type ");
+            if self.msvc_mode {
+              self.state.write(map_type_to_c(resolved_rtype.unwrap()));
+            } else {
+              self.state.write("__auto_type");
+            }
+            self.state.write(" ");
             self.state.write(fit_subj_name2);
             self.state.write(" = ");
             let cerr = self.emit_expr(*f.exp);
@@ -7983,7 +8210,12 @@ impl Codegen {
               ret .Some(.UnsupportedNode);
             }
             let fit_subj_name3 = self.next_fit_subj_name();
-            self.state.write("__auto_type ");
+            if self.msvc_mode {
+              self.state.write(map_type_to_c(resolved_rtype.unwrap()));
+            } else {
+              self.state.write("__auto_type");
+            }
+            self.state.write(" ");
             self.state.write(fit_subj_name3);
             self.state.write(" = ");
             let merr = self.emit_method_call(recv_e, dot_e.right);
@@ -8908,8 +9140,8 @@ impl Codegen {
         // this: a nested one reached through some scratch buffer
         // (`self.state != self.root_state`) leaves it alone, since its
         // own position would be relative to the wrong buffer entirely.
-        bin owns_fn_body_start_pos =
-        self.state == self.root_state && self.current_fn_body_start_pos.is_none();
+        bin owns_fn_body_start_pos = self.state == self.root_state &&
+          self.current_fn_body_start_pos.is_none();
         if owns_fn_body_start_pos {
           self.current_fn_body_start_pos = .Some(self.state.out.len());
         }
@@ -9596,6 +9828,11 @@ impl Codegen {
           field_is_pointer.push(fld_ptr || fld_arr_ptr);
           field_dtypes.push(self.resolve_type_subst(*f.dtype));
         }
+        // MSVC rejects empty structs; a guard-wrapped dummy keeps the
+        // struct valid for MSVC while staying invisible on GCC/Clang.
+        if field_names.len == 0 {
+          self.state.write("#ifdef _MSC_VER\n  char __msvc_dummy;\n#endif\n");
+        }
         self.state.write("} ");
         self.state.write(c.name);
         self.state.write(";\n\n");
@@ -9649,14 +9886,29 @@ impl Codegen {
         // See the matching fix on the local-variable declaration site:
         // `str` needs the same "pointer for const-placement purposes"
         // treatment `dtype_is_pointer` alone doesn't give it.
-        bin const_is_ptr_binding =
-        !is_let &&
-          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(v.var_type.type_str, "str"));
+        bin const_is_ptr_binding = !is_let &&
+          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
+          v.var_type.type_str,
+          "str"
+        ));
         if v.is_const && !const_is_ptr_binding {
           self.state.write("const ");
         }
         if is_let {
-          self.state.write("__auto_type");
+          if self.msvc_mode && v.has_val {
+            let msvc_gdt_opt = self.infer_let_expr_type(v.val);
+            if msvc_gdt_opt.is_some() {
+              let msvc_gdt = msvc_gdt_opt.unwrap();
+              let msvc_gwt = self.write_type(msvc_gdt);
+              if msvc_gwt.is_none() {
+                self.state.write("int64_t");
+              }
+            } else {
+              self.state.write("int64_t");
+            }
+          } else {
+            self.state.write("__auto_type");
+          }
         } else {
           let wt = self.write_type(*v.var_type);
           if wt.is_none() {
@@ -10197,7 +10449,11 @@ impl Codegen {
                     Vec<Node*> gargs;
                     gargs.init(0);
                     self.flatten_call_args(e.right, &gargs);
-                    let ginst = self.maybe_instantiate_generic_function(fn_name, gargs, e.generic_args);
+                    let ginst = self.maybe_instantiate_generic_function(
+                      fn_name,
+                      gargs,
+                      e.generic_args
+                    );
                     if ginst.is_none() {
                       ret .None;
                     }
@@ -10343,7 +10599,11 @@ impl Codegen {
   // inferred binding is a bare value type, with no pointer-arg mangling.
   // `.None` when `fn_name` isn't a template, or a type param's binding
   // can't be inferred from this call's arguments.
-  maybe_instantiate_generic_function(str fn_name, Vec<Node*> args, Vec<DataType*> explicit_generic_args) Option<GenericCallResolution> {
+  maybe_instantiate_generic_function(
+    str fn_name,
+    Vec<Node*> args,
+    Vec<DataType*> explicit_generic_args
+  ) Option<GenericCallResolution> {
     for tmpl : self.generic_function_templates {
       fit tmpl.kind {
         .Function(f) -> {
@@ -11358,6 +11618,13 @@ impl Codegen {
       `extern char** environ;
       `static char** environ_ptr(void){ return environ; }
       `#endif
+      `#ifdef _WIN32
+      `static int setenv(const char* name, const char* value, int overwrite) {
+      `  if (!overwrite && getenv(name) != NULL) { return 0; }
+      `  return _putenv_s(name, value);
+      `}
+      `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
+      `#endif
       ``);
     }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
@@ -11381,6 +11648,7 @@ impl Codegen {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
+    `#ifndef __MINGW32__
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -11393,6 +11661,7 @@ impl Codegen {
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#else
     `#include <time.h>
     `static void __fun_sleep_seconds(double seconds) {
@@ -11447,6 +11716,9 @@ impl Codegen {
     // M:N scheduler builds on top of those.
     self.state.write(`#ifdef _WIN32
     `#include <windows.h>
+    `#ifdef __MINGW32__
+    `#include <pthread.h>
+    `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
@@ -11470,9 +11742,16 @@ impl Codegen {
     `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
+    `#include <io.h>
+    `#ifdef _MSC_VER
     `#pragma comment(lib, "Ws2_32.lib")
+    `#endif
+    `#ifndef __fun_win_close_defined
+    `#define __fun_win_close_defined
+    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `#endif
     `#ifndef close
-    `#define close closesocket
+    `#define close __fun_win_close
     `#endif
     `#else
     `#include <sys/socket.h>
@@ -11563,6 +11842,7 @@ impl Codegen {
     `static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
     `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
     `static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
+    `#ifndef __MINGW32__
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -11575,6 +11855,7 @@ impl Codegen {
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#else
     `#include <unistd.h>
     `#include <time.h>
@@ -12065,8 +12346,8 @@ impl Codegen {
           // A test body compiles straight through `emit_body`, never
           // through `emit_function_named`, so it needs its own copy of
           // that function's function-start ownership capture.
-          bin owns_test_fn_body_start_pos =
-          self.state == self.root_state && self.current_fn_body_start_pos.is_none();
+          bin owns_test_fn_body_start_pos = self.state == self.root_state &&
+            self.current_fn_body_start_pos.is_none();
           if owns_test_fn_body_start_pos {
             self.current_fn_body_start_pos = .Some(self.state.out.len());
           }
@@ -16282,6 +16563,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
+    `#ifndef __MINGW32__
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -16294,6 +16576,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#else
     `#include <time.h>
     `static void __fun_sleep_seconds(double seconds) {
@@ -16327,6 +16610,9 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `#ifdef _WIN32
     `#include <windows.h>
+    `#ifdef __MINGW32__
+    `#include <pthread.h>
+    `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
@@ -16346,9 +16632,16 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
+    `#include <io.h>
+    `#ifdef _MSC_VER
     `#pragma comment(lib, "Ws2_32.lib")
+    `#endif
+    `#ifndef __fun_win_close_defined
+    `#define __fun_win_close_defined
+    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `#endif
     `#ifndef close
-    `#define close closesocket
+    `#define close __fun_win_close
     `#endif
     `#else
     `#include <sys/socket.h>
@@ -16548,6 +16841,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
+    `#ifndef __MINGW32__
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -16560,6 +16854,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#else
     `#include <time.h>
     `static void __fun_sleep_seconds(double seconds) {
@@ -16593,6 +16888,9 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#endif
     `#ifdef _WIN32
     `#include <windows.h>
+    `#ifdef __MINGW32__
+    `#include <pthread.h>
+    `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
@@ -16612,9 +16910,16 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
+    `#include <io.h>
+    `#ifdef _MSC_VER
     `#pragma comment(lib, "Ws2_32.lib")
+    `#endif
+    `#ifndef __fun_win_close_defined
+    `#define __fun_win_close_defined
+    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `#endif
     `#ifndef close
-    `#define close closesocket
+    `#define close __fun_win_close
     `#endif
     `#else
     `#include <sys/socket.h>
@@ -17670,6 +17975,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
+    `#ifndef __MINGW32__
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -17682,6 +17988,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#else
     `#include <time.h>
     `static void __fun_sleep_seconds(double seconds) {
@@ -17715,6 +18022,9 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#endif
     `#ifdef _WIN32
     `#include <windows.h>
+    `#ifdef __MINGW32__
+    `#include <pthread.h>
+    `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
@@ -17734,9 +18044,16 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
+    `#include <io.h>
+    `#ifdef _MSC_VER
     `#pragma comment(lib, "Ws2_32.lib")
+    `#endif
+    `#ifndef __fun_win_close_defined
+    `#define __fun_win_close_defined
+    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `#endif
     `#ifndef close
-    `#define close closesocket
+    `#define close __fun_win_close
     `#endif
     `#else
     `#include <sys/socket.h>
