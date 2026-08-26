@@ -130,9 +130,17 @@ impl Documents {
     let existing = self.open.at(document_uri);
     if existing.is_some() {
       Document doc = existing.unwrap();
+      // Removes from the map before freeing doc.uri: put() stored
+      // doc.uri itself as the map's key, so freeing it first would
+      // corrupt the very bytes remove()'s own key lookup compares
+      // against, and a probing hash map can walk right past a
+      // now-garbled slot without ever matching it - leaving a zombie
+      // entry with dangling fields that stays live forever.
+      self.open.remove(document_uri);
       free(doc.uri);
       free(doc.path);
       free(doc.text);
+      ret;
     }
     self.open.remove(document_uri);
   }
@@ -194,9 +202,13 @@ impl Documents {
     let existing = self.indexed.at(document_uri);
     if existing.is_some() {
       Document doc = existing.unwrap();
+      // Same ordering as closed(): remove before freeing doc.uri,
+      // since it is the map's own key storage.
+      self.indexed.remove(document_uri);
       free(doc.uri);
       free(doc.path);
       free(doc.text);
+      ret;
     }
     self.indexed.remove(document_uri);
   }
