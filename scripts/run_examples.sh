@@ -101,10 +101,14 @@ is_expected_fail() {
     return 0
   fi
 
-  # Apple's clang caps `_BitInt` at 128 bits (mainline LLVM clang and real
-  # GCC both go well past that), so `u256` in this example only fails to
-  # compile on macOS specifically.
-  if [[ "$rel" == "examples/let_and_lowlevel_types.fn" && "$(uname -s)" == "Darwin" ]]; then
+  # `u256` in this example needs a `_BitInt` past 128 bits, which no
+  # compiler CI actually provides today: Apple's clang and
+  # mainline LLVM clang both cap `_BitInt` at 128 bits regardless of
+  # platform, and Ubuntu's default GCC (13.x) doesn't recognize
+  # `_BitInt` as a keyword at all, under any -std flag - only a newer
+  # GCC (confirmed on GCC 15) lifts the cap. Expected to fail on every
+  # CI platform until CI ships a new enough GCC.
+  if [[ "$rel" == "examples/let_and_lowlevel_types.fn" ]]; then
     return 0
   fi
 
