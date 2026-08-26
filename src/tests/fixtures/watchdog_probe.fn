@@ -1,5 +1,6 @@
 imp std.c.io;
 imp std.channel;
+
 fun main() num {
   Channel<num> ch = channel_new(1);
   num v = 0;

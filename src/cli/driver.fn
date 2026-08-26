@@ -154,7 +154,8 @@ pub fun parse_args(str[] argv) Options {
   let leading = parsed.at_positional(0);
   if leading.is_some() {
     str head = leading.unwrap();
-    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") || equals(
+    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
+      equals(
       head,
       "init"
     ) {
@@ -1098,8 +1099,8 @@ pub fun init_project(str kind) num {
     writeln_to(
       Sink.Stderr,
       format(
-        "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
-        resolved_kind
+      "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
+      resolved_kind
       )
     );
     ret 1;

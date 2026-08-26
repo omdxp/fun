@@ -1,5 +1,9 @@
 imp std.c.io;
-fun logLine(str msg) { printf("%s\n", msg); }
+
+fun logLine(str msg) {
+  printf("%s\n", msg);
+}
+
 fun main() num {
   num i = 0;
   for i < 4 {

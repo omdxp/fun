@@ -1,5 +1,6 @@
 imp std.c.io;
 imp std.c.mem;
+
 pub fun unused_signature_only() str[];
 fun make_names() str[] {
   str[] out = malloc(sizeof(str) * 3);
@@ -8,6 +9,7 @@ fun make_names() str[] {
   out[2] = nil;
   ret out;
 }
+
 fun main() num {
   str[] names = make_names();
   printf("%s %s\n", names[0], make_names()[1]);

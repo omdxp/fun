@@ -1,7 +1,19 @@
 imp std.c.io;
-quirk Lenable { size() num; }
-compound Box<T> { T v; }
-impl Box<T> as Lenable { size() num { ret sizeof(T); } }
+
+quirk Lenable {
+  size() num;
+}
+
+compound Box<T> {
+  T v;
+}
+
+impl Box<T> as Lenable {
+  size() num {
+    ret sizeof(T);
+  }
+}
+
 fun main() num {
   Box<num> bn = Box<num>{v = 42};
   Lenable la = &bn;

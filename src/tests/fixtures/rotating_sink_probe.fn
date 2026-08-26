@@ -1,6 +1,7 @@
 imp std.io;
 imp std.fs;
 imp std.c.io;
+
 fun main() num {
   RotatingSink r = rotating_sink_new("fun-out/rotate_probe.log", 4096, 2);
   Sink s = Sink.Rotating(&r);

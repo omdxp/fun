@@ -4,18 +4,23 @@ imp std.process;
 imp std.vec;
 imp std.string;
 imp std.result;
+
 fun main() num {
   make_dir_all("fun-out/observe_probe");
   write_string("fun-out/observe_probe/a.txt", "content");
   str dir = "no";
-  if is_dir("fun-out/observe_probe") { dir = "yes"; }
+  if is_dir("fun-out/observe_probe") {
+    dir = "yes";
+  }
   Vec<str> command;
   command.init(2);
   command.push("echo");
   command.push("spawned");
   let r = run(argv_from(&command));
   str spawned = "no";
-  if r.is_ok() && contains(r.unwrap().stdout_text, "spawned") { spawned = "yes"; }
+  if r.is_ok() && contains(r.unwrap().stdout_text, "spawned") {
+    spawned = "yes";
+  }
   printf("dir=%s spawned=%s\n", dir, spawned);
   remove_file("fun-out/observe_probe/a.txt");
   ret 0;

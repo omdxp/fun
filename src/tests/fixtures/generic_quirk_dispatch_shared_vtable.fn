@@ -1,10 +1,23 @@
 imp std.c.io;
-quirk Lenable { size() num; addTo(num n) num; }
-compound Box<T> { T v; }
-impl Box<T> as Lenable {
-  size() num { ret sizeof(T); }
-  addTo(num n) num { ret sizeof(T) + n; }
+
+quirk Lenable {
+  size() num;
+  addTo(num n) num;
 }
+
+compound Box<T> {
+  T v;
+}
+
+impl Box<T> as Lenable {
+  size() num {
+    ret sizeof(T);
+  }
+  addTo(num n) num {
+    ret sizeof(T) + n;
+  }
+}
+
 fun main() num {
   Box<num> bn = Box<num>{v = 42};
   Box<str> bs = Box<str>{v = "hi"};

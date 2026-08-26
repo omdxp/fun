@@ -1,8 +1,23 @@
 imp std.c.io;
-compound Item { num v; }
-quirk HasV { getV() num; }
-impl Item as HasV { getV() num { ret self.v; } }
-compound Holder { Item it; }
+
+compound Item {
+  num v;
+}
+
+quirk HasV {
+  getV() num;
+}
+
+impl Item as HasV {
+  getV() num {
+    ret self.v;
+  }
+}
+
+compound Holder {
+  Item it;
+}
+
 fun main() num {
   Item[3] arr;
   arr[0] = Item{v = 7};

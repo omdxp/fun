@@ -1,5 +1,9 @@
 imp std.c.io;
-compound Grid { num[3] data; }
+
+compound Grid {
+  num[3] data;
+}
+
 fun main() num {
   Grid g;
   g.data[0] = 1;
