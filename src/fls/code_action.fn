@@ -29,7 +29,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
   for i < diags.len {
     Diagnostic d = diags.get(i);
     i = i + 1;
-    if d.severity == SEVERITY_ERROR {
+    if d.severity == DIAG_SEVERITY_ERROR {
       str error_fix = _quirk_stub_action(cache, doc, document_uri, d);
       if equals(error_fix, "") {
         error_fix = _insert_await_action(document_uri, doc.text, d);
@@ -47,7 +47,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
       }
       continue;
     }
-    if d.severity != SEVERITY_WARNING {
+    if d.severity != DIAG_SEVERITY_WARNING {
       continue;
     }
     str id_name = _warning_id_from_message(d.message);

@@ -358,7 +358,7 @@ test "diagnose caches per document revision, and drops the cache once the revisi
 
 test "an unmet expect diagnoses as an error, at the expect statement's own position" {
   // `analyze`'s own unmet-expectation case used to surface as
-  // SEVERITY_WARNING at file start (0,0), always - it's a genuine
+  // DIAG_SEVERITY_WARNING at file start (0,0), always - it's a genuine
   // compile error (the CLI fails the build over the same condition),
   // and now carries the expect statement's own position.
   AnalysisCache reads = analysis_cache_new();
@@ -386,7 +386,7 @@ test "an unmet expect diagnoses as an error, at the expect statement's own posit
   defer diags.free();
   assert diags.len == 1, "expected exactly the unmet-expectation diagnostic";
   Diagnostic d = diags.get(0);
-  assert d.severity == SEVERITY_ERROR, "expected the unmet expectation to be an error, not a warning";
+  assert d.severity == DIAG_SEVERITY_ERROR, "expected the unmet expectation to be an error, not a warning";
   assert d.line == 4, "expected the expect statement's own line, not file start";
   assert d.col == 2, "expected the expect statement's own column, not file start";
 }
@@ -3158,7 +3158,7 @@ test "code actions offer to remove an unused import and to silence any warning" 
   d.col = 0;
   d.end_line = 0;
   d.end_col = 1;
-  d.severity = SEVERITY_WARNING;
+  d.severity = DIAG_SEVERITY_WARNING;
   d.message = "unused_import: unused import 'std.io'";
   Vec<Diagnostic> diags;
   diags.init(1);
@@ -3181,7 +3181,7 @@ test "code actions offer to remove an unused import and to silence any warning" 
   err.col = 0;
   err.end_line = 2;
   err.end_col = 1;
-  err.severity = SEVERITY_ERROR;
+  err.severity = DIAG_SEVERITY_ERROR;
   err.message = "some type error";
   Vec<Diagnostic> err_diags;
   err_diags.init(1);
@@ -3212,7 +3212,7 @@ test "code actions fill in a fit's missing arm with a correctly-sized stub" {
   d.col = 2;
   d.end_line = 5;
   d.end_col = 5;
-  d.severity = SEVERITY_WARNING;
+  d.severity = DIAG_SEVERITY_WARNING;
   d.message = "fit_non_exhaustive: fit does not handle 'Shape.Square'";
   Vec<Diagnostic> diags;
   diags.init(1);
@@ -3249,7 +3249,7 @@ test "code actions fill in every missing arm at once, not just the first" {
   d.col = 2;
   d.end_line = 6;
   d.end_col = 5;
-  d.severity = SEVERITY_WARNING;
+  d.severity = DIAG_SEVERITY_WARNING;
   // The compiler itself now names every missing variant in one
   // message, not just the first - check_fit's own list, comma-joined.
   d.message = "fit_non_exhaustive: fit does not handle 'Shape.Square', 'Shape.Triangle'";
@@ -3292,7 +3292,7 @@ test "code actions implement a quirk's missing method with its exact declared si
   d.col = 0;
   d.end_line = 7;
   d.end_col = 1;
-  d.severity = SEVERITY_ERROR;
+  d.severity = DIAG_SEVERITY_ERROR;
   d.message = "'Point' does not supply 'b', which 'Q' requires";
   Vec<Diagnostic> diags;
   diags.init(1);
@@ -3323,7 +3323,7 @@ test "code actions insert 'await' right where a missing-await error points" {
   d.col = 10;
   d.end_line = 2;
   d.end_col = 17;
-  d.severity = SEVERITY_ERROR;
+  d.severity = DIAG_SEVERITY_ERROR;
   d.message = "call to async function 'fetch' needs await";
   Vec<Diagnostic> diags;
   diags.init(1);
@@ -3352,7 +3352,7 @@ test "code actions mark the enclosing function async for an await-outside-async 
   d.col = 8;
   d.end_line = 2;
   d.end_col = 20;
-  d.severity = SEVERITY_ERROR;
+  d.severity = DIAG_SEVERITY_ERROR;
   d.message = "await is only allowed in an async function";
   Vec<Diagnostic> diags;
   diags.init(1);

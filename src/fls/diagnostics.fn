@@ -24,8 +24,8 @@ imp std.map;
 imp std.c.mem;
 
 // How seriously a client should take one finding.
-pub const num SEVERITY_ERROR = 1;
-pub const num SEVERITY_WARNING = 2;
+pub const num DIAG_SEVERITY_ERROR = 1;
+pub const num DIAG_SEVERITY_WARNING = 2;
 
 // One finding, in the terms a client understands.
 pub compound Diagnostic {
@@ -131,7 +131,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
 
   Analyzed read = cache.of(doc);
   if !read.lexed {
-    out.push(_at_start(SEVERITY_ERROR, "could not read this file"));
+    out.push(_at_start(DIAG_SEVERITY_ERROR, "could not read this file"));
     ret out;
   }
 
@@ -172,7 +172,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     if state.has_error {
       message = substr(state.error_message, 0, len(state.error_message));
     }
-    Diagnostic d = _at_start(SEVERITY_ERROR, message);
+    Diagnostic d = _at_start(DIAG_SEVERITY_ERROR, message);
     if state.has_error {
       d.line = state.error_pos.line - 1;
       d.col = state.error_pos.col - 1;
@@ -187,7 +187,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // file being edited is not: its text is what the client holds, which
   // may not be what is saved.
   if !read.parsed {
-    out.push(_at_start(SEVERITY_ERROR, "this file's imports could not be resolved"));
+    out.push(_at_start(DIAG_SEVERITY_ERROR, "this file's imports could not be resolved"));
     ret out;
   }
   ProgramMergeResult program = read.program;
@@ -198,12 +198,12 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // it still runs below even when checking failed. The type error
   // itself is recorded here and re-added once warnings are collected.
   bin has_type_error = false;
-  Diagnostic type_error_diag = _at_start(SEVERITY_ERROR, "");
+  Diagnostic type_error_diag = _at_start(DIAG_SEVERITY_ERROR, "");
   let checked = typecheck_program(&program.nodes);
   if checked.is_err() {
     TypeError e = checked.unwrap_err();
     has_type_error = true;
-    type_error_diag = _at_start(SEVERITY_ERROR, e.message);
+    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, e.message);
     if e.has_pos && equals(e.pos.filename, path) {
       type_error_diag.line = e.pos.line - 1;
       type_error_diag.col = e.pos.col - 1;
@@ -224,7 +224,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     // the `expect` statement itself when it's in this file, not just
     // file start.
     UnmetExpectation ue = noticed.unwrap_err();
-    Diagnostic ue_diag = _at_start(SEVERITY_ERROR, ue.message);
+    Diagnostic ue_diag = _at_start(DIAG_SEVERITY_ERROR, ue.message);
     if ue.has_pos && equals(ue.pos.filename, path) {
       ue_diag.line = ue.pos.line - 1;
       ue_diag.col = ue.pos.col - 1;
@@ -241,7 +241,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     Warning w = found.get(i);
     i = i + 1;
     Diagnostic d = _at_start(
-      SEVERITY_WARNING,
+      DIAG_SEVERITY_WARNING,
       format("{str}: {str}", warning_id_name(w.id), w.message)
     );
     if w.has_pos {
