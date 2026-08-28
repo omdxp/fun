@@ -35,17 +35,12 @@ jobs:
         with:
           version: latest
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build fun and fls
+        timeout-minutes: 10
+        run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
-      - name: Build fun and fls
-        timeout-minutes: 10
-        run: |
-          FUN_STDLIB_DIR="$PWD/stdlib" fun build
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv fun-out/bin/fun.exe fun-out/bin/fun_stage1.exe
-            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun_stage1.exe build
-          fi
       - name: Run the test suite on ${{ matrix.lane }}
         timeout-minutes: 20
         run: |
