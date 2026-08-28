@@ -1300,15 +1300,23 @@ test "a built program observes the file system and other processes" {
   `imp std.vec;
   `imp std.string;
   `imp std.result;
+  `imp std.runtime_backend;
   `fun main() num {
   `  make_dir_all("fun-out/observe_probe");
   `  write_string("fun-out/observe_probe/a.txt", "content");
   `  str dir = "no";
   `  if is_dir("fun-out/observe_probe") { dir = "yes"; }
   `  Vec<str> command;
-  `  command.init(2);
-  `  command.push("echo");
-  `  command.push("spawned");
+  `  command.init(4);
+  `  if runtime_backend_is_windows() {
+  `    command.push("cmd");
+  `    command.push("/c");
+  `    command.push("echo");
+  `    command.push("spawned");
+  `  } else {
+  `    command.push("echo");
+  `    command.push("spawned");
+  `  }
   `  let r = run(argv_from(&command));
   `  str spawned = "no";
   `  if r.is_ok() && contains(r.unwrap().stdout_text, "spawned") { spawned = "yes"; }
