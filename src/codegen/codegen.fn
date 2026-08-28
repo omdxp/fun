@@ -33,6 +33,7 @@ compound MultidimInfo {
 compound ArrayLiteralElemInfo {
   str type_name;
   num depth;
+  Vec<num> dims;
 }
 
 // A resolved compound field's declared type name and pointer-ness.
@@ -130,6 +131,14 @@ pub compound Codegen {
   Vec<str> local_multidim_names;
   Vec<str> local_multidim_roots;
   Vec<num> local_multidim_depths;
+  // Per-dimension sizes of multi-dimensional raw-array locals.
+  // Parallel arrays keyed by variable name; dims stored outermost-first
+  // in the flat `local_arr_dim_vals` buffer.  Used by `emit_for_iter` in
+  // MSVC mode to emit explicit `elem (*name)[N]` pointer-to-array types.
+  Vec<str> local_arr_dim_names;
+  Vec<num> local_arr_dim_starts;
+  Vec<num> local_arr_dim_counts;
+  Vec<num> local_arr_dim_vals;
   // Every non-generic enum's name, variant names, and whether it's a
   // tagged union, so a qualified enum-variant access resolves without a
   // real type-inference engine.
@@ -473,6 +482,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.local_multidim_names.init(0);
   g.local_multidim_roots.init(0);
   g.local_multidim_depths.init(0);
+  g.local_arr_dim_names.init(0);
+  g.local_arr_dim_starts.init(0);
+  g.local_arr_dim_counts.init(0);
+  g.local_arr_dim_vals.init(0);
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
@@ -3509,6 +3522,39 @@ impl Codegen {
       i = i - 1;
     }
     ret .None;
+  }
+
+  // Stores `dims` (outermost-first) for the raw array variable `name`.
+  // Each entry is the count of elements at that nesting level, so for
+  // `int64_t arr[A][B][C]`, dims = [A, B, C].
+  record_local_arr_dims(str name, Vec<num> dims) {
+    self.local_arr_dim_names.push(name);
+    self.local_arr_dim_starts.push(self.local_arr_dim_vals.len);
+    self.local_arr_dim_counts.push(dims.len);
+    num di = 0;
+    for di < dims.len {
+      self.local_arr_dim_vals.push(dims.get(di));
+      di = di + 1;
+    }
+  }
+
+  // Returns the dimension value at 0-based index `idx` (outermost-first)
+  // for the array named `name`.  Returns -1 when the variable has no
+  // recorded dims or `idx` is out of range.
+  lookup_local_arr_dim(str name, num idx) num {
+    num i = self.local_arr_dim_names.len - 1;
+    for i >= 0 {
+      if equals(self.local_arr_dim_names.get(i), name) {
+        let start = self.local_arr_dim_starts.get(i);
+        let count = self.local_arr_dim_counts.get(i);
+        if idx >= 0 && idx < count {
+          ret self.local_arr_dim_vals.get(start + idx);
+        }
+        ret -1;
+      }
+      i = i - 1;
+    }
+    ret -1;
   }
 
   // Records `name` as a known enum with the given variant names and
@@ -7072,7 +7118,16 @@ impl Codegen {
             .Bracket(bracket_inner) -> {
               let_is_bracket_literal = true;
               let_lit_elem_c_type = self.infer_array_literal_elem_c_type(bracket_inner);
-              let_lit_depth = self.array_literal_nesting_depth(v.val);
+              let alit_info = self.infer_array_literal_elem_type_and_depth(v.val);
+              if alit_info.is_some() {
+                let alit = alit_info.unwrap();
+                let_lit_depth = alit.depth;
+                if self.msvc_mode {
+                  self.record_local_arr_dims(v.name, alit.dims);
+                }
+              } else {
+                let_lit_depth = self.array_literal_nesting_depth(v.val);
+              }
             }
             _ -> {}
           }
@@ -7116,6 +7171,20 @@ impl Codegen {
           }
           resolved_dtype = .Some(subst_dt);
           have_resolved = true;
+          // MSVC: record per-dimension sizes for multi-dim arrays with a
+          // bracket-literal initialiser so `emit_for_iter` can emit the
+          // correct pointer-to-array type in the generated C for loop.
+          if self.msvc_mode && v.var_type.is_array && v.var_type.array_depth > 1 && v.has_val {
+            fit v.val.kind {
+              .Bracket(_) -> {
+                let arr_alit = self.infer_array_literal_elem_type_and_depth(v.val);
+                if arr_alit.is_some() {
+                  self.record_local_arr_dims(v.name, arr_alit.unwrap().dims);
+                }
+              }
+              _ -> {}
+            }
+          }
         }
         if v.is_const && const_is_ptr_binding {
           self.state.write(" const");
@@ -7960,15 +8029,47 @@ impl Codegen {
     // flat double pointer, losing the inner dimension's stride. A 1D
     // array or a 2D row takes `elem_c_type` plus stars.
     // MSVC mode: use explicit element type when available.
+    // When dims are known the full declaration is written here and the
+    // generic suffix below is skipped.
+    bin msvc_multidim_wrote_all = false;
     if is_vec || element_depth >= 2 {
-      if self.msvc_mode && is_vec && elem_dt.is_some() {
+      if self.msvc_mode && !is_vec && element_depth >= 2 {
+        // Try stored dimension sizes for a proper pointer-to-array type:
+        // `elem_c_type (*item_name)[d2]...[dN] = arr[idx];`
+        let d0 = self.lookup_local_arr_dim(len_root, len_offset + 2);
+        if d0 >= 0 {
+          self.state.write(elem_c_type);
+          self.state.write(" (*");
+          self.state.write(fi.item_name);
+          self.state.write(")");
+          num dim_i = len_offset + 2;
+          for dim_i <= len_offset + element_depth {
+            let dim_v = self.lookup_local_arr_dim(len_root, dim_i);
+            if dim_v >= 0 {
+              self.state.write("[");
+              self.state.write(format_num(dim_v));
+              self.state.write("]");
+            }
+            dim_i = dim_i + 1;
+          }
+          self.state.write(" = ");
+          self.state.write(arr_text);
+          self.state.write("[");
+          self.state.write(idx_name);
+          self.state.write("];\n");
+          msvc_multidim_wrote_all = true;
+        } else {
+          // Dims unknown; fall back to a plain int64_t declaration.
+          self.state.write("int64_t ");
+        }
+      } elif self.msvc_mode && is_vec && elem_dt.is_some() {
         let elem_wt = self.write_type(elem_dt.unwrap());
         if elem_wt.is_none() {
           self.state.write("int64_t");
         }
         self.state.write(" ");
       } elif self.msvc_mode {
-        // element_depth >= 2 or Vec with unknown elem: best-effort fallback.
+        // Vec with unknown elem: best-effort fallback.
         self.state.write("int64_t ");
       } else {
         self.state.write("__auto_type ");
@@ -7982,16 +8083,18 @@ impl Codegen {
       }
       self.state.write(" ");
     }
-    self.state.write(fi.item_name);
-    self.state.write(" = ");
-    self.state.write(vec_src_text);
-    if is_vec {
-      self.state.write(".data[");
-    } else {
-      self.state.write("[");
+    if !msvc_multidim_wrote_all {
+      self.state.write(fi.item_name);
+      self.state.write(" = ");
+      self.state.write(vec_src_text);
+      if is_vec {
+        self.state.write(".data[");
+      } else {
+        self.state.write("[");
+      }
+      self.state.write(idx_name);
+      self.state.write("];\n");
     }
-    self.state.write(idx_name);
-    self.state.write("];\n");
     // `item` is recorded as a known local of the element type when
     // `elem_dt` resolved above; otherwise it stays unrecorded, so a later
     // `item.field` read is rejected rather than guessed. `*item` works
@@ -9337,6 +9440,10 @@ impl Codegen {
         self.local_multidim_names.init(0);
         self.local_multidim_roots.init(0);
         self.local_multidim_depths.init(0);
+        self.local_arr_dim_names.init(0);
+        self.local_arr_dim_starts.init(0);
+        self.local_arr_dim_counts.init(0);
+        self.local_arr_dim_vals.init(0);
         // Fresh per function too: a previous function's leftover pending
         // defers must never bleed into this one.
         self.defer_stack.init(0);
@@ -10360,6 +10467,17 @@ impl Codegen {
           }
         }
       }
+      .Unary(u) -> {
+        // A pointer dereference `*ptr` infers the pointee's type by
+        // resolving `ptr` via the field chain and dropping one pointer level.
+        if equals(u.op, "*") && u.has_indirection && u.indirection_depth == 1 {
+          let chain = self.resolve_field_chain(u.operand);
+          if chain.is_some() && chain.unwrap().is_pointer {
+            ret .Some(chain.unwrap().type_name);
+          }
+        }
+        ret .None;
+      }
       _ -> { ret .None; }
     }
   }
@@ -10415,6 +10533,13 @@ impl Codegen {
             ArrayLiteralElemInfo r;
             r.type_name = s.type_name;
             r.depth = s.depth + 1;
+            r.dims.init(s.dims.len + 1);
+            r.dims.push(elems.len);
+            num sub_di = 0;
+            for sub_di < s.dims.len {
+              r.dims.push(s.dims.get(sub_di));
+              sub_di = sub_di + 1;
+            }
             ret .Some(r);
           }
           _ -> {
@@ -10425,6 +10550,8 @@ impl Codegen {
             ArrayLiteralElemInfo r;
             r.type_name = tn.unwrap();
             r.depth = 1;
+            r.dims.init(1);
+            r.dims.push(elems.len);
             ret .Some(r);
           }
         }
@@ -10598,9 +10725,9 @@ impl Codegen {
           ret .Some(dt);
         }
         // For `let m = f[0];` with a pointer-typed `f`, C's `pointer[0]`
-        // is `*pointer`, a value of the pointee's type. Only a
-        // bare-identifier receiver resolves here; anything computed falls
-        // through to `.None`.
+        // is `*pointer`, a value of the pointee's type. Also handles field
+        // array subscripts like `self.workers[i]` where the field's element
+        // type is resolved through the field chain.
         if equals(e.op, "[]") && e.has_left {
           fit e.left.kind {
             .Identifier(recv_name) -> {
@@ -10612,7 +10739,20 @@ impl Codegen {
                 ret .Some(dt);
               }
             }
-            _ -> {}
+            _ -> {
+              // A field-chain receiver like `self.workers`: resolve the
+              // chain to get the field's declared element type.
+              let chain = self.resolve_field_chain(e.left);
+              if chain.is_some() {
+                let cr = chain.unwrap();
+                if cr.dtype.is_some() {
+                  ret .Some(cr.dtype.unwrap());
+                }
+                DataType dt = dtype_new();
+                dt.type_str = cr.type_name;
+                ret .Some(dt);
+              }
+            }
           }
           ret .None;
         }
@@ -10667,6 +10807,14 @@ impl Codegen {
             }
             let recv_r_opt = self.resolve_field_chain(recv_e.left);
             if recv_r_opt.is_none() {
+              // Receiver is a module alias or an unresolvable chain; the
+              // callee may still be a plain registered function (e.g.
+              // `sys.try_env(...)` where `sys` is an imported module alias
+              // and `try_env` is the bare function name in scope).
+              let fallback_rt = self.lookup_function_rtype(method_name);
+              if fallback_rt.is_some() {
+                ret .Some(*fallback_rt.unwrap());
+              }
               ret .None;
             }
             let recv_r = recv_r_opt.unwrap();
@@ -12596,6 +12744,10 @@ impl Codegen {
           self.local_multidim_names.init(0);
           self.local_multidim_roots.init(0);
           self.local_multidim_depths.init(0);
+          self.local_arr_dim_names.init(0);
+          self.local_arr_dim_starts.init(0);
+          self.local_arr_dim_counts.init(0);
+          self.local_arr_dim_vals.init(0);
           self.defer_stack.init(0);
           self.defer_scope_starts.init(0);
           self.in_main = false;
@@ -12750,6 +12902,10 @@ impl Codegen {
         self.local_multidim_names.init(0);
         self.local_multidim_roots.init(0);
         self.local_multidim_depths.init(0);
+        self.local_arr_dim_names.init(0);
+        self.local_arr_dim_starts.init(0);
+        self.local_arr_dim_counts.init(0);
+        self.local_arr_dim_vals.init(0);
         self.defer_stack.init(0);
         self.defer_scope_starts.init(0);
         // `LLVMFuzzerTestOneInput` returns `int`, like a real `main`, so a
