@@ -19,3 +19,7 @@ fun-out/
 # Executables built next to their source by `fun -in <file>` (the file
 # keeps its name with no extension, or .exe on Windows).
 *.exe
+# MSVC debug databases emitted alongside .exe files.
+*.pdb
+# MSVC object files.
+*.obj

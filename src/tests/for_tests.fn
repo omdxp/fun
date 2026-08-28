@@ -80,7 +80,7 @@ test "for Vec values transpiles via len and data" {
   `}`;
   let out = emit_c(src, "for Vec values transpiles via len and data");
   assert contains(out, "for (int64_t __fun_i = 0; __fun_i < vals.len; __fun_i++)"), "expected the loop bound to read len";
-  assert contains(out, "__auto_type val = vals.data[__fun_i];"), "expected the value binding to read data";
+  assert contains(out, "val = vals.data[__fun_i];"), "expected the value binding to read data";
 }
 
 test "for condition transpiles to while" {

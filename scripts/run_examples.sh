@@ -51,21 +51,33 @@ fi
 
 USE_WINDOWS_PATHS=0
 REPO_ROOT_WIN=""
+WIN_PATH_CONV=""
+MSVC_MODE=0
+if [[ "${FUN_CC:-}" == "cl" || "${FUN_CC:-}" == "cl.exe" ]]; then
+  MSVC_MODE=1
+fi
 if [[ "$FUN_EXE" == *.exe ]]; then
   USE_WINDOWS_PATHS=1
   if command -v wslpath >/dev/null 2>&1; then
+    WIN_PATH_CONV="wslpath"
     REPO_ROOT_WIN="$(wslpath -w "$REPO_ROOT")"
+  elif command -v cygpath >/dev/null 2>&1; then
+    WIN_PATH_CONV="cygpath"
+    REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
   else
-    echo "wslpath not found; cannot convert paths for fun.exe" >&2
+    echo "Neither wslpath nor cygpath found; cannot convert paths for fun.exe" >&2
     exit 2
   fi
 fi
 
 to_fun_path() {
-  # When executing Windows fun.exe from WSL, pass Windows-style paths.
+  # When executing Windows fun.exe from WSL or Git Bash, pass Windows-style
+  # paths but keep forward slashes: fun's basename() splits on '/' so
+  # backslashes would prevent it from stripping the directory prefix when
+  # it builds the output C path under fun-out/.
   local p="$1"
   if [[ $USE_WINDOWS_PATHS -eq 1 ]]; then
-    wslpath -w "$p"
+    "$WIN_PATH_CONV" -w "$p" | tr '\\' '/'
   else
     printf '%s' "$p"
   fi
@@ -98,6 +110,13 @@ is_expected_fail() {
 
   # Arch-specific asm example fails during codegen on mismatched targets.
   if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
+    return 0
+  fi
+
+  # GNU inline asm examples are not supported by MSVC.
+  if [[ $MSVC_MODE -eq 1 ]] && [[ "$rel" == "examples/advanced/asm_basic.fn" || \
+      "$rel" == "examples/advanced/asm_computed_operand.fn" || \
+      "$rel" == "examples/advanced/asm_operands.fn" ]]; then
     return 0
   fi
 

@@ -69,7 +69,12 @@ fun _resolve_specifier(str current_file, str specifier) str {
     }
     ret "";
   }
-  str resolved = resolve_import_path(current_file, specifier);
+  // Normalize separators so the returned path matches the node
+  // filenames stored by _parse_and_merge_source (which also normalizes
+  // via _normalize_path).  Without this, a Windows absolute path like
+  // "C:\...\stdlib/std/c/math.fn" would not compare equal to
+  // "C:/.../stdlib/std/c/math.fn" in _alias_module_completions.
+  str resolved = _normalize_path(resolve_import_path(current_file, specifier));
   if exists(resolved) {
     ret resolved;
   }

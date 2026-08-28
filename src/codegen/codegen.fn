@@ -450,6 +450,9 @@ pub compound Codegen {
   // statement instead of using GNU `({...})`, replace `__auto_type` with
   // explicit C types wherever they can be inferred at transpile time.
   bin msvc_mode;
+  // Incremented for each variadic call that uses the hoist path so each
+  // call's temporaries get a unique prefix in the surrounding scope.
+  num va_call_counter;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
   bin fuzz_mode;
@@ -537,6 +540,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_body_start_pos = .None;
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
+  g.va_call_counter = 0;
   g.hoist_scratch_depth = 0;
   // Matches `g.state`, so `self.state == self.root_state` is already
   // true for the very first function, not just after the first nested
@@ -4163,12 +4167,24 @@ impl Codegen {
       .Panic(msg) -> {
         // Prints the message and aborts. Trails off with a plain `0` so
         // it type-checks in almost any scalar/pointer context.
-        self.state.write("({ fprintf(stderr_stream(), \"panic: %s\\n\", ");
-        let merr = self.emit_expr(*msg);
-        if merr.is_some() {
-          ret merr;
+        // MSVC does not support GNU statement expressions `({…})`, so
+        // use the comma operator instead; the `(int64_t)0` is unreachable
+        // (abort() is noreturn) but makes the expression well-typed.
+        if self.msvc_mode {
+          self.state.write("(fprintf(stderr_stream(), \"panic: %s\\n\", ");
+          let merr = self.emit_expr(*msg);
+          if merr.is_some() {
+            ret merr;
+          }
+          self.state.write("), abort(), (int64_t)0)");
+        } else {
+          self.state.write("({ fprintf(stderr_stream(), \"panic: %s\\n\", ");
+          let merr2 = self.emit_expr(*msg);
+          if merr2.is_some() {
+            ret merr2;
+          }
+          self.state.write("); abort(); 0; })");
         }
-        self.state.write("); abort(); 0; })");
         ret .None;
       }
       .CompoundInit(ci) -> {
@@ -4890,17 +4906,24 @@ impl Codegen {
         if fixed_len > 0 {
           self.state.write(", ");
         }
-        self.state.write("(const char[]){0})");
+        if self.msvc_mode {
+          self.state.write("\"\")");
+        } else {
+          self.state.write("(const char[]){0})");
+        }
         ret .None;
       }
       // Resolved once per position and reused across the three loops
       // below: binding, tag string, and pass-through argument.
       Vec<bin> va_is_display;
       va_is_display.init(var_len);
+      defer va_is_display.free();
       Vec<str> va_disp_fn;
       va_disp_fn.init(var_len);
+      defer va_disp_fn.free();
       Vec<bin> va_disp_by_ref;
       va_disp_by_ref.init(var_len);
+      defer va_disp_by_ref.free();
       num vd_i = 0;
       for vd_i < var_len {
         let disp = self.resolve_display_dispatch(args.get(fixed_len + vd_i));
@@ -4924,7 +4947,22 @@ impl Codegen {
       // when emitting top-level initializers where no statement context
       // exists).
       bin va_use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+      // Arg texts captured for the msvc inline fallback (no-hoist + msvc):
+      // avoids GNU statement expressions when there is no stmt position to
+      // hoist into (e.g. nested variadic call evaluated in a scratch buffer).
+      Vec<str> gnu_msvc_va_texts;
+      gnu_msvc_va_texts.init(0);
+      defer gnu_msvc_va_texts.free();
+      // Resolved C type per variadic arg, used in MSVC mode to build a
+      // tag string literal instead of an unsupported (const char[]){…}
+      // compound literal.
+      Vec<str> va_resolved_ctypes;
+      va_resolved_ctypes.init(0);
+      defer va_resolved_ctypes.free();
+      num va_call_id = 0;
       if va_use_hoist {
+        self.va_call_counter = self.va_call_counter + 1;
+        va_call_id = self.va_call_counter;
         num va_i = 0;
         for va_i < var_len {
           Node* va_arg = args.get(fixed_len + va_i);
@@ -4939,13 +4977,25 @@ impl Codegen {
           CodegenState* va_saved_state = self.state;
           let va_saved_hoist_pos = self.hoist_insert_pos;
           let va_saved_stmt_pos = self.current_stmt_start_pos;
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
           self.state = &va_scratch;
           self.hoist_insert_pos = .None;
           self.current_stmt_start_pos = .None;
           let va_err = self.emit_expr(*va_arg);
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
           self.state = va_saved_state;
-          self.hoist_insert_pos = va_saved_hoist_pos;
-          self.current_stmt_start_pos = va_saved_stmt_pos;
+          if self.hoist_scratch_depth == 0 {
+            self.hoist_insert_pos = self.root_hoist_pos;
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+          } else {
+            self.hoist_insert_pos = va_saved_hoist_pos;
+            self.current_stmt_start_pos = va_saved_stmt_pos;
+          }
           if va_err.is_some() {
             ret va_err;
           }
@@ -4955,6 +5005,10 @@ impl Codegen {
           if va_type_opt.is_some() {
             va_c_type = map_type_to_c(va_type_opt.unwrap());
           }
+          if equals(va_c_type, "void") {
+            va_c_type = "void*";
+          }
+          va_resolved_ctypes.push(va_c_type);
           StringBuilder va_decl_sb = string_builder_init(64);
           num va_indent_ii = 0;
           for va_indent_ii < self.state.indent_level {
@@ -4963,6 +5017,8 @@ impl Codegen {
           }
           va_decl_sb.append(va_c_type);
           va_decl_sb.append(" __fun_va_");
+          va_decl_sb.append(format_num(va_call_id));
+          va_decl_sb.append("_");
           va_decl_sb.append(format_num(va_i));
           va_decl_sb.append(" = ");
           if va_is_chr_literal {
@@ -4977,6 +5033,8 @@ impl Codegen {
               va_disp_indent_ii = va_disp_indent_ii + 1;
             }
             va_decl_sb.append("char* __fun_disp_");
+            va_decl_sb.append(format_num(va_call_id));
+            va_decl_sb.append("_");
             va_decl_sb.append(format_num(va_i));
             va_decl_sb.append(" = ");
             va_decl_sb.append(va_disp_fn.get(va_i));
@@ -4985,6 +5043,8 @@ impl Codegen {
               va_decl_sb.append("&");
             }
             va_decl_sb.append("__fun_va_");
+            va_decl_sb.append(format_num(va_call_id));
+            va_decl_sb.append("_");
             va_decl_sb.append(format_num(va_i));
             va_decl_sb.append(");\n");
           }
@@ -5004,45 +5064,109 @@ impl Codegen {
           va_i = va_i + 1;
         }
       } else {
-        self.state.write("({ ");
-        num va_i = 0;
-        for va_i < var_len {
-          Node* va_arg = args.get(fixed_len + va_i);
-          // A bare character literal has type `int` in C, so `__auto_type`
-          // would infer `int`, `__fun_tag`'s `_Generic` dispatch would take
-          // the `int` case, and the callee's shim would stringify the ASCII
-          // code instead of the character. An explicit `(char)` cast forces
-          // the right inference; a `chr`-typed variable is already `char`.
-          bin va_is_chr_literal = false;
-          fit va_arg.kind {
-            .Character(_) -> { va_is_chr_literal = true; }
-            _ -> {}
+        if self.msvc_mode {
+          // No GNU statement expressions (`({...})`) in MSVC. Capture each
+          // arg's rendered text so it can be emitted inline in the tag array
+          // and arg list; args that are function calls are evaluated twice,
+          // which is acceptable here because this path only fires for nested
+          // variadic calls evaluated inside a hoist scratch buffer where
+          // side-effecting args are uncommon in practice.
+          num va_i = 0;
+          for va_i < var_len {
+            Node* va_arg = args.get(fixed_len + va_i);
+            bin va_is_chr_literal = false;
+            fit va_arg.kind {
+              .Character(_) -> { va_is_chr_literal = true; }
+              _ -> {}
+            }
+            CodegenState va_scratch_m = codegen_state_new();
+            CodegenState* va_m_saved = self.state;
+            let va_m_saved_hoist = self.hoist_insert_pos;
+            let va_m_saved_stmt = self.current_stmt_start_pos;
+            if self.hoist_scratch_depth == 0 {
+              self.root_state = self.state;
+              self.root_hoist_pos = self.hoist_insert_pos;
+              self.root_stmt_start_pos = self.current_stmt_start_pos;
+            }
+            self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+            self.state = &va_scratch_m;
+            self.hoist_insert_pos = .None;
+            self.current_stmt_start_pos = .None;
+            let va_err = self.emit_expr(*va_arg);
+            self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+            self.state = va_m_saved;
+            if self.hoist_scratch_depth == 0 {
+              self.hoist_insert_pos = self.root_hoist_pos;
+              self.current_stmt_start_pos = self.root_stmt_start_pos;
+            } else {
+              self.hoist_insert_pos = va_m_saved_hoist;
+              self.current_stmt_start_pos = va_m_saved_stmt;
+            }
+            if va_err.is_some() {
+              ret va_err;
+            }
+            str va_expr_m = va_scratch_m.out.build();
+            if va_is_chr_literal {
+              StringBuilder va_chr_sb = string_builder_init(len(va_expr_m) + 6);
+              va_chr_sb.append("(char)");
+              va_chr_sb.append(va_expr_m);
+              gnu_msvc_va_texts.push(va_chr_sb.build());
+            } else {
+              gnu_msvc_va_texts.push(va_expr_m);
+            }
+            // Collect resolved C type for the MSVC tag string literal.
+            let va_m_type_opt = self.infer_arg_type_name(va_arg);
+            str va_m_c_type = "int64_t";
+            if va_m_type_opt.is_some() {
+              va_m_c_type = map_type_to_c(va_m_type_opt.unwrap());
+            }
+            if equals(va_m_c_type, "void") {
+              va_m_c_type = "void*";
+            }
+            va_resolved_ctypes.push(va_m_c_type);
+            va_i = va_i + 1;
           }
-          self.state.write("__auto_type __fun_va_");
-          self.state.write(format_num(va_i));
-          self.state.write(" = ");
-          if va_is_chr_literal {
-            self.state.write("(char)");
-          }
-          let va_err = self.emit_expr(*va_arg);
-          if va_err.is_some() {
-            ret va_err;
-          }
-          self.state.write("; ");
-          if va_is_display.get(va_i) {
-            self.state.write("char* __fun_disp_");
+        } else {
+          self.state.write("({ ");
+          num va_i = 0;
+          for va_i < var_len {
+            Node* va_arg = args.get(fixed_len + va_i);
+            // A bare character literal has type `int` in C, so `__auto_type`
+            // would infer `int`, `__fun_tag`'s `_Generic` dispatch would take
+            // the `int` case, and the callee's shim would stringify the ASCII
+            // code instead of the character. An explicit `(char)` cast forces
+            // the right inference; a `chr`-typed variable is already `char`.
+            bin va_is_chr_literal = false;
+            fit va_arg.kind {
+              .Character(_) -> { va_is_chr_literal = true; }
+              _ -> {}
+            }
+            self.state.write("__auto_type __fun_va_");
             self.state.write(format_num(va_i));
             self.state.write(" = ");
-            self.state.write(va_disp_fn.get(va_i));
-            self.state.write("(");
-            if va_disp_by_ref.get(va_i) {
-              self.state.write("&");
+            if va_is_chr_literal {
+              self.state.write("(char)");
             }
-            self.state.write("__fun_va_");
-            self.state.write(format_num(va_i));
-            self.state.write("); ");
+            let va_err = self.emit_expr(*va_arg);
+            if va_err.is_some() {
+              ret va_err;
+            }
+            self.state.write("; ");
+            if va_is_display.get(va_i) {
+              self.state.write("char* __fun_disp_");
+              self.state.write(format_num(va_i));
+              self.state.write(" = ");
+              self.state.write(va_disp_fn.get(va_i));
+              self.state.write("(");
+              if va_disp_by_ref.get(va_i) {
+                self.state.write("&");
+              }
+              self.state.write("__fun_va_");
+              self.state.write(format_num(va_i));
+              self.state.write("); ");
+            }
+            va_i = va_i + 1;
           }
-          va_i = va_i + 1;
         }
       }
       self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
@@ -5061,37 +5185,95 @@ impl Codegen {
       if fixed_len > 0 {
         self.state.write(", ");
       }
-      self.state.write("(const char[]){");
-      num vt_i = 0;
-      for vt_i < var_len {
-        if vt_i > 0 {
+      if self.msvc_mode {
+        // MSVC C17 does not support compound literals (const char[]){…}.
+        // Emit a string literal with the tag chars pre-resolved from the
+        // inferred C types. Display args are always 's'; scalars map via
+        // their C type. Unknown types fall back to 'n' (int64_t default).
+        self.state.write("\"");
+        num vt_i = 0;
+        for vt_i < var_len {
+          if va_is_display.get(vt_i) {
+            self.state.write("s");
+          } else {
+            str ctype_for_tag = "int64_t";
+            if vt_i < va_resolved_ctypes.len {
+              ctype_for_tag = va_resolved_ctypes.get(vt_i);
+            }
+            if equals(ctype_for_tag, "char*") || equals(ctype_for_tag, "const char*") {
+              self.state.write("s");
+            } elif equals(ctype_for_tag, "double") || equals(ctype_for_tag, "float") {
+              self.state.write("d");
+            } elif equals(ctype_for_tag, "bool") {
+              self.state.write("b");
+            } elif equals(ctype_for_tag, "char") {
+              self.state.write("c");
+            } else {
+              self.state.write("n");
+            }
+          }
+          vt_i = vt_i + 1;
+        }
+        self.state.write("\"");
+      } else {
+        self.state.write("(const char[]){");
+        num vt_i = 0;
+        for vt_i < var_len {
+          if vt_i > 0 {
+            self.state.write(", ");
+          }
+          if va_is_display.get(vt_i) {
+            self.state.write("'s'");
+          } else {
+            self.state.write("__fun_tag(");
+            self.state.write("__fun_va_");
+            self.state.write(format_num(vt_i));
+            self.state.write(")");
+          }
+          vt_i = vt_i + 1;
+        }
+        if var_len > 0 {
           self.state.write(", ");
         }
-        if va_is_display.get(vt_i) {
-          self.state.write("'s'");
-        } else {
-          self.state.write("__fun_tag(__fun_va_");
-          self.state.write(format_num(vt_i));
-          self.state.write(")");
-        }
-        vt_i = vt_i + 1;
+        self.state.write("0}");
       }
-      if var_len > 0 {
-        self.state.write(", ");
-      }
-      self.state.write("0}");
       num vp_i = 0;
       for vp_i < var_len {
         self.state.write(", ");
         if va_is_display.get(vp_i) {
-          self.state.write("__fun_disp_");
+          if va_use_hoist {
+            self.state.write("__fun_disp_");
+            self.state.write(format_num(va_call_id));
+            self.state.write("_");
+            self.state.write(format_num(vp_i));
+          } elif self.msvc_mode {
+            self.state.write(va_disp_fn.get(vp_i));
+            self.state.write("(");
+            if va_disp_by_ref.get(vp_i) {
+              self.state.write("&");
+            }
+            self.state.write(gnu_msvc_va_texts.get(vp_i));
+            self.state.write(")");
+          } else {
+            self.state.write("__fun_disp_");
+            self.state.write(format_num(vp_i));
+          }
         } else {
-          self.state.write("__fun_va_");
+          if va_use_hoist {
+            self.state.write("__fun_va_");
+            self.state.write(format_num(va_call_id));
+            self.state.write("_");
+            self.state.write(format_num(vp_i));
+          } elif self.msvc_mode {
+            self.state.write(gnu_msvc_va_texts.get(vp_i));
+          } else {
+            self.state.write("__fun_va_");
+            self.state.write(format_num(vp_i));
+          }
         }
-        self.state.write(format_num(vp_i));
         vp_i = vp_i + 1;
       }
-      if va_use_hoist {
+      if va_use_hoist || self.msvc_mode {
         self.state.write(")");
       } else {
         self.state.write("); })");
@@ -10166,7 +10348,16 @@ impl Codegen {
             }
             ret .Some(rt.unwrap().type_str);
           }
-          _ -> { ret .None; }
+          _ -> {
+            // Method call (`receiver.method(args)`): resolve via the chain
+            // resolver, which handles the dot-then-call shape and returns
+            // the method's declared return type.
+            let chain = self.resolve_field_chain(arg);
+            if chain.is_some() {
+              ret .Some(chain.unwrap().type_name);
+            }
+            ret .None;
+          }
         }
       }
       _ -> { ret .None; }
@@ -11194,9 +11385,11 @@ impl Codegen {
           self.state.write("struct ");
           self.state.write(quirk_type_identity);
           self.state.write("_vtable {\n");
+          bin vtable_has_methods = false;
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
+                vtable_has_methods = true;
                 self.state.write("  ");
                 if fnv.has_rtype {
                   let wt = self.write_type(*fnv.rtype);
@@ -11233,6 +11426,9 @@ impl Codegen {
               }
               _ -> {}
             }
+          }
+          if self.msvc_mode && !vtable_has_methods {
+            self.state.write("  int __fun_dummy;\n");
           }
           self.state.write("};\n");
           self.state.write("typedef struct ");
@@ -11458,12 +11654,20 @@ impl Codegen {
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
+      // Windows defaults to a 1 MB thread stack, which the parser's recursive
+      // descent exhausts before its own depth guard fires on deeply-nested
+      // expressions.  Request 8 MB to match the Linux/macOS default so the
+      // guard, not the OS, rejects pathological input.
+      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:8388608\")\n#endif\n");
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
     if program_uses_std_c_header(self.all_nodes, "process.fn") {
       self.state.write(`
       `#if defined(_WIN32)
+      `#ifndef WIN32_LEAN_AND_MEAN
+      `#define WIN32_LEAN_AND_MEAN
+      `#endif
       `#pragma push_macro("close")
       `#undef close
       `#include <windows.h>
@@ -11618,13 +11822,6 @@ impl Codegen {
       `extern char** environ;
       `static char** environ_ptr(void){ return environ; }
       `#endif
-      `#ifdef _WIN32
-      `static int setenv(const char* name, const char* value, int overwrite) {
-      `  if (!overwrite && getenv(name) != NULL) { return 0; }
-      `  return _putenv_s(name, value);
-      `}
-      `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
-      `#endif
       ``);
     }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
@@ -11643,12 +11840,25 @@ impl Codegen {
     // std.channel's own deadline math) needs a real Windows definition
     // rather than relying on a header to provide one.
     self.state.write(`#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
+    `static int setenv(const char* name, const char* value, int overwrite) {
+    `  if (!overwrite && getenv(name) != NULL) { return 0; }
+    `  return _putenv_s(name, value);
+    `}
+    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#ifndef __MINGW32__
+    `#ifndef __fun_clock_gettime_defined
+    `#define __fun_clock_gettime_defined
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -11661,6 +11871,7 @@ impl Codegen {
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#endif
     `#else
     `#include <time.h>
@@ -11691,6 +11902,12 @@ impl Codegen {
     // `FindFirstFile`) for direct bindings, so each wrapper's signature
     // is matched exactly to its Fun type.
     self.state.write(`#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -11715,9 +11932,48 @@ impl Codegen {
     // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
     // M:N scheduler builds on top of those.
     self.state.write(`#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
+    `#endif
+    `#ifndef __MINGW32__
+    `#include <time.h>
+    `#include <errno.h>
+    `typedef HANDLE pthread_t;
+    `typedef struct { int __fun_dummy; } pthread_attr_t;
+    `typedef CRITICAL_SECTION pthread_mutex_t;
+    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
+    `typedef CONDITION_VARIABLE pthread_cond_t;
+    `typedef struct { int __fun_dummy; } pthread_condattr_t;
+    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
+    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
+    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
+    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
+    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
+    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
+    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
+    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
+    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
+    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
+    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
+    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
+    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
+    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
+    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
+    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
+    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
+    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
+    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
     `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
@@ -11843,6 +12099,8 @@ impl Codegen {
     `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
     `static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
     `#ifndef __MINGW32__
+    `#ifndef __fun_clock_gettime_defined
+    `#define __fun_clock_gettime_defined
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -11855,6 +12113,7 @@ impl Codegen {
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#endif
     `#else
     `#include <unistd.h>
@@ -16558,12 +16817,25 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
+    `static int setenv(const char* name, const char* value, int overwrite) {
+    `  if (!overwrite && getenv(name) != NULL) { return 0; }
+    `  return _putenv_s(name, value);
+    `}
+    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#ifndef __MINGW32__
+    `#ifndef __fun_clock_gettime_defined
+    `#define __fun_clock_gettime_defined
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -16576,6 +16848,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#endif
     `#else
     `#include <time.h>
@@ -16590,6 +16863,12 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -16609,9 +16888,48 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
+    `#endif
+    `#ifndef __MINGW32__
+    `#include <time.h>
+    `#include <errno.h>
+    `typedef HANDLE pthread_t;
+    `typedef struct { int __fun_dummy; } pthread_attr_t;
+    `typedef CRITICAL_SECTION pthread_mutex_t;
+    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
+    `typedef CONDITION_VARIABLE pthread_cond_t;
+    `typedef struct { int __fun_dummy; } pthread_condattr_t;
+    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
+    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
+    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
+    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
+    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
+    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
+    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
+    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
+    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
+    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
+    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
+    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
+    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
+    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
+    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
+    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
+    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
+    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
+    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
     `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
@@ -16836,12 +17154,25 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
+    `static int setenv(const char* name, const char* value, int overwrite) {
+    `  if (!overwrite && getenv(name) != NULL) { return 0; }
+    `  return _putenv_s(name, value);
+    `}
+    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#ifndef __MINGW32__
+    `#ifndef __fun_clock_gettime_defined
+    `#define __fun_clock_gettime_defined
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -16854,6 +17185,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#endif
     `#else
     `#include <time.h>
@@ -16868,6 +17200,12 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -16887,9 +17225,48 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
+    `#endif
+    `#ifndef __MINGW32__
+    `#include <time.h>
+    `#include <errno.h>
+    `typedef HANDLE pthread_t;
+    `typedef struct { int __fun_dummy; } pthread_attr_t;
+    `typedef CRITICAL_SECTION pthread_mutex_t;
+    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
+    `typedef CONDITION_VARIABLE pthread_cond_t;
+    `typedef struct { int __fun_dummy; } pthread_condattr_t;
+    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
+    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
+    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
+    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
+    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
+    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
+    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
+    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
+    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
+    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
+    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
+    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
+    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
+    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
+    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
+    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
+    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
+    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
+    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
     `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
@@ -17970,12 +18347,25 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
+    `static int setenv(const char* name, const char* value, int overwrite) {
+    `  if (!overwrite && getenv(name) != NULL) { return 0; }
+    `  return _putenv_s(name, value);
+    `}
+    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
     `}
     `#ifndef __MINGW32__
+    `#ifndef __fun_clock_gettime_defined
+    `#define __fun_clock_gettime_defined
     `static long long clock_gettime(long long clk_id, void* tp) {
     `  (void)clk_id;
     `  if (!tp) return -1;
@@ -17988,6 +18378,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
     `  return 0;
     `}
+    `#endif
     `#endif
     `#else
     `#include <time.h>
@@ -18002,6 +18393,12 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -18021,9 +18418,48 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
     `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
+    `#endif
+    `#ifndef __MINGW32__
+    `#include <time.h>
+    `#include <errno.h>
+    `typedef HANDLE pthread_t;
+    `typedef struct { int __fun_dummy; } pthread_attr_t;
+    `typedef CRITICAL_SECTION pthread_mutex_t;
+    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
+    `typedef CONDITION_VARIABLE pthread_cond_t;
+    `typedef struct { int __fun_dummy; } pthread_condattr_t;
+    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
+    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
+    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
+    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
+    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
+    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
+    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
+    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
+    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
+    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
+    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
+    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
+    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
+    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
+    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
+    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
+    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
+    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
+    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
+    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
     `#endif
     `typedef HANDLE __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);

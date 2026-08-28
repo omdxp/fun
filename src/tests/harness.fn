@@ -39,6 +39,8 @@ pub fun transpile_source(str src) Result<str, str> {
 
   CodegenState cst = codegen_state_new();
   Codegen g = codegen_new(&cst);
+  let cc_name = env_or("FUN_CC", "");
+  g.msvc_mode = equals(cc_name, "cl") || equals(cc_name, "cl.exe");
   let cerr = g.transpile(state.nodes);
   if cerr.is_some() {
     ret .Err("codegen error");
@@ -78,6 +80,8 @@ pub fun transpile_file(str path) Result<str, str> {
 
   CodegenState st = codegen_state_new();
   Codegen cg = codegen_new(&st);
+  let cc_name2 = env_or("FUN_CC", "");
+  cg.msvc_mode = equals(cc_name2, "cl") || equals(cc_name2, "cl.exe");
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -167,6 +171,7 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   build.init(8);
   defer build.free();
   str cc = env_or("FUN_CC", "cc");
+  bin is_msvc = equals(cc, "cl") || equals(cc, "cl.exe");
   build.push(cc);
   str cc_extra = env_or("FUN_CC_ARGS", "");
   if !equals(cc_extra, "") {
@@ -181,15 +186,30 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
       ci = ci + 1;
     }
   }
-  build.push("-O0");
-  build.push("-pthread");
-  build.push("-lm");
-  if runtime_backend_is_windows() {
-    build.push("-lws2_32");
+  if is_msvc {
+    build.push("/nologo");
+    build.push("/std:c17");
+    build.push("/Od");
+    build.push(format("/Fe:{str}.exe", base));
+    build.push(c_path);
+  } else {
+    build.push("-O0");
+    build.push("-pthread");
+    build.push("-lm");
+    if runtime_backend_is_windows() {
+      build.push("-lws2_32");
+    }
+    build.push("-o");
+    // zig cc (and clang) on Windows do not auto-append .exe when the -o
+    // path has no extension, so supply it explicitly here so the exe_path
+    // lookup below finds the file.
+    if runtime_backend_is_windows() {
+      build.push(format("{str}.exe", base));
+    } else {
+      build.push(base);
+    }
+    build.push(c_path);
   }
-  build.push("-o");
-  build.push(base);
-  build.push(c_path);
   let built = run(argv_from(&build));
   assert built.is_ok(), format("{str}: could not run the C compiler", label);
   assert built.unwrap().exit_code == 0, format(
@@ -211,5 +231,13 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   invocation.push(exe_path);
   let ran = run(argv_from(&invocation));
   assert ran.is_ok(), format("{str}: could not run the built program", label);
-  ret ran.unwrap();
+  ProcessResult result = ran.unwrap();
+  // MSVC's CRT runs in text mode by default, which converts \n to \r\n
+  // when the child's stdout is a pipe. Normalize here so test assertions
+  // that compare exact output can use plain \n on all platforms.
+  if runtime_backend_is_windows() {
+    result.stdout_text = replace_str(result.stdout_text, "\r\n", "\n");
+    result.stderr_text = replace_str(result.stderr_text, "\r\n", "\n");
+  }
+  ret result;
 }
