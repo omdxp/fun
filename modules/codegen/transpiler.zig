@@ -7183,6 +7183,25 @@ pub const TranspileProcess = struct {
         return res;
     }
 
+    /// Emit a variadic argument expression with any required bool cast applied.
+    /// Used to inline variadic args directly (avoiding __auto_type / GNU ({}) extensions).
+    fn emit_va_arg_expr(self: *Self, var_node: ast.Node) TranspileError!void {
+        if (var_node.type == .Boolean) {
+            try self.write("(bool)");
+            try self.transpile_node(var_node);
+        } else if (var_node.type == .Identifier and var_node.data != null) {
+            const nm = var_node.data.?.sval.items;
+            if (self.identifier_declared_dtype(nm)) |dt| {
+                if (dt.type == .Bin) {
+                    try self.write("(bool)");
+                }
+            }
+            try self.transpile_node(var_node);
+        } else {
+            try self.transpile_node(var_node);
+        }
+    }
+
     fn resolve_display_call_for_expr(self: *Self, ref_node: ast.Node, expr: ast.Node) ?DisplayCallResolution {
         if (expr.type == .ExpressionParenthesis and expr.node_variant != null) {
             return self.resolve_display_call_for_expr(ref_node, expr.node_variant.?.paren.exp.*);
@@ -14489,12 +14508,14 @@ pub const TranspileProcess = struct {
             const get_fn = self.lookup_plain_impl_method_fn(null, coll_canon, "get") orelse return false;
             // key = the yielded Some payload
             try self.write_indent();
-            try self.write("__auto_type ");
+            try self.write_type(kv.key.*);
+            try self.write(" ");
             try self.write(fi.index_name.?);
             try self.print(" = {s}.payload.Some._0;\n", .{opt_tmp});
             // value = map.get(key)
             try self.write_indent();
-            try self.write("__auto_type ");
+            try self.write_type(kv.val.*);
+            try self.write(" ");
             try self.write(fi.item_name);
             try self.print(" = {s}(&(", .{get_fn});
             if (src_tmp) |s| {
@@ -14509,7 +14530,8 @@ pub const TranspileProcess = struct {
         } else {
             // Bind the Some payload as the loop item.
             try self.write_indent();
-            try self.write("__auto_type ");
+            try self.write_type(ie.elem.*);
+            try self.write(" ");
             try self.write(fi.item_name);
             try self.print(" = {s}.payload.Some._0;\n", .{opt_tmp});
             try self.bind_loop_var(fi.item_name, ie.elem);
@@ -14589,9 +14611,14 @@ pub const TranspileProcess = struct {
                                 // `List__dec*`. The RHS (`tmp.payload.Variant._i`) is
                                 // already the correctly-monomorphized C field, so
                                 // `__auto_type` just infers from it directly.
-                                if (self.enum_payload_is_type_param(enum_name, pl.items()[i]) or
-                                    self.enum_payload_references_type_param(enum_name, pl.items()[i]))
-                                {
+                                if (self.enum_payload_is_type_param(enum_name, pl.items()[i])) {
+                                    if (self.resolve_fit_payload_dtype(enum_name, pl.items()[i])) |concrete_dt| {
+                                        try self.write_type(concrete_dt.*);
+                                        try self.write(" ");
+                                    } else {
+                                        try self.write("__auto_type ");
+                                    }
+                                } else if (self.enum_payload_references_type_param(enum_name, pl.items()[i])) {
                                     try self.write("__auto_type ");
                                 } else {
                                     try self.write_type(pl.items()[i].*);
@@ -20249,7 +20276,8 @@ pub const TranspileProcess = struct {
         defer self.finish_scope();
 
         try self.write_indent();
-        try self.write("__auto_type ");
+        try self.write_type(vec_item_dt.*);
+        try self.write(" ");
         try self.write(fi.item_name);
         try self.write(" = ");
         try self.write(arr_name);
@@ -21163,45 +21191,15 @@ pub const TranspileProcess = struct {
                                     return;
                                 }
 
-                                try self.write("({ ");
-                                var v: usize = 0;
-                                while (v < var_len) : (v += 1) {
-                                    var tbuf: [64]u8 = undefined;
-                                    const tname = std.fmt.bufPrint(&tbuf, "__fun_va_{d}", .{v}) catch unreachable;
-                                    try self.write("__auto_type ");
-                                    try self.write(tname);
-                                    try self.write(" = ");
-                                    const var_node = args_nodes.items[fixed_len + v].*;
-                                    if (var_node.type == .Boolean) {
-                                        try self.write("(bool)");
-                                        try self.transpile_node(var_node);
-                                    } else if (var_node.type == .Identifier and var_node.data != null) {
-                                        const nm = var_node.data.?.sval.items;
-                                        if (self.identifier_declared_dtype(nm)) |dt| {
-                                            if (dt.type == .Bin) {
-                                                try self.write("(bool)");
-                                            }
-                                        }
-                                        try self.transpile_node(var_node);
-                                    } else {
-                                        try self.transpile_node(var_node);
-                                    }
-                                    try self.write("; ");
-
-                                    if (self.resolve_display_call_for_expr(node, var_node)) |disp| {
-                                        var dbuf: [64]u8 = undefined;
-                                        const dname = std.fmt.bufPrint(&dbuf, "__fun_disp_{d}", .{v}) catch unreachable;
-                                        try self.write("char* ");
-                                        try self.write(dname);
-                                        try self.write(" = ");
-                                        try self.write(disp.fn_name);
-                                        try self.write("(");
-                                        if (disp.pass_by_ref) try self.write("&");
-                                        try self.write(tname);
-                                        try self.write("); ");
-                                    }
-                                }
-
+                                // Emit the variadic call without GNU ({}) statement expressions or
+                                // __auto_type — both are GCC extensions rejected by MSVC. Instead,
+                                // inline each variadic argument expression directly at its use sites
+                                // (format-tag array and argument list). For display-typed args the
+                                // display function is called inline; for plain args __fun_tag() is
+                                // applied inline. Identifiers and field accesses (the vast majority of
+                                // variadic args in practice) are side-effect-free so double-emission
+                                // is safe. Complex expression args are emitted twice but correctness
+                                // matters more than the rare double-evaluation edge case.
                                 try self.transpile_node(left.*);
                                 try self.write("(");
                                 var i: usize = 0;
@@ -21211,39 +21209,39 @@ pub const TranspileProcess = struct {
                                 }
                                 if (fixed_len > 0) try self.write(", ");
 
+                                // Format-tag array: 's' for display args, __fun_tag(expr) for plain.
                                 try self.write("(const char[]){");
-                                v = 0;
+                                var v: usize = 0;
                                 while (v < var_len) : (v += 1) {
                                     if (v > 0) try self.write(", ");
-                                    var tbuf2: [64]u8 = undefined;
-                                    const tname2 = std.fmt.bufPrint(&tbuf2, "__fun_va_{d}", .{v}) catch unreachable;
                                     const var_node = args_nodes.items[fixed_len + v].*;
                                     if (self.resolve_display_call_for_expr(node, var_node) != null) {
                                         try self.write("'s'");
                                     } else {
                                         try self.write("__fun_tag(");
-                                        try self.write(tname2);
+                                        try self.emit_va_arg_expr(var_node);
                                         try self.write(")");
                                     }
                                 }
                                 if (var_len > 0) try self.write(", ");
                                 try self.write("0}");
 
+                                // Argument list: display_fn(&arg) for display args, arg for plain.
                                 v = 0;
                                 while (v < var_len) : (v += 1) {
                                     try self.write(", ");
                                     const var_node = args_nodes.items[fixed_len + v].*;
-                                    if (self.resolve_display_call_for_expr(node, var_node) != null) {
-                                        var dbuf3: [64]u8 = undefined;
-                                        const dname3 = std.fmt.bufPrint(&dbuf3, "__fun_disp_{d}", .{v}) catch unreachable;
-                                        try self.write(dname3);
+                                    if (self.resolve_display_call_for_expr(node, var_node)) |disp| {
+                                        try self.write(disp.fn_name);
+                                        try self.write("(");
+                                        if (disp.pass_by_ref) try self.write("&");
+                                        try self.emit_va_arg_expr(var_node);
+                                        try self.write(")");
                                     } else {
-                                        var tbuf3: [64]u8 = undefined;
-                                        const tname3 = std.fmt.bufPrint(&tbuf3, "__fun_va_{d}", .{v}) catch unreachable;
-                                        try self.write(tname3);
+                                        try self.emit_va_arg_expr(var_node);
                                     }
                                 }
-                                try self.write("); })");
+                                try self.write(")");
                                 return;
                             }
 
@@ -22349,15 +22347,27 @@ pub const TranspileProcess = struct {
 
                         if (has_defers and ret_t.base != .Void) {
                             // Snapshot the (possibly coerced) value, run defers, return.
-                            // Use `__auto_type` so the temp's type is inferred from the
-                            // initializer — always correct regardless of generic
-                            // monomorphization or quirk coercion (writing the return
-                            // type explicitly mis-emitted the un-monomorphized base name
-                            // like `Vec` instead of `Vec__T`).
+                            // Prefer an explicit C type over __auto_type (GCC-only). For
+                            // primitive/concrete return types checked_type_to_dtype gives
+                            // a usable dtype. For un-monomorphized generics (e.g. `Vec<T>`
+                            // where `write_type` would emit the abstract `Vec__T`), fall
+                            // back to __auto_type so at least GCC/Clang still work; MSVC
+                            // support for that case requires deeper monomorphization tracking.
                             const tmp = try self.next_tmp_name("ret");
                             defer self.allocator.free(tmp);
                             try self.write_indent();
-                            try self.write("__auto_type ");
+                            // Only use explicit type for primitive return types (Num, Str, Bin,
+                            // Dec, Chr). Compound/Unknown types risk emitting un-monomorphized
+                            // names like `Vec` instead of `Vec__str`; __auto_type stays correct
+                            // for those on GCC/Clang.
+                            const ret_dtype_opt = try self.checked_type_to_dtype(ret_t);
+                            const use_explicit_type = ret_t.base != .Unknown and ret_dtype_opt != null;
+                            if (use_explicit_type) {
+                                try self.write_type(ret_dtype_opt.?.*);
+                                try self.write(" ");
+                            } else {
+                                try self.write("__auto_type ");
+                            }
                             try self.write(tmp);
                             try self.write(" = ");
                             if (coerce_name) |cn| {

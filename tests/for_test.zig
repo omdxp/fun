@@ -124,7 +124,7 @@ test "for Vec values transpiles via len and data" {
     defer allocator.free(out_owned);
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t __fun_i = 0; __fun_i < vals.len; __fun_i++)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__auto_type val = vals.data[__fun_i];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "val = vals.data[__fun_i];") != null);
 
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
