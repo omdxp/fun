@@ -236,19 +236,19 @@ pub compound Codegen {
   Vec<DataType*> impl_method_rtype;
   // Each method's declared parameter types, excluding the implicit
   // `self`, parallel to the arrays above.
-  Vec<Vec<DataType*>> impl_method_param_types;
+  Vec<Vec<DataType *>> impl_method_param_types;
   // Each impl method's trailing default parameter values, parallel to
   // `impl_method_param_types`; `nil` for a parameter with no default.
   // Defaults are evaluated fresh at each call site.
-  Vec<Vec<Node*>> impl_method_default_values;
+  Vec<Vec<Node *>> impl_method_default_values;
   // Every plain top-level function's name and declared parameter types,
   // so a bare enum-variant shorthand passed as a call argument resolves
   // against the callee's own declared parameter type.
   Vec<str> function_names;
-  Vec<Vec<DataType*>> function_param_types;
+  Vec<Vec<DataType *>> function_param_types;
   // Each plain top-level function's trailing default parameter values,
   // parallel to `function_param_types`/`function_names`.
-  Vec<Vec<Node*>> function_default_values;
+  Vec<Vec<Node *>> function_default_values;
   // Whether each registered plain function is variadic, parallel to
   // `function_names`.
   Vec<bin> function_is_variadic;
@@ -269,7 +269,7 @@ pub compound Codegen {
   // Each field's full pre-substitution type, generic arguments included,
   // so a field whose own type is itself a nested generic instantiation
   // can be substituted correctly.
-  Vec<Vec<DataType*>> generic_compound_field_dtypes;
+  Vec<Vec<DataType *>> generic_compound_field_dtypes;
   // A generic enum template: its name, type-param names, and each
   // variant's shape before substitution.
   Vec<str> generic_enum_names;
@@ -311,7 +311,7 @@ pub compound Codegen {
   Vec<str> instantiation_base_name;
   Vec<Vec<str>> instantiation_arg_type_names;
   Vec<Vec<bin>> instantiation_arg_is_pointer;
-  Vec<Vec<DataType*>> instantiation_arg_dtypes;
+  Vec<Vec<DataType *>> instantiation_arg_dtypes;
   // Every generic impl method emitted (or enqueued, see
   // `pending_generic_impl_method_owner`) so far, keyed
   // `"<mangled_name>::<quirk_name>::<bare_method_name>"` (`<quirk_name>`
@@ -1054,7 +1054,7 @@ impl Codegen {
   // param's binding from whichever field's declared type is a bare
   // occurrence of that param. `.None` when `base_name` isn't a generic
   // template, or a type param can't be inferred from any field.
-  infer_generic_compound_init_args(str base_name, Vec<CompoundInitField> init_fields) Option<Vec<DataType*>> {
+  infer_generic_compound_init_args(str base_name, Vec<CompoundInitField> init_fields) Option<Vec<DataType *>> {
     num template_idx = 0;
     bin found_tmpl = false;
     for template_idx < self.generic_compound_names.len {
@@ -1331,8 +1331,7 @@ impl Codegen {
       // instantiation's type argument), untouched by Pass 1's
       // type-param substitution.
       let wfield_dt = field_dtypes.get(wi);
-      if wfield_dt.is_array && resolved_field_ptr_depth.get(wi) == 0 &&
-        wfield_dt.array_brackets.len > 0 {
+      if wfield_dt.is_array && resolved_field_ptr_depth.get(wi) == 0 && wfield_dt.array_brackets.len > 0 {
         for bnode : wfield_dt.array_brackets {
           self.state.write("[");
           fit bnode.kind {
@@ -1918,8 +1917,7 @@ impl Codegen {
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
-          if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len &&
-            impl_allows_generic_args(
+          if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len && impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
             arg_dtypes
@@ -2061,8 +2059,7 @@ impl Codegen {
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
-          if !equals(i.type_name, base_name) || !i.has_quirk_name ||
-            i.has_quirk_concrete_instantiation || i.type_params.len != arg_type_names.len {
+          if !equals(i.type_name, base_name) || !i.has_quirk_name || i.has_quirk_concrete_instantiation || i.type_params.len != arg_type_names.len {
             continue;
           }
           // `i.has_quirk_concrete_instantiation` only flags a generic
@@ -2237,8 +2234,7 @@ impl Codegen {
           if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
             continue;
           }
-          if !equals(quirk_name, "") &&
-            (!i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
+          if !equals(quirk_name, "") && ( !i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
             continue;
           }
           if !impl_allows_generic_args(
@@ -2421,8 +2417,7 @@ impl Codegen {
     num pmi = 0;
     bin found_pm = false;
     for pmi < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(pmi), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(pmi), owner_type) && equals(
         self.impl_method_bare_name.get(pmi),
         bare_name
       ) {
@@ -2922,8 +2917,7 @@ impl Codegen {
           // name first, since most call sites here have no quirk to
           // disambiguate with in the first place. Only a non-empty
           // `quirk_name` narrows the search, and only to that quirk.
-          if !equals(quirk_name, "") &&
-            (!i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
+          if !equals(quirk_name, "") && ( !i.has_quirk_name || !equals(i.quirk_name, quirk_name)) {
             continue;
           }
           if !impl_allows_generic_args(
@@ -3055,8 +3049,7 @@ impl Codegen {
             for pm : pi.methods {
               fit pm.kind {
                 .Function(pfn) -> {
-                  if pfn.has_type_params &&
-                    equals(strip_prefix(pfn.name, ptpfx), bare_name) {
+                  if pfn.has_type_params && equals(strip_prefix(pfn.name, ptpfx), bare_name) {
                     ret true;
                   }
                 }
@@ -3081,8 +3074,7 @@ impl Codegen {
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
-                if fnv.has_type_params &&
-                  equals(strip_prefix(fnv.name, tpfx), bare_name) {
+                if fnv.has_type_params && equals(strip_prefix(fnv.name, tpfx), bare_name) {
                   ret true;
                 }
               }
@@ -3149,8 +3141,7 @@ impl Codegen {
     for tmpl : candidates {
       fit tmpl.kind {
         .Impl(i) -> {
-          if !equals(i.type_name, base_name) ||
-            i.type_params.len != impl_arg_type_names.len {
+          if !equals(i.type_name, base_name) || i.type_params.len != impl_arg_type_names.len {
             continue;
           }
           StringBuilder pfx = string_builder_init(16);
@@ -3161,8 +3152,7 @@ impl Codegen {
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
-                if !fnv.has_type_params ||
-                  !equals(strip_prefix(fnv.name, prefix), bare_name) {
+                if !fnv.has_type_params || !equals(strip_prefix(fnv.name, prefix), bare_name) {
                   continue;
                 }
 
@@ -3184,8 +3174,7 @@ impl Codegen {
                       }
                       fit parg.kind {
                         .Variable(v) -> {
-                          if equals(v.var_type.type_str, tp) &&
-                            v.var_type.generic_args.len == 0 && arg_i < args.len {
+                          if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 && arg_i < args.len {
                             let inferred = self.infer_arg_type_name(args.get(arg_i));
                             if inferred.is_some() {
                               found_name = inferred.unwrap();
@@ -3614,8 +3603,7 @@ impl Codegen {
   lookup_enum_variant_payload_type(str enum_name, str variant_name, num position) Option<FieldTypeInfo> {
     num i = 0;
     for i < self.enum_variant_payload_owner.len {
-      if equals(self.enum_variant_payload_owner.get(i), enum_name) &&
-        equals(
+      if equals(self.enum_variant_payload_owner.get(i), enum_name) && equals(
         self.enum_variant_payload_variant.get(i),
         variant_name
       ) {
@@ -3815,8 +3803,7 @@ impl Codegen {
   lookup_impl_method_rtype(str owner_type, str bare_name) Option<DataType*> {
     num i = 0;
     for i < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(i), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
         self.impl_method_bare_name.get(i),
         bare_name
       ) {
@@ -3837,8 +3824,7 @@ impl Codegen {
   lookup_impl_method_param_type(str owner_type, str bare_name, num arg_index) Option<DataType*> {
     num i = 0;
     for i < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(i), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
         self.impl_method_bare_name.get(i),
         bare_name
       ) {
@@ -3855,11 +3841,10 @@ impl Codegen {
 
   // Looks up `bare_name`'s full declared param list (excluding `self`),
   // for `emit_method_call`'s default-parameter fill-in.
-  lookup_impl_method_param_types(str owner_type, str bare_name) Option<Vec<DataType*>> {
+  lookup_impl_method_param_types(str owner_type, str bare_name) Option<Vec<DataType *>> {
     num i = 0;
     for i < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(i), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
         self.impl_method_bare_name.get(i),
         bare_name
       ) {
@@ -3871,11 +3856,10 @@ impl Codegen {
   }
 
   // Looks up `bare_name`'s trailing default-parameter value expressions.
-  lookup_impl_method_default_values(str owner_type, str bare_name) Option<Vec<Node*>> {
+  lookup_impl_method_default_values(str owner_type, str bare_name) Option<Vec<Node *>> {
     num i = 0;
     for i < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(i), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
         self.impl_method_bare_name.get(i),
         bare_name
       ) {
@@ -3890,8 +3874,7 @@ impl Codegen {
   lookup_impl_method(str owner_type, str bare_name) Option<str> {
     num i = 0;
     for i < self.impl_method_owner_type.len {
-      if equals(self.impl_method_owner_type.get(i), owner_type) &&
-        equals(
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
         self.impl_method_bare_name.get(i),
         bare_name
       ) {
@@ -4119,13 +4102,11 @@ impl Codegen {
   fn_proto_splice_pos(Vec<str> type_names) ProtoSplice {
     if self.state == self.root_state && self.current_fn_body_start_pos.is_some() {
       num fp = self.current_fn_body_start_pos.unwrap();
-      if self.fn_types_declared_before(type_names, fp) &&
-        is_safe_splice_boundary(
+      if self.fn_types_declared_before(type_names, fp) && is_safe_splice_boundary(
         &self.state.out,
         fp
       ) {
-        if self.current_stmt_start_pos.is_some() &&
-          self.current_stmt_start_pos.unwrap() < fp {
+        if self.current_stmt_start_pos.is_some() && self.current_stmt_start_pos.unwrap() < fp {
           ProtoSplice broad_stmt;
           broad_stmt.pos = self.current_stmt_start_pos;
           broad_stmt.broad = true;
@@ -4152,8 +4133,7 @@ impl Codegen {
         // because a bare `_ = expr` discard returns before ever
         // reaching the flag check below, which would leak the flag,
         // set but never consumed, into whatever gets emitted next.
-        if !equals(ce.op, "()") && !equals(ce.op, ".") && !equals(ce.op, "[]") &&
-          !equals(
+        if !equals(ce.op, "()") && !equals(ce.op, ".") && !equals(ce.op, "[]") && !equals(
           ce.op,
           ","
         ) && !equals(ce.op, "=") {
@@ -4462,8 +4442,7 @@ impl Codegen {
         // An assignment or equality comparison's right-hand side may be a
         // bare enum-variant shorthand, so the left side's declared type
         // becomes the expected type for the right expression only.
-        bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") ||
-          equals(e.op, "!=");
+        bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") || equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
         str prev_expected_compound = self.expected_compound_type;
         // A quirk-typed left side needs the same coercion wrapper a
@@ -4797,8 +4776,7 @@ impl Codegen {
           if recv_e.has_left {
             fit recv_e.left.kind {
               .Identifier(lname) -> {
-                if self.import_aliases.contains(lname) &&
-                  self.lookup_local_type_name(lname).is_none() {
+                if self.import_aliases.contains(lname) && self.lookup_local_type_name(lname).is_none() {
                   left_is_known_alias = true;
                   known_alias_name = lname;
                 }
@@ -4862,8 +4840,7 @@ impl Codegen {
                       StringBuilder ec_tmpl_pfx = string_builder_init(16);
                       ec_tmpl_pfx.append(enum_name);
                       ec_tmpl_pfx.append("__");
-                      if starts_with(self.expected_enum_type, ec_tmpl_pfx.build()) &&
-                        self.enum_has_variant(
+                      if starts_with(self.expected_enum_type, ec_tmpl_pfx.build()) && self.enum_has_variant(
                         self.expected_enum_type,
                         variant_name
                       ) {
@@ -4899,8 +4876,7 @@ impl Codegen {
     // decision on its own). Only applies to a literal, non-raw format
     // string with no bare `{}` placeholder, exactly like the reference:
     // a bare `{}` takes the general vararg path, uncounted.
-    if equals(callee_name, "format") && args.len >= 1 &&
-      !args.get(0).flags.is_raw_string {
+    if equals(callee_name, "format") && args.len >= 1 && !args.get(0).flags.is_raw_string {
       fit args.get(0).kind {
         .String(fmt_str) -> {
           let ph_opt = self.count_format_placeholders(fmt_str);
@@ -5578,7 +5554,7 @@ impl Codegen {
   // that is itself a bare shorthand has something to resolve against.
   emit_default_trailing_args(
     Vec<Node*> defaults,
-    Option<Vec<DataType*>> param_types,
+    Option<Vec<DataType *>> param_types,
     num provided_count,
     bin anything_written
   ) Option<CodegenErrorKind> {
@@ -6014,8 +5990,7 @@ impl Codegen {
             .Expression(recv_e) -> {
               if equals(recv_e.op, ".") && recv_e.has_left && recv_e.has_right {
                 let recv_r_opt = self.resolve_field_chain(recv_e.left);
-                if recv_r_opt.is_some() &&
-                  self.quirk_names.contains(recv_r_opt.unwrap().type_name) {
+                if recv_r_opt.is_some() && self.quirk_names.contains(recv_r_opt.unwrap().type_name) {
                   ret self.emit_expr(*operand);
                 }
               }
@@ -6382,8 +6357,7 @@ impl Codegen {
           bin inner_left_is_alias = false;
           fit inner_e.left.kind {
             .Identifier(aname) -> {
-              if self.import_aliases.contains(aname) &&
-                self.lookup_local_type_name(aname).is_none() {
+              if self.import_aliases.contains(aname) && self.lookup_local_type_name(aname).is_none() {
                 inner_left_is_alias = true;
               }
             }
@@ -6426,24 +6400,21 @@ impl Codegen {
     // bare template name, which is never registered in `enum_names` (only
     // a concrete instantiation like `Option__num` is), so it falls back
     // to `expected_enum_type`, which already holds that mangled name.
-    if left_is_single_level && !is_bare_shorthand &&
-      !self.enum_has_variant(
+    if left_is_single_level && !is_bare_shorthand && !self.enum_has_variant(
       enum_recv_name,
       field_name
     ) {
       StringBuilder tmpl_pfx = string_builder_init(16);
       tmpl_pfx.append(enum_recv_name);
       tmpl_pfx.append("__");
-      if starts_with(self.expected_enum_type, tmpl_pfx.build()) &&
-        self.enum_has_variant(
+      if starts_with(self.expected_enum_type, tmpl_pfx.build()) && self.enum_has_variant(
         self.expected_enum_type,
         field_name
       ) {
         enum_recv_name = self.expected_enum_type;
       }
     }
-    if left_is_single_level && !equals(enum_recv_name, "") &&
-      self.enum_has_variant(
+    if left_is_single_level && !equals(enum_recv_name, "") && self.enum_has_variant(
       enum_recv_name,
       field_name
     ) {
@@ -6475,8 +6446,7 @@ impl Codegen {
     // known local, which always shadows a same-named alias.
     fit e.left.kind {
       .Identifier(alias_name) -> {
-        if self.import_aliases.contains(alias_name) &&
-          self.lookup_local_type_name(alias_name).is_none() {
+        if self.import_aliases.contains(alias_name) && self.lookup_local_type_name(alias_name).is_none() {
           let renamed = self.lookup_alias_rename(alias_name, field_name);
           if renamed.is_some() {
             self.state.write(renamed.unwrap());
@@ -6560,8 +6530,7 @@ impl Codegen {
                 if !equals(method_name, "") {
                   fit recv_e.left.kind {
                     .Identifier(lname2) -> {
-                      if self.import_aliases.contains(lname2) &&
-                        self.lookup_local_type_name(lname2).is_none() {
+                      if self.import_aliases.contains(lname2) && self.lookup_local_type_name(lname2).is_none() {
                         left_is_known_alias2 = true;
                       }
                     }
@@ -6582,8 +6551,7 @@ impl Codegen {
                     // `maybe_instantiate_generic_impl_method_own_params`
                     // builds; `lookup_impl_method_rtype` below only knows
                     // the raw unsubstituted template return type.
-                    if inner_e.has_right &&
-                      self.impl_method_has_own_type_params(
+                    if inner_e.has_right && self.impl_method_has_own_type_params(
                       recv_r2.type_name,
                       method_name
                     ) {
@@ -6608,8 +6576,7 @@ impl Codegen {
                     // A quirk-typed receiver dispatches dynamically, so
                     // no concrete impl owns the call; the return type
                     // comes from what the quirk itself declares instead.
-                    if call_rtype.is_none() &&
-                      self.quirk_names.contains(recv_r2.type_name) {
+                    if call_rtype.is_none() && self.quirk_names.contains(recv_r2.type_name) {
                       let qrt = self.lookup_quirk_method_rtype(recv_r2.type_name, method_name);
                       if qrt.is_some() {
                         call_rtype = .Some(*qrt.unwrap());
@@ -6825,8 +6792,7 @@ impl Codegen {
       // `pointer_depth`, since a dereferenced pointer is a plain value.
       // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
-        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
-          u.indirection_depth != 1 {
+        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
           ret .None;
         }
         let recv_r_opt = self.resolve_field_chain(u.operand);
@@ -6902,8 +6868,7 @@ impl Codegen {
           main_discards_return = true;
           if self.current_fn_rtype_dt.is_some() {
             let main_rt = self.current_fn_rtype_dt.unwrap();
-            if equals(main_rt.type_str, "num") && !main_rt.is_array &&
-              main_rt.pointer_depth == 0 {
+            if equals(main_rt.type_str, "num") && !main_rt.is_array && main_rt.pointer_depth == 0 {
               main_discards_return = false;
             }
           }
@@ -7095,8 +7060,7 @@ impl Codegen {
         // char*`, incompatible with the plain `char*` every ordinary
         // `str` value uses, which is what every str-returning function
         // and str-taking parameter expects.
-        bin const_is_ptr_binding = !is_let &&
-          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
+        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
           v.var_type.type_str,
           "str"
         ));
@@ -7824,8 +7788,7 @@ impl Codegen {
       for n2 : self.all_nodes {
         fit n2.kind {
           .Impl(i2) -> {
-            if equals(i2.type_name, coll_dt.type_str) && i2.has_quirk_name &&
-              equals(
+            if equals(i2.type_name, coll_dt.type_str) && i2.has_quirk_name && equals(
               i2.quirk_name,
               "Iterator"
             ) && i2.has_quirk_concrete_instantiation {
@@ -8582,8 +8545,7 @@ impl Codegen {
               StringBuilder tmpl_pfx = string_builder_init(16);
               tmpl_pfx.append(enum_name);
               tmpl_pfx.append("__");
-              if starts_with(subj, tmpl_pfx.build()) &&
-                self.enum_has_variant(subj, variant_name) {
+              if starts_with(subj, tmpl_pfx.build()) && self.enum_has_variant(subj, variant_name) {
                 has_variant = true;
                 effective_enum_name = subj;
               }
@@ -9037,9 +8999,8 @@ impl Codegen {
     if !node.has_pos {
       ret false;
     }
-    ret contains(node.pos.filename, "/std/c/") ||
-      contains(node.pos.filename, "\\std\\c\\");
-    }
+    ret contains(node.pos.filename, "/std/c/") || contains(node.pos.filename, "\\std\\c\\");
+  }
 
   // Emits the wrapper C functions an `async` function or method needs
   // around its ordinary body: a payload struct holding its args and
@@ -9425,8 +9386,7 @@ impl Codegen {
         // this: a nested one reached through some scratch buffer
         // (`self.state != self.root_state`) leaves it alone, since its
         // own position would be relative to the wrong buffer entirely.
-        bin owns_fn_body_start_pos = self.state == self.root_state &&
-          self.current_fn_body_start_pos.is_none();
+        bin owns_fn_body_start_pos = self.state == self.root_state && self.current_fn_body_start_pos.is_none();
         if owns_fn_body_start_pos {
           self.current_fn_body_start_pos = .Some(self.state.out.len());
         }
@@ -9510,7 +9470,7 @@ impl Codegen {
         self.state.write(" ");
         self.state.write(emit_name);
         self.state.write("(");
-        if is_main && (!f.has_args || f.args.len == 0) {
+        if is_main && ( !f.has_args || f.args.len == 0) {
           self.state.write("int argc, char** argv");
         } elif is_main && main_is_single_str_array {
           self.state.write("int argc, ");
@@ -9717,8 +9677,7 @@ impl Codegen {
           }
           _ -> {}
         }
-        if !is_main && !fn_body_ends_in_return && rt.is_some() &&
-          !equals(rt.unwrap(), "void") {
+        if !is_main && !fn_body_ends_in_return && rt.is_some() && !equals(rt.unwrap(), "void") {
           self.state.write_indent();
           self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
         }
@@ -10175,8 +10134,7 @@ impl Codegen {
         // See the matching fix on the local-variable declaration site:
         // `str` needs the same "pointer for const-placement purposes"
         // treatment `dtype_is_pointer` alone doesn't give it.
-        bin const_is_ptr_binding = !is_let &&
-          (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
+        bin const_is_ptr_binding = !is_let && (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
           v.var_type.type_str,
           "str"
         ));
@@ -10429,8 +10387,7 @@ impl Codegen {
           // A comparison yields `bin`; other binary operators yield
           // whichever operand resolves, so an argument like `n - 1`
           // still infers a type param.
-          if equals(e.op, "==") || equals(e.op, "!=") || equals(e.op, "<") ||
-            equals(e.op, "<=") || equals(
+          if equals(e.op, "==") || equals(e.op, "!=") || equals(e.op, "<") || equals(e.op, "<=") || equals(
             e.op,
             ">"
           ) || equals(e.op, ">=") || equals(e.op, "&&") || equals(e.op, "||") {
@@ -10843,9 +10800,7 @@ impl Codegen {
                       }
                       DataType qm_rdt = *qm2.rtype;
                       let q_type_params2 = self.quirk_decl_type_params.get(qdi2);
-                      if q_type_params2.len == 1 &&
-                        equals(qm_rdt.type_str, q_type_params2.get(0)) &&
-                        qm_rdt.generic_args.len == 0 {
+                      if q_type_params2.len == 1 && equals(qm_rdt.type_str, q_type_params2.get(0)) && qm_rdt.generic_args.len == 0 {
                         DataType subst_dt = dtype_new();
                         subst_dt.type_str = qarg_name;
                         ret .Some(subst_dt);
@@ -10871,8 +10826,7 @@ impl Codegen {
       // resolves `pb`'s chain first, then drops one level of
       // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
-        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
-          u.indirection_depth != 1 {
+        if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
           ret .None;
         }
         let recv_r_opt = self.resolve_field_chain(u.operand);
@@ -10914,8 +10868,7 @@ impl Codegen {
       ret .None;
     }
     let caller_rtype = self.current_fn_rtype_dt.unwrap();
-    if !equals(f.rtype.type_str, caller_rtype.type_str) ||
-      f.rtype.generic_args.len != caller_rtype.generic_args.len {
+    if !equals(f.rtype.type_str, caller_rtype.type_str) || f.rtype.generic_args.len != caller_rtype.generic_args.len {
       ret .None;
     }
     num pi = 0;
@@ -10972,8 +10925,7 @@ impl Codegen {
               for parg : f.args {
                 fit parg.kind {
                   .Variable(v) -> {
-                    if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 &&
-                      ai < args.len {
+                    if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 && ai < args.len {
                       let arg_node = args.get(ai);
                       let inferred = self.infer_arg_type_name(arg_node);
                       if inferred.is_some() {
@@ -11008,8 +10960,7 @@ impl Codegen {
                       if v3.var_type.generic_args.len > 0 && ai3 < args.len {
                         num gi = 0;
                         for garg : v3.var_type.generic_args {
-                          if !found && equals(garg.type_str, tp) &&
-                            garg.generic_args.len == 0 {
+                          if !found && equals(garg.type_str, tp) && garg.generic_args.len == 0 {
                             let arg_dt3 = self.infer_arg_dtype(args.get(ai3));
                             if arg_dt3.is_some() {
                               let adt3 = arg_dt3.unwrap();
@@ -11265,7 +11216,7 @@ impl Codegen {
   // declares. A generic is recorded whole and monomorphized from its
   // call site, so its defaults are read from the template rather than
   // from the plain-function registry, which never sees it.
-  lookup_generic_default_values(str fn_name) Option<Vec<Node*>> {
+  lookup_generic_default_values(str fn_name) Option<Vec<Node *>> {
     for tmpl : self.generic_function_templates {
       fit tmpl.kind {
         .Function(f) -> {
@@ -11300,7 +11251,7 @@ impl Codegen {
     ret .None;
   }
 
-  lookup_function_default_values(str fn_name) Option<Vec<Node*>> {
+  lookup_function_default_values(str fn_name) Option<Vec<Node *>> {
     num i = 0;
     for i < self.function_names.len {
       if equals(self.function_names.get(i), fn_name) {
@@ -11315,7 +11266,7 @@ impl Codegen {
   // `emit_default_trailing_args` can resolve a default value that is
   // itself a bare enum shorthand against that param's declared type.
   // `.None` means `fn_name` isn't registered as a plain function.
-  lookup_function_param_types(str fn_name) Option<Vec<DataType*>> {
+  lookup_function_param_types(str fn_name) Option<Vec<DataType *>> {
     num i = 0;
     for i < self.function_names.len {
       if equals(self.function_names.get(i), fn_name) {
@@ -11470,8 +11421,7 @@ impl Codegen {
         // exception is a call arriving through `quirk_inst_override_name`,
         // where the caller has already bound `T` to one concrete
         // instantiation and set up substitution context accordingly.
-        if !i.has_quirk_name ||
-          (i.has_type_params && equals(self.quirk_inst_override_name, "")) {
+        if !i.has_quirk_name || (i.has_type_params && equals(self.quirk_inst_override_name, "")) {
           ret .None;
         }
         str quirk_name = i.quirk_name;
@@ -11704,7 +11654,10 @@ impl Codegen {
               }
               self.state.write(") {\n  ");
               if fnv.has_rtype {
-                self.state.write("return ");
+                let rtype_name = self.resolve_type_name(*fnv.rtype);
+                if rtype_name.is_some() && !equals(rtype_name.unwrap(), "void") {
+                  self.state.write("return ");
+                }
               }
               self.state.write(real_fn_name);
               self.state.write("((");
@@ -12549,9 +12502,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          if !f.has_type_params && !self.is_std_c_signature_node(n) &&
-            !equals(f.name, "main") && !f.is_variadic &&
-            self.function_prototype_is_safe_early(n) {
+          if !f.has_type_params && !self.is_std_c_signature_node(n) && !equals(f.name, "main") && !f.is_variadic && self.function_prototype_is_safe_early(n) {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function_prototype(n);
             if ferr.is_some() {
@@ -12562,8 +12513,7 @@ impl Codegen {
         .Impl(i) -> {
           if !i.has_type_params {
             for m : i.methods {
-              if self.is_std_c_signature_node(*m) ||
-                !self.function_prototype_is_safe_early(*m) {
+              if self.is_std_c_signature_node(*m) || !self.function_prototype_is_safe_early(*m) {
                 continue;
               }
               // Emitted per call site once its own type params are
@@ -12757,8 +12707,7 @@ impl Codegen {
           // A test body compiles straight through `emit_body`, never
           // through `emit_function_named`, so it needs its own copy of
           // that function's function-start ownership capture.
-          bin owns_test_fn_body_start_pos = self.state == self.root_state &&
-            self.current_fn_body_start_pos.is_none();
+          bin owns_test_fn_body_start_pos = self.state == self.root_state && self.current_fn_body_start_pos.is_none();
           if owns_test_fn_body_start_pos {
             self.current_fn_body_start_pos = .Some(self.state.out.len());
           }

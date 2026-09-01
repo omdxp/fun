@@ -45,7 +45,7 @@ jobs:
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            FUN_CC=cl FUN_STDLIB_DIR="$GITHUB_WORKSPACE/stdlib" ./fun-out/bin/fun.exe test src/tests
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test src/tests
           else
             export FUN_STDLIB_DIR="$PWD/stdlib"
             ./fun-out/bin/fun test src/tests
@@ -54,7 +54,7 @@ jobs:
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            FUN_CC=cl FUN_STDLIB_DIR="$GITHUB_WORKSPACE/stdlib" FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
           else
             export FUN_STDLIB_DIR="$PWD/stdlib"
             FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
