@@ -40,7 +40,8 @@ pub fun transpile_source(str src) Result<str, str> {
   CodegenState cst = codegen_state_new();
   Codegen g = codegen_new(&cst);
   let cc_name = env_or("FUN_CC", "");
-  g.msvc_mode = equals(cc_name, "cl") || equals(cc_name, "cl.exe");
+  g.msvc_mode = equals(cc_name, "cl") || equals(cc_name, "cl.exe") ||
+    (equals(cc_name, "") && runtime_backend_is_windows());
   let cerr = g.transpile(state.nodes);
   if cerr.is_some() {
     ret .Err("codegen error");
@@ -81,7 +82,8 @@ pub fun transpile_file(str path) Result<str, str> {
   CodegenState st = codegen_state_new();
   Codegen cg = codegen_new(&st);
   let cc_name2 = env_or("FUN_CC", "");
-  cg.msvc_mode = equals(cc_name2, "cl") || equals(cc_name2, "cl.exe");
+  cg.msvc_mode = equals(cc_name2, "cl") || equals(cc_name2, "cl.exe") ||
+    (equals(cc_name2, "") && runtime_backend_is_windows());
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -170,7 +172,14 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   Vec<str> build;
   build.init(8);
   defer build.free();
-  str cc = env_or("FUN_CC", "cc");
+  str cc = env_or("FUN_CC", "");
+  if equals(cc, "") {
+    if runtime_backend_is_windows() {
+      cc = "cl";
+    } else {
+      cc = "cc";
+    }
+  }
   bin is_msvc = equals(cc, "cl") || equals(cc, "cl.exe");
   build.push(cc);
   str cc_extra = env_or("FUN_CC_ARGS", "");

@@ -1212,11 +1212,73 @@ pub fun run_fuzz(str input, str target, Vec<str>* args, bin debug_info) num {
   ret code;
 }
 
+compound SuiteTestResult {
+  num exit_code;
+  str captured;
+}
+
+// Like run_tests but captures the test binary's stdout instead of inheriting
+// it, so run_test_suite can decide what to display. Compile output still goes
+// to stderr when a compiler is explicitly set via FUN_CC.
+fun _run_tests_captured(str input, bin debug_info) SuiteTestResult {
+  SuiteTestResult bad;
+  bad.exit_code = 1;
+  bad.captured = "";
+
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  if exists("fun.toml") {
+    let loaded = load_manifest();
+    if loaded.is_ok() {
+      Manifest m = loaded.unwrap();
+      defines.free();
+      defines = manifest_defines(&m);
+    }
+  }
+
+  str c_path = default_c_path(input, ".test.c");
+  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "");
+  if lowered.is_err() {
+    bad.captured = format("[Error]\n{str}", lowered.unwrap_err());
+    ret bad;
+  }
+
+  str exe = default_exe_path(input, ".test");
+  let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  remove_file(c_path);
+  if cc_code != 0 {
+    bad.captured = "C compiler returned non-zero";
+    ret bad;
+  }
+
+  Vec<str> argv_args;
+  argv_args.init(1);
+  defer argv_args.free();
+  argv_args.push(executable_path(exe));
+  str[] argv = argv_from(&argv_args);
+  let result = run(argv);
+  free_argv(argv);
+  remove_file(exe);
+
+  if result.is_err() {
+    bad.captured = "could not run test binary";
+    ret bad;
+  }
+  ProcessResult r = result.unwrap();
+  SuiteTestResult ok;
+  ok.exit_code = r.exit_code;
+  ok.captured = r.stdout_text;
+  ret ok;
+}
+
 // `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
-// `root` that declares a `test` block, runs each with `run_tests`, and
-// prints an aggregate pass/fail summary. Every file gets its own compile
-// pass and its own process for the compiled binary, so one file's failure
-// or crash can't take the rest of the run down with it.
+// `root` that declares a `test` block, runs each with `_run_tests_captured`,
+// and prints an aggregate pass/fail summary. Passing files flicker on a
+// single overwritten line; failing files show their full captured output and
+// are listed again in the summary at the end. Every file gets its own compile
+// pass and its own process for the compiled binary, so one file's failure or
+// crash can't take the rest of the run down with it.
 pub fun run_test_suite(str root, bin debug_info) num {
   str dir = root;
   if equals(dir, "") {
@@ -1229,9 +1291,9 @@ pub fun run_test_suite(str root, bin debug_info) num {
   _collect_fun_files(dir, &files);
   files.sort();
 
-  Vec<str> no_args;
-  no_args.init(0);
-  defer no_args.free();
+  Vec<str> failed_files;
+  failed_files.init(4);
+  defer failed_files.free();
 
   num passed = 0;
   num failed = 0;
@@ -1242,12 +1304,18 @@ pub fun run_test_suite(str root, bin debug_info) num {
     if !_declares_top_level_block(path, "test") {
       continue;
     }
-    println(format("== {str} ==", path));
-    let code = run_tests(path, &no_args, debug_info);
-    if code == 0 {
+    // Show which file is being compiled/run; \r lets a pass overwrite this line.
+    print(format("\r  running {str}  ", path));
+    let res = _run_tests_captured(path, debug_info);
+    if res.exit_code == 0 {
       passed = passed + 1;
+      num n = count(res.captured, " ... PASS");
+      println(format("\r  ok  {str}  ({num} tests)  ", path, n));
     } else {
       failed = failed + 1;
+      println(format("\r  FAIL  {str}", path));
+      print(res.captured);
+      failed_files.push(path);
     }
   }
 
@@ -1258,6 +1326,12 @@ pub fun run_test_suite(str root, bin debug_info) num {
 
   println(format("\n{num}/{num} test files passed", passed, passed + failed));
   if failed > 0 {
+    println("\nFailed:");
+    num j = 0;
+    for j < failed_files.len {
+      println(format("  {str}", failed_files.get(j)));
+      j = j + 1;
+    }
     ret 1;
   }
   ret 0;
