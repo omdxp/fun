@@ -265,6 +265,13 @@ pub const TranspileProcess = struct {
         kind: DeferScopeKind,
     };
 
+    /// Holds the buffered output for one statement and any pre-declarations
+    /// that must be emitted before it (hoisted method-receiver temps).
+    const StmtFrame = struct {
+        stmt_buf: ArrayList(u8),
+        pre_decls: ArrayList(u8),
+    };
+
     /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
 
@@ -289,6 +296,18 @@ pub const TranspileProcess = struct {
     ifile: std.Io.File,
     ofile: ?std.Io.File,
     outbuf: ?ArrayList(u8),
+
+    /// Stack of per-statement output frames. Each `transpile_statement_in_current_scope`
+    /// call pushes a frame; `write_raw` routes into the top frame's `stmt_buf`.
+    /// When popped, any pre-hoisted method-receiver declarations are emitted
+    /// first inside a wrapping `{...}` block.
+    stmt_stack: ArrayList(StmtFrame),
+    /// When non-null, expression output is redirected here (used to capture
+    /// a method receiver's C expression for hoisting into a pre-declaration).
+    mrecv_recv_buf: ?*ArrayList(u8) = null,
+    /// When true, all writes are redirected to the top stmt_stack frame's
+    /// `pre_decls` buffer (used to hoist format-literal setup code).
+    pre_decls_mode: bool = false,
 
     /// Tracked read offset for cross-platform positional file reads.
     file_pos: u64 = 0,
@@ -2706,7 +2725,19 @@ pub const TranspileProcess = struct {
         const c_format_impl = try self.prefixed_fn_name(module_alias, "format_impl");
         defer self.allocator.free(c_format_impl);
 
-        try self.write("({ ");
+        // When inside a statement frame, hoist all format temporaries into
+        // pre-declarations to avoid GNU statement expressions (`({...})`),
+        // which MSVC does not support. The expression value is just out_name.
+        const use_pre_decls = self.stmt_stack.items.len > 0;
+        if (use_pre_decls) {
+            self.pre_decls_mode = true;
+            // Write a newline so each pre-decl starts on its own line.
+            try self.write("\n");
+            try self.write_spaces(self.indent_level * 4);
+        } else {
+            try self.write("({ ");
+        }
+
         try self.write("Vec__str ");
         try self.write(vec_name);
         try self.write("; ");
@@ -2800,9 +2831,15 @@ pub const TranspileProcess = struct {
             try self.write(".data);");
         }
 
-        try self.write(" ");
-        try self.write(out_name);
-        try self.write("; })");
+        if (use_pre_decls) {
+            // Switch back to stmt_buf and emit just the result variable.
+            self.pre_decls_mode = false;
+            try self.write(out_name);
+        } else {
+            try self.write(" ");
+            try self.write(out_name);
+            try self.write("; })");
+        }
         return true;
     }
 
@@ -4265,6 +4302,7 @@ pub const TranspileProcess = struct {
             .owned_scope_entities = ArrayList(*scope.ScopeEntity).init(a),
             .defer_stack = ArrayList(DeferEntry).init(a),
             .defer_scope_stack = ArrayList(DeferScopeFrame).init(a),
+            .stmt_stack = ArrayList(StmtFrame).init(a),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
@@ -12904,6 +12942,11 @@ pub const TranspileProcess = struct {
         self.owned_nodes.deinit();
         self.defer_stack.deinit();
         self.defer_scope_stack.deinit();
+        for (self.stmt_stack.items) |*frame| {
+            frame.stmt_buf.deinit();
+            frame.pre_decls.deinit();
+        }
+        self.stmt_stack.deinit();
         if (self.symbols.active_table) |table| {
             table.symbols.deinit();
         }
@@ -12981,19 +13024,15 @@ pub const TranspileProcess = struct {
         return null;
     }
 
-    /// Helper function to format and write values
+    /// Helper function to format and write values.
+    /// Routes through write_raw so output is correctly buffered when inside a
+    /// stmt_stack frame (same as write()).  Previously this wrote directly to
+    /// outbuf/ofile, which caused out-of-order output when mixed with write()
+    /// calls inside transpile_statement_in_current_scope.
     fn print(self: *Self, comptime fmt: []const u8, args: anytype) TranspileError!void {
-        if (self.flags.outf) {
-            const s = std.fmt.allocPrint(self.backing_allocator, fmt, args) catch return TranspileError.MemoryAllocationFailed;
-            defer self.backing_allocator.free(s);
-            self.ofile.?.writeStreamingAll(self.io, s) catch {
-                return TranspileError.FileWriteError;
-            };
-        } else {
-            self.outbuf.?.print(fmt, args) catch {
-                return TranspileError.BufferWriteError;
-            };
-        }
+        const s = std.fmt.allocPrint(self.backing_allocator, fmt, args) catch return TranspileError.MemoryAllocationFailed;
+        defer self.backing_allocator.free(s);
+        try self.write_raw(s);
     }
 
     /// Emits the shared `fprintf(...); abort();` pair a `panic(msg)` lowers to,
@@ -13128,16 +13167,46 @@ pub const TranspileProcess = struct {
         if (statement.type == .Variable) {
             try self.register_scope_variable(statement);
         }
-        // When debug info is enabled, queue a #line directive for write_indent() to emit.
         if (self.flags.debug_info) {
             self.pending_line_directive = statement.pos;
         }
+
+        // Push a statement frame so that method-receiver temps emitted during
+        // this statement can be hoisted to pre-declarations (MSVC requires
+        // variables to be declared before they are used as pointer targets,
+        // and does not support GNU statement expressions `({...})`).
+        self.stmt_stack.append(StmtFrame{
+            .stmt_buf = ArrayList(u8).init(self.allocator),
+            .pre_decls = ArrayList(u8).init(self.allocator),
+        }) catch return TranspileError.MemoryAllocationFailed;
+
         if (statement.type != .StatementReturn and statement.type != .StatementDefer) {
             try self.write_indent();
         }
         try self.transpile_node(statement.*);
         if (self.node_needs_trailing_semicolon(statement.*)) {
             try self.write(";");
+        }
+
+        // Pop and flush the frame.
+        var frame = self.stmt_stack.pop() orelse unreachable;
+        defer {
+            frame.stmt_buf.deinit();
+            frame.pre_decls.deinit();
+        }
+        if (frame.pre_decls.items.len > 0) {
+            // Emit the hoisted temp declarations at the same scope level BEFORE
+            // the statement. No block wrapping — that would scope the statement's
+            // own declared variables (e.g. `bool found = ...;`) inside a `{}`
+            // block, making them invisible to later code.  Temp names are unique
+            // across the whole function (counter-based), so no collision risk.
+            // The pre-decl content starts with indent spaces (not a newline), so
+            // we emit a leading "\n" to avoid running it onto the previous line.
+            try self.write_raw("\n");
+            try self.write_raw(frame.pre_decls.items);
+            try self.write_raw(frame.stmt_buf.items);
+        } else {
+            try self.write_raw(frame.stmt_buf.items);
         }
     }
 
@@ -13404,6 +13473,21 @@ pub const TranspileProcess = struct {
     }
 
     fn write_raw(self: *Self, bytes: []const u8) TranspileError!void {
+        if (self.mrecv_recv_buf) |buf| {
+            buf.appendSlice(bytes) catch return TranspileError.MemoryAllocationFailed;
+            return;
+        }
+        if (self.stmt_stack.items.len > 0) {
+            const top = &self.stmt_stack.items[self.stmt_stack.items.len - 1];
+            const target = if (self.pre_decls_mode) &top.pre_decls else &top.stmt_buf;
+            target.appendSlice(bytes) catch return TranspileError.MemoryAllocationFailed;
+            return;
+        }
+        try self.write_raw_direct(bytes);
+    }
+
+    /// Write directly to the configured output (file or outbuf), bypassing stmt_stack.
+    fn write_raw_direct(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
             self.ofile.?.writeStreamingAll(self.io, bytes) catch {
                 return TranspileError.FileWriteError;
@@ -14110,31 +14194,76 @@ pub const TranspileProcess = struct {
     fn emit_materialized_field_method_call(self: *Self, fbase: ast.Node, fbase_type_name: []const u8, field_name: []const u8, field_is_pointer: bool, fn_name: []const u8, args_node: ?*ast.Node) TranspileError!void {
         const tmp = try self.next_tmp_name("frecv");
         defer self.allocator.free(tmp);
-        try self.write("({ ");
-        try self.write(self.canonical_compound_name(fbase_type_name));
-        try self.write(" ");
-        try self.write(tmp);
-        try self.write(" = ");
+        const canon_name = self.canonical_compound_name(fbase_type_name);
+
+        // Capture the base expression so we can hoist a pre-declaration.
+        var base_expr_buf = ArrayList(u8).init(self.allocator);
+        defer base_expr_buf.deinit();
+        const saved_recv_buf = self.mrecv_recv_buf;
+        self.mrecv_recv_buf = &base_expr_buf;
         try self.transpile_node(fbase);
-        try self.write("; (");
-        try self.write_module_impl_method_ref(fn_name);
-        try self.write("(");
-        if (!field_is_pointer) try self.write("&(");
-        try self.write(tmp);
-        try self.write(".");
-        try self.write(field_name);
-        if (!field_is_pointer) try self.write(")");
-        if (args_node) |right| {
-            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
-                right.node_variant.?.paren.exp.*
-            else
-                right.*;
-            if (inner.type != .Blank) {
-                try self.write(", ");
-                try self.transpile_node(inner);
+        self.mrecv_recv_buf = saved_recv_buf;
+
+        if (self.stmt_stack.items.len > 0) {
+            const frame = &self.stmt_stack.items[self.stmt_stack.items.len - 1];
+            const il = self.indent_level * 4;
+            var i: u32 = 0;
+            while (i < il) : (i += 1) {
+                frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
             }
+            frame.pre_decls.appendSlice(canon_name) catch return TranspileError.MemoryAllocationFailed;
+            frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
+            frame.pre_decls.appendSlice(tmp) catch return TranspileError.MemoryAllocationFailed;
+            frame.pre_decls.appendSlice(" = ") catch return TranspileError.MemoryAllocationFailed;
+            frame.pre_decls.appendSlice(base_expr_buf.items) catch return TranspileError.MemoryAllocationFailed;
+            frame.pre_decls.appendSlice(";\n") catch return TranspileError.MemoryAllocationFailed;
+
+            try self.write("(");
+            try self.write_module_impl_method_ref(fn_name);
+            try self.write("(");
+            if (!field_is_pointer) try self.write("&(");
+            try self.write(tmp);
+            try self.write(".");
+            try self.write(field_name);
+            if (!field_is_pointer) try self.write(")");
+            if (args_node) |right| {
+                const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                    right.node_variant.?.paren.exp.*
+                else
+                    right.*;
+                if (inner.type != .Blank) {
+                    try self.write(", ");
+                    try self.transpile_node(inner);
+                }
+            }
+            try self.write("))");
+        } else {
+            try self.write("({ ");
+            try self.write(canon_name);
+            try self.write(" ");
+            try self.write(tmp);
+            try self.write(" = ");
+            try self.write(base_expr_buf.items);
+            try self.write("; (");
+            try self.write_module_impl_method_ref(fn_name);
+            try self.write("(");
+            if (!field_is_pointer) try self.write("&(");
+            try self.write(tmp);
+            try self.write(".");
+            try self.write(field_name);
+            if (!field_is_pointer) try self.write(")");
+            if (args_node) |right| {
+                const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                    right.node_variant.?.paren.exp.*
+                else
+                    right.*;
+                if (inner.type != .Blank) {
+                    try self.write(", ");
+                    try self.transpile_node(inner);
+                }
+            }
+            try self.write(")); })");
         }
-        try self.write(")); })");
     }
 
     /// Classifies a `fit` subject expression so codegen can choose a lowering:
@@ -20620,37 +20749,82 @@ pub const TranspileProcess = struct {
                                 // Quirk method on a CALL RESULT, e.g. `make(&s).weight()`.
                                 // The receiver is an rvalue (no name in scope), so vtable
                                 // dispatch must materialize it once into a temp — emitting
-                                // `recv` twice would evaluate the call twice. Lower to a
-                                // statement-expression: `({ Q __t = recv; __t.vtable->m(__t.self, args); })`.
+                                // `recv` twice would evaluate the call twice.
+                                // When inside a stmt_stack frame, hoist the temp declaration
+                                // to pre_decls to avoid GNU statement expressions ({...}).
+                                // Otherwise fall back to `({ Q __t = recv; __t.vtable->m(...); })`.
                                 if (!force_dynamic_quirk_dispatch and !self.expr_is_quirk_typed_from_scope(recv.?.*)) {
                                     if (self.expr_call_return_quirk_name(recv.?.*)) |qname| {
                                         const mname = member.?.data.?.sval.items;
                                         const tmp = try self.next_tmp_name("qrecv");
                                         defer self.allocator.free(tmp);
-                                        try self.write("({ ");
-                                        try self.write(qname);
-                                        try self.write(" ");
-                                        try self.write(tmp);
-                                        try self.write(" = ");
-                                        try self.transpile_node(recv.?.*);
-                                        try self.write("; ");
-                                        try self.write(tmp);
-                                        try self.write(".vtable->");
-                                        try self.write(mname);
-                                        try self.write("(");
-                                        try self.write(tmp);
-                                        try self.write(".self");
-                                        if (exp.right) |right| {
-                                            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
-                                                right.node_variant.?.paren.exp.*
-                                            else
-                                                right.*;
-                                            if (inner.type != .Blank) {
-                                                try self.write(", ");
-                                                try self.transpile_node(inner);
+                                        if (self.stmt_stack.items.len > 0) {
+                                            // Hoist: emit `qname tmp = recv;` into pre_decls.
+                                            // Write DIRECTLY to frame.pre_decls (not via write_raw) so
+                                            // that an outer mrecv_recv_buf capture doesn't intercept it.
+                                            var recv_buf = ArrayList(u8).init(self.allocator);
+                                            defer recv_buf.deinit();
+                                            const prev_buf = self.mrecv_recv_buf;
+                                            self.mrecv_recv_buf = &recv_buf;
+                                            try self.transpile_node(recv.?.*);
+                                            self.mrecv_recv_buf = prev_buf;
+                                            const frame = &self.stmt_stack.items[self.stmt_stack.items.len - 1];
+                                            const il = self.indent_level * 4;
+                                            var si: u32 = 0;
+                                            while (si < il) : (si += 1) {
+                                                frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
                                             }
+                                            frame.pre_decls.appendSlice(qname) catch return TranspileError.MemoryAllocationFailed;
+                                            frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
+                                            frame.pre_decls.appendSlice(tmp) catch return TranspileError.MemoryAllocationFailed;
+                                            frame.pre_decls.appendSlice(" = ") catch return TranspileError.MemoryAllocationFailed;
+                                            frame.pre_decls.appendSlice(recv_buf.items) catch return TranspileError.MemoryAllocationFailed;
+                                            frame.pre_decls.appendSlice(";\n") catch return TranspileError.MemoryAllocationFailed;
+                                            // Emit the call expression inline.
+                                            try self.write("(");
+                                            try self.write(tmp);
+                                            try self.write(".vtable->");
+                                            try self.write(mname);
+                                            try self.write("(");
+                                            try self.write(tmp);
+                                            try self.write(".self");
+                                            if (exp.right) |right| {
+                                                const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                    right.node_variant.?.paren.exp.*
+                                                else
+                                                    right.*;
+                                                if (inner.type != .Blank) {
+                                                    try self.write(", ");
+                                                    try self.transpile_node(inner);
+                                                }
+                                            }
+                                            try self.write("))");
+                                        } else {
+                                            try self.write("({ ");
+                                            try self.write(qname);
+                                            try self.write(" ");
+                                            try self.write(tmp);
+                                            try self.write(" = ");
+                                            try self.transpile_node(recv.?.*);
+                                            try self.write("; ");
+                                            try self.write(tmp);
+                                            try self.write(".vtable->");
+                                            try self.write(mname);
+                                            try self.write("(");
+                                            try self.write(tmp);
+                                            try self.write(".self");
+                                            if (exp.right) |right| {
+                                                const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                    right.node_variant.?.paren.exp.*
+                                                else
+                                                    right.*;
+                                                if (inner.type != .Blank) {
+                                                    try self.write(", ");
+                                                    try self.transpile_node(inner);
+                                                }
+                                            }
+                                            try self.write("); })");
                                         }
-                                        try self.write("); })");
                                         return;
                                     }
                                 }
@@ -20837,13 +21011,62 @@ pub const TranspileProcess = struct {
                                         if (fn_name) |resolved_fn_name| {
                                             const tmp = try self.next_tmp_name("mrecv");
                                             defer self.allocator.free(tmp);
-                                            try self.write("({ ");
-                                            try self.write(recv_canon);
-                                            try self.write(" ");
-                                            try self.write(tmp);
-                                            try self.write(" = ");
+
+                                            // Capture the receiver expression into a temporary
+                                            // buffer, then hoist a pre-declaration into the
+                                            // enclosing statement frame. This produces standard
+                                            // C (no GNU statement expressions) so MSVC accepts it.
+                                            var recv_expr_buf = ArrayList(u8).init(self.allocator);
+                                            defer recv_expr_buf.deinit();
+                                            const saved_recv_buf = self.mrecv_recv_buf;
+                                            self.mrecv_recv_buf = &recv_expr_buf;
                                             try self.transpile_node(recv.?.*);
-                                            try self.write("; (");
+                                            self.mrecv_recv_buf = saved_recv_buf;
+
+                                            // Append the pre-declaration to the enclosing frame.
+                                            if (self.stmt_stack.items.len > 0) {
+                                                const frame = &self.stmt_stack.items[self.stmt_stack.items.len - 1];
+                                                const il = self.indent_level * 4;
+                                                var i: u32 = 0;
+                                                while (i < il) : (i += 1) {
+                                                    frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
+                                                }
+                                                frame.pre_decls.appendSlice(recv_canon) catch return TranspileError.MemoryAllocationFailed;
+                                                frame.pre_decls.append(' ') catch return TranspileError.MemoryAllocationFailed;
+                                                frame.pre_decls.appendSlice(tmp) catch return TranspileError.MemoryAllocationFailed;
+                                                frame.pre_decls.appendSlice(" = ") catch return TranspileError.MemoryAllocationFailed;
+                                                frame.pre_decls.appendSlice(recv_expr_buf.items) catch return TranspileError.MemoryAllocationFailed;
+                                                frame.pre_decls.appendSlice(";\n") catch return TranspileError.MemoryAllocationFailed;
+                                            } else {
+                                                // Fallback: emit GNU statement expression when no
+                                                // enclosing frame exists (should not occur in normal
+                                                // function-body emission).
+                                                try self.write("({ ");
+                                                try self.write(recv_canon);
+                                                try self.write(" ");
+                                                try self.write(tmp);
+                                                try self.write(" = ");
+                                                try self.write(recv_expr_buf.items);
+                                                try self.write("; (");
+                                                try self.write_module_impl_method_ref(resolved_fn_name);
+                                                try self.write("(&");
+                                                try self.write(tmp);
+                                                if (exp.right) |right| {
+                                                    const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                        right.node_variant.?.paren.exp.*
+                                                    else
+                                                        right.*;
+                                                    if (inner.type != .Blank) {
+                                                        try self.write(", ");
+                                                        try self.transpile_node(inner);
+                                                    }
+                                                }
+                                                try self.write(")); })");
+                                                return;
+                                            }
+
+                                            // Emit just the method call; the temp is declared above.
+                                            try self.write("(");
                                             try self.write_module_impl_method_ref(resolved_fn_name);
                                             try self.write("(&");
                                             try self.write(tmp);
@@ -20857,7 +21080,7 @@ pub const TranspileProcess = struct {
                                                     try self.transpile_node(inner);
                                                 }
                                             }
-                                            try self.write(")); })");
+                                            try self.write("))");
                                             return;
                                         }
                                     }
@@ -22408,7 +22631,14 @@ pub const TranspileProcess = struct {
                         if (asrt.message) |msg| {
                             try self.write("fprintf(stderr, \"Assertion failed at ");
                             if (node.pos) |p| {
-                                try self.print("{s}:{d}: ", .{ p.filename, p.line });
+                                for (p.filename) |c| {
+                                    if (c == '\\') {
+                                        try self.write("\\\\");
+                                    } else {
+                                        try self.write(&[_]u8{c});
+                                    }
+                                }
+                                try self.print(":{d}: ", .{p.line});
                             }
                             try self.write("%s\\n\", ");
                             try self.transpile_node(msg.*);
