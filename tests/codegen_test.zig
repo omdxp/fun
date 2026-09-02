@@ -10257,13 +10257,13 @@ test "panic(msg) in return position lowers to a bare fprintf+abort (no return-va
     try std.testing.expect(std.mem.indexOf(u8, after_abort[0..next_brace], "return") == null);
 }
 
-test "panic(msg) in a general expression position lowers to a GNU statement expression" {
+test "panic(msg) in a general expression position lowers to a comma expression" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_panic_expr.fn";
 
     // Used as a `let` initializer (not the special-cased return position),
-    // `panic(...)` still needs to be ONE C expression, so it lowers to a `({
-    // ...; 0; })` statement expression instead.
+    // `panic(...)` still needs to be ONE C expression. It lowers to a comma
+    // expression `(fprintf(...), abort(), 0)` so MSVC accepts it.
     const input =
         "fun main() num {\n" ++
         "  num x = panic(\"cannot happen\");\n" ++
@@ -10274,7 +10274,7 @@ test "panic(msg) in a general expression position lowers to a GNU statement expr
     defer allocator.free(out_owned);
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"cannot happen\"); abort(); 0; })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "(fprintf(stderr_stream(), \"panic: %s\\n\", \"cannot happen\"), abort(), 0)") != null);
 }
 
 test "panic(msg): unreached branch does not affect the normal return path" {

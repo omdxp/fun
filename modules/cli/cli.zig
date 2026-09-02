@@ -1447,8 +1447,13 @@ fn detect_compiler_flavor(argv0: []const u8) CompilerFlavor {
 fn append_default_compile_args(allocator: mem.Allocator, argv_list: *ArrayList([]const u8), flavor: CompilerFlavor, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
     switch (flavor) {
         .cl => {
+            // C17 mode is required for compound-literal initializers and
+            // mixed declarations/statements; /W0 silences warnings that
+            // are noise for generated C.
+            try argv_list.append(try allocator.dupe(u8, "/std:c17"));
+            try argv_list.append(try allocator.dupe(u8, "/W0"));
             try argv_list.append(try allocator.dupe(u8, c_path));
-            const out_flag = try std.fmt.allocPrint(allocator, "/Fe{s}", .{exe_file});
+            const out_flag = try std.fmt.allocPrint(allocator, "/Fe:{s}", .{exe_file});
             try argv_list.append(out_flag);
         },
         else => {
@@ -3896,6 +3901,9 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
             // doesn't dump a real-looking compiler error into CI logs.
             if (!builtin.is_test) {
                 std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                // cl.exe sends errors to stdout; gcc/clang send them to stderr.
+                // Print both so no output is lost regardless of compiler.
+                std.Io.File.stderr().writeStreamingAll(io, result.stdout) catch {};
                 std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
             }
             return CliError.CompilationFailed;
@@ -3930,6 +3938,7 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
             if (result.term.exited != 0) {
                 if (!builtin.is_test) {
                     std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                    std.Io.File.stderr().writeStreamingAll(io, result.stdout) catch {};
                     std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
                 }
                 return CliError.CompilationFailed;
@@ -4163,20 +4172,24 @@ pub fn run_build_in(allocator: mem.Allocator, io: std.Io, root: []const u8, debu
             tmp_file.close(io);
         }
 
-        var tp = try codegen.TranspileProcess.init(allocator, tmp_path, out_c_path, .{
-            .exec = false,
-            .outf = true,
-            .debug_info = debug_info,
-        });
-        var lp = lexer.LexProcess.init(&tp);
-        var pp = parser.ParseProcess.init(&tp);
-        defer {
-            lp.deinit();
-            tp.deinit();
+        {
+            var tp = try codegen.TranspileProcess.init(allocator, tmp_path, out_c_path, .{
+                .exec = false,
+                .outf = true,
+                .debug_info = debug_info,
+            });
+            var lp = lexer.LexProcess.init(&tp);
+            var pp = parser.ParseProcess.init(&tp);
+            defer {
+                lp.deinit();
+                tp.deinit();
+            }
+            try lp.lex();
+            try pp.parse();
+            try tp.transpile();
         }
-        try lp.lex();
-        try pp.parse();
-        try tp.transpile();
+        // tp/lp are fully deinited (output file handle released) before
+        // invoking the C compiler, which needs to open the same file.
 
         const exe_leaf = if (builtin.target.os.tag == .windows)
             try std.fmt.allocPrint(allocator, "{s}.exe", .{b.name})

@@ -13038,10 +13038,8 @@ pub const TranspileProcess = struct {
     /// Emits the shared `fprintf(...); abort();` pair a `panic(msg)` lowers to,
     /// as bare C STATEMENTS (no wrapping expression, no trailing dummy value).
     /// Used directly in return-statement position (where `abort()` never
-    /// returning means no value is needed at all) and wrapped in a `({ ...
-    /// 0; })` GNU statement expression everywhere else `.Panic` is emitted as
-    /// a general expression (see the `.Panic` case in the main transpile
-    /// switch).
+    /// returning means no value is needed at all). In general expression position
+    /// the `.Panic` case wraps these into a comma expression instead.
     fn write_panic_message_and_abort(self: *Self, message: ast.Node) TranspileError!void {
         try self.write("fprintf(stderr_stream(), \"panic: %s\\n\", ");
         try self.transpile_node(message);
@@ -16575,6 +16573,10 @@ pub const TranspileProcess = struct {
                     try self.write(c.name.items);
                     try self.write(" {\n");
 
+                    if (c.fields.count == 0) {
+                        // MSVC C requires at least one struct member; add a zero-size padding field.
+                        try self.write("  char __fun_pad;\n");
+                    }
                     for (c.fields.items()) |f| {
                         try self.write("  ");
                         const is_fixed_array = f.dtype.array != null and !f.dtype.array.?.brackets.is_empty();
@@ -19915,10 +19917,20 @@ pub const TranspileProcess = struct {
             try self.write("#include <io.h>\n");
             try self.write("#include <fcntl.h>\n");
             try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("#if defined(__GNUC__) || defined(__clang__)\n");
             try self.write("__attribute__((constructor)) static void __fun_win_stdio_binary(void) {\n");
             try self.write("  _setmode(_fileno(stdout), _O_BINARY);\n");
             try self.write("  _setmode(_fileno(stderr), _O_BINARY);\n");
             try self.write("}\n");
+            try self.write("#elif defined(_MSC_VER)\n");
+            try self.write("static void __fun_win_stdio_binary(void);\n");
+            try self.write("#pragma section(\".CRT$XCU\", read)\n");
+            try self.write("__declspec(allocate(\".CRT$XCU\")) static void (*__fun_win_stdio_binary_p)(void) = __fun_win_stdio_binary;\n");
+            try self.write("static void __fun_win_stdio_binary(void) {\n");
+            try self.write("  _setmode(_fileno(stdout), _O_BINARY);\n");
+            try self.write("  _setmode(_fileno(stderr), _O_BINARY);\n");
+            try self.write("}\n");
+            try self.write("#endif\n");
             try self.write("#endif\n");
             // `environ` (the process environment, needed by std.c.process's
             // posix_spawn binding to inherit the parent's env) is a global, not a
@@ -22068,7 +22080,13 @@ pub const TranspileProcess = struct {
 
                 const prev_fn_return = self.current_fn_return;
                 defer self.current_fn_return = prev_fn_return;
-                self.current_fn_return = if (function.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+                // Use pointer capture (`|*rt|`) so dtype_ref stays stable for the
+                // Function case block; value capture (`|rt|`) would dangle after the if.
+                if (function.rtype) |*rt| {
+                    self.current_fn_return = try self.type_from_dtype_with_mangled(rt);
+                } else {
+                    self.current_fn_return = CheckedType{ .base = .Void };
+                }
 
                 // Function scope (arguments live here; body gets its own nested scope).
                 _ = try self.new_scope();
@@ -22580,13 +22598,18 @@ pub const TranspileProcess = struct {
                             defer self.allocator.free(tmp);
                             try self.write_indent();
                             // Only use explicit type for primitive return types (Num, Str, Bin,
-                            // Dec, Chr). Compound/Unknown types risk emitting un-monomorphized
-                            // names like `Vec` instead of `Vec__str`; __auto_type stays correct
-                            // for those on GCC/Clang.
+                            // Prefer an explicit C type. `checked_type_to_dtype` resolves
+                            // generics/compounds when `mangled_name` is set; falls back to
+                            // `ret_t.name` for plain compound types; last resort __auto_type.
                             const ret_dtype_opt = try self.checked_type_to_dtype(ret_t);
-                            const use_explicit_type = ret_t.base != .Unknown and ret_dtype_opt != null;
-                            if (use_explicit_type) {
+                            const compound_name = ret_t.mangled_name orelse ret_t.name;
+                            if (ret_dtype_opt != null) {
                                 try self.write_type(ret_dtype_opt.?.*);
+                                try self.write(" ");
+                            } else if (compound_name) |cname| {
+                                try self.write(cname);
+                                var _pd: usize = 0;
+                                while (_pd < ret_t.pointer_depth) : (_pd += 1) try self.write("*");
                                 try self.write(" ");
                             } else {
                                 try self.write("__auto_type ");
@@ -23228,9 +23251,12 @@ pub const TranspileProcess = struct {
             // (see `transpile_prelude`), so no import is required for this.
             .Panic => {
                 if (node.node_variant) |nv| {
-                    try self.write("({ ");
-                    try self.write_panic_message_and_abort(nv.panic_expr.message.*);
-                    try self.write(" 0; })");
+                    // Comma expression avoids GNU statement expression ({...}),
+                    // which is rejected by MSVC. abort() never returns so 0 is
+                    // unreachable but gives the expression a well-typed value.
+                    try self.write("(fprintf(stderr_stream(), \"panic: %s\\n\", ");
+                    try self.transpile_node(nv.panic_expr.message.*);
+                    try self.write("), abort(), 0)");
                 }
             },
             else => {},

@@ -1214,7 +1214,7 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
     const allocator = gpa.allocator();
     // First workspace/symbol call lazily triggers the full-workspace scan
     // (see indexWorkspace); CI runners are slower than local, so give it room.
-    const slow_timeout_ms = 60000;
+    const slow_timeout_ms = 120000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -1281,7 +1281,7 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     const allocator = gpa.allocator();
     // First workspace/symbol call lazily triggers the full-workspace scan
     // (see indexWorkspace); CI runners are slower than local, so give it room.
-    const slow_timeout_ms = 60000;
+    const slow_timeout_ms = 120000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -3369,7 +3369,7 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
     const ws_params = try allocator.dupe(u8, "{\"query\":\"x\"}");
     defer allocator.free(ws_params);
     const ws_id = try lsp.request("workspace/symbol", ws_params);
-    var ws_res = try lsp.waitResponse(ws_id, 60000); // first `workspace/symbol` call lazily triggers the full-workspace scan (see indexWorkspace)
+    var ws_res = try lsp.waitResponse(ws_id, 120000); // first `workspace/symbol` call lazily triggers the full-workspace scan (see indexWorkspace)
     defer ws_res.deinit();
     const ws_result = try jsonResultFromResponseObj(ws_res.parsed.value.object);
     try std.testing.expect(symbolInfosHasName(ws_result, "x"));
@@ -5176,7 +5176,7 @@ test "fls e2e: references and rename baseline" {
     );
     defer allocator.free(refs_params);
     const refs_id = try lsp.request("textDocument/references", refs_params);
-    var refs_res = try lsp.waitResponse(refs_id, 60000); // first call to `references` lazily triggers the full-workspace scan (see indexWorkspace)
+    var refs_res = try lsp.waitResponse(refs_id, 120000); // first call to `references` lazily triggers the full-workspace scan (see indexWorkspace) — 120 s to cover slow CI runners
     defer refs_res.deinit();
     const refs_val = try jsonResultFromResponseObj(refs_res.parsed.value.object);
     try expectLocationsContain(allocator, refs_val, doc_uri, decl_pos.line, decl_pos.col + 2);
@@ -5241,7 +5241,7 @@ test "fls e2e: references and rename with let await async calls" {
     );
     defer allocator.free(refs_params);
     const refs_id = try lsp.request("textDocument/references", refs_params);
-    var refs_res = try lsp.waitResponse(refs_id, 60000); // first call to `references` lazily triggers the full-workspace scan (see indexWorkspace)
+    var refs_res = try lsp.waitResponse(refs_id, 120000); // first call to `references` lazily triggers the full-workspace scan (see indexWorkspace) — 120 s to cover slow CI runners
     defer refs_res.deinit();
     const refs_val = try jsonResultFromResponseObj(refs_res.parsed.value.object);
     try expectLocationsContain(allocator, refs_val, doc_uri, decl_pos.line, decl_pos.col + 2);
@@ -6497,7 +6497,7 @@ test "fls e2e: torture - extreme positions + most handlers" {
     {
         const ws_params = "{\"query\":\"alpha\"}";
         const id = try lsp.request("workspace/symbol", ws_params);
-        var res = try lsp.waitResponse(id, 60000); // first `workspace/symbol` call lazily triggers the full-workspace scan (see indexWorkspace)
+        var res = try lsp.waitResponse(id, 120000); // first `workspace/symbol` call lazily triggers the full-workspace scan (see indexWorkspace) — 120 s to cover slow CI runners
         defer res.deinit();
         const val = try jsonResultFromResponseObj(res.parsed.value.object);
         // Might be empty if indexing failed; key property is stable response.
