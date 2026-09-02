@@ -541,6 +541,10 @@ impl Lexer {
       if c == '\n' {
         ret .Continues;
       }
+      if c == '\r' {
+        self._advance();
+        continue;
+      }
       b.append_char(self._advance());
     }
     ret .Eof;
