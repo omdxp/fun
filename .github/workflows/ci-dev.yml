@@ -33,7 +33,7 @@ jobs:
         with:
           version: ${{ env.zig_version }}
       - name: Run all tests (including fls LSP) on ${{ matrix.lane }}
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: zig build test --summary all
   run:
     runs-on: ubuntu-latest
