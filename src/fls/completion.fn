@@ -2126,10 +2126,21 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
           _collect_locals(fr.body, items, program, file, line);
         }
         .Iter(fi) -> {
+          str map_key = "";
+          str map_value = "";
+          bin is_map = fi.has_index_name &&
+            _for_iter_map_kv(fi.iterable, program, file, line, &map_key, &map_value);
           if fi.has_index_name {
-            items.push(_item(fi.index_name, .Variable, "num"));
+            str index_type = "num";
+            if is_map {
+              index_type = map_key;
+            }
+            items.push(_item(fi.index_name, .Variable, index_type));
           }
-          str item_type = _for_iter_item_type(fi.iterable, program, file, line);
+          str item_type = map_value;
+          if !is_map {
+            item_type = _for_iter_item_type(fi.iterable, program, file, line);
+          }
           items.push(_item(fi.item_name, .Variable, item_type));
           _collect_locals(fi.body, items, program, file, line);
         }

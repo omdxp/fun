@@ -2915,6 +2915,33 @@ test "hover and completion resolve a for loop's own bound variables, item type i
   assert contains(hover(&reads, doc, 8, 8), "num i"), "expected the range loop's own index";
 }
 
+test "the two-variable for loop's own bindings are key/value for a Map, not index/item" {
+  // User-reported: `for name, score :: scores` (scores: Map<str,
+  // num>) hovered name as "num" (the array-form's own always-num
+  // index) and score as "str" (Map's own single-binding key-only
+  // resolution, reused as if it were the item type) - neither
+  // resolution actually applies to a Map's own two-binding form,
+  // which yields key/value pairs specifically, not index/item.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///formapkv.fn";
+  doc.path = "formapkv.fn";
+  doc.text = `fun use_it(Map<str, num> scores) {
+  `  for name, score :: scores {
+  `    _ = name;
+  `    _ = score;
+  `  }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 1, 6), "str name"), "expected the Map's own key type, not a bare num index";
+  assert contains(hover(&reads, doc, 1, 13), "num score"), "expected the Map's own value type, not its key type again";
+  str offered = completion(&reads, doc, 2, 8, false);
+  assert contains(offered, `"label":"name"`), "expected the key binding offered in scope completion";
+  assert contains(offered, `"label":"score"`), "expected the value binding offered in scope completion";
+}
+
 test "hover and completion resolve a local declared inside a fit arm, including inside an impl method" {
   // _lookup_in_body (hover's own local search) and _declared
   // (completion's scope walk) both had every other statement shape

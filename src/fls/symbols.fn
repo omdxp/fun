@@ -3313,11 +3313,22 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
           ret _lookup_in_body(fr.body, name, program, file, line);
         }
         .Iter(fi) -> {
+          str map_key = "";
+          str map_value = "";
+          bin is_map = fi.has_index_name &&
+            _for_iter_map_kv(fi.iterable, program, file, line, &map_key, &map_value);
           if fi.has_index_name && equals(fi.index_name, name) {
-            ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
+            str index_type = "num";
+            if is_map {
+              index_type = map_key;
+            }
+            ret .Some(_declaration(name, .Local, format("{str} {str}", index_type, name), body.pos));
           }
           if equals(fi.item_name, name) {
-            str item_type = _for_iter_item_type(fi.iterable, program, file, line);
+            str item_type = map_value;
+            if !is_map {
+              item_type = _for_iter_item_type(fi.iterable, program, file, line);
+            }
             str detail = name;
             if !equals(item_type, "") {
               detail = format("{str} {str}", item_type, name);
@@ -3339,13 +3350,68 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
   ret .None;
 }
 
+// Whether `iterable` resolves to a bare local declared `Map<K, V>`
+// and, if so, its own key and value types. `for k, v :: m` yields
+// key/value pairs specifically for a Map - unlike every other
+// iterable's own two-binding form (`for i, item :: arr`), where the
+// first binding is always a plain `num` index and the second is the
+// element type - so the two-binding case needs to special-case a Map
+// before falling back to that assumption. Both out-params are left ""
+// and this returns false for anything else (a Vec/Set/array, or
+// deeper than a bare local), leaving the existing index-is-num
+// assumption alone for those.
+pub fun _for_iter_map_kv(
+  Node* iterable,
+  Vec<Node>* program,
+  str file,
+  num line,
+  str* out_key_type,
+  str* out_value_type
+) bin {
+  *out_key_type = "";
+  *out_value_type = "";
+  if iterable == nil {
+    ret false;
+  }
+  fit iterable.kind {
+    .Identifier(s) -> {
+      let found = _lookup_local(program, s, file, line);
+      if found.is_none() {
+        ret false;
+      }
+      str declared = bare_type_from_detail(found.unwrap().detail);
+      bin is_map = equals(declared, "Map");
+      free(declared);
+      if !is_map {
+        ret false;
+      }
+      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
+      if args.len < 2 {
+        _free_str_vec_deep(&args);
+        ret false;
+      }
+      str key_arg = args.get(0);
+      str value_arg = args.get(1);
+      *out_key_type = substr(key_arg, 0, len(key_arg));
+      *out_value_type = substr(value_arg, 0, len(value_arg));
+      _free_str_vec_deep(&args);
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
 // A for-each loop's own iterable, best-effort: a bare local's own
 // declared generic argument (`Vec<num> nums` -> `num`), or one
 // bracket pair stripped off a raw array's own declared type
 // (`num[] arr` -> `num`, `num[][][] tensor` -> `num[][]`). "" for
 // anything deeper (a chain, a call), matching this file's own
 // established scope for AST-only, token-free inference elsewhere
-// (`fit_subject_type` and its own siblings).
+// (`fit_subject_type` and its own siblings). For a Map specifically,
+// this is what its own single-binding for-each (`for k : m`) yields
+// - just the key type, the first generic arg - correct as-is; the
+// two-binding form (`for k, v :: m`) needs `_for_iter_map_kv` instead,
+// since that one also needs the VALUE type for the second binding.
 pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num line) str {
   if iterable == nil {
     ret "";
