@@ -20,7 +20,7 @@ imp std.fs;
 imp std.c.mem;
 
 // A source file compiled to an executable.
-pub compound BinTarget {
+pub compound ExeTarget {
   str name;
   str path;
 }
@@ -39,7 +39,7 @@ pub enum PackageKind {
   // A library only.
   Lib,
   // One or more executables only.
-  Bin,
+  Exe,
   // A library alongside one or more executables.
   Mixed,
 }
@@ -49,26 +49,26 @@ pub compound Manifest {
   str version;
   bin has_lib;
   LibTarget lib;
-  Vec<BinTarget> bins;
+  Vec<ExeTarget> exes;
 }
 
 impl Manifest {
   // What this package builds, once targets have been resolved.
   pub kind() PackageKind {
-    if self.has_lib && self.bins.len > 0 {
+    if self.has_lib && self.exes.len > 0 {
       ret .Mixed;
     }
     if self.has_lib {
       ret .Lib;
     }
-    if self.bins.len > 0 {
-      ret .Bin;
+    if self.exes.len > 0 {
+      ret .Exe;
     }
     ret .Empty;
   }
 
   pub free() {
-    self.bins.free();
+    self.exes.free();
   }
 }
 
@@ -84,7 +84,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.has_lib = false;
   m.lib.name = "";
   m.lib.path = "";
-  m.bins.init(0);
+  m.exes.init(0);
 
   let pkg = doc.table("package");
   if pkg.is_none() {
@@ -110,7 +110,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   num ai = 0;
   for ai < doc.array_tables.len {
     str aname = doc.array_tables.get(ai).name;
-    if !equals(aname, "bin") {
+    if !equals(aname, "exe") {
       ret .Err(format("unknown table `[[{str}]]`", aname));
     }
     ai = ai + 1;
@@ -123,22 +123,22 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     m.lib.path = lib.unwrap().get_str("path");
   }
 
-  let bins = doc.array("bin");
-  defer bins.free();
+  let exes = doc.array("exe");
+  defer exes.free();
   num i = 0;
-  for i < bins.len {
-    str name = bins.get(i).get_str("name");
-    str path = bins.get(i).get_str("path");
+  for i < exes.len {
+    str name = exes.get(i).get_str("name");
+    str path = exes.get(i).get_str("path");
     if equals(name, "") {
-      ret .Err("a [[bin]] is missing a `name`");
+      ret .Err("an [[exe]] is missing a `name`");
     }
     if equals(path, "") {
-      ret .Err(format("[[bin]] `{str}` is missing a `path`", name));
+      ret .Err(format("[[exe]] `{str}` is missing a `path`", name));
     }
-    BinTarget b;
-    b.name = name;
-    b.path = path;
-    m.bins.push(b);
+    ExeTarget e;
+    e.name = name;
+    e.path = path;
+    m.exes.push(e);
     i = i + 1;
   }
 
@@ -162,17 +162,17 @@ pub fun resolve_targets(Manifest* m, str root) {
     }
   }
 
-  if !m.has_lib && m.bins.len == 0 {
+  if !m.has_lib && m.exes.len == 0 {
     if exists(lib_path) {
       m.has_lib = true;
       m.lib.name = m.package_name;
       m.lib.path = lib_path;
     }
     if exists(main_path) {
-      BinTarget b;
-      b.name = m.package_name;
-      b.path = main_path;
-      m.bins.push(b);
+      ExeTarget e;
+      e.name = m.package_name;
+      e.path = main_path;
+      m.exes.push(e);
     }
   }
 }
@@ -239,12 +239,12 @@ pub fun manifest_const_node(str name, str value) Node {
   ret node_new(.Variable(v));
 }
 
-test "parses a package with a single binary" {
+test "parses a package with a single executable" {
   str text = `[package]
   `name = "demo"
   `version = "1.2.3"
   `
-  `[[bin]]
+  `[[exe]]
   `name = "app"
   `path = "src/main.fn"`;
   let r = parse_manifest(text);
@@ -252,26 +252,26 @@ test "parses a package with a single binary" {
   let m = r.unwrap();
   assert equals(m.package_name, "demo"), "expected the package name";
   assert equals(m.version, "1.2.3"), "expected the declared version";
-  assert m.bins.len == 1, "expected one binary target";
-  assert equals(m.bins.get(0).name, "app"), "expected the binary's name";
-  assert equals(m.bins.get(0).path, "src/main.fn"), "expected the binary's path";
-  assert m.kind() == .Bin, "expected a binary-only package";
+  assert m.exes.len == 1, "expected one executable target";
+  assert equals(m.exes.get(0).name, "app"), "expected the executable's name";
+  assert equals(m.exes.get(0).path, "src/main.fn"), "expected the executable's path";
+  assert m.kind() == .Exe, "expected an executable-only package";
 }
 
-test "parses several binaries" {
+test "parses several executables" {
   str text = `[package]
   `name = "demo"
   `
-  `[[bin]]
+  `[[exe]]
   `name = "one"
   `path = "src/one.fn"
   `
-  `[[bin]]
+  `[[exe]]
   `name = "two"
   `path = "src/two.fn"`;
   let m = parse_manifest(text).unwrap();
-  assert m.bins.len == 2, "expected both binary targets";
-  assert equals(m.bins.get(1).name, "two"), "expected the second target";
+  assert m.exes.len == 2, "expected both executable targets";
+  assert equals(m.exes.get(1).name, "two"), "expected the second target";
 }
 
 test "parses a library-only package" {
@@ -286,20 +286,20 @@ test "parses a library-only package" {
   assert m.kind() == .Lib, "expected a library-only package";
 }
 
-test "parses a package building both a library and a binary" {
+test "parses a package building both a library and an executable" {
   str text = `[package]
   `name = "both"
   `
   `[lib]
   `path = "src/lib.fn"
   `
-  `[[bin]]
+  `[[exe]]
   `name = "cli"
   `path = "src/main.fn"`;
   let m = parse_manifest(text).unwrap();
   assert m.kind() == .Mixed, "expected a mixed package";
   assert m.has_lib, "expected the library target";
-  assert m.bins.len == 1, "expected the binary target";
+  assert m.exes.len == 1, "expected the executable target";
 }
 
 test "a version left out defaults to 0.0.0" {
@@ -329,14 +329,14 @@ test "a missing package name is rejected" {
   assert r.is_err(), "expected a manifest with no package name to be rejected";
 }
 
-test "a bin without a path is rejected" {
+test "an exe without a path is rejected" {
   str text = `[package]
   `name = "demo"
   `
-  `[[bin]]
+  `[[exe]]
   `name = "app"`;
   let r = parse_manifest(text);
-  assert r.is_err(), "expected a bin with no path to be rejected";
+  assert r.is_err(), "expected an exe with no path to be rejected";
 }
 
 test "a value keeps its quotes stripped" {

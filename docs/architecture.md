@@ -36,4 +36,4 @@ The language model includes default 64-bit numeric types (`num`, `dec`), fixed-w
 
 ## Build System
 
-`fun build` reads [fun.toml](../fun.toml) and compiles the `[[bin]]` targets it declares (`fun`, `fls`) into `fun-out/bin/`. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full validation workflow.
+`fun build` reads [fun.toml](../fun.toml) and compiles the `[[exe]]` targets it declares (`fun`, `fls`) into `fun-out/bin/`. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full validation workflow.

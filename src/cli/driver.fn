@@ -979,7 +979,7 @@ pub fun build_project(bin debug_info) num {
   if m.kind() == .Empty {
     writeln_to(
       Sink.Stderr,
-      format("[Error]\npackage `{str}` declares no [lib] or [[bin]] target", m.package_name)
+      format("[Error]\npackage `{str}` declares no [lib] or [[exe]] target", m.package_name)
     );
     ret 1;
   }
@@ -1003,21 +1003,21 @@ pub fun build_project(bin debug_info) num {
   }
 
   num i = 0;
-  for i < m.bins.len {
-    BinTarget* b = &m.bins.data[i];
+  for i < m.exes.len {
+    ExeTarget* e = &m.exes.data[i];
     make_dir_all("fun-out/bin");
-    str c_path = path_join("fun-out/bin", format("{str}.c", b.name));
-    let lowered = compile_to_c(b.path, c_path, &defines);
+    str c_path = path_join("fun-out/bin", format("{str}.c", e.name));
+    let lowered = compile_to_c(e.path, c_path, &defines);
     if lowered.is_err() {
       writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
       ret 1;
     }
-    str exe = path_join("fun-out/bin", format("{str}{str}", b.name, exe_suffix()));
+    str exe = path_join("fun-out/bin", format("{str}{str}", e.name, exe_suffix()));
     let code = compile_c_to_exe(c_path, exe, debug_info);
     if code != 0 {
       ret 1;
     }
-    println(format("built {str} -> {str}", b.name, exe));
+    println(format("built {str} -> {str}", e.name, exe));
     i = i + 1;
   }
   ret 0;
@@ -1053,8 +1053,8 @@ pub fun init_project(str kind) num {
     resolved_kind = "exe";
   }
   bin wants_lib = equals(resolved_kind, "lib") || equals(resolved_kind, "mix");
-  bin wants_bin = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
-  if !wants_lib && !wants_bin {
+  bin wants_exe = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
+  if !wants_lib && !wants_exe {
     writeln_to(
       Sink.Stderr,
       format(
@@ -1085,8 +1085,8 @@ pub fun init_project(str kind) num {
     write_string("src/lib.fn", _init_lib_source());
     println("created src/lib.fn");
   }
-  if wants_bin {
-    toml.append(format("\n[[bin]]\nname = \"{str}\"\npath = \"src/main.fn\"\n", name));
+  if wants_exe {
+    toml.append(format("\n[[exe]]\nname = \"{str}\"\npath = \"src/main.fn\"\n", name));
     write_string("src/main.fn", _init_main_source());
     println("created src/main.fn");
   }

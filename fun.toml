@@ -2,10 +2,10 @@
 name = "fun"
 version = "0.50.0"
 
-[[bin]]
+[[exe]]
 name = "fun"
 path = "src/cli/main.fn"
 
-[[bin]]
+[[exe]]
 name = "fls"
 path = "src/fls/main.fn"
