@@ -3457,8 +3457,9 @@ test "inlay hints name each call argument, skip declarations, skip redundant mat
 
 test "inlay hints suppress the raw __let_infer__ sentinel rather than showing it verbatim" {
   // A bare copy of a let local whose OWN type this heuristic still
-  // can't resolve (an array literal, out of scope for every shape
-  // _infer_type covers) must not leak the parser's internal
+  // can't resolve (an enum shorthand - `.Red` needs the surrounding
+  // expected type to know which enum it names at all, not something
+  // _infer_type has a way to see) must not leak the parser's internal
   // placeholder into the hint text, and must not chase the copy into
   // a wrong hint either.
   AnalysisCache reads = analysis_cache_new();
@@ -3466,8 +3467,9 @@ test "inlay hints suppress the raw __let_infer__ sentinel rather than showing it
   Document doc;
   doc.uri = "file:///hints3.fn";
   doc.path = "hints3.fn";
-  doc.text = `fun main() {
-  `  let a = [1, 2, 3];
+  doc.text = `enum Color { Red, Green }
+  `fun main() {
+  `  let a = .Red;
   `  let b = a;
   `}`;
   doc.version = 1;

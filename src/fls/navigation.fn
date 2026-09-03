@@ -1049,8 +1049,12 @@ fun _int_literal_doc(num n) str {
   if negative {
     sign = "-";
   }
+  // Fenced, not plain prose: `_doc`'s own prose half renders as
+  // ordinary markdown, where a single `\n` is a soft line break (a
+  // space, not a line break per CommonMark) - a fence is what actually
+  // keeps each base on its own line.
   StringBuilder prose = string_builder_init(96);
-  prose.append("decimal: ");
+  prose.append("```\ndecimal: ");
   prose.append(sign);
   prose.append(format_num(magnitude));
   prose.append("\nhex:     ");
@@ -1065,6 +1069,7 @@ fun _int_literal_doc(num n) str {
   prose.append(sign);
   prose.append("0o");
   prose.append(to_octal(magnitude, 0));
+  prose.append("\n```");
 
   str note = _pow2_note(n);
   if !equals(note, "") {
