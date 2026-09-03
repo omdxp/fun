@@ -541,16 +541,20 @@ fun main() {
 
 ## C Compiler Selection
 
-By default, `fun` uses `zig cc`. You can override the compiler with environment variables:
+By default, `fun` tries `clang`, then `gcc`, then the platform's default `cc`
+(`cl` on Windows), using the first one it finds on `PATH`. A candidate that's
+found but fails to compile stops the search there rather than falling through
+to the next one, since a real compile error is never solved by switching
+compilers. You can override the compiler with environment variables:
 
-- `FUN_CC`: compiler command. If it contains `{src}` and `{out}`, it is treated as a full template.
-- `FUN_CC_ARGS`: extra arguments appended after the base command.
+- `FUN_CC`: the exact compiler command to use, in place of the search above.
+- `FUN_CC_ARGS`: extra arguments appended after the usual defaults, space-separated.
 
 Examples:
 
 - `FUN_CC=clang`
-- `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
-- `FUN_CC="clang -O2 {src} -o {out}"`
+- `FUN_CC=cl` (MSVC, on Windows)
+- `FUN_CC=gcc FUN_CC_ARGS="-O2 -Wall"`
 
 `fun fuzz` does NOT use `FUN_CC`/`FUN_CC_ARGS` — it needs a compiler whose
 toolchain bundles a coverage-guided fuzzing runtime specifically, which has

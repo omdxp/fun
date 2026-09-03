@@ -504,7 +504,7 @@ fun main() num {
 - **Direct Mapping**: `imp std.c.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
 - **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
-- **Compiler selection**: `fun` uses `zig cc` by default. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
+- **Compiler selection**: `fun` tries `clang`, then `gcc`, then the platform's default `cc` (`cl` on Windows), using the first one it finds on `PATH`. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
 
 ### Standard Library Highlights
 - **std.io**: file helpers + `print`/`println`/`print_num`/`print_dec`/`print_bin`
