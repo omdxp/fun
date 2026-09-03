@@ -1098,6 +1098,62 @@ test "hover documents a sized integer type (i7, u23), never a real declared symb
   assert contains(unsigned_hover, "23-bit unsigned integer"), "expected u23's own bit width and signedness";
 }
 
+test "hovering an integer literal shows decimal, hex, binary, and octal" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///intlit.fn";
+  doc.path = "intlit.fn";
+  doc.text = `fun main() {
+  `  u64 mask = 4294967295;
+  `  num small = 10;
+  `}`;
+  doc.version = 1;
+
+  str mask_hover = hover(&reads, doc, 1, 15);
+  assert contains(mask_hover, "hex:     0xffffffff"), "expected the hex form";
+  assert contains(mask_hover, "binary:  0b1111_1111_1111_1111_1111_1111_1111_1111"), "expected the binary form, grouped in nibbles";
+  assert contains(mask_hover, "octal:   0o37777777777"), "expected the octal form";
+  assert contains(mask_hover, "= 2^32 - 1"), "expected the power-of-two-minus-one annotation";
+
+  str small_hover = hover(&reads, doc, 2, 15);
+  assert contains(small_hover, "hex:     0xa"), "expected an unpadded, minimal-width hex form";
+  assert !contains(small_hover, "2^"), "expected no power-of-two annotation for a value that isn't one";
+}
+
+test "hovering a character literal shows its own decimal, hex, and binary codepoint" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///charlit.fn";
+  doc.path = "charlit.fn";
+  doc.text = `fun main() {
+  `  chr letter = 'A';
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 17);
+  assert contains(hovered, "decimal: 65"), "expected the ASCII decimal codepoint";
+  assert contains(hovered, "hex:     0x41"), "expected the hex codepoint";
+  assert contains(hovered, "binary:  0b01000001"), "expected the binary codepoint, byte-padded";
+}
+
+test "hovering a decimal literal names its own type, without a meaningless base conversion" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///declit.fn";
+  doc.path = "declit.fn";
+  doc.text = `fun main() {
+  `  dec pi = 3.14159;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 12);
+  assert contains(hovered, "floating-point"), "expected the decimal literal's own type named";
+  assert !contains(hovered, "hex:"), "expected no hex/binary conversion for a decimal literal";
+}
+
 test "hovering 'as' reads contextually: import alias vs quirk impl" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

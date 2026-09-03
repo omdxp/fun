@@ -958,6 +958,24 @@ pub fun to_hex_upper(num value, num width) str {
 }
 
 fun _to_hex_with(num value, num width, str digits) str {
+  ret _to_base_with(value, width, 16, digits);
+}
+
+// Formats `value` in binary (`0`/`1` digits only), padded with leading
+// zeros to `width` digits. A value wider than `width` keeps its digits
+// rather than being cut short. "" for a negative value, the same as
+// `to_hex`.
+pub fun to_binary(num value, num width) str {
+  ret _to_base_with(value, width, 2, "01");
+}
+
+// Formats `value` in octal, padded with leading zeros to `width`
+// digits. "" for a negative value, the same as `to_hex`.
+pub fun to_octal(num value, num width) str {
+  ret _to_base_with(value, width, 8, "01234567");
+}
+
+fun _to_base_with(num value, num width, num base, str digits) str {
   if value < 0 {
     ret "";
   }
@@ -967,8 +985,8 @@ fun _to_hex_with(num value, num width, str digits) str {
   }
   num remaining = value;
   for remaining > 0 {
-    b.append_char(digits[remaining % 16]);
-    remaining = remaining / 16;
+    b.append_char(digits[remaining % base]);
+    remaining = remaining / base;
   }
   str reversed = b.build();
   StringBuilder out = string_builder_init(16);

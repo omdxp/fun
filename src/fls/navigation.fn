@@ -55,6 +55,14 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(doc_text, span_of(t, doc.text));
     }
+    .Number -> {
+      fit t.data {
+        .Num(n) -> { ret _hover_result(_int_literal_doc(n), span_of(t, doc.text)); }
+        .Dec(d) -> { ret _hover_result(_dec_literal_doc(d), span_of(t, doc.text)); }
+        .Cval(c) -> { ret _hover_result(_char_literal_doc(c), span_of(t, doc.text)); }
+        _ -> { ret NO_HOVER; }
+      }
+    }
     .Identifier -> {
       // `fork` is not a lexer-level keyword (its recognition is
       // contextual, parser-side), so it lexes as a plain identifier;
@@ -1024,6 +1032,135 @@ fun _doc(str code, str prose) str {
   `{str}
   ```````
   `{str}`, code, prose);
+}
+
+// An integer literal's own value spelled in decimal, hex, binary, and
+// octal, plus a note when it's exactly a power of two or one away
+// from one (the shape overflow boundaries, bitmasks, and buffer sizes
+// tend to take): `4294967295` reads a lot faster as "2^32 - 1" than as
+// a wall of nines.
+fun _int_literal_doc(num n) str {
+  bin negative = n < 0;
+  num magnitude = n;
+  if negative {
+    magnitude = 0 - magnitude;
+  }
+  str sign = "";
+  if negative {
+    sign = "-";
+  }
+  StringBuilder prose = string_builder_init(96);
+  prose.append("decimal: ");
+  prose.append(sign);
+  prose.append(format_num(magnitude));
+  prose.append("\nhex:     ");
+  prose.append(sign);
+  prose.append("0x");
+  prose.append(to_hex(magnitude, 0));
+  prose.append("\nbinary:  ");
+  prose.append(sign);
+  prose.append("0b");
+  prose.append(_grouped(to_binary(magnitude, 0), 4));
+  prose.append("\noctal:   ");
+  prose.append(sign);
+  prose.append("0o");
+  prose.append(to_octal(magnitude, 0));
+
+  str note = _pow2_note(n);
+  if !equals(note, "") {
+    prose.append("\n\n");
+    prose.append(note);
+  }
+
+  ret _doc(format_num(n), prose.build());
+}
+
+// A decimal literal's own value, with a doc naming the type: unlike an
+// integer, showing it in another base isn't meaningful the reader
+// would actually reach for.
+fun _dec_literal_doc(dec d) str {
+  ret _doc(format_dec(d, 6), "A 64-bit floating-point literal.");
+}
+
+// A character literal's own byte value, the same three bases an
+// integer literal gets (a char is a single byte, arithmetic on it is
+// ordinary in Fun, so its numeric value is exactly as relevant here).
+fun _char_literal_doc(chr c) str {
+  num code = c;
+  StringBuilder prose = string_builder_init(48);
+  prose.append("decimal: ");
+  prose.append(format_num(code));
+  prose.append("\nhex:     0x");
+  prose.append(to_hex(code, 2));
+  prose.append("\nbinary:  0b");
+  prose.append(to_binary(code, 8));
+  ret _doc(format("'{chr}'", c), prose.build());
+}
+
+// Groups `digits` into clusters of `size`, separated by `_`, right-
+// aligned (a leading partial group keeps whatever digits are left
+// over): `11111111111111111111111111111111` reads as
+// `11_1111_1111_1111_1111_1111_1111_1111` instead.
+fun _grouped(str digits, num size) str {
+  num n = len(digits);
+  if n <= size {
+    ret digits;
+  }
+  StringBuilder b = string_builder_init(n + n / size);
+  num first_group = n % size;
+  if first_group == 0 {
+    first_group = size;
+  }
+  b.append(substr(digits, 0, first_group));
+  num i = first_group;
+  for i < n {
+    b.append("_");
+    b.append(substr(digits, i, size));
+    i = i + size;
+  }
+  ret b.build();
+}
+
+// "= 2^k" when `n` is exactly a power of two, "= 2^k + 1" when it's
+// one more, or "= 2^k - 1" when it's one less (an unsigned type's own
+// max value, most often). "" for anything else, 0 and negative values
+// included - no power of two is zero or negative.
+fun _pow2_note(num n) str {
+  if n <= 0 {
+    ret "";
+  }
+  num k = _log2_exact(n);
+  if k >= 0 {
+    ret format("= 2^{num}", k);
+  }
+  num k_minus = _log2_exact(n - 1);
+  if k_minus >= 0 {
+    ret format("= 2^{num} + 1", k_minus);
+  }
+  num k_plus = _log2_exact(n + 1);
+  if k_plus >= 0 {
+    ret format("= 2^{num} - 1", k_plus);
+  }
+  ret "";
+}
+
+// `k` such that `2^k == v`, or -1 when `v` isn't exactly a power of
+// two (including 0 or negative, neither of which any power of two
+// equals).
+fun _log2_exact(num v) num {
+  if v <= 0 {
+    ret -1;
+  }
+  num k = 0;
+  num remaining = v;
+  for remaining > 1 {
+    if remaining % 2 != 0 {
+      ret -1;
+    }
+    remaining = remaining / 2;
+    k = k + 1;
+  }
+  ret k;
 }
 
 // What a keyword means, for the keywords whose meaning is not obvious

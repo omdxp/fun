@@ -169,3 +169,23 @@ test "a quirk implemented by a stdlib type dispatches through its vtable" {
   let out = emit_c_with_imports(src, "sl_quirk_sized", "Sized quirk on Vec");
   assert contains(out, "Vec__num"), "expected the instantiation";
 }
+
+test "to_hex formats a value in lower-case hex, zero-padded to width" {
+  assert equals(to_hex(255, 4), "00ff"), "expected zero-padded lower-case hex";
+  assert equals(to_hex(0, 2), "00"), "expected zero itself padded";
+  assert equals(to_hex(4294967295, 4), "ffffffff"), "expected a value wider than width to keep its own digits";
+  assert equals(to_hex(-1, 4), ""), "expected a negative value to be unsupported";
+}
+
+test "to_binary formats a value in binary, zero-padded to width" {
+  assert equals(to_binary(10, 8), "00001010"), "expected zero-padded binary";
+  assert equals(to_binary(0, 4), "0000"), "expected zero itself padded";
+  assert equals(to_binary(255, 4), "11111111"), "expected a value wider than width to keep its own digits";
+  assert equals(to_binary(-1, 8), ""), "expected a negative value to be unsupported";
+}
+
+test "to_octal formats a value in octal, zero-padded to width" {
+  assert equals(to_octal(8, 3), "010"), "expected zero-padded octal";
+  assert equals(to_octal(0, 2), "00"), "expected zero itself padded";
+  assert equals(to_octal(-1, 3), ""), "expected a negative value to be unsupported";
+}
