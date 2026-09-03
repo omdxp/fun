@@ -9,6 +9,7 @@
 // imports by path, so a manifest declares build targets, never an
 // import graph.
 
+imp ..ast.ast;
 imp std.string;
 imp std.toml;
 imp std.vec;
@@ -16,6 +17,7 @@ imp std.option;
 imp std.result;
 imp std.io;
 imp std.fs;
+imp std.c.mem;
 
 // A source file compiled to an executable.
 pub compound BinTarget {
@@ -189,6 +191,52 @@ fun _join(str root, str rel) str {
   }
   b.append(rel);
   ret b.build();
+}
+
+// A constant supplied by the build rather than written in source.
+pub compound Define {
+  str name;
+  str value;
+}
+
+// The constants every build makes available to the program: the package
+// name and version, taken from the manifest.
+pub fun manifest_defines(Manifest* m) Vec<Define> {
+  Vec<Define> out;
+  out.init(0);
+  Define name;
+  name.name = "PACKAGE_NAME";
+  name.value = m.package_name;
+  out.push(name);
+  Define version;
+  version.name = "PACKAGE_VERSION";
+  version.value = m.version;
+  out.push(version);
+  ret out;
+}
+
+// Builds a `pub const str name = "value";` declaration, so a value known
+// only to the build is reachable from source as an ordinary constant.
+// Also used by fls (`analysis.fn`) to give a workspace's own
+// PACKAGE_NAME/PACKAGE_VERSION the same hover/completion/go-to-
+// definition support any other declared constant gets, rather than
+// leaving them invisible to source analysis the way a build-only
+// define otherwise would be.
+pub fun manifest_const_node(str name, str value) Node {
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "str";
+
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(.String(value));
+
+  VariableNode v;
+  v.var_type = dt;
+  v.name = name;
+  v.val = val;
+  v.has_val = true;
+  v.is_const = true;
+  ret node_new(.Variable(v));
 }
 
 test "parses a package with a single binary" {

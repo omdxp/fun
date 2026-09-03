@@ -34,12 +34,6 @@ imp std.task;
 imp std.sync;
 imp std.time;
 
-// A constant supplied by the build rather than written in source.
-pub compound Define {
-  str name;
-  str value;
-}
-
 // What the arguments asked for.
 pub compound Options {
   // `build`, `test`, `fuzz`, `init`, or "" for a plain compile.
@@ -293,25 +287,6 @@ pub fun compiler_is_msvc(str cc) bin {
   ret equals(name, "cl") || equals(name, "cl.exe");
 }
 
-// Builds a `pub const str name = "value";` declaration, so a value known
-// only to the build is reachable from source as an ordinary constant.
-fun _const_string_node(str name, str value) Node {
-  DataType* dt = malloc(sizeof(DataType));
-  *dt = dtype_new();
-  dt.type_str = "str";
-
-  Node* val = malloc(sizeof(Node));
-  *val = node_new(.String(value));
-
-  VariableNode v;
-  v.var_type = dt;
-  v.name = name;
-  v.val = val;
-  v.has_val = true;
-  v.is_const = true;
-  ret node_new(.Variable(v));
-}
-
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
 // program.
@@ -350,7 +325,7 @@ pub fun compile_to_c_mode(
   for di > 0 {
     di = di - 1;
     Define* d = &defines.data[di];
-    merged.nodes.insert(0, _const_string_node(d.name, d.value));
+    merged.nodes.insert(0, manifest_const_node(d.name, d.value));
   }
 
   // Type checking runs over the merged program, so a call into an
@@ -987,22 +962,6 @@ pub fun load_manifest() Result<Manifest, str> {
   Manifest m = parsed.unwrap();
   resolve_targets(&m, "");
   ret .Ok(m);
-}
-
-// The constants every build makes available to the program: the package
-// name and version, taken from the manifest.
-pub fun manifest_defines(Manifest* m) Vec<Define> {
-  Vec<Define> out;
-  out.init(0);
-  Define name;
-  name.name = "PACKAGE_NAME";
-  name.value = m.package_name;
-  out.push(name);
-  Define version;
-  version.name = "PACKAGE_VERSION";
-  version.value = m.version;
-  out.push(version);
-  ret out;
 }
 
 // Compiles every target the manifest declares, writing executables to

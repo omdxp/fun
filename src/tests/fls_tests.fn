@@ -410,6 +410,34 @@ test "hover documents sizeof, never a real declared symbol" {
   assert contains(hovered, "compile time"), "expected the doc explaining it's compile-time";
 }
 
+test "PACKAGE_NAME and PACKAGE_VERSION resolve as ordinary declared constants, from this workspace's own fun.toml" {
+  // Neither is written anywhere in source: fun build injects both as
+  // synthetic AST nodes ahead of the program's own declarations before
+  // type-checking (manifest_defines/manifest_const_node), so source
+  // analysis alone (fls's own parse, with no build step involved) has
+  // never seen either one and would otherwise resolve nothing at all,
+  // the same as any other undeclared name. AnalysisCache mirrors that
+  // same injection for its own merged program, reading fun.toml from
+  // the process's own working directory exactly like fun build does -
+  // this test relies on the one this whole test suite already runs
+  // from (the fun project's own repo root), not a fixture of its own.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///pkgconst.fn";
+  doc.path = "pkgconst.fn";
+  doc.text = `fun main() {
+  `  println(PACKAGE_NAME);
+  `  println(PACKAGE_VERSION);
+  `}`;
+  doc.version = 1;
+
+  str name_hover = hover(&reads, doc, 1, 12);
+  assert contains(name_hover, `const str PACKAGE_NAME = \"`), "expected PACKAGE_NAME to resolve as a declared string constant";
+  str version_hover = hover(&reads, doc, 2, 12);
+  assert contains(version_hover, `const str PACKAGE_VERSION = \"`), "expected PACKAGE_VERSION to resolve as a declared string constant";
+}
+
 test "hovering a stdlib import path segment resolves at every depth" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
