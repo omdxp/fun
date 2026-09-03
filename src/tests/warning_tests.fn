@@ -277,6 +277,31 @@ test "sends beyond a channel's room with nothing receiving are noticed" {
   );
 }
 
+test "a wait group created with no room, never grown before forking into it, is noticed" {
+  notices(
+    `async fun worker() {}
+    `fun main() {
+    `  let wg = wait_group_new(0);
+    `  for i : 0..4 {
+    `    fork worker();
+    `  }
+    `}`,
+    "never grown",
+    "expected the ungrown empty wait group to be noticed"
+  );
+  says_nothing(
+    `async fun worker() {}
+    `fun main() {
+    `  let wg = wait_group_new(0);
+    `  for i : 0..4 {
+    `    wg.add(1);
+    `    fork worker();
+    `  }
+    `}`,
+    "expected a wait group grown before forking to be accepted"
+  );
+}
+
 test "a fit written in shorthand is still checked for the variants it skips" {
   // Every branch here names no enum, so what is being matched has to
   // come from what the subject holds. Without that, a shorthand fit was
