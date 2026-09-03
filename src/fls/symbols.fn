@@ -116,9 +116,32 @@ pub fun render_type(DataType* dt) str {
     if depth == 0 {
       depth = 1;
     }
+    // `array_brackets` only ever records a SIZED bracket's own
+    // expression (`parse_array_brackets` skips pushing anything for a
+    // bare `[]`), so a mix of bare and sized dimensions in one
+    // declaration (`num[5][]`) can't be matched back up positionally
+    // from this alone - only rendered with a size when every
+    // dimension recorded one (the overwhelmingly common case: a
+    // single `[N]`, or every dimension of a multi-dimensional array
+    // sized the same way).
+    bin show_sizes = dt.array_brackets.len == depth;
     num a = 0;
     for a < depth {
-      b.append("[]");
+      b.append("[");
+      if show_sizes {
+        Node* bracket = dt.array_brackets.get(a);
+        if bracket != nil {
+          fit bracket.kind {
+            .Bracket(exp) -> {
+              str size_text = _literal_value_text(exp);
+              b.append(size_text);
+              free(size_text);
+            }
+            _ -> {}
+          }
+        }
+      }
+      b.append("]");
       a = a + 1;
     }
   }

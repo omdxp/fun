@@ -1093,12 +1093,13 @@ fun _dec_literal_doc(dec d) str {
 fun _char_literal_doc(chr c) str {
   num code = c;
   StringBuilder prose = string_builder_init(48);
-  prose.append("decimal: ");
+  prose.append("```\ndecimal: ");
   prose.append(format_num(code));
   prose.append("\nhex:     0x");
   prose.append(to_hex(code, 2));
   prose.append("\nbinary:  0b");
   prose.append(to_binary(code, 8));
+  prose.append("\n```");
   ret _doc(format("'{chr}'", c), prose.build());
 }
 

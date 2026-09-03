@@ -2143,6 +2143,94 @@ test "a constant string value with an embedded quote is escaped exactly once, ei
   assert contains(hovered_raw, `const str RAWQUOTED = \"he said \\\"hi\\\"\"`), "expected the unescaped raw-string source newly escaped, also one backslash per quote";
 }
 
+test "hover on a generic compound/enum/quirk's own name shows its type params, not just the bare declaration" {
+  // User-reported: hovering a generic compound's own name (at its
+  // declaration or a use site) showed "compound Box" with no mention
+  // of <T> at all - lookup_top_level's own Compound/Enum/Quirk cases
+  // never rendered their type params, unlike a function's own
+  // render_function_named. This also silently defeated the "is this
+  // compound generic" check bare-generic-literal inference needs, so
+  // it's worth locking down on its own.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///gentypeparams.fn";
+  doc.path = "gentypeparams.fn";
+  doc.text = `compound Box<T> {
+  `  T value;
+  `}
+  `enum Maybe<T> {
+  `  Has(T),
+  `  None
+  `}
+  `quirk Mapper<T> {
+  `  map(T x) T;
+  `}
+  `fun main() {
+  `  Box<num> b;
+  `  _ = b;
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 11, 3), "compound Box<T>"), "expected the compound's own type param shown";
+  assert contains(hover(&reads, doc, 3, 6), "enum Maybe<T>"), "expected the enum's own type param shown";
+  assert contains(hover(&reads, doc, 7, 7), "quirk Mapper<T>"), "expected the quirk's own type param shown";
+}
+
+test "hover on a sized array local shows its own declared size, not a bare '[]'" {
+  // User-reported: `chr[64] buf;` hovered as `chr[] buf`, silently
+  // dropping the 64 - render_type's own array-rendering never looked
+  // at DataType.array_brackets at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sizedarr.fn";
+  doc.path = "sizedarr.fn";
+  doc.text = `fun main() {
+  `  chr[64] buf;
+  `  num[] dyn;
+  `  _ = buf;
+  `  _ = dyn;
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 1, 10), "chr[64] buf"), "expected the declared size to show";
+  assert contains(hover(&reads, doc, 2, 9), "num[] dyn"), "expected a bare '[]' to stay bare, not gain a wrong size";
+}
+
+test "hovering a number literal shows decimal/hex/binary/octal each on its own line, not run together" {
+  // User-reported: the whole breakdown rendered on one run-together
+  // line, since a single '\n' in plain markdown prose is a soft line
+  // break (a space), not a real one - needs its own fence to keep
+  // each base on its own line.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///numhover.fn";
+  doc.path = "numhover.fn";
+  doc.text = `fun main() {
+  `  let n = 17;
+  `  let c = 'A';
+  `  _ = n;
+  `  _ = c;
+  `}`;
+  doc.version = 1;
+
+  // `hover` returns its result already JSON-serialized, so a real
+  // newline in the markdown content shows up here as the literal two
+  // characters `\n` (backslash, n), not an actual newline byte.
+  str num_hover = hover(&reads, doc, 1, 10);
+  assert contains(num_hover, "```\\ndecimal: 17"), "expected the breakdown fenced, decimal first";
+  assert contains(num_hover, "\\nhex:     0x11"), "expected hex on its own line";
+  assert contains(num_hover, "\\nbinary:  0b1_0001"), "expected binary on its own line";
+  assert contains(num_hover, "\\noctal:   0o21"), "expected octal on its own line";
+
+  str char_hover = hover(&reads, doc, 2, 12);
+  assert contains(char_hover, "```\\ndecimal: 65"), "expected the char breakdown fenced too";
+  assert contains(char_hover, "\\nhex:     0x41"), "expected the char's hex on its own line";
+  assert contains(char_hover, "\\nbinary:  0b01000001"), "expected the char's binary on its own line";
+}
+
 test "hovering a constant shows its own literal value, not just its type" {
   // User-requested: a const's rendered detail only ever showed its
   // type and name, the same as any other global. Its own initializer
