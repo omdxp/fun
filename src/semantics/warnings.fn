@@ -1112,6 +1112,13 @@ impl Analysis {
       }
     }
     if f.has_default_branch {
+      if truths == 2 {
+        self.report(
+          .FitUnreachableBranch,
+          "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values",
+          stmt
+        );
+      }
       ret;
     }
     if truths > 0 && truths < 2 {

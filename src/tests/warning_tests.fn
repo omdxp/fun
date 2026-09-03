@@ -427,6 +427,18 @@ test "a fit over bin with both true and false covered is not double-flagged by t
   assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning when both truth values are covered";
 }
 
+test "a fit over bin with a catch-all after both truth values are already covered is noticed" {
+  str src = `fun main() num {
+  `  bin b = true;
+  `  fit b {
+  `    true -> { ret 1; }
+  `    false -> { ret 0; }
+  `    _ -> { ret 2; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "fit_unreachable_branch"), "expected the unreachable catch-all noticed";
+}
+
 test "a fit receiving from a channel is checked against the channel's own element type" {
   // `fit <- ch { ... }` desugars to `ch.recv()` at parse time; the
   // catch-all/enum check needs the channel's own generic element type,
