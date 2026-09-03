@@ -326,13 +326,13 @@ payload; payload-free variants still coexist.
     name = "myproject"
     version = "0.1.0"
 
-    [[bin]]
+    [[exe]]
     name = "myapp"
     path = "src/main.fn"
     ```
-- `version` is optional (defaults to `0.0.0`); multiple `[[bin]]` targets are
+- `version` is optional (defaults to `0.0.0`); multiple `[[exe]]` targets are
   supported (e.g. mirroring this repo's own `fun` + `fls` binaries).
-- **`fun build`**: reads `./fun.toml`, compiles every `[[bin]]` target, and
+- **`fun build`**: reads `./fun.toml`, compiles every `[[exe]]` target, and
   installs the resulting binaries under `fun-out/bin/`. Unlike `fun -in
   file.fn`, nothing is run afterward — matching `zig build` (compile only).
 - Only a narrow TOML subset is supported: no nested tables, no arrays of

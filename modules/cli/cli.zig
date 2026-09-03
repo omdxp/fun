@@ -4100,7 +4100,7 @@ pub fn compile_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, 
     try invoke_c_compiler_to_exe(allocator, io, c_path, exe_output_path, debug_info);
 }
 
-/// `fun build`: reads `./fun.toml`, compiles each declared `[[bin]]` target,
+/// `fun build`: reads `./fun.toml`, compiles each declared `[[exe]]` target,
 /// and installs the resulting binaries under `fun-out/bin/`. Unlike a plain
 /// `fun -in file.fn`, nothing is run afterward -- matching `zig build`
 /// (compile only; `zig build run`/`fun -in ... ` are the "compile and run"

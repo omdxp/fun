@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
-/// A single `[[bin]]` build target: a Fun source file compiled to a binary.
+/// A single `[[exe]]` build target: a Fun source file compiled to a binary.
 pub const BinTarget = struct {
     name: []const u8,
     path: []const u8,
@@ -39,7 +39,7 @@ pub const ManifestError = error{
 /// name = "myproject"
 /// version = "0.1.0"
 ///
-/// [[bin]]
+/// [[exe]]
 /// name = "myapp"
 /// path = "src/main.fn"
 /// ```
@@ -83,7 +83,7 @@ pub fn parse(allocator: mem.Allocator, text: []const u8) !Manifest {
 
         if (mem.startsWith(u8, line, "[[") and mem.endsWith(u8, line, "]]")) {
             const name = mem.trim(u8, line[2 .. line.len - 2], " \t");
-            if (!mem.eql(u8, name, "bin")) return ManifestError.InvalidManifest;
+            if (!mem.eql(u8, name, "exe")) return ManifestError.InvalidManifest;
             try flush_bin(allocator, &bins, &cur_bin_name, &cur_bin_path);
             section = .bin;
             continue;

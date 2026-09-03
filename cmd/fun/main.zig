@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) void {
         }
     }
 
-    // `fun build`: reads `./fun.toml` and compiles each declared `[[bin]]`
+    // `fun build`: reads `./fun.toml` and compiles each declared `[[exe]]`
     // target into `fun-out/bin/`. No compile pipeline / CliOptions needed
     // for this one -- it's a manifest-driven multi-file operation, not a
     // single `-in <file>` compile.

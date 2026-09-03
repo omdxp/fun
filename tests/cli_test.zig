@@ -114,7 +114,7 @@ test "parse_args keeps directory input for -fmt-check-all" {
     try std.testing.expectEqualStrings("examples", options.input_file);
 }
 
-test "run_build: compiles a fun.toml manifest's bin target and it runs correctly" {
+test "run_build: compiles a fun.toml manifest's exe target and it runs correctly" {
     const allocator = std.testing.allocator;
 
     // The build runs in a directory of its own. Writing the manifest into the
@@ -141,7 +141,7 @@ test "run_build: compiles a fun.toml manifest's bin target and it runs correctly
         try f.writeStreamingAll(std.testing.io, "[package]\n" ++
             "name = \"cli-run-build-test\"\n" ++
             "\n" ++
-            "[[bin]]\n" ++
+            "[[exe]]\n" ++
             "name = \"cli_run_build_hello\"\n" ++
             "path = \"cli_run_build_hello.fn\"\n");
     }
