@@ -161,6 +161,26 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
     }
   }
+  // A generic function's own callee name at a call site
+  // (`pick_first(100, 200)`, not `fun pick_first<T>(...)`'s own
+  // declaration) shows its signature specialized against that call's
+  // own arguments, not the bare unspecialized template - the same
+  // improvement `_call_return_type` already gives a `let`-inferred
+  // local reading the call's result, extended to hovering the callee
+  // itself. `d.kind == .Function` alone can't tell a call site from
+  // the declaration; `specialized_call_signature` does that itself
+  // (a `(` right after `t` means a call, `<` means the declaration).
+  if read.parsed {
+    fit d.kind {
+      .Function -> {
+        str specialized = specialized_call_signature(&tokens, d, t, &read.program.nodes, doc.path, line, 0);
+        if !equals(specialized, d.detail) {
+          d.detail = specialized;
+        }
+      }
+      _ -> {}
+    }
+  }
   str source_text = "";
   if equals(d.pos.filename, doc.path) {
     source_text = doc.text;
@@ -473,10 +493,10 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     // ...)` alone would fail here whenever the receiver is itself a
     // field access or a call rather than a bare local, since neither
     // was ever declared as one.
-    ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line);
+    ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line, 0);
     str type_name = found_receiver.type_name;
     if !equals(type_name, "") {
-      let field = lookup_field(&program.nodes, type_name, name);
+      let field = lookup_field(&program.nodes, type_name, name, found_receiver.generic_args);
       if field.is_some() {
         ret field;
       }

@@ -169,69 +169,6 @@ fun _token_index_at_or_before(Vec<Token>* tokens, num line, num character) Optio
 // inside a param's own generic args ("Map<str, num> m") is never
 // mistaken for a separator. Shared with `inlay_hints.fn`, which needs
 // the same parameter list to place a name hint at each call argument.
-pub fun split_signature_params(str signature) Vec<str> {
-  Vec<str> out;
-  out.init(4);
-  num open = index_of_char(signature, '(');
-  if open < 0 {
-    ret out;
-  }
-  num depth_paren = 0;
-  num depth_angle = 0;
-  num start = open + 1;
-  num i = start;
-  num n = len(signature);
-  for i < n {
-    chr c = signature[i];
-    if c == '(' {
-      depth_paren = depth_paren + 1;
-    } elif c == ')' {
-      if depth_paren == 0 {
-        str raw_piece = substr(signature, start, i - start);
-        str piece = trim(raw_piece);
-        free(raw_piece);
-        if !equals(piece, "") {
-          out.push(piece);
-        } else {
-          free(piece);
-        }
-        ret out;
-      }
-      depth_paren = depth_paren - 1;
-    } elif c == '<' {
-      depth_angle = depth_angle + 1;
-    } elif c == '>' {
-      if depth_angle > 0 {
-        depth_angle = depth_angle - 1;
-      }
-    } elif c == ',' && depth_paren == 0 && depth_angle == 0 {
-      str raw_piece2 = substr(signature, start, i - start);
-      str piece = trim(raw_piece2);
-      free(raw_piece2);
-      if !equals(piece, "") {
-        out.push(piece);
-      } else {
-        free(piece);
-      }
-      start = i + 1;
-    }
-    i = i + 1;
-  }
-  ret out;
-}
-
-// Frees a `Vec<str>` `split_signature_params` returned: each piece is
-// its own `substr`/`trim` allocation, so the plain `Vec<str>.free()`
-// house style (backing array only) leaves every piece leaked.
-pub fun free_params_vec(Vec<str>* params) {
-  num i = 0;
-  for i < params.len {
-    free(params.get(i));
-    i = i + 1;
-  }
-  params.free();
-}
-
 // The LSP `SignatureHelp` result: `signature`'s own parameters broken
 // out individually, with `active_param` (clamped into range) marking
 // which one the cursor sits on.

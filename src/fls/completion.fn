@@ -770,7 +770,9 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
-    let field = lookup_field(&target.nodes, type_name, field_name);
+    Vec<str> no_args;
+    no_args.init(0);
+    let field = lookup_field(&target.nodes, type_name, field_name, no_args);
     if field.is_some() {
       ret bare_type_from_detail(field.unwrap().detail);
     }
@@ -1648,7 +1650,9 @@ fun _receiver_own_type(
     // own receiver, the same way an alias names a module.
     ret _bare_type_name(program, token_word(receiver_tok));
   }
-  let field = lookup_field(program, prefix_type, token_word(receiver_tok));
+  Vec<str> no_field_args;
+  no_field_args.init(0);
+  let field = lookup_field(program, prefix_type, token_word(receiver_tok), no_field_args);
   if field.is_none() {
     ret "";
   }

@@ -665,7 +665,9 @@ test "a pointer type keeps its star when spelled back" {
 
   // A field declared as a pointer is reported as one: the old server
   // dropped the star here.
-  let field = lookup_field(&program.nodes, "Holder", "data");
+  Vec<str> no_args;
+  no_args.init(0);
+  let field = lookup_field(&program.nodes, "Holder", "data", no_args);
   assert field.is_some(), "expected the field to resolve";
   assert equals(field.unwrap().detail, "Vec<str>* data"), "expected the pointer spelling kept";
 }
@@ -3024,11 +3026,12 @@ test "inlay hints cover a char literal, a field read, an impl method's own local
   assert contains(hints, `"position":{"line":12,"character":7}`), "expected a hint positioned right after 'c'";
 }
 
-test "inlay hints don't chase a bare copy through another unresolved let, only a real declared type" {
+test "inlay hints chase a bare copy through another unresolved let, bounded by a depth cap" {
   // 'a' is itself let-inferred, so its own AST-stored type is
   // permanently the sentinel regardless of what heuristic guess its
-  // own hint shows, and a copy of it can't resolve any further than
-  // that, correctly showing no hint rather than a stale or wrong one.
+  // own hint shows - but that guess is re-derivable on demand from
+  // 'a's own initializer, so a copy of it resolves the same way 'a'
+  // itself would hint, not just its first hop.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -3043,7 +3046,263 @@ test "inlay hints don't chase a bare copy through another unresolved let, only a
 
   str hints = inlay_hints(&reads, doc, 0, 10);
   assert !contains(hints, "__let_infer__"), "expected the sentinel never shown verbatim";
-  assert !contains(hints, `"position":{"line":3`), "expected no hint at all for the chained copy";
+  assert contains(hints, `"position":{"line":3,"character":7},"label":": num"`), "expected the chained copy to resolve the same way its source local would";
+}
+
+test "inlay hints stop chasing a chain of bare copies past the depth cap, showing no hint rather than looping" {
+  // A short, deliberate chain of plain copies exercises the depth cap
+  // (MAX_LET_INFER_DEPTH) without a document malformed enough to
+  // actually cycle: nine hops from a real call is one past the cap,
+  // so the last local in the chain shows no hint while every earlier
+  // one still resolves.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hints2c.fn";
+  doc.path = "hints2c.fn";
+  doc.text = `fun helper() num { ret 5; }
+  `fun top() {
+  `  let a0 = helper();
+  `  let a1 = a0;
+  `  let a2 = a1;
+  `  let a3 = a2;
+  `  let a4 = a3;
+  `  let a5 = a4;
+  `  let a6 = a5;
+  `  let a7 = a6;
+  `  let a8 = a7;
+  `  let a9 = a8;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  assert !contains(hints, "__let_infer__"), "expected the sentinel never shown verbatim";
+  // a1 (line 3) is one hop from the real call, well inside the cap;
+  // a9 (line 11) is nine hops away, past it.
+  assert contains(hints, `"position":{"line":3,"character":8},"label":": num"`), "expected an early copy in the chain to still resolve";
+  assert !contains(hints, `"position":{"line":11`), "expected the copy past the depth cap to show no hint";
+}
+
+test "inlay hints substitute a generic function's own type parameter from the call site's arguments" {
+  // chain_ending_receiver's plain-call branch used to hand back a
+  // generic function's declared return type completely unsubstituted
+  // (`fun pick_first<T>(T a, T b) T` called with two nums hinted as
+  // the bare "T", not "num"). User-reported, from
+  // examples/let_and_lowlevel_types.fn. The Point case pairs a
+  // compound-literal argument (never itself resolvable, by design)
+  // with a plain call, the same shape the real example uses: only one
+  // matching argument has to resolve for the whole call to specialize.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///genericcall.fn";
+  doc.path = "genericcall.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `fun make_point(num x, num y) Point {
+  `  ret Point{x = x, y = y};
+  `}
+  `fun pick_first<T>(T a, T b) T {
+  `  _ = b;
+  `  ret a;
+  `}
+  `fun main() {
+  `  let from_num = pick_first(100, 200);
+  `  let p1 = Point{x = 1, y = 2};
+  `  let p2 = make_point(3, 4);
+  `  let from_point = pick_first(p1, p2);
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  assert !contains(hints, `"label":": T"`), "expected no raw, unsubstituted type parameter in any hint";
+  assert contains(hints, `"position":{"line":12,"character":14},"label":": num"`), "expected the num instantiation substituted";
+  assert contains(hints, `"position":{"line":15,"character":16},"label":": Point"`), "expected the Point instantiation substituted";
+}
+
+test "hover on a generic function's own callee name specializes its signature against the call's own arguments" {
+  // Hovering the callee itself (not a let-inferred local reading its
+  // result) showed the same raw, unsubstituted signature. User-reported.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///genericcallee.fn";
+  doc.path = "genericcallee.fn";
+  doc.text = `fun pick_first<T>(T a, T b) T {
+  `  _ = b;
+  `  ret a;
+  `}
+  `fun main() {
+  `  let x = pick_first(100, 200);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 10);
+  assert contains(hovered, "pick_first(num a, num b) num"), "expected the callee's own hover to show the specialized signature, not the bare template";
+}
+
+test "let inference unwraps an await expression to its own async return type" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///awaitinfer.fn";
+  doc.path = "awaitinfer.fn";
+  doc.text = `async fun fetch() num {
+  `  ret 5;
+  `}
+  `async fun main() {
+  `  let out = await fetch();
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"position":{"line":4,"character":9},"label":": num"`), "expected an await expression's own inlay hint to unwrap to its async return type";
+  str hovered = hover(&reads, doc, 4, 6);
+  assert contains(hovered, "num out"), "expected hover on the await-inferred local to show its own async return type";
+}
+
+test "let inference resolves a binary arithmetic expression, promoting num to dec the same way the real typechecker does" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///arithinfer.fn";
+  doc.path = "arithinfer.fn";
+  doc.text = `fun main() {
+  `  let total = 20;
+  `  let bonus = 8;
+  `  let final_total = total + bonus;
+  `  let f = 1.5;
+  `  let mixed = total + f;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"position":{"line":3,"character":17},"label":": num"`), "expected num + num to infer num";
+  assert contains(hints, `"position":{"line":5,"character":11},"label":": dec"`), "expected num + dec to promote to dec, matching the real typechecker's own rule";
+}
+
+test "let inference unwraps a pointer dereference to one level shallower than its own operand" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///derefinfer.fn";
+  doc.path = "derefinfer.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `fun make() Point* {
+  `  Point p;
+  `  ret &p;
+  `}
+  `fun main() {
+  `  let pp = make();
+  `  let p = *pp;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"position":{"line":8,"character":8},"label":": Point*"`), "expected pp's own pointer type";
+  assert contains(hints, `"position":{"line":9,"character":7},"label":": Point"`), "expected the dereference one level shallower than its operand";
+}
+
+test "let inference dispatches a method call through a value typed as a quirk, not just a concrete impl type" {
+  // chain_receiver/chain_ending_receiver only ever searched an impl
+  // block by the implementing type's own name (lookup_method), never
+  // falling back to the quirk's own declared signature - a quirk-typed
+  // field or local's own method call (dispatched dynamically at
+  // runtime) never resolved at all. User-reported, from
+  // examples/advanced/async_quirk_await_pointer_receiver.fn.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkchain.fn";
+  doc.path = "quirkchain.fn";
+  doc.text = `quirk Greeter {
+  `  greet() num;
+  `}
+  `compound Loud {
+  `  num n;
+  `}
+  `impl Loud as Greeter {
+  `  greet() num {
+  `    ret self.n;
+  `  }
+  `}
+  `fun main() {
+  `  Loud l;
+  `  Greeter g = &l;
+  `  let out = g.greet();
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  assert contains(hints, `"position":{"line":14,"character":9},"label":": num"`), "expected a method call through a quirk-typed local to resolve via the quirk's own declared signature";
+}
+
+test "let inference specializes a generic compound field's own type against its receiver's concrete instantiation" {
+  // lookup_field never took the receiver's own concrete generic args
+  // at all (unlike lookup_method, which already did), so a generic
+  // compound field's type always read as its own bare, unspecialized
+  // type parameter. `b`'s own receiver type has to come from
+  // somewhere already resolvable (a function's own declared return
+  // type here, not a compound literal - that shape is still its own
+  // separate, unresolved case, covered by a different existing test).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldgeneric.fn";
+  doc.path = "fieldgeneric.fn";
+  doc.text = `compound Box<T> {
+  `  T v;
+  `}
+  `fun make_box() Box<num> {
+  `  Box<num> b;
+  `  b.v = 5;
+  `  ret b;
+  `}
+  `fun main() {
+  `  let b = make_box();
+  `  let x = b.v;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 12);
+  assert contains(hints, `"position":{"line":9,"character":7},"label":": Box<num>"`), "expected b's own receiver type";
+  assert contains(hints, `"position":{"line":10,"character":7},"label":": num"`), "expected the generic field's own type substituted against its receiver's concrete instantiation";
+}
+
+test "let inference continues a chain past a parenthesized sub-expression, not just an identifier" {
+  // chain_receiver/chain_ending_receiver only ever walked backward
+  // from an identifier; `(<expr>).field.method()` has no identifier to
+  // walk backward from at all, so any chain continuing past a
+  // parenthesized base never resolved past that paren.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///parenchain.fn";
+  doc.path = "parenchain.fn";
+  doc.text = `compound Box {
+  `  num n;
+  `}
+  `impl Box {
+  `  doubled() num {
+  `    ret self.n * 2;
+  `  }
+  `}
+  `fun make() Box* {
+  `  Box b;
+  `  b.n = 5;
+  `  ret &b;
+  `}
+  `fun main() {
+  `  let out = (*make()).doubled();
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 20);
+  assert contains(hints, `"position":{"line":14,"character":9},"label":": num"`), "expected the chain continuing past the parenthesized dereference to resolve to the method's own return type";
 }
 
 test "inlay hints name a call argument correctly even when the parameter has a default value" {
@@ -3113,16 +3372,18 @@ test "inlay hints name each call argument, skip declarations, skip redundant mat
 }
 
 test "inlay hints suppress the raw __let_infer__ sentinel rather than showing it verbatim" {
-  // A bare copy of a let local whose OWN type this heuristic could
-  // not resolve (an unsupported initializer shape) must not leak the
-  // parser's internal placeholder into the hint text.
+  // A bare copy of a let local whose OWN type this heuristic still
+  // can't resolve (an array literal, out of scope for every shape
+  // _infer_type covers) must not leak the parser's internal
+  // placeholder into the hint text, and must not chase the copy into
+  // a wrong hint either.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///hints3.fn";
   doc.path = "hints3.fn";
   doc.text = `fun main() {
-  `  let a = 1 + 2;
+  `  let a = [1, 2, 3];
   `  let b = a;
   `}`;
   doc.version = 1;
