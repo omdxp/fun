@@ -10,7 +10,6 @@ imp analysis;
 imp positions;
 imp symbols;
 imp symbol_table;
-imp signature_help;
 imp uri;
 imp imports;
 imp ..lexer.token;
@@ -1100,7 +1099,28 @@ fun _char_literal_doc(chr c) str {
   prose.append("\nbinary:  0b");
   prose.append(to_binary(code, 8));
   prose.append("\n```");
-  ret _doc(format("'{chr}'", c), prose.build());
+  str escaped = _escaped_char_display(c);
+  str title = format("'{str}'", escaped);
+  free(escaped);
+  str result = _doc(title, prose.build());
+  free(title);
+  ret result;
+}
+
+// `c` spelled the way a reader would write it in source, not the raw
+// byte itself - a control character (newline, tab, ...) embedded
+// directly into a fenced code block breaks the fence visually instead
+// of reading as the literal it represents.
+fun _escaped_char_display(chr c) str {
+  fit c {
+    '\n' -> { ret substr(`\n`, 0, 2); }
+    '\t' -> { ret substr(`\t`, 0, 2); }
+    '\r' -> { ret substr(`\r`, 0, 2); }
+    '\0' -> { ret substr(`\0`, 0, 2); }
+    '\\' -> { ret substr(`\\`, 0, 2); }
+    '\'' -> { ret substr(`\'`, 0, 2); }
+    _ -> { ret format("{chr}", c); }
+  }
 }
 
 // Groups `digits` into clusters of `size`, separated by `_`, right-

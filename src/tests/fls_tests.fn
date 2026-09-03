@@ -2231,6 +2231,33 @@ test "hovering a number literal shows decimal/hex/binary/octal each on its own l
   assert contains(char_hover, "\\nbinary:  0b01000001"), "expected the char's binary on its own line";
 }
 
+test "hovering a control-character literal shows its own escaped form, not a raw embedded byte" {
+  // User-reported: '\n' hovered with the literal newline BYTE spliced
+  // into the fenced code block ('' then a real line break then '),
+  // breaking the fence's own visual rendering, since format('{chr}',
+  // c) wrote the raw byte rather than the source escape a reader
+  // actually typed.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///ctrlchar.fn";
+  doc.path = "ctrlchar.fn";
+  doc.text = `fun main() {
+  `  chr nl = '\n';
+  `  chr tab = '\t';
+  `  _ = nl;
+  `  _ = tab;
+  `}`;
+  doc.version = 1;
+
+  // `hover`'s own JSON serialization escapes each literal backslash
+  // in the markdown text to `\\`, same as the number-hover test
+  // above's own newline check - so the escape this test is looking
+  // for is itself doubled here too.
+  assert contains(hover(&reads, doc, 1, 13), `'\\n'`), "expected the newline shown escaped, not as a raw embedded byte";
+  assert contains(hover(&reads, doc, 2, 14), `'\\t'`), "expected the tab shown escaped too";
+}
+
 test "hovering a constant shows its own literal value, not just its type" {
   // User-requested: a const's rendered detail only ever showed its
   // type and name, the same as any other global. Its own initializer
