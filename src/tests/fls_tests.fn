@@ -2470,6 +2470,40 @@ test "hover resolves a bare variant shorthand and its payload binding inside a f
   assert contains(variant_def, `"line":1`), "expected the variant's own declaration line";
 }
 
+test "hover resolves a fit arm's own payload binding when the subject is a plain function call" {
+  // User-reported: `fit parse(src) { Result.Ok(doc) -> { ... } }`
+  // hovered doc/e as the raw unsubstituted "T"/"E" - fit_subject_type
+  // only ever covered a bare local/field subject, or the desugared
+  // channel-receive call, never a plain top-level call's own declared
+  // return type at all, so a call-shaped fit subject's own payload
+  // bindings never resolved past the enum's own template params.
+  str src = `enum Result<T, E> {
+  `  Ok(T),
+  `  Err(E)
+  `}
+  `compound Box { num n; }
+  `compound Oops { num n; }
+  `fun parse(str s) Result<Box, Oops> {
+  `  ret Result.Ok(Box{n = 1});
+  `}
+  `fun main() {
+  `  fit parse("x") {
+  `    Result.Ok(doc) -> { _ = doc; }
+  `    Result.Err(e) -> { _ = e; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///parsecall.fn";
+  doc.path = "parsecall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 11, 14), "Box doc"), "expected the call's own concrete Ok payload type, not a bare T";
+  assert contains(hover(&reads, doc, 12, 15), "Oops e"), "expected the call's own concrete Err payload type, not a bare E";
+}
+
 test "hover on an enum variant shows its own tag value, auto-incrementing across an explicit override" {
   str src = `enum Shape {
   `  Circle(num),

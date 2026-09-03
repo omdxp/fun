@@ -3505,6 +3505,20 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
         ret "";
       }
       fit e.left.kind {
+        // `fit parse(src) { ... }`: a plain top-level call's own
+        // declared return type, the same "Type<Args>" shape a let's
+        // own inference would show for it - not substituted against
+        // this call's own arguments (see `_call_return_type` for
+        // that), since a fit subject's callee is overwhelmingly a
+        // fixed, non-generic-at-the-call-site return in practice
+        // (`fun parse(str) Result<JsonValue, Error>`, not something
+        // like `pick_first<T>`).
+        .Identifier(callee_name) -> {
+          let f = lookup_top_level(program, callee_name);
+          if f.is_some() {
+            ret _bare_return_type(f.unwrap().detail);
+          }
+        }
         .Expression(callee) -> {
           if !equals(callee.op, ".") || !callee.has_right || callee.right == nil {
             ret "";
@@ -3568,6 +3582,24 @@ pub fun fit_subject_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* s
   }
   fit subject.kind {
     .Identifier(s) -> { ret local_generic_args(tokens, program, s, file, line); }
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left || e.left == nil {
+        ret empty;
+      }
+      fit e.left.kind {
+        .Identifier(callee_name) -> {
+          let f = lookup_top_level(program, callee_name);
+          if f.is_some() {
+            str rtype_text = _return_type_text(f.unwrap().detail);
+            Vec<str> args = generic_args_of_detail(rtype_text);
+            free(rtype_text);
+            ret args;
+          }
+        }
+        _ -> {}
+      }
+      ret empty;
+    }
     _ -> { ret empty; }
   }
 }
@@ -4005,7 +4037,13 @@ pub fun branch_variant_name(FitBranch br) str {
 
 // The payload type at position `idx` of `enum_name`'s variant named
 // `variant_name`, rendered as a reader would write it.
-pub fun variant_payload_type(Vec<Node>* program, str enum_name, str variant_name, num idx) Option<str> {
+pub fun variant_payload_type(
+  Vec<Node>* program,
+  str enum_name,
+  str variant_name,
+  num idx,
+  Vec<str> concrete_args
+) Option<str> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -4025,7 +4063,20 @@ pub fun variant_payload_type(Vec<Node>* program, str enum_name, str variant_name
           if idx < 0 || idx >= variant.payload.len {
             ret .None;
           }
-          ret .Some(render_type(variant.payload.get(idx)));
+          str declared = render_type(variant.payload.get(idx));
+          // Substituted against the enum's own concrete generic args
+          // when the caller has them (a fit's own subject, resolved
+          // via fit_subject_generic_args), so a payload declared as a
+          // bare type param in the template (`Ok(T)`) reads as the
+          // subject's actual type (`Ok(str)`), the same way
+          // enum_variant_declaration already does for the whole
+          // variant's own rendered signature. A length mismatch (no
+          // concrete args known) leaves it as declared.
+          str substituted = specialize_signature(declared, e.type_params, concrete_args);
+          if substituted != declared {
+            free(declared);
+          }
+          ret .Some(substituted);
         }
       }
       _ -> {}
@@ -4083,11 +4134,13 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
             // shallow case this was fixed for).
             str enum_name = fit_subject_type(nil, program, f.exp, file, line);
             if !equals(enum_name, "") {
+              Vec<str> concrete_args = fit_subject_generic_args(nil, program, f.exp, file, line);
               let payload_type = variant_payload_type(
                 program,
                 enum_name,
                 branch_variant_name(br),
-                idx
+                idx,
+                concrete_args
               );
               if payload_type.is_some() && br.body != nil {
                 StringBuilder b = string_builder_init(24);

@@ -2097,6 +2097,7 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
       // here either (same deeper gap noted in symbols.fn's own
       // `_lookup_fit_binding`).
       str enum_name = fit_subject_type(nil, program, fs.exp, file, line);
+      Vec<str> concrete_args = fit_subject_generic_args(nil, program, fs.exp, file, line);
       num i = 0;
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
@@ -2106,7 +2107,7 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
           num bi = 0;
           for bi < branch.bindings.len {
             str binding_name = branch.bindings.get(bi);
-            let payload_type = variant_payload_type(program, enum_name, variant_name, bi);
+            let payload_type = variant_payload_type(program, enum_name, variant_name, bi, concrete_args);
             if payload_type.is_some() {
               items.push(_item(binding_name, .Variable, payload_type.unwrap()));
             }
