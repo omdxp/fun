@@ -85,10 +85,7 @@ function flattenText(node: unknown): string {
 function buildHeadingPermalink(headingPrefix: string | undefined, id: string) {
   if (typeof window === "undefined") return "";
 
-  const route =
-    headingPrefix === "language" || headingPrefix === "reference"
-      ? headingPrefix
-      : "";
+  const route = headingPrefix ?? "";
 
   if (!route) {
     return `${window.location.origin}${window.location.pathname}${window.location.search}#${id}`;
@@ -167,6 +164,12 @@ export default function MarkdownWithPlayground({
       className="md-content"
       remarkPlugins={[remarkGfm]}
       components={{
+        // `code()` below already returns a full `<pre>` for every block
+        // form (a runnable block, a highlighted block, or the plain
+        // fallback) - without this override, react-markdown's own default
+        // `pre` wraps that in a second, unstyled `<pre>`, doubling the box
+        // around every fenced code block.
+        pre: (props) => <>{props.children}</>,
         h1: headingRenderer("h1"),
         h2: headingRenderer("h2"),
         h3: headingRenderer("h3"),
@@ -204,14 +207,24 @@ export default function MarkdownWithPlayground({
           }
 
           if (isBlock && lang) {
-            return <HighlightedCode code={text} lang={lang} className="md-pre" />;
+            return (
+              <HighlightedCode
+                code={text}
+                lang={lang}
+                className="md-pre"
+                showCopy
+              />
+            );
           }
 
           if (isBlock) {
             return (
-              <pre className="md-pre">
-                <code>{text}</code>
-              </pre>
+              <HighlightedCode
+                code={text}
+                lang=""
+                className="md-pre"
+                showCopy
+              />
             );
           }
 
