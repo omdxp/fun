@@ -60,9 +60,9 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_test_suite(root, opts.debug_info);
+      ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient);
     }
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info);
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient);
   }
   if equals(opts.subcommand, "fuzz") {
     // No path, or a path that names a directory rather than a `.fn`
@@ -77,17 +77,17 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_fuzz_suite(root, opts.debug_info);
+      ret run_fuzz_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient);
     }
-    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info);
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient);
   }
   // `-test`/`-fuzz` given directly alongside `-in`, rather than through
   // the `test`/`fuzz` subcommand spellings above.
   if opts.test_flag {
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info);
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient);
   }
   if opts.fuzz_flag {
-    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info);
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient);
   }
   // Scanning a tree needs no input file: the working directory is the
   // root when none is named.
@@ -163,7 +163,8 @@ fun main(str[] args) num {
     opts.warn_unused,
     false,
     "",
-    opts.debug_info
+    opts.debug_info,
+    opts.warn_unused_lenient
   );
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());

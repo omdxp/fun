@@ -291,12 +291,12 @@ pub fun compiler_is_msvc(str cc) bin {
 // program as constants. The error text names the stage that rejected the
 // program.
 pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info);
+  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false);
 }
 
 // Lowers `input` to C, reporting declarations nothing reads.
 pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info);
+  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false);
 }
 
 // Lowers `input` to C, emitting a test runner in place of the program's
@@ -304,6 +304,21 @@ pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* define
 // `fuzz_mode` is set (`fuzz_target` names which target when the file
 // declares more than one; empty is only valid when it declares exactly
 // one).
+// Writes one `Warning` to stderr in the CLI's own reporting shape.
+// Shared by the ordinary post-typecheck report below and
+// `-warn-unused-lenient`'s own best-effort report ahead of a type error.
+fun _print_warning(Warning w) {
+  StringBuilder line = string_builder_init(96);
+  line.append("[Warning:");
+  line.append(warning_id_name(w.id));
+  line.append("] ");
+  line.append(w.message);
+  if w.has_pos {
+    line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
+  }
+  writeln_to(Sink.Stderr, line.build());
+}
+
 pub fun compile_to_c_mode(
   str input,
   str out_path,
@@ -312,7 +327,8 @@ pub fun compile_to_c_mode(
   bin warn_unused,
   bin fuzz_mode,
   str fuzz_target,
-  bin debug_info
+  bin debug_info,
+  bin warn_unused_lenient
 ) Result<bin, str> {
   let parsed = parse_program_with_imports(input);
   if parsed.is_err() {
@@ -335,6 +351,26 @@ pub fun compile_to_c_mode(
   let checked = typecheck_program(&merged.nodes);
   if checked.is_err() {
     TypeError e = checked.unwrap_err();
+    // Lenient mode's own promise (see Options.warn_unused_lenient's doc
+    // comment): a warning nothing else depends on shouldn't stay
+    // invisible just because something unrelated in the file doesn't
+    // typecheck. `analyze` reads straight from the parsed nodes,
+    // independent of whatever typechecking got through, so it still
+    // runs here even though the type error below still fails the build
+    // - fls's own diagnose() does the identical thing for the same
+    // reason, for the editor rather than the CLI.
+    if warn_unused_lenient {
+      let lenient_noticed = analyze(&merged.entry_nodes, &merged.nodes, true, input);
+      if lenient_noticed.is_ok() {
+        Vec<Warning> lenient_warnings = lenient_noticed.unwrap();
+        num lwi = 0;
+        for lwi < lenient_warnings.len {
+          _print_warning(lenient_warnings.get(lwi));
+          lwi = lwi + 1;
+        }
+        lenient_warnings.free();
+      }
+    }
     if e.has_pos {
       // The node's own file, which is not the entry file when the error
       // is in something it imported.
@@ -379,17 +415,8 @@ pub fun compile_to_c_mode(
   defer warnings.free();
   num wi = 0;
   for wi < warnings.len {
-    Warning w = warnings.get(wi);
+    _print_warning(warnings.get(wi));
     wi = wi + 1;
-    StringBuilder line = string_builder_init(96);
-    line.append("[Warning:");
-    line.append(warning_id_name(w.id));
-    line.append("] ");
-    line.append(w.message);
-    if w.has_pos {
-      line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
-    }
-    writeln_to(Sink.Stderr, line.build());
   }
 
   CodegenState state = codegen_state_new();
@@ -1105,7 +1132,20 @@ pub fun init_project(str kind) num {
 
 // Compiles `input` with its test blocks and runs them, passing `args` on
 // so a single test can be named. Returns the runner's exit code.
-pub fun run_tests(str input, Vec<str>* args, bin debug_info) num {
+// `no_exec` stops right after writing the C (to `out_override` when
+// given, the default `.test.c` path otherwise) - the artifact a caller
+// wanting to compile and debug it themselves asked for (the vscode
+// extension's own Debug Test command does exactly this) - rather than
+// this function's own compile-run-delete cycle silently overriding it.
+pub fun run_tests(
+  str input,
+  Vec<str>* args,
+  bin debug_info,
+  bin no_exec,
+  str out_override,
+  bin warn_unused,
+  bin warn_unused_lenient
+) num {
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -1118,11 +1158,28 @@ pub fun run_tests(str input, Vec<str>* args, bin debug_info) num {
     }
   }
 
-  str c_path = default_c_path(input, ".test.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "", debug_info);
+  str c_path = out_override;
+  if equals(c_path, "") {
+    c_path = default_c_path(input, ".test.c");
+  }
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    true,
+    warn_unused,
+    false,
+    "",
+    debug_info,
+    warn_unused_lenient
+  );
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
+  }
+
+  if no_exec {
+    ret 0;
   }
 
   str exe = default_exe_path(input, ".test");
@@ -1141,7 +1198,18 @@ pub fun run_tests(str input, Vec<str>* args, bin debug_info) num {
 // the file's own single declared target) and runs it, passing `args` on
 // (a caller wanting a bounded run passes libFuzzer flags like
 // `-max_total_time=30` here). Returns the harness's own exit code.
-pub fun run_fuzz(str input, str target, Vec<str>* args, bin debug_info) num {
+// `no_exec`/`out_override`: see `run_tests`'s own doc comment - the
+// same gap applied here identically.
+pub fun run_fuzz(
+  str input,
+  str target,
+  Vec<str>* args,
+  bin debug_info,
+  bin no_exec,
+  str out_override,
+  bin warn_unused,
+  bin warn_unused_lenient
+) num {
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -1154,11 +1222,28 @@ pub fun run_fuzz(str input, str target, Vec<str>* args, bin debug_info) num {
     }
   }
 
-  str c_path = default_c_path(input, ".fuzz.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, false, false, true, target, debug_info);
+  str c_path = out_override;
+  if equals(c_path, "") {
+    c_path = default_c_path(input, ".fuzz.c");
+  }
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    false,
+    warn_unused,
+    true,
+    target,
+    debug_info,
+    warn_unused_lenient
+  );
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
+  }
+
+  if no_exec {
+    ret 0;
   }
 
   str exe = default_exe_path(input, ".fuzz");
@@ -1181,7 +1266,12 @@ compound SuiteTestResult {
 // Like run_tests but captures the test binary's stdout instead of inheriting
 // it, so run_test_suite can decide what to display. Compile output still goes
 // to stderr when a compiler is explicitly set via FUN_CC.
-fun _run_tests_captured(str input, bin debug_info) SuiteTestResult {
+fun _run_tests_captured(
+  str input,
+  bin debug_info,
+  bin warn_unused,
+  bin warn_unused_lenient
+) SuiteTestResult {
   SuiteTestResult bad;
   bad.exit_code = 1;
   bad.captured = "";
@@ -1199,7 +1289,17 @@ fun _run_tests_captured(str input, bin debug_info) SuiteTestResult {
   }
 
   str c_path = default_c_path(input, ".test.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "", debug_info);
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    true,
+    warn_unused,
+    false,
+    "",
+    debug_info,
+    warn_unused_lenient
+  );
   if lowered.is_err() {
     bad.captured = format("[Error]\n{str}", lowered.unwrap_err());
     ret bad;
@@ -1240,7 +1340,7 @@ fun _run_tests_captured(str input, bin debug_info) SuiteTestResult {
 // are listed again in the summary at the end. Every file gets its own compile
 // pass and its own process for the compiled binary, so one file's failure or
 // crash can't take the rest of the run down with it.
-pub fun run_test_suite(str root, bin debug_info) num {
+pub fun run_test_suite(str root, bin debug_info, bin warn_unused, bin warn_unused_lenient) num {
   str dir = root;
   if equals(dir, "") {
     dir = ".";
@@ -1267,7 +1367,7 @@ pub fun run_test_suite(str root, bin debug_info) num {
     }
     // Show which file is being compiled/run; \r lets a pass overwrite this line.
     print(format("\r  running {str}  ", path));
-    let res = _run_tests_captured(path, debug_info);
+    let res = _run_tests_captured(path, debug_info, warn_unused, warn_unused_lenient);
     if res.exit_code == 0 {
       passed = passed + 1;
       num n = count(res.captured, " ... PASS");
@@ -1449,7 +1549,7 @@ fun _collect_fuzz_targets(str path) Vec<str> {
 // single-target run, this form exists for a CI-style "did anything
 // regress" sweep across a whole project, so every target gets the same
 // short, bounded budget rather than running indefinitely.
-pub fun run_fuzz_suite(str root, bin debug_info) num {
+pub fun run_fuzz_suite(str root, bin debug_info, bin warn_unused, bin warn_unused_lenient) num {
   str dir = root;
   if equals(dir, "") {
     dir = ".";
@@ -1494,7 +1594,17 @@ pub fun run_fuzz_suite(str root, bin debug_info) num {
       }
 
       str c_path = default_c_path(path, ".fuzz.c");
-      let lowered = compile_to_c_mode(path, c_path, &defines, false, false, true, target, debug_info);
+      let lowered = compile_to_c_mode(
+        path,
+        c_path,
+        &defines,
+        false,
+        warn_unused,
+        true,
+        target,
+        debug_info,
+        warn_unused_lenient
+      );
       if lowered.is_err() {
         writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
         failed = failed + 1;
