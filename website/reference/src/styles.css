@@ -106,6 +106,7 @@ aside {
   position: sticky;
   top: 0;
   height: 100vh;
+  overflow-y: auto;
   background: var(--aside-bg);
   backdrop-filter: blur(8px);
 }
@@ -204,9 +205,14 @@ aside {
   height: 38px;
   flex: none;
   object-fit: contain;
-  border-radius: 50%;
-  background: var(--brand-cream);
-  border: 1px solid var(--border-soft);
+  /* The mark has real alpha transparency and its own drawn edge - a
+     forced background box and circular crop fought that shape and left
+     visible seams. A soft shadow gives it lift instead. */
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.35));
+}
+
+:root[data-theme="light"] .brand-logo {
+  filter: drop-shadow(0 2px 4px rgba(22, 34, 74, 0.25));
 }
 
 .brand-text {
@@ -351,6 +357,7 @@ a:focus-visible {
 
 nav { display: grid; gap: 8px; margin-top: 18px; }
 nav button {
+  width: 100%;
   border: 1px solid var(--border-soft);
   background: var(--surface);
   color: var(--text);
@@ -367,10 +374,76 @@ nav button:focus-visible {
   outline-offset: 2px;
 }
 nav button.active {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--brand-navy), var(--accent-2));
-  color: #ffffff;
+  border-color: var(--border-strong);
+  background:
+    linear-gradient(90deg, rgba(226, 59, 78, 0.14), transparent 65%),
+    var(--surface-2);
+  color: var(--heading);
+  font-weight: 700;
   box-shadow: inset 3px 0 0 var(--brand-red);
+}
+
+.nav-item + .nav-item {
+  margin-top: 2px;
+}
+
+.nav-subitems {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 2px 14px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  animation: navSubitemsIn 140ms ease-out;
+}
+
+@keyframes navSubitemsIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.nav-subitem {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.nav-subitem.level-2 {
+  padding-left: 16px;
+}
+
+.nav-subitem.level-3 {
+  padding-left: 24px;
+  font-size: 12px;
+}
+
+.nav-subitem:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.nav-subitem.active {
+  background: var(--surface-3);
+  color: var(--heading);
+  font-weight: 700;
+}
+
+.nav-subitem:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 main { padding: clamp(18px, 2.6vw, 34px); min-width: 0; }
@@ -386,71 +459,8 @@ main { padding: clamp(18px, 2.6vw, 34px); min-width: 0; }
   box-shadow: var(--shadow);
 }
 
-.doc-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 18px;
-}
-
 .doc-main {
   min-width: 0;
-}
-
-.doc-toc {
-  position: -webkit-sticky;
-  position: sticky;
-  top: 18px;
-  align-self: start;
-  height: auto;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px;
-  background: var(--surface-2);
-  max-height: 75vh;
-  overflow-y: auto;
-}
-
-.doc-toc-title {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  margin-bottom: 8px;
-}
-
-.doc-toc-item {
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  border-left: 2px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  padding: 6px 8px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
-}
-
-.doc-toc-item.level-2 {
-  padding-left: 16px;
-}
-
-.doc-toc-item.level-3 {
-  padding-left: 24px;
-}
-
-.doc-toc-item:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-3);
-}
-
-.doc-toc-item.active {
-  border-color: transparent;
-  border-left-color: var(--brand-red);
-  background: var(--surface-3);
-  color: var(--heading);
-  font-weight: 600;
 }
 
 h1, h2, h3, h4, h5, h6 { color: var(--heading); }
@@ -774,18 +784,21 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .md-content img,
 .md-content video,
-.md-content svg,
-.md-content table {
+.md-content svg {
   max-width: 100%;
 }
 
-.md-content table {
-  display: block;
+.md-table-wrap {
+  max-width: 100%;
   overflow-x: auto;
-  border-collapse: separate;
-  border-spacing: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 .md-content th,
@@ -1391,10 +1404,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 @media (max-width: 1280px) {
-  .doc-layout {
-    grid-template-columns: minmax(0, 1fr) 240px;
-  }
-
   .stdlib-grid {
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   }
@@ -1456,38 +1465,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     padding: 16px;
   }
   .output-grid { grid-template-columns: 1fr; }
-  .doc-layout {
-    grid-template-columns: 1fr;
-  }
-  .doc-main {
-    order: 2;
-  }
-  .doc-toc {
-    order: 1;
-    display: block;
-    position: -webkit-sticky;
-    position: sticky;
-    top: 10px;
-    z-index: 5;
-    max-height: none;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    padding: 8px;
-  }
-  .doc-toc-title { display: none; }
-  .doc-toc-item {
-    display: inline-flex;
-    width: auto;
-    margin-right: 6px;
-    margin-bottom: 0;
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-  .doc-toc-item.level-2,
-  .doc-toc-item.level-3 {
-    padding-left: 10px;
-  }
   .stdlib-toolbar {
     grid-template-columns: 1fr;
     align-items: stretch;

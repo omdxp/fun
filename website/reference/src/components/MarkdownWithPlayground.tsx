@@ -219,6 +219,20 @@ export default function MarkdownWithPlayground({
         // `pre` wraps that in a second, unstyled `<pre>`, doubling the box
         // around every fenced code block.
         pre: (props) => <>{props.children}</>,
+        // A wide table needs to scroll horizontally rather than squeeze
+        // its columns, but `overflow-x: auto` directly on the <table>
+        // (its old home) forces `display: block`, which breaks the
+        // browser's own column-width distribution: a table narrower than
+        // its container no longer stretches to fill it, leaving a dead
+        // gap next to a header background sized to the content instead
+        // of the row. Scrolling lives on this wrapper div instead, so the
+        // table itself stays a real table and lays out its columns
+        // normally.
+        table: (props) => (
+          <div className="md-table-wrap">
+            <table>{props.children}</table>
+          </div>
+        ),
         h1: headingRenderer("h1"),
         h2: headingRenderer("h2"),
         h3: headingRenderer("h3"),

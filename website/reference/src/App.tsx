@@ -1516,42 +1516,70 @@ export default function App() {
           </div>
 
           <nav>
-            {TABS.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => {
-                  if (!t.disabled) {
-                    setTab(t.key);
-                    // A top-level nav click always means "go to the top of
-                    // this page" - never carry over a TOC anchor selected
-                    // on whichever page was open before, doc tab or not,
-                    // and never keep whatever scroll offset that page had
-                    // (the SPA swaps content in place, so the browser has
-                    // no reason to reset scroll on its own).
-                    setSelectedDocAnchorKey("");
-                    setActiveDocAnchorKey("");
-                    setIsMobileDrawerOpen(false);
-                    if (typeof window !== "undefined") {
-                      window.scrollTo({ top: 0 });
+            {TABS.map((t) => {
+              const isActive = tab === t.key;
+              const subItems =
+                isActive && isDocTab(t.key)
+                  ? (docTocHeadings[t.key] ?? []).filter((h) => h.level <= 3)
+                  : [];
+              return (
+                <div className="nav-item" key={t.key}>
+                  <button
+                    onClick={() => {
+                      if (!t.disabled) {
+                        setTab(t.key);
+                        // A top-level nav click always means "go to the top
+                        // of this page" - never carry over a TOC anchor
+                        // selected on whichever page was open before, doc
+                        // tab or not, and never keep whatever scroll offset
+                        // that page had (the SPA swaps content in place, so
+                        // the browser has no reason to reset scroll itself).
+                        setSelectedDocAnchorKey("");
+                        setActiveDocAnchorKey("");
+                        setIsMobileDrawerOpen(false);
+                        if (typeof window !== "undefined") {
+                          window.scrollTo({ top: 0 });
+                        }
+                      }
+                    }}
+                    className={
+                      isActive
+                        ? "active" + (t.disabled ? " disabled" : "")
+                        : t.disabled
+                          ? "disabled"
+                          : ""
                     }
-                  }
-                }}
-                className={
-                  tab === t.key
-                    ? "active" + (t.disabled ? " disabled" : "")
-                    : t.disabled
-                      ? "disabled"
-                      : ""
-                }
-                disabled={!!t.disabled}
-                title={t.tooltip}
-                style={
-                  t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
-                }
-              >
-                {t.label}
-              </button>
-            ))}
+                    disabled={!!t.disabled}
+                    title={t.tooltip}
+                    style={
+                      t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
+                    }
+                  >
+                    {t.label}
+                  </button>
+                  {subItems.length > 0 && (
+                    <div className="nav-subitems">
+                      {subItems.map((h) => (
+                        <button
+                          key={h.id}
+                          type="button"
+                          className={`nav-subitem level-${Math.min(h.level, 3)} ${
+                            activeDocAnchorKey === h.id ? "active" : ""
+                          }`}
+                          onClick={() => {
+                            setSelectedDocAnchorKey(h.id);
+                            scrollToDocAnchor(h.id, "smooth");
+                            setIsMobileDrawerOpen(false);
+                          }}
+                        >
+                          {h.title}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </nav>
           <div className="meta muted">
             <a href={releaseUrl} target="_blank" rel="noreferrer">
@@ -1571,39 +1599,12 @@ export default function App() {
               <section className="panel" key={dt.key}>
                 <h1>{dt.title}</h1>
                 <p className="lead">{dt.lead}</p>
-                <div className="doc-layout">
-                  <div className="doc-main">
-                    <MarkdownWithPlayground
-                      markdown={content.docs[dt.key] ?? ""}
-                      sourcePath={dt.sourcePath}
-                      headingPrefix={dt.key}
-                    />
-                  </div>
-                  {(docTocHeadings[dt.key]?.length ?? 0) > 0 && (
-                    <aside
-                      className="doc-toc"
-                      aria-label={`${dt.title} table of contents`}
-                    >
-                      <div className="doc-toc-title">On this page</div>
-                      {(docTocHeadings[dt.key] ?? [])
-                        .filter((h) => h.level <= 3)
-                        .map((heading) => (
-                          <button
-                            key={heading.id}
-                            type="button"
-                            className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
-                              activeDocAnchorKey === heading.id ? "active" : ""
-                            }`}
-                            onClick={() => {
-                              setSelectedDocAnchorKey(heading.id);
-                              scrollToDocAnchor(heading.id, "smooth");
-                            }}
-                          >
-                            {heading.title}
-                          </button>
-                        ))}
-                    </aside>
-                  )}
+                <div className="doc-main">
+                  <MarkdownWithPlayground
+                    markdown={content.docs[dt.key] ?? ""}
+                    sourcePath={dt.sourcePath}
+                    headingPrefix={dt.key}
+                  />
                 </div>
               </section>
             ),
