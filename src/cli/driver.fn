@@ -1,0 +1,1958 @@
+// Command-line driver: turns arguments into a compile, and optionally
+// builds and runs the result.
+// 
+// Compiling a program happens in two steps. The first lowers Fun to C,
+// which this module owns. The second hands that C to a host compiler,
+// chosen by `FUN_CC` or by platform default, and runs the executable it
+// produces.
+
+imp ..parser.import_resolver;
+imp ..semantics.typecheck;
+imp ..semantics.warnings;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp fmt;
+imp ..ast.ast;
+imp ..ast.ast_print;
+imp manifest;
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+imp std.fs;
+imp std.sys;
+imp std.cli;
+imp std.process;
+imp std.path;
+imp std.set;
+imp std.runtime_backend;
+imp std.c.mem;
+imp std.task;
+imp std.sync;
+imp std.time;
+
+// What the arguments asked for.
+pub compound Options {
+  // `build`, `test`, `fuzz`, `init`, or "" for a plain compile.
+  str subcommand;
+  // `-test`/`-fuzz` given directly (alongside `-in`) rather than via a
+  // `test`/`fuzz` subcommand. Only meaningful when `subcommand` is "".
+  bin test_flag;
+  bin fuzz_flag;
+  str input;
+  str output;
+  // The `fuzz` target's name, from `fun fuzz <input> <target>`'s optional
+  // second positional. Empty when not given (only valid when the file
+  // declares exactly one target).
+  str fuzz_target;
+  // Compile only, leaving the executable unrun.
+  bin no_exec;
+  // Keep the generated C instead of removing it after the build.
+  bin keep_c;
+  // Build with debug information.
+  bin debug_info;
+  bin show_help;
+  bin show_version;
+  // Report declarations nothing reads.
+  bin warn_unused;
+  // Like `warn_unused`, but keeps reporting them even when the file has
+  // an unrelated type error elsewhere. fls's own diagnose() implements
+  // the identical idea separately, for the editor rather than the CLI.
+  bin warn_unused_lenient;
+  // Print the parsed AST before compiling.
+  bin show_ast;
+  // Rewrite the input in place, and with `fmt_all` its local imports too.
+  bin fmt;
+  bin fmt_all;
+  // Rewrite the input in place, then still run diagnostics against it
+  // (what fls shells out to, to combine formatting and diagnostics).
+  bin fmt_diag;
+  // Report whether the input, or everything under it, is formatted,
+  // without rewriting anything.
+  bin fmt_check;
+  bin fmt_check_all;
+  // Arguments after `--`, passed to the compiled program.
+  Vec<str> program_args;
+  // Constants injected into the program, from `-D name=value`.
+  Vec<Define> defines;
+  // Set when parsing failed, with `error_text` explaining why.
+  bin has_error;
+  str error_text;
+}
+
+fun _options_new() Options {
+  Options o;
+  o.subcommand = "";
+  o.test_flag = false;
+  o.fuzz_flag = false;
+  o.input = "";
+  o.output = "";
+  o.fuzz_target = "";
+  o.no_exec = false;
+  o.keep_c = false;
+  o.debug_info = false;
+  o.show_help = false;
+  o.show_version = false;
+  o.warn_unused = false;
+  o.warn_unused_lenient = false;
+  o.show_ast = false;
+  o.fmt = false;
+  o.fmt_all = false;
+  o.fmt_diag = false;
+  o.fmt_check = false;
+  o.fmt_check_all = false;
+  o.program_args.init(0);
+  o.defines.init(0);
+  o.has_error = false;
+  o.error_text = "";
+  ret o;
+}
+
+impl Options {
+  pub free() {
+    self.program_args.free();
+    self.defines.free();
+  }
+}
+
+// The flags that take a separate value.
+fun _value_flags() Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  out.push("in");
+  out.push("out");
+  out.push("D");
+  out.push("fuzz-target");
+  ret out;
+}
+
+// Reads `argv` into `Options`. A subcommand, when present, is the first
+// argument, and anything after `--` belongs to the compiled program.
+pub fun parse_args(str[] argv) Options {
+  Options o = _options_new();
+
+  Vec<str> value_flags = _value_flags();
+  defer value_flags.free();
+  CliArgs parsed = cli_parse_flags(argv, &value_flags);
+  defer parsed.free();
+
+  if parsed.missing_value {
+    o.has_error = true;
+    o.error_text = format("-{str} expects a value", parsed.missing_value_flag);
+    ret o;
+  }
+
+  num first_positional = 0;
+  let leading = parsed.at_positional(0);
+  if leading.is_some() {
+    str head = leading.unwrap();
+    if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
+      equals(
+      head,
+      "init"
+    ) {
+      o.subcommand = head;
+      first_positional = 1;
+    }
+  }
+
+  o.show_help = parsed.has("help") || parsed.has("h");
+  o.show_version = parsed.has("version");
+  o.no_exec = parsed.has("no-exec");
+  o.keep_c = parsed.has("outf");
+  o.debug_info = parsed.has("g");
+  o.warn_unused = parsed.has("warn-unused");
+  o.warn_unused_lenient = parsed.has("warn-unused-lenient");
+  // Implies the same detection as `warn_unused`.
+  if o.warn_unused_lenient {
+    o.warn_unused = true;
+  }
+  o.show_ast = parsed.has("ast");
+  o.fmt = parsed.has("fmt");
+  o.fmt_all = parsed.has("fmt-all");
+  o.fmt_diag = parsed.has("fmt-diag");
+  o.fmt_check = parsed.has("fmt-check");
+  o.fmt_check_all = parsed.has("fmt-check-all");
+  o.test_flag = parsed.has("test");
+  o.fuzz_flag = parsed.has("fuzz");
+  o.fuzz_target = parsed.get_or("fuzz-target", "");
+  o.input = parsed.get_or("in", "");
+  o.output = parsed.get_or("out", "");
+  if !equals(o.output, "") {
+    if !ends_with(o.output, ".c") {
+      o.has_error = true;
+      o.error_text = format("-out expects a `.c` file, found `{str}`", o.output);
+      ret o;
+    }
+    // Naming the generated C file is itself a request to keep it.
+    o.keep_c = true;
+  }
+
+  let define = parsed.at("D");
+  if define.is_some() {
+    str pair = define.unwrap();
+    let eq = index_of_char(pair, '=');
+    if eq == -1 {
+      o.has_error = true;
+      o.error_text = format("-D expects `name=value`, found `{str}`", pair);
+      ret o;
+    }
+    Define d;
+    d.name = substr(pair, 0, eq);
+    d.value = substr(pair, eq + 1, len(pair) - (eq + 1));
+    o.defines.push(d);
+  }
+
+  // A bare path is the input, so `fun file.fn` works without `-in`. For
+  // `fun fuzz <input> [<target>]`, the positional right after `input` is
+  // the target name when it's a bare word, not a value that leaked
+  // through from `-- <program args>` (`cli_parse_flags` already drops the
+  // literal `--` marker itself, so a forwarded flag like
+  // `-max_total_time=5` would otherwise look just like a target name by
+  // position alone; a real target never starts with `-`).
+  num i = first_positional;
+  for i < parsed.positionals.len {
+    str arg = parsed.positionals.get(i);
+    bin looks_like_flag = len(arg) > 0 && arg[0] == '-';
+    if equals(o.input, "") {
+      o.input = arg;
+    } elif equals(o.subcommand, "fuzz") && equals(o.fuzz_target, "") && !looks_like_flag {
+      o.fuzz_target = arg;
+    } else {
+      o.program_args.push(arg);
+    }
+    i = i + 1;
+  }
+  ret o;
+}
+
+// Replaces `path`'s extension with `ext`, or appends when it has none.
+pub fun with_extension(str path, str ext) str {
+  if equals(ext, "") {
+    ret strip_ext(path);
+  }
+  ret change_ext(path, ext);
+}
+
+// The suffix an executable carries on this platform.
+pub fun exe_suffix() str {
+  if runtime_backend_is_windows() {
+    ret ".exe";
+  }
+  ret "";
+}
+
+// Where build output goes, so nothing lands next to the sources.
+pub fun out_dir() str {
+  ret "fun-out";
+}
+
+// The generated C for `input`, under the build directory.
+pub fun default_c_path(str input, str suffix) str {
+  make_dir_all(out_dir());
+  StringBuilder b = string_builder_init(16);
+  b.append(strip_ext(basename(input)));
+  b.append(suffix);
+  ret path_join(out_dir(), b.build());
+}
+
+// The executable built from `input`, under the build directory.
+pub fun default_exe_path(str input, str suffix) str {
+  str dir = path_join(out_dir(), "bin");
+  make_dir_all(dir);
+  StringBuilder b = string_builder_init(16);
+  b.append(strip_ext(basename(input)));
+  b.append(suffix);
+  b.append(exe_suffix());
+  ret path_join(dir, b.build());
+}
+
+// The host C compiler to shell, honoring `FUN_CC`.
+pub fun c_compiler() str {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret override_cc;
+  }
+  if runtime_backend_is_windows() {
+    ret "cl";
+  }
+  ret "cc";
+}
+
+// True when `cc` takes MSVC-style arguments rather than gcc-style ones.
+pub fun compiler_is_msvc(str cc) bin {
+  let name = basename(cc);
+  ret equals(name, "cl") || equals(name, "cl.exe");
+}
+
+// Lowers `input` to C at `out_path`, with `defines` available to the
+// program as constants. The error text names the stage that rejected the
+// program.
+pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false);
+}
+
+// Lowers `input` to C, reporting declarations nothing reads.
+pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false);
+}
+
+// Lowers `input` to C, emitting a test runner in place of the program's
+// own entry point when `test_mode` is set, or a fuzz harness when
+// `fuzz_mode` is set (`fuzz_target` names which target when the file
+// declares more than one; empty is only valid when it declares exactly
+// one).
+// Writes one `Warning` to stderr in the CLI's own reporting shape.
+// Shared by the ordinary post-typecheck report below and
+// `-warn-unused-lenient`'s own best-effort report ahead of a type error.
+fun _print_warning(Warning w) {
+  StringBuilder line = string_builder_init(96);
+  line.append("[Warning:");
+  line.append(warning_id_name(w.id));
+  line.append("] ");
+  line.append(w.message);
+  if w.has_pos {
+    line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
+  }
+  writeln_to(Sink.Stderr, line.build());
+}
+
+pub fun compile_to_c_mode(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  bin test_mode,
+  bin warn_unused,
+  bin fuzz_mode,
+  str fuzz_target,
+  bin debug_info,
+  bin warn_unused_lenient
+) Result<bin, str> {
+  let parsed = parse_program_with_imports(input);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  // Injected ahead of the program's own declarations, so anything in it
+  // can refer to them.
+  num di = defines.len;
+  for di > 0 {
+    di = di - 1;
+    Define* d = &defines.data[di];
+    merged.nodes.insert(0, manifest_const_node(d.name, d.value));
+  }
+
+  // Type checking runs over the merged program, so a call into an
+  // imported module is checked against the signature it was declared
+  // with.
+  let checked = typecheck_program(&merged.nodes);
+  if checked.is_err() {
+    TypeError e = checked.unwrap_err();
+    // Lenient mode's own promise (see Options.warn_unused_lenient's doc
+    // comment): a warning nothing else depends on shouldn't stay
+    // invisible just because something unrelated in the file doesn't
+    // typecheck. `analyze` reads straight from the parsed nodes,
+    // independent of whatever typechecking got through, so it still
+    // runs here even though the type error below still fails the build
+    // - fls's own diagnose() does the identical thing for the same
+    // reason, for the editor rather than the CLI.
+    if warn_unused_lenient {
+      let lenient_noticed = analyze(&merged.entry_nodes, &merged.nodes, true, input);
+      if lenient_noticed.is_ok() {
+        Vec<Warning> lenient_warnings = lenient_noticed.unwrap();
+        num lwi = 0;
+        for lwi < lenient_warnings.len {
+          _print_warning(lenient_warnings.get(lwi));
+          lwi = lwi + 1;
+        }
+        lenient_warnings.free();
+      }
+    }
+    if e.has_pos {
+      // The node's own file, which is not the entry file when the error
+      // is in something it imported.
+      str where = e.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        e.message,
+        where,
+        e.pos.line,
+        e.pos.col
+      ));
+    }
+    ret .Err(e.message);
+  }
+
+  // Warnings are reported after checking, so a program that does not
+  // compile is not also told what it might have meant. They are read
+  // from the file's own parse: merging drops the import statements, and
+  // what another file declares is its own business.
+  let noticed = analyze(&merged.entry_nodes, &merged.nodes, warn_unused, input);
+  if noticed.is_err() {
+    UnmetExpectation ue = noticed.unwrap_err();
+    if ue.has_pos {
+      str where = ue.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        ue.message,
+        where,
+        ue.pos.line,
+        ue.pos.col
+      ));
+    }
+    ret .Err(ue.message);
+  }
+  Vec<Warning> warnings = noticed.unwrap();
+  defer warnings.free();
+  num wi = 0;
+  for wi < warnings.len {
+    _print_warning(warnings.get(wi));
+    wi = wi + 1;
+  }
+
+  CodegenState state = codegen_state_new();
+  Codegen cg = codegen_new(&state);
+  cg.test_mode = test_mode;
+  cg.fuzz_mode = fuzz_mode;
+  cg.fuzz_target = fuzz_target;
+  cg.msvc_mode = compiler_is_msvc(c_compiler());
+  cg.debug_info = debug_info;
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+
+  let cg_err = cg.transpile(merged.nodes);
+  fit cg_err {
+    .Some(kind) -> {
+      str what = "unsupported node";
+      fit kind {
+        .UnsupportedNode -> {}
+        .InvalidNode -> { what = "invalid node"; }
+      }
+      if !equals(cg.error_note, "") {
+        if !equals(cg.last_where, "") {
+          ret .Err(format(
+            "codegen failed: {str}: {str}, near {str}",
+            what,
+            cg.error_note,
+            cg.last_where
+          ));
+        }
+        ret .Err(format("codegen failed: {str}: {str}", what, cg.error_note));
+      }
+      if !equals(cg.last_where, "") {
+        ret .Err(format("codegen failed: {str}, near {str}", what, cg.last_where));
+      }
+      ret .Err(format("codegen failed: {str}", what));
+    }
+    .None -> {}
+  }
+
+  str c_source = state.out.build();
+  if !write_string(out_path, c_source) {
+    ret .Err(format("could not write {str}", out_path));
+  }
+  ret .Ok(true);
+}
+
+// Appends the arguments a compile of `c_path` into `exe_path` needs,
+// after `cc`'s own name is already in `argv_args`. MSVC spells its
+// arguments differently and links the C runtime itself, so the thread
+// and math flags apply only to gcc-style compilers.
+fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, bin debug_info) {
+  if compiler_is_msvc(cc) {
+    argv_args.push("/nologo");
+    argv_args.push("/std:c17");
+    argv_args.push(c_path);
+    if debug_info {
+      argv_args.push("/Zi");
+    }
+    argv_args.push(format("/Fe:{str}", exe_path));
+  } else {
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(exe_path);
+    if debug_info {
+      argv_args.push("-g");
+    } else {
+      argv_args.push("-g0");
+    }
+    argv_args.push("-pthread");
+    argv_args.push("-lm");
+    if runtime_backend_is_windows() {
+      argv_args.push("-lws2_32");
+    }
+  }
+}
+
+// The C compilers tried, in order, when `FUN_CC` names none.
+fun _default_cc_candidates() Vec<str> {
+  Vec<str> out;
+  out.init(3);
+  out.push("clang");
+  out.push("gcc");
+  if runtime_backend_is_windows() {
+    out.push("cl");
+  } else {
+    out.push("cc");
+  }
+  ret out;
+}
+
+// Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
+// arguments inserted right after `cc` itself and before the source
+// file — this lets e.g. FUN_CC=zig FUN_CC_ARGS=cc work (a user
+// override is trusted to know what it's asking for, so this streams
+// the compiler's own output live rather than capturing it).
+fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(cc);
+
+  str extra = env_or("FUN_CC_ARGS", "");
+  if !equals(extra, "") {
+    Vec<str> extra_parts = split(extra, ' ');
+    defer extra_parts.free();
+    num j = 0;
+    for j < extra_parts.len {
+      str part = extra_parts.get(j);
+      if !equals(part, "") {
+        argv_args.push(part);
+      }
+      j = j + 1;
+    }
+  }
+
+  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
+// Builds `c_path` into `exe_path`. Returns the compiler's exit code.
+// `FUN_CC`, when set, is used exactly as given. Otherwise, each of
+// `_default_cc_candidates` is tried in turn until one is actually found
+// on `PATH`; a candidate that's found but fails to compile stops the
+// search there rather than trying the next one, since a real compile
+// error is never solved by switching compilers.
+pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret _compile_with_cc(override_cc, c_path, exe_path, debug_info);
+  }
+
+  Vec<str> candidates = _default_cc_candidates();
+  defer candidates.free();
+  num i = 0;
+  for i < candidates.len {
+    str cc = candidates.get(i);
+    i = i + 1;
+
+    Vec<str> argv_args;
+    argv_args.init(0);
+    defer argv_args.free();
+    argv_args.push(cc);
+    _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+
+    str[] argv = argv_from(&argv_args);
+    let result = run(argv);
+    free_argv(argv);
+    if result.is_err() {
+      // Not installed; try the next candidate.
+      continue;
+    }
+    ProcessResult r = result.unwrap();
+    if r.exit_code != 0 {
+      writeln_to(Sink.Stderr, r.stderr_text);
+    }
+    ret r.exit_code;
+  }
+
+  writeln_to(Sink.Stderr, "no C compiler found (tried clang, gcc, cc); set FUN_CC to override");
+  ret 1;
+}
+
+// The C compilers this tries, in order, for building a fuzz harness:
+// `FUN_FUZZ_CC` if set (a user override takes priority over everything
+// else), then a short list of clang builds likely to carry libFuzzer's
+// runtime (`-fsanitize=fuzzer` needs clang specifically, not gcc). A
+// plain `clang` on PATH is tried first since it's the common case;
+// candidates specific to a platform's own package manager layout follow,
+// harmless to also try on another platform since a missing binary just
+// fails to spawn and the search moves on.
+fun _fuzz_cc_candidates() Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  str override_cc = env_or("FUN_FUZZ_CC", "");
+  if !equals(override_cc, "") {
+    out.push(override_cc);
+    ret out;
+  }
+  out.push("clang");
+  out.push("/opt/homebrew/opt/llvm/bin/clang");
+  out.push("/usr/local/opt/llvm/bin/clang");
+  out.push("clang-20");
+  out.push("clang-19");
+  out.push("clang-18");
+  out.push("clang-17");
+  out.push("clang-16");
+  out.push("clang-15");
+  out.push("clang-14");
+  out.push("C:\\Program Files\\LLVM\\bin\\clang.exe");
+  ret out;
+}
+
+// Builds `c_path` into a libFuzzer harness at `exe_path`, trying each
+// candidate compiler from `_fuzz_cc_candidates` in turn until one
+// compiles successfully. `-fsanitize=fuzzer,address` is the default
+// (coverage-guided fuzzing plus AddressSanitizer's memory-error
+// detection); `FUN_FUZZ_NO_ASAN` drops the `,address` half, since
+// AddressSanitizer's own startup has been observed to hang in some
+// sandboxed environments even when the compiler and fuzzing engine both
+// work fine otherwise. Returns the exit code of the last candidate tried
+// (0 on success), or -1 if no candidate compiler could be found at all.
+pub fun compile_c_to_fuzz_exe(str c_path, str exe_path, bin debug_info) num {
+  str no_asan_setting = env_or("FUN_FUZZ_NO_ASAN", "");
+  bin no_asan = !equals(no_asan_setting, "") && !equals(no_asan_setting, "0");
+  str sanitize_flag = "-fsanitize=fuzzer,address";
+  if no_asan {
+    sanitize_flag = "-fsanitize=fuzzer";
+  }
+
+  Vec<str> candidates = _fuzz_cc_candidates();
+  defer candidates.free();
+
+  num last_code = -1;
+  num i = 0;
+  for i < candidates.len {
+    str cc = candidates.get(i);
+    i = i + 1;
+
+    Vec<str> argv_args;
+    argv_args.init(0);
+    defer argv_args.free();
+    argv_args.push(cc);
+    argv_args.push(sanitize_flag);
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(exe_path);
+    if debug_info {
+      argv_args.push("-g");
+    } else {
+      argv_args.push("-g0");
+    }
+    argv_args.push("-pthread");
+    argv_args.push("-lm");
+
+    str[] argv = argv_from(&argv_args);
+    let result = run(argv);
+    free_argv(argv);
+    if result.is_err() {
+      // Couldn't even spawn this candidate (most likely not installed);
+      // move on without treating it as a real compile failure.
+      continue;
+    }
+    ProcessResult r = result.unwrap();
+    if r.exit_code == 0 {
+      ret 0;
+    }
+    last_code = r.exit_code;
+    writeln_to(Sink.Stderr, r.stderr_text);
+  }
+  ret last_code;
+}
+
+// Compiles `c_path` to an object at `obj_path` without linking, which is
+// how a library target is checked: it has no entry point to link.
+pub fun compile_c_to_object(str c_path, str obj_path) num {
+  str cc = c_compiler();
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(cc);
+
+  if compiler_is_msvc(cc) {
+    argv_args.push("/nologo");
+    argv_args.push("/c");
+    argv_args.push(c_path);
+    argv_args.push(format("/Fo:{str}", obj_path));
+  } else {
+    argv_args.push("-c");
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(obj_path);
+  }
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
+// Qualifies a bare executable name so it is run from the current
+// directory rather than searched for on `PATH`. Windows already looks in
+// the current directory, so only POSIX needs the prefix.
+pub fun executable_path(str path) str {
+  if runtime_backend_is_windows() {
+    // posix_spawnp on MinGW fails with forward-slash relative paths; use backslashes.
+    ret replace_char(path, '/', '\\');
+  }
+  if contains(path, "/") || contains(path, "\\") {
+    ret path;
+  }
+  StringBuilder b = string_builder_init(16);
+  b.append("./");
+  b.append(path);
+  ret b.build();
+}
+
+// Runs `exe_path` with `args`, inheriting this process's streams, and
+// returns its exit code.
+pub fun run_exe(str exe_path, Vec<str>* args) num {
+  Vec<str> argv_args;
+  argv_args.init(0);
+  defer argv_args.free();
+  argv_args.push(executable_path(exe_path));
+  num i = 0;
+  for i < args.len {
+    argv_args.push(args.get(i));
+    i = i + 1;
+  }
+
+  str[] argv = argv_from(&argv_args);
+  let code = spawn_inherited(argv);
+  free_argv(argv);
+  ret code;
+}
+
+pub fun help_text() str {
+  ret `usage:
+  `  fun -in <input.fn> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-help] [-- <program args>]
+  `  fun test <input.fn>      compiles and runs just that file's own test blocks
+  `  fun test [<dir>]         runs every test block found under <dir> (default '.')
+  `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
+  `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
+  `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
+  `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
+  `  fun -fmt-check-all [-in <file_or_dir>]
+  `  fun -version
+  `
+  `  -help, -h         Show this help message.
+  `  -version          Print the package version and exit.
+  `  -in <file>        Input file to compile.
+  `  -out <file>       Write the generated C here.
+  `  -no-exec          Compile only, without running the result.
+  `  -outf             Keep the generated C file.
+  `  -ast              Print the parsed AST, then continue compiling.
+  `  -g                Build with debug information.
+  `  -warn-unused      Report unused imports, variables, functions, and compounds.
+  `  -warn-unused-lenient  Like -warn-unused, but keeps reporting them past an unrelated type error.
+  `  -D name=value     Inject a constant the program can read.
+  `  -test             Run -in's own test blocks, in place of a plain compile.
+  `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
+  `  -fuzz-target <name>  Which target, when -in declares more than one.
+  `  -fmt              Format the input file in place.
+  `  -fmt-all          Format the input file and the modules it imports.
+  `  -fmt-diag         Format the input file in place, then still run diagnostics.
+  `  -fmt-check        Report the input if it is unformatted, and exit 1.
+  `  -fmt-check-all    Report every unformatted file under the input, and exit 1.
+  `  --                Pass every following argument to the compiled program.`;
+}
+
+fun _argv(Vec<str>* parts) str[] {
+  str[] out = malloc(sizeof(str) * (parts.len + 2));
+  out[0] = "fun";
+  num i = 0;
+  for i < parts.len {
+    out[i + 1] = parts.get(i);
+    i = i + 1;
+  }
+  out[parts.len + 1] = nil;
+  ret out;
+}
+
+test "parses an input path and an output path" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-out");
+  a.push("prog.c");
+  let o = parse_args(_argv(&a));
+  assert !o.has_error, "expected the arguments to parse";
+  assert equals(o.input, "main.fn"), "expected the input path";
+  assert equals(o.output, "prog.c"), "expected the output path";
+  assert o.keep_c, "expected -out to imply keeping the generated C file";
+}
+
+test "accepts a bare path as the input" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("main.fn");
+  let o = parse_args(_argv(&a));
+  assert equals(o.input, "main.fn"), "expected the input path";
+}
+
+test "collects the flags" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-no-exec");
+  a.push("-outf");
+  a.push("-g");
+  let o = parse_args(_argv(&a));
+  assert o.no_exec, "expected -no-exec";
+  assert o.keep_c, "expected -outf";
+  assert o.debug_info, "expected -g";
+}
+
+test "everything after -- belongs to the program" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("--");
+  a.push("passed");
+  let o = parse_args(_argv(&a));
+  defer o.free();
+  assert o.program_args.len == 1, "expected the program argument";
+  assert equals(o.program_args.get(0), "passed"), "expected the argument verbatim";
+}
+
+test "recognizes a build subcommand" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("build");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "build"), "expected the build subcommand";
+}
+
+test "recognizes an init subcommand and its kind positional" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("init");
+  a.push("lib");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "init"), "expected the init subcommand";
+  assert equals(o.input, "lib"), "expected the project kind as the positional";
+}
+
+test "init with no positional leaves the kind empty" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("init");
+  let o = parse_args(_argv(&a));
+  assert equals(o.subcommand, "init"), "expected the init subcommand";
+  assert equals(o.input, ""), "expected no kind, defaulted later by init_project";
+}
+
+test "a double-dash spelling is equivalent to a single dash" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("--version");
+  let o = parse_args(_argv(&a));
+  assert o.show_version, "expected --version to match -version";
+}
+
+test "-test and -fuzz work as direct flags alongside -in" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-test");
+  let o = parse_args(_argv(&a));
+  assert o.test_flag, "expected the direct -test flag";
+  assert equals(o.subcommand, ""), "expected no subcommand rewrite";
+}
+
+test "-fuzz-target names a target without the fuzz subcommand" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-fuzz");
+  a.push("-fuzz-target");
+  a.push("one");
+  let o = parse_args(_argv(&a));
+  assert o.fuzz_flag, "expected the direct -fuzz flag";
+  assert equals(o.fuzz_target, "one"), "expected the named target";
+}
+
+test "a value flag with nothing following it is reported, not silently '1'" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a missing value to be an error";
+}
+
+test "-out rejects a non-.c extension" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-in");
+  a.push("main.fn");
+  a.push("-out");
+  a.push("prog");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a non-.c -out to be rejected";
+}
+
+test "reads a -D define" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-D");
+  a.push("TAG=v1.2.3");
+  a.push("main.fn");
+  let o = parse_args(_argv(&a));
+  defer o.free();
+  assert o.defines.len == 1, "expected the define";
+  assert equals(o.defines.get(0).name, "TAG"), "expected the define's name";
+  assert equals(o.defines.get(0).value, "v1.2.3"), "expected the define's value";
+}
+
+test "a malformed -D is reported" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-D");
+  a.push("NOEQUALS");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a malformed define to be rejected";
+}
+
+test "with_extension replaces an existing extension" {
+  assert equals(with_extension("main.fn", ".c"), "main.c"), "expected the extension replaced";
+  assert equals(with_extension("src/main.fn", ".c"), "src/main.c"), "expected the directory kept";
+}
+
+test "with_extension appends when there is none" {
+  assert equals(with_extension("main", ".c"), "main.c"), "expected the extension appended";
+}
+
+test "with_extension ignores a dot in a parent directory" {
+  assert equals(with_extension("a.b/main", ".c"), "a.b/main.c"), "expected only the file's own name to matter";
+}
+
+test "executable_path qualifies a bare name" {
+  assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+}
+
+test "executable_path leaves a path alone" {
+  assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
+  assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+}
+
+test "with_extension handles a windows-style path" {
+  assert equals(with_extension("src\\main.fn", ".c"), "src\\main.c"), "expected a backslash path to keep its directory";
+}
+
+test "the msvc compiler is recognized by name" {
+  assert compiler_is_msvc("cl"), "expected cl to be msvc";
+  assert compiler_is_msvc("cl.exe"), "expected cl.exe to be msvc";
+  assert !compiler_is_msvc("cc"), "expected cc to be gcc-style";
+  assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
+}
+
+// Reads `./fun.toml` and fills in whatever it left implicit.
+pub fun load_manifest() Result<Manifest, str> {
+  if !exists("fun.toml") {
+    ret .Err("no fun.toml in this directory");
+  }
+  let parsed = parse_manifest(read_to_string("fun.toml"));
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  Manifest m = parsed.unwrap();
+  resolve_targets(&m, "");
+  ret .Ok(m);
+}
+
+// Compiles every target the manifest declares, writing executables to
+// `fun-out/bin`. A library has no entry point, so it is compiled to an
+// object under `fun-out/lib` to prove it builds, never linked.
+pub fun build_project(bin debug_info, Vec<Define>* extra_defines) num {
+  let loaded = load_manifest();
+  if loaded.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
+    ret 1;
+  }
+  Manifest m = loaded.unwrap();
+  defer m.free();
+
+  if m.kind() == .Empty {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\npackage `{str}` declares no [lib] or [[exe]] target", m.package_name)
+    );
+    ret 1;
+  }
+
+  // Re-reads and re-parses fun.toml a second time (already loaded as
+  // `m` above, needed for `m.kind()`/`m.has_lib`/... below) rather than
+  // hand-merging `-D` in again here - `fun build` isn't a hot path, and
+  // reusing the one shared merge point matters more than the extra read.
+  Vec<Define> defines = resolved_defines(extra_defines);
+  defer defines.free();
+
+  if m.has_lib {
+    make_dir_all("fun-out/lib");
+    str c_path = path_join("fun-out/lib", format("{str}.c", m.lib.name));
+    let lowered = compile_to_c(m.lib.path, c_path, &defines, debug_info);
+    if lowered.is_err() {
+      writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+      ret 1;
+    }
+    let code = compile_c_to_object(c_path, path_join("fun-out/lib", format("{str}.o", m.lib.name)));
+    if code != 0 {
+      ret 1;
+    }
+    println(format("checked {str}", m.lib.name));
+  }
+
+  num i = 0;
+  for i < m.exes.len {
+    ExeTarget* e = &m.exes.data[i];
+    make_dir_all("fun-out/bin");
+    str c_path = path_join("fun-out/bin", format("{str}.c", e.name));
+    let lowered = compile_to_c(e.path, c_path, &defines, debug_info);
+    if lowered.is_err() {
+      writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+      ret 1;
+    }
+    str exe = path_join("fun-out/bin", format("{str}{str}", e.name, exe_suffix()));
+    let code = compile_c_to_exe(c_path, exe, debug_info);
+    if code != 0 {
+      ret 1;
+    }
+    println(format("built {str} -> {str}", e.name, exe));
+    i = i + 1;
+  }
+  ret 0;
+}
+
+// The starter `src/main.fn` an `init`ed executable target gets.
+fun _init_main_source() str {
+  ret `imp std.io;
+  `
+  `fun main(str[] args) {
+  `  println("Hello, World!");
+  `}`;
+}
+
+// The starter `src/lib.fn` an `init`ed library target gets.
+fun _init_lib_source() str {
+  ret `pub fun hello() str {
+  `  ret "Hello, World!";
+  `}`;
+}
+
+// The starter `.gitignore` an `init`ed project gets.
+fun _init_gitignore_source() str {
+  ret `/fun-out/`;
+}
+
+// `fun init [lib|exe|mix]`: writes a `fun.toml`, a `src/` directory, and
+// a `.gitignore` for a new package in the working directory. `kind` is
+// one of `lib`, `exe`, or `mix`; empty defaults to `exe`.
+pub fun init_project(str kind) num {
+  str resolved_kind = kind;
+  if equals(resolved_kind, "") {
+    resolved_kind = "exe";
+  }
+  bin wants_lib = equals(resolved_kind, "lib") || equals(resolved_kind, "mix");
+  bin wants_exe = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
+  if !wants_lib && !wants_exe {
+    writeln_to(
+      Sink.Stderr,
+      format(
+      "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
+      resolved_kind
+      )
+    );
+    ret 1;
+  }
+  if exists("fun.toml") {
+    writeln_to(Sink.Stderr, "[Error]\nfun.toml already exists in this directory");
+    ret 1;
+  }
+
+  str name = "app";
+
+  let made_dir = make_dir_all("src");
+  if made_dir.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", made_dir.unwrap_err().message));
+    ret 1;
+  }
+
+  StringBuilder toml = string_builder_init(64);
+  toml.append(format("[package]\nname = \"{str}\"\nversion = \"0.1.0\"\n", name));
+
+  if wants_lib {
+    toml.append("\n[lib]\npath = \"src/lib.fn\"\n");
+    write_string("src/lib.fn", _init_lib_source());
+    println("created src/lib.fn");
+  }
+  if wants_exe {
+    toml.append(format("\n[[exe]]\nname = \"{str}\"\npath = \"src/main.fn\"\n", name));
+    write_string("src/main.fn", _init_main_source());
+    println("created src/main.fn");
+  }
+
+  write_string("fun.toml", toml.build());
+  println("created fun.toml");
+
+  if !exists(".gitignore") {
+    write_string(".gitignore", _init_gitignore_source());
+    println("created .gitignore");
+  }
+  ret 0;
+}
+
+// The full set of build-time constants a program compiles with: this
+// workspace's own `PACKAGE_NAME`/`PACKAGE_VERSION` when a `fun.toml`
+// exists here, plus whatever `-D name=value` the caller supplied
+// directly. Shared so every entry point (a plain compile, `-test`,
+// `-fuzz`, and both directory-suite forms) offers the same constants,
+// rather than each seeing only its own half: the plain compile path
+// only ever saw `-D`, `-test`/`-fuzz` only ever saw the manifest's own.
+pub fun resolved_defines(Vec<Define>* extra) Vec<Define> {
+  Vec<Define> out;
+  out.init(extra.len + 2);
+  if exists("fun.toml") {
+    let loaded = load_manifest();
+    if loaded.is_ok() {
+      Manifest m = loaded.unwrap();
+      let manifest_ones = manifest_defines(&m);
+      num mi = 0;
+      for mi < manifest_ones.len {
+        out.push(manifest_ones.get(mi));
+        mi = mi + 1;
+      }
+      manifest_ones.free();
+    }
+  }
+  num ei = 0;
+  for ei < extra.len {
+    out.push(extra.get(ei));
+    ei = ei + 1;
+  }
+  ret out;
+}
+
+// Compiles `input` with its test blocks and runs them, passing `args` on
+// so a single test can be named. Returns the runner's exit code.
+// `no_exec` stops right after writing the C (to `out_override` when
+// given, the default `.test.c` path otherwise) - the artifact a caller
+// wanting to compile and debug it themselves asked for (the vscode
+// extension's own Debug Test command does exactly this) - rather than
+// this function's own compile-run-delete cycle silently overriding it.
+pub fun run_tests(
+  str input,
+  Vec<str>* args,
+  bin debug_info,
+  bin no_exec,
+  str out_override,
+  bin warn_unused,
+  bin warn_unused_lenient,
+  bin keep_c,
+  Vec<Define>* extra_defines
+) num {
+  Vec<Define> defines = resolved_defines(extra_defines);
+  defer defines.free();
+
+  str c_path = out_override;
+  if equals(c_path, "") {
+    c_path = default_c_path(input, ".test.c");
+  }
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    true,
+    warn_unused,
+    false,
+    "",
+    debug_info,
+    warn_unused_lenient
+  );
+  if lowered.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+    ret 1;
+  }
+
+  if no_exec {
+    ret 0;
+  }
+
+  str exe = default_exe_path(input, ".test");
+  let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  if !keep_c {
+    remove_file(c_path);
+  }
+  if cc_code != 0 {
+    ret 1;
+  }
+
+  let code = run_exe(exe, args);
+  remove_file(exe);
+  ret code;
+}
+
+// Compiles `input`'s `target` fuzz harness (or, when `target` is empty,
+// the file's own single declared target) and runs it, passing `args` on
+// (a caller wanting a bounded run passes libFuzzer flags like
+// `-max_total_time=30` here). Returns the harness's own exit code.
+// `no_exec`/`out_override`: see `run_tests`'s own doc comment - the
+// same gap applied here identically.
+pub fun run_fuzz(
+  str input,
+  str target,
+  Vec<str>* args,
+  bin debug_info,
+  bin no_exec,
+  str out_override,
+  bin warn_unused,
+  bin warn_unused_lenient,
+  bin keep_c,
+  Vec<Define>* extra_defines
+) num {
+  Vec<Define> defines = resolved_defines(extra_defines);
+  defer defines.free();
+
+  str c_path = out_override;
+  if equals(c_path, "") {
+    c_path = default_c_path(input, ".fuzz.c");
+  }
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    false,
+    warn_unused,
+    true,
+    target,
+    debug_info,
+    warn_unused_lenient
+  );
+  if lowered.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+    ret 1;
+  }
+
+  if no_exec {
+    ret 0;
+  }
+
+  str exe = default_exe_path(input, ".fuzz");
+  let cc_code = compile_c_to_fuzz_exe(c_path, exe, debug_info);
+  if !keep_c {
+    remove_file(c_path);
+  }
+  if cc_code != 0 {
+    ret 1;
+  }
+
+  let code = run_exe(exe, args);
+  remove_file(exe);
+  ret code;
+}
+
+compound SuiteTestResult {
+  num exit_code;
+  str captured;
+}
+
+// Like run_tests but captures the test binary's stdout instead of inheriting
+// it, so run_test_suite can decide what to display. Compile output still goes
+// to stderr when a compiler is explicitly set via FUN_CC.
+fun _run_tests_captured(
+  str input,
+  bin debug_info,
+  bin warn_unused,
+  bin warn_unused_lenient,
+  Vec<Define>* extra_defines
+) SuiteTestResult {
+  SuiteTestResult bad;
+  bad.exit_code = 1;
+  bad.captured = "";
+
+  Vec<Define> defines = resolved_defines(extra_defines);
+  defer defines.free();
+
+  str c_path = default_c_path(input, ".test.c");
+  let lowered = compile_to_c_mode(
+    input,
+    c_path,
+    &defines,
+    true,
+    warn_unused,
+    false,
+    "",
+    debug_info,
+    warn_unused_lenient
+  );
+  if lowered.is_err() {
+    bad.captured = format("[Error]\n{str}", lowered.unwrap_err());
+    ret bad;
+  }
+
+  str exe = default_exe_path(input, ".test");
+  let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  remove_file(c_path);
+  if cc_code != 0 {
+    bad.captured = "C compiler returned non-zero";
+    ret bad;
+  }
+
+  Vec<str> argv_args;
+  argv_args.init(1);
+  defer argv_args.free();
+  argv_args.push(executable_path(exe));
+  str[] argv = argv_from(&argv_args);
+  let result = run(argv);
+  free_argv(argv);
+  remove_file(exe);
+
+  if result.is_err() {
+    bad.captured = "could not run test binary";
+    ret bad;
+  }
+  ProcessResult r = result.unwrap();
+  SuiteTestResult ok;
+  ok.exit_code = r.exit_code;
+  ok.captured = r.stdout_text;
+  ret ok;
+}
+
+// `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
+// `root` that declares a `test` block, runs each with `_run_tests_captured`,
+// and prints an aggregate pass/fail summary. Passing files flicker on a
+// single overwritten line; failing files show their full captured output and
+// are listed again in the summary at the end. Every file gets its own compile
+// pass and its own process for the compiled binary, so one file's failure or
+// crash can't take the rest of the run down with it.
+pub fun run_test_suite(
+  str root,
+  bin debug_info,
+  bin warn_unused,
+  bin warn_unused_lenient,
+  Vec<Define>* extra_defines
+) num {
+  str dir = root;
+  if equals(dir, "") {
+    dir = ".";
+  }
+
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  _collect_fun_files(dir, &files);
+  files.sort();
+
+  Vec<str> failed_files;
+  failed_files.init(4);
+  defer failed_files.free();
+
+  num passed = 0;
+  num failed = 0;
+  num i = 0;
+  for i < files.len {
+    str path = files.get(i);
+    i = i + 1;
+    if !_declares_top_level_block(path, "test") {
+      continue;
+    }
+    // Show which file is being compiled/run; \r lets a pass overwrite this line.
+    print(format("\r  running {str}  ", path));
+    let res = _run_tests_captured(path, debug_info, warn_unused, warn_unused_lenient, extra_defines);
+    if res.exit_code == 0 {
+      passed = passed + 1;
+      num n = count(res.captured, " ... PASS");
+      println(format("\r  ok  {str}  ({num} tests)  ", path, n));
+    } else {
+      failed = failed + 1;
+      println(format("\r  FAIL  {str}", path));
+      print(res.captured);
+      failed_files.push(path);
+    }
+  }
+
+  if passed + failed == 0 {
+    println(format("no `test` blocks found under {str}", dir));
+    ret 0;
+  }
+
+  println(format("\n{num}/{num} test files passed", passed, passed + failed));
+  if failed > 0 {
+    println("\nFailed:");
+    num j = 0;
+    for j < failed_files.len {
+      println(format("  {str}", failed_files.get(j)));
+      j = j + 1;
+    }
+    ret 1;
+  }
+  ret 0;
+}
+
+// Default wall-clock budget (seconds) for one fuzz target when running
+// the directory-wide `fun fuzz [path]` form, where multiple targets
+// across possibly multiple files each get their own bounded run rather
+// than the open-ended campaign a single `fun fuzz <file.fn> <target>`
+// normally leaves to the caller. Override with `FUN_FUZZ_DEFAULT_SECONDS`.
+const num default_fuzz_seconds = 30;
+
+fun _fuzz_budget_seconds() num {
+  str override_s = env_or("FUN_FUZZ_DEFAULT_SECONDS", "");
+  if equals(override_s, "") {
+    ret default_fuzz_seconds;
+  }
+  num parsed = atoi(override_s);
+  if parsed <= 0 {
+    ret default_fuzz_seconds;
+  }
+  ret parsed;
+}
+
+// Shared state between `_fuzz_watchdog` and the thread waiting on the
+// harness process. `mu` guards `done`/`killed`; both flip only once, from
+// false to true, so a stale read just means the watchdog checks again a
+// second later rather than reads garbage.
+compound FuzzWatch {
+  num pid;
+  num budget_seconds;
+  Mutex mu;
+  bin done;
+  bin killed;
+}
+
+// Sleeps up to `budget_seconds`, checking once a second whether the
+// harness has already finished on its own, and force-kills it if it's
+// still running when the budget runs out. Runs as its own virtual thread
+// alongside the thread blocked in `wait_exit_code`, matching the
+// reference compiler's own watchdog for the same reason: libFuzzer's own
+// `-max_total_time` flag isn't reliable in every environment, so the
+// budget can't depend on the fuzzing engine honoring it alone.
+async fun _fuzz_watchdog(FuzzWatch* w, WaitGroup* wg) {
+  num slept = 0;
+  for slept < w.budget_seconds {
+    w.mu.lock();
+    bin d = w.done;
+    w.mu.unlock();
+    if d {
+      break;
+    }
+    sleep_seconds(1);
+    slept = slept + 1;
+  }
+  w.mu.lock();
+  bin already_done = w.done;
+  if !already_done {
+    w.killed = true;
+  }
+  w.mu.unlock();
+  if !already_done {
+    kill_pid(w.pid);
+  }
+  wg.done();
+}
+
+// Runs `argv` (index 0 is the executable) to completion, force-killing it
+// if it's still running after `budget_seconds`. `wg`/`w.mu` outlive the
+// watchdog task (waited on below before returning), so there is no
+// dangling reference to either once this function's own stack frame
+// disappears.
+compound FuzzRunResult {
+  num exit_code;
+  bin killed_by_budget;
+}
+
+fun _run_fuzz_bounded(str[] argv, num budget_seconds) FuzzRunResult {
+  FuzzRunResult result;
+  result.exit_code = -1;
+  result.killed_by_budget = false;
+
+  let spawned = spawn_background(argv);
+  if spawned.is_err() {
+    ret result;
+  }
+
+  FuzzWatch w;
+  w.pid = spawned.unwrap();
+  w.budget_seconds = budget_seconds;
+  w.mu = mutex_new();
+  w.done = false;
+  w.killed = false;
+
+  WaitGroup wg = wait_group_new(1);
+  fork _fuzz_watchdog(&w, &wg);
+
+  num code = wait_exit_code(w.pid);
+  w.mu.lock();
+  w.done = true;
+  w.mu.unlock();
+  wg.wait();
+  wg.destroy();
+  w.mu.destroy();
+
+  result.exit_code = code;
+  result.killed_by_budget = w.killed;
+  ret result;
+}
+
+// Every `fuzz "<name>" (...)` target `path` declares, in source order. A
+// file can declare more than one; the directory-wide fuzz runner builds
+// and runs each separately (a fuzz harness only ever exercises one target
+// per binary, selected at compile time).
+fun _collect_fuzz_targets(str path) Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  if !exists(path) {
+    ret out;
+  }
+  str src = read_to_string(path);
+  let lexed = tokenize(src, path);
+  if lexed.is_err() {
+    ret out;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  num i = 0;
+  for i + 1 < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .Keyword || !equals(token_text(t), "fuzz") {
+      continue;
+    }
+    Token next = tokens.get(i);
+    if next.type == .String {
+      // Not `token_text`: for a `.String` token that returns the value
+      // re-quoted for source reproduction (`fmt.fn`'s own job), not the
+      // decoded name a target was declared with.
+      fit next.data {
+        .Sval(s) -> { out.push(s); }
+        _ -> {}
+      }
+    }
+  }
+  ret out;
+}
+
+// `fun fuzz <dir>`/`fun fuzz` (no path): discovers every `.fn` file under
+// `root` that declares one or more `fuzz` targets, runs each target for a
+// bounded `FUN_FUZZ_DEFAULT_SECONDS` (default 30s), and prints an
+// aggregate summary. Unlike `fun fuzz <file.fn> <target>`'s open-ended
+// single-target run, this form exists for a CI-style "did anything
+// regress" sweep across a whole project, so every target gets the same
+// short, bounded budget rather than running indefinitely.
+pub fun run_fuzz_suite(
+  str root,
+  bin debug_info,
+  bin warn_unused,
+  bin warn_unused_lenient,
+  Vec<Define>* extra_defines
+) num {
+  str dir = root;
+  if equals(dir, "") {
+    dir = ".";
+  }
+
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  _collect_fun_files(dir, &files);
+  files.sort();
+
+  num budget = _fuzz_budget_seconds();
+  num ran = 0;
+  num failed = 0;
+  num fi = 0;
+  for fi < files.len {
+    str path = files.get(fi);
+    fi = fi + 1;
+    if !_declares_top_level_block(path, "fuzz") {
+      continue;
+    }
+    Vec<str> targets = _collect_fuzz_targets(path);
+    defer targets.free();
+
+    num ti = 0;
+    for ti < targets.len {
+      str target = targets.get(ti);
+      ti = ti + 1;
+
+      println(format("== {str} :: {str} ({num}s) ==", path, target, budget));
+
+      Vec<Define> defines = resolved_defines(extra_defines);
+      defer defines.free();
+
+      str c_path = default_c_path(path, ".fuzz.c");
+      let lowered = compile_to_c_mode(
+        path,
+        c_path,
+        &defines,
+        false,
+        warn_unused,
+        true,
+        target,
+        debug_info,
+        warn_unused_lenient
+      );
+      if lowered.is_err() {
+        writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
+        failed = failed + 1;
+        ran = ran + 1;
+        continue;
+      }
+
+      str exe = default_exe_path(path, ".fuzz");
+      let cc_code = compile_c_to_fuzz_exe(c_path, exe, debug_info);
+      remove_file(c_path);
+      if cc_code != 0 {
+        failed = failed + 1;
+        ran = ran + 1;
+        continue;
+      }
+
+      Vec<str> argv_args;
+      argv_args.init(0);
+      defer argv_args.free();
+      argv_args.push(executable_path(exe));
+      str[] argv = argv_from(&argv_args);
+      FuzzRunResult result = _run_fuzz_bounded(argv, budget);
+      free_argv(argv);
+      remove_file(exe);
+
+      // A watchdog kill just means the budget ran out with nothing found,
+      // the expected, successful outcome of a bounded sweep, not a
+      // crash. Only an exit code the process reached on its own reflects
+      // a real result.
+      if !result.killed_by_budget && result.exit_code != 0 {
+        failed = failed + 1;
+      }
+      ran = ran + 1;
+    }
+  }
+
+  if ran == 0 {
+    println(format("no `fuzz` targets found under {str}", dir));
+    ret 0;
+  }
+
+  println(format("\n{num}/{num} fuzz targets clean", ran - failed, ran));
+  if failed > 0 {
+    ret 1;
+  }
+  ret 0;
+}
+
+// True when `path` declares at least one top level `keyword "name" {`/`(`
+// block (`keyword` is `"test"` or `"fuzz"`). Shared scan behind
+// `run_test_suite` and `run_fuzz_suite`'s own filters.
+fun _declares_top_level_block(str path, str keyword) bin {
+  if !exists(path) {
+    ret false;
+  }
+  str src = read_to_string(path);
+  let lexed = tokenize(src, path);
+  if lexed.is_err() {
+    ret false;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  // Deep: returns a plain `bin`, nothing aliasing these tokens' own
+  // strings escapes this function.
+  defer free_token_vec(&tokens);
+
+  num i = 0;
+  for i + 1 < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .Keyword || !equals(token_text(t), keyword) {
+      continue;
+    }
+    if tokens.get(i).type == .String {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// Parses `input` and prints its own top-level nodes as a plain-text
+// tree (`-ast`). Errors are swallowed: this is a best-effort look at
+// the shape of a program, not itself the reason a compile fails.
+pub fun print_ast_for(str input) {
+  let parsed = parse_program_with_imports(input);
+  if parsed.is_err() {
+    ret;
+  }
+  let merged = parsed.unwrap();
+  print_ast(&merged.entry_nodes);
+}
+
+// Formats `path` in place, reporting whether the file changed. A file
+// that is already formatted is left untouched, so its timestamp only
+// moves when its contents do.
+pub fun format_file(str path) Result<bin, str> {
+  if !exists(path) {
+    ret .Err(format("no such file: {str}", path));
+  }
+  str src = read_to_string(path);
+  let formatted = format_source(src, path);
+  if formatted.is_err() {
+    ret .Err(formatted.unwrap_err());
+  }
+  str out = formatted.unwrap();
+  if equals(out, src) {
+    ret .Ok(false);
+  }
+  if !write_string(path, out) {
+    ret .Err(format("could not write {str}", path));
+  }
+  ret .Ok(true);
+}
+
+// True when `path` is already formatted.
+pub fun format_file_is_clean(str path) bin {
+  if !exists(path) {
+    ret false;
+  }
+  str src = read_to_string(path);
+  let formatted = format_source(src, path);
+  if formatted.is_err() {
+    ret false;
+  }
+  ret equals(formatted.unwrap(), src);
+}
+
+// The dotted paths that `src` imports, in the order they are written.
+fun _imported_paths(str src, str filename) Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  let lexed = tokenize(src, filename);
+  if lexed.is_err() {
+    ret out;
+  }
+  Vec<Token> tokens = lexed.unwrap();
+  // Deep: every path pushed to `out` below is a fresh StringBuilder
+  // copy (`b.build()`), never a token's own `Sval` directly, so
+  // nothing in the returned `Vec<str>` aliases these tokens.
+  defer free_token_vec(&tokens);
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .Keyword || !equals(token_text(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    StringBuilder b = string_builder_init(32);
+    num j = i + 1;
+    for j < tokens.len {
+      Token it = tokens.get(j);
+      if it.type == .NewLine || it.type == .Comment {
+        j = j + 1;
+        continue;
+      }
+      str text = token_text(it);
+      if equals(text, ";") {
+        break;
+      }
+      // An alias renames the import; the path is what precedes it.
+      if it.type == .Keyword && equals(text, "as") {
+        break;
+      }
+      b.append(text);
+      j = j + 1;
+    }
+    str path = b.build();
+    if !equals(path, "") {
+      out.push(path);
+    }
+    i = j + 1;
+  }
+  ret out;
+}
+
+// Formats `path` and every module it imports, directly or not, leaving
+// the stdlib alone. Reports how many files changed.
+pub fun format_file_and_imports(str path) Result<num, str> {
+  Vec<str> queue;
+  queue.init(4);
+  defer queue.free();
+  queue.push(path);
+
+  Set<str> seen = set_init("", 8);
+  defer seen.free();
+
+  num changed = 0;
+  num i = 0;
+  for i < queue.len {
+    str current = queue.get(i);
+    i = i + 1;
+    if seen.has(current) {
+      continue;
+    }
+    seen.add(current);
+
+    let done = format_file(current);
+    if done.is_err() {
+      ret .Err(done.unwrap_err());
+    }
+    if done.unwrap() {
+      changed = changed + 1;
+    }
+
+    Vec<str> imports = _imported_paths(read_to_string(current), current);
+    defer imports.free();
+    num k = 0;
+    for k < imports.len {
+      str dotted = imports.get(k);
+      k = k + 1;
+      // The stdlib ships formatted and is not the caller's to rewrite.
+      if starts_with(dotted, "std.") {
+        continue;
+      }
+      str resolved = resolve_import_path(current, dotted);
+      if exists(resolved) {
+        queue.push(resolved);
+      }
+    }
+  }
+  ret .Ok(changed);
+}
+
+// Directories that hold generated or vendored files, which are not the
+// project's own source.
+fun _skip_scan_dir(str name) bin {
+  fit name {
+    ".git", ".funsand", "fun-out", "build", "node_modules" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+fun _collect_fun_files(str dir, Vec<str>* out) {
+  let listed = list_dir(dir);
+  if listed.is_err() {
+    ret;
+  }
+  Vec<str> entries = listed.unwrap();
+  defer entries.free();
+  entries.sort();
+
+  num i = 0;
+  for i < entries.len {
+    str name = entries.get(i);
+    i = i + 1;
+    str full = path_join(dir, name);
+    if is_dir(full) {
+      if !_skip_scan_dir(name) {
+        _collect_fun_files(full, out);
+      }
+      continue;
+    }
+    if ends_with(name, ".fn") {
+      out.push(full);
+    }
+  }
+}
+
+// The unformatted `.fn` files under `root`, which may name a directory
+// or a file whose directory is scanned instead.
+pub fun collect_unformatted(str root) Vec<str> {
+  str dir = root;
+  if equals(dir, "") {
+    dir = ".";
+  } elif !is_dir(dir) {
+    dir = dirname(dir);
+    if equals(dir, "") {
+      dir = ".";
+    }
+  }
+
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  _collect_fun_files(dir, &files);
+
+  Vec<str> out;
+  out.init(0);
+  num i = 0;
+  for i < files.len {
+    str path = files.get(i);
+    i = i + 1;
+    if !format_file_is_clean(path) {
+      out.push(path);
+    }
+  }
+  ret out;
+}
+
+test "lists the modules a file imports, aliases and stdlib included" {
+  str src = `imp sub.helper;
+  `imp std.io as out;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  Vec<str> found = _imported_paths(src, "main.fn");
+  defer found.free();
+  assert found.len == 2, "expected both imports to be listed";
+  assert equals(found.get(0), "sub.helper"), "expected the local import first";
+  assert equals(found.get(1), "std.io"), "expected the alias dropped from the path";
+}
+
+test "formatting reports a change only when the file is rewritten" {
+  make_dir_all("fun-out");
+  str path = "fun-out/_fmt_probe.fn";
+  write_string(path, "fun probe() num{ret 1;}\n");
+  defer remove_file(path);
+
+  let first = format_file(path);
+  assert first.is_ok(), "expected the file to format";
+  assert first.unwrap(), "expected the unformatted file to change";
+  assert format_file_is_clean(path), "expected the file to be formatted now";
+
+  let second = format_file(path);
+  assert second.is_ok(), "expected the formatted file to format again";
+  assert !second.unwrap(), "expected no second rewrite";
+}
+
+test "an unformatted file is reported by a scan of its directory" {
+  make_dir_all("fun-out/_fmt_scan");
+  str path = "fun-out/_fmt_scan/dirty.fn";
+  write_string(path, "fun dirty() num{ret 1;}\n");
+  defer remove_file(path);
+
+  Vec<str> offenders = collect_unformatted("fun-out/_fmt_scan");
+  defer offenders.free();
+  assert offenders.len == 1, "expected the unformatted file to be reported";
+  assert ends_with(offenders.get(0), "dirty.fn"), "expected the offender's path";
+}

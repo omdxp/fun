@@ -1,0 +1,426 @@
+// Formatter cases: an unformatted input, and the layout it is given.
+
+imp ..cli.fmt;
+imp std.string;
+imp std.result;
+imp std.io;
+imp std.vec;
+
+test "formats file in-place" {
+  str src = `fun  add(num a,num b) num{ret a+b;}
+  `//comment
+  `if true{ret 1;}else{ret 2;}`;
+  str want = `fun add(num a, num b) num {
+  `  ret a + b;
+  `}
+  `// comment
+  `if true {
+  `  ret 1;
+  `} else {
+  `  ret 2;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps a blank line between functions" {
+  str src = `fun a() num{ret 1;}fun b() num{ret 2;}`;
+  str want = `fun a() num {
+  `  ret 1;
+  `}
+  `
+  `fun b() num {
+  `  ret 2;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "preserves blank lines in function bodies" {
+  str src = `fun main() num{
+  `num x=1;
+  `
+  `num y=2;
+  `
+  `
+  `ret x+y;
+  `}`;
+  str want = `fun main() num {
+  `  num x = 1;
+  `
+  `  num y = 2;
+  `
+  `  ret x + y;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "preserves blank lines between top-level constructs" {
+  str src = `compound A{num x;}
+  `
+  `quirk Q{f() num;}
+  `
+  `impl A as Q {f() num{ret self.x;}}
+  `
+  `fun main(){}`;
+  str want = `compound A {
+  `  num x;
+  `}
+  `
+  `quirk Q {
+  `  f() num;
+  `}
+  `
+  `impl A as Q {
+  `  f() num {
+  `    ret self.x;
+  `  }
+  `}
+  `
+  `fun main() {
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "formats pointer and address-of spacing" {
+  str src = `compound User{raw* p;}
+  `fun main() void{User user;User * u2=& user;raw * buf=malloc(10);num x=1;num y=2;ret x*y;}`;
+  str want = `compound User {
+  `  raw* p;
+  `}
+  `
+  `fun main() void {
+  `  User user;
+  `  User* u2 = &user;
+  `  raw* buf = malloc(10);
+  `  num x = 1;
+  `  num y = 2;
+  `  ret x * y;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "groups imports and globals at top" {
+  str src = `fun main() num{ret 0;}
+  `imp std.c.io;
+  `num x=1;
+  `imp foo.bar;
+  `num y=2;`;
+  str want = `imp std.c.io;
+  `imp foo.bar;
+  `
+  `num x = 1;
+  `num y = 2;
+  `
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps unused warning controls attached to grouped imports and globals" {
+  str src = `allow unused_import, "keep attached";
+  `imp std.option;
+  `allow unused_variable, "keep attached";
+  `num value=1;
+  `fun main(){}`;
+  str want = `allow unused_import, "keep attached";
+  `imp std.option;
+  `
+  `allow unused_variable, "keep attached";
+  `num value = 1;
+  `
+  `fun main() {
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "formats parent traversal imports" {
+  str src = `imp std.c.io;
+  `imp .. defs.user;
+  `imp ..  defs.greeter;
+  `imp .... defs.greeter;
+  `fun main() void{ }`;
+  str want = `imp std.c.io;
+  `imp ..defs.user;
+  `imp ..defs.greeter;
+  `imp ....defs.greeter;
+  `
+  `fun main() void {
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "formats lowercase type pointers in signatures" {
+  str src = `compound tm{num tm_sec;}
+  `fun mktime(tm * t) num;
+  `fun gmtime(num* timep) tm *;`;
+  str want = `compound tm {
+  `  num tm_sec;
+  `}
+  `
+  `fun mktime(tm* t) num;
+  `fun gmtime(num* timep) tm*;`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps generic pointer signatures glued" {
+  str src = `compound Box<T>{T value;}
+  `fun get(Box<num> * p) num;
+  `fun put(Box<num>* p,num v) num;`;
+  str want = `compound Box<T> {
+  `  T value;
+  `}
+  `
+  `fun get(Box<num>* p) num;
+  `fun put(Box<num>* p, num v) num;`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps generic compound literals tight after ret" {
+  str src = `compound Box<T>{T v;}
+  `fun pack(Box<num> q) Box<num>{ret Box < num >{v = q};}`;
+  str want = `compound Box<T> {
+  `  T v;
+  `}
+  `
+  `fun pack(Box<num> q) Box<num> {
+  `  ret Box<num>{v = q};
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps space after await before parenthesized receiver" {
+  str src = `compound Box{num v;}
+  `fun pack(Box q) Box{ret q;}
+  `async fun f() num{Box q;num out=await(pack(q)).v;ret out;}`;
+  str want = `compound Box {
+  `  num v;
+  `}
+  `
+  `fun pack(Box q) Box {
+  `  ret q;
+  `}
+  `async fun f() num {
+  `  Box q;
+  `  num out = await (pack(q)).v;
+  `  ret out;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps pointer-to-pointer spacing and assignment spacing" {
+  str src = `fun use(raw **args) num{raw** local=args;ret 0;}`;
+  str want = `fun use(raw** args) num {
+  `  raw** local = args;
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "preserves indexed for-range loop syntax" {
+  str src = `fun main(){let a=[1,2,3];for i,item :: a {println_fmt("%d %d",i,item);}}`;
+  str want = `fun main() {
+  `  let a = [1, 2, 3];
+  `  for i, item :: a {
+  `    println_fmt("%d %d", i, item);
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "preserves single-variable for-range loop syntax" {
+  str src = `fun main(){let items=[1,2,3];for i : items {println_fmt("%d",i);}}`;
+  str want = `fun main() {
+  `  let items = [1, 2, 3];
+  `  for i : items {
+  `    println_fmt("%d", i);
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "formats nested blocks with comment lines" {
+  str src = `fun main(){
+  `{
+  `defer println("done");
+  `//comment about the block
+  `num value=1;
+  `println_fmt("%d",value);
+  `}
+  `}`;
+  str want = `fun main() {
+  `  {
+  `    defer println("done");
+  `    // comment about the block
+  `    num value = 1;
+  `    println_fmt("%d", value);
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps space after ret before unary reference" {
+  str src = `fun bad() num*{num x=123;ret&x;}`;
+  str want = `fun bad() num* {
+  `  num x = 123;
+  `  ret &x;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "keeps space before unary minus after comparisons" {
+  str src = `fun f(num x) bin{if x<=-1000000000{ret true;}ret false;}`;
+  str want = `fun f(num x) bin {
+  `  if x <= -1000000000 {
+  `    ret true;
+  `  }
+  `  ret false;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "preserves an inline raw string's backtick spelling verbatim" {
+  str src = "fun main() num {\n  str s = `a \"quoted\" // note`;\n  ret 0;\n}\n";
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "str s = `a \"quoted\" // note`;"), "expected the raw string reproduced as written";
+}
+
+test "reports the stage that rejected the input" {
+  let out = format_source("fun main() num {\n  /* never closed\n", "t.fn");
+  assert out.is_err(), "expected a lex failure to be reported";
+}
+
+test "wraps an over-long fit arm's own conditions, filling each line rather than one per line" {
+  str src = `fun classify(str text) bin {
+  `  fit text {
+  `    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
+  `      ret true;
+  `    }
+  `    _ -> { ret false; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  // Wrapped onto more than one line, but packed rather than one
+  // condition per line: several conditions still share a line.
+  assert contains(got, `"fun", "compound"`), "expected consecutive short conditions to stay packed on one line, not each on its own";
+  assert !contains(
+    got,
+    `"fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm"`
+  ), "expected the whole list not to still be on one line";
+}
+
+test "a fit arm's own conditions that already fit stay on one line" {
+  str src = `fun classify(str text) bin {
+  `  fit text {
+  `    "fun", "enum" -> { ret true; }
+  `    _ -> { ret false; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, `"fun", "enum" -> { ret true; }`), "expected a short condition list to stay exactly as written, unwrapped";
+}
+
+test "an over-long fit arm still wraps after an earlier arm's own body collapsed to one line" {
+  // A short arm's own body ("EOF", ... -> { ret "std.c.io"; }) is
+  // written as opaque verbatim text on its own fast path, bypassing
+  // the general brace handling the wrap decision is normally
+  // recomputed from - this arm's own over-long conditions must still
+  // wrap, not silently reuse a short earlier arm's own decision.
+  str src = `fun classify(str name) str {
+  `  fit name {
+  `    "a" -> { ret "x"; }
+  `    "CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MAX", "INT_MIN", "UINT_MAX", "LONG_MAX", "LONG_MIN", "ULONG_MAX", "LLONG_MAX", "LLONG_MIN", "ULLONG_MAX" -> {
+  `      ret "std.c.limits";
+  `    }
+  `    _ -> { ret ""; }
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert !contains(
+    got,
+    `"CHAR_BIT", "MB_LEN_MAX", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "SHRT_MIN"`
+  ), "expected the over-long arm to wrap even though the arm before it collapsed to one line";
+}
+
+test "wraps an over-long boolean chain, filling each line rather than one operand per line" {
+  str src = `fun is_typed(chr a, chr b2, chr d) bin {
+  `  ret (a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c') || (a == 'b' && b2 == 'i' && d == 'n') || (a == 'c' && b2 == 'h' && d == 'r');
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  // Wrapped onto more than one line, but packed rather than one
+  // operand per line: several operands still share a line.
+  assert contains(
+    got,
+    `(a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm')`
+  ), "expected consecutive short operands to stay packed on one line, not each on its own";
+  assert !contains(
+    got,
+    `(a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c')`
+  ), "expected the whole chain not to still be on one line";
+  num i = 0;
+  bin over_width = false;
+  Vec<str> lines = split(got, '\n');
+  defer lines.free();
+  for i < lines.len {
+    if len(lines.get(i)) > 100 {
+      over_width = true;
+    }
+    i = i + 1;
+  }
+  assert !over_width, "expected every wrapped line to stay within the width budget";
+}
+
+test "a boolean chain that already fits stays on one line" {
+  str src = `fun f(bin a, bin b) bin {
+  `  ret a || b;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "ret a || b;"), "expected a short chain to stay exactly as written, unwrapped";
+}
+
+test "a boolean chain nested inside a call's own parens defers to the call's own wrapping" {
+  // The chain itself sits inside an already-open paren (the call), so
+  // it must not force its own extra continuation indent on top of
+  // whatever the call's own argument wrapping already does.
+  str src = `fun f(bin a, bin b, bin c, bin d, bin e, bin g, bin h, bin j, bin k, bin l) bin {
+  `  ret takes(a == true && b == true && c == true && d == true && e == true && g == true && h == true, j, k, l);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert !contains(got, "\n\n"), "expected no blank line introduced by the nested chain";
+}
+
+test "a wrapped chain followed by an already-multi-line nested call keeps the call's own closer at base indent" {
+  // Regression: `bool_chain_wrap` staying set for the rest of the
+  // statement once leaked into a LATER, unrelated nested call whose
+  // own arguments were already written across multiple lines, pushing
+  // its closing paren one level too deep instead of back to the
+  // statement's own indent.
+  str src = `fun f(bin a, bin b) bin {
+  `  if a == true && b == true && a == true && b == true && a == true && b == true || takes(
+  `    a,
+  `    b
+  `  ) {
+  `    ret true;
+  `  }
+  `  ret false;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n  ) {"), "expected the nested call's own closing paren back at the if's own indent, not one level deeper";
+}

@@ -36,36 +36,48 @@ cleanup_leftovers() {
 trap cleanup_leftovers EXIT
 
 # Prefer Windows build output if present (WSL can execute .exe), otherwise use native binary.
-# Honor a pre-set FUN_EXE (e.g. to run the corpus against a self-hosted binary).
+# Honor a pre-set FUN_EXE (e.g. to run the corpus against a specific build).
 FUN_EXE="${FUN_EXE:-}"
 if [[ -n "$FUN_EXE" ]]; then
   :
-elif [[ -f "$REPO_ROOT/zig-out/bin/fun.exe" ]]; then
-  FUN_EXE="$REPO_ROOT/zig-out/bin/fun.exe"
-elif [[ -f "$REPO_ROOT/zig-out/bin/fun" ]]; then
-  FUN_EXE="$REPO_ROOT/zig-out/bin/fun"
+elif [[ -f "$REPO_ROOT/fun-out/bin/fun.exe" ]]; then
+  FUN_EXE="$REPO_ROOT/fun-out/bin/fun.exe"
+elif [[ -f "$REPO_ROOT/fun-out/bin/fun" ]]; then
+  FUN_EXE="$REPO_ROOT/fun-out/bin/fun"
 else
-  echo "Missing zig-out/bin/fun(.exe). Run 'zig build' first." >&2
+  echo "Missing fun-out/bin/fun(.exe). Run 'fun build' first, or set FUN_EXE to point at a built fun binary." >&2
   exit 2
 fi
 
 USE_WINDOWS_PATHS=0
 REPO_ROOT_WIN=""
+WIN_PATH_CONV=""
+MSVC_MODE=0
+if [[ "${FUN_CC:-}" == "cl" || "${FUN_CC:-}" == "cl.exe" ]]; then
+  MSVC_MODE=1
+fi
 if [[ "$FUN_EXE" == *.exe ]]; then
   USE_WINDOWS_PATHS=1
   if command -v wslpath >/dev/null 2>&1; then
+    WIN_PATH_CONV="wslpath"
     REPO_ROOT_WIN="$(wslpath -w "$REPO_ROOT")"
+  elif command -v cygpath >/dev/null 2>&1; then
+    WIN_PATH_CONV="cygpath"
+    REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
   else
-    echo "wslpath not found; cannot convert paths for fun.exe" >&2
+    echo "Neither wslpath nor cygpath found; cannot convert paths for fun.exe" >&2
     exit 2
   fi
 fi
 
 to_fun_path() {
-  # When executing Windows fun.exe from WSL, pass Windows-style paths.
+  # When executing Windows fun.exe from WSL or Git Bash, pass Windows-style
+  # paths but keep forward slashes: fun's basename() splits on '/' so
+  # backslashes would prevent it from stripping the directory prefix when
+  # it builds the output C path under fun-out/.
   local p="$1"
   if [[ $USE_WINDOWS_PATHS -eq 1 ]]; then
-    wslpath -w "$p"
+    "$WIN_PATH_CONV" -w "$p" | tr '\\' '/'
   else
     printf '%s' "$p"
   fi
@@ -98,6 +110,24 @@ is_expected_fail() {
 
   # Arch-specific asm example fails during codegen on mismatched targets.
   if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
+    return 0
+  fi
+
+  # GNU inline asm examples are not supported by MSVC.
+  if [[ $MSVC_MODE -eq 1 ]] && [[ "$rel" == "examples/advanced/asm_basic.fn" || \
+      "$rel" == "examples/advanced/asm_computed_operand.fn" || \
+      "$rel" == "examples/advanced/asm_operands.fn" ]]; then
+    return 0
+  fi
+
+  # `u256` in this example needs a `_BitInt` past 128 bits, which no
+  # compiler CI actually provides today: Apple's clang and
+  # mainline LLVM clang both cap `_BitInt` at 128 bits regardless of
+  # platform, and Ubuntu's default GCC (13.x) doesn't recognize
+  # `_BitInt` as a keyword at all, under any -std flag - only a newer
+  # GCC (confirmed on GCC 15) lifts the cap. Expected to fail on every
+  # CI platform until CI ships a new enough GCC.
+  if [[ "$rel" == "examples/let_and_lowlevel_types.fn" ]]; then
     return 0
   fi
 
@@ -134,24 +164,50 @@ run_with_timeout() {
   fi
 }
 
-# Minimal output assertions (only where we have stable strings).
-# Format: expected[relpath]=$'line1\nline2\n...'
-declare -A expected
-expected["examples/test.fn"]=$'The factorial of'
-expected["examples/advanced/custom_functions.fn"]=$'The result of subtracting'
-expected["examples/advanced/fit_exhaustive_ok.fn"]=$'x was true'
-expected["examples/advanced/fit_exhaustive_warning.fn"]=$'x was true'
-expected["examples/advanced/for_loops.fn"]=$'arr[0]=1\narr[2]=3'
-expected["examples/imports/main.fn"]=$'grand_child\nchild'
+# Not `declare -A` (bash 4+ only): macOS ships bash 3.2 by default and never
+# upgrades it (GPLv3 licensing), so this needs to run on that too.
+# `expected_content_for`/`fail_out_write`/`fail_out_read` below replace the
+# two associative arrays this used to be with a case statement and a small
+# file-backed lookup, both bash-3.2-compatible.
+expected_content_for() {
+  case "$1" in
+    "examples/test.fn") printf '%s' $'The factorial of' ;;
+    "examples/advanced/custom_functions.fn") printf '%s' $'The result of subtracting' ;;
+    "examples/advanced/fit_exhaustive_ok.fn") printf '%s' $'x was true' ;;
+    "examples/advanced/fit_exhaustive_warning.fn") printf '%s' $'x was true' ;;
+    "examples/advanced/for_loops.fn") printf '%s' $'arr[0]=1\narr[2]=3' ;;
+    "examples/imports/main.fn") printf '%s' $'grand_child\nchild' ;;
+    *) return 1 ;;
+  esac
+}
 
-mapfile -t files < <(find "$REPO_ROOT/examples" -type f -name '*.fn' | sort)
+# `mapfile`/`readarray` are also bash 4+; a plain read loop works everywhere.
+files=()
+while IFS= read -r f; do
+  files+=("$f")
+done < <(find "$REPO_ROOT/examples" -type f -name '*.fn' | sort)
 
 echo "Running ${#files[@]} example files..."
 
 failed=()
 unexpected_pass=()
 expected_fail_count=0
-declare -A fail_out
+
+# File-backed stand-in for an associative array keyed by a failed file's
+# relative path (there's no bash-3.2 equivalent) -- one file per failure,
+# named by the path with '/' replaced so it's a valid filename.
+FAIL_OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "$FAIL_OUT_DIR"; cleanup_leftovers' EXIT
+
+fail_out_write() {
+  local rel="$1" content="$2"
+  printf '%s' "$content" >"$FAIL_OUT_DIR/${rel//\//_}"
+}
+
+fail_out_read() {
+  local rel="$1" f="$FAIL_OUT_DIR/${rel//\//_}"
+  [[ -f "$f" ]] && cat "$f"
+}
 
 idx=0
 for full in "${files[@]}"; do
@@ -205,19 +261,19 @@ for full in "${files[@]}"; do
 
   if [[ $ec -ne $expected_ec ]]; then
     failed+=("$rel (exit=$ec)")
-      fail_out["$rel"]="$out"
+    fail_out_write "$rel" "$out"
     continue
   fi
 
-  if [[ -n "${expected[$rel]+x}" ]]; then
+  if expected_content="$(expected_content_for "$rel")"; then
     while IFS= read -r needle; do
       [[ -z "$needle" ]] && continue
       if ! grep -Fq -- "$needle" <<<"$out"; then
         failed+=("$rel (missing: $needle)")
-        fail_out["$rel"]="$out"
+        fail_out_write "$rel" "$out"
         break
       fi
-    done <<<"${expected[$rel]}"
+    done <<<"$expected_content"
   fi
 
 done
@@ -234,8 +290,8 @@ if [[ ${#failed[@]} -gt 0 ]]; then
   for item in "${failed[@]}"; do
     rel="${item%% (*}"
     echo "--- $rel ---"
-    if [[ -n "${fail_out[$rel]+x}" ]]; then
-      printf '%s\n' "${fail_out[$rel]}" | tail -n 40
+    if captured="$(fail_out_read "$rel")" && [[ -n "$captured" ]]; then
+      printf '%s\n' "$captured" | tail -n 40
     else
       echo "(no captured output)"
     fi

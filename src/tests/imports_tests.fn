@@ -1,0 +1,188 @@
+// Import-resolution corpus, ported from the `imports` suite. Each test
+// compiles a real entry file from disk through import resolution and
+// checks the emitted C, so paths here are relative to the repository root.
+
+imp ..codegen.codegen;
+imp ..codegen.codegen_state;
+imp ..parser.import_resolver;
+imp ..semantics.typecheck;
+imp std.string;
+imp std.result;
+
+// Resolves `path`'s import graph and transpiles the merged program.
+fun transpile_file(str path) Result<str, str> {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  CodegenState st = codegen_state_new();
+  Codegen cg = codegen_new(&st);
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+  if cg.transpile(merged.nodes).is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(st.out.build());
+}
+
+// Transpiles `path`, aborting with `label` when any stage rejects it.
+fun emit_file(str path, str label) str {
+  let r = transpile_file(path);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the file";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
+test "an imported module's functions are merged into the program" {
+  let out = emit_file(
+    "examples/imports/main.fn",
+    "an imported module's functions are merged into the program"
+  );
+  assert contains(out, "parent("), "expected the imported function to be emitted";
+  assert contains(out, "child("), "expected the transitively imported function to be emitted";
+}
+
+test "two aliases exporting the same name are disambiguated" {
+  let out = emit_file(
+    "examples/imports/alias_collision/main.fn",
+    "two aliases exporting the same name are disambiguated"
+  );
+  assert contains(out, "pick"), "expected the colliding function to be emitted";
+  assert count(out, "pick(void) {") == 2, "expected one definition per aliased module";
+}
+
+test "aliased std.io import: print_fmt emits its helpers" {
+  let out = emit_file(
+    "src/tests/fixtures/alias_io_print.fn",
+    "aliased std.io import: print_fmt emits its helpers"
+  );
+  assert contains(out, "format_impl"), "expected the format helper to be emitted";
+  assert contains(out, "fmt_num"), "expected the number formatter to be emitted";
+}
+
+test "aliased std.io import: format emits its helpers" {
+  let out = emit_file(
+    "src/tests/fixtures/alias_io_format.fn",
+    "aliased std.io import: format emits its helpers"
+  );
+  assert contains(out, "format_impl"), "expected the format helper to be emitted";
+  assert contains(out, "fmt_num"), "expected the number formatter to be emitted";
+}
+
+test "aliased std.log import: emits its level helper" {
+  let out = emit_file(
+    "src/tests/fixtures/alias_log_levels.fn",
+    "aliased std.log import: emits its level helper"
+  );
+  assert contains(out, "level_name"), "expected the level helper to be emitted";
+}
+
+test "a user module imported under an alias is emitted under that alias" {
+  let out = emit_file(
+    "src/tests/fixtures/alias_stub_main.fn",
+    "a user module imported under an alias is emitted under that alias"
+  );
+  assert contains(out, "say_hello"), "expected the imported function to be emitted";
+}
+
+test "the same module imported without an alias uses bare function names" {
+  let out = emit_file(
+    "src/tests/fixtures/no_alias_io.fn",
+    "the same module imported without an alias uses bare function names"
+  );
+  assert contains(out, "format_impl"), "expected the bare format helper";
+  assert contains(out, "fmt_num"), "expected the bare number formatter";
+}
+
+test "diamond import: the shared module is emitted exactly once" {
+  let out = emit_file(
+    "examples/imports/diamond/main.fn",
+    "diamond import: the shared module is emitted exactly once"
+  );
+  // A definition is the header immediately followed by '{'; a forward
+  // declaration ends in ';' and a call site is followed by ')'.
+  assert count(out, "shared_value(void) {") == 1, "expected one definition of the shared function";
+  assert contains(out, "shared_value"), "expected the shared function to be referenced";
+}
+
+test "an aliased generic function call is monomorphized" {
+  let out = emit_file(
+    "src/tests/fixtures/agc_main.fn",
+    "an aliased generic function call is monomorphized"
+  );
+  assert contains(out, "ident__num"), "expected the monomorphized instance";
+  assert !contains(out, "g__ident"), "expected no alias-prefixed generic, which would be undeclared";
+}
+
+// Aliased imports are flattened into one program and keep their own
+// names, renamed only when two aliases export the same name. The
+// assertions below check the symbol is emitted and reachable rather
+// than a particular prefix.
+
+// What the typechecker says about a whole resolved program. Visibility
+// is its business, not codegen's, so these read it directly rather than
+// through `transpile_file`.
+fun check_file(str path) str {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret parsed.unwrap_err();
+  }
+  let merged = parsed.unwrap();
+  let checked = typecheck_program(&merged.nodes);
+  if checked.is_err() {
+    ret checked.unwrap_err().message;
+  }
+  ret "";
+}
+
+test "an alias-qualified call to a private function is rejected" {
+  // A call written `one.secret()` reaches a function in the file that
+  // alias stands for. The merge flattens both files into one program, so
+  // what is left to say is whether that file offers the name at all.
+  str found = check_file("src/tests/fixtures/privalias_main_bad.fn");
+  assert contains(found, "not public"), "expected the private function refused through its alias";
+  assert equals(check_file("src/tests/fixtures/privalias_main_ok.fn"), ""), "expected the public one still reachable";
+}
+
+test "an alias-qualified call to a public function compiles" {
+  let out = emit_file(
+    "src/tests/fixtures/privalias_main_ok.fn",
+    "an alias-qualified call to a public function compiles"
+  );
+  assert contains(out, "visible"), "expected the public function to be emitted";
+}
+
+test "an alias-qualified read of a private global is rejected" {
+  // A read written `one.secret_g` reaches a variable in the file that
+  // alias stands for, the same way a call reaches a function there.
+  assert contains(check_file("src/tests/fixtures/privglob_main_bad.fn"), "not public"), "expected the private global refused through its alias";
+  assert equals(check_file("src/tests/fixtures/privglob_main_ok.fn"), ""), "expected the public global still reachable";
+}
+
+test "an alias-qualified read of a public global compiles" {
+  let out = emit_file(
+    "src/tests/fixtures/privglob_main_ok.fn",
+    "an alias-qualified read of a public global compiles"
+  );
+  assert contains(out, "shared_g"), "expected the public global to be emitted";
+}
+
+test "a leading-underscore field is private to the file that declares it" {
+  // The type may be offered publicly while some of what it holds stays
+  // its own business, which is what the leading underscore says.
+  assert contains(check_file("src/tests/fixtures/privfield_main_bad.fn"), "is private to the file"), "expected the underscore field refused from another file";
+  assert equals(check_file("src/tests/fixtures/privfield_main_ok.fn"), ""), "expected an accessor in the declaring file to still reach it";
+}
+
+test "a public accessor reaching a leading-underscore field compiles" {
+  let out = emit_file(
+    "src/tests/fixtures/privfield_main_ok.fn",
+    "a public accessor reaching a leading-underscore field compiles"
+  );
+  assert contains(out, "balance"), "expected the accessor method to be emitted";
+}

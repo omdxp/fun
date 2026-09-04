@@ -1,0 +1,121 @@
+// Token types produced by the lexer.
+// 
+// A `Number` token distinguishes integer vs decimal by which `TokenData`
+// variant it carries (`Num` vs `Dec`).
+
+imp std.string;
+imp std.c.mem;
+
+// The kind of lexical token.
+pub enum TokKind {
+  Identifier,
+  Keyword,
+  Operator,
+  Symbol,
+  Number,
+  String,
+  Boolean,
+  Comment,
+  NewLine,
+}
+
+// The value carried by a token. A `Number`-kind token carries `Num` for an
+// integer literal or `Dec` for a decimal one; a `Symbol`/character-literal
+// token carries `Cval`; `Identifier`/`Keyword`/`Operator`/`String`/`Comment`
+// carry `Sval`; `Boolean` carries `Bval`.
+pub enum TokenData {
+  Cval(chr),
+  Sval(str),
+  Num(num),
+  Dec(dec),
+  Bval(bin),
+}
+
+// The span of a token in its source file.
+pub compound Pos {
+  num line;
+  num col;
+  num start_col;
+  num end_col;
+  // For most tokens this equals `line`, but for tokens that cross a newline
+  // boundary (e.g. a multi-line block comment) it differs.
+  num end_line;
+  str filename;
+}
+
+// A single lexical token: its kind, value, and source span.
+pub compound Token {
+  TokKind type;
+  TokenData data;
+  Pos pos;
+  // True when whitespace (space/tab) follows the token, as opposed to the
+  // next token being immediately adjacent. This is what tells `Vec<T>`
+  // and `Type*` apart from a comparison or a multiplication.
+  bin whitespace;
+  // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
+  // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences
+  // verbatim, ready for direct re-embedding in C), a raw string's data
+  // holds the literal bytes with no escape processing at all; codegen
+  // must escape this content when emitting the C string literal, and the
+  // formatter must reproduce the backtick spelling verbatim rather than
+  // requoting the buffer.
+  bin is_raw_string;
+}
+
+// Frees `t`'s own heap-allocated content: `Sval`'s string, the only
+// per-token allocation the lexer makes (`Pos.filename` is always the
+// same shared path string handed to `tokenize()`, borrowed by every
+// token in the file - not owned by any single one of them).
+fun free_token_contents(Token* t) {
+  fit t.data {
+    .Sval(s) -> { free(s); }
+    _ -> {}
+  }
+}
+
+// Frees a `Vec<Token>` this caller owns outright. Not safe on tokens a
+// parse ran against: the AST reuses their `Sval` strings directly
+// (`token_word`, the parser's own `name = s`), so freeing those here
+// would free strings the AST still needs.
+pub fun free_token_vec(Vec<Token>* tokens) {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    free_token_contents(&t);
+    i = i + 1;
+  }
+  tokens.free();
+}
+
+// Returns true if `t` is an `Operator` token whose text equals `val`.
+pub fun token_is_operator(Token t, str val) bin {
+  fit t.data {
+    .Sval(s) -> { ret t.type == .Operator && equals(s, val); }
+    _ -> { ret false; }
+  }
+}
+
+// Returns true if `t` is a `Keyword` token whose text equals `val`.
+pub fun token_is_keyword(Token t, str val) bin {
+  fit t.data {
+    .Sval(s) -> { ret t.type == .Keyword && equals(s, val); }
+    _ -> { ret false; }
+  }
+}
+
+// Returns true if `t` is a `Symbol` token whose character equals `val`.
+pub fun token_is_symbol(Token t, chr val) bin {
+  fit t.data {
+    .Cval(c) -> { ret t.type == .Symbol && c == val; }
+    _ -> { ret false; }
+  }
+}
+
+// Returns true if `t` is a newline, a comment, or the `\` newline-separator
+// symbol (used to continue a logical line across a physical one).
+pub fun token_is_nl_or_comment_or_newline_separator(Token t) bin {
+  if t.type == .NewLine || t.type == .Comment {
+    ret true;
+  }
+  ret token_is_symbol(t, '\\');
+}

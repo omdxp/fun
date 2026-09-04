@@ -1,0 +1,184 @@
+// Reading a document once.
+// 
+// Every question a client asks about a document is answered from the
+// same two things: its tokens, and the program its imports resolve to.
+// Reading those is what costs, and the text does not change between the
+// questions asked about one revision, so it is read once per revision
+// and kept.
+// 
+// The revision a client sends is what says whether what is kept is
+// still current. An edit raises it, and the next question re-reads.
+
+imp documents;
+imp ..ast.ast;
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp ..cli.manifest;
+imp std.map;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.fs;
+
+// One document as it was last read.
+pub compound Analyzed {
+  // False when the text could not be lexed or its imports could not be
+  // resolved, which is ordinary while a reader is typing.
+  bin lexed;
+  bin parsed;
+  num version;
+  Vec<Token> tokens;
+  ProgramMergeResult program;
+}
+
+// What has been read, by document URI.
+pub compound AnalysisCache {
+  Map<str, Analyzed> entries;
+  // What every file the open documents import last parsed as. An edit
+  // changes one file, so the rest are reused rather than read again.
+  ImportCache imports;
+  // The workspace's own PACKAGE_NAME/PACKAGE_VERSION, read from
+  // fun.toml the same way `fun build` itself does (manifest_defines),
+  // so hover/completion/go-to-definition see them as ordinary declared
+  // constants instead of an undeclared name a build-only define would
+  // otherwise leave invisible to source analysis entirely. Read once
+  // and reused (fun.toml itself changes far less often than fls
+  // answers questions per revision), not on every `.of()` call.
+  Vec<Define> workspace_defines;
+  bin workspace_defines_checked;
+}
+
+pub fun analysis_cache_new() AnalysisCache {
+  AnalysisCache c;
+  c.entries.init(8);
+  c.imports = import_cache_new();
+  c.workspace_defines.init(0);
+  c.workspace_defines_checked = false;
+  ret c;
+}
+
+impl AnalysisCache {
+  // What `doc` reads as, from what was kept when the revision matches
+  // and by reading it again when it does not.
+  pub of(Document doc) Analyzed {
+    let kept = self.entries.at(doc.uri);
+    if kept.is_some() {
+      Analyzed found = kept.unwrap();
+      if found.version == doc.version {
+        ret found;
+      }
+      // A stale revision is about to be replaced below - freed first,
+      // or every edit leaks the whole previous parse for as long as
+      // the server keeps running. `program.nodes` (the transitively
+      // merged cross-file program) is safe to free this deeply too,
+      // not just `entry_nodes`: `_parse_and_merge_source` clones every
+      // node it pulls from `self.imports` rather than sharing it, so
+      // this document's own copy is exclusively its own.
+      if found.lexed {
+        // Deep: this is AnalysisCache's own independent tokenize()
+        // call below, not the tokens a parse ran against, so nothing
+        // aliases these strings.
+        free_token_vec(&found.tokens);
+      }
+      if found.parsed {
+        free_node_tree(&found.program.entry_nodes);
+        free_node_tree(&found.program.nodes);
+        found.program.aliases.free();
+        found.program.alias_rename_keys.free();
+        found.program.alias_rename_targets.free();
+      }
+    }
+
+    Analyzed fresh;
+    fresh.version = doc.version;
+    fresh.lexed = false;
+    fresh.parsed = false;
+    fresh.tokens.init(0);
+
+    let lexed = tokenize(doc.text, doc.path);
+    if lexed.is_ok() {
+      fresh.tokens = lexed.unwrap();
+      fresh.lexed = true;
+    }
+
+    // The text a client holds is what to read, not what is on disk;
+    // everything it imports is still read from disk.
+    let merged = parse_program_cached(doc.path, doc.text, &self.imports);
+    if merged.is_ok() {
+      fresh.program = merged.unwrap();
+      fresh.parsed = true;
+      self._inject_workspace_defines(&fresh.program.nodes);
+    }
+
+    self.entries.put(doc.uri, fresh);
+    ret fresh;
+  }
+
+  // Inserts this workspace's own PACKAGE_NAME/PACKAGE_VERSION (if
+  // fun.toml exists) into `nodes`, mirroring exactly how
+  // `compile_to_c_mode` itself injects them ahead of the program's own
+  // declarations before type-checking - into the merged program, not
+  // this one file's own entry_nodes, since neither constant is
+  // actually declared by any file a client opened.
+  _inject_workspace_defines(Vec<Node>* nodes) {
+    if !self.workspace_defines_checked {
+      self.workspace_defines_checked = true;
+      if exists("fun.toml") {
+        let parsed = parse_manifest(read_to_string("fun.toml"));
+        if parsed.is_ok() {
+          Manifest m = parsed.unwrap();
+          self.workspace_defines = manifest_defines(&m);
+        }
+      }
+    }
+    num i = self.workspace_defines.len;
+    for i > 0 {
+      i = i - 1;
+      Define* d = &self.workspace_defines.data[i];
+      Node n = manifest_const_node(d.name, d.value);
+      // `manifest_const_node` (built for a one-shot compile, where
+      // nothing ever inspects a synthesized node's own position)
+      // leaves `has_pos` false and `pos` itself untouched - every
+      // fls feature that scans `program.nodes` assumes a real node
+      // always has a real position, so an uninspected one here reads
+      // as garbage memory the moment anything looks (go-to-definition,
+      // document links, workspace symbols, ...). Pointing it at
+      // fun.toml itself is honest: that's genuinely where the value
+      // comes from.
+      n.pos.filename = "fun.toml";
+      n.pos.line = 1;
+      n.pos.col = 1;
+      n.pos.start_col = 1;
+      n.pos.end_col = 1;
+      n.pos.end_line = 1;
+      n.has_pos = true;
+      nodes.insert(0, n);
+    }
+  }
+
+  // Drops what was kept for a document a client closed.
+  pub forget(str document_uri) {
+    let found = self.entries.at(document_uri);
+    if found.is_some() {
+      Analyzed a = found.unwrap();
+      if a.lexed {
+        free_token_vec(&a.tokens);
+      }
+      if a.parsed {
+        free_node_tree(&a.program.entry_nodes);
+        free_node_tree(&a.program.nodes);
+        a.program.aliases.free();
+        a.program.alias_rename_keys.free();
+        a.program.alias_rename_targets.free();
+      }
+    }
+    self.entries.remove(document_uri);
+  }
+
+  pub free() {
+    self.entries.free();
+    self.imports.files.free();
+    self.workspace_defines.free();
+  }
+}

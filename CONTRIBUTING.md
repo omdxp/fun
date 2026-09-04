@@ -16,12 +16,24 @@ Thank you for contributing to Fun. This document outlines the expected workflow 
 4. Run the relevant validation commands before opening a pull request.
 5. Open a pull request with a clear description of the problem, approach, and validation performed.
 
+## Building From Source
+
+Fun's compiler and language server are themselves written in Fun, under `src/`. Building them needs an existing `fun` binary to run the build with: install one from a [release bundle](README.md#installation) or [`omdxp/setup-fun`](https://github.com/omdxp/setup-fun), then run:
+
+```sh
+fun build
+```
+
+This reads [fun.toml](fun.toml) and builds `fun`/`fls` from `src/` into `fun-out/bin/`. That freshly built binary is what actually gets tested and iterated on day to day.
+
 ## Validation Expectations
 
 At minimum, contributors should run the repository validation relevant to the changed area.
 
-- Full repository validation: `zig build test --summary all`
-- Build validation: `zig build`
+- Build: `fun build`
+- Test suite: `fun-out/bin/fun test src/tests`
+- Examples corpus: `FUN_EXE=fun-out/bin/fun ./scripts/run_examples.sh`
+- Formatting: `fun -fmt-check-all`
 - Editor extension changes: run the local build steps documented in [editors/vscode/README.md](editors/vscode/README.md)
 
 If a change intentionally affects diagnostics, formatting, runtime backends, or editor tooling, include the commands used to verify that behavior in the pull request description.

@@ -377,7 +377,9 @@ async fun main() {
 
 ## Concurrency: `fork` & channels
 - `fork <async-call>;` spawns a **virtual thread** (fire-and-forget) onto an M:N
-  scheduler — a CPU-count-sized pool of OS worker threads runs many cheap tasks.
+  scheduler — an elastic pool of OS worker threads (CPU-count base, grows under
+  contention up to `FUN_SCHED_MAX_WORKERS`, default 4096; idle growth retires
+  after 10s) runs many cheap tasks.
 - `main` automatically waits for all `fork`ed tasks to finish before returning.
 - Channel operators (sugar over `std.channel`):
   - `ch <- v` ≡ `ch.send(v)` (send)
@@ -389,7 +391,8 @@ async fun main() {
   `SendResult` (`Ok`/`Closed`/`Full`/`Cancelled`/`Error(num)`) — `fit` on them instead of
   decoding a numeric status. Timeout/token and `try_*`/`*_async` variants exist for both.
 - **`std.task` WaitGroup**: `wait_group_new(n)` + `wg.done()` in each task + `wg.wait()`
-  blocks until all `n` `fork`ed tasks complete.
+  blocks until all `n` `fork`ed tasks complete. Its count is `Mutex`-guarded, so
+  concurrent `add()`/`wait()` from multiple already-forked tasks is safe.
 
 ```fun
 imp std.channel;
@@ -538,16 +541,20 @@ fun main() {
 
 ## C Compiler Selection
 
-By default, `fun` uses `zig cc`. You can override the compiler with environment variables:
+By default, `fun` tries `clang`, then `gcc`, then the platform's default `cc`
+(`cl` on Windows), using the first one it finds on `PATH`. A candidate that's
+found but fails to compile stops the search there rather than falling through
+to the next one, since a real compile error is never solved by switching
+compilers. You can override the compiler with environment variables:
 
-- `FUN_CC`: compiler command. If it contains `{src}` and `{out}`, it is treated as a full template.
-- `FUN_CC_ARGS`: extra arguments appended after the base command.
+- `FUN_CC`: the exact compiler command to use, in place of the search above.
+- `FUN_CC_ARGS`: extra arguments appended after the usual defaults, space-separated.
 
 Examples:
 
 - `FUN_CC=clang`
-- `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
-- `FUN_CC="clang -O2 {src} -o {out}"`
+- `FUN_CC=cl` (MSVC, on Windows)
+- `FUN_CC=gcc FUN_CC_ARGS="-O2 -Wall"`
 
 `fun fuzz` does NOT use `FUN_CC`/`FUN_CC_ARGS` — it needs a compiler whose
 toolchain bundles a coverage-guided fuzzing runtime specifically, which has
@@ -587,14 +594,17 @@ wait to avoid warning on slow-but-live operations.
 ## Testing
 - `test "description" { ... }` at the top level; body reuses ordinary statement
   parsing (`assert`, `panic`, `if`/`for`, ... all work inside).
-- Ignored entirely by an ordinary compile (not type-checked, not emitted) —
-  matches `zig build` vs `zig test`.
+- Ignored entirely by an ordinary compile: not type-checked, not emitted.
 - `fun test <path>` (or `-test`) compiles every discovered `test` block into a
   runner and runs it. Tests run CONCURRENTLY, one per virtual task (`fork`),
   printing `test: <name> ... PASS`/`FAIL` in completion order plus a final
   `N/N tests passed` summary.
 - `fun test <path> -- "exact name"` filters to just the matching test(s) — no
   separate flag; this is what an editor's per-test Run/Debug button uses.
+- `fun test` (no path) or `fun test <dir>` discovers every `.fn` file under
+  that root declaring a `test` block, compiles and runs each in its own pass,
+  and prints an aggregate `N/N test files passed` summary. `fun test
+  <file.fn>` keeps its existing single-file behavior.
 - A failing `assert` inside a test is caught and reported as `FAIL` without
   aborting the run — every other test still executes. `panic` still aborts
   the whole process (no per-test recovery for it); prefer `assert`.
@@ -639,6 +649,16 @@ wait to avoid warning on slow-but-live operations.
   environments hang during AddressSanitizer's own startup, unrelated to Fun
   or the fuzzing engine. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety
   half of the sanitizer flag — fuzzing still runs and still finds crashes.
+- `fun fuzz` (no path) or `fun fuzz <dir>` discovers every `.fn` file under
+  that root declaring one or more `fuzz` targets and runs each for a bounded
+  `FUN_FUZZ_DEFAULT_SECONDS` (default 30s) rather than the open-ended
+  campaign a single named target gets — a CI-style regression sweep, not a
+  real fuzzing session. Since the engine's own `-max_total_time` isn't
+  reliable in every environment, the budget is enforced independently by a
+  watchdog that force-kills a target still running when it elapses; that
+  alone doesn't count as a failure, only an actual crash does. Never takes a
+  target name (only meaningful alongside one file); `fun fuzz <file.fn>
+  [target]` is unchanged.
 - Windows is unverified: the macOS (via the Homebrew-LLVM fallback) and
   (expected, by similar reasoning) Linux paths have actually been confirmed
   working; Windows has not, for lack of a machine to test on. Plain LLVM
@@ -689,7 +709,7 @@ wait to avoid warning on slow-but-live operations.
 - `std.sync_backend_posix`: POSIX sync backend module (`sync_backend_posix_*`) used by `std.sync_runtime`
 - `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread_windows`
 - `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
-- `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
+- `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms); `mutex_new()`/`condvar_new()` initialize eagerly and are the safe choice for a value shared across threads, with a lazy fallback in `lock`/`wait` for single-threaded use
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via `std.quirks`' generic `To<JsonValue>`/`From<JsonValue>` (hand-implemented — Fun has no reflection), plus `to_json_value`/`to_json_string` convenience wrappers.
 - `std.toml`: typed TOML via the `TomlValue` enum (`Str`/`Int`/`Float`/`Bool`); `parse_document`, typed `get(key) -> Option<TomlValue>`, `as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`. Top-level `key = value` pairs sit on the document; `[name]` sections are reached with `table(name)` and `[[name]]` entries with `array(name)`, both giving a `TomlTable` with its own `get`/`get_str`.
 - `std.serde`: text-layer `to_string`/`from_string`, dispatching through `std.quirks`' generic `To<str>`/`From<str>` (implemented by `JsonValue` and `TomlDoc`).
@@ -698,16 +718,27 @@ wait to avoid warning on slow-but-live operations.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.mock_time`: a `Clock` quirk for time-mocked tests — `SystemClock` (the real clock) and `MockClock` (a fully controllable fake one, advanced only via explicit `advance`/`set` calls, never real time)
 - `std.testing`: the concurrent test-mode runner (`run_discovered_tests`) `fun test` auto-imports and calls into — not intended to be used directly from ordinary Fun source
-- `std.sys`: environment and process helpers (`env`/`set_env`/`clear_env` for environment variables, `sys_exit`, `sys_abort`, `sys_system`)
+- `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/`clear_env` for environment variables — `env` returns null when unset, `env_or(name, fallback)` is the null-safe form; `sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI
 ```
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-fuzz] [-fuzz-target <name>] [-help]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-version] [-- <program args>]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
+fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
+- `-no-exec`/`-outf`/`-out` apply the same way under `-test`/`-fuzz` (both the
+  single-file and `test`/`fuzz` subcommand forms) as they do for a plain
+  compile: `-no-exec` stops right after writing the C file instead of also
+  compiling and running it, `-out` names where it's written, and `-outf`
+  (or naming `-out` at all) keeps it afterward instead of deleting it once
+  compiled. This is what the VS Code extension's own Debug Test command
+  relies on to get just the C file to compile and debug itself.
+- `-warn-unused`/`-warn-unused-lenient` also apply under `-test`/`-fuzz`,
+  both forms.
 
 ## Errors and Warnings
 - Type mismatches, unknown symbols, and incomplete quirk implementations are errors.

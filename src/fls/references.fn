@@ -1,0 +1,310 @@
+// References and rename.
+// 
+// Both start from the same list: every place a name is written. That
+// list is built by matching the word itself across the documents a
+// client has open, which is what the outgoing server does too. It finds
+// every real occurrence, and it can also find a different declaration
+// that happens to share the name; resolving each occurrence would need
+// an index of the whole workspace rather than the open files.
+
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp protocol;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.c.mem;
+
+// One place a name is written.
+pub compound Occurrence {
+  str document_uri;
+  Span span;
+}
+
+// Every place the name at `line`/`character` is written, but only
+// within `doc` itself, as the result a client is sent. Unlike
+// `references`, no workspace scan and no other document's own
+// occurrences: a client asks for this on essentially every cursor
+// move, so it stays scoped to what is already read for free.
+pub fun document_highlights(AnalysisCache* cache, Document doc, num line, num character) str {
+  str name = name_at(cache, doc, line, character);
+  if equals(name, "") {
+    ret "[]";
+  }
+
+  Vec<Occurrence> found;
+  found.init(8);
+  defer found.free();
+  _occurrences_in_doc(cache, doc, doc.uri, name, &found);
+
+  StringBuilder b = string_builder_init(128);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    Occurrence o = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(`{"range":{"start":{"line":`);
+    b.append_num(o.span.line);
+    b.append(`,"character":`);
+    b.append_num(o.span.start);
+    b.append(`},"end":{"line":`);
+    b.append_num(o.span.line);
+    b.append(`,"character":`);
+    b.append_num(o.span.end);
+    b.append("}}}");
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// Every place the name at `line`/`character` is written, as the result a
+// client is sent.
+pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line, num character) str {
+  str name = name_at(cache, doc, line, character);
+  if equals(name, "") {
+    ret "[]";
+  }
+
+  Vec<Occurrence> found;
+  found.init(16);
+  defer found.free();
+  _collect_occurrences(cache, docs, name, &found);
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    Occurrence o = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    str loc = _occurrence_location(o);
+    b.append(loc);
+    free(loc);
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// True when `new_name` already names a top-level declaration in the
+// merged program of any document `found` touches. Fun resolves a
+// private top-level name flatly across the whole merged program, not
+// per file, so renaming into a name already taken elsewhere in that
+// same program doesn't just shadow it, it breaks the build the moment
+// both declarations sit in one merged program together.
+fun _collides_with_existing(AnalysisCache* cache, Documents* docs, Vec<Occurrence>* found, str new_name) bin {
+  Vec<str> checked;
+  checked.init(4);
+  defer checked.free();
+  num i = 0;
+  for i < found.len {
+    str uri = found.get(i).document_uri;
+    i = i + 1;
+    if checked.contains(uri) {
+      continue;
+    }
+    checked.push(uri);
+    let doc_opt = docs.at(uri);
+    if doc_opt.is_none() {
+      continue;
+    }
+    Analyzed read = cache.of(doc_opt.unwrap());
+    if !read.parsed {
+      continue;
+    }
+    let existing = lookup_top_level(&read.program.nodes, new_name);
+    if existing.is_some() {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// The edit that renames what sits at `line`/`character` to `new_name`,
+// as the result a client is sent. A name a reader could not have written
+// is refused rather than applied.
+pub fun rename_symbol(
+  AnalysisCache* cache,
+  Documents* docs,
+  Document doc,
+  num line,
+  num character,
+  str new_name
+) str {
+  if !is_identifier(new_name) {
+    ret "null";
+  }
+  str name = name_at(cache, doc, line, character);
+  if equals(name, "") || equals(name, new_name) {
+    ret "null";
+  }
+
+  Vec<Occurrence> found;
+  found.init(16);
+  defer found.free();
+  _collect_occurrences(cache, docs, name, &found);
+  if found.len == 0 {
+    ret "null";
+  }
+  if _collides_with_existing(cache, docs, &found, new_name) {
+    ret "null";
+  }
+
+  // The edits are grouped by document, which is the shape the protocol
+  // asks for: one list of edits per URI.
+  StringBuilder b = string_builder_init(256);
+  b.append(`{"changes":{`);
+  Vec<str> written;
+  written.init(4);
+  defer written.free();
+  num i = 0;
+  for i < found.len {
+    str document_uri = found.get(i).document_uri;
+    i = i + 1;
+    if written.contains(document_uri) {
+      continue;
+    }
+    if written.len > 0 {
+      b.append(",");
+    }
+    written.push(document_uri);
+    json_quote_into(&b, document_uri);
+    b.append(":[");
+    num j = 0;
+    num emitted = 0;
+    for j < found.len {
+      Occurrence o = found.get(j);
+      j = j + 1;
+      if !equals(o.document_uri, document_uri) {
+        continue;
+      }
+      if emitted > 0 {
+        b.append(",");
+      }
+      emitted = emitted + 1;
+      b.append(`{"range":{"start":{"line":`);
+      b.append_num(o.span.line);
+      b.append(`,"character":`);
+      b.append_num(o.span.start);
+      b.append(`},"end":{"line":`);
+      b.append_num(o.span.line);
+      b.append(`,"character":`);
+      b.append_num(o.span.end);
+      b.append(`}},"newText":`);
+      json_quote_into(&b, new_name);
+      b.append("}");
+    }
+    b.append("]");
+  }
+  b.append("}}");
+  ret b.build();
+}
+
+// The name written at `line`/`character`, or empty when what sits there
+// is not a name.
+pub fun name_at(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "";
+  }
+  Vec<Token> tokens = read.tokens;
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret "";
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> { ret token_word(t); }
+    _ -> {}
+  }
+  ret "";
+}
+
+// True for text a reader could have written as a name: a letter or an
+// underscore, then letters, digits, or underscores.
+pub fun is_identifier(str s) bin {
+  num n = len(s);
+  if n == 0 {
+    ret false;
+  }
+  let first = s[0];
+  bin starts = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_';
+  if !starts {
+    ret false;
+  }
+  num i = 1;
+  for i < n {
+    let c = s[i];
+    i = i + 1;
+    bin ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    if !ok {
+      ret false;
+    }
+  }
+  ret true;
+}
+
+// Every place `name` is written, across the documents a client holds.
+pub fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+  Vec<str> uris = docs.all_uris();
+  defer uris.free();
+  num i = 0;
+  for i < uris.len {
+    str document_uri = uris.get(i);
+    i = i + 1;
+    let held = docs.at(document_uri);
+    if held.is_none() {
+      continue;
+    }
+    _occurrences_in_doc(cache, held.unwrap(), document_uri, name, out);
+  }
+}
+
+// Every place `name` is written in `d` alone.
+fun _occurrences_in_doc(AnalysisCache* cache, Document d, str document_uri, str name, Vec<Occurrence>* out) {
+  Analyzed read = cache.of(d);
+  if !read.lexed {
+    ret;
+  }
+  Vec<Token> tokens = read.tokens;
+  num t = 0;
+  for t < tokens.len {
+    Token tok = tokens.get(t);
+    t = t + 1;
+    fit tok.type {
+      .Identifier -> {
+        if equals(token_word(tok), name) {
+          Occurrence o;
+          o.document_uri = document_uri;
+          o.span = span_of(tok, d.text);
+          out.push(o);
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+pub fun _occurrence_location(Occurrence o) str {
+  StringBuilder b = string_builder_init(96);
+  b.append(`{"uri":`);
+  json_quote_into(&b, o.document_uri);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(o.span.line);
+  b.append(`,"character":`);
+  b.append_num(o.span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(o.span.line);
+  b.append(`,"character":`);
+  b.append_num(o.span.end);
+  b.append("}}}");
+  ret b.build();
+}

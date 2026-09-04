@@ -1,0 +1,217 @@
+// Code lenses.
+// 
+// One "N references" lens per top-level function this document
+// declares, its own count reusing references.fn's workspace-wide
+// occurrence scan rather than re-implementing name matching. Clicking
+// it runs `fun.showReferences`, a thin extension-side wrapper
+// (editors/vscode/src/extension.ts) that converts these plain JSON
+// arguments into real Uri/Position/Location instances before handing
+// off to VS Code's own built-in show-references command, which
+// validates its own arguments by type and rejects a plain object.
+
+imp documents;
+imp analysis;
+imp positions;
+imp references;
+imp protocol;
+imp uri;
+imp ..ast.ast;
+imp std.vec;
+imp std.string;
+imp std.c.mem;
+
+// Every top-level function/compound/enum/quirk's own code lens in
+// `doc`, as the result a client is sent: "N references" for a
+// function/compound/enum, "N implementations" for a quirk (a
+// structural `impl X as Quirk` scan, not the same naive name match -
+// see `_implementations_lens`). Skips `main` and an impl's own
+// methods: `main` is an entry point invoked by the runtime, never
+// really "called" by other code the way an ordinary function is, and
+// a naive whole-name occurrence count would still count an unrelated
+// file's own same-named `main` as a reference to this one (every
+// example in this repo declares its own). A method name is skipped
+// for the same reason but far more often: `free`, `get`, `init` and
+// the like are shared across many unrelated types, so the count
+// would mostly measure name collisions, not real calls.
+pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
+    ret "[]";
+  }
+  str document_uri = path_to_uri(doc.path);
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < read.program.entry_nodes.len {
+    Node n = read.program.entry_nodes.get(i);
+    i = i + 1;
+    str name = "";
+    bin is_quirk = false;
+    fit n.kind {
+      .Function(f) -> {
+        if !equals(f.name, "main") {
+          name = f.name;
+        }
+      }
+      .Compound(c) -> { name = c.name; }
+      .Enum(e) -> { name = e.name; }
+      .Quirk(q) -> {
+        name = q.name;
+        is_quirk = true;
+      }
+      _ -> {}
+    }
+    if equals(name, "") || !n.has_pos {
+      continue;
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    if is_quirk {
+      str impl_lens_text = _implementations_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      b.append(impl_lens_text);
+      free(impl_lens_text);
+    } else {
+      str ref_lens_text = _references_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      b.append(ref_lens_text);
+      free(ref_lens_text);
+    }
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The "N references" lens for the declaration named `name` at
+// `decl_pos`, in the document identified by `document_uri`.
+fun _references_lens(
+  AnalysisCache* cache,
+  Documents* docs,
+  str name,
+  Pos decl_pos,
+  str document_uri,
+  str decl_text
+) str {
+  Vec<Occurrence> found;
+  found.init(4);
+  defer found.free();
+  _collect_occurrences(cache, docs, name, &found);
+  ret _lens(found, "reference", decl_pos, len(name), document_uri, decl_text);
+}
+
+// The "N implementations" lens for the quirk named `name` at
+// `decl_pos`. Unlike a reference count, this is a structural scan
+// (every `impl X as name { ... }` block, workspace-wide) rather than
+// a name match, so it stays precise even though `name` itself might
+// coincide with an unrelated identifier elsewhere - a quirk name and
+// a function/compound/enum name can never collide (Fun's own flat
+// top-level namespace already forbids it), and an impl's own `as`
+// clause names its quirk exactly, no guessing which one a bare
+// occurrence of the word actually meant.
+fun _implementations_lens(
+  AnalysisCache* cache,
+  Documents* docs,
+  str name,
+  Pos decl_pos,
+  str document_uri,
+  str decl_text
+) str {
+  Vec<Occurrence> found;
+  found.init(4);
+  defer found.free();
+  _collect_quirk_implementations(cache, docs, name, &found);
+  ret _lens(found, "implementation", decl_pos, len(name), document_uri, decl_text);
+}
+
+// Every `impl X as name { ... }` block, across the documents `docs`
+// holds, regardless of which file declares `name` itself.
+fun _collect_quirk_implementations(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+  Vec<str> uris = docs.all_uris();
+  defer uris.free();
+  num i = 0;
+  for i < uris.len {
+    str document_uri = uris.get(i);
+    i = i + 1;
+    let held = docs.at(document_uri);
+    if held.is_none() {
+      continue;
+    }
+    Document d = held.unwrap();
+    Analyzed read = cache.of(d);
+    if !read.parsed {
+      continue;
+    }
+    num j = 0;
+    for j < read.program.entry_nodes.len {
+      Node n = read.program.entry_nodes.get(j);
+      j = j + 1;
+      fit n.kind {
+        .Impl(im) -> {
+          if !im.has_quirk_name || !equals(im.quirk_name, name) || !n.has_pos {
+            continue;
+          }
+          Occurrence o;
+          o.document_uri = document_uri;
+          o.span = span_of_pos(n.pos, len(im.type_name), d.text);
+          out.push(o);
+        }
+        _ -> {}
+      }
+    }
+  }
+}
+
+// `found`, rendered as one lens: "N <noun>(s)" at `decl_pos`'s own
+// span, clicking through `fun.showReferences` to every location in
+// `found` (a reference or an implementation reads the same way to a
+// client - a location list to jump through).
+fun _lens(Vec<Occurrence> found, str noun, Pos decl_pos, num name_len, str document_uri, str decl_text) str {
+  StringBuilder locs = string_builder_init(128);
+  defer locs.free();
+  locs.append("[");
+  num i = 0;
+  for i < found.len {
+    if i > 0 {
+      locs.append(",");
+    }
+    str loc = _occurrence_location(found.get(i));
+    locs.append(loc);
+    free(loc);
+    i = i + 1;
+  }
+  locs.append("]");
+
+  Span span = span_of_pos(decl_pos, name_len, decl_text);
+  str plural = "s";
+  if found.len == 1 {
+    plural = "";
+  }
+  str locs_text = locs.build();
+  StringBuilder b = string_builder_init(len(locs_text) + 160);
+  b.append(`{"range":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"command":{"title":"`);
+  b.append_num(found.len);
+  b.append(" ");
+  b.append(noun);
+  b.append(plural);
+  b.append(`","command":"fun.showReferences","arguments":[`);
+  json_quote_into(&b, document_uri);
+  b.append(`,{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append("},");
+  b.append(locs_text);
+  b.append("]}}");
+  free(locs_text);
+  ret b.build();
+}

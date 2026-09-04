@@ -1,0 +1,1035 @@
+// Language server.
+// 
+// The server reads one message at a time from its client, answers what
+// it understands, and keeps going until the client asks it to stop. A
+// request it does not recognize is answered with an error rather than
+// silence, which is what keeps a client from waiting forever.
+
+imp protocol;
+imp documents;
+imp analysis;
+imp symbol_table;
+imp diagnostics;
+imp navigation;
+imp signature_help;
+imp inlay_hints;
+imp code_action;
+imp semantic_tokens;
+imp outline;
+imp references;
+imp completion;
+imp formatting;
+imp folding_range;
+imp imports;
+imp code_lens;
+imp selection_range;
+imp call_hierarchy;
+imp uri;
+imp std.string;
+imp std.option;
+imp std.result;
+imp std.json;
+imp std.math;
+imp std.io;
+imp std.fs;
+imp std.c.mem;
+
+// What the server carries between messages.
+pub compound Server {
+  // Set once the client asks the server to shut down, so the next
+  // `exit` leaves quietly rather than as a failure.
+  bin shutting_down;
+  bin running;
+  // What the client has open, which is the text to work from: an editor
+  // holds edits the compiler would not read from disk.
+  Documents docs;
+  // What each open document last read as, so one revision is read
+  // once rather than once per question asked about it.
+  AnalysisCache reads;
+  // What each open document's own diagnostics last computed as, so a
+  // revision already typechecked and analyzed for one report isn't
+  // redone for another that happens to ask about the same text.
+  DiagnosticsCache diagnosed;
+  // Whether the client said it understands a completion written as a
+  // skeleton. One that does not would insert the marks as text, so it
+  // is told only plain words.
+  bin snippets;
+  // Whether the client said it can dynamically register interest in
+  // `workspace/didChangeWatchedFiles`. Registration is requested only
+  // when this is true; a client that never says so never gets asked,
+  // and never sends the notification either.
+  bin watch_registration_supported;
+  // The workspace root `initialize` was told, as a filesystem path
+  // ready to walk. Absent for a single-file client with no folder
+  // open, in which case a whole-workspace feature only ever sees
+  // whatever the client has open.
+  str workspace_root;
+  bin has_workspace_root;
+  // Set once the workspace has been walked and every `.fn` file under
+  // it recorded in `docs`, so the (possibly large) scan only ever
+  // runs once per server lifetime, not once per request.
+  bin workspace_indexed;
+  // The persistent workspace symbol table `workspace_symbols`/
+  // `definition_workspace_wide` query, kept current by version
+  // rather than re-walked from scratch on every request.
+  WorkspaceSymbolTable symbols;
+}
+
+pub fun server_new() Server {
+  Server s;
+  s.shutting_down = false;
+  s.running = true;
+  s.docs = documents_new();
+  s.reads = analysis_cache_new();
+  s.diagnosed = diagnostics_cache_new();
+  s.symbols = workspace_symbol_table_new();
+  s.snippets = false;
+  s.watch_registration_supported = false;
+  s.workspace_root = "";
+  s.has_workspace_root = false;
+  s.workspace_indexed = false;
+  ret s;
+}
+
+// The codes the protocol reserves for what a server can refuse.
+const num METHOD_NOT_FOUND = -32601;
+
+impl Server {
+  // Reads messages until the client asks the server to exit, or until
+  // there is nothing left to read.
+  pub serve(Sink* input) num {
+    for self.running {
+      let message = read_message(input);
+      if message.is_none() {
+        break;
+      }
+      self.handle(message.unwrap().body);
+    }
+    if self.shutting_down {
+      ret 0;
+    }
+    // Leaving without being asked to is what a client reads as a crash.
+    ret 1;
+  }
+
+  // Answers one message. A request carries an id and expects a reply; a
+  // notification carries none and expects none.
+  handle(str body) {
+    let parsed = parse(body);
+    free(body);
+    if parsed.is_err() {
+      ret;
+    }
+    JsonValue message = parsed.unwrap();
+    defer message.free();
+    str method = _string_field(message, "method");
+    if equals(method, "") {
+      ret;
+    }
+    str id = _raw_field(message, "id");
+    defer free(id);
+    bin is_request = !equals(id, "");
+
+    if equals(method, "initialize") {
+      self.snippets = _snippets_supported(message);
+      self.watch_registration_supported = _watch_registration_supported(message);
+      str root = _workspace_root(message);
+      if !equals(root, "") {
+        self.workspace_root = root;
+        self.has_workspace_root = true;
+      }
+      str init_result = _initialize_result();
+      write_message(response(id, init_result));
+      free(init_result);
+      ret;
+    }
+    if equals(method, "initialized") {
+      if self.watch_registration_supported {
+        write_message(_watch_registration_request());
+      }
+      ret;
+    }
+    if equals(method, "workspace/didChangeWatchedFiles") {
+      self.watched_files_changed(message);
+      ret;
+    }
+    if equals(method, "textDocument/didOpen") {
+      self.opened(message);
+      ret;
+    }
+    if equals(method, "textDocument/didChange") {
+      self.changed(message);
+      ret;
+    }
+    if equals(method, "textDocument/didClose") {
+      self.closed(message);
+      ret;
+    }
+    if equals(method, "textDocument/didSave") {
+      JsonValue params = _field(message, "params");
+      JsonValue document = _field(params, "textDocument");
+      self.report(_string_field(document, "uri"));
+      ret;
+    }
+    if equals(method, "textDocument/hover") {
+      self.answer_hover(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/signatureHelp") {
+      self.answer_signature_help(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/inlayHint") {
+      self.answer_inlay_hints(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/codeAction") {
+      self.answer_code_action(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/semanticTokens/full") {
+      self.answer_semantic_tokens(id, message);
+      ret;
+    }
+    // A client asks for a declaration under three names; what it wants
+    // back is the same place. `typeDefinition` asks a different
+    // question (what a value's type is, not where the value itself
+    // was declared) and gets its own handler.
+    if equals(method, "textDocument/definition") ||
+      equals(method, "textDocument/declaration") ||
+      equals(
+      method,
+      "textDocument/implementation"
+    ) {
+      self.answer_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/typeDefinition") {
+      self.answer_type_definition(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/formatting") {
+      self.answer_formatting(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/completion") {
+      self.answer_completion(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/references") {
+      self.answer_references(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/rename") {
+      self.answer_rename(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/documentHighlight") {
+      self.answer_document_highlight(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/documentSymbol") {
+      self.answer_document_symbols(id, message);
+      ret;
+    }
+    if equals(method, "workspace/symbol") {
+      self.answer_workspace_symbols(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/foldingRange") {
+      self.answer_folding_range(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/documentLink") {
+      self.answer_document_link(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/codeLens") {
+      self.answer_code_lens(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/selectionRange") {
+      self.answer_selection_range(id, message);
+      ret;
+    }
+    if equals(method, "textDocument/prepareCallHierarchy") {
+      self.answer_prepare_call_hierarchy(id, message);
+      ret;
+    }
+    if equals(method, "callHierarchy/incomingCalls") {
+      self.answer_incoming_calls(id, message);
+      ret;
+    }
+    if equals(method, "callHierarchy/outgoingCalls") {
+      self.answer_outgoing_calls(id, message);
+      ret;
+    }
+    if equals(method, "shutdown") {
+      self.shutting_down = true;
+      write_message(response(id, "null"));
+      ret;
+    }
+    if equals(method, "exit") {
+      self.running = false;
+      ret;
+    }
+    if is_request {
+      str unsupported_msg = format("unsupported request '{str}'", method);
+      write_message(error_response(id, METHOD_NOT_FOUND, unsupported_msg));
+      free(unsupported_msg);
+    }
+  }
+}
+
+impl Server {
+  // Records a document the client opened, with the text it holds.
+  opened(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret;
+    }
+    self.docs.opened(
+      document_uri,
+      _string_field(document, "text"),
+      _number_field(document, "version")
+    );
+    self.report(document_uri);
+  }
+
+  // Applies what the client changed. A change either replaces the whole
+  // document or a range of it, which is what an ordinary keystroke
+  // sends.
+  changed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret;
+    }
+    num version = _number_field(document, "version");
+    JsonValue changes = _field(params, "contentChanges");
+    fit changes {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue change = items.get(i);
+          i = i + 1;
+          str text = _string_field(change, "text");
+          JsonValue range = _field(change, "range");
+          fit range {
+            .Object(_) -> {
+              JsonValue start = _field(range, "start");
+              JsonValue end = _field(range, "end");
+              self.docs.edited(
+                document_uri,
+                _number_field(start, "line"),
+                _number_field(start, "character"),
+                _number_field(end, "line"),
+                _number_field(end, "character"),
+                text,
+                version
+              );
+            }
+            // No range means the whole document was sent.
+            _ -> { self.docs.replaced(document_uri, text, version); }
+          }
+        }
+      }
+      _ -> {}
+    }
+    self.report(document_uri);
+  }
+
+  // Tells the client what is wrong with a document, which is also how
+  // the margin is cleared once nothing is.
+  report(str document_uri) {
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      ret;
+    }
+    Vec<Diagnostic> found = diagnose(&self.reads, &self.diagnosed, doc.unwrap());
+    defer found.free();
+    write_message(publish(document_uri, doc.unwrap().text, &found));
+  }
+
+  closed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if !equals(document_uri, "") {
+      self.docs.closed(document_uri);
+      self.reads.forget(document_uri);
+      self.diagnosed.forget(document_uri);
+      self.symbols.forget(document_uri);
+      // A closed document's own errors/warnings would otherwise sit in
+      // the editor's Problems panel forever, since nothing else ever
+      // tells the client to drop them.
+      Vec<Diagnostic> none;
+      none.init(0);
+      write_message(publish(document_uri, "", &none));
+    }
+  }
+
+  // A `.fn` file changed, created, or deleted on disk by something
+  // other than this client itself - a different tool, a `git
+  // checkout`, a formatter run outside the editor. Only ever fires
+  // once `initialized` registered for it, so an unregistered client
+  // never sends this at all. An open document's own buffer stays
+  // authoritative either way (`index_from_disk` already skips it),
+  // matching the reference's own mtime-checked-on-lazy-re-access
+  // freshness model but pushed by the client instead of pulled.
+  watched_files_changed(JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue changes = _field(params, "changes");
+    fit changes {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue change = items.get(i);
+          i = i + 1;
+          str document_uri = _string_field(change, "uri");
+          if equals(document_uri, "") {
+            continue;
+          }
+          self.reads.forget(document_uri);
+          self.diagnosed.forget(document_uri);
+          self.symbols.forget(document_uri);
+          // FileChangeType: 1 Created, 2 Changed, 3 Deleted.
+          num change_type = _number_field(change, "type");
+          if change_type == 3 {
+            self.docs.forget_indexed(document_uri);
+            continue;
+          }
+          let resolved = uri_to_path(document_uri);
+          if resolved.is_some() {
+            // index_from_disk takes ownership of the URI it's given;
+            // `document_uri` itself aliases `message`'s own text, so
+            // it hands over a copy rather than the field itself.
+            self.docs.index_from_disk(substr(document_uri, 0, len(document_uri)), resolved.unwrap());
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Spells the declaration under the cursor back to the reader.
+  answer_hover(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str hover_result = hover(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, hover_result));
+    _free_result(hover_result, "null");
+  }
+
+  // Shows a call's own signature and which parameter the cursor sits
+  // on, while the reader is still typing inside its parens.
+  answer_signature_help(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str sig_result = signature_help(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, sig_result));
+    _free_result(sig_result, "null");
+  }
+
+  // Shows a `let`-inferred local's own resolved type as inline text
+  // right after its name, for every one in the requested range.
+  answer_inlay_hints(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    JsonValue range = _field(params, "range");
+    JsonValue start = _field(range, "start");
+    JsonValue end = _field(range, "end");
+    num start_line = _number_field(start, "line");
+    num end_line = _number_field(end, "line");
+    str hints_result = inlay_hints(&self.reads, doc.unwrap(), start_line, end_line);
+    write_message(response(id, hints_result));
+    _free_result(hints_result, "[]");
+  }
+
+  // The whole document, classified token by token: what a client
+  // colors as a keyword, a type, a function's own name, and so on.
+  answer_semantic_tokens(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, `{"data":[]}`));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, `{"data":[]}`));
+      ret;
+    }
+    str tokens_result = semantic_tokens(&self.reads, doc.unwrap());
+    write_message(response(id, tokens_result));
+    free(tokens_result);
+  }
+
+  // Offers a quick fix for each warning the client's own request
+  // names, echoed back in its context: removing an unused import
+  // outright, or silencing any warning with the same `allow` a reader
+  // could write by hand.
+  answer_code_action(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    JsonValue context = _field(params, "context");
+    JsonValue diags_json = _field(context, "diagnostics");
+    Vec<Diagnostic> diags;
+    diags.init(4);
+    let arr = diags_json.as_array();
+    if arr.is_some() {
+      for item : arr.unwrap() {
+        JsonValue range = _field(item, "range");
+        JsonValue start = _field(range, "start");
+        JsonValue end = _field(range, "end");
+        Diagnostic d;
+        d.line = _number_field(start, "line");
+        d.col = utf16_char_to_byte_col(doc.unwrap().text, d.line, _number_field(start, "character"));
+        d.end_line = _number_field(end, "line");
+        d.end_col = utf16_char_to_byte_col(doc.unwrap().text, d.end_line, _number_field(end, "character"));
+        d.severity = _number_field(item, "severity");
+        d.message = _string_field(item, "message");
+        diags.push(d);
+      }
+    }
+    str actions_result = code_actions(&self.reads, doc.unwrap(), document_uri, &diags);
+    write_message(response(id, actions_result));
+    free(actions_result);
+  }
+
+  // Says where the name under the cursor was declared.
+  answer_definition(str id, JsonValue message) {
+    self._ensure_workspace_symbols_current();
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str def_result = definition_workspace_wide(&self.reads, &self.docs, &self.symbols, r.doc, r.line, r.character);
+    write_message(response(id, def_result));
+    _free_result(def_result, "[]");
+  }
+
+  // Says where the *type* of the name under the cursor was declared.
+  answer_type_definition(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str type_def_result = type_definition(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, type_def_result));
+    _free_result(type_def_result, "[]");
+  }
+
+  // Formats the whole document.
+  answer_formatting(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str formatting_result = formatting(doc.unwrap());
+    write_message(response(id, formatting_result));
+    _free_result(formatting_result, "[]");
+  }
+
+  // Offers what a reader could type where the cursor sits.
+  answer_completion(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str completion_result = completion(&self.reads, r.doc, r.line, r.character, self.snippets);
+    write_message(response(id, completion_result));
+    _free_result(completion_result, "[]");
+  }
+
+  // Lists every place the name under the cursor is written.
+  answer_references(str id, JsonValue message) {
+    self._ensure_workspace_indexed();
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str references_result = references(&self.reads, &self.docs, r.doc, r.line, r.character);
+    write_message(response(id, references_result));
+    _free_result(references_result, "[]");
+  }
+
+  // Highlights every place the name under the cursor is written,
+  // scoped to the current document (no workspace scan).
+  answer_document_highlight(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str highlights_result = document_highlights(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, highlights_result));
+    _free_result(highlights_result, "[]");
+  }
+
+  // Renames the name under the cursor everywhere it is written.
+  answer_rename(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "null"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    JsonValue params = _field(message, "params");
+    str new_name = _string_field(params, "newName");
+    str rename_result = rename_symbol(&self.reads, &self.docs, r.doc, r.line, r.character, new_name);
+    write_message(response(id, rename_result));
+    _free_result(rename_result, "null");
+  }
+
+  // Lists what the document declares, for an outline.
+  answer_document_symbols(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str symbols_result = document_symbols(&self.reads, doc.unwrap());
+    write_message(response(id, symbols_result));
+    _free_result(symbols_result, "[]");
+  }
+
+  // Every foldable `{`...`}` block in the document.
+  answer_folding_range(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str folding_result = folding_ranges(&self.reads, doc.unwrap());
+    write_message(response(id, folding_result));
+    _free_result(folding_result, "[]");
+  }
+
+  // One link per `imp` statement's own dotted path, pointing at the
+  // file or directory it resolves to.
+  answer_document_link(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str links_result = document_links(&self.reads, doc.unwrap());
+    write_message(response(id, links_result));
+    _free_result(links_result, "[]");
+  }
+
+  // One "N references" lens per function the document declares.
+  answer_code_lens(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str lenses_result = code_lenses(&self.reads, &self.docs, doc.unwrap());
+    write_message(response(id, lenses_result));
+    _free_result(lenses_result, "[]");
+  }
+
+  // One expanding selection-range chain per requested position.
+  answer_selection_range(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Vec<num> lines;
+    lines.init(4);
+    defer lines.free();
+    Vec<num> chars;
+    chars.init(4);
+    defer chars.free();
+    JsonValue positions = _field(params, "positions");
+    fit positions {
+      .Array(items) -> {
+        num i = 0;
+        for i < items.len {
+          JsonValue p = items.get(i);
+          i = i + 1;
+          lines.push(_number_field(p, "line"));
+          chars.push(_number_field(p, "character"));
+        }
+      }
+      _ -> {}
+    }
+    str selection_result = selection_ranges(&self.reads, doc.unwrap(), &lines, &chars);
+    write_message(response(id, selection_result));
+    _free_result(selection_result, "[]");
+  }
+
+  // The top-level function at a position, as prepareCallHierarchy's
+  // own single-item starting point.
+  answer_prepare_call_hierarchy(str id, JsonValue message) {
+    let asked = self.document_at(message);
+    if asked.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    Request r = asked.unwrap();
+    str prepare_result = prepare_call_hierarchy(&self.reads, r.doc, r.line, r.character);
+    write_message(response(id, prepare_result));
+    _free_result(prepare_result, "[]");
+  }
+
+  // Every top-level function calling the item's own name, workspace
+  // -wide.
+  answer_incoming_calls(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue item = _field(params, "item");
+    str name = _string_field(item, "name");
+    if equals(name, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str incoming_result = incoming_calls(&self.reads, &self.docs, name);
+    write_message(response(id, incoming_result));
+    free(incoming_result);
+  }
+
+  // Every top-level function the item's own name calls, from its own
+  // body alone.
+  answer_outgoing_calls(str id, JsonValue message) {
+    JsonValue params = _field(message, "params");
+    JsonValue item = _field(params, "item");
+    str name = _string_field(item, "name");
+    str item_uri = _string_field(item, "uri");
+    if equals(name, "") || equals(item_uri, "") {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    let doc = self.docs.at(item_uri);
+    if doc.is_none() {
+      write_message(response(id, "[]"));
+      ret;
+    }
+    str outgoing_result = outgoing_calls(&self.reads, doc.unwrap(), name);
+    write_message(response(id, outgoing_result));
+    _free_result(outgoing_result, "[]");
+  }
+
+  // Every symbol matching `query`, across every document this server
+  // holds open.
+  answer_workspace_symbols(str id, JsonValue message) {
+    self._ensure_workspace_symbols_current();
+    JsonValue params = _field(message, "params");
+    str query = _string_field(params, "query");
+    str wsym_result = workspace_symbols(&self.docs, &self.reads, &self.symbols, query);
+    write_message(response(id, wsym_result));
+    free(wsym_result);
+  }
+
+  // Walks every `.fn` file under the workspace root and records it,
+  // so a whole-workspace feature can see a file the client's own open
+  // documents never happen to import. Expensive (one disk read per
+  // file), so this only ever runs once per server lifetime, and only
+  // when a request that actually needs it (references, workspace
+  // symbol search) is the one asking, not on every request.
+  _ensure_workspace_indexed() {
+    if self.workspace_indexed {
+      ret;
+    }
+    self.workspace_indexed = true;
+    if !self.has_workspace_root {
+      ret;
+    }
+    Vec<str> paths = walk_dir(self.workspace_root);
+    defer paths.free();
+    num i = 0;
+    for i < paths.len {
+      str path = paths.get(i);
+      i = i + 1;
+      self.docs.index_from_disk(path_to_uri(path), path);
+    }
+  }
+
+  // `_ensure_workspace_indexed`, plus keeping the persistent symbol
+  // table current. Deliberately *not* folded into
+  // `_ensure_workspace_indexed` itself: that gate runs its body once
+  // per server lifetime, but the table needs to stay current across
+  // every later edit too, so `symbols.ensure_all` runs on every call
+  // here, relying on its own per-document version check to make
+  // repeat calls cheap.
+  _ensure_workspace_symbols_current() {
+    self._ensure_workspace_indexed();
+    self.symbols.ensure_all(&self.reads, &self.docs);
+  }
+
+  // The document and position a request names, or nothing when it names
+  // a document this server does not hold.
+  document_at(JsonValue message) Option<Request> {
+    JsonValue params = _field(message, "params");
+    JsonValue document = _field(params, "textDocument");
+    str document_uri = _string_field(document, "uri");
+    if equals(document_uri, "") {
+      ret .None;
+    }
+    let doc = self.docs.at(document_uri);
+    if doc.is_none() {
+      ret .None;
+    }
+    JsonValue position = _field(params, "position");
+    Request r;
+    r.doc = doc.unwrap();
+    r.line = _number_field(position, "line");
+    // The client sends a UTF-16 code unit count; everything downstream
+    // (token_at, position-based lookups) works in byte columns, matching
+    // the lexer's own convention.
+    r.character = utf16_char_to_byte_col(r.doc.text, r.line, _number_field(position, "character"));
+    ret .Some(r);
+  }
+}
+
+// A request about one place in one document.
+pub compound Request {
+  Document doc;
+  num line;
+  num character;
+}
+
+// True when the client said it understands a completion written as a
+// skeleton, which lives deep in what `initialize` carries.
+// `initialize`'s own workspace root as a filesystem path, preferring
+// `rootUri` (the current field) over the deprecated `rootPath` (a
+// bare path string, no scheme). "" when the client opened a single
+// file with no folder at all, which both fields leave null/absent for.
+fun _workspace_root(JsonValue message) str {
+  JsonValue params = _field(message, "params");
+  str root_uri = _string_field(params, "rootUri");
+  if !equals(root_uri, "") {
+    let resolved = uri_to_path(root_uri);
+    if resolved.is_some() {
+      ret resolved.unwrap();
+    }
+  }
+  // A fresh copy, not the raw field - `message` is freed once `handle`
+  // returns, but this becomes `self.workspace_root`, kept for the
+  // server's whole lifetime.
+  str root_path = _string_field(params, "rootPath");
+  if equals(root_path, "") {
+    ret "";
+  }
+  ret substr(root_path, 0, len(root_path));
+}
+
+fun _snippets_supported(JsonValue message) bin {
+  JsonValue params = _field(message, "params");
+  JsonValue capabilities = _field(params, "capabilities");
+  JsonValue document = _field(capabilities, "textDocument");
+  JsonValue completion_caps = _field(document, "completion");
+  JsonValue item = _field(completion_caps, "completionItem");
+  JsonValue supported = _field(item, "snippetSupport");
+  fit supported {
+    .Bool(yes) -> { ret yes; }
+    _ -> {}
+  }
+  ret false;
+}
+
+// Whether the client's own `initialize` said it can dynamically
+// register `workspace/didChangeWatchedFiles`. A client that can't is
+// never asked, and never sends the notification either.
+fun _watch_registration_supported(JsonValue message) bin {
+  JsonValue params = _field(message, "params");
+  JsonValue capabilities = _field(params, "capabilities");
+  JsonValue workspace = _field(capabilities, "workspace");
+  JsonValue watched = _field(workspace, "didChangeWatchedFiles");
+  JsonValue supported = _field(watched, "dynamicRegistration");
+  fit supported {
+    .Bool(yes) -> { ret yes; }
+    _ -> {}
+  }
+  ret false;
+}
+
+// Asks the client to notify this server of any `.fn` file changed,
+// created, or deleted on disk - the counterpart to `initialize`'s own
+// lazy workspace scan, which otherwise only ever sees a file's state
+// as of whenever that one-time walk ran.
+fun _watch_registration_request() str {
+  ret request_to_client(
+    `"fun-watch-fn-files"`,
+    "client/registerCapability",
+    `{"registrations":[{"id":"fun-watch-fn-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.fn"}]}}]}`
+  );
+}
+
+// Frees `result` unless it's exactly `sentinel`'s own content - a
+// handler answering "nothing to say" commonly returns a plain literal
+// (`"null"`, `"[]"`) rather than building one fresh, and freeing a
+// literal crashes. A real, freshly built result that happens to equal
+// the sentinel's own text (an empty list built fresh rather than
+// returned as the shortcut) is left unfreed too, safe to get wrong in
+// this direction - a handful of missed frees, never a freed literal.
+fun _free_result(str result, str sentinel) {
+  if !equals(result, sentinel) {
+    free(result);
+  }
+}
+
+// A nested value, or null when the message has no such field.
+fun _field(JsonValue message, str name) JsonValue {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret JsonValue.Null;
+      }
+      ret found.unwrap();
+    }
+    _ -> { ret JsonValue.Null; }
+  }
+  ret JsonValue.Null;
+}
+
+// The value of a numeric field, or zero when the message has none.
+fun _number_field(JsonValue message, str name) num {
+  JsonValue value = _field(message, name);
+  fit value {
+    .Num(n) -> { ret dec_to_num(n); }
+    _ -> { ret 0; }
+  }
+  ret 0;
+}
+
+// What the server tells a client it can do. Every capability named here
+// is one a request handler answers.
+fun _initialize_result() str {
+  ret format(
+    `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},"hoverProvider":true,"definitionProvider":true,"declarationProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"referencesProvider":true,"documentHighlightProvider":true,"renameProvider":true,"completionProvider":{"triggerCharacters":["."]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"inlayHintProvider":true,"codeActionProvider":true,"documentFormattingProvider":true,"foldingRangeProvider":true,"documentLinkProvider":{"resolveProvider":false},"codeLensProvider":{"resolveProvider":false},"selectionRangeProvider":true,"callHierarchyProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":{str},"tokenModifiers":{str}},"full":true}}}`,
+    TOKEN_TYPES,
+    TOKEN_MODIFIERS
+  );
+}
+
+// The value of a string field, or empty when the message has none.
+fun _string_field(JsonValue message, str name) str {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret "";
+      }
+      JsonValue value = found.unwrap();
+      fit value {
+        .Str(text) -> { ret text; }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// A field as it was written, which is how an id is echoed back: the
+// protocol allows either a number or a string, and the reply must use
+// whichever the request did.
+fun _raw_field(JsonValue message, str name) str {
+  fit message {
+    .Object(fields) -> {
+      let found = fields.at(name);
+      if found.is_none() {
+        ret substr("", 0, 0);
+      }
+      JsonValue value = found.unwrap();
+      fit value {
+        .Str(text) -> { ret json_quote(text); }
+        .Num(n) -> {
+          // An id written as a number is echoed as one.
+          ret format_num(dec_to_num(n));
+        }
+        _ -> { ret substr("", 0, 0); }
+      }
+    }
+    _ -> { ret substr("", 0, 0); }
+  }
+  ret "";
+}

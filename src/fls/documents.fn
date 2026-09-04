@@ -1,0 +1,339 @@
+// Open documents.
+// 
+// A client edits text the compiler never reads from disk, so the server
+// keeps what it was told. An edit arrives either as the whole document
+// or as a range to replace, which means turning line and column
+// positions into offsets in the text held here.
+
+imp uri;
+imp std.string;
+imp std.map;
+imp std.option;
+imp std.fs;
+
+// One document a client has open.
+pub compound Document {
+  str uri;
+  str path;
+  str text;
+  // The revision the client last sent, which a stale reply can be
+  // checked against.
+  num version;
+}
+
+// Every document a client has open, by URI, plus a second store for a
+// workspace-wide scan: a file read from disk rather than told to the
+// server by the client, for a whole-workspace feature (`references`,
+// `workspace/symbol`) to see beyond what happens to be open right
+// now. An open document always wins when a URI is in both, since it
+// is the more current text; `indexed` is never version-tracked or
+// edited, only replaced wholesale by another scan.
+pub compound Documents {
+  Map<str, Document> open;
+  Map<str, Document> indexed;
+}
+
+pub fun documents_new() Documents {
+  Documents d;
+  d.open.init(8);
+  d.indexed.init(64);
+  ret d;
+}
+
+impl Documents {
+  // Records a document the client opened, or replaces one it reopened.
+  // Keeps its own copy of `document_uri`/`text` rather than aliasing
+  // the caller's - both typically come from a request's own parsed
+  // JSON, freed once the request finishes, while this entry outlives
+  // the request.
+  pub opened(str document_uri, str text, num version) {
+    let existing = self.open.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      free(doc.text);
+      doc.text = substr(text, 0, len(text));
+      doc.version = version;
+      self.open.put(doc.uri, doc);
+      ret;
+    }
+    Document doc;
+    doc.uri = substr(document_uri, 0, len(document_uri));
+    // A real, freeable allocation even when unset, not the "" literal
+    // - closed()/forget_indexed() free doc.path unconditionally.
+    doc.path = substr("", 0, 0);
+    let resolved = uri_to_path(document_uri);
+    if resolved.is_some() {
+      free(doc.path);
+      doc.path = resolved.unwrap();
+    }
+    doc.text = substr(text, 0, len(text));
+    doc.version = version;
+    self.open.put(doc.uri, doc);
+  }
+
+  // Replaces the whole text of an open document.
+  pub replaced(str document_uri, str text, num version) {
+    let existing = self.open.at(document_uri);
+    if existing.is_none() {
+      self.opened(document_uri, text, version);
+      ret;
+    }
+    Document doc = existing.unwrap();
+    free(doc.text);
+    doc.text = substr(text, 0, len(text));
+    doc.version = version;
+    self.open.put(document_uri, doc);
+  }
+
+  // Replaces the text between two positions, which is how an editor
+  // sends an ordinary keystroke.
+  pub edited(
+    str document_uri,
+    num start_line,
+    num start_col,
+    num end_line,
+    num end_col,
+    str replacement,
+    num version
+  ) {
+    // A ranged edit against a document this server has no baseline
+    // for (never opened, or already closed) has nothing to apply the
+    // edit against - refusing it, rather than guessing at a baseline,
+    // is deliberate: it leaves the server's own state exactly as
+    // absent as before, matching what a client that never sent a
+    // matching didOpen should expect.
+    let existing = self.open.at(document_uri);
+    if existing.is_none() {
+      ret;
+    }
+    Document doc = existing.unwrap();
+    num from = offset_of(doc.text, start_line, start_col);
+    num to = offset_of(doc.text, end_line, end_col);
+    if from < 0 || to < from {
+      ret;
+    }
+    str before = substr(doc.text, 0, from);
+    str after = substr(doc.text, to, len(doc.text) - to);
+    StringBuilder b = string_builder_init(len(doc.text) + len(replacement));
+    b.append(before);
+    b.append(replacement);
+    b.append(after);
+    free(before);
+    free(after);
+    free(doc.text);
+    doc.text = b.build();
+    doc.version = version;
+    self.open.put(document_uri, doc);
+  }
+
+  pub closed(str document_uri) {
+    let existing = self.open.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      // Removes from the map before freeing doc.uri: put() stored
+      // doc.uri itself as the map's key, so freeing it first would
+      // corrupt the very bytes remove()'s own key lookup compares
+      // against, and a probing hash map can walk right past a
+      // now-garbled slot without ever matching it - leaving a zombie
+      // entry with dangling fields that stays live forever.
+      self.open.remove(document_uri);
+      free(doc.uri);
+      free(doc.path);
+      free(doc.text);
+      ret;
+    }
+    self.open.remove(document_uri);
+  }
+
+  pub at(str document_uri) Option<Document> {
+    let live = self.open.at(document_uri);
+    if live.is_some() {
+      ret live;
+    }
+    ret self.indexed.at(document_uri);
+  }
+
+  // Reads `path` from disk and records it as a workspace-indexed
+  // document, unless the client already has this URI open (which
+  // stays authoritative) or the read fails (a symlink that doesn't
+  // resolve, a permissions error, gone since the scan started).
+  pub index_from_disk(str document_uri, str path) {
+    if self.open.at(document_uri).is_some() {
+      ret;
+    }
+    str text = read_to_string(path);
+    if text == nil {
+      ret;
+    }
+    // Keeps its own copies rather than aliasing the caller's, the
+    // same as opened() - a re-index (the file changed on disk again)
+    // must not leave this entry's own uri/path pointing at whatever
+    // the caller's own strings happen to be, since those can be freed
+    // out from under it once the caller returns.
+    let existing = self.indexed.at(document_uri);
+    if existing.is_some() {
+      // put() never replaces an existing key, only the value it maps
+      // to - freeing old.uri here would leave the map's own key slot
+      // dangling. Reuse it instead of allocating a new one, and only
+      // free/replace what this update actually changes.
+      Document old = existing.unwrap();
+      free(old.path);
+      free(old.text);
+      Document doc;
+      doc.uri = old.uri;
+      doc.path = substr(path, 0, len(path));
+      doc.text = text;
+      doc.version = 0;
+      self.indexed.put(old.uri, doc);
+      ret;
+    }
+    Document doc;
+    doc.uri = substr(document_uri, 0, len(document_uri));
+    doc.path = substr(path, 0, len(path));
+    doc.text = text;
+    doc.version = 0;
+    self.indexed.put(doc.uri, doc);
+  }
+
+  // Drops a workspace-indexed document deleted on disk. A no-op for a
+  // URI that's open (it stays whatever the client tells it, not
+  // filesystem state) or was never indexed in the first place.
+  pub forget_indexed(str document_uri) {
+    let existing = self.indexed.at(document_uri);
+    if existing.is_some() {
+      Document doc = existing.unwrap();
+      // Same ordering as closed(): remove before freeing doc.uri,
+      // since it is the map's own key storage.
+      self.indexed.remove(document_uri);
+      free(doc.uri);
+      free(doc.path);
+      free(doc.text);
+      ret;
+    }
+    self.indexed.remove(document_uri);
+  }
+
+  // Every document URI this server currently knows about, open or
+  // indexed from disk, for a whole-workspace scan to walk. `indexed`'s
+  // own keys are already unique among themselves (a Map's own
+  // guarantee), so only a duplicate against the open set (typically a
+  // handful of files, however large the workspace is) is worth
+  // checking for, not against the whole growing list.
+  pub all_uris() Vec<str> {
+    Vec<str> out = self.open.keys();
+    num open_count = out.len;
+    Vec<str> from_disk = self.indexed.keys();
+    defer from_disk.free();
+    num i = 0;
+    for i < from_disk.len {
+      str u = from_disk.get(i);
+      i = i + 1;
+      bin dup = false;
+      num j = 0;
+      for j < open_count {
+        if equals(out.get(j), u) {
+          dup = true;
+          break;
+        }
+        j = j + 1;
+      }
+      if !dup {
+        out.push(u);
+      }
+    }
+    ret out;
+  }
+
+  pub free() {
+    self.open.free();
+    self.indexed.free();
+  }
+}
+
+// The byte offset in `text` where `line` (counted from zero) begins,
+// or the text's own end when there aren't that many lines.
+pub fun line_byte_start(str text, num line) num {
+  num offset = 0;
+  num current_line = 0;
+  num n = len(text);
+  for current_line < line {
+    if offset >= n {
+      ret n;
+    }
+    if text[offset] == '\n' {
+      current_line = current_line + 1;
+    }
+    offset = offset + 1;
+  }
+  ret offset;
+}
+
+// The offset in `text` of a position given as a line and a column, both
+// counted from zero. `col` is a UTF-16 code unit count, matching what
+// LSP itself sends, not a byte count — a line with any character
+// outside ASCII needs decoding to land on the right byte. A position
+// past the end of a line lands at its end, which is what an editor
+// means by a column beyond the text.
+pub fun offset_of(str text, num line, num col) num {
+  num offset = line_byte_start(text, line);
+  num n = len(text);
+  num units = 0;
+  for units < col {
+    if offset >= n || text[offset] == '\n' {
+      ret offset;
+    }
+    num seq_len = utf8_seq_len(text[offset]);
+    units = units + utf16_units_for_utf8_seq_len(seq_len);
+    offset = offset + seq_len;
+  }
+  ret offset;
+}
+
+// A byte column on `line` (not a client's UTF-16 count) converted to
+// the UTF-16 code unit count LSP itself reports for that same point.
+pub fun byte_col_to_utf16_char(str text, num line, num byte_col) num {
+  num start = line_byte_start(text, line);
+  num target = start + byte_col;
+  num offset = start;
+  num units = 0;
+  num n = len(text);
+  for offset < target {
+    if offset >= n || text[offset] == '\n' {
+      break;
+    }
+    num seq_len = utf8_seq_len(text[offset]);
+    units = units + utf16_units_for_utf8_seq_len(seq_len);
+    offset = offset + seq_len;
+  }
+  ret units;
+}
+
+// A client's UTF-16 character count on `line` converted to the byte
+// column on that line the rest of the server operates in. The read-side
+// counterpart to `byte_col_to_utf16_char`.
+pub fun utf16_char_to_byte_col(str text, num line, num utf16_char) num {
+  ret offset_of(text, line, utf16_char) - line_byte_start(text, line);
+}
+
+// The line and column an offset falls on, both counted from zero (`col`
+// as a UTF-16 code unit count, matching `offset_of`). The reverse of
+// `offset_of`, for reporting a position back to a client.
+pub fun position_of(str text, num offset, num* line, num* col) {
+  num current_line = 0;
+  num current_col = 0;
+  num i = 0;
+  num n = len(text);
+  for i < offset && i < n {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      current_col = 0;
+      i = i + 1;
+    } else {
+      num seq_len = utf8_seq_len(text[i]);
+      current_col = current_col + utf16_units_for_utf8_seq_len(seq_len);
+      i = i + seq_len;
+    }
+  }
+  *line = current_line;
+  *col = current_col;
+}

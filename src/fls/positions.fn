@@ -1,0 +1,193 @@
+// Positions.
+// 
+// A client points at a place in a document with a line and a character,
+// both counted from zero; the lexer counts lines and columns from one,
+// and a token's end column is the column just past it. Everything that
+// has to turn one into the other goes through here.
+
+imp ..lexer.token;
+imp documents;
+imp std.vec;
+imp std.option;
+
+// A span in the terms a client understands: a line and the characters
+// it covers, all counted from zero.
+pub compound Span {
+  num line;
+  num start;
+  num end;
+}
+
+// The token `line`/`character` falls on, or nothing when the position is
+// past the end of a line or inside whitespace. A position sitting at a
+// token's last character still counts as being on it, which is where a
+// cursor rests when a client asks about the word it is in.
+pub fun token_at(Vec<Token>* tokens, num line, num character) Option<Token> {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line != source_line {
+      continue;
+    }
+    if _is_trivia(t) {
+      continue;
+    }
+    if source_col >= t.pos.start_col && source_col < t.pos.end_col {
+      ret .Some(t);
+    }
+  }
+  ret .None;
+}
+
+// The token immediately before the one at `index`, skipping what carries
+// no meaning. Used to tell a bare name from one reached through a dot.
+pub fun token_before(Vec<Token>* tokens, num index) Option<Token> {
+  num i = index - 1;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if !_is_trivia(t) {
+      ret .Some(t);
+    }
+    i = i - 1;
+  }
+  ret .None;
+}
+
+// The token at or after `index`, skipping what carries no meaning.
+// `token_before`'s forward counterpart.
+pub fun token_after(Vec<Token>* tokens, num index) Option<Token> {
+  num i = index;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if !_is_trivia(t) {
+      ret .Some(t);
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// Where `t` sits, in the terms a client understands: `start`/`end` are
+// UTF-16 code unit counts, matching LSP itself, not the byte columns
+// the lexer counts in. `text` is the document `t` was lexed from.
+pub fun span_of(Token t, str text) Span {
+  Span s;
+  s.line = t.pos.line - 1;
+  s.start = byte_col_to_utf16_char(text, s.line, t.pos.start_col - 1);
+  s.end = byte_col_to_utf16_char(text, s.line, t.pos.end_col - 1);
+  if s.end < s.start {
+    s.end = s.start;
+  }
+  ret s;
+}
+
+// The span of a declaration's own name, given where the declaration
+// starts. A declaration is reported at its name rather than at the
+// keyword introducing it, which is where a client puts the cursor after
+// jumping. `text` is the document `p` sits in, needed for the same
+// byte-to-UTF-16 conversion `span_of` does.
+pub fun span_of_pos(Pos p, num name_length, str text) Span {
+  Span s;
+  s.line = p.line - 1;
+  s.start = byte_col_to_utf16_char(text, s.line, p.col - 1);
+  s.end = byte_col_to_utf16_char(text, s.line, p.col - 1 + name_length);
+  ret s;
+}
+
+// The index of `t` among `tokens`, or -1. Positions are compared rather
+// than tokens, since a token carries no identity of its own.
+pub fun index_of_token(Vec<Token>* tokens, Token t) num {
+  num i = 0;
+  for i < tokens.len {
+    Token other = tokens.get(i);
+    if other.pos.line == t.pos.line && other.pos.start_col == t.pos.start_col {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// One function body still open while scanning toward `target_line`:
+// the depth its own `{` opened at, and where `async ` would go (empty
+// when the function already is async, nothing left to fix).
+compound FnAsyncScope {
+  num body_depth;
+  bin has_insert;
+  Pos insert_pos;
+}
+
+// Where to insert `async ` to make the function enclosing
+// `target_line` (0-indexed, as a diagnostic reports it) async: right
+// before its own `fun` keyword. `None` when no enclosing function is
+// found, or it already is async (an `await_outside_async_function`
+// diagnostic naming a function this can't find is a bug elsewhere,
+// not something to paper over here).
+pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line) Option<Pos> {
+  num source_target = target_line + 1;
+  Vec<FnAsyncScope> scopes;
+  scopes.init(8);
+  num depth = 0;
+  bin has_pending = false;
+  Pos pending_pos;
+  bin pending_is_async = false;
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.pos.line > source_target {
+      break;
+    }
+    if token_is_keyword(t, "fun") {
+      bin is_async = false;
+      let prev = token_before(tokens, i);
+      if prev.is_some() && token_is_keyword(prev.unwrap(), "async") {
+        is_async = true;
+      }
+      pending_pos = t.pos;
+      has_pending = true;
+      pending_is_async = is_async;
+    } elif token_is_symbol(t, '{') {
+      depth = depth + 1;
+      if has_pending {
+        FnAsyncScope sc;
+        sc.body_depth = depth;
+        sc.has_insert = !pending_is_async;
+        sc.insert_pos = pending_pos;
+        scopes.push(sc);
+        has_pending = false;
+        pending_is_async = false;
+      }
+    } elif token_is_symbol(t, '}') {
+      if scopes.len != 0 && scopes.get(scopes.len - 1).body_depth == depth {
+        scopes.pop();
+      }
+      if depth > 0 {
+        depth = depth - 1;
+      }
+    }
+    i = i + 1;
+  }
+
+  if scopes.len == 0 {
+    ret .None;
+  }
+  FnAsyncScope last = scopes.get(scopes.len - 1);
+  if !last.has_insert {
+    ret .None;
+  }
+  ret .Some(last.insert_pos);
+}
+
+// True for a token that is only there for the reader.
+fun _is_trivia(Token t) bin {
+  fit t.type {
+    .Comment -> { ret true; }
+    .NewLine -> { ret true; }
+    _ -> {}
+  }
+  ret false;
+}

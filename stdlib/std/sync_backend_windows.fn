@@ -29,17 +29,13 @@ pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
   }
-
-  let m = mutex[0];
-  if m.initialized == true {
+  if mutex.initialized {
     ret 0;
   }
-
-  let rc = pthread_mutex_init(&m.inner, nil);
+  let rc = pthread_mutex_init(&mutex.inner, nil);
   if rc == 0 {
-    m.initialized = true;
+    mutex.initialized = true;
   }
-  mutex[0] = m;
   ret rc;
 }
 
@@ -49,19 +45,14 @@ pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
   }
-
-  let m = mutex[0];
-  if m.initialized == false {
-    let init_rc = pthread_mutex_init(&m.inner, nil);
+  if !mutex.initialized {
+    let init_rc = pthread_mutex_init(&mutex.inner, nil);
     if init_rc != 0 {
       ret init_rc;
     }
-    m.initialized = true;
+    mutex.initialized = true;
   }
-
-  let rc = pthread_mutex_lock(&m.inner);
-  mutex[0] = m;
-  ret rc;
+  ret pthread_mutex_lock(&mutex.inner);
 }
 
 // Tries to lock a Windows backend mutex without blocking, auto-initializing
@@ -70,19 +61,14 @@ pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
   }
-
-  let m = mutex[0];
-  if m.initialized == false {
-    let init_rc = pthread_mutex_init(&m.inner, nil);
+  if !mutex.initialized {
+    let init_rc = pthread_mutex_init(&mutex.inner, nil);
     if init_rc != 0 {
       ret init_rc;
     }
-    m.initialized = true;
+    mutex.initialized = true;
   }
-
-  let rc = pthread_mutex_trylock(&m.inner);
-  mutex[0] = m;
-  ret rc;
+  ret pthread_mutex_trylock(&mutex.inner);
 }
 
 // Unlocks a Windows backend mutex. No-op if uninitialized. Returns -1 when
@@ -91,15 +77,10 @@ pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
   }
-
-  let m = mutex[0];
-  if m.initialized == false {
+  if !mutex.initialized {
     ret 0;
   }
-
-  let rc = pthread_mutex_unlock(&m.inner);
-  mutex[0] = m;
-  ret rc;
+  ret pthread_mutex_unlock(&mutex.inner);
 }
 
 // Destroys a Windows backend mutex. No-op if uninitialized. Returns -1
@@ -108,17 +89,13 @@ pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
   if mutex == nil {
     ret -1;
   }
-
-  let m = mutex[0];
-  if m.initialized == false {
+  if !mutex.initialized {
     ret 0;
   }
-
-  let rc = pthread_mutex_destroy(&m.inner);
+  let rc = pthread_mutex_destroy(&mutex.inner);
   if rc == 0 {
-    m.initialized = false;
+    mutex.initialized = false;
   }
-  mutex[0] = m;
   ret rc;
 }
 
@@ -128,17 +105,13 @@ pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
   if cond == nil {
     ret -1;
   }
-
-  let c = cond[0];
-  if c.initialized == true {
+  if cond.initialized {
     ret 0;
   }
-
-  let rc = pthread_cond_init(&c.inner, nil);
+  let rc = pthread_cond_init(&cond.inner, nil);
   if rc == 0 {
-    c.initialized = true;
+    cond.initialized = true;
   }
-  cond[0] = c;
   ret rc;
 }
 
@@ -148,33 +121,21 @@ pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
   if cond == nil || mutex == nil {
     ret -1;
   }
-
-  let c = cond[0];
-  let m = mutex[0];
-
-  if c.initialized == false {
-    let c_init_rc = pthread_cond_init(&c.inner, nil);
+  if !cond.initialized {
+    let c_init_rc = pthread_cond_init(&cond.inner, nil);
     if c_init_rc != 0 {
-      cond[0] = c;
       ret c_init_rc;
     }
-    c.initialized = true;
+    cond.initialized = true;
   }
-
-  if m.initialized == false {
-    let m_init_rc = pthread_mutex_init(&m.inner, nil);
+  if !mutex.initialized {
+    let m_init_rc = pthread_mutex_init(&mutex.inner, nil);
     if m_init_rc != 0 {
-      cond[0] = c;
-      mutex[0] = m;
       ret m_init_rc;
     }
-    m.initialized = true;
+    mutex.initialized = true;
   }
-
-  let rc = pthread_cond_wait(&c.inner, &m.inner);
-  cond[0] = c;
-  mutex[0] = m;
-  ret rc;
+  ret pthread_cond_wait(&cond.inner, &mutex.inner);
 }
 
 // Waits on a Windows backend condition variable until the absolute timeout
@@ -187,33 +148,21 @@ pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw
   if abs_time == nil {
     ret -2;
   }
-
-  let c = cond[0];
-  let m = mutex[0];
-
-  if c.initialized == false {
-    let c_init_rc = pthread_cond_init(&c.inner, nil);
+  if !cond.initialized {
+    let c_init_rc = pthread_cond_init(&cond.inner, nil);
     if c_init_rc != 0 {
-      cond[0] = c;
       ret c_init_rc;
     }
-    c.initialized = true;
+    cond.initialized = true;
   }
-
-  if m.initialized == false {
-    let m_init_rc = pthread_mutex_init(&m.inner, nil);
+  if !mutex.initialized {
+    let m_init_rc = pthread_mutex_init(&mutex.inner, nil);
     if m_init_rc != 0 {
-      cond[0] = c;
-      mutex[0] = m;
       ret m_init_rc;
     }
-    m.initialized = true;
+    mutex.initialized = true;
   }
-
-  let rc = pthread_cond_timedwait(&c.inner, &m.inner, abs_time);
-  cond[0] = c;
-  mutex[0] = m;
-  ret rc;
+  ret pthread_cond_timedwait(&cond.inner, &mutex.inner, abs_time);
 }
 
 // Signals one Windows backend condition variable waiter. No-op if
@@ -222,15 +171,10 @@ pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
   if cond == nil {
     ret -1;
   }
-
-  let c = cond[0];
-  if c.initialized == false {
+  if !cond.initialized {
     ret 0;
   }
-
-  let rc = pthread_cond_signal(&c.inner);
-  cond[0] = c;
-  ret rc;
+  ret pthread_cond_signal(&cond.inner);
 }
 
 // Broadcasts to all Windows backend condition variable waiters. No-op if
@@ -239,15 +183,10 @@ pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
   if cond == nil {
     ret -1;
   }
-
-  let c = cond[0];
-  if c.initialized == false {
+  if !cond.initialized {
     ret 0;
   }
-
-  let rc = pthread_cond_broadcast(&c.inner);
-  cond[0] = c;
-  ret rc;
+  ret pthread_cond_broadcast(&cond.inner);
 }
 
 // Destroys a Windows backend condition variable. No-op if uninitialized.
@@ -256,16 +195,12 @@ pub fun sync_backend_windows_condvar_destroy(CondVar* cond) num {
   if cond == nil {
     ret -1;
   }
-
-  let c = cond[0];
-  if c.initialized == false {
+  if !cond.initialized {
     ret 0;
   }
-
-  let rc = pthread_cond_destroy(&c.inner);
+  let rc = pthread_cond_destroy(&cond.inner);
   if rc == 0 {
-    c.initialized = false;
+    cond.initialized = false;
   }
-  cond[0] = c;
   ret rc;
 }

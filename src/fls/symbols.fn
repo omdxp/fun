@@ -1,0 +1,4739 @@
+// Symbols.
+// 
+// What a name at a position in a document refers to, and where it was
+// declared. A name is looked for from the inside out: a parameter or
+// local of the function it sits in, then a field of the type it is
+// reached through, and only then a declaration the whole program shares.
+// Answering in that order is what keeps a local named `len` from
+// resolving to the standard library's function of the same name.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp positions;
+imp std.string;
+imp std.io;
+imp std.vec;
+imp std.c.mem;
+imp std.option;
+imp std.ctype;
+
+// What a name turned out to be.
+pub enum DeclarationKind {
+  Function,
+  Compound,
+  Enum,
+  Quirk,
+  Field,
+  Local,
+  Parameter,
+  Global,
+  Variant,
+}
+
+// A name's declaration: what it is, how to spell it back to a reader,
+// and where it was written.
+pub compound Declaration {
+  str name;
+  DeclarationKind kind;
+  // The declaration as a reader would write it, e.g. `fun len(str s) num`
+  // or `Vec<str>* data`.
+  str detail;
+  Pos pos;
+  // The compound/enum this was found on (a field, a method, a
+  // variant); empty for anything declared at the top level. A field
+  // typed `num` has no type name of its own to link from its
+  // `detail`, but "See also: its own compound" is still worth
+  // showing.
+  str container;
+  // Whether this declaration was written `pub`. Meaningful for the
+  // top-level kinds a cross-file lookup can actually reach (Function,
+  // Compound, Enum, Quirk, Global) and, matching `check_visibility`'s
+  // own per-method rule in typecheck.fn, an impl method too - `true`
+  // for everything else (a field, a local, a parameter, a variant),
+  // which this language has no independent `pub`/private concept for
+  // at all.
+  bin is_public;
+}
+
+// Whether `d` is visible from `current_file`: always, from the same
+// file it's declared in (`pos.filename` empty means no position info
+// at all, trusted the same way), otherwise only when it was written
+// `pub`. Matches `check_visibility`'s own rule in typecheck.fn exactly.
+pub fun declaration_visible_from(Declaration d, str current_file) bin {
+  if d.is_public || equals(d.pos.filename, "") || equals(current_file, "") {
+    ret true;
+  }
+  ret equals(d.pos.filename, current_file);
+}
+
+// The word a client's cursor sits on, given the token it landed on.
+// The word a token spells, for the tokens that carry one.
+pub fun token_word(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> {}
+  }
+  ret "";
+}
+
+// A type as a reader would write it. A pointer is spelled with its `*`,
+// which the flag records even when the depth does not, so a `Vec<T>*`
+// field is not reported as a `Vec<T>`.
+pub fun render_type(DataType* dt) str {
+  if dt == nil {
+    ret "";
+  }
+  StringBuilder b = string_builder_init(32);
+  str base_name = _base_type_name(dt);
+  b.append(base_name);
+  free(base_name);
+
+  if dt.generic_args.len > 0 {
+    b.append("<");
+    num i = 0;
+    for i < dt.generic_args.len {
+      if i > 0 {
+        b.append(", ");
+      }
+      str arg_type = render_type(dt.generic_args.get(i));
+      b.append(arg_type);
+      free(arg_type);
+      i = i + 1;
+    }
+    b.append(">");
+  }
+
+  num stars = dt.pointer_depth;
+  if dt.flags.is_pointer && stars == 0 {
+    stars = 1;
+  }
+  num s = 0;
+  for s < stars {
+    b.append("*");
+    s = s + 1;
+  }
+
+  if dt.is_array || dt.flags.is_array {
+    num depth = dt.array_depth;
+    if depth == 0 {
+      depth = 1;
+    }
+    // `array_brackets` only ever records a SIZED bracket's own
+    // expression (`parse_array_brackets` skips pushing anything for a
+    // bare `[]`), so a mix of bare and sized dimensions in one
+    // declaration (`num[5][]`) can't be matched back up positionally
+    // from this alone - only rendered with a size when every
+    // dimension recorded one (the overwhelmingly common case: a
+    // single `[N]`, or every dimension of a multi-dimensional array
+    // sized the same way).
+    bin show_sizes = dt.array_brackets.len == depth;
+    num a = 0;
+    for a < depth {
+      b.append("[");
+      if show_sizes {
+        Node* bracket = dt.array_brackets.get(a);
+        if bracket != nil {
+          fit bracket.kind {
+            .Bracket(exp) -> {
+              str size_text = _literal_value_text(exp);
+              b.append(size_text);
+              free(size_text);
+            }
+            _ -> {}
+          }
+        }
+      }
+      b.append("]");
+      a = a + 1;
+    }
+  }
+  ret b.build();
+}
+
+fun _base_type_name(DataType* dt) str {
+  fit dt.kind {
+    .Void -> { ret substr("void", 0, 4); }
+    .Raw -> { ret substr("raw", 0, 3); }
+    .Chr -> { ret substr("chr", 0, 3); }
+    .Str -> { ret substr("str", 0, 3); }
+    .Dec -> { ret substr("dec", 0, 3); }
+    .Num -> { ret substr("num", 0, 3); }
+    .Bin -> { ret substr("bin", 0, 3); }
+    _ -> {}
+  }
+  ret _demangled_alias_type_name(dt.type_str);
+}
+
+// A module-alias-qualified type's own internal name, written the way a
+// reader wrote it rather than the mangled form the parser keeps
+// internally for symbol lookup (`imp std.log as l;` then `l.Logger`
+// parses `type_str` to "l__Logger" - parser.fn's own
+// `parse_datatype`). Left alone for a generic instantiation's own
+// mangled name (`Vec__num`, `Box__Node_ptr1`), whose first segment is
+// always the container's own declared PascalCase name, never a
+// lowercase import alias - the two mangling schemes share the same
+// "__" separator, so this only touches a name whose segment before it
+// reads like an alias.
+fun _demangled_alias_type_name(str type_str) str {
+  num sep = index_of_str(type_str, "__");
+  if sep <= 0 {
+    ret substr(type_str, 0, len(type_str));
+  }
+  bin looks_like_alias = is_lower(type_str[0]);
+  num i = 1;
+  for looks_like_alias && i < sep {
+    if !(is_alnum(type_str[i]) || type_str[i] == '_') {
+      looks_like_alias = false;
+    }
+    i = i + 1;
+  }
+  if !looks_like_alias {
+    ret substr(type_str, 0, len(type_str));
+  }
+  str prefix = substr(type_str, 0, sep);
+  str suffix = substr(type_str, sep + 2, len(type_str) - sep - 2);
+  str result = format("{str}.{str}", prefix, suffix);
+  free(prefix);
+  free(suffix);
+  ret result;
+}
+
+// A function as its signature reads, without its body.
+pub fun render_function(FunctionNode f) str {
+  ret render_function_named(f, f.name, true);
+}
+
+// Like `render_function`, but spelled back under `name` instead of
+// `f.name`, since an impl method's own `f.name` is always mangled
+// with its owning type (`Box__doubled`, never the bare `doubled` a
+// reader wrote), so a caller resolving a method needs to supply the
+// de-mangled name itself. `include_fun` leaves off the leading `fun `
+// for a method, which is never written with one of its own
+// (`pub doubled(...) num { ... }`, not `pub fun doubled(...)`).
+// Appends a declaration's own `<T, U>` type-param list to `b`, when it
+// has any - shared by every declaration kind that can be generic
+// (function, compound, enum, quirk), so a compound/enum/quirk's own
+// hover shows its type params the same way a function's already does,
+// not just "compound Box" with no `<T>` at all.
+fun _append_type_params(StringBuilder* b, bin has_type_params, Vec<str>* type_params) {
+  if !has_type_params || type_params.len == 0 {
+    ret;
+  }
+  b.append("<");
+  num t = 0;
+  for t < type_params.len {
+    if t > 0 {
+      b.append(", ");
+    }
+    b.append(type_params.get(t));
+    t = t + 1;
+  }
+  b.append(">");
+}
+
+pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
+  StringBuilder b = string_builder_init(64);
+  if f.is_async {
+    b.append("async ");
+  }
+  if include_fun {
+    b.append("fun ");
+  }
+  b.append(name);
+  _append_type_params(&b, f.has_type_params, &f.type_params);
+  b.append("(");
+  num i = 0;
+  for i < f.args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    Node* arg = f.args.get(i);
+    str param_text = _render_param(arg);
+    b.append(param_text);
+    free(param_text);
+    i = i + 1;
+  }
+  if f.is_variadic {
+    if f.args.len > 0 {
+      b.append(", ");
+    }
+    b.append("...");
+  }
+  b.append(")");
+  if f.has_rtype {
+    let rendered = render_type(f.rtype);
+    if !equals(rendered, "") && !equals(rendered, "void") {
+      b.append(" ");
+      b.append(rendered);
+    }
+    free(rendered);
+  }
+  ret b.build();
+}
+
+fun _render_param(Node* arg) str {
+  if arg == nil {
+    ret "";
+  }
+  fit arg.kind {
+    .Variable(v) -> {
+      StringBuilder b = string_builder_init(24);
+      str type_text = render_type(v.var_type);
+      b.append(type_text);
+      free(type_text);
+      b.append(" ");
+      b.append(v.name);
+      if v.has_val {
+        str default_text = _literal_value_text(v.val);
+        if !equals(default_text, "") {
+          b.append(" = ");
+          b.append(default_text);
+        }
+        free(default_text);
+      }
+      ret b.build();
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
+// `s`, escaped for display inside a double-quoted rendering, without
+// double-escaping content that already carries its own valid escapes.
+// A `.String` node's own content is the lexer's raw as-written text:
+// a double-quoted source string keeps every `\"`/`\\` it was written
+// with untouched, but a backtick raw string has none at all, so an
+// embedded quote there is a literal `"` character. Since the AST
+// carries no record of which one produced this value, a quote is
+// escaped only when it is not already preceded by an odd run of
+// backslashes (an escape already covering it).
+fun _quote_escaped(str s) str {
+  StringBuilder b = string_builder_init(len(s) + 4);
+  num n = len(s);
+  num i = 0;
+  bin prev_is_escaping_backslash = false;
+  for i < n {
+    chr c = s[i];
+    if c == '"' && !prev_is_escaping_backslash {
+      b.append_char('\\');
+    }
+    b.append_char(c);
+    if c == '\\' {
+      prev_is_escaping_backslash = !prev_is_escaping_backslash;
+    } else {
+      prev_is_escaping_backslash = false;
+    }
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// A constant's own literal value (or a parameter's own default one:
+// `num times = 2`), spelled back the way a reader would read it (a
+// re-rendered numeric form rather than the exact source text, so
+// `0xFF` shows as `255`): "" for an initializer that isn't a plain
+// literal, a bare name, or a unary minus over one of those - covers
+// every shape a default parameter value is allowed to take (a
+// constant, a global, `nil`, or an enum variant's own bare name;
+// arbitrary expressions aren't legal there to begin with), but not
+// a qualified or dot-shorthand variant construction.
+fun _literal_value_text(Node* val) str {
+  if val == nil {
+    ret substr("", 0, 0);
+  }
+  fit val.kind {
+    // Copied, not returned directly: every other arm here returns an
+    // owned string, so a caller can free this function's result
+    // uniformly regardless of which arm produced it.
+    .Identifier(s) -> { ret substr(s, 0, len(s)); }
+    .Number(d) -> {
+      fit d {
+        .Num(n) -> { ret format_num(n); }
+        .Dec(x) -> { ret format_dec(x, 6); }
+        .Cval(c) -> { ret format("'{chr}'", c); }
+        _ -> { ret substr("", 0, 0); }
+      }
+    }
+    .String(s) -> {
+      str escaped = _quote_escaped(s);
+      str result = format(`"{str}"`, escaped);
+      free(escaped);
+      ret result;
+    }
+    .Character(c) -> { ret format("'{chr}'", c); }
+    .Boolean(b) -> {
+      if b {
+        ret substr("true", 0, 4);
+      }
+      ret substr("false", 0, 5);
+    }
+    .Nil -> { ret substr("nil", 0, 3); }
+    .Unary(u) -> {
+      // A negative numeric literal (`-1`) is parsed as a unary minus
+      // over a plain Number node, not folded into the literal itself.
+      if equals(u.op, "-") {
+        str inner = _literal_value_text(u.operand);
+        if !equals(inner, "") {
+          str result = format("-{str}", inner);
+          free(inner);
+          ret result;
+        }
+        free(inner);
+      }
+      ret substr("", 0, 0);
+    }
+    _ -> { ret substr("", 0, 0); }
+  }
+}
+
+// The contiguous `//`-prefixed comment lines immediately above
+// `decl_line` (1-indexed, as `Pos.line` reads) in `text`, with each
+// line's own `// ` prefix stripped and re-joined top to bottom. Empty
+// when there is no such block directly above: a blank line or a
+// non-comment line breaks the search, so a doc block separated from
+// the declaration by a blank line (or an unrelated trailing comment
+// on the previous declaration) is never mistaken for this one's own.
+// Frees every element of a `Vec<str>` whose own elements are this
+// call's to free (each an independent allocation, none aliased
+// elsewhere), then the vector itself.
+fun _free_str_vec_deep(Vec<str>* v) {
+  num i = 0;
+  for i < v.len {
+    free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
+pub fun doc_comment_above(str text, num decl_line) str {
+  if decl_line <= 1 {
+    ret "";
+  }
+  Vec<str> src_lines = split_lines(text);
+  num idx = decl_line - 2;
+  // `decl_line` reads however the lexer counted lines, which is not
+  // guaranteed to match `split_lines`'s own count exactly at the
+  // edges (a missing final newline, a `\r\n` line ending); `Vec.get`
+  // has no bounds check of its own, so a mismatch here would read out
+  // of bounds rather than just finding no comment.
+  if idx >= src_lines.len {
+    _free_str_vec_deep(&src_lines);
+    ret "";
+  }
+  Vec<str> collected;
+  collected.init(4);
+  for idx >= 0 {
+    str line_text = src_lines.get(idx);
+    str t = trim(line_text);
+    if equals(t, "") {
+      free(t);
+      break;
+    }
+    if !starts_with(t, "//") {
+      free(t);
+      break;
+    }
+    str content = substr(t, 2, len(t) - 2);
+    free(t);
+    if len(content) > 0 && content[0] == ' ' {
+      str trimmed_leading = substr(content, 1, len(content) - 1);
+      free(content);
+      content = trimmed_leading;
+    }
+    collected.push(content);
+    idx = idx - 1;
+  }
+  _free_str_vec_deep(&src_lines);
+  if collected.len == 0 {
+    collected.free();
+    ret "";
+  }
+  // Rendered top-to-bottom (`collected` was built bottom-to-top),
+  // tracking ``` fenced code blocks: inside a fence, a line's own
+  // indentation is kept verbatim so example code keeps its real
+  // structure; outside, it's trimmed further so a stray extra space
+  // in prose doesn't render as accidental sub-indentation.
+  StringBuilder b = string_builder_init(64);
+  bin in_fence = false;
+  num i = collected.len;
+  for i > 0 {
+    i = i - 1;
+    str content = collected.get(i);
+    str trimmed_content = trim(content);
+    bin is_fence = starts_with(trimmed_content, "```");
+    if in_fence {
+      b.append(content);
+    } else {
+      b.append(trimmed_content);
+    }
+    free(trimmed_content);
+    if is_fence {
+      in_fence = !in_fence;
+    }
+    if i > 0 {
+      b.append("\n");
+    }
+  }
+  _free_str_vec_deep(&collected);
+  ret b.build();
+}
+
+// A trailing same-line comment on `decl_line` itself (`Circle(num), //
+// meaning`), for a declaration with no leading block of its own to
+// fall back to. Only the first `//` on the line, whatever comes
+// before it on the source line is not re-parsed as code.
+pub fun doc_comment_trailing(str text, num decl_line) str {
+  if decl_line < 1 {
+    ret "";
+  }
+  Vec<str> src_lines = split_lines(text);
+  num idx = decl_line - 1;
+  if idx >= src_lines.len {
+    _free_str_vec_deep(&src_lines);
+    ret "";
+  }
+  str line_text = src_lines.get(idx);
+  num slashes = index_of_str(line_text, "//");
+  if slashes < 0 {
+    _free_str_vec_deep(&src_lines);
+    ret "";
+  }
+  str raw_content = substr(line_text, slashes + 2, len(line_text) - slashes - 2);
+  str content = trim(raw_content);
+  free(raw_content);
+  _free_str_vec_deep(&src_lines);
+  ret content;
+}
+
+// Best-effort literal type for a global const's own initializer, when
+// its declared type is the `__let_infer__` sentinel (`const x = 5;`,
+// no type written): the same handful of literal shapes
+// `_literal_value_text` already recognizes for rendering the value
+// itself, just the type instead. A local's own `let`/`const` resolves
+// this the same way through token-based inference elsewhere (hover's
+// own re-inference, `infer_let_local_type`); a global has no token
+// stream on hand here, so this stays AST-only and narrower - "" for
+// anything past a plain literal, matching what a caller already does
+// with an unresolved type name.
+fun _infer_global_const_type(Node* val) str {
+  if val == nil {
+    ret "";
+  }
+  fit val.kind {
+    .Number(d) -> {
+      fit d {
+        .Dec(_) -> { ret "dec"; }
+        .Cval(_) -> { ret "chr"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String(_) -> { ret "str"; }
+    .Boolean(_) -> { ret "bin"; }
+    _ -> { ret ""; }
+  }
+}
+
+// The declaration of `name` as seen from `file` at `line`: a parameter
+// or local of the function that line sits in, before anything the whole
+// program shares.
+pub fun lookup(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  let local = _lookup_local(tokens, program, name, file, line);
+  if local.is_some() {
+    ret local;
+  }
+  ret lookup_top_level(program, name);
+}
+
+// The declaration of `name` among what the whole program declares.
+pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if equals(f.name, name) {
+          ret .Some(_declaration_vis(name, .Function, render_function(f), n.pos, n.flags.is_public));
+        }
+      }
+      .Compound(c) -> {
+        if equals(c.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("compound ");
+          b.append(c.name);
+          _append_type_params(&b, c.has_type_params, &c.type_params);
+          ret .Some(_declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public));
+        }
+      }
+      .Enum(e) -> {
+        if equals(e.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("enum ");
+          b.append(e.name);
+          _append_type_params(&b, e.has_type_params, &e.type_params);
+          ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
+        }
+      }
+      .Quirk(q) -> {
+        if equals(q.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("quirk ");
+          b.append(q.name);
+          _append_type_params(&b, q.has_type_params, &q.type_params);
+          ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
+        }
+      }
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          StringBuilder b = string_builder_init(32);
+          if v.is_const {
+            b.append("const ");
+          }
+          str global_type_text = render_type(v.var_type);
+          if equals(global_type_text, "__let_infer__") && v.has_val {
+            free(global_type_text);
+            str inferred = _infer_global_const_type(v.val);
+            global_type_text = substr(inferred, 0, len(inferred));
+          }
+          b.append(global_type_text);
+          free(global_type_text);
+          b.append(" ");
+          b.append(v.name);
+          if v.is_const && v.has_val {
+            str literal = _literal_value_text(v.val);
+            if !equals(literal, "") {
+              b.append(" = ");
+              b.append(literal);
+            }
+            free(literal);
+          }
+          ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The field `field` of the compound named `type_name`.
+// `field` declared on `type_name`, its own type specialized against
+// `concrete_args` when the owning compound is generic (an empty `Vec`
+// when they aren't known, or it isn't generic at all, gets the field
+// exactly as declared, template param included) - mirrors
+// `lookup_method`'s own `concrete_args` handling for the same reason:
+// `box.v` on a `Box<AsyncCounter>` should read `AsyncCounter`, not the
+// bare `T` every field of every instantiation would otherwise share.
+pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> concrete_args) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if !equals(c.name, type_name) {
+          continue;
+        }
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          if !equals(cf.name, field) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(32);
+          str field_type_text = render_type(cf.dtype);
+          b.append(field_type_text);
+          free(field_type_text);
+          b.append(" ");
+          b.append(cf.name);
+          Pos field_pos = n.pos;
+          if cf.has_pos {
+            field_pos = cf.pos;
+          }
+          str signature = b.build();
+          if c.has_type_params {
+            signature = specialize_signature(signature, c.type_params, concrete_args);
+          }
+          Declaration d = _declaration(field, .Field, signature, field_pos);
+          d.container = type_name;
+          ret .Some(d);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// Whether `field_tok` sits at a compound-literal's own `field = value`
+// position (`Box<AsyncCounter>{v = q}`'s own `v`, `.{ v = q }`'s own
+// `v`, or plain `Box{v = q}`'s own `v`), and if so, the literal's own
+// compound name and explicit generic args - "" and empty when the
+// literal is a bare `.{...}` shorthand (its own type comes from
+// context, not resolvable from the tokens alone). Purely token-based,
+// walking backward from `field_tok` to the nearest unmatched `{` and
+// whatever names it, the same style `_infer_type_primary`'s own
+// (forward-facing) compound-literal handling already uses rather than
+// a real AST-position lookup - `CompoundInitField` carries no position
+// of its own to look up by.
+pub fun compound_literal_field_context(
+  Vec<Token>* tokens,
+  Token field_tok,
+  str* out_name,
+  Vec<str>* out_args
+) bin {
+  *out_name = "";
+  out_args.init(2);
+  num idx = index_of_token(tokens, field_tok);
+  let after = token_after(tokens, idx + 1);
+  if after.is_none() || !token_is_operator(after.unwrap(), "=") {
+    ret false;
+  }
+  num depth = 0;
+  num cursor = idx;
+  num open_brace_idx = -1;
+  for true {
+    let prev = token_before(tokens, cursor);
+    if prev.is_none() {
+      ret false;
+    }
+    cursor = index_of_token(tokens, prev.unwrap());
+    if token_is_symbol(prev.unwrap(), '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(prev.unwrap(), '{') {
+      if depth == 0 {
+        open_brace_idx = cursor;
+        break;
+      }
+      depth = depth - 1;
+    }
+  }
+  let before_brace = token_before(tokens, open_brace_idx);
+  if before_brace.is_none() {
+    ret false;
+  }
+  if token_is_operator(before_brace.unwrap(), ">") {
+    num angle_depth = 0;
+    num acursor = index_of_token(tokens, before_brace.unwrap());
+    num open_angle_idx = -1;
+    for true {
+      let aprev = token_before(tokens, acursor);
+      if aprev.is_none() {
+        ret false;
+      }
+      acursor = index_of_token(tokens, aprev.unwrap());
+      if token_is_operator(aprev.unwrap(), ">") {
+        angle_depth = angle_depth + 1;
+      } elif token_is_operator(aprev.unwrap(), "<") {
+        if angle_depth == 0 {
+          open_angle_idx = acursor;
+          break;
+        }
+        angle_depth = angle_depth - 1;
+      } elif angle_depth == 0 && aprev.unwrap().type == .Identifier {
+        out_args.push(token_word(aprev.unwrap()));
+      }
+    }
+    let name_tok = token_before(tokens, open_angle_idx);
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
+      ret false;
+    }
+    // Collected right-to-left; flip to source order.
+    num lo = 0;
+    num hi = out_args.len - 1;
+    for lo < hi {
+      let tmp = out_args.get(lo);
+      out_args.set(lo, out_args.get(hi));
+      out_args.set(hi, tmp);
+      lo = lo + 1;
+      hi = hi - 1;
+    }
+    *out_name = token_word(name_tok.unwrap());
+    ret true;
+  }
+  if before_brace.unwrap().type == .Identifier {
+    *out_name = token_word(before_brace.unwrap());
+    ret true;
+  }
+  ret false;
+}
+
+// The method `method_name` declared in an `impl` block targeting
+// `type_name`. Unlike a field or an enum variant, a method keeps its
+// own real declaration position, so go-to-definition lands on the
+// method itself, not on the enclosing impl or type. `concrete_args`
+// is the receiver's own generic arguments in source order (`num` for
+// an `Option<num>` receiver), when known; pass an empty `Vec` when
+// they aren't (or the receiver isn't generic at all) to get the
+// signature exactly as declared, template params included.
+pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<str> concrete_args) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Impl(im) -> {
+        if !equals(im.type_name, type_name) {
+          continue;
+        }
+        num m = 0;
+        for m < im.methods.len {
+          Node* method = im.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              if equals(bare_method_name(f.name), method_name) {
+                str signature = render_function_named(f, method_name, false);
+                if im.has_type_params {
+                  signature = specialize_signature(signature, im.type_params, concrete_args);
+                }
+                Declaration d = _declaration_vis(
+                  method_name,
+                  .Function,
+                  signature,
+                  method.pos,
+                  method.flags.is_public
+                );
+                d.container = type_name;
+                ret .Some(d);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  // `type_name` names a quirk directly, not a concrete type with its own
+  // impl block, whenever the receiver itself is quirk-typed (`AsyncCounter
+  // q = &c;` then `q.add(...)`, or a quirk-typed parameter/return) - no
+  // `impl` block is ever literally named after a quirk (`impl Counter as
+  // AsyncCounter`'s own type_name is "Counter"), so the search above
+  // always comes back empty for one and needs this fallback to resolve
+  // at all.
+  ret quirk_method_declaration(program, type_name, method_name);
+}
+
+// The signature `quirk_name` requires for `method_name`, as declared
+// in the `quirk` block itself (no `self`, no body): what an `impl ...
+// as quirk_name` block has to supply. `None` when no such quirk or
+// method exists.
+pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_name) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Quirk(q) -> {
+        if !equals(q.name, quirk_name) {
+          continue;
+        }
+        num m = 0;
+        for m < q.methods.len {
+          QuirkMethodSig ms = q.methods.get(m);
+          m = m + 1;
+          if equals(ms.name, method_name) {
+            Declaration d = _declaration(method_name, .Function, _render_quirk_method(ms), ms.pos);
+            d.container = quirk_name;
+            ret .Some(d);
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `m` as a reader would write it inside an `impl` block: no `self`,
+// since a quirk method's signature never carries one of its own.
+fun _render_quirk_method(QuirkMethodSig m) str {
+  StringBuilder b = string_builder_init(48);
+  if m.is_async {
+    b.append("async ");
+  }
+  b.append(m.name);
+  b.append("(");
+  num i = 0;
+  for i < m.args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    QuirkArg a = m.args.get(i);
+    str arg_type_text = render_type(a.dtype);
+    b.append(arg_type_text);
+    free(arg_type_text);
+    b.append(" ");
+    b.append(a.name);
+    i = i + 1;
+  }
+  b.append(")");
+  let rendered = render_type(m.rtype);
+  if !equals(rendered, "") && !equals(rendered, "void") {
+    b.append(" ");
+    b.append(rendered);
+  }
+  free(rendered);
+  ret b.build();
+}
+
+// `signature`, with each of `type_params`'s own name replaced by its
+// positional entry in `concrete_args` wherever it appears as a whole
+// word: `o.unwrap_or` on an `Option<num>` receiver shows
+// `unwrap_or(num value) num`, not the bare template's own
+// `unwrap_or(T value) T`. A length mismatch (an absent or unparsed
+// concrete argument list) leaves `signature` unchanged, template
+// params and all.
+pub fun specialize_signature(str signature, Vec<str> type_params, Vec<str> concrete_args) str {
+  if type_params.len == 0 || type_params.len != concrete_args.len {
+    ret signature;
+  }
+  str out = signature;
+  num i = 0;
+  for i < type_params.len {
+    out = _replace_word(out, type_params.get(i), concrete_args.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
+// The comma-separated generic type arguments in a rendered "Type<Arg1,
+// Arg2> name" declaration detail, depth-aware so a nested generic
+// argument's own comma isn't mistaken for a separator. Empty when
+// `detail` names no generic instantiation at all.
+pub fun generic_args_of_detail(str detail) Vec<str> {
+  Vec<str> out;
+  out.init(2);
+  num open = index_of_char(detail, '<');
+  if open < 0 {
+    ret out;
+  }
+  num depth = 0;
+  num start = open + 1;
+  num i = start;
+  num n = len(detail);
+  for i < n {
+    chr c = detail[i];
+    if c == '<' {
+      depth = depth + 1;
+    } elif c == '>' {
+      if depth == 0 {
+        str piece = trim(substr(detail, start, i - start));
+        if !equals(piece, "") {
+          out.push(piece);
+        }
+        ret out;
+      }
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      str piece = trim(substr(detail, start, i - start));
+      if !equals(piece, "") {
+        out.push(piece);
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// A rendered "fun name(Type a, Type b) rtype" signature's own
+// parameter list, split at each top-level comma (depth-aware, so a
+// parameter's own generic argument or nested call type doesn't get
+// mistaken for a separator). Shared by `signature_help.fn`,
+// `inlay_hints.fn`, `completion.fn`, and `navigation.fn`; kept here
+// rather than in any one of them since all four already depend on
+// this file.
+pub fun split_signature_params(str signature) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num open = index_of_char(signature, '(');
+  if open < 0 {
+    ret out;
+  }
+  num depth_paren = 0;
+  num depth_angle = 0;
+  num start = open + 1;
+  num i = start;
+  num n = len(signature);
+  for i < n {
+    chr c = signature[i];
+    if c == '(' {
+      depth_paren = depth_paren + 1;
+    } elif c == ')' {
+      if depth_paren == 0 {
+        str raw_piece = substr(signature, start, i - start);
+        str piece = trim(raw_piece);
+        free(raw_piece);
+        if !equals(piece, "") {
+          out.push(piece);
+        } else {
+          free(piece);
+        }
+        ret out;
+      }
+      depth_paren = depth_paren - 1;
+    } elif c == '<' {
+      depth_angle = depth_angle + 1;
+    } elif c == '>' {
+      if depth_angle > 0 {
+        depth_angle = depth_angle - 1;
+      }
+    } elif c == ',' && depth_paren == 0 && depth_angle == 0 {
+      str raw_piece2 = substr(signature, start, i - start);
+      str piece = trim(raw_piece2);
+      free(raw_piece2);
+      if !equals(piece, "") {
+        out.push(piece);
+      } else {
+        free(piece);
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  ret out;
+}
+
+// Frees a `Vec<str>` `split_signature_params` returned: each piece is
+// its own `substr`/`trim` allocation, so the plain `Vec<str>.free()`
+// house style (backing array only) leaves every piece leaked.
+pub fun free_params_vec(Vec<str>* params) {
+  num i = 0;
+  for i < params.len {
+    free(params.get(i));
+    i = i + 1;
+  }
+  params.free();
+}
+
+// The declared type half of one rendered parameter piece
+// (`split_signature_params`'s own output: "T a" -> "T", "Vec<T>* data"
+// -> "Vec<T>*"), the inverse of inlay_hints.fn's own
+// param_name_from_piece (which keeps the trailing name instead). Kept
+// as its own copy here rather than imported, since inlay_hints.fn
+// already imports this file and importing it back would cycle.
+fun _param_type_from_piece(str piece) str {
+  str name_part = piece;
+  num eq = index_of_str(piece, " = ");
+  bin owned = false;
+  if eq >= 0 {
+    name_part = substr(piece, 0, eq);
+    owned = true;
+  }
+  num end = len(name_part);
+  num start = end;
+  for start > 0 && (is_alnum(name_part[start - 1]) || name_part[start - 1] == '_') {
+    start = start - 1;
+  }
+  str result = trim(substr(name_part, 0, start));
+  if owned {
+    free(name_part);
+  }
+  ret result;
+}
+
+// The generic type arguments of the local or parameter named `name`,
+// as declared (`["num"]` for an `Option<num>` local); empty when it
+// isn't generic, or isn't a known local at all. `tokens` is nil where
+// a caller has no token stream to offer, the same convention
+// `type_name_of_local` uses: a `let`-inferred local, whose own
+// declared-args-from-detail read otherwise always comes back empty
+// (the sentinel has no `<...>` to parse), only resolves its real
+// generic args when `tokens` is available to re-run the same
+// best-effort inference `type_name_of_local` already falls back to
+// for the bare type name.
+pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Vec<str> {
+  let found = _lookup_local(tokens, program, name, file, line);
+  if found.is_none() {
+    Vec<str> empty;
+    empty.init(0);
+    ret empty;
+  }
+  Declaration d = found.unwrap();
+  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+    let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_none() {
+      Vec<str> empty2;
+      empty2.init(0);
+      ret empty2;
+    }
+    num name_idx = index_of_token(tokens, name_tok.unwrap());
+    Vec<str> inferred_args;
+    inferred_args.init(0);
+    infer_let_local_type_with_args(tokens, name_idx, program, file, d.pos.line, &inferred_args);
+    ret inferred_args;
+  }
+  ret generic_args_of_detail(d.detail);
+}
+
+// `s` with every whole-word occurrence of `word` replaced by
+// `replacement`. `word` must not be preceded or followed by an
+// identifier character, so substituting `T` doesn't corrupt `Type`
+// or a local actually named `Tx`.
+fun _replace_word(str s, str word, str replacement) str {
+  num n = len(s);
+  num wlen = len(word);
+  if wlen == 0 {
+    ret s;
+  }
+  StringBuilder b = string_builder_init(n + 8);
+  num i = 0;
+  for i < n {
+    bin matches = i + wlen <= n;
+    if matches {
+      num k = 0;
+      for k < wlen {
+        if s[i + k] != word[k] {
+          matches = false;
+        }
+        k = k + 1;
+      }
+    }
+    if matches {
+      bin before_ok = i == 0 || !_is_type_param_ident_char(s[i - 1]);
+      bin after_ok = i + wlen >= n || !_is_type_param_ident_char(s[i + wlen]);
+      if before_ok && after_ok {
+        b.append(replacement);
+        i = i + wlen;
+        continue;
+      }
+    }
+    b.append_char(s[i]);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// True for a character that can appear in an identifier.
+fun _is_type_param_ident_char(chr c) bin {
+  ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+// A method's own written name, with whatever it was mangled with
+// removed: `Type__method` for a plain impl, `Type__Quirk__method`
+// for one conforming to a quirk (see `_parse_impl_method`'s own
+// `gen_name` construction). Neither a type nor a quirk name is ever
+// written with a leading or embedded `__` of its own, but the
+// method's own name can start with one; the separator is always the
+// first two underscores of whichever run sits at that boundary, not
+// just the rightmost matching pair.
+pub fun bare_method_name(str mangled) str {
+  num n = len(mangled);
+  num i = n - 1;
+  for i > 0 {
+    if mangled[i] == '_' && mangled[i - 1] == '_' {
+      // Found the end of a run of underscores, not necessarily the
+      // mangler's own fixed two-character separator by itself: a
+      // private method's own name can start with one or more
+      // underscores of its own, immediately following the separator
+      // (`Type___method` for a `_method`, three raw underscores in a
+      // row). Walk back to the run's own start first, so only the
+      // separator's own two characters are consumed and the rest,
+      // including any leading underscore the method was actually
+      // written with, is returned intact.
+      num run_start = i;
+      for run_start > 0 && mangled[run_start - 1] == '_' {
+        run_start = run_start - 1;
+      }
+      ret substr(mangled, run_start + 2, n - run_start - 2);
+    }
+    i = i - 1;
+  }
+  ret mangled;
+}
+
+// The field, enum variant, or impl method `name` of whichever
+// compound, enum, or impl block is being declared at `line`. A bare
+// name written inside one of their bodies is only ever met without a
+// value in front of it there.
+pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option<Declaration> {
+  num best_line = -1;
+  Declaration best;
+  bin found = false;
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) || n.pos.line > line {
+      continue;
+    }
+    fit n.kind {
+      .Compound(c) -> {
+        // A field's own name only means anything for the rest of
+        // this compound's own body - a same-named bare identifier
+        // written later in the file, in an unrelated function, must
+        // not resolve to it just because it happens to be the
+        // nearest declaration above.
+        if line > _compound_last_line(c) {
+          continue;
+        }
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          if !equals(cf.name, name) {
+            continue;
+          }
+          // The nearest declaration above the line is the one being
+          // written in.
+          if n.pos.line > best_line {
+            best_line = n.pos.line;
+            StringBuilder b = string_builder_init(32);
+            str decl_field_type_text = render_type(cf.dtype);
+            b.append(decl_field_type_text);
+            free(decl_field_type_text);
+            b.append(" ");
+            b.append(cf.name);
+            Pos field_pos = n.pos;
+            if cf.has_pos {
+              field_pos = cf.pos;
+            }
+            best = _declaration(name, .Field, b.build(), field_pos);
+            best.container = c.name;
+            found = true;
+          }
+        }
+      }
+      .Enum(e) -> {
+        // Same reasoning as the compound case above: a variant's own
+        // name only means anything for the rest of this enum's own
+        // body.
+        if line > _enum_last_line(e) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, name) {
+            continue;
+          }
+          if n.pos.line > best_line {
+            best_line = n.pos.line;
+            StringBuilder b = string_builder_init(24);
+            b.append(variant.name);
+            if variant.has_payload && variant.payload.len > 0 {
+              b.append("(");
+              num p = 0;
+              for p < variant.payload.len {
+                if p > 0 {
+                  b.append(", ");
+                }
+                str payload_type_text = render_type(variant.payload.get(p));
+                b.append(payload_type_text);
+                free(payload_type_text);
+                p = p + 1;
+              }
+              b.append(")");
+            }
+            Pos variant_pos = n.pos;
+            if variant.has_pos {
+              variant_pos = variant.pos;
+            }
+            str detail = format("{str} = {num}", b.build(), _variant_ordinal(e, v - 1));
+            best = _declaration(name, .Variant, detail, variant_pos);
+            best.container = e.name;
+            found = true;
+          }
+        }
+      }
+      .Impl(im) -> {
+        // Unlike a compound/enum (a single-point container with no
+        // body span of its own to fall outside of), an impl's own
+        // methods stop meaning anything past its closing brace: a
+        // same-named bare identifier written later in the file, in
+        // an unrelated function, must not resolve to this impl's own
+        // method just because it happens to be the nearest one above.
+        if line > _impl_last_line(im) {
+          continue;
+        }
+        num m = 0;
+        for m < im.methods.len {
+          Node* method = im.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              // Not just "same name, somewhere in this impl's own
+              // span" - that also matches a bare call to an unrelated
+              // same-named function written anywhere inside the
+              // method's own body (free(x) inside JsonValue's own
+              // free() method resolving to itself instead of
+              // std.c.mem's free, the real bug this line exists to
+              // rule out). Only the method's own declaration line is
+              // a real match; a plain reference falls through to
+              // ordinary lookup() below instead, same as it would
+              // anywhere outside this impl.
+              if !equals(bare_method_name(f.name), name) || line != method.pos.line {
+                continue;
+              }
+              if n.pos.line > best_line {
+                best_line = n.pos.line;
+                str signature = render_function_named(f, name, false);
+                best = _declaration_vis(
+                  name,
+                  .Function,
+                  signature,
+                  method.pos,
+                  method.flags.is_public
+                );
+                best.container = im.type_name;
+                found = true;
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  if !found {
+    ret .None;
+  }
+  ret .Some(best);
+}
+
+// True when `name` reads as a type by Fun's own naming convention: a
+// type is always capitalized, checked after skipping any leading
+// underscores - not a language rule of its own, just this codebase's
+// house style of also prefixing a non-`pub` declaration with one
+// (`_Range`, `_OpenBracket`), the same convention a private function
+// follows. A non-`pub` value (function/variable) never has an
+// uppercase letter right after its own leading underscore though, so
+// this stays false for those. Shared by every classifier that tells a
+// type reference apart from an ordinary name by capitalization alone.
+pub fun looks_like_type_name(str name) bin {
+  num i = 0;
+  num n = len(name);
+  for i < n && name[i] == '_' {
+    i = i + 1;
+  }
+  ret i < n && is_upper(name[i]);
+}
+
+// The type a local or parameter named `name` was declared with, as
+// written. Used to resolve what a field is reached through. `tokens`
+// is nil where a caller has no token stream to offer (a `fit`
+// subject's own type, resolved from the AST alone); a `let`-inferred
+// local, whose `detail` otherwise carries the permanent
+// `__let_infer__` sentinel forever, only resolves to its real type
+// when `tokens` is available to re-run the same best-effort inference
+// `inlay_hints.fn` uses to display it.
+pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) str {
+  let found = _lookup_local(tokens, program, name, file, line);
+  if found.is_none() {
+    ret "";
+  }
+  Declaration d = found.unwrap();
+  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+    let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_none() {
+      ret "";
+    }
+    num name_idx = index_of_token(tokens, name_tok.unwrap());
+    str inferred = infer_let_local_type(tokens, name_idx, program, file, d.pos.line);
+    if equals(inferred, "") {
+      ret "";
+    }
+    ret _bare_type_expr(inferred);
+  }
+  ret bare_type_from_detail(d.detail);
+}
+
+// `type_expr`'s own bare name, with any generic args or pointer
+// spelling removed: up to the first `<`, stars stripped. `type_expr`
+// is already just a type on its own, not a "Type name" pair (see
+// `bare_type_from_detail` for that shape).
+fun _bare_type_expr(str type_expr) str {
+  str written = type_expr;
+  bin owned = false;
+  num cut = index_of_char(written, '<');
+  if cut > 0 {
+    written = substr(written, 0, cut);
+    owned = true;
+  }
+  str spaced = replace_char(written, '*', ' ');
+  if owned {
+    free(written);
+  }
+  str out = trim(spaced);
+  free(spaced);
+  ret out;
+}
+
+// The bare declared type of a rendered "Type name" declaration
+// detail, with any generic args or pointer spelling removed: what
+// precedes the space, up to the first `<`, stars stripped. Shared by
+// `type_name_of_local` and `chain_receiver_type`, since a field's own
+// `Declaration.detail` reads the same shape a local's does.
+pub fun bare_type_from_detail(str detail) str {
+  num space = index_of_char(detail, ' ');
+  if space <= 0 {
+    ret "";
+  }
+  ret _bare_type_expr(substr(detail, 0, space));
+}
+
+// The bare return type of a rendered function/method signature
+// ("name(args) RetType"), generics/pointer stripped: everything after
+// its own last closing paren. "" for a declared void return, or a
+// signature with no return type written at all.
+pub fun return_type_from_detail(str signature) str {
+  num close = last_index_of_char(signature, ')');
+  if close < 0 {
+    ret "";
+  }
+  ret _bare_type_expr(trim(substr(signature, close + 1, len(signature) - close - 1)));
+}
+
+// `return_type_from_detail`, but keeping the pointer star and any
+// generic args written out - the "full" half of the bare/full split
+// `ChainReceiver.full_type_name` documents.
+fun full_return_type_from_detail(str signature) str {
+  num close = last_index_of_char(signature, ')');
+  if close < 0 {
+    ret "";
+  }
+  ret trim(substr(signature, close + 1, len(signature) - close - 1));
+}
+
+// One segment of a dotted chain, closest-to-the-cursor first until
+// reversed: a plain field/local name, or a call (`name(...)`, its
+// own arguments skipped over), whose type comes from the callee's
+// declared return type rather than a field lookup.
+compound ChainSeg {
+  str name;
+  bin is_call;
+  // The segment's own name token, needed only when `is_call` and it's
+  // the chain's first segment (`chain_receiver`'s `first.is_call`
+  // branch), to locate its own argument list in `tokens` for generic
+  // call-site substitution (`_call_return_type`).
+  Token tok;
+  // Set for a segment that is a whole parenthesized sub-expression
+  // (`(pack(q).v).add(1)`'s own `(pack(q).v)`), rather than a bare
+  // identifier or call - `tok` then names the sub-expression's own
+  // last token (`v`, not a callee name), and `paren_is_call` says
+  // whether that inner tail is itself a call, both needed to resolve
+  // the group's own type through `chain_ending_receiver` instead of
+  // the ordinary local/top-level-call lookup a plain first segment
+  // gets. Always the chain's own first segment when set, since a
+  // parenthesized group's own closing `)` ends the leftward walk -
+  // whatever precedes its matching `(` (a keyword like `await`,
+  // another operator, or nothing) is not part of this chain.
+  bin is_paren_group;
+  bin paren_is_call;
+}
+
+// The index of the `(` matching the `)` at `rparen_idx`, scanning
+// backward, depth-tracked.
+fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
+  num depth = 0;
+  num i = rparen_idx;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(t, "(") {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i - 1;
+  }
+  ret .None;
+}
+
+// `detail` (a rendered "name(args) RetType" signature) with only the
+// return type kept, generics and pointer star intact: everything
+// after its own closing paren.
+fun _return_type_text(str detail) str {
+  num close = last_index_of_char(detail, ')');
+  if close < 0 {
+    ret substr("", 0, 0);
+  }
+  ret trim(substr(detail, close + 1, len(detail) - close - 1));
+}
+
+// `_return_type_text`, bare (generics/pointer stars stripped,
+// matching `bare_type_from_detail`'s own convention) since a chain
+// segment's type is looked up by its plain name.
+fun _bare_return_type(str detail) str {
+  str rtype = _return_type_text(detail);
+  num cut = index_of_char(rtype, '<');
+  if cut > 0 {
+    str cut_rtype = substr(rtype, 0, cut);
+    free(rtype);
+    rtype = cut_rtype;
+  }
+  str spaced = replace_char(rtype, '*', ' ');
+  free(rtype);
+  str out = trim(spaced);
+  free(spaced);
+  ret out;
+}
+
+// `chain_receiver`'s own result: the type everything before some
+// token resolves to, plus whatever generic args that type itself
+// carries at that point (a local's own annotation, or a field's/
+// method's own declared generic type one hop back), needed by a
+// caller that goes on to resolve one more segment past it, since a
+// bare type name alone loses the specialization a further method
+// call on it would need.
+pub compound ChainReceiver {
+  str type_name;
+  Vec<str> generic_args;
+  // `type_name`, but with a pointer star kept when the resolved
+  // field/return type has one. `type_name` itself must stay bare,
+  // since `chain_ending_type`'s own callers use it as a lookup key
+  // against a registered type name ("Scope", never "Scope*"); a caller
+  // that wants to display the type instead (an inlay hint, a hover)
+  // wants this one. Equal to `type_name` everywhere the two don't
+  // differ.
+  str full_type_name;
+}
+
+// Continues a chain forward from `from_idx` (the last token already
+// consumed - a closing paren, typically) through every following
+// `.field` or `.method(...)` hop, starting from `start_type` (a
+// resolved value's own full type text, generic args and pointer star
+// included, as `_infer_type_primary` itself returns). Unlike
+// `chain_receiver`/`chain_ending_receiver` (which walk a dotted chain
+// backward from its own last token, assuming the base is eventually a
+// bare identifier or call), this walks forward from an already-known
+// starting type, the shape `(<expr>).field.method()` needs: the
+// parenthesized base isn't an identifier `chain_receiver` could ever
+// find by walking backward from `.field`. A no-op (returns
+// `start_type` unchanged, `*out_end_idx` left at `from_idx`) when
+// nothing follows. "" on any hop that doesn't resolve.
+fun _walk_forward_chain(
+  Vec<Token>* tokens,
+  num from_idx,
+  str start_type,
+  Vec<Node>* program,
+  num* out_end_idx,
+  Vec<str>* out_args
+) str {
+  str current_type = _bare_type_expr(start_type);
+  Vec<str> current_args = generic_args_of_detail(start_type);
+  str current_full = start_type;
+  num cursor = from_idx;
+  for true {
+    let dot_opt = token_after(tokens, cursor + 1);
+    if dot_opt.is_none() || !token_is_operator(dot_opt.unwrap(), ".") {
+      break;
+    }
+    num dot_idx = index_of_token(tokens, dot_opt.unwrap());
+    let member_opt = token_after(tokens, dot_idx + 1);
+    if member_opt.is_none() {
+      ret "";
+    }
+    fit member_opt.unwrap().type {
+      .Identifier -> {}
+      _ -> { ret ""; }
+    }
+    str member_name = token_word(member_opt.unwrap());
+    num member_idx = index_of_token(tokens, member_opt.unwrap());
+    let after_member = token_after(tokens, member_idx + 1);
+    bin is_call = after_member.is_some() && token_is_operator(after_member.unwrap(), "(");
+    if is_call {
+      let m = lookup_method(program, current_type, member_name, current_args);
+      if m.is_none() {
+        ret "";
+      }
+      let rparen = matching_rparen(tokens, index_of_token(tokens, after_member.unwrap()));
+      if rparen.is_none() {
+        ret "";
+      }
+      cursor = rparen.unwrap();
+      current_type = _bare_return_type(m.unwrap().detail);
+      current_full = full_return_type_from_detail(m.unwrap().detail);
+      str rtype_text = _return_type_text(m.unwrap().detail);
+      current_args = generic_args_of_detail(rtype_text);
+      free(rtype_text);
+    } else {
+      let field = lookup_field(program, current_type, member_name, current_args);
+      if field.is_none() {
+        ret "";
+      }
+      cursor = member_idx;
+      current_type = bare_type_from_detail(field.unwrap().detail);
+      current_full = _full_declared_type(field.unwrap());
+      current_args = generic_args_of_detail(field.unwrap().detail);
+    }
+  }
+  *out_end_idx = cursor;
+  if out_args != nil {
+    *out_args = current_args;
+  }
+  ret current_full;
+}
+
+// `lookup_method`, falling back to `quirk_method_declaration` when
+// `f`'s own return type, substituted when it's a bare generic type
+// parameter (`fun pick_first<T>(T a, T b) T`) and the call at
+// `name_tok` in `tokens` supplies a resolvable concrete type for it:
+// the first declared parameter whose own type is that same bare
+// parameter name, matched against that argument's own inferred type.
+// Unchanged (and `*out_substituted` left false) when `f` isn't
+// generic, its return type isn't a bare parameter to begin with (a
+// compound generic return like `Vec<T>` is out of scope here -
+// `specialize_signature` above exists for the receiver-generics case,
+// a different problem, not a call-site-argument one), or nothing
+// resolves. `depth` bounds the recursion into `_infer_type` this
+// causes for each argument, the same cap `_infer_type` itself enforces
+// against a cyclic chain of `let` copies.
+// `f`'s own return type, substituted against the call at `name_tok` in
+// `tokens`. Two shapes: a bare bare type parameter (`fun pick_first<T>(T
+// a, T b) T`, called with concrete args, reads as `num`) returns the
+// concrete type directly and leaves `out_resolved_args` empty; a
+// compound return naming one or more of `f`'s own params
+// (`fun make_pair<L, R>(L left, R right) Pair<L, R>`) returns the
+// return type's own bare name unchanged ("Pair", still the right
+// lookup key for a further `.field`/`.method()`) and writes the
+// substituted args ("num", "str") into `out_resolved_args`, mirroring
+// what `generic_args_of_detail`/`_return_type_text` would have given a
+// caller for the unspecialized case - a caller already knows to use
+// whichever one actually got filled in. A parameter this can't resolve
+// falls back to its own name rather than leaving a gap (`Pair<num,
+// R>` beats a corrupted `Pair<num, >`), and `*out_substituted` only
+// flips true when at least one parameter genuinely resolved.
+// `out_resolved_args` must already be `.init(0)`-ed by the caller.
+// `depth`: the same recursion cap `_infer_type` enforces, since
+// resolving an argument's own type recurses into it.
+fun _call_return_type(
+  Vec<Token>* tokens,
+  Declaration f,
+  Token name_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth,
+  bin* out_substituted,
+  Vec<str>* out_resolved_args
+) str {
+  *out_substituted = false;
+  str rtype = _bare_return_type(f.detail);
+  if depth > 8 {
+    ret rtype;
+  }
+  num paren_idx = index_of_char(f.detail, '(');
+  if paren_idx < 0 {
+    ret rtype;
+  }
+  str head = substr(f.detail, 0, paren_idx);
+  Vec<str> type_params = generic_args_of_detail(head);
+  free(head);
+  if type_params.len == 0 {
+    type_params.free();
+    ret rtype;
+  }
+
+  bin rtype_is_bare_param = false;
+  num pi = 0;
+  for pi < type_params.len {
+    if equals(rtype, type_params.get(pi)) {
+      rtype_is_bare_param = true;
+    }
+    pi = pi + 1;
+  }
+  // `rtype` itself is already bare (`_bare_return_type` strips any
+  // `<...>` off), so a compound return's own generic args have to be
+  // read from the full declared return type instead - the whole
+  // reason this needs both.
+  Vec<str> rtype_generic_args;
+  rtype_generic_args.init(0);
+  if !rtype_is_bare_param {
+    str full_rtype = full_return_type_from_detail(f.detail);
+    rtype_generic_args = generic_args_of_detail(full_rtype);
+    free(full_rtype);
+  }
+  if !rtype_is_bare_param && rtype_generic_args.len == 0 {
+    _free_str_vec_deep(&type_params);
+    ret rtype;
+  }
+
+  num name_idx = index_of_token(tokens, name_tok);
+  let lparen_opt = token_after(tokens, name_idx + 1);
+  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+    _free_str_vec_deep(&type_params);
+    _free_str_vec_deep(&rtype_generic_args);
+    ret rtype;
+  }
+  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
+
+  Vec<str> params = split_signature_params(f.detail);
+  defer free_params_vec(&params);
+
+  Vec<str> resolved;
+  resolved.init(type_params.len);
+  num zi = 0;
+  for zi < type_params.len {
+    resolved.push(substr("", 0, 0));
+    zi = zi + 1;
+  }
+
+  num depth_p = 0;
+  num arg_idx = 0;
+  bin expecting = true;
+  num k = lparen_idx;
+  for k < tokens.len {
+    Token at = tokens.get(k);
+    k = k + 1;
+    bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    if is_open {
+      depth_p = depth_p + 1;
+      if depth_p == 1 {
+        continue;
+      }
+    } elif is_close {
+      depth_p = depth_p - 1;
+      if depth_p == 0 {
+        break;
+      }
+      continue;
+    } elif depth_p == 1 && token_is_operator(at, ",") {
+      arg_idx = arg_idx + 1;
+      expecting = true;
+      continue;
+    }
+    if depth_p != 1 || !expecting {
+      continue;
+    }
+    if at.type == .Comment || at.type == .NewLine {
+      continue;
+    }
+    expecting = false;
+    if arg_idx >= params.len {
+      continue;
+    }
+    str ptype = _param_type_from_piece(params.get(arg_idx));
+    if index_of_char(ptype, '<') >= 0 {
+      // A compound-shaped parameter (`Pair<L, R> p`), matched against
+      // the argument's own concrete generic args position-by-position
+      // rather than against the whole type name at once (`swap_pair`,
+      // `pick_left`: the parameter is never itself a bare type param
+      // here, only its own arguments are).
+      Vec<str> param_generic_args = generic_args_of_detail(ptype);
+      str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
+      if !equals(arg_type, "") {
+        Vec<str> arg_generic_args = generic_args_of_detail(arg_type);
+        if arg_generic_args.len == param_generic_args.len {
+          num mi = 0;
+          for mi < param_generic_args.len {
+            num tpk = 0;
+            for tpk < type_params.len {
+              if equals(param_generic_args.get(mi), type_params.get(tpk)) {
+                str existing2 = resolved.get(tpk);
+                if equals(existing2, "") {
+                  str got = arg_generic_args.get(mi);
+                  free(existing2);
+                  resolved.set(tpk, substr(got, 0, len(got)));
+                }
+              }
+              tpk = tpk + 1;
+            }
+            mi = mi + 1;
+          }
+        }
+        _free_str_vec_deep(&arg_generic_args);
+        free(arg_type);
+      }
+      _free_str_vec_deep(&param_generic_args);
+    } else {
+      num tpi = 0;
+      for tpi < type_params.len {
+        if equals(ptype, type_params.get(tpi)) {
+          str existing = resolved.get(tpi);
+          if equals(existing, "") {
+            // Not freed when unresolved: `_infer_type`'s own "" result
+            // is typically a literal, not a heap allocation (see the
+            // note on `_infer_type`'s own binary-operator combination,
+            // the same reasoning applies here).
+            str arg_type2 = _infer_type(tokens, at, program, file, line, nil, depth + 1);
+            if !equals(arg_type2, "") {
+              free(existing);
+              resolved.set(tpi, arg_type2);
+            }
+          }
+        }
+        tpi = tpi + 1;
+      }
+    }
+    free(ptype);
+  }
+
+  bin any_resolved = false;
+  num ri = 0;
+  for ri < resolved.len {
+    if !equals(resolved.get(ri), "") {
+      any_resolved = true;
+    }
+    ri = ri + 1;
+  }
+  if !any_resolved {
+    _free_str_vec_deep(&type_params);
+    _free_str_vec_deep(&rtype_generic_args);
+    _free_str_vec_deep(&resolved);
+    ret rtype;
+  }
+  num fi = 0;
+  for fi < resolved.len {
+    if equals(resolved.get(fi), "") {
+      free(resolved.get(fi));
+      resolved.set(fi, substr(type_params.get(fi), 0, len(type_params.get(fi))));
+    }
+    fi = fi + 1;
+  }
+
+  if rtype_is_bare_param {
+    num match_i = 0;
+    for match_i < type_params.len {
+      if equals(rtype, type_params.get(match_i)) {
+        break;
+      }
+      match_i = match_i + 1;
+    }
+    str result = substr(resolved.get(match_i), 0, len(resolved.get(match_i)));
+    free(rtype);
+    _free_str_vec_deep(&type_params);
+    _free_str_vec_deep(&rtype_generic_args);
+    _free_str_vec_deep(&resolved);
+    *out_substituted = true;
+    ret result;
+  }
+
+  num gi = 0;
+  for gi < rtype_generic_args.len {
+    str garg = rtype_generic_args.get(gi);
+    num match_i = 0;
+    bin found = false;
+    for match_i < type_params.len {
+      if equals(garg, type_params.get(match_i)) {
+        found = true;
+        break;
+      }
+      match_i = match_i + 1;
+    }
+    if found {
+      str resolved_arg = resolved.get(match_i);
+      out_resolved_args.push(substr(resolved_arg, 0, len(resolved_arg)));
+    } else {
+      out_resolved_args.push(substr(garg, 0, len(garg)));
+    }
+    gi = gi + 1;
+  }
+  *out_substituted = true;
+  _free_str_vec_deep(&type_params);
+  _free_str_vec_deep(&rtype_generic_args);
+  _free_str_vec_deep(&resolved);
+  ret rtype;
+}
+
+// `f`'s own full signature (params and return both), specialized
+// against the concrete types resolved from the call at `name_tok` in
+// `tokens`, for hovering the callee name itself at a call site
+// (`_call_return_type` above only ever substitutes the return type,
+// for `let`-inference's own narrower purposes). Every one of `f`'s own
+// type parameters has to resolve to a concrete type before anything
+// is substituted - a partial substitution (one param resolved, another
+// left as a bare, empty replacement) would corrupt the signature worse
+// than showing the unspecialized template. Unchanged (a fresh copy of
+// `f.detail`) when `f` isn't generic, isn't actually called at
+// `name_tok` (no `(` follows it - hovering the declaration itself,
+// where `<T>` follows instead), or any parameter's own argument
+// doesn't resolve.
+pub fun specialized_call_signature(
+  Vec<Token>* tokens,
+  Declaration f,
+  Token name_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth
+) str {
+  if depth > MAX_LET_INFER_DEPTH {
+    ret substr(f.detail, 0, len(f.detail));
+  }
+  num paren_idx = index_of_char(f.detail, '(');
+  if paren_idx < 0 {
+    ret substr(f.detail, 0, len(f.detail));
+  }
+  str head = substr(f.detail, 0, paren_idx);
+  Vec<str> type_params = generic_args_of_detail(head);
+  free(head);
+  if type_params.len == 0 {
+    _free_str_vec_deep(&type_params);
+    ret substr(f.detail, 0, len(f.detail));
+  }
+
+  num name_idx = index_of_token(tokens, name_tok);
+  let lparen_opt = token_after(tokens, name_idx + 1);
+  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+    _free_str_vec_deep(&type_params);
+    ret substr(f.detail, 0, len(f.detail));
+  }
+  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
+
+  Vec<str> params = split_signature_params(f.detail);
+  defer free_params_vec(&params);
+
+  Vec<str> concrete;
+  concrete.init(type_params.len);
+  num ci = 0;
+  for ci < type_params.len {
+    concrete.push(substr("", 0, 0));
+    ci = ci + 1;
+  }
+
+  num depth_p = 0;
+  num arg_idx = 0;
+  bin expecting = true;
+  num k = lparen_idx;
+  for k < tokens.len {
+    Token at = tokens.get(k);
+    k = k + 1;
+    bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    if is_open {
+      depth_p = depth_p + 1;
+      if depth_p == 1 {
+        continue;
+      }
+    } elif is_close {
+      depth_p = depth_p - 1;
+      if depth_p == 0 {
+        break;
+      }
+      continue;
+    } elif depth_p == 1 && token_is_operator(at, ",") {
+      arg_idx = arg_idx + 1;
+      expecting = true;
+      continue;
+    }
+    if depth_p != 1 || !expecting {
+      continue;
+    }
+    if at.type == .Comment || at.type == .NewLine {
+      continue;
+    }
+    expecting = false;
+    if arg_idx >= params.len {
+      continue;
+    }
+    str ptype = _param_type_from_piece(params.get(arg_idx));
+    num ti = 0;
+    for ti < type_params.len {
+      if equals(ptype, type_params.get(ti)) {
+        str existing = concrete.get(ti);
+        if equals(existing, "") {
+          str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
+          if !equals(arg_type, "") {
+            free(existing);
+            concrete.set(ti, substr(arg_type, 0, len(arg_type)));
+          }
+        }
+      }
+      ti = ti + 1;
+    }
+    free(ptype);
+  }
+
+  bin all_resolved = true;
+  num check_i = 0;
+  for check_i < concrete.len {
+    if equals(concrete.get(check_i), "") {
+      all_resolved = false;
+    }
+    check_i = check_i + 1;
+  }
+
+  if !all_resolved {
+    _free_str_vec_deep(&type_params);
+    _free_str_vec_deep(&concrete);
+    ret substr(f.detail, 0, len(f.detail));
+  }
+
+  str substituted = specialize_signature(f.detail, type_params, concrete);
+  _free_str_vec_deep(&type_params);
+  _free_str_vec_deep(&concrete);
+  // `specialize_signature` substitutes every occurrence of a type
+  // param's own name, the `<T, U>` list right after the function name
+  // included (now `<num, str>` instead) - misleading once every
+  // parameter's own type is already concrete, since that's not valid
+  // call syntax to write back. Cut just that span, angle-depth-aware
+  // so a substituted arg that's itself generic (`<Vec<num>>`) doesn't
+  // truncate early on its own inner `>`.
+  str result = substituted;
+  num langle = index_of_char(substituted, '<');
+  if langle > 0 {
+    num depth_a = 0;
+    num i = langle + 1;
+    num n = len(substituted);
+    for i < n {
+      chr c = substituted[i];
+      if c == '<' {
+        depth_a = depth_a + 1;
+      } elif c == '>' {
+        if depth_a == 0 {
+          str before = substr(substituted, 0, langle);
+          str after = substr(substituted, i + 1, n - i - 1);
+          result = format("{str}{str}", before, after);
+          free(before);
+          free(after);
+          free(substituted);
+          break;
+        }
+        depth_a = depth_a - 1;
+      }
+      i = i + 1;
+    }
+  }
+  ret result;
+}
+
+// The type at the end of a dotted chain leading up to (but not
+// including) `t`: for `a.b.c`, `c`'s own receiver type is whatever
+// `b` resolves to on `a`'s declared type, not just `a`'s own type.
+pub fun chain_receiver_type(Vec<Token>* tokens, Token t, Vec<Node>* program, str file, num line) str {
+  ret chain_receiver(tokens, t, program, file, line, 0).type_name;
+}
+
+// `chain_receiver_type`, also carrying the resolved type's own
+// generic args. Walks backward through consecutive `ident.ident...`
+// segments, including a call anywhere in the chain (`a.f().g`,
+// `a.b().c().d`): its own callee's declared return type stands in
+// for a field lookup at that step. An index (`x[0].g`) still ends
+// the chain one segment short. `depth` bounds a generic call's own
+// argument-type recursion (see `_call_return_type`), threaded through
+// from whichever caller is already tracking it (0 for one, like
+// `chain_receiver_type` above, that isn't).
+pub fun chain_receiver(
+  Vec<Token>* tokens,
+  Token t,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth
+) ChainReceiver {
+  ChainReceiver empty;
+  empty.type_name = "";
+  empty.generic_args.init(0);
+  Vec<ChainSeg> segments;
+  segments.init(4);
+  num cursor = index_of_token(tokens, t);
+  for cursor > 0 {
+    let dot = token_before(tokens, cursor);
+    if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
+      break;
+    }
+    num dot_idx = index_of_token(tokens, dot.unwrap());
+    let before_dot = token_before(tokens, dot_idx);
+    if before_dot.is_none() {
+      break;
+    }
+    Token seg_tok = before_dot.unwrap();
+    bin is_call = false;
+    if token_is_symbol(seg_tok, ')') {
+      let lparen = _matching_lparen(tokens, index_of_token(tokens, seg_tok));
+      if lparen.is_none() {
+        break;
+      }
+      let callee = token_before(tokens, lparen.unwrap());
+      bin callee_is_ident = false;
+      if callee.is_some() {
+        fit callee.unwrap().type {
+          .Identifier -> { callee_is_ident = true; }
+          _ -> {}
+        }
+      }
+      if callee_is_ident {
+        seg_tok = callee.unwrap();
+        is_call = true;
+      } else {
+        // A plain parenthesized sub-expression (`(pack(q).v).add(1)`'s
+        // own `(pack(q).v)`), not a call: nothing immediately before
+        // the `(` reads as a callee identifier (`await`, another
+        // operator, or the very start of the expression). Resolves
+        // the whole group as one segment via `chain_ending_receiver`
+        // on its own inner tail token, and stops the leftward walk
+        // here rather than `break`-ing with nothing collected -
+        // whatever precedes the outer `(` isn't part of this chain.
+        let inner_last_raw = token_before(tokens, index_of_token(tokens, seg_tok));
+        if inner_last_raw.is_none() {
+          break;
+        }
+        Token inner_tok = inner_last_raw.unwrap();
+        bin inner_is_call = false;
+        // The group's own tail can itself be a call's closing paren
+        // (`(*ptr(&b))`'s inner content is `*ptr(&b)`, ending in
+        // `ptr(&b)`'s own `)`, not a nameable identifier) - a leading
+        // unary `*`/`&` never changes the tail, since field lookups
+        // already resolve through a pointer to its pointee, so only
+        // the callee itself needs recovering here.
+        if token_is_symbol(inner_tok, ')') {
+          let inner_lparen = _matching_lparen(tokens, index_of_token(tokens, inner_tok));
+          if inner_lparen.is_none() {
+            break;
+          }
+          let inner_callee = token_before(tokens, inner_lparen.unwrap());
+          bin inner_callee_is_ident = false;
+          if inner_callee.is_some() {
+            fit inner_callee.unwrap().type {
+              .Identifier -> { inner_callee_is_ident = true; }
+              _ -> {}
+            }
+          }
+          if !inner_callee_is_ident {
+            break;
+          }
+          inner_tok = inner_callee.unwrap();
+          inner_is_call = true;
+        } else {
+          let after_inner = token_after(tokens, index_of_token(tokens, inner_tok) + 1);
+          if after_inner.is_some() && token_is_operator(after_inner.unwrap(), "(") {
+            inner_is_call = true;
+          }
+        }
+        ChainSeg pseg;
+        pseg.name = "";
+        pseg.is_call = false;
+        pseg.tok = inner_tok;
+        pseg.is_paren_group = true;
+        pseg.paren_is_call = inner_is_call;
+        segments.push(pseg);
+        break;
+      }
+    } else {
+      fit seg_tok.type {
+        .Identifier -> {}
+        _ -> { break; }
+      }
+    }
+    ChainSeg seg;
+    seg.name = token_word(seg_tok);
+    seg.is_call = is_call;
+    seg.tok = seg_tok;
+    seg.is_paren_group = false;
+    seg.paren_is_call = false;
+    segments.push(seg);
+    cursor = index_of_token(tokens, seg_tok);
+  }
+  if segments.len == 0 {
+    ret empty;
+  }
+  // Collected closest-to-`t` first; reverse to left-to-right order.
+  num lo = 0;
+  num hi = segments.len - 1;
+  for lo < hi {
+    let tmp = segments.get(lo);
+    segments.set(lo, segments.get(hi));
+    segments.set(hi, tmp);
+    lo = lo + 1;
+    hi = hi - 1;
+  }
+  ChainSeg first = segments.get(0);
+  str current_type = "";
+  Vec<str> current_args;
+  current_args.init(0);
+  if first.is_call {
+    let f = lookup_top_level(program, first.name);
+    if f.is_some() {
+      bin substituted = false;
+      current_type = _call_return_type(
+        tokens,
+        f.unwrap(),
+        first.tok,
+        program,
+        file,
+        line,
+        depth,
+        &substituted,
+        &current_args
+      );
+      if !substituted {
+        str first_rtype_text = _return_type_text(f.unwrap().detail);
+        current_args = generic_args_of_detail(first_rtype_text);
+        free(first_rtype_text);
+      }
+    }
+  } elif first.is_paren_group {
+    ChainReceiver inner = chain_ending_receiver(
+      tokens,
+      first.tok,
+      first.paren_is_call,
+      program,
+      file,
+      line,
+      depth + 1
+    );
+    current_type = inner.type_name;
+    current_args = inner.generic_args;
+  } else {
+    current_type = type_name_of_local(tokens, program, first.name, file, line);
+    current_args = local_generic_args(tokens, program, first.name, file, line);
+  }
+  num i = 1;
+  for i < segments.len {
+    if equals(current_type, "") {
+      ret empty;
+    }
+    ChainSeg seg = segments.get(i);
+    if seg.is_call {
+      // Threads whatever generic args the receiver carries at this
+      // point in the chain (from a local's own annotation, or from a
+      // field/method's own declared generic type one step back) into
+      // the method lookup, so a stdlib container's own `get`/`unwrap`
+      // returns its concrete element type here too, not the bare
+      // unspecialized template.
+      let m = lookup_method(program, current_type, seg.name, current_args);
+      if m.is_none() {
+        ret empty;
+      }
+      current_type = _bare_return_type(m.unwrap().detail);
+      str seg_rtype_text = _return_type_text(m.unwrap().detail);
+      current_args = generic_args_of_detail(seg_rtype_text);
+      free(seg_rtype_text);
+      i = i + 1;
+      continue;
+    }
+    let field = lookup_field(program, current_type, seg.name, current_args);
+    if field.is_none() {
+      ret empty;
+    }
+    current_args = generic_args_of_detail(field.unwrap().detail);
+    current_type = bare_type_from_detail(field.unwrap().detail);
+    i = i + 1;
+  }
+  ChainReceiver result;
+  result.type_name = current_type;
+  result.generic_args = current_args;
+  ret result;
+}
+
+// The type of the whole chain ending at `last_tok`, including it,
+// unlike `chain_receiver_type` (which stops one segment short). When
+// `last_tok` is itself a call, that's its callee's own declared
+// return type, specialized against whatever generic args the rest of
+// the chain carries at that point; otherwise it's an ordinary field
+// or bare local read.
+pub fun chain_ending_type(
+  Vec<Token>* tokens,
+  Token last_tok,
+  bin last_is_call,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
+  ret chain_ending_receiver(tokens, last_tok, last_is_call, program, file, line, 0).type_name;
+}
+
+// `chain_ending_type`, also carrying the resolved type's own generic
+// args (mirroring `chain_receiver_type`/`chain_receiver`'s own split),
+// needed by a caller that goes on to resolve a further member against
+// the chain's own end rather than just displaying it. `depth`: see
+// `chain_receiver`.
+pub fun chain_ending_receiver(
+  Vec<Token>* tokens,
+  Token last_tok,
+  bin last_is_call,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth
+) ChainReceiver {
+  ChainReceiver empty;
+  empty.type_name = "";
+  empty.full_type_name = "";
+  empty.generic_args.init(0);
+
+  ChainReceiver receiver = chain_receiver(tokens, last_tok, program, file, line, depth);
+  str name = token_word(last_tok);
+  if equals(receiver.type_name, "") {
+    // `last_tok` is the chain's own base: no receiver before it at
+    // all, so it's either a bare local or a plain top-level call.
+    if last_is_call {
+      let f = lookup_top_level(program, name);
+      if f.is_none() {
+        ret empty;
+      }
+      bin substituted = false;
+      empty.type_name = _call_return_type(
+        tokens,
+        f.unwrap(),
+        last_tok,
+        program,
+        file,
+        line,
+        depth,
+        &substituted,
+        &empty.generic_args
+      );
+      if substituted {
+        // Two shapes `_call_return_type` can hand back: a scalar
+        // fully collapsed to its concrete type (`empty.generic_args`
+        // stays empty - `full_type_name` is just that type, same as
+        // `type_name`), or a compound whose own bare name came back
+        // unchanged with its substituted args in `generic_args`
+        // instead (`full_type_name` reconstructs the `<...>` display
+        // form, the same convention `infer_let_local_type`'s own
+        // outer wrapper already uses for a chain-ending field/method
+        // result).
+        if empty.generic_args.len == 0 {
+          empty.full_type_name = substr(empty.type_name, 0, len(empty.type_name));
+        } else {
+          StringBuilder fb = string_builder_init(32);
+          fb.append(empty.type_name);
+          fb.append("<");
+          num fbi = 0;
+          for fbi < empty.generic_args.len {
+            if fbi > 0 {
+              fb.append(", ");
+            }
+            fb.append(empty.generic_args.get(fbi));
+            fbi = fbi + 1;
+          }
+          fb.append(">");
+          empty.full_type_name = fb.build();
+        }
+        ret empty;
+      }
+      empty.full_type_name = full_return_type_from_detail(f.unwrap().detail);
+      str base_rtype_text = _return_type_text(f.unwrap().detail);
+      empty.generic_args = generic_args_of_detail(base_rtype_text);
+      free(base_rtype_text);
+      ret empty;
+    }
+    empty.type_name = type_name_of_local(tokens, program, name, file, line);
+    empty.full_type_name = empty.type_name;
+    empty.generic_args = local_generic_args(tokens, program, name, file, line);
+    ret empty;
+  }
+  if last_is_call {
+    // `receiver`'s own generic args (threaded all the way through by
+    // `chain_receiver`, however deep the chain leading to it) are
+    // what let a stdlib container's own method resolve its concrete
+    // element type here, not just a bare local's.
+    let m = lookup_method(program, receiver.type_name, name, receiver.generic_args);
+    if m.is_none() {
+      ret empty;
+    }
+    empty.type_name = _bare_return_type(m.unwrap().detail);
+    empty.full_type_name = full_return_type_from_detail(m.unwrap().detail);
+    str tail_rtype_text = _return_type_text(m.unwrap().detail);
+    empty.generic_args = generic_args_of_detail(tail_rtype_text);
+    free(tail_rtype_text);
+    ret empty;
+  }
+  let field = lookup_field(program, receiver.type_name, name, receiver.generic_args);
+  if field.is_none() {
+    ret empty;
+  }
+  empty.type_name = bare_type_from_detail(field.unwrap().detail);
+  empty.full_type_name = _full_declared_type(field.unwrap());
+  empty.generic_args = generic_args_of_detail(field.unwrap().detail);
+  ret empty;
+}
+
+// The index of the `)` matching the `(` at `lparen_idx`, depth-tracked.
+pub fun matching_rparen(Vec<Token>* tokens, num lparen_idx) Option<num> {
+  num depth = 0;
+  num i = lparen_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_operator(t, "(") {
+      depth = depth + 1;
+    } elif token_is_symbol(t, ')') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// The index of the `}` matching the `{` at `lbrace_idx`, depth-tracked.
+pub fun matching_rbrace(Vec<Token>* tokens, num lbrace_idx) Option<num> {
+  num depth = 0;
+  num i = lbrace_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '}') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// The index of the `{` matching the `}` at `rbrace_idx`, depth-tracked
+// backward - `matching_rbrace`'s own counterpart, for walking from
+// inside a brace group back to where it opened.
+pub fun matching_lbrace(Vec<Token>* tokens, num rbrace_idx) Option<num> {
+  num depth = 0;
+  num i = rbrace_idx;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '{') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    if i == 0 {
+      break;
+    }
+    i = i - 1;
+  }
+  ret .None;
+}
+
+// The index of the `]` matching the `[` at `lbracket_idx`, depth-tracked.
+pub fun matching_rbracket(Vec<Token>* tokens, num lbracket_idx) Option<num> {
+  num depth = 0;
+  num i = lbracket_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_operator(t, "[") {
+      depth = depth + 1;
+    } elif token_is_symbol(t, ']') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
+// The best-effort inferred type of the `let` local whose own name
+// token sits at `name_idx`, read from its initializer, generic args
+// included when it has any (`Option<num>`, not just `Option`).
+// Shared by `inlay_hints.fn` (a `let`-inferred local's own type
+// hint), hover, and `type_name_of_local` (a chain's own receiver,
+// when it's a `let`-inferred local resolving further members needs
+// its real type, not the permanent `__let_infer__` sentinel
+// `d.detail` otherwise carries; that caller strips generic args back
+// off immediately after, so carrying them here costs it nothing).
+// How deep `_infer_type` will chase a bare copy of another
+// `let`-inferred local (Part 4), or a generic call's own argument
+// (Part 1), before giving up rather than showing a hint at all. Cheap
+// and generous for any real chain of copies; exists only so a
+// malformed mid-edit document (`let a = b; let b = a;`) can't recurse
+// forever.
+const num MAX_LET_INFER_DEPTH = 8;
+
+pub fun infer_let_local_type(
+  Vec<Token>* tokens,
+  num name_idx,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
+  Vec<str> args;
+  args.init(2);
+  defer args.free();
+  str base = infer_let_local_type_with_args(tokens, name_idx, program, file, line, &args);
+  // `base` already carries its own generic args verbatim when it has
+  // any (a field/return type resolved through `ChainReceiver.full_type_name`
+  // keeps everything written, `<...>` included) - only append `args`
+  // when it doesn't, or they'd double up.
+  if equals(base, "") || args.len == 0 || index_of_char(base, '<') >= 0 {
+    ret base;
+  }
+  StringBuilder b = string_builder_init(32);
+  b.append(base);
+  b.append("<");
+  num i = 0;
+  for i < args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    b.append(args.get(i));
+    i = i + 1;
+  }
+  b.append(">");
+  ret b.build();
+}
+
+// `infer_let_local_type`, also writing the resolved type's own generic
+// args into `out_args` when it isn't nil (a caller not needing them,
+// the overwhelming majority, passes nil and pays nothing extra).
+// Needed by `local_generic_args`'s own `__let_infer__` fallback, the
+// same way `type_name_of_local` already falls back to
+// `infer_let_local_type` itself for the bare type name.
+pub fun infer_let_local_type_with_args(
+  Vec<Token>* tokens,
+  num name_idx,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Vec<str>* out_args
+) str {
+  let eq_tok_opt = token_after(tokens, name_idx + 1);
+  if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
+    ret "";
+  }
+  num eq_idx = index_of_token(tokens, eq_tok_opt.unwrap());
+  let val_tok_opt = token_after(tokens, eq_idx + 1);
+  if val_tok_opt.is_none() {
+    ret "";
+  }
+  ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line, out_args, 0);
+}
+
+// A best-effort read of `val_tok`'s own type, when it's the first
+// token of a `let`'s initializer (or, recursively, of a sub-expression
+// this function is chasing into): a literal, `await <expr>`, a
+// parenthesized sub-expression, a plain/method call chain (generic
+// call-site substitution included, see `_call_return_type`), a bare
+// read of an already-typed local (recursing through another
+// `let`-inferred local's own initializer when that local's own AST-
+// recorded type is still the unresolved sentinel), or one arithmetic
+// binary operator (`+ - * /`) over two such operands, promoted the
+// same way the real typechecker does (decimal wins over num,
+// otherwise the left operand's type) - `typecheck.fn`'s own
+// `infer_expression`. A right operand that itself continues with
+// another arithmetic operator resolves the same way through this same
+// recursion, so a short chain (`a + b + c`) works out correctly for
+// that same two-way promotion rule without this function needing to
+// track associativity explicitly. "" for anything else: a compound
+// literal, an index followed by more expression, a comparison/logical
+// operator, and so on aren't covered. `depth` bounds every recursive
+// entry point this function has against a cycle (`MAX_LET_INFER_DEPTH`
+// above); `out_args`: see `infer_let_local_type_with_args`.
+fun _infer_type(
+  Vec<Token>* tokens,
+  Token val_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Vec<str>* out_args,
+  num depth
+) str {
+  if depth > MAX_LET_INFER_DEPTH {
+    ret "";
+  }
+  num end_idx = -1;
+  str base_type = _infer_type_primary(
+    tokens,
+    val_tok,
+    program,
+    file,
+    line,
+    out_args,
+    depth,
+    &end_idx
+  );
+  if equals(base_type, "") || end_idx < 0 {
+    ret base_type;
+  }
+  let op_tok_opt = token_after(tokens, end_idx + 1);
+  if op_tok_opt.is_none() {
+    ret base_type;
+  }
+  Token op_tok = op_tok_opt.unwrap();
+  bin is_arith = token_is_operator(op_tok, "+") || token_is_operator(op_tok, "-") ||
+    token_is_operator(
+    op_tok,
+    "*"
+  ) || token_is_operator(op_tok, "/");
+  if !is_arith {
+    ret base_type;
+  }
+  let rhs_tok_opt = token_after(tokens, index_of_token(tokens, op_tok) + 1);
+  if rhs_tok_opt.is_none() {
+    ret base_type;
+  }
+  // Neither operand's own result is freed here (kept or discarded):
+  // some of this file's own type-string helpers return a literal
+  // rather than a heap allocation depending on which branch they took
+  // (`_infer_type_primary`'s own literal arms among them, fixed to
+  // always heap-allocate; several others transitively reachable from
+  // here haven't been audited the same way), so freeing one blind
+  // risks freeing a literal. This matches the existing convention
+  // every caller of `infer_let_local_type` already relies on
+  // (`inlay_hints.fn`'s own `type_part` is never freed either) rather
+  // than introducing a stricter one this function alone can't
+  // actually guarantee.
+  str rhs_type = _infer_type(tokens, rhs_tok_opt.unwrap(), program, file, line, nil, depth + 1);
+  if equals(rhs_type, "") {
+    ret base_type;
+  }
+  if equals(rhs_type, "dec") && equals(base_type, "num") {
+    ret rhs_type;
+  }
+  ret base_type;
+}
+
+// `_infer_type`'s own single-operand resolution: everything it covers
+// except the trailing-binary-operator combination, which lives in
+// `_infer_type` itself so every recursive entry point here benefits
+// from it too. Writes the resolved value's own last token's index to
+// `*out_end_idx` whenever it resolves a real type (left at -1
+// otherwise), so `_infer_type` knows where to look for a following
+// operator; a shape whose own end isn't tracked (the `name[...]`
+// index read) simply isn't extended into a following operator, rather
+// than guessing wrong.
+fun _infer_type_primary(
+  Vec<Token>* tokens,
+  Token val_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Vec<str>* out_args,
+  num depth,
+  num* out_end_idx
+) str {
+  fit val_tok.type {
+    .Number -> {
+      // A fresh heap copy, not the literal directly: `_infer_type`'s
+      // own binary-operator combination frees whichever side it
+      // doesn't keep, so every non-empty result this function returns
+      // has to be a real, freeable allocation, literals included.
+      *out_end_idx = index_of_token(tokens, val_tok);
+      fit val_tok.data {
+        .Dec(_) -> { ret substr("dec", 0, 3); }
+        .Cval(_) -> { ret substr("chr", 0, 3); }
+        _ -> { ret substr("num", 0, 3); }
+      }
+    }
+    .String -> {
+      *out_end_idx = index_of_token(tokens, val_tok);
+      ret substr("str", 0, 3);
+    }
+    .Boolean -> {
+      *out_end_idx = index_of_token(tokens, val_tok);
+      ret substr("bin", 0, 3);
+    }
+    .Keyword -> {
+      // `await <expr>`: Fun's async model makes an `async fun foo()
+      // num`'s own await expression yield `num` directly - no wrapper
+      // type to strip, so this is a pure pass-through to whatever the
+      // awaited expression itself resolves to.
+      if equals(token_word(val_tok), "await") {
+        let next_opt = token_after(tokens, index_of_token(tokens, val_tok) + 1);
+        if next_opt.is_none() {
+          ret "";
+        }
+        ret _infer_type_primary(
+          tokens,
+          next_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth,
+          out_end_idx
+        );
+      }
+      ret "";
+    }
+    .Operator -> {
+      // `(<expr>)`: unwraps to whatever the inner expression resolves
+      // to (itself possibly a further binary expression, handled by
+      // `_infer_type`'s own recursive call here), with the outer end
+      // set to the closing paren so a caller checking what follows
+      // sees past it, not into it.
+      if token_is_operator(val_tok, "(") {
+        num open_idx = index_of_token(tokens, val_tok);
+        let close_opt = matching_rparen(tokens, open_idx);
+        if close_opt.is_none() {
+          ret "";
+        }
+        let inner_opt = token_after(tokens, open_idx + 1);
+        if inner_opt.is_none() {
+          ret "";
+        }
+        str inner_type = _infer_type(
+          tokens,
+          inner_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth + 1
+        );
+        if equals(inner_type, "") {
+          ret "";
+        }
+        // `(<expr>).field`/`.method(...)`: a parenthesized value is
+        // never itself an identifier `chain_receiver` could walk
+        // backward from, so any further chain past the closing paren
+        // is continued forward here instead.
+        num chain_end = close_opt.unwrap();
+        str chained = _walk_forward_chain(
+          tokens,
+          close_opt.unwrap(),
+          inner_type,
+          program,
+          &chain_end,
+          out_args
+        );
+        if !equals(chained, "") {
+          *out_end_idx = chain_end;
+          ret chained;
+        }
+        *out_end_idx = close_opt.unwrap();
+        ret inner_type;
+      }
+      // `*<expr>`: a prefix dereference, one pointer level shallower
+      // than its own operand - resolved via `_infer_type_primary`
+      // directly, not the full `_infer_type` wrapper, since `*` binds
+      // tighter than a following binary operator (`*ptr + 1` derefs
+      // `ptr` alone, then adds 1 - swallowing `+ 1` into the deref's
+      // own operand first would read that backwards).
+      if token_is_operator(val_tok, "*") {
+        let deref_opt = token_after(tokens, index_of_token(tokens, val_tok) + 1);
+        if deref_opt.is_none() {
+          ret "";
+        }
+        num inner_end = -1;
+        str deref_operand_type = _infer_type_primary(
+          tokens,
+          deref_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth,
+          &inner_end
+        );
+        if equals(deref_operand_type, "") || inner_end < 0 ||
+          !ends_with(deref_operand_type, "*") {
+          ret "";
+        }
+        *out_end_idx = inner_end;
+        ret trim(substr(deref_operand_type, 0, len(deref_operand_type) - 1));
+      }
+      // `&<expr>`: address-of, one pointer level deeper than its own
+      // operand. Binds just as tightly as `*` above, for the same
+      // reason (`&x` alone, not `&(x + 1)`).
+      if token_is_operator(val_tok, "&") {
+        let addr_opt = token_after(tokens, index_of_token(tokens, val_tok) + 1);
+        if addr_opt.is_none() {
+          ret "";
+        }
+        num inner_end = -1;
+        str operand_type = _infer_type_primary(
+          tokens,
+          addr_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth,
+          &inner_end
+        );
+        if equals(operand_type, "") || inner_end < 0 {
+          ret "";
+        }
+        *out_end_idx = inner_end;
+        ret format("{str}*", operand_type);
+      }
+      // `-<expr>`: unary minus, the same type as its own operand
+      // (negation doesn't change num/dec/chr). Binds tightly, same
+      // reasoning as `*`/`&` above.
+      if token_is_operator(val_tok, "-") {
+        let neg_opt = token_after(tokens, index_of_token(tokens, val_tok) + 1);
+        if neg_opt.is_none() {
+          ret "";
+        }
+        num inner_end = -1;
+        str operand_type = _infer_type_primary(
+          tokens,
+          neg_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth,
+          &inner_end
+        );
+        if equals(operand_type, "") || inner_end < 0 {
+          ret "";
+        }
+        *out_end_idx = inner_end;
+        ret operand_type;
+      }
+      // `[<expr>, <expr>, ...]`: an array literal's own element type,
+      // read from its first element (recursively, so a nested array
+      // literal - `[[1, 0], [0, 1]]` - resolves through this same
+      // case one level down, composing into the right depth of `[]`
+      // on its own). An empty `[]` has nothing to infer an element
+      // type from, so it stays unresolved same as any other genuinely
+      // ambiguous shape.
+      if token_is_operator(val_tok, "[") {
+        num open_idx = index_of_token(tokens, val_tok);
+        let close_opt = matching_rbracket(tokens, open_idx);
+        if close_opt.is_none() {
+          ret "";
+        }
+        let first_opt = token_after(tokens, open_idx + 1);
+        if first_opt.is_none() {
+          ret "";
+        }
+        if token_is_symbol(first_opt.unwrap(), ']') {
+          ret "";
+        }
+        str elem_type = _infer_type(tokens, first_opt.unwrap(), program, file, line, nil, depth + 1);
+        if equals(elem_type, "") {
+          ret "";
+        }
+        *out_end_idx = close_opt.unwrap();
+        ret format("{str}[]", elem_type);
+      }
+      ret "";
+    }
+    .Identifier -> {
+      str name = token_word(val_tok);
+      num idx = index_of_token(tokens, val_tok);
+
+      // `name[...]`: a str indexes to a chr, an array's own bracket
+      // pair strips down one level - resolved from name's own
+      // declared type before the dot/call chain walk below, which
+      // has no notion of `[` at all. Anything the declared type
+      // can't resolve to falls through unchanged. The matching `]`
+      // isn't located here, so `*out_end_idx` is left at -1: nothing
+      // downstream extends this into a following binary operator.
+      let bracket_opt = token_after(tokens, idx + 1);
+      if bracket_opt.is_some() && token_is_operator(bracket_opt.unwrap(), "[") {
+        let base_decl = lookup(tokens, program, name, file, line);
+        if base_decl.is_some() {
+          str base_type = bare_type_from_detail(base_decl.unwrap().detail);
+          if equals(base_type, "str") {
+            free(base_type);
+            ret substr("chr", 0, 3);
+          }
+          if ends_with(base_type, "[]") {
+            str elem = substr(base_type, 0, len(base_type) - 2);
+            free(base_type);
+            ret elem;
+          }
+          free(base_type);
+        }
+      }
+
+      // `EnumName.Variant` or `EnumName.Variant(payload)`: an enum's
+      // own longhand construction, not a receiver.field/method read at
+      // all - `chain_receiver`'s own machinery only ever resolves a
+      // LOCAL's declared type, so a bare type name used as a
+      // qualifier here would resolve to nothing downstream. Checked
+      // directly against the program's own enum declarations instead,
+      // before the general chain walk ever gets a chance to
+      // misinterpret `name` as a local read.
+      let dot_after_name = token_after(tokens, idx + 1);
+      if dot_after_name.is_some() && token_is_operator(dot_after_name.unwrap(), ".") {
+        let variant_tok_opt = token_after(tokens, index_of_token(tokens, dot_after_name.unwrap()) + 1);
+        if variant_tok_opt.is_some() {
+          fit variant_tok_opt.unwrap().type {
+            .Identifier -> {
+              str variant_name = token_word(variant_tok_opt.unwrap());
+              num variant_idx = index_of_token(tokens, variant_tok_opt.unwrap());
+              Vec<str> no_args;
+              no_args.init(0);
+              let variant_decl = enum_variant_declaration(program, name, variant_name, no_args);
+              no_args.free();
+              if variant_decl.is_some() {
+                num end_idx = variant_idx;
+                let payload_paren = token_after(tokens, variant_idx + 1);
+                if payload_paren.is_some() &&
+                  token_is_operator(payload_paren.unwrap(), "(") {
+                  let payload_close = matching_rparen(
+                    tokens,
+                    index_of_token(tokens, payload_paren.unwrap())
+                  );
+                  if payload_close.is_some() {
+                    end_idx = payload_close.unwrap();
+                  }
+                }
+                *out_end_idx = end_idx;
+                ret substr(name, 0, len(name));
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+
+      // Walks the whole chain forward from `val_tok` (`a.b.c()`,
+      // `a().b`, any mix, any length), tracking the last segment
+      // reached and whether it's itself a call, then hands off to
+      // chain_ending_type for the actual resolution: a receiver's
+      // own field/method, a plain top-level call, or (no chain at
+      // all) the bare read handled below.
+      Token last_tok = val_tok;
+      bin last_is_call = false;
+      num cursor_idx = idx;
+      let after0 = token_after(tokens, cursor_idx + 1);
+      if after0.is_some() && token_is_operator(after0.unwrap(), "(") {
+        last_is_call = true;
+        let rparen0 = matching_rparen(tokens, index_of_token(tokens, after0.unwrap()));
+        if rparen0.is_some() {
+          cursor_idx = rparen0.unwrap();
+        }
+      }
+      for true {
+        let dot_opt = token_after(tokens, cursor_idx + 1);
+        if dot_opt.is_none() || !token_is_operator(dot_opt.unwrap(), ".") {
+          break;
+        }
+        num dot_idx = index_of_token(tokens, dot_opt.unwrap());
+        let member_opt = token_after(tokens, dot_idx + 1);
+        if member_opt.is_none() {
+          break;
+        }
+        fit member_opt.unwrap().type {
+          .Identifier -> {}
+          _ -> { break; }
+        }
+        last_tok = member_opt.unwrap();
+        last_is_call = false;
+        cursor_idx = index_of_token(tokens, last_tok);
+        let after_opt = token_after(tokens, cursor_idx + 1);
+        if after_opt.is_some() && token_is_operator(after_opt.unwrap(), "(") {
+          last_is_call = true;
+          let rparen = matching_rparen(tokens, index_of_token(tokens, after_opt.unwrap()));
+          if rparen.is_some() {
+            cursor_idx = rparen.unwrap();
+          }
+        }
+      }
+      if index_of_token(tokens, last_tok) != idx || last_is_call {
+        let ending = chain_ending_receiver(
+          tokens,
+          last_tok,
+          last_is_call,
+          program,
+          file,
+          line,
+          depth
+        );
+        if out_args != nil {
+          *out_args = ending.generic_args;
+        }
+        if equals(ending.full_type_name, "") {
+          ret "";
+        }
+        *out_end_idx = cursor_idx;
+        // `full_type_name`, not `type_name`: this is the last hop, so
+        // what gets displayed, not a lookup key for a further one -
+        // `let cur = self.scope_current;` should hint `Scope*`, not
+        // `Scope`.
+        ret ending.full_type_name;
+      }
+
+      // `Name{...}` or `Name<Args>{...}`, a compound-init literal
+      // (`let b = Box{value = 7};`, `let b = Box<AsyncCounter>{v =
+      // q};`): not a bare read of `Name` as a value at all, so falling
+      // through to the lookup below would resolve `Name` as its own
+      // compound declaration and, worse, render its "compound Name"
+      // detail as though "compound" were a real type. The generic-args
+      // span (if any) is walked with a plain depth count, collecting
+      // each single-identifier top-level arg as it goes (a nested
+      // generic arg, e.g. `Vec<Vec<num>>`, isn't captured this way -
+      // rare enough at a literal site to leave for a future pass
+      // rather than a real type-expression parse here).
+      let after_cursor = token_after(tokens, cursor_idx + 1);
+      num brace_check_idx = cursor_idx;
+      Vec<str> literal_args;
+      literal_args.init(2);
+      if after_cursor.is_some() && token_is_operator(after_cursor.unwrap(), "<") {
+        num angle_depth = 0;
+        num scan_idx = index_of_token(tokens, after_cursor.unwrap());
+        for true {
+          let scan_opt = token_after(tokens, scan_idx + 1);
+          if scan_opt.is_none() {
+            break;
+          }
+          Token scan_tok = scan_opt.unwrap();
+          scan_idx = index_of_token(tokens, scan_tok);
+          if token_is_operator(scan_tok, "<") {
+            angle_depth = angle_depth + 1;
+          } elif token_is_operator(scan_tok, ">") {
+            if angle_depth == 0 {
+              brace_check_idx = scan_idx;
+              break;
+            }
+            angle_depth = angle_depth - 1;
+          } elif token_is_symbol(scan_tok, ';') {
+            break;
+          } elif angle_depth == 0 && scan_tok.type == .Identifier {
+            literal_args.push(token_word(scan_tok));
+          }
+        }
+      }
+      let brace_opt = token_after(tokens, brace_check_idx + 1);
+      if brace_opt.is_some() && token_is_symbol(brace_opt.unwrap(), '{') {
+        // Safe to resolve as `name` itself only when there's no
+        // ambiguity left: either this compound isn't generic at all,
+        // or the literal wrote its own concrete args explicitly - a
+        // bare generic literal (`Box{value = 7}` for `compound
+        // Box<T>`) still can't say what `T` is without the field
+        // values' own types, which isn't resolved here.
+        bin explicit_args = brace_check_idx != cursor_idx;
+        let type_decl = lookup_top_level(program, name);
+        bin is_generic_compound = false;
+        if type_decl.is_some() {
+          Declaration td = type_decl.unwrap();
+          if td.kind == .Compound && index_of_char(td.detail, '<') >= 0 {
+            is_generic_compound = true;
+          }
+        }
+        if type_decl.is_none() {
+          _free_str_vec_deep(&literal_args);
+          ret "";
+        }
+        let close_opt = matching_rbrace(tokens, index_of_token(tokens, brace_opt.unwrap()));
+        if close_opt.is_none() {
+          _free_str_vec_deep(&literal_args);
+          ret "";
+        }
+        // A bare generic literal (`Box{value = 7}` for `compound
+        // Box<T>`) has no explicit `<...>` to read T from, but the
+        // field values themselves say what it is - the same
+        // substitution `_call_return_type` does from a call's own
+        // arguments, run here against the literal's own `field =
+        // value` pairs instead. Each field whose own declared type is
+        // exactly one of the compound's type params gets that value's
+        // inferred type recorded (first match wins per param, same as
+        // everywhere else this pattern is used); a param nothing
+        // resolves for falls back to its own name, so a partial
+        // inference still displays instead of being thrown away.
+        if is_generic_compound && !explicit_args {
+          Vec<str> ctype_params = generic_args_of_detail(type_decl.unwrap().detail);
+          Vec<str> cresolved;
+          cresolved.init(ctype_params.len);
+          num czi = 0;
+          for czi < ctype_params.len {
+            cresolved.push(substr("", 0, 0));
+            czi = czi + 1;
+          }
+          num cursor2 = index_of_token(tokens, brace_opt.unwrap());
+          bin field_expecting = true;
+          for cursor2 < close_opt.unwrap() {
+            let f_opt = token_after(tokens, cursor2 + 1);
+            if f_opt.is_none() {
+              break;
+            }
+            Token ft = f_opt.unwrap();
+            cursor2 = index_of_token(tokens, ft);
+            if token_is_operator(ft, ",") {
+              field_expecting = true;
+              continue;
+            }
+            if !field_expecting || ft.type != .Identifier {
+              continue;
+            }
+            field_expecting = false;
+            str field_name = token_word(ft);
+            let eq_opt = token_after(tokens, cursor2 + 1);
+            if eq_opt.is_none() || !token_is_operator(eq_opt.unwrap(), "=") {
+              continue;
+            }
+            let val_opt = token_after(tokens, index_of_token(tokens, eq_opt.unwrap()) + 1);
+            if val_opt.is_none() {
+              continue;
+            }
+            Vec<str> no_args2;
+            no_args2.init(0);
+            let field_decl = lookup_field(program, name, field_name, no_args2);
+            no_args2.free();
+            if field_decl.is_some() {
+              str field_type = bare_type_from_detail(field_decl.unwrap().detail);
+              num ctpi = 0;
+              for ctpi < ctype_params.len {
+                if equals(field_type, ctype_params.get(ctpi)) {
+                  str cexisting = cresolved.get(ctpi);
+                  if equals(cexisting, "") {
+                    str field_val_type = _infer_type(
+                      tokens,
+                      val_opt.unwrap(),
+                      program,
+                      file,
+                      line,
+                      nil,
+                      depth + 1
+                    );
+                    if !equals(field_val_type, "") {
+                      free(cexisting);
+                      cresolved.set(ctpi, field_val_type);
+                    }
+                  }
+                }
+                ctpi = ctpi + 1;
+              }
+              free(field_type);
+            }
+          }
+          bin cany_resolved = false;
+          num cri = 0;
+          for cri < cresolved.len {
+            if !equals(cresolved.get(cri), "") {
+              cany_resolved = true;
+            }
+            cri = cri + 1;
+          }
+          if !cany_resolved {
+            _free_str_vec_deep(&ctype_params);
+            _free_str_vec_deep(&cresolved);
+            _free_str_vec_deep(&literal_args);
+            ret "";
+          }
+          num cfi = 0;
+          for cfi < cresolved.len {
+            if equals(cresolved.get(cfi), "") {
+              free(cresolved.get(cfi));
+              cresolved.set(cfi, substr(ctype_params.get(cfi), 0, len(ctype_params.get(cfi))));
+            }
+            cfi = cfi + 1;
+          }
+          _free_str_vec_deep(&ctype_params);
+          _free_str_vec_deep(&literal_args);
+          if out_args != nil {
+            *out_args = cresolved;
+          } else {
+            _free_str_vec_deep(&cresolved);
+          }
+          *out_end_idx = close_opt.unwrap();
+          ret substr(name, 0, len(name));
+        }
+        if explicit_args {
+          if out_args != nil {
+            *out_args = literal_args;
+          } else {
+            _free_str_vec_deep(&literal_args);
+          }
+        } else {
+          literal_args.free();
+        }
+        *out_end_idx = close_opt.unwrap();
+        ret substr(name, 0, len(name));
+      }
+      // Not a compound literal after all (a real `<` comparison, most
+      // likely) - `literal_args` was speculative, never handed off.
+      _free_str_vec_deep(&literal_args);
+
+      // A bare read of an already-typed local/field/parameter/global
+      // (`let c = a;`): whatever `a` itself was declared as, in full
+      // (a pointer star or generic argument matters here, unlike
+      // `type_name_of_local`'s bare form, which exists for looking a
+      // further member up rather than for display). `a` may itself be
+      // a `let` local this same heuristic hasn't resolved yet, in
+      // which case its own recorded type is still the raw sentinel;
+      // rather than giving up, re-run this same inference on `a`'s
+      // own initializer (bounded by `depth`), so a short chain of
+      // plain copies resolves all the way through instead of only the
+      // first hop.
+      let existing = lookup(tokens, program, name, file, line);
+      if existing.is_none() {
+        ret "";
+      }
+      Declaration existing_decl = existing.unwrap();
+      str existing_type = _full_declared_type(existing_decl);
+      if !equals(existing_type, "__let_infer__") {
+        *out_end_idx = idx;
+        ret existing_type;
+      }
+      free(existing_type);
+      let src_name_tok = token_at(tokens, existing_decl.pos.line - 1, existing_decl.pos.col - 1);
+      if src_name_tok.is_none() {
+        ret "";
+      }
+      num src_name_idx = index_of_token(tokens, src_name_tok.unwrap());
+      let src_eq_opt = token_after(tokens, src_name_idx + 1);
+      if src_eq_opt.is_none() || !token_is_operator(src_eq_opt.unwrap(), "=") {
+        ret "";
+      }
+      num src_eq_idx = index_of_token(tokens, src_eq_opt.unwrap());
+      let src_val_opt = token_after(tokens, src_eq_idx + 1);
+      if src_val_opt.is_none() {
+        ret "";
+      }
+      str chased = _infer_type(
+        tokens,
+        src_val_opt.unwrap(),
+        program,
+        existing_decl.pos.filename,
+        existing_decl.pos.line,
+        out_args,
+        depth + 1
+      );
+      if equals(chased, "") {
+        ret "";
+      }
+      *out_end_idx = idx;
+      ret chased;
+    }
+    _ -> { ret ""; }
+  }
+}
+
+// `d`'s own declared type, spelled in full (pointer star, generic
+// args, everything): whatever precedes `d`'s own name in its
+// rendered "Type name" detail.
+fun _full_declared_type(Declaration d) str {
+  num name_len = len(d.name);
+  if len(d.detail) <= name_len {
+    ret "";
+  }
+  ret trim(substr(d.detail, 0, len(d.detail) - name_len));
+}
+
+// A parameter or local of the function containing `line` in `file`.
+fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !covers(n, f, file, line) {
+          continue;
+        }
+        let found = _lookup_in_function(tokens, f, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(f) -> {
+              if !covers(*m, f, file, line) {
+                continue;
+              }
+              let found = _lookup_in_function(tokens, f, name, program, file, line);
+              if found.is_some() {
+                ret found;
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Test(td) -> {
+        if !covers_body(n, td.body, file, line) {
+          continue;
+        }
+        let found = _lookup_in_body(td.body, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+        let found_binding = _lookup_fit_binding(tokens, td.body, name, program, file, line);
+        if found_binding.is_some() {
+          ret found_binding;
+        }
+      }
+      .Fuzz(fz) -> {
+        if !covers_body(n, fz.body, file, line) {
+          continue;
+        }
+        let param = _fuzz_param_named(fz, name);
+        if param.is_some() {
+          ret param;
+        }
+        let found = _lookup_in_body(fz.body, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+        let found_binding = _lookup_fit_binding(tokens, fz.body, name, program, file, line);
+        if found_binding.is_some() {
+          ret found_binding;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `fz`'s own `data`/`len` parameter, if it is spelled `name`. A
+// `fuzz` block's two parameters aren't in a `Vec<Node*>` the way a
+// function's are, just two direct fields, so they're checked by hand
+// rather than through `_lookup_in_function`'s own arg loop.
+fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
+  if fz.data_param != nil {
+    fit fz.data_param.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(fz.data_param), fz.data_param.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  if fz.len_param != nil {
+    fit fz.len_param.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(fz.len_param), fz.len_param.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// `name` as a parameter or local of `f`, whether declared directly at
+// the top level or reached as one of an impl block's own methods
+// (which are `FunctionNode`s just the same, only nested one level
+// deeper in the program's own node list).
+fun _lookup_in_function(
+  Vec<Token>* tokens,
+  FunctionNode f,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
+  num a = 0;
+  for a < f.args.len {
+    Node* arg = f.args.get(a);
+    a = a + 1;
+    if arg == nil {
+      continue;
+    }
+    fit arg.kind {
+      .Variable(v) -> {
+        if equals(v.name, name) {
+          ret .Some(_declaration(name, .Parameter, _render_param(arg), arg.pos));
+        }
+      }
+      _ -> {}
+    }
+  }
+  if f.has_body {
+    let found = _lookup_in_body(f.body, name, program, file, line);
+    if found.is_some() {
+      ret found;
+    }
+    let found_binding = _lookup_fit_binding(tokens, f.body, name, program, file, line);
+    if found_binding.is_some() {
+      ret found_binding;
+    }
+  }
+  ret .None;
+}
+
+// The enclosing function or impl method's own declared return type,
+// unstripped, so a caller can resolve a generic instantiation's
+// concrete type arguments rather than just its bare template name
+// (`Result<str, Error>`'s own `str`/`Error`, not just `Result`).
+// `.None` when `line` isn't inside a function with a declared,
+// non-void return type.
+pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<DataType*> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if !covers(n, f, file, line) {
+          continue;
+        }
+        if !f.has_rtype {
+          ret .None;
+        }
+        ret .Some(f.rtype);
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(mf) -> {
+              if !covers(*m, mf, file, line) {
+                continue;
+              }
+              if !mf.has_rtype {
+                ret .None;
+              }
+              ret .Some(mf.rtype);
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// True when `line` falls inside the function `f` declared by `n`, in
+// the file being asked about. Shared with `completion.fn`, which
+// needs the exact same coverage test to scope what it offers to the
+// function the cursor actually sits in.
+pub fun covers(Node n, FunctionNode f, str file, num line) bin {
+  if !f.has_body {
+    ret false;
+  }
+  ret covers_body(n, f.body, file, line);
+}
+
+// The same test as `covers`, for a declaration whose body isn't
+// wrapped in a `FunctionNode` (a `test`/`fuzz` block, which has no
+// return type or generic params of its own to carry one).
+pub fun covers_body(Node n, Node* body, str file, num line) bin {
+  if !n.has_pos || !equals(n.pos.filename, file) {
+    ret false;
+  }
+  if line < n.pos.line {
+    ret false;
+  }
+  if body == nil {
+    ret false;
+  }
+  num last = _last_line(body);
+  ret line <= last;
+}
+
+// The furthest line any of `c`'s own fields reaches, standing in for
+// where the whole compound itself ends - the same reach `im`'s own
+// methods give `_impl_last_line`, needed for the identical reason: a
+// same-named bare identifier written later in the file, in an
+// unrelated function, must not resolve to this compound's own field
+// just because it happens to be the nearest declaration above.
+fun _compound_last_line(CompoundNode c) num {
+  num last = 0;
+  num f = 0;
+  for f < c.fields.len {
+    CompoundField cf = c.fields.get(f);
+    f = f + 1;
+    if cf.has_pos && cf.pos.line > last {
+      last = cf.pos.line;
+    }
+  }
+  ret last;
+}
+
+// `_compound_last_line`'s own twin for an enum's own variants.
+fun _enum_last_line(EnumDeclNode e) num {
+  num last = 0;
+  num v = 0;
+  for v < e.variants.len {
+    EnumVariant variant = e.variants.get(v);
+    v = v + 1;
+    if variant.has_pos && variant.pos.line > last {
+      last = variant.pos.line;
+    }
+  }
+  ret last;
+}
+
+// The furthest line any of `im`'s own methods reaches, standing in
+// for where the whole impl block itself ends.
+fun _impl_last_line(ImplNode im) num {
+  num last = 0;
+  num m = 0;
+  for m < im.methods.len {
+    Node* method = im.methods.get(m);
+    m = m + 1;
+    if method == nil {
+      continue;
+    }
+    fit method.kind {
+      .Function(f) -> {
+        // The method's own declaration line is always a valid floor,
+        // even when its body's own position never got set (a
+        // trivially empty `{}` body, `_last_line`'s scan finding
+        // nothing to seed from): a hover sitting exactly on that
+        // line must not be pushed out of coverage by an unreliable
+        // body position.
+        num reach = 0;
+        if method.has_pos {
+          reach = method.pos.line;
+        }
+        if f.has_body && f.body != nil {
+          num body_reach = _last_line(f.body);
+          if body_reach > reach {
+            reach = body_reach;
+          }
+        }
+        if reach > last {
+          last = reach;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret last;
+}
+
+// The last line any statement of `body` reaches, which stands in for
+// where the function ends.
+fun _last_line(Node* body) num {
+  num last = 0;
+  if body == nil {
+    ret last;
+  }
+  if body.has_pos {
+    last = body.pos.end_line;
+    if last == 0 {
+      last = body.pos.line;
+    }
+  }
+  fit body.kind {
+    .Body(b) -> {
+      num i = 0;
+      for i < b.statements.len {
+        Node* s = b.statements.get(i);
+        i = i + 1;
+        if s == nil {
+          continue;
+        }
+        if s.has_pos {
+          num reach = s.pos.end_line;
+          if reach == 0 {
+            reach = s.pos.line;
+          }
+          if reach > last {
+            last = reach;
+          }
+        }
+        // A container statement's own `pos` only ever covers its
+        // leading token (see parse_if_statement/parse_fit_statement
+        // et al) - the real last line lives inside whatever body it
+        // carries, so descend into it too.
+        let nested = single_nested_body(s);
+        if nested.is_some() {
+          num nested_last = _last_line(nested.unwrap());
+          if nested_last > last {
+            last = nested_last;
+          }
+        }
+        fit s.kind {
+          .StatementFit(f) -> {
+            num bi = 0;
+            for bi < f.branches.len {
+              FitBranch br = f.branches.get(bi);
+              bi = bi + 1;
+              num branch_last = _last_line(br.body);
+              if branch_last > last {
+                last = branch_last;
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret last;
+}
+
+// A variable declared anywhere in `body`, including inside a nested
+// block, since a name is in scope for everything that follows it.
+fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .Variable(v) -> {
+      if equals(v.name, name) {
+        StringBuilder b = string_builder_init(32);
+        str local_type_text = render_type(v.var_type);
+        b.append(local_type_text);
+        free(local_type_text);
+        b.append(" ");
+        b.append(v.name);
+        ret .Some(_declaration(name, .Local, b.build(), body.pos));
+      }
+    }
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _lookup_in_body(block.statements.get(i), name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    .StatementFit(fs) -> {
+      num i = 0;
+      for i < fs.branches.len {
+        FitBranch branch = fs.branches.get(i);
+        i = i + 1;
+        // Only a branch `line` actually falls within: a name declared
+        // in one arm (a for-loop counter, say) is not in scope in a
+        // sibling arm reusing the same name for something else
+        // entirely, even though both live in the same fit statement.
+        num start = 0;
+        if branch.has_condition && branch.condition != nil && branch.condition.has_pos {
+          start = branch.condition.pos.line;
+        } elif branch.body != nil && branch.body.has_pos {
+          start = branch.body.pos.line;
+        }
+        num last = _last_line(branch.body);
+        if start > 0 && !(line >= start && line <= last) {
+          continue;
+        }
+        let found = _lookup_in_body(branch.body, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+      }
+    }
+    // A `for`'s own loop variable (`item`/`index` in `for item : xs`,
+    // `for i, item :: xs`, or `index` in `for i : a..b`) is bound by
+    // the statement itself, not declared inside its body the way an
+    // ordinary local is - checked here before recursing in, the same
+    // shape a fit's own destructuring bindings already get above.
+    .StatementFor(fk) -> {
+      fit fk {
+        .Range(fr) -> {
+          if equals(fr.index_name, name) {
+            ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
+          }
+          ret _lookup_in_body(fr.body, name, program, file, line);
+        }
+        .Iter(fi) -> {
+          str map_key = "";
+          str map_value = "";
+          bin is_map = fi.has_index_name &&
+            _for_iter_map_kv(
+            fi.iterable,
+            program,
+            file,
+            line,
+            &map_key,
+            &map_value
+          );
+          if fi.has_index_name && equals(fi.index_name, name) {
+            str index_type = "num";
+            if is_map {
+              index_type = map_key;
+            }
+            ret .Some(_declaration(name, .Local, format("{str} {str}", index_type, name), body.pos));
+          }
+          if equals(fi.item_name, name) {
+            str item_type = map_value;
+            if !is_map {
+              item_type = _for_iter_item_type(fi.iterable, program, file, line);
+            }
+            str detail = name;
+            if !equals(item_type, "") {
+              detail = format("{str} {str}", item_type, name);
+            }
+            ret .Some(_declaration(name, .Local, detail, body.pos));
+          }
+          ret _lookup_in_body(fi.body, name, program, file, line);
+        }
+        .Cond(fc) -> { ret _lookup_in_body(fc.body, name, program, file, line); }
+      }
+    }
+    _ -> {
+      let nested = single_nested_body(body);
+      if nested.is_some() {
+        ret _lookup_in_body(nested.unwrap(), name, program, file, line);
+      }
+    }
+  }
+  ret .None;
+}
+
+// Whether `iterable` resolves to a bare local declared `Map<K, V>`
+// and, if so, its own key and value types. `for k, v :: m` yields
+// key/value pairs specifically for a Map - unlike every other
+// iterable's own two-binding form (`for i, item :: arr`), where the
+// first binding is always a plain `num` index and the second is the
+// element type - so the two-binding case needs to special-case a Map
+// before falling back to that assumption. Both out-params are left ""
+// and this returns false for anything else (a Vec/Set/array, or
+// deeper than a bare local), leaving the existing index-is-num
+// assumption alone for those.
+pub fun _for_iter_map_kv(
+  Node* iterable,
+  Vec<Node>* program,
+  str file,
+  num line,
+  str* out_key_type,
+  str* out_value_type
+) bin {
+  *out_key_type = "";
+  *out_value_type = "";
+  if iterable == nil {
+    ret false;
+  }
+  fit iterable.kind {
+    .Identifier(s) -> {
+      let found = _lookup_local(nil, program, s, file, line);
+      if found.is_none() {
+        ret false;
+      }
+      str declared = bare_type_from_detail(found.unwrap().detail);
+      bin is_map = equals(declared, "Map");
+      free(declared);
+      if !is_map {
+        ret false;
+      }
+      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
+      if args.len < 2 {
+        _free_str_vec_deep(&args);
+        ret false;
+      }
+      str key_arg = args.get(0);
+      str value_arg = args.get(1);
+      *out_key_type = substr(key_arg, 0, len(key_arg));
+      *out_value_type = substr(value_arg, 0, len(value_arg));
+      _free_str_vec_deep(&args);
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// A for-each loop's own iterable, best-effort: a bare local's own
+// declared generic argument (`Vec<num> nums` -> `num`), or one
+// bracket pair stripped off a raw array's own declared type
+// (`num[] arr` -> `num`, `num[][][] tensor` -> `num[][]`). "" for
+// anything deeper (a chain, a call), matching this file's own
+// established scope for AST-only, token-free inference elsewhere
+// (`fit_subject_type` and its own siblings). For a Map specifically,
+// this is what its own single-binding for-each (`for k : m`) yields
+// - just the key type, the first generic arg - correct as-is; the
+// two-binding form (`for k, v :: m`) needs `_for_iter_map_kv` instead,
+// since that one also needs the VALUE type for the second binding.
+pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num line) str {
+  if iterable == nil {
+    ret "";
+  }
+  fit iterable.kind {
+    .Identifier(s) -> {
+      let found = _lookup_local(nil, program, s, file, line);
+      if found.is_none() {
+        ret "";
+      }
+      str declared = bare_type_from_detail(found.unwrap().detail);
+      if ends_with(declared, "[]") {
+        str elem = substr(declared, 0, len(declared) - 2);
+        free(declared);
+        ret elem;
+      }
+      free(declared);
+      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
+      if args.len == 0 {
+        _free_str_vec_deep(&args);
+        ret "";
+      }
+      str first = args.get(0);
+      str out = substr(first, 0, len(first));
+      _free_str_vec_deep(&args);
+      ret out;
+    }
+    _ -> { ret ""; }
+  }
+}
+
+// The type name of an arbitrary expression, as far as `fit_subject_type`
+// needs to resolve one: a bare identifier's own declared type, or (for
+// `base.field`) `base`'s own type resolved the same way, then that
+// field's own declared type on it. Covers the shape a fit subject most
+// commonly takes in this codebase's own source (`fit n.kind { ... }`,
+// `fit node.data { ... }`), which a bare identifier alone never did.
+// "" for anything deeper (a call, an index, a chain more than one dot
+// long) — narrower than `chain_ending_type`'s own token-based walk on
+// purpose, since this operates on the already-parsed AST a fit
+// statement carries, not a token stream.
+fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) str {
+  if expr == nil {
+    ret "";
+  }
+  fit expr.kind {
+    .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
+    .Expression(fe) -> {
+      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
+        fe.right == nil {
+        ret "";
+      }
+      str base_type = _expr_type_name(tokens, program, fe.left, file, line);
+      if equals(base_type, "") {
+        ret "";
+      }
+      fit fe.right.kind {
+        .Identifier(field_name) -> {
+          Vec<str> no_args;
+          no_args.init(0);
+          let field = lookup_field(program, base_type, field_name, no_args);
+          if field.is_none() {
+            ret "";
+          }
+          ret bare_type_from_detail(field.unwrap().detail);
+        }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+}
+
+// The enum type name a `fit` statement's subject expression resolves
+// to: a bare local/parameter subject's own declared type, a
+// `base.field` subject's own field type (see `_expr_type_name`), or,
+// for `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a
+// call whose callee is `ch`'s own `.recv` method access), the
+// channel's element type. Anything else yields "".
+pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, str file, num line) str {
+  if subject == nil {
+    ret "";
+  }
+  fit subject.kind {
+    .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
+    .Expression(e) -> {
+      if equals(e.op, ".") {
+        ret _expr_type_name(tokens, program, subject, file, line);
+      }
+      if !equals(e.op, "()") || !e.has_left || e.left == nil {
+        ret "";
+      }
+      fit e.left.kind {
+        // `fit parse(src) { ... }`: a plain top-level call's own
+        // declared return type, the same "Type<Args>" shape a let's
+        // own inference would show for it - not substituted against
+        // this call's own arguments (see `_call_return_type` for
+        // that), since a fit subject's callee is overwhelmingly a
+        // fixed, non-generic-at-the-call-site return in practice
+        // (`fun parse(str) Result<JsonValue, Error>`, not something
+        // like `pick_first<T>`).
+        .Identifier(callee_name) -> {
+          let f = lookup_top_level(program, callee_name);
+          if f.is_some() {
+            ret _bare_return_type(f.unwrap().detail);
+          }
+        }
+        .Expression(callee) -> {
+          if !equals(callee.op, ".") || !callee.has_right || callee.right == nil {
+            ret "";
+          }
+          if !callee.has_left || callee.left == nil {
+            ret "";
+          }
+          str method_name = "";
+          fit callee.right.kind {
+            .Identifier(m) -> { method_name = m; }
+            _ -> {}
+          }
+          if equals(method_name, "") {
+            ret "";
+          }
+          // `try_recv(T* out) num` declares a raw status-code return,
+          // unrelated to what a fit over it actually matches: the
+          // element type written through its out-parameter. `recv() T`
+          // has no such mismatch (its declared return already is the
+          // element type), so it needs no special case - the general
+          // method-lookup path below resolves it the same way.
+          if equals(method_name, "try_recv") {
+            fit callee.left.kind {
+              .Identifier(chan_name) -> {
+                ret _first_generic_arg_of_local(program, chan_name, file, line);
+              }
+              _ -> {}
+            }
+            ret "";
+          }
+          // Any other method call (`ch.recv_result()`, and generally):
+          // the method's own declared return type, substituted against
+          // the receiver's own concrete generic args when known - same
+          // resolution `chain_receiver` uses elsewhere in this file for
+          // a chain ending in a call, just entered from the subject's
+          // own AST node rather than a token position.
+          fit callee.left.kind {
+            .Identifier(recv_name) -> {
+              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
+              if equals(recv_type, "") {
+                ret "";
+              }
+              Vec<str> concrete_args = local_generic_args(tokens, program, recv_name, file, line);
+              let m = lookup_method(program, recv_type, method_name, concrete_args);
+              if m.is_some() {
+                ret _bare_return_type(m.unwrap().detail);
+              }
+            }
+            _ -> {}
+          }
+        }
+        _ -> {}
+      }
+    }
+    // `fit *self { ... }`, a method fitting over its own dereferenced
+    // pointer receiver rather than a field or a bare value - common
+    // for a method whose type is itself the enum being matched
+    // (`impl JsonValue { pub free() { fit *self { ... } } }`).
+    // type_name_of_local already returns a bare, pointer-stripped type
+    // name, the same one `self`'s own declared `JsonValue*` reduces to
+    // once dereferenced, so no separate stripping is needed here.
+    .Unary(u) -> {
+      if u.has_indirection && u.operand != nil {
+        fit u.operand.kind {
+          .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
+// `fit_subject_type`'s own concrete generic args, when the subject is
+// a bare local/parameter carrying them directly (`fit b { ... }` for
+// `b: Box<str>`) - the common case, and the one a `fit`'s own variant
+// hover most needs. "" for the field-access and channel-receive
+// shapes `fit_subject_type` also covers, matching what
+// `local_generic_args` itself only resolves for a bare identifier.
+pub fun fit_subject_generic_args(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* subject,
+  str file,
+  num line
+) Vec<str> {
+  Vec<str> empty;
+  empty.init(0);
+  if subject == nil {
+    ret empty;
+  }
+  fit subject.kind {
+    .Identifier(s) -> { ret local_generic_args(tokens, program, s, file, line); }
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left || e.left == nil {
+        ret empty;
+      }
+      fit e.left.kind {
+        .Identifier(callee_name) -> {
+          let f = lookup_top_level(program, callee_name);
+          if f.is_some() {
+            str rtype_text = _return_type_text(f.unwrap().detail);
+            Vec<str> args = generic_args_of_detail(rtype_text);
+            free(rtype_text);
+            ret args;
+          }
+        }
+        // A method call (`ch.recv_result()`): the same receiver-type
+        // substitution `fit_subject_type` uses for the bare enum name
+        // above, just reading the args back out instead. `lookup_method`
+        // already substitutes the receiver's own concrete generic args
+        // into the whole signature (including the return type) when
+        // given them, so the args read directly off the result are
+        // already concrete, not the method's own template params.
+        .Expression(callee) -> {
+          if !equals(callee.op, ".") || !callee.has_right || callee.right == nil {
+            ret empty;
+          }
+          if !callee.has_left || callee.left == nil {
+            ret empty;
+          }
+          str method_name = "";
+          fit callee.right.kind {
+            .Identifier(m) -> { method_name = m; }
+            _ -> {}
+          }
+          if equals(method_name, "") || equals(method_name, "try_recv") {
+            ret empty;
+          }
+          fit callee.left.kind {
+            .Identifier(recv_name) -> {
+              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
+              if equals(recv_type, "") {
+                ret empty;
+              }
+              Vec<str> recv_args = local_generic_args(tokens, program, recv_name, file, line);
+              let m = lookup_method(program, recv_type, method_name, recv_args);
+              if m.is_some() {
+                str rtype_text2 = _return_type_text(m.unwrap().detail);
+                Vec<str> args2 = generic_args_of_detail(rtype_text2);
+                free(rtype_text2);
+                ret args2;
+              }
+            }
+            _ -> {}
+          }
+        }
+        _ -> {}
+      }
+      ret empty;
+    }
+    _ -> { ret empty; }
+  }
+}
+
+// The first generic type argument of local/parameter `name`'s own
+// declared type, as written (`Job` from `Channel<Job>`). "" when
+// `name` isn't found, or its declared type isn't generic.
+fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line) str {
+  let found = _lookup_local(nil, program, name, file, line);
+  if found.is_none() {
+    ret "";
+  }
+  Declaration d = found.unwrap();
+  num open = index_of_char(d.detail, '<');
+  if open < 0 {
+    ret "";
+  }
+  num depth = 0;
+  num i = open;
+  num n = len(d.detail);
+  num end = -1;
+  for i < n {
+    chr c = d.detail[i];
+    if c == '<' {
+      depth = depth + 1;
+    } elif c == '>' {
+      depth = depth - 1;
+      if depth == 0 {
+        end = i;
+        break;
+      }
+    } elif c == ',' && depth == 1 {
+      end = i;
+      break;
+    }
+    i = i + 1;
+  }
+  if end < 0 {
+    ret "";
+  }
+  ret trim(substr(d.detail, open + 1, end - open - 1));
+}
+
+// The body of whichever function-like construct - a plain function,
+// an impl method, a test, or a fuzz block, the same set `_lookup_local`
+// enumerates for a local's own scope - covers `line` in `file`. Shared
+// so a caller only cares "what body am I inside," not which of the
+// four shapes got it there.
+pub fun enclosing_body(Vec<Node>* program, str file, num line) Option<Node*> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if covers(n, f, file, line) && f.has_body {
+          ret .Some(f.body);
+        }
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(f) -> {
+              if covers(*m, f, file, line) && f.has_body {
+                ret .Some(f.body);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Test(td) -> {
+        if covers_body(n, td.body, file, line) {
+          ret .Some(td.body);
+        }
+      }
+      .Fuzz(fz) -> {
+        if covers_body(n, fz.body, file, line) {
+          ret .Some(fz.body);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The `fit` statement, among every function-like body in the program
+// (not just a plain function's - an impl method's, a test's, or a
+// fuzz block's own body can carry one just as well), whose braces
+// cover `line` in `file`.
+pub fun covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
+  let body = enclosing_body(program, file, line);
+  if body.is_none() {
+    ret .None;
+  }
+  ret _find_covering_fit(body.unwrap(), line);
+}
+
+// Descends into every nested block a statement can hide one inside,
+// looking for a `fit` whose overall span (from its own line through
+// the last line any of its branches reaches) covers `line`.
+fun _find_covering_fit(Node* body, num line) Option<Node*> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .StatementFit(f) -> {
+      // A branch's own body can hide another `fit` (matching a
+      // nested field, say), whose own span always sits inside this
+      // one's - checking it first means the deepest, most specific
+      // fit statement wins, instead of every line inside any nested
+      // fit incorrectly resolving against this outer one's subject.
+      num bi2 = 0;
+      for bi2 < f.branches.len {
+        FitBranch br2 = f.branches.get(bi2);
+        bi2 = bi2 + 1;
+        let nested = _find_covering_fit(br2.body, line);
+        if nested.is_some() {
+          ret nested;
+        }
+      }
+      num last = 0;
+      num bi = 0;
+      for bi < f.branches.len {
+        FitBranch br = f.branches.get(bi);
+        bi = bi + 1;
+        num reach = _last_line(br.body);
+        if reach > last {
+          last = reach;
+        }
+      }
+      num start = 0;
+      if body.has_pos {
+        start = body.pos.line;
+      }
+      if line >= start && line <= last {
+        ret .Some(body);
+      }
+    }
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _find_covering_fit(block.statements.get(i), line);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    _ -> {
+      let nested = single_nested_body(body);
+      if nested.is_some() {
+        ret _find_covering_fit(nested.unwrap(), line);
+      }
+    }
+  }
+  ret .None;
+}
+
+// The body of any of the three `for` loop shapes, so a caller
+// recursing through a function's statements doesn't need its own
+// three-way match just to keep descending.
+// The body of a `for` loop, whichever of the three shapes (bare
+// condition, range, or iterator) it was parsed as. Shared with
+// `completion.fn`, which needs the same descent to collect every
+// local in scope, not just look one up.
+pub fun for_body(ForKind fk) Node* {
+  fit fk {
+    .Cond(c) -> { ret c.body; }
+    .Range(r) -> { ret r.body; }
+    .Iter(it) -> { ret it.body; }
+  }
+}
+
+// The single nested body a statement kind recurses into, for every
+// shape that has exactly one and nothing else special about it - if,
+// elif, else, defer (the block form), for. `.Body` (many statements)
+// and `.StatementFit` (many branches, plus each one's own payload
+// bindings) need their own handling and are deliberately not folded
+// in here.
+// 
+// This is the one place that enumerates "which statement kinds carry
+// a nested body" for every fls walker that needs to recurse into a
+// function's own body looking for something (a local's own
+// declaration, a covering fit, a fit's own binding, every local in
+// scope for completion) - previously each of those four walkers
+// listed if/elif/else/defer/for by hand, and StatementElseIf/
+// StatementDefer were each missing from three of the four before
+// being found and fixed one at a time. codegen.fn's own
+// node_contains_fork enumerates this identical set of kinds for a
+// different purpose (whether a fork sits anywhere inside a body) -
+// cross-checked against it as the source of truth for what "every
+// body-carrying statement kind" actually means in this language.
+pub fun single_nested_body(Node* node) Option<Node*> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .StatementIf(s) -> { ret .Some(s.body); }
+    .StatementElseIf(ein) -> { ret .Some(ein.body); }
+    .StatementElse(inner) -> { ret .Some(inner); }
+    .StatementDefer(inner) -> { ret .Some(inner); }
+    .StatementFor(fk) -> { ret .Some(for_body(fk)); }
+    _ -> { ret .None; }
+  }
+}
+
+// The declaration of `variant_name`, one of `enum_name`'s own
+// variants, rendered as a reader would write its own pattern (bare,
+// or with its payload types in parens).
+pub fun enum_variant_declaration(
+  Vec<Node>* program,
+  str enum_name,
+  str variant_name,
+  Vec<str> concrete_args
+) Option<Declaration> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, enum_name) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(24);
+          b.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            b.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                b.append(", ");
+              }
+              str variant_type_text = render_type(variant.payload.get(p));
+              b.append(variant_type_text);
+              free(variant_type_text);
+              p = p + 1;
+            }
+            b.append(")");
+          }
+          Pos variant_pos = n.pos;
+          if variant.has_pos {
+            variant_pos = variant.pos;
+          }
+          // Substituted against the enum's own concrete generic args
+          // when the caller has them (a fit's own subject, resolved
+          // via fit_subject_generic_args), so a payload declared as a
+          // bare type param in the template (`Ok(T)`) reads as the
+          // subject's actual type (`Ok(str)`) the same way
+          // enum_variant_declaration_typed already does for a ret
+          // value's own declared type. A length mismatch (no concrete
+          // args known) leaves it as declared, template params and
+          // all, matching every existing caller's own behavior.
+          str detail = specialize_signature(b.build(), e.type_params, concrete_args);
+          detail = format("{str} = {num}", detail, _variant_ordinal(e, v - 1));
+          Declaration d = _declaration(variant_name, .Variant, detail, variant_pos);
+          d.container = enum_name;
+          ret .Some(d);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// Like `enum_variant_declaration`, but resolved against `dt`'s own
+// concrete generic arguments (`Result<str, Error>`'s `str`/`Error`),
+// so a payload declared as a bare type param in the template (`Ok(T)`)
+// renders as the caller's actual concrete type (`Ok(str)`) rather
+// than the template's own param name. A payload that isn't a bare
+// type param (already concrete, or itself a further generic
+// instantiation) renders as declared, unsubstituted.
+pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str variant_name) Option<Declaration> {
+  if dt == nil {
+    ret .None;
+  }
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, dt.type_str) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          StringBuilder b = string_builder_init(24);
+          b.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            b.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                b.append(", ");
+              }
+              str subst_type_text = _substituted_payload_type(
+                variant.payload.get(p),
+                e.type_params,
+                dt.generic_args
+              );
+              b.append(subst_type_text);
+              if !equals(subst_type_text, "") {
+                free(subst_type_text);
+              }
+              p = p + 1;
+            }
+            b.append(")");
+          }
+          str typed_detail = format("{str} = {num}", b.build(), _variant_ordinal(e, v - 1));
+          Declaration d = _declaration(variant_name, .Variant, typed_detail, n.pos);
+          d.container = e.name;
+          ret .Some(d);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// The ordinal `e`'s variant at `index` (0-indexed) is tagged with:
+// its own explicit `= N` when written, otherwise one past whatever
+// the variant before it resolved to (0 for the very first), the
+// same auto-increment rule an ordinary C-style enum follows.
+// Payload or not - a data-carrying variant can still be given its
+// own explicit tag (`Circle(num) = 3`), and the auto-incremented one
+// is just as fixed at compile time either way.
+fun _variant_ordinal(EnumDeclNode e, num index) num {
+  num running = 0;
+  num i = 0;
+  for i <= index {
+    EnumVariant variant = e.variants.get(i);
+    if variant.has_value {
+      running = variant.value;
+    }
+    if i == index {
+      ret running;
+    }
+    running = running + 1;
+    i = i + 1;
+  }
+  ret running;
+}
+
+// `payload`'s own rendered type, substituted with the matching entry
+// of `concrete_args` when `payload` is written as a bare type param
+// name found in `type_params` (positional match). Renders as-is
+// otherwise.
+fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataType*> concrete_args) str {
+  if payload == nil {
+    ret "";
+  }
+  if payload.generic_args.len == 0 {
+    num i = 0;
+    for i < type_params.len {
+      if equals(type_params.get(i), payload.type_str) && i < concrete_args.len {
+        ret render_type(concrete_args.get(i));
+      }
+      i = i + 1;
+    }
+  }
+  ret render_type(payload);
+}
+
+// The declaration of a bare `.VariantName` (or a fit destructuring
+// pattern's own qualified `Enum.VariantName`) written at `line` in
+// `file`, resolved against the enclosing `fit` statement's subject
+// type.
+pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  let found = covering_fit(program, file, line);
+  if found.is_none() {
+    ret .None;
+  }
+  fit found.unwrap().kind {
+    .StatementFit(f) -> {
+      str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
+      if equals(enum_name, "") {
+        ret .None;
+      }
+      ret enum_variant_declaration(
+        program,
+        enum_name,
+        name,
+        fit_subject_generic_args(tokens, program, f.exp, file, line)
+      );
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
+// The variant name a fit branch's own condition names, when it is a
+// data-carrying destructuring pattern (`.Circle(r)` or
+// `Shape.Circle(r)`): the identifier `_try_parse_fit_destructure`
+// builds as the right side of the condition's `.` expression.
+pub fun branch_variant_name(FitBranch br) str {
+  if !br.has_condition || br.condition == nil {
+    ret "";
+  }
+  fit br.condition.kind {
+    .Expression(e) -> {
+      if equals(e.op, ".") && e.has_right && e.right != nil {
+        fit e.right.kind {
+          .Identifier(s) -> { ret s; }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
+// The payload type at position `idx` of `enum_name`'s variant named
+// `variant_name`, rendered as a reader would write it.
+pub fun variant_payload_type(
+  Vec<Node>* program,
+  str enum_name,
+  str variant_name,
+  num idx,
+  Vec<str> concrete_args
+) Option<str> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, enum_name) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          if idx < 0 || idx >= variant.payload.len {
+            ret .None;
+          }
+          str declared = render_type(variant.payload.get(idx));
+          // Substituted against the enum's own concrete generic args
+          // when the caller has them (a fit's own subject, resolved
+          // via fit_subject_generic_args), so a payload declared as a
+          // bare type param in the template (`Ok(T)`) reads as the
+          // subject's actual type (`Ok(str)`), the same way
+          // enum_variant_declaration already does for the whole
+          // variant's own rendered signature. A length mismatch (no
+          // concrete args known) leaves it as declared.
+          str substituted = specialize_signature(declared, e.type_params, concrete_args);
+          if substituted != declared {
+            free(declared);
+          }
+          ret .Some(substituted);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// A fit arm's own payload binding named `name`, if `line` falls
+// within that arm: its pattern through the end of its body. Its type
+// is the matching positional payload type of whichever variant the
+// arm's own condition names, resolved against the fit's subject.
+fun _lookup_fit_binding(
+  Vec<Token>* tokens,
+  Node* body,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
+  if body == nil {
+    ret .None;
+  }
+  fit body.kind {
+    .Body(block) -> {
+      num i = 0;
+      for i < block.statements.len {
+        let found = _lookup_fit_binding(tokens, block.statements.get(i), name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+        i = i + 1;
+      }
+    }
+    .StatementFit(f) -> {
+      num bi = 0;
+      for bi < f.branches.len {
+        FitBranch br = f.branches.get(bi);
+        bi = bi + 1;
+        num start = 0;
+        if br.has_condition && br.condition != nil && br.condition.has_pos {
+          start = br.condition.pos.line;
+        } elif br.body != nil && br.body.has_pos {
+          start = br.body.pos.line;
+        }
+        num last = _last_line(br.body);
+        bin covers = line >= start && line <= last;
+        if covers && br.has_bindings {
+          num idx = -1;
+          num k = 0;
+          for k < br.bindings.len {
+            if equals(br.bindings.get(k), name) {
+              idx = k;
+            }
+            k = k + 1;
+          }
+          if idx >= 0 {
+            str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
+            if !equals(enum_name, "") {
+              Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);
+              let payload_type = variant_payload_type(
+                program,
+                enum_name,
+                branch_variant_name(br),
+                idx,
+                concrete_args
+              );
+              if payload_type.is_some() && br.body != nil {
+                StringBuilder b = string_builder_init(24);
+                b.append(payload_type.unwrap());
+                b.append(" ");
+                b.append(name);
+                // Neither AST node here carries the individual binding
+                // name's own position (bindings are plain strings,
+                // Vec<str>, with nothing parallel tracking where each
+                // one was written) and a fit arm's body block isn't
+                // always given its own position by the parser either
+                // (has_pos can read false, its fields then unset stack
+                // garbage) - but the arm's own pattern expression
+                // (`.Circle(r)` itself, `condition` here despite the
+                // name, which also doubles as a boolean guard on a
+                // non-destructuring arm) reliably is, and starts right
+                // at the binding it names, close enough to be useful
+                // for a jump even without landing on `r` exactly.
+                // Falls back to the whole fit statement's own position
+                // only when neither is available.
+                Pos decl_pos = body.pos;
+                if br.body.has_pos {
+                  decl_pos = br.body.pos;
+                }
+                if br.has_condition && br.condition != nil && br.condition.has_pos {
+                  decl_pos = br.condition.pos;
+                }
+                ret .Some(_declaration(name, .Local, b.build(), decl_pos));
+              }
+            }
+          }
+        }
+        let nested = _lookup_fit_binding(tokens, br.body, name, program, file, line);
+        if nested.is_some() {
+          ret nested;
+        }
+      }
+    }
+    _ -> {
+      let single = single_nested_body(body);
+      if single.is_some() {
+        ret _lookup_fit_binding(tokens, single.unwrap(), name, program, file, line);
+      }
+    }
+  }
+  ret .None;
+}
+
+pub fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declaration {
+  ret _declaration_vis(name, kind, detail, pos, true);
+}
+
+// `_declaration`, additionally recording whether the declaration was
+// written `pub` (see `Declaration.is_public`). Used directly only at
+// the handful of top-level call sites where that matters; every other
+// call site keeps going through the plain `_declaration` wrapper,
+// which is always visible from anywhere within the merged program the
+// same way it always has been.
+fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, bin is_public) Declaration {
+  Declaration d;
+  d.name = name;
+  d.kind = kind;
+  d.detail = detail;
+  d.pos = pos;
+  d.container = "";
+  d.is_public = is_public;
+  ret d;
+}
+
+// Every declaration `file` itself makes at the top level, as
+// `Declaration`s: a function, a compound and each of its own fields,
+// an enum and each of its own variants, a quirk, a plain top-level
+// global, and each impl method declared for a type in this file.
+// Mirrors `outline.fn`'s own `_collect` (same five-way node-kind
+// split, since that's the richer of the two existing walks —
+// `lookup_top_level` alone is missing fields/variants/methods
+// entirely), but builds `Declaration`s instead of `OutlineEntry`s so
+// the result carries `detail`/`is_public`, not just a name and a
+// position. Used to build the workspace symbol table; a fresh call
+// per document, not itself cached.
+pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_name && !equals(f.name, "") {
+          out.push(_declaration_vis(
+            f.name,
+            .Function,
+            render_function(f),
+            n.pos,
+            n.flags.is_public
+          ));
+        }
+      }
+      .Compound(c) -> {
+        StringBuilder cb = string_builder_init(32);
+        cb.append("compound ");
+        cb.append(c.name);
+        _append_type_params(&cb, c.has_type_params, &c.type_params);
+        out.push(_declaration_vis(c.name, .Compound, cb.build(), n.pos, n.flags.is_public));
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          StringBuilder fb = string_builder_init(32);
+          str fb_type_text = render_type(cf.dtype);
+          fb.append(fb_type_text);
+          free(fb_type_text);
+          fb.append(" ");
+          fb.append(cf.name);
+          Pos field_pos = n.pos;
+          if cf.has_pos {
+            field_pos = cf.pos;
+          }
+          Declaration fd = _declaration_vis(cf.name, .Field, fb.build(), field_pos, true);
+          fd.container = c.name;
+          out.push(fd);
+        }
+      }
+      .Enum(e) -> {
+        StringBuilder eb = string_builder_init(32);
+        eb.append("enum ");
+        eb.append(e.name);
+        _append_type_params(&eb, e.has_type_params, &e.type_params);
+        out.push(_declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public));
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          StringBuilder vb = string_builder_init(24);
+          vb.append(variant.name);
+          if variant.has_payload && variant.payload.len > 0 {
+            vb.append("(");
+            num p = 0;
+            for p < variant.payload.len {
+              if p > 0 {
+                vb.append(", ");
+              }
+              str vb_type_text = render_type(variant.payload.get(p));
+              vb.append(vb_type_text);
+              free(vb_type_text);
+              p = p + 1;
+            }
+            vb.append(")");
+          }
+          Declaration vd = _declaration_vis(variant.name, .Variant, vb.build(), n.pos, true);
+          vd.container = e.name;
+          out.push(vd);
+        }
+      }
+      .Quirk(q) -> {
+        StringBuilder qb = string_builder_init(32);
+        qb.append("quirk ");
+        qb.append(q.name);
+        _append_type_params(&qb, q.has_type_params, &q.type_params);
+        out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
+      }
+      .Impl(im) -> {
+        num m = 0;
+        for m < im.methods.len {
+          Node* method = im.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(mf) -> {
+              if !mf.has_name || equals(mf.name, "") {
+                continue;
+              }
+              str method_name = bare_method_name(mf.name);
+              Declaration md = _declaration_vis(
+                method_name,
+                .Function,
+                render_function_named(mf, method_name, false),
+                method.pos,
+                method.flags.is_public
+              );
+              md.container = im.type_name;
+              out.push(md);
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Variable(v) -> {
+        StringBuilder gb = string_builder_init(32);
+        if v.is_const {
+          gb.append("const ");
+        }
+        str gb_type_text = render_type(v.var_type);
+        gb.append(gb_type_text);
+        free(gb_type_text);
+        gb.append(" ");
+        gb.append(v.name);
+        out.push(_declaration_vis(v.name, .Global, gb.build(), n.pos, n.flags.is_public));
+      }
+      _ -> {}
+    }
+  }
+}

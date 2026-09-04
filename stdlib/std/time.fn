@@ -1,9 +1,9 @@
 // Time helpers.
 
 imp std.c.time;
-imp std.c.io;
 imp std.c.mem;
 imp std.c.string;
+imp std.string;
 imp std.result;
 imp std.error;
 
@@ -26,6 +26,14 @@ pub fun now() Timestamp {
 // equivalent to bind under the same name.
 pub fun sleep_seconds(num seconds) {
   __fun_sleep_seconds(seconds);
+}
+
+// Suspends the calling thread for `milliseconds`, sub-second
+// precision included - what a short, precise wait (a debounce timer,
+// a retry backoff) needs that `sleep_seconds`'s own whole-second
+// resolution can't give it.
+pub fun sleep_ms(num milliseconds) {
+  __fun_sleep_seconds(milliseconds / 1000.0);
 }
 
 fun _copy_str(str dst, num dst_len, str src) num {
@@ -196,6 +204,31 @@ pub fun format_human_cstr(num epoch) str {
   ret cstr;
 }
 
+// Writes `epoch`'s own decimal text into `buf` (capacity `buf_len`,
+// truncated and NUL-terminated the same way snprintf would), the
+// fallback both now_string variants use when the platform gives no
+// better formatting. Returns the full length that would have been
+// written, regardless of truncation, matching snprintf's own
+// contract - not just how many bytes actually landed in `buf`.
+fun _write_epoch_fallback(str buf, num buf_len, num epoch) num {
+  str text = format_num(epoch);
+  num full_len = len(text);
+  num copy_len = full_len;
+  if buf_len > 0 && copy_len > buf_len - 1 {
+    copy_len = buf_len - 1;
+  }
+  num k = 0;
+  for k < copy_len {
+    buf[k] = text[k];
+    k = k + 1;
+  }
+  if buf_len > 0 {
+    buf[copy_len] = '\0';
+  }
+  free(text);
+  ret full_len;
+}
+
 // Formats the current time with the default format. Returns the number of
 // bytes written.
 pub fun now_string(str buf, num buf_len) num {
@@ -204,7 +237,7 @@ pub fun now_string(str buf, num buf_len) num {
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%lld", t.epoch);
+  ret _write_epoch_fallback(buf, buf_len, t.epoch);
 }
 
 // Format current time with default format (Result).
@@ -224,7 +257,7 @@ pub fun now_string_utc(str buf, num buf_len) num {
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%lld", t.epoch);
+  ret _write_epoch_fallback(buf, buf_len, t.epoch);
 }
 
 // Format current time with default format (UTC) with Result.

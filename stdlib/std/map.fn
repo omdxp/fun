@@ -2,7 +2,7 @@
 
 imp std.c.mem;
 imp std.c.string;
-imp std.c.io;
+imp std.string;
 imp std.vec;
 imp std.quirks;
 imp std.option;
@@ -457,6 +457,23 @@ impl Map<K, V> as Clearable {
   }
 }
 
+impl Map<K, V> as Clonable<Map<K, V>> {
+  // Returns a shallow copy with independent backing storage.
+  pub clone() Map<K, V> {
+    Map<K, V> out;
+    out.init(self.cap);
+    Vec<K> ks = self.keys();
+    defer ks.free();
+    num i = 0;
+    for i < ks.len {
+      K k = ks.get(i);
+      out.put(k, self.at(k).unwrap());
+      i = i + 1;
+    }
+    ret out;
+  }
+}
+
 fun _map_str_len(str s) num {
   num i = 0;
   for s[i] != 0 {
@@ -504,13 +521,14 @@ impl Map<str, num> as Display {
         pos = _map_append(out, pos, "\"");
         pos = _map_append(out, pos, self.key_slots[i]);
         pos = _map_append(out, pos, "\": ");
-        chr[24] cell;
-        let c = snprintf(cell, 24, "%lld", self.value_slots[i]);
+        str cell = format_num(self.value_slots[i]);
+        num c = len(cell);
         num k = 0;
         for k < c {
           out[pos + k] = cell[k];
           k = k + 1;
         }
+        free(cell);
         pos = pos + c;
         written = written + 1;
       }

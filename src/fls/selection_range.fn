@@ -1,0 +1,194 @@
+// Selection ranges.
+// 
+// One expanding chain per requested position: the token under the
+// cursor, then each `(...)`/`[...]`/`{...}` pair still open at that
+// position, innermost first, tracked with a single bracket-depth
+// stack over the token stream - the same technique folding_range.fn
+// uses for its own block folds, generalized to all three bracket
+// kinds and read off at a specific position rather than emitted for
+// every pair in the document.
+
+imp documents;
+imp analysis;
+imp positions;
+imp ..lexer.token;
+imp std.vec;
+imp std.string;
+imp std.c.mem;
+
+// A range that may cross lines, unlike `Span` (which assumes its own
+// start and end share one line - true of a single token, never true
+// of a bracket pair's own outer span).
+compound _Range {
+  num start_line;
+  num start_char;
+  num end_line;
+  num end_char;
+}
+
+// One still-open bracket, tracked while scanning forward: which
+// character opened it and where, so a match against the right kind
+// of closer can be confirmed before popping it.
+compound _OpenBracket {
+  chr kind;
+  num line;
+  num col;
+}
+
+// Every requested position's own selection-range chain, as the
+// result a client is sent. `lines`/`chars` are parallel to each
+// other, one 0-indexed position per requested selection.
+pub fun selection_ranges(AnalysisCache* cache, Document doc, Vec<num>* lines, Vec<num>* chars) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "[]";
+  }
+  Vec<Token> tokens = read.tokens;
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num i = 0;
+  for i < lines.len {
+    if i > 0 {
+      b.append(",");
+    }
+    str chain_text = _chain_at(&tokens, lines.get(i), chars.get(i), doc.text);
+    b.append(chain_text);
+    free(chain_text);
+    i = i + 1;
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The token at `line`/`character`, then every bracket pair enclosing
+// it, outermost last, rendered as one nested `SelectionRange` object.
+fun _chain_at(Vec<Token>* tokens, num line, num character, str text) str {
+  Vec<_Range> chain;
+  chain.init(4);
+  defer chain.free();
+
+  let found = token_at(tokens, line, character);
+  if found.is_some() {
+    Span s = span_of(found.unwrap(), text);
+    _Range r;
+    r.start_line = s.line;
+    r.start_char = s.start;
+    r.end_line = s.line;
+    r.end_char = s.end;
+    chain.push(r);
+  }
+
+  Vec<_OpenBracket> stack;
+  stack.init(8);
+  defer stack.free();
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    chr kind = _bracket_kind_of(t);
+    if kind == 0 {
+      continue;
+    }
+    num tok_line = t.pos.line - 1;
+    if _is_open_bracket(kind) {
+      _OpenBracket ob;
+      ob.kind = kind;
+      ob.line = tok_line;
+      ob.col = byte_col_to_utf16_char(text, tok_line, t.pos.start_col - 1);
+      stack.push(ob);
+      continue;
+    }
+    if stack.len == 0 {
+      continue;
+    }
+    _OpenBracket opened = stack.pop();
+    if !_matches(opened.kind, kind) {
+      continue;
+    }
+    num close_char = byte_col_to_utf16_char(text, tok_line, t.pos.end_col - 1);
+    bin at_or_after_open = line > opened.line ||
+      (line == opened.line && character >= opened.col);
+    bin at_or_before_close = line < tok_line || (line == tok_line && character <= close_char);
+    if at_or_after_open && at_or_before_close {
+      _Range r;
+      r.start_line = opened.line;
+      r.start_char = opened.col;
+      r.end_line = tok_line;
+      r.end_char = close_char;
+      chain.push(r);
+    }
+  }
+
+  ret _render_chain(chain);
+}
+
+// A `(`/`[`/`{` or `)`/`]`/`}` token's own bracket character, or the
+// null character for anything else. `(`/`[` lex as an Operator
+// (single-char `Sval`, the same kind of asymmetry a `,` between two
+// enum variants also has - see `semantic_tokens.fn`'s own regression
+// test for that one); `)`/`]`/`{`/`}` lex as a Symbol (`Cval`).
+fun _bracket_kind_of(Token t) chr {
+  if token_is_operator(t, "(") {
+    ret '(';
+  }
+  if token_is_operator(t, "[") {
+    ret '[';
+  }
+  if token_is_symbol(t, ')') || token_is_symbol(t, ']') || token_is_symbol(t, '{') ||
+    token_is_symbol(t, '}') {
+    fit t.data {
+      .Cval(c) -> { ret c; }
+      _ -> {}
+    }
+  }
+  ret 0;
+}
+
+fun _is_open_bracket(chr c) bin {
+  ret c == '(' || c == '[' || c == '{';
+}
+
+fun _matches(chr open, chr close) bin {
+  if open == '(' {
+    ret close == ')';
+  }
+  if open == '[' {
+    ret close == ']';
+  }
+  ret close == '}';
+}
+
+// `chain`, innermost first, rendered as one `SelectionRange` object
+// nesting each subsequent entry as its own `parent`. Empty when
+// nothing at all was found at the position (a client reads that as
+// "nothing to select here").
+fun _render_chain(Vec<_Range> chain) str {
+  if chain.len == 0 {
+    ret `{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`;
+  }
+  str inner = "";
+  num i = chain.len - 1;
+  for i >= 0 {
+    _Range r = chain.get(i);
+    str range = format(
+      `{"start":{"line":{num},"character":{num}},"end":{"line":{num},"character":{num}}}`,
+      r.start_line,
+      r.start_char,
+      r.end_line,
+      r.end_char
+    );
+    str next_inner;
+    if equals(inner, "") {
+      next_inner = format(`{"range":{str}}`, range);
+    } else {
+      next_inner = format(`{"range":{str},"parent":{str}}`, range, inner);
+      free(inner);
+    }
+    free(range);
+    inner = next_inner;
+    i = i - 1;
+  }
+  ret inner;
+}

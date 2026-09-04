@@ -9,8 +9,7 @@ Fun is a statically typed language that transpiles to C. The project emphasizes 
 See the Quickstart section in the repository [README](../README.md). The standard local workflow is:
 
 ```sh
-zig build
-./zig-out/bin/fun -in path/to/file.fn
+fun -in path/to/file.fn
 ```
 
 ## What numeric types does Fun provide?

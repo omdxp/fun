@@ -1,0 +1,1216 @@
+// Type checking cases: a program, and whether the checker accepts it.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..semantics.typecheck;
+imp std.string;
+imp std.result;
+
+// Parses `src` and checks it, reporting the message of the first type
+// error, or an empty string when the program checks out.
+fun check(str src) str {
+  let tokens = tokenize(src, "t.fn");
+  if tokens.is_err() {
+    ret "lex error";
+  }
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret "parse error";
+  }
+  let checked = typecheck_program(&state.nodes);
+  if checked.is_err() {
+    ret checked.unwrap_err().message;
+  }
+  ret "";
+}
+
+fun rejects(str src, str label) {
+  assert !equals(check(src), ""), label;
+}
+
+fun accepts(str src, str label) {
+  str got = check(src);
+  assert equals(got, ""), label;
+}
+
+test "a value must fit the type it initializes" {
+  rejects(`fun main() {
+  `  num x = "hi";
+  `}`, "expected a string not to initialize a number");
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  dec y = x;
+    `}`,
+    "expected a whole number to widen into a decimal"
+  );
+}
+
+test "a decimal does not narrow into a whole number on its own" {
+  rejects(
+    `fun main() {
+    `  dec x = 1.5;
+    `  num y = x;
+    `}`,
+    "expected the narrowing to be rejected"
+  );
+}
+
+test "a returned value must fit what the function promises" {
+  rejects(`fun f() num {
+  `  ret true;
+  `}`, "expected a truth value not to stand for a number");
+  accepts(`fun f() num {
+  `  ret 1;
+  `}`, "expected a number to be returned");
+}
+
+test "a call passes what the callee declares" {
+  rejects(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1);
+    `}`,
+    "expected the missing argument to be reported"
+  );
+  rejects(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1, "two");
+    `}`,
+    "expected the argument type to be reported"
+  );
+  accepts(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  num x = add(1, 2);
+    `}`,
+    "expected the call to check out"
+  );
+}
+
+test "a parameter with a default may be left out" {
+  accepts(
+    `fun greet(str name, str greeting = "hi") str { ret greeting; }
+    `fun main() {
+    `  str s = greet("world");
+    `}`,
+    "expected the defaulted parameter to be optional"
+  );
+}
+
+test "only an async function awaits, and only an async call is awaited" {
+  rejects(
+    `async fun work() num { ret 1; }
+    `fun main() {
+    `  num x = await work();
+    `}`,
+    "expected await outside an async function to be rejected"
+  );
+  rejects(
+    `fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = await work();
+    `}`,
+    "expected awaiting a plain call to be rejected"
+  );
+  rejects(
+    `async fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = work();
+    `}`,
+    "expected the missing await to be reported"
+  );
+  accepts(
+    `async fun work() num { ret 1; }
+    `async fun main() {
+    `  num x = await work();
+    `}`,
+    "expected the awaited call to check out"
+  );
+}
+
+test "a const binding is not assigned again" {
+  rejects(
+    `fun main() {
+    `  const num x = 5;
+    `  x = 10;
+    `}`,
+    "expected the reassignment to be rejected"
+  );
+  rejects(
+    `const num MAX = 100;
+    `fun bump() {
+    `  MAX = 200;
+    `}`,
+    "expected the global reassignment to be rejected"
+  );
+}
+
+test "an array literal holds one type" {
+  rejects(
+    `fun main() {
+    `  num[] arr = [1, "x"];
+    `}`,
+    "expected the mixed literal to be rejected"
+  );
+  accepts(
+    `fun main() {
+    `  num[] arr = [1, 2, 3];
+    `}`,
+    "expected the uniform literal to check out"
+  );
+}
+
+test "a decimal has no remainder" {
+  rejects(
+    `fun main() {
+    `  dec x = 5.0 % 2.0;
+    `}`,
+    "expected the remainder of a decimal to be rejected"
+  );
+}
+
+test "a field is read from the type that declares it" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num x = c.missing;
+    `}`,
+    "expected the unknown field to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num x = c.base;
+    `}`,
+    "expected the declared field to be read"
+  );
+}
+
+test "an async method is awaited like an async function" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  async add(num x) num { ret self.base + x; }
+    `}
+    `async fun main() {
+    `  Counter c;
+    `  num out = c.add(2);
+    `}`,
+    "expected the missing await on a method to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  async add(num x) num { ret self.base + x; }
+    `}
+    `async fun main() {
+    `  Counter c;
+    `  num out = await c.add(2);
+    `}`,
+    "expected the awaited method call to check out"
+  );
+}
+
+test "a generic function's type parameters stand for anything" {
+  accepts(
+    `fun id<T>(T x) T { ret x; }
+    `fun main() {
+    `  num out = id(2);
+    `  str s = id("hi");
+    `}`,
+    "expected a type parameter to accept either call"
+  );
+}
+
+test "nil stands for a pointer, and zero for a null one" {
+  accepts(
+    `fun main() {
+    `  num* p = nil;
+    `  str s = nil;
+    `}`,
+    "expected nil to stand for a pointer and a string"
+  );
+}
+
+test "a method call is checked against what the method declares" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `impl Counter {
+    `  add(num x) num { ret self.base + x; }
+    `}
+    `fun main() {
+    `  Counter c;
+    `  num out = c.add(1, 2);
+    `}`,
+    "expected the extra argument to a method to be reported"
+  );
+}
+
+test "a method body reads fields from the type it belongs to" {
+  rejects(
+    `compound User {
+    `  num age;
+    `}
+    `impl User {
+    `  greet() {
+    `    num x = self.missing;
+    `    ret;
+    `  }
+    `}`,
+    "expected the unknown field on self to be reported"
+  );
+  accepts(
+    `compound User {
+    `  num age;
+    `}
+    `impl User {
+    `  greet() num {
+    `    ret self.age;
+    `  }
+    `}`,
+    "expected the declared field on self to be read"
+  );
+}
+
+test "an impl supplies every method its quirk requires" {
+  rejects(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk Q {
+    `  a() num;
+    `  b(num x) num;
+    `}
+    `impl Point as Q {
+    `  a() num { ret 1; }
+    `}`,
+    "expected the missing quirk method to be reported"
+  );
+  accepts(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk Q {
+    `  a() num;
+    `}
+    `impl Point as Q {
+    `  a() num { ret self.x; }
+    `}`,
+    "expected the complete impl to check out"
+  );
+}
+
+test "a missing quirk method is reported at its own impl block, not file start" {
+  // check_quirk_conformance used to call self.fail with a nil node, so
+  // every such error landed at line 0 col 0 regardless of where the
+  // offending impl actually was, useless for an editor pointing a
+  // squiggle at it, and indistinguishable from a second, unrelated
+  // impl earlier in the same file.
+  str src = `compound Point {
+  `  num x;
+  `}
+  `quirk Q {
+  `  a() num;
+  `  b(num x) num;
+  `}
+  `impl Point {
+  `  noop() {}
+  `}
+  `impl Point as Q {
+  `  a() num { ret self.x; }
+  `}`;
+  let tokens = tokenize(src, "t.fn");
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  p.parse();
+  let checked = typecheck_program(&state.nodes);
+  assert checked.is_err(), "expected the missing quirk method to be reported";
+  TypeError e = checked.unwrap_err();
+  assert e.has_pos, "expected the error to carry a position";
+  assert e.pos.line == 11, "expected the position at the 'impl Point as Q' line, not file start";
+}
+
+test "a quirk is not what a let infers" {
+  rejects(
+    `compound Point {
+    `  num x;
+    `}
+    `quirk HasX {
+    `  get_x() num;
+    `}
+    `impl Point as HasX {
+    `  get_x() num { ret self.x; }
+    `}
+    `fun as_hasx(Point* p) HasX { ret p; }
+    `fun main() {
+    `  Point p;
+    `  let inferred = as_hasx(&p);
+    `}`,
+    "expected a quirk not to be inferred"
+  );
+}
+
+test "a bare enum-variant shorthand ambiguous between two enums is rejected, not left to crash codegen" {
+  // Neither enum's name is written anywhere, so nothing tells codegen
+  // which one `.Same` means; this used to sail through typechecking
+  // unflagged and crash codegen far later with a generic "unsupported
+  // node" internal error instead of a real diagnostic.
+  str msg = check(
+    `enum A {
+    `  Same
+    `}
+    `enum B {
+    `  Same
+    `}
+    `fun main() {
+    `  let v = .Same;
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg, "ambiguous"), "expected the ambiguity named in the message";
+  assert contains(msg, "A"), "expected the first candidate enum named";
+  assert contains(msg, "B"), "expected the second candidate enum named";
+
+  // The same ambiguity, but through a payload-carrying call shorthand
+  // (`.Same(5)`, parsed as a call whose callee is the dot-shorthand) -
+  // a different AST shape than the bare case above, same underlying gap.
+  str msg2 = check(
+    `enum C {
+    `  Same(num)
+    `}
+    `enum D {
+    `  Same(num)
+    `}
+    `fun main() {
+    `  let v = .Same(5);
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg2, "ambiguous"), "expected the ambiguity named for the payload-carrying shorthand too";
+}
+
+test "a bare enum-variant shorthand naming no enum at all is rejected with its own message" {
+  str msg = check(
+    `enum A {
+    `  Real
+    `}
+    `fun main() {
+    `  let v = .Typo;
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg, "no enum declares a variant named 'Typo'"), "expected a message naming the unknown variant";
+}
+
+test "a bare enum-variant shorthand unambiguous across the program still infers fine" {
+  accepts(
+    `enum A {
+    `  Only
+    `}
+    `fun main() {
+    `  let v = .Only;
+    `  _ = v;
+    `}`,
+    "expected the single owning enum to resolve without an explicit type"
+  );
+}
+
+test "an ambiguous variant name with an explicit declared type is not flagged" {
+  // The declared type on the left resolves it outright; the ambiguity
+  // check only applies to a fully `let`-inferred initializer, which has
+  // nothing else to lean on.
+  accepts(
+    `enum A {
+    `  Same
+    `}
+    `enum B {
+    `  Same
+    `}
+    `fun main() {
+    `  A v = .Same;
+    `  _ = v;
+    `}`,
+    "expected an explicit declared type to disambiguate on its own"
+  );
+}
+
+test "an enum with no payloads reads as a number" {
+  accepts(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  num n = Color.Green;
+    `  c = n;
+    `}`,
+    "expected a payload-free enum to stand for a number"
+  );
+}
+
+test "an array stands for a pointer to what it holds" {
+  // The callee is declared here rather than imported: this harness checks
+  // the source it is given on its own, without resolving imports.
+  accepts(
+    `fun release(raw* p) {
+    `  ret;
+    `}
+    `compound Item {
+    `  num v;
+    `}
+    `compound Holder {
+    `  Item[] items;
+    `}
+    `fun main() {
+    `  Holder h;
+    `  release(h.items);
+    `}`,
+    "expected an array of compounds to stand for a raw pointer"
+  );
+}
+
+test "a call names a function that exists" {
+  rejects(`fun main() {
+  `  missing();
+  `}`, "expected the unknown callee to be reported");
+  accepts(
+    `fun helper() num { ret 1; }
+    `fun main() {
+    `  num x = helper();
+    `}`,
+    "expected the declared callee to check out"
+  );
+}
+
+test "sizeof measures a type, not a value" {
+  rejects(`fun main() {
+  `  num s = sizeof(1);
+  `}`, "expected a value operand to be rejected");
+  accepts(
+    `compound Item {
+    `  num v;
+    `}
+    `fun main() {
+    `  num a = sizeof(Item);
+    `  num b = sizeof(num);
+    `}`,
+    "expected a type operand to check out"
+  );
+}
+
+test "a condition holds a truth value" {
+  rejects(
+    `fun main() {
+    `  if 1 { ret; }
+    `}`,
+    "expected a number as a condition to be rejected"
+  );
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  if x > 0 { ret; }
+    `}`,
+    "expected a comparison to check out"
+  );
+}
+
+test "a constrained type parameter accepts only what it lists" {
+  rejects(
+    `fun f<T: num | str>(T x) T { ret x; }
+    `fun main() {
+    `  dec d = 3.5;
+    `  let a = f(d);
+    `}`,
+    "expected an unlisted type to be rejected"
+  );
+  accepts(
+    `fun f<T: num | str>(T x) T { ret x; }
+    `fun main() {
+    `  let a = f(1);
+    `  let b = f("hi");
+    `}`,
+    "expected both listed types to be accepted"
+  );
+}
+
+test "an impl matches how its quirk declares a method" {
+  rejects(
+    `compound Counter {
+    `  num base;
+    `}
+    `quirk AsyncCounter {
+    `  async add(num x) num;
+    `}
+    `impl Counter as AsyncCounter {
+    `  add(num x) num { ret self.base + x; }
+    `}`,
+    "expected the missing async to be reported"
+  );
+  accepts(
+    `compound Counter {
+    `  num base;
+    `}
+    `quirk AsyncCounter {
+    `  async add(num x) num;
+    `}
+    `impl Counter as AsyncCounter {
+    `  async add(num x) num { ret self.base + x; }
+    `}`,
+    "expected the matching signature to check out"
+  );
+}
+
+test "a field reads through what the instantiation supplied" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  str s = b.v;
+    `}`,
+    "expected the substituted field type to be checked"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  num n = b.v;
+    `}`,
+    "expected the substituted field type to be read"
+  );
+}
+
+test "a builtin declares no methods" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{v = 1};
+    `  num out = b.v.add(2);
+    `}`,
+    "expected a method on a number to be reported"
+  );
+}
+
+test "a constrained compound accepts only the instantiations it lists" {
+  rejects(
+    `compound Box<T: num | str> {
+    `  T val;
+    `}
+    `fun main() {
+    `  Box<bin> b = Box<bin>{val = true};
+    `}`,
+    "expected the unlisted instantiation to be rejected"
+  );
+  accepts(
+    `compound Box<T: num | str> {
+    `  T val;
+    `}
+    `fun main() {
+    `  Box<num> b = Box<num>{val = 5};
+    `}`,
+    "expected a listed instantiation to check out"
+  );
+}
+
+test "a literal without arguments takes them from the fields it writes" {
+  rejects(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `fun main() {
+    `  let boxed = Box{value = 7};
+    `  boxed.value = true;
+    `}`,
+    "expected the inferred instantiation to be checked"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `fun main() {
+    `  let boxed = Box{value = 7};
+    `  boxed.value = 9;
+    `}`,
+    "expected a matching assignment to check out"
+  );
+}
+
+test "a raw pointer is how array storage is allocated" {
+  accepts(
+    `fun allocate(num n) raw* { ret nil; }
+    `compound Pool {
+    `  num[] slots;
+    `}
+    `fun main() {
+    `  Pool p;
+    `  p.slots = allocate(4);
+    `}`,
+    "expected raw storage to be assignable to an array field"
+  );
+}
+
+test "a file keeps to itself what it does not mark public" {
+  // Both declarations sit in the file being checked, so neither is
+  // reached across a boundary and both are readable.
+  accepts(
+    `compound Secret {
+    `  num value;
+    `}
+    `fun main() {
+    `  Secret s;
+    `  s.value = 1;
+    `}`,
+    "expected a file to read its own declarations"
+  );
+}
+
+test "a call names a method the type does not have" {
+  // The type's methods are known here, since the program declares an
+  // impl for it, so a call naming none of them is wrong and is said so
+  // in Fun rather than left to the C compiler.
+  str src = `compound Box {
+  `  num v;
+  `}
+  `impl Box {
+  `  pub bump() num { ret self.v + 1; }
+  `}
+  `fun main() num {
+  `  Box b;
+  `  b.v = 1;
+  `  ret b.missing();
+  `}`;
+  str message = check(src);
+  assert contains(message, "has no method"), "expected the reason to name the method";
+  assert contains(message, "missing"), "expected the message to name the call";
+}
+
+test "a type whose impls were never seen is left alone" {
+  // Nothing here declares an impl for Outside, so the checker cannot
+  // know what it has and does not guess.
+  str src = `compound Outside {
+  `  num v;
+  `}
+  `fun main() num {
+  `  Outside o;
+  `  o.v = 1;
+  `  ret 0;
+  `}`;
+  assert equals(check(src), ""), "expected a program that calls nothing to pass";
+}
+
+test "a zero divisor written into the program is rejected" {
+  // The machine would find this too, at the cost of a crash rather than
+  // a message. Every spelling of a written zero is caught: a literal, a
+  // remainder, and arithmetic that folds to one.
+  assert contains(check(`fun main() num { ret 10 / 0; }`), "division by zero"), "expected a literal zero divisor rejected";
+  assert contains(check(`fun main() num { ret 7 % 0; }`), "division by zero"), "expected a zero remainder rejected";
+  assert contains(check(`fun main() num { ret 8 / (2 - 2); }`), "division by zero"), "expected a folded zero rejected";
+  assert contains(check(`fun main() num { ret 8 / (0); }`), "division by zero"), "expected a parenthesized zero rejected";
+}
+
+test "a divisor that is not a written zero is left alone" {
+  // A zero only the running program could know about is not this
+  // check's business, and neither is a decimal divisor.
+  accepts(`fun main() num { ret 10 / 2; }`, "expected a plain divisor accepted");
+  accepts(`fun main() num { ret 8 / (2 + 2); }`, "expected a folded non-zero accepted");
+  accepts(
+    `fun main() num {
+    `  num z = 0;
+    `  ret 9 / z;
+    `}`,
+    "expected a runtime zero left to the program"
+  );
+  accepts(`fun main() dec { ret 1.5 / 0.5; }`, "expected a decimal divisor accepted");
+}
+
+test "a fit branch naming a different enum is rejected" {
+  // A branch written against another enum's variant can never be taken,
+  // so it is a mistake rather than a branch that happens to be dead.
+  str src = `enum A { X, Y }
+  `enum B { P, Q }
+  `fun main() num {
+  `  A a = .X;
+  `  fit a {
+  `    A.X -> { ret 1; }
+  `    B.P -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert contains(check(src), "fit branch names"), "expected the wrong enum to be rejected";
+}
+
+test "a fit branch naming its own enum, or nothing, is accepted" {
+  // Shorthand names no enum and so cannot disagree with one.
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  fit a {
+    `    A.X -> { ret 1; }
+    `    A.Y -> { ret 2; }
+    `  }
+    `}`,
+    "expected branches naming their own enum accepted"
+  );
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  fit a {
+    `    .X -> { ret 1; }
+    `    _ -> { ret 2; }
+    `  }
+    `}`,
+    "expected shorthand branches accepted"
+  );
+}
+
+test "a method's own generic bound is enforced against the call" {
+  // The bound belongs to the method, not to the type it is written on,
+  // so it holds whether or not the impl is generic.
+  str on_plain = `compound Plain { num v; }
+  `impl Plain {
+  `  pub blend<U: num | str>(U other) num { ret 1; }
+  `}
+  `fun main() num {
+  `  Plain p;
+  `  dec d = 2.5;
+  `  ret p.blend(d);
+  `}`;
+  assert contains(check(on_plain), "does not accept"), "expected the bound enforced on a plain impl";
+
+  str on_generic = `compound Box<T> { T value; }
+  `impl Box<T> {
+  `  pub blend<U: num | str>(U other) num { ret 1; }
+  `}
+  `fun main() num {
+  `  Box<num> b;
+  `  dec d = 2.5;
+  `  ret b.blend(d);
+  `}`;
+  assert contains(check(on_generic), "does not accept"), "expected the bound enforced on a generic impl";
+}
+
+test "a method call inside the bound is accepted" {
+  accepts(
+    `compound Plain { num v; }
+    `impl Plain {
+    `  pub blend<U: num | str>(U other) num { ret 1; }
+    `}
+    `fun main() num {
+    `  Plain p;
+    `  ret p.blend(2) + p.blend("two");
+    `}`,
+    "expected both types the bound allows accepted"
+  );
+}
+
+test "await outside an async function is rejected" {
+  // `await` suspends the caller, which only an async function can do.
+  assert contains(
+    check(`async fun work() num { ret 1; }
+    `fun main() num {
+    `  ret await work();
+    `}`),
+    "await is only allowed in an async function"
+  ), "expected await outside async rejected";
+}
+
+test "an async call that is never awaited is rejected" {
+  // Binding the call without awaiting it reads as a value but is not
+  // one, so it is reported rather than quietly producing a handle.
+  assert contains(
+    check(`async fun work() num { ret 1; }
+    `fun main() num {
+    `  let v = work();
+    `  ret 0;
+    `}`),
+    "needs await"
+  ), "expected the un-awaited call rejected";
+  accepts(
+    `async fun work() num { ret 1; }
+    `async fun caller() num {
+    `  let v = await work();
+    `  ret v;
+    `}`,
+    "expected the awaited call accepted"
+  );
+}
+
+test "one generic instantiation does not stand for another" {
+  // Both are written `Box`, so comparing names alone let a `Box<num>`
+  // pass where a `Box<str>` was asked for.
+  str src = `compound Box<T> { T value; }
+  `fun take(Box<str> b) num { ret 1; }
+  `fun main() num {
+  `  Box<num> n;
+  `  ret take(n);
+  `}`;
+  str found = check(src);
+  assert contains(found, "expects Box<str>"), "expected the message to name what was wanted";
+  assert contains(found, "found Box<num>"), "expected the message to name what was supplied";
+}
+
+test "a matching instantiation, and one still standing for a parameter, are accepted" {
+  accepts(
+    `compound Box<T> { T value; }
+    `fun take(Box<str> b) num { ret 1; }
+    `fun main() num {
+    `  Box<str> s;
+    `  ret take(s);
+    `}`,
+    "expected the same instantiation accepted"
+  );
+
+  // Inside a generic body the argument is still a parameter, which
+  // stands for whatever an instantiation supplies.
+  accepts(
+    `compound Box<T> { T value; }
+    `fun pass<T>(Box<T> b) num { ret 1; }
+    `fun main() num {
+    `  Box<num> n;
+    `  ret pass(n);
+    `}`,
+    "expected an unresolved parameter to stand for anything"
+  );
+}
+
+test "two different enums are not compared by ordinal" {
+  // Both lower to a number, so nothing stopped the comparison; it asks
+  // whether two unrelated ordinals coincide, which is never the point.
+  str found = check(`enum A { X }
+  `enum B { P }
+  `fun main() num {
+  `  A a = .X;
+  `  B b = .P;
+  `  if a == b { ret 1; }
+  `  ret 0;
+  `}`);
+  assert contains(found, "share no variants"), "expected the cross-enum comparison rejected";
+}
+
+test "an enum compared with its own kind, or with a number, is accepted" {
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  A b = .Y;
+    `  if a == b { ret 1; }
+    `  ret 0;
+    `}`,
+    "expected two values of one enum to compare"
+  );
+
+  // A plain enum reads as the number behind it, which is how a program
+  // written against C constants compares one.
+  accepts(
+    `enum A { X, Y }
+    `fun main() num {
+    `  A a = .X;
+    `  if a == 0 { ret 1; }
+    `  ret 0;
+    `}`,
+    "expected an enum to compare with a number"
+  );
+}
+
+test "sizeof names a type the program declares" {
+  // Measuring a type nothing defines has no answer, and C would be left
+  // guessing at a name it has never seen either.
+  assert contains(check(`fun main() num { ret sizeof(Nope); }`), "sizeof names no type"), "expected an undeclared type to be rejected";
+}
+
+test "sizeof accepts every shape that does name a type" {
+  // A parameter stands for whatever an instantiation supplies.
+  accepts(
+    `fun size_of<T>(T v) num { ret sizeof(T); }
+    `fun main() num { ret size_of(1); }`,
+    "expected a type parameter accepted"
+  );
+  // Declaration order is the reader's business, not the checker's.
+  accepts(
+    `fun main() num { ret sizeof(Later); }
+    `compound Later { num v; }`,
+    "expected a type declared later accepted"
+  );
+  // An enum whose variants carry payloads is a type like any other.
+  accepts(
+    `enum Shape { Dot, Held(num) }
+    `fun main() num { ret sizeof(Shape); }`,
+    "expected a data-carrying enum accepted"
+  );
+  accepts(
+    `compound Node { num v; }
+    `fun main() num { ret sizeof(Node*); }`,
+    "expected a pointer to a declared type accepted"
+  );
+}
+
+test "an empty enum declaration is rejected" {
+  // No variants lowers to an empty C `enum`, which is invalid; caught
+  // here rather than left for the C compiler to explain.
+  assert contains(
+    check(`enum Empty { }
+    `fun main() num { ret 0; }`),
+    "must declare at least one variant"
+  ), "expected the empty enum rejected";
+}
+
+test "let cannot infer a type from a void call" {
+  // `let x = noop();` would declare `void x`, which holds nothing.
+  assert contains(
+    check(`fun noop() { }
+    `fun main() num {
+    `  let x = noop();
+    `  ret 0;
+    `}`),
+    "cannot be initialized from a value of type void"
+  ), "expected the void-returning call rejected";
+  accepts(
+    `fun give() num { ret 5; }
+    `fun main() num {
+    `  let x = give();
+    `  ret 0;
+    `}`,
+    "expected a non-void call still inferred normally"
+  );
+}
+
+test "sizeof on an undeclared type is rejected" {
+  rejects(
+    `fun main() num { ret sizeof(Nope); }`,
+    "expected sizeof on an unknown type name to be rejected"
+  );
+}
+
+test "a fit branch naming a different enum than its subject is rejected" {
+  rejects(
+    `enum A { X, Y }
+    `enum B { P, Q }
+    `fun main() num {
+    `  A a = A.X;
+    `  fit a {
+    `    B.P -> { ret 1; }
+    `    _ -> { ret 0; }
+    `  }
+    `  ret 0;
+    `}`,
+    "expected a branch naming a different enum to be rejected"
+  );
+}
+
+test "awaiting outside an async function is rejected" {
+  rejects(
+    `async fun inc(num x) num { ret x + 1; }
+    `fun main() {
+    `  let out = await inc(1);
+    `  _ = out;
+    `}`,
+    "expected awaiting outside an async function to be rejected"
+  );
+}
+
+test "an un-awaited async call bound with let is rejected" {
+  rejects(
+    `async fun inc(num x) num { ret x + 1; }
+    `async fun main() {
+    `  let out = inc(1);
+    `  _ = out;
+    `}`,
+    "expected an un-awaited async call to be rejected"
+  );
+}
+
+test "a required parameter following a defaulted one is rejected" {
+  rejects(
+    `fun f(num x = 1, num y) num { ret x + y; }
+    `fun main() num { ret f(1, 2); }`,
+    "expected the bad parameter order to be rejected"
+  );
+  accepts(
+    `fun f(num x, num y = 1) num { ret x + y; }
+    `fun main() num { ret f(1); }`,
+    "expected the correctly-ordered defaults to be accepted"
+  );
+}
+
+test "a partial index of a 2D array is rejected as a num initializer" {
+  rejects(
+    `fun main() num {
+    `  num[2][3] m;
+    `  num x = m[0];
+    `  ret 0;
+    `}`,
+    "expected a single index of a 2D array (still an array) to be rejected as a num"
+  );
+}
+
+test "a method's own generic type param constraint is still enforced against a real violation" {
+  rejects(
+    `compound Box<T> {
+    `  T value;
+    `}
+    `impl Box<T> {
+    `  pub sum_with<U: num | dec>(U other) U {
+    `    ret other + other;
+    `  }
+    `}
+    `fun main() num {
+    `  Box<num> b;
+    `  b.value = 1;
+    `  let bad = b.sum_with("bad");
+    `  ret 0;
+    `}`,
+    "expected the constraint violation to be rejected"
+  );
+}
+
+test "format()'s own {type} placeholders are checked against the arguments passed" {
+  rejects(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  str s = "hi";
+    `  ret format("{num}", s);
+    `}`,
+    "expected a str argument to be rejected against a {num} placeholder"
+  );
+  rejects(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{num} and {str}", 1);
+    `}`,
+    "expected too few arguments for two placeholders to be rejected"
+  );
+  accepts(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{num} and {str}", 1, "two");
+    `}`,
+    "expected matching count and types to be accepted"
+  );
+  accepts(
+    `pub fun format(str fmt, ...) str;
+    `fun main() str {
+    `  ret format("{\"range\":{\"start\":{num}}}", 1);
+    `}`,
+    "expected a JSON-shaped format string's own literal braces not to be misread as placeholders"
+  );
+}
+
+test "printf's own %-specifiers are checked against the arguments passed, bin widened to num" {
+  rejects(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  printf("%d\n", "not a number");
+    `  ret 0;
+    `}`,
+    "expected a str argument to be rejected against a %d specifier"
+  );
+  accepts(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  bin flag = true;
+    `  printf("%d\n", flag);
+    `  ret 0;
+    `}`,
+    "expected a bin argument accepted against %d, idiomatic C usage"
+  );
+  accepts(
+    `pub fun printf(str fmt, ...) num;
+    `fun main() num {
+    `  printf("%s = %lld\n", "count", 3);
+    `  ret 0;
+    `}`,
+    "expected a length-modified specifier (%lld) to still be recognized correctly"
+  );
+}
+
+test "a for loop's own two-variable form types a Map's key/value pair, not an always-num index" {
+  accepts(
+    `compound Map<K, V> {
+    `  K k;
+    `  V v;
+    `}
+    `fun main() num {
+    `  Map<str, num> scores;
+    `  for name, score :: scores {
+    `    str s = name;
+    `    num n = score;
+    `  }
+    `  ret 0;
+    `}`,
+    "expected the map's own key type on the first name and value type on the second"
+  );
+}
+
+test "a name declared twice at top level is rejected, even across different kinds" {
+  // Fun's transitive, non-scoped import model merges every declaration
+  // into one flat program before codegen, so two top-level names that
+  // collide - even a function and a global variable, never checked
+  // against each other before - reach the C compiler as the same
+  // symbol. User-reported (examples/error_cases/duplicate_symbols.fn):
+  // this used to sail through typechecking and crash with a raw
+  // "redefinition of 'x'" error from the C compiler instead of a real
+  // diagnostic.
+  str fn_vs_global = check(
+    `pub num x = 1;
+    `pub fun x() num { ret 2; }
+    `fun main() {}`
+  );
+  assert contains(fn_vs_global, "already declared"), "expected a function colliding with a global variable to be rejected";
+
+  // Two global variables sharing a name in the SAME file are already
+  // rejected earlier, by the parser's own scope tracking - covered
+  // separately, and not exercising this check at all. The gap this
+  // fixes is specifically cross-file (see the multi-file reproduction
+  // in examples/error_cases/duplicate_symbols.fn, where two files
+  // never share a parse pass to catch it that way).
+
+  str fn_vs_fn = check(
+    `pub fun z() num { ret 1; }
+    `pub fun z() num { ret 2; }
+    `fun main() {}`
+  );
+  assert contains(fn_vs_fn, "already declared"), "expected two functions sharing a name to be rejected even when neither is ever called";
+
+  str compound_vs_enum = check(
+    `compound W { num v; }
+    `enum W { A }
+    `fun main() {}`
+  );
+  assert contains(compound_vs_enum, "already declared"), "expected a compound colliding with an enum to be rejected";
+
+  accepts(
+    `pub num only_once = 1;
+    `pub fun distinct_name() num { ret 1; }
+    `fun main() {}`,
+    "expected two ordinarily distinct top-level names not to be flagged"
+  );
+}

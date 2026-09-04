@@ -1,173 +1,35 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "build",
-			"type": "shell",
-			"command": "zig build",
-			"problemMatcher": [],
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			}
-		},
-		{
-			"label": "test",
-			"type": "shell",
-			"command": "zig",
-			"args": [
-				"build",
-				"test"
-			],
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "zig test main_test.zig",
-			"type": "shell",
-			"command": "zig",
-			"args": [
-				"test",
-				"tests/main_test.zig"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test summary all",
-			"type": "shell",
-			"command": "zig",
-			"args": [
-				"build",
-				"test",
-				"--summary",
-				"all"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test verbose",
-			"type": "shell",
-			"command": "zig",
-			"args": [
-				"build",
-				"test",
-				"--verbose"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test capture log",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test capture log (refresh)",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test capture log (refresh 2)",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "zig test fls_e2e_test.zig",
-			"type": "shell",
-			"command": "zig",
-			"args": [
-				"test",
-				"tests/fls_e2e_test.zig",
-				"-ODebug"
-			],
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "zig test fls_e2e capture",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig test tests\\fls_e2e_test.zig -ODebug 2>&1\" | Tee-Object -FilePath .\\_fls_e2e_only_log.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "test capture log summary",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log3.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "test (kill fls first)",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; zig build test; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "test (kill fls first, capture log)",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log_fmtfix.txt; exit $LASTEXITCODE"
-			],
-			"isBackground": false,
-			"group": "test"
-		},
-		{
-			"label": "check fls processes",
-			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Get-Process fls -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-Table -AutoSize | Out-String -Width 200; exit 0"
-			],
-			"isBackground": false
-		}
-	]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "fun build",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "test",
+      "type": "shell",
+      "command": "${workspaceFolder}/fun-out/bin/fun",
+      "args": ["test", "src/tests"],
+      "isBackground": false,
+      "problemMatcher": [],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "format check",
+      "type": "shell",
+      "command": "${workspaceFolder}/fun-out/bin/fun",
+      "args": ["-fmt-check-all"],
+      "isBackground": false,
+      "problemMatcher": []
+    }
+  ]
 }

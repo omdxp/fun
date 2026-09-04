@@ -1,0 +1,217 @@
+// Finding what changed.
+// 
+// Re-reading a file costs in proportion to its length, which is why a
+// large file grows slow to edit while a small one stays instant. Almost
+// nothing changes between two keystrokes though: one declaration is
+// being typed in and every other one is the same text it was.
+// 
+// This finds where each top-level declaration starts and ends, so the
+// ones that did not change can be kept rather than read again. The scan
+// is over tokens rather than text, so a brace inside a string or a
+// comment cannot be mistaken for the end of a declaration.
+
+imp ..lexer.token;
+imp std.vec;
+imp std.string;
+
+// Where one top-level declaration sits: the tokens it spans, and the
+// lines it covers. The lines matter because a declaration kept from an
+// earlier read is only still correct where nothing above it changed
+// length.
+pub compound DeclRange {
+  num first_token;
+  // One past the last token, so an empty range is first == last.
+  num last_token;
+  num first_line;
+  num last_line;
+}
+
+// Every top-level declaration in `tokens`, in the order written.
+// 
+// A declaration begins at a token sitting outside every brace, bracket
+// and parenthesis, and runs until the next one begins. Whatever leads it
+// (a doc comment, `pub`, `async`) belongs to it, since a reader editing
+// a comment is editing that declaration.
+pub fun top_level_ranges(Vec<Token>* tokens) Vec<DeclRange> {
+  Vec<DeclRange> out;
+  out.init(16);
+
+  num depth = 0;
+  num started = -1;
+  bin inside = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+
+    if _opens(t) {
+      depth = depth + 1;
+      i = i + 1;
+      continue;
+    }
+    if _closes(t) {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      // The outermost closing brace ends the declaration it belongs to.
+      if depth == 0 && inside && _is_brace(t) {
+        _push_range(&out, tokens, started, i + 1);
+        inside = false;
+        started = -1;
+      }
+      i = i + 1;
+      continue;
+    }
+
+    if depth == 0 {
+      if !inside && _starts_declaration(t) {
+        // Whatever leads the declaration belongs to it: a reader editing
+        // its doc comment is editing that declaration.
+        started = _back_over_trivia(tokens, i);
+        inside = true;
+      } elif inside && token_is_symbol(t, ';') && _ends_without_brace(tokens, started, i) {
+        // One with no body of its own, an `imp` line or a bare binding,
+        // ends at its semicolon.
+        _push_range(&out, tokens, started, i + 1);
+        inside = false;
+        started = -1;
+      }
+    }
+    i = i + 1;
+  }
+
+  if inside && started >= 0 {
+    _push_range(&out, tokens, started, tokens.len);
+  }
+  ret out;
+}
+
+// The first token of the run of comments and blank lines leading the
+// declaration that starts at `at`.
+fun _back_over_trivia(Vec<Token>* tokens, num at) num {
+  num first = at;
+  num i = at - 1;
+  for i >= 0 {
+    if !_is_trivia(tokens.get(i)) {
+      break;
+    }
+    fit tokens.get(i).type {
+      .Comment -> { first = i; }
+      _ -> {}
+    }
+    i = i - 1;
+  }
+  ret first;
+}
+
+// The text `range` covers, which is what says whether it changed.
+pub fun range_text(str source, Vec<Token>* tokens, DeclRange range) str {
+  if range.first_token >= tokens.len || range.last_token <= range.first_token {
+    ret "";
+  }
+  num from = _offset_of(source, tokens.get(range.first_token).pos);
+  num to = len(source);
+  if range.last_token < tokens.len {
+    to = _offset_of(source, tokens.get(range.last_token).pos);
+  }
+  if from < 0 || to < from || to > len(source) {
+    ret "";
+  }
+  ret substr(source, from, to - from);
+}
+
+// The offset in `source` of a position given as a line and a column,
+// both counted from one, as the lexer counts them.
+fun _offset_of(str source, Pos p) num {
+  num line = 1;
+  num i = 0;
+  num n = len(source);
+  for i < n && line < p.line {
+    if source[i] == '\n' {
+      line = line + 1;
+    }
+    i = i + 1;
+  }
+  num col = 1;
+  for i < n && col < p.start_col {
+    if source[i] == '\n' {
+      ret i;
+    }
+    col = col + 1;
+    i = i + 1;
+  }
+  ret i;
+}
+
+fun _push_range(Vec<DeclRange>* out, Vec<Token>* tokens, num first, num last) {
+  if first < 0 || first >= tokens.len || last <= first {
+    ret;
+  }
+  DeclRange r;
+  r.first_token = first;
+  r.last_token = last;
+  r.first_line = tokens.get(first).pos.line;
+  num end = last - 1;
+  if end >= tokens.len {
+    end = tokens.len - 1;
+  }
+  Token final_token = tokens.get(end);
+  r.last_line = final_token.pos.end_line;
+  if r.last_line == 0 {
+    r.last_line = final_token.pos.line;
+  }
+  out.push(r);
+}
+
+// True when what was read from `started` up to `at` carries no brace of
+// its own, which is what tells a bodyless declaration from one whose
+// body is still being read.
+fun _ends_without_brace(Vec<Token>* tokens, num started, num at) bin {
+  num i = started;
+  for i < at {
+    if _is_brace(tokens.get(i)) {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// A word that can only begin a top-level declaration.
+fun _starts_declaration(Token t) bin {
+  fit t.type {
+    .Keyword -> {}
+    _ -> { ret false; }
+  }
+  fit t.data {
+    .Sval(word) -> {
+      fit word {
+        "imp", "pub", "fun", "async", "compound", "enum", "quirk", "impl", "const", "test",
+        "fuzz" -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    _ -> {}
+  }
+  ret false;
+}
+
+fun _is_brace(Token t) bin {
+  ret token_is_symbol(t, '{') || token_is_symbol(t, '}');
+}
+
+fun _opens(Token t) bin {
+  ret token_is_symbol(t, '{') || token_is_symbol(t, '(') || token_is_symbol(t, '[');
+}
+
+fun _closes(Token t) bin {
+  ret token_is_symbol(t, '}') || token_is_symbol(t, ')') || token_is_symbol(t, ']');
+}
+
+fun _is_trivia(Token t) bin {
+  fit t.type {
+    .Comment -> { ret true; }
+    .NewLine -> { ret true; }
+    _ -> {}
+  }
+  ret false;
+}

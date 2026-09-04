@@ -90,5 +90,5 @@ Fun maps `imp std.c.*;` imports to C standard headers during code generation. Ac
 
 Signature-only modules support tooling (IDE completion, future LSP).
 
-Installed location (via `zig build install`):
-- `share/fun/stdlib/std/c/*.fn`
+Installed location (via a release bundle or `fun build`):
+- `share/fun/std/c/*.fn`

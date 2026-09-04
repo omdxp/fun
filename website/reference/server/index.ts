@@ -16,7 +16,7 @@ app.use(express.json({ limit: "1mb" }));
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "../../..");
-const funBinary = path.join(repoRoot, "zig-out/bin/fun");
+const funBinary = path.join(repoRoot, "fun-out/bin/fun");
 const stdlibDir = path.join(repoRoot, "stdlib");
 const webDist = path.resolve(__dirname, "../dist");
 
@@ -114,7 +114,7 @@ app.post("/api/run", async (req, res) => {
     res.status(500).json({
       ok: false,
       error:
-        "Compiler binary not found at zig-out/bin/fun. Run `zig build` from repository root first.",
+        "Compiler binary not found at fun-out/bin/fun. Run `fun build` from repository root first.",
     });
     return;
   }

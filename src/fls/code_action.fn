@@ -1,0 +1,516 @@
+// Code actions.
+// 
+// Quick fixes offered for a diagnostic already reported: removing an
+// unused import outright, filling in a fit's missing arm or a quirk
+// impl's missing method, inserting a missing `await` or marking a
+// function `async`, or silencing any warning with the same `allow` a
+// reader could write by hand.
+
+imp protocol;
+imp documents;
+imp analysis;
+imp diagnostics;
+imp symbols;
+imp positions;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.c.mem;
+
+// The quick fixes available for `diags`, as the result a client is
+// sent.
+pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<Diagnostic>* diags) str {
+  Vec<str> lines = split(doc.text, '\n');
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < diags.len {
+    Diagnostic d = diags.get(i);
+    i = i + 1;
+    if d.severity == DIAG_SEVERITY_ERROR {
+      str error_fix = _quirk_stub_action(cache, doc, document_uri, d);
+      if equals(error_fix, "") {
+        error_fix = _insert_await_action(document_uri, doc.text, d);
+      }
+      if equals(error_fix, "") {
+        error_fix = _mark_async_action(cache, doc, document_uri, d);
+      }
+      if !equals(error_fix, "") {
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(error_fix);
+        free(error_fix);
+      }
+      continue;
+    }
+    if d.severity != DIAG_SEVERITY_WARNING {
+      continue;
+    }
+    str id_name = _warning_id_from_message(d.message);
+    if equals(id_name, "") {
+      continue;
+    }
+    if equals(id_name, "unused_import") && d.line >= 0 && d.line < lines.len {
+      if any {
+        b.append(",");
+      }
+      any = true;
+      str remove_line_text = _remove_line_action(document_uri, "Remove unused import", d.line);
+      b.append(remove_line_text);
+      free(remove_line_text);
+    }
+    if equals(id_name, "fit_non_exhaustive") {
+      str fit_fix = _fit_arm_action(cache, doc, document_uri, d);
+      if !equals(fit_fix, "") {
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(fit_fix);
+        free(fit_fix);
+      }
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    str allow_text = _allow_action(document_uri, d, id_name);
+    b.append(allow_text);
+    free(allow_text);
+    free(id_name);
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// The warning's own bare id: the part of `message` (formatted
+// "id_name: text" by `diagnose`) before the first colon.
+fun _warning_id_from_message(str message) str {
+  num sep = index_of_char(message, ':');
+  if sep < 0 {
+    ret "";
+  }
+  ret substr(message, 0, sep);
+}
+
+// Deletes line `line` (0-indexed) outright, including its own
+// trailing newline.
+fun _remove_line_action(str document_uri, str title, num line) str {
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":`);
+  json_quote_into(&b, title);
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(line);
+  b.append(`,"character":0},"end":{"line":`);
+  b.append_num(line + 1);
+  b.append(`,"character":0}},"newText":""}]}}}`);
+  ret b.build();
+}
+
+// Inserts `allow id_name;` right above the line the diagnostic points
+// at, the same suppression a reader could write by hand.
+fun _allow_action(str document_uri, Diagnostic d, str id_name) str {
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":`);
+  str allow_title = format("Silence with 'allow {str};'", id_name);
+  json_quote_into(&b, allow_title);
+  free(allow_title);
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(d.line);
+  b.append(`,"character":0},"end":{"line":`);
+  b.append_num(d.line);
+  b.append(`,"character":0}},"newText":`);
+  str allow_stmt = format("allow {str};\n", id_name);
+  json_quote_into(&b, allow_stmt);
+  free(allow_stmt);
+  b.append(`}]}}}`);
+  ret b.build();
+}
+
+// The quick fix for a "call to async ... needs await" error: inserts
+// `await ` right where the diagnostic itself points, which `fail`
+// always positions at the call's own start.
+fun _insert_await_action(str document_uri, str text, Diagnostic d) str {
+  if !contains(d.message, "needs await") {
+    ret "";
+  }
+  num character = byte_col_to_utf16_char(text, d.line, d.col);
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":"Insert 'await'","kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(d.line);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`},"end":{"line":`);
+  b.append_num(d.line);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`}},"newText":"await "}]}}}`);
+  ret b.build();
+}
+
+// The quick fix for an "await is only allowed in an async function"
+// error: inserts `async ` right before the enclosing function's own
+// `fun` keyword, found by scanning tokens for whichever function body
+// is still open at the diagnostic's own line.
+fun _mark_async_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  if !contains(d.message, "only allowed in an async function") {
+    ret "";
+  }
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "";
+  }
+  Vec<Token> tokens = read.tokens;
+  let found = enclosing_function_async_insert_pos(&tokens, d.line);
+  if found.is_none() {
+    ret "";
+  }
+  Pos p = found.unwrap();
+  num line0 = p.line - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
+  StringBuilder b = string_builder_init(160);
+  b.append(`{"title":"Mark enclosing function async","kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`},"end":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`}},"newText":"async "}]}}}`);
+  ret b.build();
+}
+
+// The enum and variant `diagnose()`'s own `fit does not handle
+// 'Enum.Variant'` message names, parsed straight out of the quoted
+// text between the single quotes.
+compound EnumVariantRef {
+  str enum_name;
+  str variant_name;
+}
+
+// The quick fix for a `fit does not handle 'Enum.A', 'Enum.B', ...`
+// diagnostic: a stub arm (`.Variant -> {}`, or `.Variant(v0, v1) ->
+// {}` for a data-carrying variant) for every variant the message
+// names, inserted together right before the fit's own closing brace.
+// "" when the message names none, or the enclosing fit's closing
+// brace can't be found.
+fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  Vec<EnumVariantRef> refs = _enum_and_variants_from_message(d.message);
+  defer refs.free();
+  if refs.len == 0 {
+    ret "";
+  }
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret "";
+  }
+  // A stub's own shape only needs each variant's payload arity, not
+  // its concrete types, so no generic args are resolved here.
+  Vec<str> no_args;
+  no_args.init(0);
+
+  StringBuilder arms = string_builder_init(64);
+  defer arms.free();
+  StringBuilder title_names = string_builder_init(32);
+  defer title_names.free();
+  num written = 0;
+  num ri = 0;
+  for ri < refs.len {
+    EnumVariantRef ev = refs.get(ri);
+    ri = ri + 1;
+    let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
+    if variant.is_none() {
+      continue;
+    }
+    num arity = _payload_arity(variant.unwrap().detail);
+    str arm_line = format("  {str}\n", _stub_arm(ev.variant_name, arity));
+    arms.append(arm_line);
+    free(arm_line);
+    if written > 0 {
+      title_names.append(", ");
+    }
+    str name_ref = format("'{str}.{str}'", ev.enum_name, ev.variant_name);
+    title_names.append(name_ref);
+    free(name_ref);
+    written = written + 1;
+  }
+  if written == 0 {
+    ret "";
+  }
+
+  Vec<Token> tokens = read.tokens;
+  let close = _find_block_close(&tokens, d.line);
+  if close.is_none() {
+    ret "";
+  }
+  Pos p = close.unwrap();
+  num line0 = p.line - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
+  str names_text = title_names.build();
+  str title = format("Fill in missing {str} arm", names_text);
+  if written > 1 {
+    free(title);
+    title = format("Fill in missing {str} arms", names_text);
+  }
+  free(names_text);
+  StringBuilder b = string_builder_init(192);
+  b.append(`{"title":`);
+  json_quote_into(&b, title);
+  free(title);
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`},"end":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`}},"newText":`);
+  str arms_text = arms.build();
+  json_quote_into(&b, arms_text);
+  free(arms_text);
+  b.append(`}]}}}`);
+  ret b.build();
+}
+
+// Every `'Enum.Variant'`-shaped reference the message names, in the
+// order it lists them.
+fun _enum_and_variants_from_message(str message) Vec<EnumVariantRef> {
+  Vec<EnumVariantRef> out;
+  out.init(2);
+  str rest = message;
+  for true {
+    num open_q = index_of_char(rest, '\'');
+    if open_q < 0 {
+      break;
+    }
+    str after_open = substr(rest, open_q + 1, len(rest) - open_q - 1);
+    num close_q = index_of_char(after_open, '\'');
+    if close_q < 0 {
+      break;
+    }
+    str inner = substr(after_open, 0, close_q);
+    num dot = index_of_char(inner, '.');
+    if dot >= 0 {
+      EnumVariantRef ev;
+      ev.enum_name = substr(inner, 0, dot);
+      ev.variant_name = substr(inner, dot + 1, len(inner) - dot - 1);
+      out.push(ev);
+    }
+    rest = substr(after_open, close_q + 1, len(after_open) - close_q - 1);
+  }
+  ret out;
+}
+
+// How many payload types `detail` (a variant's own rendered
+// "Variant(Type1, Type2)") names: the count of top-level commas plus
+// one, or 0 when the variant carries no payload at all (no parens in
+// the detail).
+fun _payload_arity(str detail) num {
+  num open = index_of_char(detail, '(');
+  if open < 0 {
+    ret 0;
+  }
+  num close = last_index_of_char(detail, ')');
+  if close <= open + 1 {
+    ret 0;
+  }
+  str inner = substr(detail, open + 1, close - open - 1);
+  num n = 1;
+  num depth = 0;
+  num i = 0;
+  num len_inner = len(inner);
+  for i < len_inner {
+    chr c = inner[i];
+    if c == '<' || c == '(' {
+      depth = depth + 1;
+    } elif c == '>' || c == ')' {
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  ret n;
+}
+
+// `.Name -> {}` for a plain variant, `.Name(v0, v1, ...) -> {}` for
+// one carrying `arity` payload values.
+fun _stub_arm(str variant_name, num arity) str {
+  StringBuilder b = string_builder_init(32);
+  b.append(".");
+  b.append(variant_name);
+  if arity > 0 {
+    b.append("(");
+    num i = 0;
+    for i < arity {
+      if i > 0 {
+        b.append(", ");
+      }
+      b.append("v");
+      b.append_num(i);
+      i = i + 1;
+    }
+    b.append(")");
+  }
+  b.append(" -> {}");
+  ret b.build();
+}
+
+// The method and quirk names out of `diagnose()`'s own "'Type' does
+// not supply 'method', which 'Quirk' requires" message: its second
+// and third single-quoted segments.
+compound QuirkConformanceRef {
+  str method_name;
+  str quirk_name;
+}
+
+// The quick fix for a "does not supply" quirk-conformance error: a
+// stub method (`pub name(args) rtype { // TODO: implement }`) with
+// the exact signature the quirk itself declares, inserted right
+// before the impl block's own closing brace. "" when the message
+// isn't shaped that way, the quirk or method can't be found, or the
+// enclosing impl block's closing brace can't be found.
+fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  let parsed = _quirk_conformance_from_message(d.message);
+  if parsed.is_none() {
+    ret "";
+  }
+  QuirkConformanceRef qc = parsed.unwrap();
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret "";
+  }
+  let method = quirk_method_declaration(&read.program.nodes, qc.quirk_name, qc.method_name);
+  if method.is_none() {
+    ret "";
+  }
+  Vec<Token> tokens = read.tokens;
+  let close = _find_block_close(&tokens, d.line);
+  if close.is_none() {
+    ret "";
+  }
+  Pos p = close.unwrap();
+  num line0 = p.line - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
+  StringBuilder b = string_builder_init(192);
+  b.append(`{"title":`);
+  str impl_title = format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name);
+  json_quote_into(&b, impl_title);
+  free(impl_title);
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`},"end":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`}},"newText":`);
+  str stub_text = format(
+    "  pub {str} {\n    // TODO: implement\n  }\n",
+    method.unwrap().detail
+  );
+  json_quote_into(&b, stub_text);
+  free(stub_text);
+  b.append(`}]}}}`);
+  ret b.build();
+}
+
+fun _quirk_conformance_from_message(str message) Option<QuirkConformanceRef> {
+  if !contains(message, "does not supply") || !contains(message, "requires") {
+    ret .None;
+  }
+  // Segment 1 is the impl's own type name, which this fix has no use
+  // for; only the method (segment 2) and quirk (segment 3) matter.
+  num q1 = index_of_char(message, '\'');
+  if q1 < 0 {
+    ret .None;
+  }
+  str after1 = substr(message, q1 + 1, len(message) - q1 - 1);
+  num q2 = index_of_char(after1, '\'');
+  if q2 < 0 {
+    ret .None;
+  }
+  str rest1 = substr(after1, q2 + 1, len(after1) - q2 - 1);
+  num q3 = index_of_char(rest1, '\'');
+  if q3 < 0 {
+    ret .None;
+  }
+  str after3 = substr(rest1, q3 + 1, len(rest1) - q3 - 1);
+  num q4 = index_of_char(after3, '\'');
+  if q4 < 0 {
+    ret .None;
+  }
+  str method_name = substr(after3, 0, q4);
+
+  str rest2 = substr(after3, q4 + 1, len(after3) - q4 - 1);
+  num q5 = index_of_char(rest2, '\'');
+  if q5 < 0 {
+    ret .None;
+  }
+  str after5 = substr(rest2, q5 + 1, len(rest2) - q5 - 1);
+  num q6 = index_of_char(after5, '\'');
+  if q6 < 0 {
+    ret .None;
+  }
+  str quirk_name = substr(after5, 0, q6);
+
+  QuirkConformanceRef qc;
+  qc.method_name = method_name;
+  qc.quirk_name = quirk_name;
+  ret .Some(qc);
+}
+
+// The position right before the closing `}` of the block whose
+// opening `{` is the first one found at or after `diag_line`
+// (0-indexed): the fit statement's own body when `diag_line` is a
+// `fit_non_exhaustive` warning's own position, or the impl block's
+// own body when it is a quirk-conformance error's, since that's
+// exactly where each diagnostic's own position points.
+fun _find_block_close(Vec<Token>* tokens, num diag_line) Option<Pos> {
+  num source_line = diag_line + 1;
+  bin found_open = false;
+  num depth = 0;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if !found_open {
+      if t.pos.line < source_line {
+        continue;
+      }
+      if token_is_symbol(t, '{') {
+        found_open = true;
+        depth = 1;
+      }
+      continue;
+    }
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '}') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(t.pos);
+      }
+    }
+  }
+  ret .None;
+}

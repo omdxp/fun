@@ -55,7 +55,7 @@ function resolveExe(
   const trimmed = stripOuterQuotes(configured ?? "");
   const expanded = expandWindowsEnvVars(expandWorkspaceVars(trimmed, root));
 
-  // If user left it as default, try workspace-local zig-out first.
+  // If user left it as default, try workspace-local fun-out first.
   if (!expanded || expanded === "fls" || expanded === "fun") {
     if (root) {
       const candidate = path.join(root, defaultRel);
@@ -219,7 +219,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
   const config = vscode.workspace.getConfiguration("fun");
   const funCfg = config.get<string>("fls.funPath", "");
   const stdlibCfg = config.get<string>("fls.stdlibDir", "");
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
   const funPath = resolveExe(funCfg, root, funDefaultRel);
 
   const existingStdlibRaw =
@@ -256,7 +256,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
       : "") ||
     (root
       ? deriveStdlibDirFromExe(
-          path.join(root, "zig-out", "bin", platformExeName("fun")),
+          path.join(root, "fun-out", "bin", platformExeName("fun")),
         )
       : "");
 
@@ -269,7 +269,7 @@ function buildFunEnv(root: string | undefined): Record<string, string> {
 function resolveFunCompilerExe(root: string | undefined): string {
   const config = vscode.workspace.getConfiguration("fun");
   const funCfg = config.get<string>("fls.funPath", "");
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
   const resolved = resolveExe(funCfg, root, funDefaultRel);
   return resolved || "fun";
 }
@@ -574,8 +574,8 @@ function createClient(output: vscode.LogOutputChannel): LanguageClient {
   const debugImports = config.get<boolean>("fls.debugImports", false);
   const debugDefinitions = config.get<boolean>("fls.debugDefinitions", false);
 
-  const flsDefaultRel = path.join("zig-out", "bin", platformExeName("fls"));
-  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const flsDefaultRel = path.join("fun-out", "bin", platformExeName("fls"));
+  const funDefaultRel = path.join("fun-out", "bin", platformExeName("fun"));
 
   const flsResolved = resolveExe(flsCfg, root, flsDefaultRel);
   const flsPath = flsResolved;
@@ -1014,6 +1014,54 @@ export function activate(context: vscode.ExtensionContext) {
         const escapedName = fuzzName.replace(/(["\\$`])/g, "\\$1");
         runTerminal.sendText(
           `"${funExe}" -in "${fileUri.fsPath}" -fuzz -fuzz-target "${escapedName}"`,
+        );
+      },
+    ),
+  );
+
+  // Bridges the "N references" code lens to the built-in references
+  // view. fls's own arguments are plain JSON (an LSP Command carries
+  // no richer shape than that), but editor.action.showReferences
+  // validates its own arguments by type (instanceof Uri/Position) and
+  // rejects a plain object outright -- this wrapper is what actually
+  // constructs those before handing off to it.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.showReferences",
+      async (
+        uriStr: string,
+        position: { line: number; character: number },
+        locations: {
+          uri: string;
+          range: {
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+          };
+        }[],
+      ) => {
+        const uri = vscode.Uri.parse(uriStr);
+        const pos = new vscode.Position(position.line, position.character);
+        const vsLocations = locations.map(
+          (loc) =>
+            new vscode.Location(
+              vscode.Uri.parse(loc.uri),
+              new vscode.Range(
+                new vscode.Position(
+                  loc.range.start.line,
+                  loc.range.start.character,
+                ),
+                new vscode.Position(
+                  loc.range.end.line,
+                  loc.range.end.character,
+                ),
+              ),
+            ),
+        );
+        await vscode.commands.executeCommand(
+          "editor.action.showReferences",
+          uri,
+          pos,
+          vsLocations,
         );
       },
     ),

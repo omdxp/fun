@@ -1,0 +1,11 @@
+[package]
+name = "fun"
+version = "0.50.0"
+
+[[exe]]
+name = "fun"
+path = "src/cli/main.fn"
+
+[[exe]]
+name = "fls"
+path = "src/fls/main.fn"

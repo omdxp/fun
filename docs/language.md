@@ -208,9 +208,9 @@ payload; payload-free variants still coexist.
       assert add(2, 3) == 5, "expected 5";
     }
     ```
-- **Ignored by an ordinary compile**: matching `zig build` vs `zig test`, `fun -in
-  file.fn` never type-checks or emits `test` blocks at all — a test referencing
-  something broken doesn't stop the normal program from compiling.
+- **Ignored by an ordinary compile**: `fun -in file.fn` never type-checks or
+  emits `test` blocks at all, so a test referencing something broken doesn't
+  stop the normal program from compiling.
 - **Running tests**: `fun test <path>` (shorthand for `fun -in <path> -test`)
   compiles `test` blocks into a runner and runs it. Every discovered test runs
   CONCURRENTLY (each dispatched onto its own virtual task, via the same
@@ -220,6 +220,11 @@ payload; payload-free variants still coexist.
 - **Filtering to one test**: `fun test <path> -- "exact name"` runs just the
   matching test(s) instead of the whole file — what an editor's per-test
   "Run"/"Debug" button uses under the hood, needing no separate flag.
+- **Running every test in a project**: `fun test` (no path) or `fun test <dir>`
+  discovers every `.fn` file under that root declaring a `test` block, compiles
+  and runs each one in its own pass, and prints an aggregate `== <file> ==`
+  header per file plus a final `N/N test files passed` summary. `fun test
+  <file.fn>` keeps compiling and running just that one file, unchanged.
 - **Failure semantics**: a failing `assert` inside a test is caught and reported
   as `FAIL` — it does NOT abort the run, so every other test still executes.
   `panic`, by contrast, still aborts the whole process outright (no per-test
@@ -316,6 +321,20 @@ payload; payload-free variants still coexist.
   flags, but whether the runtime is reliably bundled and the result actually
   runs correctly on Windows is genuinely unknown — treat it as "might work,"
   not confirmed.
+- **Running every fuzz target in a project**: `fun fuzz` (no path) or `fun
+  fuzz <dir>` discovers every `.fn` file under that root declaring one or
+  more `fuzz` targets and runs each for a short, bounded budget
+  (`FUN_FUZZ_DEFAULT_SECONDS`, default 30s) instead of the open-ended
+  campaign a single named target normally gets. This form is for a CI-style
+  "did anything regress" sweep, not a real fuzzing session — a target that
+  survives its whole budget with nothing found counts as clean, exactly like
+  a target that stops early on its own. Because the fuzzing engine's own
+  `-max_total_time` flag isn't reliable in every environment, the budget is
+  enforced independently: a watchdog force-kills a target's process if it's
+  still running when the budget elapses, and that alone is never treated as
+  a failure (only an actual crash is). A target name only makes sense
+  alongside one specific file, so this form never takes one; `fun fuzz
+  <file.fn> [target]` keeps its existing open-ended single-target behavior.
 
 ### Build Manifest (`fun.toml`)
 - **Declares build targets, not an import graph**: `imp` already does path-based
@@ -334,10 +353,10 @@ payload; payload-free variants still coexist.
   supported (e.g. mirroring this repo's own `fun` + `fls` binaries).
 - **`fun build`**: reads `./fun.toml`, compiles every `[[exe]]` target, and
   installs the resulting binaries under `fun-out/bin/`. Unlike `fun -in
-  file.fn`, nothing is run afterward — matching `zig build` (compile only).
+  file.fn`, nothing is run afterward: `fun build` only ever compiles.
 - Only a narrow TOML subset is supported: no nested tables, no arrays of
   scalars, no multi-line/escaped strings — just what a package name/version
-  and a flat list of binary targets need.
+  and a flat list of executable targets need.
 
 ### Async / Await
 - **Async function declaration**: `async fun name(args) type { ... }`
@@ -369,13 +388,27 @@ async fun main() {
 
 ### Concurrency: virtual threads (`fork`) & channels
 - **`fork <call>;`** spawns a *virtual thread* — a fire-and-forget task that runs
-  on a runtime **M:N scheduler**: a small pool of OS worker threads (sized to the
-  CPU count) multiplexes many cheap `fork` tasks. The target is an `async fun`.
-  `fork` returns nothing; results flow back through channels.
+  on a runtime **M:N scheduler**: a pool of OS worker threads multiplexes many
+  cheap `fork` tasks. The target is an `async fun`. `fork` returns nothing;
+  results flow back through channels.
 - **Automatic drain**: `main` blocks until every `fork`ed task has completed before
   it returns, so spawned work always finishes.
 - **Cooperative**: a task that blocks on a channel op holds its worker (the yield
   points are the blocking primitives). It is not preemptive.
+- **Elastic worker pool**: the scheduler starts with a base pool sized to the CPU
+  count, but a task that blocks inside a blocking primitive (a channel op, a
+  `Mutex`, a `WaitGroup`) doesn't starve the rest of the program — the scheduler
+  spins up an extra worker whenever none is idle and the pool has room to grow
+  (default cap 4096, override with the `FUN_SCHED_MAX_WORKERS` env var). Idle
+  workers above the base pool retire after 10 seconds of nothing to do, so a
+  burst of blocking work doesn't leave the process holding hundreds of threads
+  open indefinitely.
+- **`std.sync.Mutex`/`CondVar`**: `mutex_new()`/`condvar_new()` initialize
+  eagerly at construction, which is the safe form to use when the value will be
+  shared across threads (e.g. captured by multiple `fork`ed tasks) — a value
+  that only ever sees single-threaded use may rely on the lazy fallback in
+  `lock`/`wait`, but a fresh `Mutex`/`CondVar` several tasks might lock/wait on
+  concurrently for the first time should always come from `_new()`.
 - **Channel operators** (sugar over `std.channel`):
   - `ch <- v` — send `v` into `ch` (equivalent to `ch.send(v)`).
   - `<-ch` — receive from `ch` (equivalent to `ch.recv()`, lossy; use
@@ -409,6 +442,10 @@ async fun main() {
     ```
 - **`std.task` WaitGroup**: wait for a batch of `fork`ed tasks. `wait_group_new(n)`,
   each task calls `wg.done()`, and `wg.wait()` blocks until all `n` complete.
+  Its completion count is guarded by its own internal `Mutex`, so `add()` is
+  safe to call concurrently from multiple already-forked tasks (growing the
+  group for their own children), and `wait()` never returns before every
+  expected `done()` has actually landed.
 
 Example:
 ```fun
@@ -467,7 +504,7 @@ fun main() num {
 - **Direct Mapping**: `imp std.c.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
 - **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
-- **Compiler selection**: `fun` uses `zig cc` by default. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
+- **Compiler selection**: `fun` tries `clang`, then `gcc`, then the platform's default `cc` (`cl` on Windows), using the first one it finds on `PATH`. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
 
 ### Standard Library Highlights
 - **std.io**: file helpers + `print`/`println`/`print_num`/`print_dec`/`print_bin`

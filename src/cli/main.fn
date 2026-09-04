@@ -1,0 +1,200 @@
+// Compiler entry point: reads the command line, lowers the input to C,
+// then builds and runs it unless asked not to.
+
+imp driver;
+imp std.string;
+imp std.io;
+imp std.fs;
+imp std.vec;
+
+fun _fail(str msg) num {
+  writeln_to(Sink.Stderr, format(`[Error]
+  `{str}`, msg));
+  ret 1;
+}
+
+fun main(str[] args) num {
+  // A totally bare invocation is a request for usage, not an error --
+  // anything past the program name that still fails to resolve an input
+  // falls through to the `opts.input == ""` case below instead, which is
+  // a real error.
+  if args[1] == 0 {
+    println(help_text());
+    ret 0;
+  }
+
+  Options opts = parse_args(args);
+  defer opts.free();
+
+  if opts.has_error {
+    ret _fail(opts.error_text);
+  }
+  if opts.show_version {
+    // `PACKAGE_VERSION` is not declared in this file: `fun build` injects
+    // it as a top-level const ahead of every target it compiles, taken
+    // from this repository's own fun.toml, so the compiled binary
+    // reports its own release version rather than re-reading a
+    // manifest at runtime (which could be some unrelated project's).
+    println(PACKAGE_VERSION);
+    ret 0;
+  }
+  if opts.show_help {
+    println(help_text());
+    ret 0;
+  }
+  // Checked once, ahead of every dispatch branch below (test/fuzz
+  // included, both spellings) rather than only the plain-compile
+  // fallthrough at the bottom of this function - `-ast -test` used to
+  // silently print nothing at all, since run_tests/run_fuzz return
+  // before ever reaching that check. Guarded the same way a single
+  // real input file already has to be for any of those branches to do
+  // anything; a directory-suite form (no single file, an empty/invalid
+  // `-in`) has no one AST to print, so it's simply skipped here rather
+  // than special-cased.
+  if opts.show_ast && !equals(opts.input, "") && ends_with(opts.input, ".fn") &&
+    exists(opts.input) {
+    print_ast_for(opts.input);
+  }
+  if equals(opts.subcommand, "build") {
+    ret build_project(opts.debug_info, &opts.defines);
+  }
+  if equals(opts.subcommand, "init") {
+    ret init_project(opts.input);
+  }
+  if equals(opts.subcommand, "test") {
+    // No path, or a path that names a directory rather than a `.fn`
+    // file, runs every `test` block found under that root instead of a
+    // single file. `fun test some_file.fn` keeps compiling and running
+    // just that one file.
+    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") ||
+      is_dir(opts.input);
+    if is_dir_form {
+      str root = opts.input;
+      if equals(root, "") {
+        root = ".";
+      }
+      ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines);
+    }
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+  }
+  if equals(opts.subcommand, "fuzz") {
+    // No path, or a path that names a directory rather than a `.fn`
+    // file, runs every `fuzz` target found under that root instead of a
+    // single file, each bounded to a short default budget rather than
+    // fuzzing's normal open-ended campaign. A target name only makes
+    // sense alongside a specific file, so this form never takes one.
+    bin is_dir_form = equals(opts.input, "") || !ends_with(opts.input, ".fn") ||
+      is_dir(opts.input);
+    if is_dir_form {
+      str root = opts.input;
+      if equals(root, "") {
+        root = ".";
+      }
+      ret run_fuzz_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines);
+    }
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+  }
+  // `-test`/`-fuzz` given directly alongside `-in`, rather than through
+  // the `test`/`fuzz` subcommand spellings above.
+  if opts.test_flag {
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+  }
+  if opts.fuzz_flag {
+    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+  }
+  // Scanning a tree needs no input file: the working directory is the
+  // root when none is named.
+  if opts.fmt_check_all {
+    Vec<str> offenders = collect_unformatted(opts.input);
+    defer offenders.free();
+    num i = 0;
+    for i < offenders.len {
+      writeln_to(Sink.Stderr, offenders.get(i));
+      i = i + 1;
+    }
+    if offenders.len > 0 {
+      ret 1;
+    }
+    ret 0;
+  }
+
+  if equals(opts.input, "") {
+    println(help_text());
+    ret 1;
+  }
+  if !ends_with(opts.input, ".fn") {
+    ret _fail(format("input file must have a .fn extension: {str}", opts.input));
+  }
+  if !exists(opts.input) {
+    ret _fail(format("no such file: {str}", opts.input));
+  }
+
+  if opts.fmt_check {
+    if format_file_is_clean(opts.input) {
+      ret 0;
+    }
+    writeln_to(Sink.Stderr, opts.input);
+    ret 1;
+  }
+  if opts.fmt_all {
+    let done = format_file_and_imports(opts.input);
+    if done.is_err() {
+      ret _fail(done.unwrap_err());
+    }
+    ret 0;
+  }
+  if opts.fmt_diag {
+    // Rewritten in place, then falls through so diagnostics still run:
+    // what fls shells out to, to combine formatting and diagnostics in
+    // one call. A format failure here is not itself fatal -- the
+    // diagnostics that follow report anything actually wrong.
+    format_file(opts.input);
+  }
+  if opts.fmt && !opts.fmt_diag {
+    let done = format_file(opts.input);
+    if done.is_err() {
+      ret _fail(done.unwrap_err());
+    }
+    ret 0;
+  }
+
+  // `-out` names the generated C file, defaulting to the input's own
+  // name with a `.c` extension.
+  str c_path = opts.output;
+  if equals(c_path, "") {
+    c_path = default_c_path(opts.input, ".c");
+  }
+  Vec<Define> all_defines = resolved_defines(&opts.defines);
+  defer all_defines.free();
+  let lowered = compile_to_c_mode(
+    opts.input,
+    c_path,
+    &all_defines,
+    false,
+    opts.warn_unused,
+    false,
+    "",
+    opts.debug_info,
+    opts.warn_unused_lenient
+  );
+  if lowered.is_err() {
+    ret _fail(lowered.unwrap_err());
+  }
+
+  // `-no-exec` stops at the C, which is the artifact it was asked for.
+  if opts.no_exec {
+    ret 0;
+  }
+
+  str exe_path = default_exe_path(opts.input, "");
+
+  let cc_code = compile_c_to_exe(c_path, exe_path, opts.debug_info);
+  if !opts.keep_c {
+    remove_file(c_path);
+  }
+  if cc_code != 0 {
+    ret _fail("the C compiler rejected the generated program");
+  }
+
+  ret run_exe(exe_path, &opts.program_args);
+}

@@ -1,0 +1,469 @@
+// Document symbols.
+// 
+// What a file declares, in the order it declares it, so a client can
+// show an outline and jump around by name.
+// 
+// `textDocument/documentSymbol` is sent as the protocol's own nested
+// `DocumentSymbol` tree (a field/variant/quirk-method-signature under
+// its own compound/enum/quirk, an impl's own method under whichever
+// compound or enum it targets), not the flat, deprecated
+// `SymbolInformation` form: a client would otherwise have to guess the
+// same tree back from a flat list's ranges, which is exactly the
+// "fields and methods don't show under their compound" bug this once
+// was - two entries at the very same position (a field and its
+// compound, which carried no position of its own before) gave a client
+// nothing reliable to guess containment from. Every mainstream client
+// (this project targets) supports the nested form; `workspace/symbol`
+// has no such nested variant in the protocol at all, so `workspace_symbols`
+// below stays flat.
+
+imp documents;
+imp analysis;
+imp symbols;
+imp symbol_table;
+imp positions;
+imp protocol;
+imp ..ast.ast;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.c.mem;
+
+// What a client is told a symbol is. The values are the protocol's own
+// numbering, which is why they are written out rather than counted from
+// zero; only the kinds this file reports are listed.
+enum OutlineKind {
+  Method = 6,
+  Field = 8,
+  Enumeration = 10,
+  Interface = 11,
+  Function = 12,
+  Variable = 13,
+  Constant = 14,
+  EnumMember = 22,
+  Struct = 23,
+}
+
+// One entry in the outline: a `DocumentSymbol`. `range` and
+// `selectionRange` are the same span (the name itself) - nothing in the
+// AST tracks a whole declaration's own end position (where its closing
+// brace sits) to report a wider one, and the protocol only requires
+// `range` to contain `selectionRange`, which a single span trivially
+// does.
+compound OutlineEntry {
+  str name;
+  OutlineKind kind;
+  Pos pos;
+  Vec<OutlineEntry> children;
+}
+
+// Everything `doc` declares, as the nested `DocumentSymbol[]` tree the
+// protocol's own hierarchical form expects.
+pub fun document_symbols(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
+    ret "[]";
+  }
+  ProgramMergeResult program = read.program;
+
+  Vec<OutlineEntry> found;
+  found.init(16);
+  defer found.free();
+  _collect(&program.entry_nodes, doc.path, &found);
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  num i = 0;
+  for i < found.len {
+    if i > 0 {
+      b.append(",");
+    }
+    _write_entry(&b, found.get(i), doc.text);
+    i = i + 1;
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// Writes one `DocumentSymbol`, recursing into its own `children`.
+fun _write_entry(StringBuilder* b, OutlineEntry s, str text) {
+  Span span = span_of_pos(s.pos, len(s.name), text);
+  b.append(`{"name":`);
+  json_quote_into(b, s.name);
+  b.append(`,"kind":`);
+  b.append_num(s.kind);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"selectionRange":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"children":[`);
+  num i = 0;
+  for i < s.children.len {
+    if i > 0 {
+      b.append(",");
+    }
+    _write_entry(b, s.children.get(i), text);
+    i = i + 1;
+  }
+  b.append("]}");
+}
+
+// `d`'s own protocol `SymbolKind`, mirroring `_collect`'s own
+// per-node-kind mapping: a `Function` with a `container` is really a
+// method, a `Global` reads `Variable`/`Constant` off its own rendered
+// `"const "` prefix (the same detail `lookup_top_level`'s own
+// Variable case writes it with).
+fun _outline_kind_for(Declaration d) OutlineKind {
+  fit d.kind {
+    .Function -> {
+      if !equals(d.container, "") {
+        ret .Method;
+      }
+      ret .Function;
+    }
+    .Compound -> { ret .Struct; }
+    .Enum -> { ret .Enumeration; }
+    .Quirk -> { ret .Interface; }
+    .Field -> { ret .Field; }
+    .Variant -> { ret .EnumMember; }
+    .Global -> {
+      if starts_with(d.detail, "const ") {
+        ret .Constant;
+      }
+      ret .Variable;
+    }
+    _ -> { ret .Variable; }
+  }
+}
+
+// Every symbol across the whole indexed workspace whose name contains
+// `query` (case-insensitively; an empty query matches everything), as
+// the result a client is sent. Queries the persistent `symbols`
+// table (kept current by `WorkspaceSymbolTable.ensure_all`) rather than
+// re-walking every document's own AST on every request.
+pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbolTable* symbols, str query) str {
+  symbols.ensure_all(cache, docs);
+  str lower_query = to_lower(query);
+  Vec<str> names = symbols.by_name.keys();
+  defer names.free();
+
+  // Every name worth showing, scored (exact > prefix > substring >
+  // fuzzy subsequence) and sorted best-first, rather than emitted in
+  // whatever order the table's own map happens to iterate.
+  Vec<str> matched;
+  matched.init(names.len);
+  defer matched.free();
+  Vec<num> scores;
+  scores.init(names.len);
+  defer scores.free();
+  num ni = 0;
+  for ni < names.len {
+    str name = names.get(ni);
+    ni = ni + 1;
+    num score = _symbol_match_score(to_lower(name), lower_query);
+    if score <= 0 {
+      continue;
+    }
+    matched.push(name);
+    scores.push(score);
+  }
+  num si = 1;
+  for si < matched.len {
+    str name_key = matched.get(si);
+    num score_key = scores.get(si);
+    num sj = si - 1;
+    for sj >= 0 && scores.get(sj) < score_key {
+      matched.set(sj + 1, matched.get(sj));
+      scores.set(sj + 1, scores.get(sj));
+      sj = sj - 1;
+    }
+    matched.set(sj + 1, name_key);
+    scores.set(sj + 1, score_key);
+    si = si + 1;
+  }
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num mi = 0;
+  for mi < matched.len {
+    str name = matched.get(mi);
+    mi = mi + 1;
+    let bucket_opt = symbols.by_name.at(name);
+    if bucket_opt.is_none() {
+      continue;
+    }
+    Vec<IndexedDeclaration> bucket = bucket_opt.unwrap();
+    num i = 0;
+    for i < bucket.len {
+      IndexedDeclaration entry = bucket.get(i);
+      i = i + 1;
+      let held = docs.at(entry.uri);
+      if held.is_none() {
+        continue;
+      }
+      Document doc = held.unwrap();
+      if any {
+        b.append(",");
+      }
+      any = true;
+      Span span = span_of_pos(entry.decl.pos, len(entry.decl.name), doc.text);
+      b.append(`{"name":`);
+      json_quote_into(&b, entry.decl.name);
+      b.append(`,"kind":`);
+      b.append_num(_outline_kind_for(entry.decl));
+      b.append(`,"containerName":`);
+      json_quote_into(&b, entry.decl.container);
+      b.append(`,"location":{"uri":`);
+      json_quote_into(&b, entry.uri);
+      b.append(`,"range":{"start":{"line":`);
+      b.append_num(span.line);
+      b.append(`,"character":`);
+      b.append_num(span.start);
+      b.append(`},"end":{"line":`);
+      b.append_num(span.line);
+      b.append(`,"character":`);
+      b.append_num(span.end);
+      b.append("}}}}");
+    }
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// `lower_name`'s own match strength against `lower_query` (both
+// already lowercased), higher is better: exact, then a prefix, then
+// an ordinary substring, then a fuzzy subsequence (every character of
+// the query appears in the name, in order, not necessarily
+// contiguous - "wst" matches "WorkspaceSymbolTable"). 0 for no match
+// at all. An empty query matches everything equally, the same "show
+// the whole workspace" behavior a blank search box already implies.
+fun _symbol_match_score(str lower_name, str lower_query) num {
+  if equals(lower_query, "") {
+    ret 1;
+  }
+  if equals(lower_name, lower_query) {
+    ret 1000;
+  }
+  if starts_with(lower_name, lower_query) {
+    ret 500;
+  }
+  if contains(lower_name, lower_query) {
+    ret 250;
+  }
+  if _is_subsequence(lower_query, lower_name) {
+    ret 100;
+  }
+  ret 0;
+}
+
+fun _is_subsequence(str needle, str haystack) bin {
+  num ni = 0;
+  num hi = 0;
+  num nlen = len(needle);
+  num hlen = len(haystack);
+  for ni < nlen && hi < hlen {
+    if needle[ni] == haystack[hi] {
+      ni = ni + 1;
+    }
+    hi = hi + 1;
+  }
+  ret ni == nlen;
+}
+
+// What `nodes` declares in `file`, in source order, as a tree - a
+// field under its own compound, a variant under its own enum, a
+// method-signature under its own quirk, an impl's own method under
+// whichever compound or enum it targets. Only the file's own top-level
+// declarations are listed: what it imports belongs to the outline of
+// the file that declares it.
+// 
+// Two passes, since an impl targeting a compound or enum can (and
+// commonly does) appear anywhere relative to that declaration's own
+// position in the file: the first collects every compound/enum/quirk/
+// function/global this file declares, with its own directly-nested
+// children (fields, variants, quirk method signatures); the second
+// walks every impl block and nests its methods under the matching
+// compound/enum entry the first pass already built, falling back to a
+// plain top-level entry when the type an impl targets isn't declared
+// in this same file (so a method never just disappears - it's simply
+// not nested under a declaration this document doesn't have).
+fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_name && !equals(f.name, "") {
+          out.push(_entry(f.name, .Function, n.pos));
+        }
+      }
+      .Compound(c) -> {
+        OutlineEntry e = _entry(c.name, .Struct, n.pos);
+        num f = 0;
+        for f < c.fields.len {
+          CompoundField cf = c.fields.get(f);
+          f = f + 1;
+          Pos field_pos = n.pos;
+          if cf.has_pos {
+            field_pos = cf.pos;
+          }
+          e.children.push(_entry(cf.name, .Field, field_pos));
+        }
+        out.push(e);
+      }
+      .Enum(en) -> {
+        OutlineEntry e = _entry(en.name, .Enumeration, n.pos);
+        num v = 0;
+        for v < en.variants.len {
+          EnumVariant variant = en.variants.get(v);
+          v = v + 1;
+          Pos variant_pos = n.pos;
+          if variant.has_pos {
+            variant_pos = variant.pos;
+          }
+          e.children.push(_entry(variant.name, .EnumMember, variant_pos));
+        }
+        out.push(e);
+      }
+      .Quirk(q) -> {
+        OutlineEntry e = _entry(q.name, .Interface, n.pos);
+        num qm = 0;
+        for qm < q.methods.len {
+          QuirkMethodSig m = q.methods.get(qm);
+          qm = qm + 1;
+          // Neither carries its own position in the tree - unlike a
+          // compound field or an enum variant, falls back to the
+          // quirk's own.
+          e.children.push(_entry(m.name, .Method, n.pos));
+        }
+        out.push(e);
+      }
+      .Variable(v) -> {
+        OutlineKind kind = .Variable;
+        if v.is_const {
+          kind = .Constant;
+        }
+        out.push(_entry(v.name, kind, n.pos));
+      }
+      _ -> {}
+    }
+  }
+
+  num j = 0;
+  for j < nodes.len {
+    Node n = nodes.get(j);
+    j = j + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Impl(block) -> {
+        // A concrete-instantiation impl (`impl Vec<str> { ... }`) mangles
+        // its own `type_name` to `Vec__str`, which the top-level entry
+        // (bare `Vec`) never matches; `concrete_dtype` carries the
+        // un-mangled base name for exactly this purpose. A constrained
+        // but still-generic impl (`impl Vec<T: num | dec> { ... }`)
+        // keeps `type_name` bare already and has no `concrete_dtype` at
+        // all, so it needs no special casing here.
+        str target_name = block.type_name;
+        if block.has_concrete_dtype {
+          target_name = block.concrete_dtype.type_str;
+        }
+        num target_idx = -1;
+        num oi = 0;
+        for oi < out.len {
+          if equals(out.get(oi).name, target_name) {
+            target_idx = oi;
+          }
+          oi = oi + 1;
+        }
+        str quirk_name = "";
+        if block.has_quirk_name {
+          quirk_name = block.quirk_name;
+        }
+        num m = 0;
+        for m < block.methods.len {
+          Node* method = block.methods.get(m);
+          m = m + 1;
+          if method == nil {
+            continue;
+          }
+          fit method.kind {
+            .Function(f) -> {
+              if f.has_name && !equals(f.name, "") {
+                // A method is stored under the name it is emitted as,
+                // `Type__method` or, for a quirk impl,
+                // `Type__Quirk__method`; a reader wants the name they
+                // wrote, not either mangled form.
+                OutlineEntry me = _entry(
+                  _method_name(f.name, block.type_name, quirk_name),
+                  .Method,
+                  method.pos
+                );
+                if target_idx >= 0 {
+                  OutlineEntry* target = &out.data[target_idx];
+                  target.children.push(me);
+                } else {
+                  out.push(me);
+                }
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+// The method's own name, with whatever it is mangled with removed: just
+// the type (`Type__method`) for a plain impl, or the type and the
+// quirk both (`Type__Quirk__method`) for a quirk impl.
+fun _method_name(str mangled, str type_name, str quirk_name) str {
+  StringBuilder tb = string_builder_init(len(type_name) + 2);
+  tb.append(type_name);
+  tb.append("__");
+  str type_prefix = tb.build();
+  if !starts_with(mangled, type_prefix) {
+    ret mangled;
+  }
+  str after_type = substr(mangled, len(type_prefix), len(mangled) - len(type_prefix));
+  if equals(quirk_name, "") {
+    ret after_type;
+  }
+  StringBuilder qb = string_builder_init(len(quirk_name) + 2);
+  qb.append(quirk_name);
+  qb.append("__");
+  str quirk_prefix = qb.build();
+  if starts_with(after_type, quirk_prefix) {
+    ret substr(after_type, len(quirk_prefix), len(after_type) - len(quirk_prefix));
+  }
+  ret after_type;
+}
+
+fun _entry(str name, OutlineKind kind, Pos pos) OutlineEntry {
+  OutlineEntry s;
+  s.name = name;
+  s.kind = kind;
+  s.pos = pos;
+  s.children.init(0);
+  ret s;
+}

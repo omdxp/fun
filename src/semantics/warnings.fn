@@ -1,0 +1,2046 @@
+// Warnings.
+// 
+// The analysis walks a program looking for shapes that compile but are
+// almost certainly not what was meant. Each finding carries the warning
+// it belongs to, so a program can silence one with `allow` or require
+// one with `expect`, and an expectation that never fires is an error
+// rather than a silent no-op.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp ..parser.datatype_defs;
+imp std.string;
+imp std.vec;
+imp std.set;
+imp std.map;
+imp std.option;
+imp std.result;
+imp std.io;
+
+// One finding: what was noticed, and where.
+pub compound Warning {
+  WarningId id;
+  str message;
+  Pos pos;
+  bin has_pos;
+}
+
+// The name a warning is written as in `allow` and `expect`.
+pub fun warning_id_name(WarningId id) str {
+  fit id {
+    .ReturnLocalPtr -> { ret "return_local_ptr"; }
+    .FitNonExhaustive -> { ret "fit_non_exhaustive"; }
+    .FitUnreachableBranch -> { ret "fit_unreachable_branch"; }
+    .UnreachableCode -> { ret "unreachable_code"; }
+    .AssertConstant -> { ret "assert_constant"; }
+    .UnusedVariable -> { ret "unused_variable"; }
+    .UnusedImport -> { ret "unused_import"; }
+    .UnusedFunction -> { ret "unused_function"; }
+    .UnusedCompound -> { ret "unused_compound"; }
+    .MissingReturn -> { ret "missing_return"; }
+    .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
+    .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
+    .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
+    .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
+  }
+  ret "";
+}
+
+// What the analysis carries while walking one program.
+compound Analysis {
+  Vec<Warning> found;
+  // Set when a declaration nothing reads is worth reporting, which is
+  // asked for rather than assumed.
+  bin report_unused;
+  // What each enum declares, so a `fit` over one can be told whether it
+  // covers every variant.
+  Map<str, Vec<str>> enum_variants;
+  // The functions a fork can name, and the types whose fields say
+  // whether a value guards itself.
+  Map<str, FunctionNode> functions;
+  Map<str, CompoundNode> compound_decls;
+  // What each local in the function being walked is declared as.
+  Map<str, str> local_types;
+  // A `Channel<T>` local's own element type, by name - `local_types`
+  // itself only ever carries the bare "Channel", never its own
+  // generic argument, and a `fit <- ch { ... }` needs T to check
+  // exhaustiveness against.
+  Map<str, str> channel_element_types;
+  // True while walking a function that creates a wait group with no
+  // room of its own.
+  bin waits_on_unsized_group;
+  // The file being compiled. A program is merged with everything it
+  // imports, and what those files declare and read is their own
+  // business, so only this one is judged.
+  str file;
+  // The warnings a program asked to silence, and the ones it requires,
+  // by the name each is written as.
+  Set<str> allowed;
+  // The `expect` statement's own position, by the name it names -
+  // needed so an unmet expectation can be reported right where it
+  // was written, not just somewhere in the file.
+  Map<str, Pos> expected;
+  // Expectations that have been met, so an unmet one can be reported.
+  Set<str> met;
+}
+
+fun _analysis_new() Analysis {
+  Analysis a;
+  a.found.init(0);
+  a.report_unused = false;
+  a.file = "";
+  a.enum_variants.init(8);
+  a.functions.init(16);
+  a.compound_decls.init(16);
+  a.local_types.init(16);
+  a.channel_element_types.init(4);
+  a.waits_on_unsized_group = false;
+  a.allowed = set_init("", 8);
+  a.expected.init(8);
+  a.met = set_init("", 8);
+  ret a;
+}
+
+impl Analysis {
+  // Records a finding, unless the program asked for silence. An
+  // expectation counts as met whether or not it silences the message.
+  report(WarningId id, str message, Node* at) {
+    str name = warning_id_name(id);
+    if self.expected.has(name) {
+      self.met.add(name);
+      ret;
+    }
+    if self.allowed.has(name) {
+      ret;
+    }
+    Warning w;
+    w.id = id;
+    w.message = message;
+    w.has_pos = false;
+    if at != nil && at.has_pos {
+      w.pos = at.pos;
+      w.has_pos = true;
+    }
+    self.found.push(w);
+  }
+
+  // Records what a `allow` or `expect` statement asks for. `pos` is
+  // the control statement's own position, kept for `expect` so an
+  // unmet expectation can be reported right where it was written.
+  control(WarningCtrlNode ctrl, Pos pos) {
+    str name = warning_id_name(ctrl.id);
+    fit ctrl.action {
+      .Allow -> { self.allowed.add(name); }
+      .Expect -> { self.expected.put(name, pos); }
+    }
+  }
+
+  pub free() {
+    self.found.free();
+    self.allowed.free();
+    self.expected.free();
+    self.met.free();
+    self.enum_variants.free();
+    self.functions.free();
+    self.compound_decls.free();
+    self.local_types.free();
+    self.channel_element_types.free();
+  }
+}
+
+// True when a statement always leaves the scope it is written in, so
+// anything after it is never reached.
+fun _always_exits(Node* stmt) bin {
+  if stmt == nil {
+    ret false;
+  }
+  fit stmt.kind {
+    .StatementReturn(_) -> { ret true; }
+    .StatementBreak -> { ret true; }
+    .StatementContinue -> { ret true; }
+    .Panic(_) -> { ret true; }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when `node` reads the address of something declared in the body
+// being walked, which stops existing when that body returns.
+fun _takes_address_of_local(Node* node, Set<str>* locals) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Unary(u) -> {
+      if !equals(u.op, "&") {
+        ret _takes_address_of_local(u.operand, locals);
+      }
+      if u.operand == nil {
+        ret false;
+      }
+      fit u.operand.kind {
+        .Identifier(name) -> { ret locals.has(name); }
+        _ -> { ret false; }
+      }
+      ret false;
+    }
+    .ExpressionParenthesis(inner) -> { ret _takes_address_of_local(inner, locals); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// The value an expression is known to hold at compile time, when it is
+// written as a literal truth value.
+fun _constant_truth(Node* node) Option<bin> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .Boolean(value) -> { ret .Some(value); }
+    .ExpressionParenthesis(inner) -> { ret _constant_truth(inner); }
+    _ -> { ret .None; }
+  }
+  ret .None;
+}
+
+// What a function reads: its body, the types of its arguments, and its
+// return type. Shared so a method inside an `impl` is read exactly as a
+// top-level function is, rather than being skipped for want of a case.
+fun _collect_function_reads(FunctionNode f, Set<str>* out) {
+  if f.has_body {
+    _collect_reads(f.body, out);
+  }
+  for a : f.args {
+    _collect_reads(a, out);
+  }
+  if f.has_rtype && f.rtype != nil {
+    out.add(f.rtype.type_str);
+  }
+}
+
+// Collects the names a body reads, leaving out the names it declares:
+// a declaration's own name is not a read of it, while the value it is
+// given is.
+fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
+  if stmt == nil {
+    ret;
+  }
+  fit stmt.kind {
+    .Body(body) -> {
+      for s : body.statements {
+        _collect_reads_excluding_declarations(s, out);
+      }
+    }
+    .Variable(v) -> {
+      if v.var_type != nil {
+        out.add(v.var_type.type_str);
+      }
+      if v.has_val {
+        _collect_reads(v.val, out);
+      }
+    }
+    .StatementIf(ifn) -> {
+      _collect_reads(ifn.condition, out);
+      _collect_reads_excluding_declarations(ifn.body, out);
+    }
+    .StatementElseIf(ein) -> {
+      _collect_reads(ein.condition, out);
+      _collect_reads_excluding_declarations(ein.body, out);
+    }
+    .StatementElse(body) -> { _collect_reads_excluding_declarations(body, out); }
+    .StatementDefer(inner) -> { _collect_reads_excluding_declarations(inner, out); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if c.has_condition {
+            _collect_reads(c.condition, out);
+          }
+          _collect_reads_excluding_declarations(c.body, out);
+        }
+        .Range(r) -> {
+          _collect_reads(r.range_expr, out);
+          _collect_reads_excluding_declarations(r.body, out);
+        }
+        .Iter(it) -> {
+          _collect_reads(it.iterable, out);
+          _collect_reads_excluding_declarations(it.body, out);
+        }
+      }
+    }
+    _ -> { _collect_reads(stmt, out); }
+  }
+}
+
+// True when a statement hands a value back on every path through it.
+fun _always_returns(Node* stmt) bin {
+  if stmt == nil {
+    ret false;
+  }
+  fit stmt.kind {
+    .StatementReturn(_) -> { ret true; }
+    .Panic(_) -> { ret true; }
+    .Body(body) -> {
+      num i = 0;
+      for i < body.statements.len {
+        Node* s = body.statements.get(i);
+        // An `if` hands a value back on every path only when what
+        // follows it does too, which is the `else` written after it.
+        fit s.kind {
+          .StatementIf(ifn) -> {
+            if _always_returns(ifn.body) && _rest_always_returns(&body.statements, i + 1) {
+              ret true;
+            }
+          }
+          _ -> {
+            if _always_returns(s) {
+              ret true;
+            }
+          }
+        }
+        i = i + 1;
+      }
+      ret false;
+    }
+    // A `fit` hands a value back on every path when every arm does.
+    // Whether every value is matched at all is a separate question, and
+    // one the exhaustiveness check already answers: a `fit` that leaves
+    // a variant out is reported as non-exhaustive, so treating this as a
+    // return cannot hide a real gap, only avoid naming it twice.
+    .StatementFit(f) -> {
+      if f.branches.len == 0 {
+        ret false;
+      }
+      for branch : f.branches {
+        if !_always_returns(branch.body) {
+          ret false;
+        }
+      }
+      ret true;
+    }
+    // A loop with no condition runs until something inside it leaves the
+    // function.
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if !c.has_condition {
+            ret true;
+          }
+          // A condition that is always true never lets the loop finish,
+          // so nothing after it runs.
+          let known = _constant_truth(c.condition);
+          ret known.is_some() && known.unwrap();
+        }
+        _ -> { ret false; }
+      }
+    }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when the branches written after an `if` hand a value back on
+// every path, which is what an `else` chain amounts to.
+fun _rest_always_returns(Vec<Node*>* statements, num from) bin {
+  num i = from;
+  for i < statements.len {
+    Node* s = statements.get(i);
+    i = i + 1;
+    fit s.kind {
+      .StatementElseIf(ein) -> {
+        if !_always_returns(ein.body) {
+          ret false;
+        }
+      }
+      .StatementElse(body) -> { ret _always_returns(body); }
+      _ -> { ret false; }
+    }
+  }
+  ret false;
+}
+
+// The enum and variant a branch pattern names, as `Color.Red` does.
+// Empty when the pattern names neither.
+fun _pattern_enum(Node* condition) str {
+  if condition == nil {
+    ret "";
+  }
+  fit condition.kind {
+    .Expression(e) -> {
+      if !equals(e.op, ".") || !e.has_left {
+        ret "";
+      }
+      fit e.left.kind {
+        .Identifier(name) -> { ret name; }
+        _ -> { ret ""; }
+      }
+      ret "";
+    }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+fun _pattern_variant(Node* condition) str {
+  if condition == nil {
+    ret "";
+  }
+  fit condition.kind {
+    .Expression(e) -> {
+      if !equals(e.op, ".") || !e.has_right {
+        ret "";
+      }
+      Node* right = e.right;
+      fit right.kind {
+        .Identifier(name) -> { ret name; }
+        // A destructuring pattern names the variant and binds what it
+        // carries, so the variant is the callee of that call.
+        .Expression(call) -> {
+          if !equals(call.op, "()") || !call.has_left {
+            ret "";
+          }
+          fit call.left.kind {
+            .Identifier(name) -> { ret name; }
+            _ -> { ret ""; }
+          }
+          ret "";
+        }
+        _ -> { ret ""; }
+      }
+      ret "";
+    }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// The value a numeric literal holds, with a leading minus applied.
+// Reports nothing for anything that is not written as one.
+fun _literal_value(Node* node) Option<num> {
+  if node == nil {
+    ret .None;
+  }
+  fit node.kind {
+    .Number(data) -> {
+      fit data {
+        .Num(value) -> { ret .Some(value); }
+        _ -> { ret .None; }
+      }
+      ret .None;
+    }
+    .ExpressionParenthesis(inner) -> { ret _literal_value(inner); }
+    .Unary(u) -> {
+      if !equals(u.op, "-") {
+        ret .None;
+      }
+      let inner = _literal_value(u.operand);
+      if inner.is_none() {
+        ret .None;
+      }
+      ret .Some(0 - inner.unwrap());
+    }
+    _ -> { ret .None; }
+  }
+  ret .None;
+}
+
+// The range a sized integer type holds, as the pair its bits allow.
+fun _int_range(DynamicIntType t, num* low, num* high) {
+  // A 64-bit type covers everything the checker can represent, so it is
+  // left alone rather than measured against a wider type.
+  num bits = t.bits;
+  if bits >= 64 {
+    *low = 0;
+    *high = 0;
+    ret;
+  }
+  num span = 1;
+  num i = 0;
+  for i < bits {
+    span = span * 2;
+    i = i + 1;
+  }
+  if t.is_signed {
+    *low = 0 - (span / 2);
+    *high = (span / 2) - 1;
+    ret;
+  }
+  *low = 0;
+  *high = span - 1;
+}
+
+// The name a `receiver.method(...)` call is made on, anywhere inside
+// `node`. Empty when the call is not written there.
+fun _method_receiver(Node* node, str method) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left {
+        fit e.left.kind {
+          .Expression(callee) -> {
+            if equals(callee.op, ".") && callee.has_left && callee.has_right {
+              str named = "";
+              fit callee.right.kind {
+                .Identifier(name) -> { named = name; }
+                _ -> {}
+              }
+              if starts_with(named, method) {
+                str receiver = _plain_name(callee.left);
+                if !equals(receiver, "") {
+                  ret receiver;
+                }
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+      if e.has_left {
+        str found = _method_receiver(e.left, method);
+        if !equals(found, "") {
+          ret found;
+        }
+      }
+      if e.has_right {
+        ret _method_receiver(e.right, method);
+      }
+      ret "";
+    }
+    .ExpressionParenthesis(inner) -> { ret _method_receiver(inner, method); }
+    .Variable(v) -> {
+      if !v.has_val {
+        ret "";
+      }
+      ret _method_receiver(v.val, method);
+    }
+    .StatementReturn(value) -> { ret _method_receiver(value, method); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// The room a channel is created with, for a declaration that creates
+// one. A channel asked for less than one still holds one.
+fun _channel_capacity(Node* value) Option<num> {
+  if value == nil {
+    ret .None;
+  }
+  fit value.kind {
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left {
+        ret .None;
+      }
+      str callee = "";
+      fit e.left.kind {
+        .Identifier(name) -> { callee = name; }
+        _ -> {}
+      }
+      if !equals(callee, "channel_new_cap") || !e.has_right {
+        ret .None;
+      }
+      Vec<Node*> args;
+      args.init(2);
+      defer args.free();
+      _flatten_arguments(e.right, &args);
+      if args.len < 2 {
+        ret .None;
+      }
+      let room = _literal_value(args.get(1));
+      if room.is_none() {
+        ret .None;
+      }
+      if room.unwrap() < 1 {
+        ret .Some(1);
+      }
+      ret room;
+    }
+    _ -> { ret .None; }
+  }
+  ret .None;
+}
+
+// The name an expression reads, for an expression that is just a name.
+fun _plain_name(Node* node) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Identifier(name) -> { ret name; }
+    .ExpressionParenthesis(inner) -> { ret _plain_name(inner); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// True when a body creates a wait group with no room, which only works
+// if something grows it before the tasks arrive.
+fun _creates_empty_wait_group(Node* body) bin {
+  if body == nil {
+    ret false;
+  }
+  fit body.kind {
+    .Body(inner) -> {
+      for st : inner.statements {
+        if _creates_empty_wait_group(st) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Variable(v) -> {
+      if !v.has_val {
+        ret false;
+      }
+      fit v.val.kind {
+        .Expression(e) -> {
+          if !equals(e.op, "()") || !e.has_left {
+            ret false;
+          }
+          str callee = "";
+          fit e.left.kind {
+            .Identifier(name) -> { callee = name; }
+            _ -> {}
+          }
+          if !equals(callee, "wait_group_new") || !e.has_right {
+            ret false;
+          }
+          Vec<Node*> args;
+          args.init(2);
+          defer args.free();
+          _flatten_arguments(e.right, &args);
+          if args.len == 0 {
+            ret false;
+          }
+          let room = _literal_value(args.get(0));
+          ret room.is_some() && room.unwrap() == 0;
+        }
+        _ -> { ret false; }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// The arguments of a call, which are written as one comma expression
+// when there is more than one.
+fun _flatten_arguments(Node* node, Vec<Node*>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") && e.has_left && e.has_right {
+        _flatten_arguments(e.left, out);
+        _flatten_arguments(e.right, out);
+        ret;
+      }
+    }
+    .ExpressionParenthesis(inner) -> {
+      _flatten_arguments(inner, out);
+      ret;
+    }
+    .Blank -> { ret; }
+    _ -> {}
+  }
+  out.push(node);
+}
+
+// True when `body` writes through `param`, either into a field it
+// points at or into the value itself.
+fun _writes_through(Node* body, str param) bin {
+  if body == nil {
+    ret false;
+  }
+  fit body.kind {
+    .Body(inner) -> {
+      for st : inner.statements {
+        if _writes_through(st, param) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Expression(e) -> {
+      if _is_assignment_op(e.op) && e.has_left {
+        if _reads_through(e.left, param) {
+          ret true;
+        }
+      }
+      if e.has_left && _writes_through(e.left, param) {
+        ret true;
+      }
+      if e.has_right && _writes_through(e.right, param) {
+        ret true;
+      }
+      ret false;
+    }
+    .ExpressionParenthesis(x) -> { ret _writes_through(x, param); }
+    .Variable(v) -> { ret v.has_val && _writes_through(v.val, param); }
+    .StatementIf(ifn) -> { ret _writes_through(ifn.body, param); }
+    .StatementElseIf(ein) -> { ret _writes_through(ein.body, param); }
+    .StatementElse(b) -> { ret _writes_through(b, param); }
+    .StatementDefer(x) -> { ret _writes_through(x, param); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> { ret _writes_through(c.body, param); }
+        .Range(r) -> { ret _writes_through(r.body, param); }
+        .Iter(it) -> { ret _writes_through(it.body, param); }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when an expression reaches into what `param` points at, as the
+// left side of an assignment does.
+fun _reads_through(Node* node, str param) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Identifier(name) -> { ret equals(name, param); }
+    .Expression(e) -> {
+      if !e.has_left {
+        ret false;
+      }
+      ret _reads_through(e.left, param);
+    }
+    .Unary(u) -> { ret _reads_through(u.operand, param); }
+    .ExpressionParenthesis(inner) -> { ret _reads_through(inner, param); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+fun _is_assignment_op(str op) bin {
+  if equals(op, "=") {
+    ret true;
+  }
+  if len(op) < 2 || op[len(op) - 1] != '=' {
+    ret false;
+  }
+  str head = substr(op, 0, len(op) - 1);
+  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") ||
+    equals(
+    head,
+    "%"
+  );
+}
+
+// The name a `&name` argument reads the address of, empty for anything
+// else.
+fun _address_of_name(Node* node) str {
+  if node == nil {
+    ret "";
+  }
+  fit node.kind {
+    .Unary(u) -> {
+      if !equals(u.op, "&") || u.operand == nil {
+        ret "";
+      }
+      fit u.operand.kind {
+        .Identifier(name) -> { ret name; }
+        _ -> { ret ""; }
+      }
+      ret "";
+    }
+    .ExpressionParenthesis(inner) -> { ret _address_of_name(inner); }
+    _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// True when a call names `method` on any receiver, which is how a
+// wait group is grown or a value is guarded.
+fun _calls_method(Node* node, str method) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .Body(body) -> {
+      for st : body.statements {
+        if _calls_method(st, method) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Expression(e) -> {
+      if equals(e.op, ".") && e.has_right {
+        fit e.right.kind {
+          .Identifier(name) -> {
+            if equals(name, method) {
+              ret true;
+            }
+          }
+          _ -> {}
+        }
+      }
+      if e.has_left && _calls_method(e.left, method) {
+        ret true;
+      }
+      if e.has_right && _calls_method(e.right, method) {
+        ret true;
+      }
+      ret false;
+    }
+    .ExpressionParenthesis(x) -> { ret _calls_method(x, method); }
+    .Variable(v) -> { ret v.has_val && _calls_method(v.val, method); }
+    .StatementIf(ifn) -> { ret _calls_method(ifn.body, method); }
+    .StatementDefer(x) -> { ret _calls_method(x, method); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+// True when a body forks a task.
+fun _contains_fork(Node* node) bin {
+  if node == nil {
+    ret false;
+  }
+  fit node.kind {
+    .StatementFork(_) -> { ret true; }
+    .Body(body) -> {
+      for st : body.statements {
+        if _contains_fork(st) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .StatementIf(ifn) -> { ret _contains_fork(ifn.body); }
+    .StatementElse(b) -> { ret _contains_fork(b); }
+    _ -> { ret false; }
+  }
+  ret false;
+}
+
+impl Analysis {
+  // Walks a body, noticing what is written after a statement that always
+  // exits and what a `ret` hands back.
+  walk_body(Node* stmt, Set<str>* locals) {
+    if stmt == nil {
+      ret;
+    }
+    fit stmt.kind {
+      .Body(body) -> {
+        // A control covers the body it is written in, wherever in it,
+        // including the part that is never reached.
+        for s : body.statements {
+          fit s.kind {
+            .StatementWarningControl(ctrl) -> { self.control(ctrl, s.pos); }
+            _ -> {}
+          }
+        }
+        bin exited = false;
+        for s : body.statements {
+          if exited {
+            self.report(
+              .UnreachableCode,
+              "statement is unreachable because the previous statement always exits the current scope",
+              s
+            );
+            break;
+          }
+          self.walk_body(s, locals);
+          if _always_exits(s) {
+            exited = true;
+          }
+        }
+      }
+      .Variable(v) -> {
+        locals.add(v.name);
+        if v.var_type != nil {
+          str vtype = v.var_type.type_str;
+          if v.var_type.pointer_depth > 0 || v.var_type.flags.is_pointer {
+            vtype = format("{str}*", vtype);
+          }
+          self.local_types.put(v.name, vtype);
+          self._record_channel_element_type(v.name, v.var_type);
+        }
+        self.check_literal_range(stmt, v);
+        if v.has_val {
+          self.walk_body(v.val, locals);
+        }
+      }
+      .StatementReturn(value) -> {
+        if _takes_address_of_local(value, locals) {
+          self.report(.ReturnLocalPtr, "returning address of local variable", stmt);
+        }
+      }
+      .StatementAssert(a) -> {
+        let known = _constant_truth(a.condition);
+        if known.is_some() {
+          if known.unwrap() {
+            self.report(.AssertConstant, "assert condition is always true", stmt);
+          } else {
+            self.report(.AssertConstant, "assert condition is always false", stmt);
+          }
+        }
+      }
+      .StatementWarningControl(ctrl) -> { self.control(ctrl, stmt.pos); }
+      .StatementFit(f) -> { self.check_fit(stmt, f, locals); }
+      .StatementIf(ifn) -> { self.walk_body(ifn.body, locals); }
+      .StatementElseIf(ein) -> { self.walk_body(ein.body, locals); }
+      .StatementElse(body) -> { self.walk_body(body, locals); }
+      .StatementDefer(inner) -> { self.walk_body(inner, locals); }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            self.check_forking_loop(stmt, c.body);
+            self.walk_body(c.body, locals);
+          }
+          .Range(r) -> {
+            self.check_forking_loop(stmt, r.body);
+            self.walk_body(r.body, locals);
+          }
+          .Iter(it) -> {
+            self.check_forking_loop(stmt, it.body);
+            self.walk_body(it.body, locals);
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // A loop that forks hands the same values to several tasks at once.
+  check_forking_loop(Node* stmt, Node* body) {
+    if !_contains_fork(body) {
+      ret;
+    }
+    // A wait group the loop never grows is waited on for arrivals that
+    // were never counted.
+    if self.waits_on_unsized_group && !_calls_method(body, "add") {
+      self.report(
+        .BlockingForkDeadlock,
+        "a wait group created with no room is never grown before the tasks it waits for are forked",
+        stmt
+      );
+    }
+    self.check_shared_captures(body);
+  }
+
+  // Reports a value handed to several tasks that write through it.
+  check_shared_captures(Node* body) {
+    if body == nil {
+      ret;
+    }
+    fit body.kind {
+      .Body(inner) -> {
+        for st : inner.statements {
+          self.check_shared_captures(st);
+        }
+      }
+      .StatementFork(call) -> { self.check_forked_call(call); }
+      .StatementIf(ifn) -> { self.check_shared_captures(ifn.body); }
+      .StatementElse(b) -> { self.check_shared_captures(b); }
+      _ -> {}
+    }
+  }
+
+  check_forked_call(Node* call) {
+    if call == nil {
+      ret;
+    }
+    fit call.kind {
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left || !e.has_right {
+          ret;
+        }
+        str callee = "";
+        fit e.left.kind {
+          .Identifier(name) -> { callee = name; }
+          _ -> {}
+        }
+        if equals(callee, "") {
+          ret;
+        }
+        let known = self.functions.at(callee);
+        if known.is_none() {
+          ret;
+        }
+        FunctionNode f = known.unwrap();
+        Vec<Node*> args;
+        args.init(4);
+        defer args.free();
+        _flatten_arguments(e.right, &args);
+        num i = 0;
+        for i < args.len && i < f.args.len {
+          str shared = _address_of_name(args.get(i));
+          num at = i;
+          i = i + 1;
+          if equals(shared, "") {
+            continue;
+          }
+          if self.guards_itself(shared) {
+            continue;
+          }
+          str param = "";
+          Node* declared = f.args.get(at);
+          fit declared.kind {
+            .Variable(v) -> { param = v.name; }
+            _ -> {}
+          }
+          if equals(param, "") {
+            continue;
+          }
+          if _writes_through(f.body, param) {
+            self.report(
+              .SharedMutableCaptureRace,
+              format("'{str}' is handed to several tasks that write through it", shared),
+              call
+            );
+            ret;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // True when the type of `name` carries something that guards access to
+  // it, which is what makes sharing it safe.
+  guards_itself(str name) bin {
+    let declared = self.local_types.at(name);
+    if declared.is_none() {
+      ret false;
+    }
+    let info = self.compound_decls.at(declared.unwrap());
+    if info.is_none() {
+      ret false;
+    }
+    CompoundNode c = info.unwrap();
+    for field : c.fields {
+      if field.dtype != nil && equals(field.dtype.type_str, "Mutex") {
+        ret true;
+      }
+    }
+    ret false;
+  }
+
+  // Reports a literal a sized integer cannot hold, which is a value the
+  // declaration silently changes.
+  check_literal_range(Node* stmt, VariableNode v) {
+    if v.var_type == nil || !v.has_val {
+      ret;
+    }
+    let sized = parse_dynamic_int_datatype(v.var_type.type_str);
+    if sized.is_none() {
+      ret;
+    }
+    let written = _literal_value(v.val);
+    if written.is_none() {
+      ret;
+    }
+    num low = 0;
+    num high = 0;
+    _int_range(sized.unwrap(), &low, &high);
+    if low == 0 && high == 0 {
+      ret;
+    }
+    num value = written.unwrap();
+    if value < low || value > high {
+      self.report(
+        .IntegerLiteralOutOfRange,
+        format(
+        "{num} does not fit in {str}, which holds {num} to {num}",
+        value,
+        v.var_type.type_str,
+        low,
+        high
+        ),
+        stmt
+      );
+    }
+  }
+
+  // Checks a `fit` for variants it never handles and for a pattern that
+  // an earlier branch already covered.
+  check_fit(Node* stmt, FitStmtNode f, Set<str>* locals) {
+    Set<str> covered = set_init("", 8);
+    defer covered.free();
+    str over = "";
+    // A truth value has two cases of its own, which a `fit` over one
+    // must both handle.
+    num truths = 0;
+    for branch : f.branches {
+      self.walk_body(branch.body, locals);
+      if !branch.has_condition {
+        continue;
+      }
+      let truth = _constant_truth(branch.condition);
+      if truth.is_some() {
+        str written = "false";
+        if truth.unwrap() {
+          written = "true";
+        }
+        if covered.has(written) {
+          self.report(
+            .FitUnreachableBranch,
+            format("branch '{str}' is already covered by an earlier one", written),
+            stmt
+          );
+        } else {
+          covered.add(written);
+          truths = truths + 1;
+        }
+        continue;
+      }
+      str variant = _pattern_variant(branch.condition);
+      if equals(variant, "") {
+        continue;
+      }
+      if covered.has(variant) {
+        self.report(
+          .FitUnreachableBranch,
+          format("branch '{str}' is already covered by an earlier one", variant),
+          stmt
+        );
+      }
+      covered.add(variant);
+      str named = _pattern_enum(branch.condition);
+      if !equals(named, "") {
+        over = named;
+      }
+    }
+    if f.has_default_branch {
+      if truths == 2 {
+        self.report(
+          .FitUnreachableBranch,
+          "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values",
+          stmt
+        );
+      }
+      ret;
+    }
+    if truths > 0 && truths < 2 {
+      self.report(.FitNonExhaustive, "fit does not handle both truth values", stmt);
+      ret;
+    }
+    if equals(over, "") {
+      // Every branch was written in shorthand (`.Dot ->`), which names
+      // no enum, so what is being matched is what the subject holds.
+      over = self._fit_subject_enum(f);
+    }
+    if equals(over, "") {
+      // No fixed value set to enumerate, so a catch-all is the only
+      // way to be exhaustive. `bin` is excluded: the `truths` counter
+      // above already covers it correctly.
+      str subj_type = self._fit_subject_type(f);
+      if equals(subj_type, "num") || equals(subj_type, "str") || equals(subj_type, "chr") ||
+        equals(subj_type, "dec") || ends_with(subj_type, "*") {
+        self.report(
+          .FitNonExhaustive,
+          "fit does not handle every value (missing catch-all '_' branch)",
+          stmt
+        );
+      }
+      ret;
+    }
+    let declared = self.enum_variants.at(over);
+    if declared.is_none() {
+      ret;
+    }
+    Vec<str> variants = declared.unwrap();
+    // Every missing variant is named in one warning rather than
+    // stopping at the first: a reader (and the fill-in-missing-arms
+    // codeAction, which parses every 'Enum.Variant' this message
+    // names) fixes them all at once instead of rebuilding once per
+    // variant to discover the next one.
+    StringBuilder missing = string_builder_init(32);
+    num missing_count = 0;
+    num i = 0;
+    for i < variants.len {
+      str name = variants.get(i);
+      i = i + 1;
+      if covered.has(name) {
+        continue;
+      }
+      if missing_count > 0 {
+        missing.append(", ");
+      }
+      missing.append(format("'{str}.{str}'", over, name));
+      missing_count = missing_count + 1;
+    }
+    if missing_count > 0 {
+      self.report(.FitNonExhaustive, format("fit does not handle {str}", missing.build()), stmt);
+    }
+  }
+
+  // The type a `fit`'s subject ultimately reads from, taken from what its
+  // identifier was declared as (`local_types` carries a trailing `*` for
+  // a pointer-typed local). `fit *self` matches what the pointer holds,
+  // not the pointer itself, so an explicit deref strips one level.
+  _fit_subject_type(FitStmtNode f) str {
+    if f.exp == nil {
+      ret "";
+    }
+    Node* subject = f.exp;
+    bin deref = false;
+    fit subject.kind {
+      .Unary(u) -> {
+        if equals(u.op, "*") && u.operand != nil {
+          subject = u.operand;
+          deref = true;
+        }
+      }
+      _ -> {}
+    }
+    fit subject.kind {
+      .Identifier(name) -> {
+        let declared = self.local_types.at(name);
+        if declared.is_none() {
+          ret "";
+        }
+        str type_name = declared.unwrap();
+        if deref && ends_with(type_name, "*") {
+          type_name = substr(type_name, 0, len(type_name) - 1);
+        }
+        ret type_name;
+      }
+      _ -> {}
+    }
+    // `fit <- ch { ... }` desugars to `ch.recv()` at parse time - what
+    // it matches is the channel's own element type, not the call's
+    // return value read literally.
+    str channel = _method_receiver(subject, "recv");
+    if !equals(channel, "") {
+      let elem = self.channel_element_types.at(channel);
+      if elem.is_some() {
+        ret elem.unwrap();
+      }
+    }
+    ret "";
+  }
+
+  // Records `name`'s own element type when `dtype` declares it as a
+  // `Channel<T>`, so a later `fit <- name { ... }` can check
+  // exhaustiveness against T.
+  _record_channel_element_type(str name, DataType* dtype) {
+    if dtype == nil || !equals(dtype.type_str, "Channel") || dtype.generic_args.len != 1 {
+      ret;
+    }
+    DataType* elem = dtype.generic_args.get(0);
+    if elem == nil {
+      ret;
+    }
+    self.channel_element_types.put(name, elem.type_str);
+  }
+
+  // The enum a `fit` is matching, taken from what its subject was
+  // declared as. Used when the branches name no enum of their own.
+  _fit_subject_enum(FitStmtNode f) str {
+    str type_name = self._fit_subject_type(f);
+    if !equals(type_name, "") && self.enum_variants.at(type_name).is_some() {
+      ret type_name;
+    }
+    ret "";
+  }
+
+  // Reports more sends into a channel than it can hold when nothing in
+  // the same body receives from it: those sends wait forever.
+  check_channel_sends(Node* body) {
+    if body == nil {
+      ret;
+    }
+    fit body.kind {
+      .Body(statements) -> {
+        Map<str, num> capacity;
+        capacity.init(4);
+        defer capacity.free();
+        Map<str, num> sent;
+        sent.init(4);
+        defer sent.free();
+        Set<str> received = set_init("", 4);
+        defer received.free();
+
+        for st : statements.statements {
+          fit st.kind {
+            .Variable(v) -> {
+              if !v.has_val {
+                continue;
+              }
+              let room = _channel_capacity(v.val);
+              if room.is_some() {
+                capacity.put(v.name, room.unwrap());
+                sent.put(v.name, 0);
+              }
+              // A receive is often written as the value a name takes.
+              str drained = _method_receiver(v.val, "recv");
+              if !equals(drained, "") {
+                received.add(drained);
+              }
+              str pushed = _method_receiver(v.val, "send");
+              if !equals(pushed, "") {
+                let already = sent.at(pushed);
+                if already.is_some() {
+                  sent.put(pushed, already.unwrap() + 1);
+                }
+              }
+            }
+            _ -> {
+              // A send is written `ch <- v` and reaches here as the
+              // `send` method it stands for; a receive is `recv`.
+              str target = _method_receiver(st, "send");
+              if !equals(target, "") {
+                let already = sent.at(target);
+                if already.is_some() {
+                  sent.put(target, already.unwrap() + 1);
+                }
+              }
+              str source = _method_receiver(st, "recv");
+              if !equals(source, "") {
+                received.add(source);
+              }
+            }
+          }
+        }
+
+        Vec<str> names = capacity.keys();
+        defer names.free();
+        num i = 0;
+        for i < names.len {
+          str name = names.get(i);
+          i = i + 1;
+          if received.has(name) {
+            continue;
+          }
+          let room = capacity.at(name);
+          let count = sent.at(name);
+          if room.is_none() || count.is_none() {
+            continue;
+          }
+          if count.unwrap() > room.unwrap() {
+            self.report(
+              .ChannelCapacityOverflow,
+              format(
+              "'{str}' holds {num} but is sent {num} values with nothing receiving them",
+              name,
+              room.unwrap(),
+              count.unwrap()
+              ),
+              body
+            );
+            ret;
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Walks one function, with the names it declares tracked so a returned
+  // address can be recognized as pointing at one of them.
+  walk_function(FunctionNode f) {
+    if !f.has_body {
+      ret;
+    }
+    Set<str> locals = set_init("", 8);
+    defer locals.free();
+    self.local_types.clear();
+    self.channel_element_types.clear();
+    // A parameter is exactly as good a `fit` subject as a `let`
+    // local, but only a `.Variable` statement inside the body ever
+    // registered here before this: `fit` over a plain parameter never
+    // resolved its own enum type, so exhaustiveness checking silently
+    // never ran for what is, in practice, the single most common
+    // shape (`fit` straight over what the function was handed).
+    for arg : f.args {
+      if arg == nil {
+        continue;
+      }
+      fit arg.kind {
+        .Variable(av) -> {
+          locals.add(av.name);
+          if av.var_type != nil {
+            str atype = av.var_type.type_str;
+            if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
+              atype = format("{str}*", atype);
+            }
+            self.local_types.put(av.name, atype);
+            self._record_channel_element_type(av.name, av.var_type);
+          }
+        }
+        _ -> {}
+      }
+    }
+    self.waits_on_unsized_group = _creates_empty_wait_group(f.body);
+    self.check_channel_sends(f.body);
+    self.walk_body(f.body, &locals);
+    // A function that names a return type promises a value on every
+    // path, and a void one promises nothing.
+    if f.has_rtype && f.rtype != nil && f.rtype.kind != .Void {
+      if !_always_returns(f.body) {
+        self.report(
+          .MissingReturn,
+          format("function '{str}' can finish without returning a value", f.name),
+          f.body
+        );
+      }
+    }
+    if self.report_unused {
+      self.check_unused_locals(f);
+    }
+  }
+
+  // Reports a local nothing reads. A parameter is not judged: what a
+  // function accepts is part of how it is called.
+  check_unused_locals(FunctionNode f) {
+    Set<str> read = set_init("", 16);
+    defer read.free();
+    _collect_reads_excluding_declarations(f.body, &read);
+    self.report_unused_declarations(f.body, &read);
+  }
+
+  // Walks the declarations in a body, reporting each name the body never
+  // reads.
+  report_unused_declarations(Node* stmt, Set<str>* read) {
+    if stmt == nil {
+      ret;
+    }
+    fit stmt.kind {
+      .Body(body) -> {
+        for s : body.statements {
+          self.report_unused_declarations(s, read);
+        }
+      }
+      .Variable(v) -> {
+        // A name beginning with `_` says the value is being discarded on
+        // purpose, so there is nothing to report.
+        if !read.has(v.name) && !starts_with(v.name, "_") {
+          self.report(.UnusedVariable, format("unused variable '{str}'", v.name), stmt);
+        }
+      }
+      .StatementIf(ifn) -> { self.report_unused_declarations(ifn.body, read); }
+      .StatementElseIf(ein) -> { self.report_unused_declarations(ein.body, read); }
+      .StatementElse(body) -> { self.report_unused_declarations(body, read); }
+      .StatementDefer(inner) -> { self.report_unused_declarations(inner, read); }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> { self.report_unused_declarations(c.body, read); }
+          .Range(r) -> { self.report_unused_declarations(r.body, read); }
+          .Iter(it) -> { self.report_unused_declarations(it.body, read); }
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+impl Analysis {
+  // Reports a top-level declaration nothing reads. A public one is part
+  // of what the file offers, so its use is not visible here.
+  // True when a node was written in the file being compiled.
+  belongs_here(Node* node) bin {
+    if equals(self.file, "") {
+      ret true;
+    }
+    if !node.has_pos {
+      ret false;
+    }
+    ret equals(node.pos.filename, self.file);
+  }
+
+  check_unused_declarations(Vec<Node>* nodes, Vec<Node>* program) {
+    Set<str> read = set_init("", 64);
+    defer read.free();
+    num i = 0;
+    for i < nodes.len {
+      Node* node = &nodes.data[i];
+      i = i + 1;
+      if !self.belongs_here(node) {
+        continue;
+      }
+      fit node.kind {
+        .Function(f) -> { _collect_function_reads(f, &read); }
+        .Impl(block) -> {
+          read.add(block.type_name);
+          if block.has_quirk_name {
+            read.add(block.quirk_name);
+          }
+          for m : block.methods {
+            if m == nil {
+              continue;
+            }
+            // A method's own node reads nothing; what it reads is in its
+            // body and signature, the same as any other function.
+            fit m.kind {
+              .Function(f) -> { _collect_function_reads(f, &read); }
+              _ -> {}
+            }
+          }
+        }
+        .Compound(c) -> {
+          for field : c.fields {
+            if field.dtype != nil {
+              read.add(field.dtype.type_str);
+              for g : field.dtype.generic_args {
+                read.add(g.type_str);
+              }
+            }
+          }
+        }
+        .Variable(v) -> { _collect_reads(node, &read); }
+        .Test(t) -> { _collect_reads(t.body, &read); }
+        _ -> {}
+      }
+    }
+
+    i = 0;
+    for i < nodes.len {
+      Node* node = &nodes.data[i];
+      i = i + 1;
+      if !self.belongs_here(node) {
+        continue;
+      }
+      fit node.kind {
+        .Import(module) -> {
+          str used_as = module.path;
+          if module.has_alias {
+            used_as = module.alias;
+          }
+          bin earned = _import_is_read(used_as, &read) ||
+            _module_is_read(
+            module.path,
+            self.file,
+            program,
+            &read
+          ) || _module_owns_a_read_builtin(module.path, &read) ||
+            _is_reexport_passthrough(
+            module.path,
+            self.file,
+            program
+          );
+          if !earned {
+            self.report(.UnusedImport, format("unused import '{str}'", module.path), node);
+          }
+        }
+        .Function(f) -> {
+          // A function with no body declares something that exists
+          // elsewhere, a C binding among them. Nothing here can be
+          // deleted by not calling it, so there is nothing to report.
+          if !node.flags.is_public && f.has_name && f.has_body && !read.has(f.name) &&
+            !equals(
+            f.name,
+            "main"
+          ) {
+            self.report(.UnusedFunction, format("unused function '{str}'", f.name), node);
+          }
+        }
+        .Compound(c) -> {
+          if !node.flags.is_public && !read.has(c.name) {
+            self.report(.UnusedCompound, format("unused compound '{str}'", c.name), node);
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+}
+
+// A C macro or typedef the language accepts without a declaration of
+// its own, and the module that documents it.
+pub compound CBuiltin {
+  str name;
+  str module;
+}
+
+// Every C builtin the language recognizes this way, name paired with
+// the module that documents it. The single source of truth both
+// `c_builtin_owner` (a compiler warning: is an import earning its
+// place by naming one of these) and fls (hover/completion on one, at
+// a use site the AST never represents as a declared symbol at all)
+// read from, so the two can never drift apart from each other.
+pub fun c_builtins() Vec<CBuiltin> {
+  Vec<CBuiltin> out;
+  out.init(32);
+  out.push(.{name = "NULL", module = "std.c.def"});
+  out.push(.{name = "SIZE_MAX", module = "std.c.def"});
+  out.push(.{name = "RSIZE_MAX", module = "std.c.def"});
+  out.push(.{name = "PTRDIFF_MIN", module = "std.c.def"});
+  out.push(.{name = "PTRDIFF_MAX", module = "std.c.def"});
+  out.push(.{name = "WCHAR_MIN", module = "std.c.def"});
+  out.push(.{name = "WCHAR_MAX", module = "std.c.def"});
+  out.push(.{name = "WINT_MIN", module = "std.c.def"});
+  out.push(.{name = "WINT_MAX", module = "std.c.def"});
+  out.push(.{name = "size_t", module = "std.c.def"});
+  out.push(.{name = "ptrdiff_t", module = "std.c.def"});
+  out.push(.{name = "wchar_t", module = "std.c.def"});
+  out.push(.{name = "rsize_t", module = "std.c.def"});
+  out.push(.{name = "ssize_t", module = "std.c.def"});
+  out.push(.{name = "va_list", module = "std.c.def"});
+  out.push(.{name = "EOF", module = "std.c.io"});
+  out.push(.{name = "SEEK_SET", module = "std.c.io"});
+  out.push(.{name = "SEEK_CUR", module = "std.c.io"});
+  out.push(.{name = "SEEK_END", module = "std.c.io"});
+  out.push(.{name = "FILE", module = "std.c.io"});
+  out.push(.{name = "EXIT_SUCCESS", module = "std.c.mem"});
+  out.push(.{name = "EXIT_FAILURE", module = "std.c.mem"});
+  out.push(.{name = "CHAR_BIT", module = "std.c.limits"});
+  out.push(.{name = "MB_LEN_MAX", module = "std.c.limits"});
+  out.push(.{name = "SCHAR_MIN", module = "std.c.limits"});
+  out.push(.{name = "SCHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "UCHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "CHAR_MIN", module = "std.c.limits"});
+  out.push(.{name = "CHAR_MAX", module = "std.c.limits"});
+  out.push(.{name = "SHRT_MIN", module = "std.c.limits"});
+  out.push(.{name = "SHRT_MAX", module = "std.c.limits"});
+  out.push(.{name = "USHRT_MAX", module = "std.c.limits"});
+  out.push(.{name = "INT_MAX", module = "std.c.limits"});
+  out.push(.{name = "INT_MIN", module = "std.c.limits"});
+  out.push(.{name = "UINT_MAX", module = "std.c.limits"});
+  out.push(.{name = "LONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LONG_MIN", module = "std.c.limits"});
+  out.push(.{name = "ULONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LLONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "LLONG_MIN", module = "std.c.limits"});
+  out.push(.{name = "ULLONG_MAX", module = "std.c.limits"});
+  out.push(.{name = "CLOCKS_PER_SEC", module = "std.c.time"});
+  out.push(.{name = "time_t", module = "std.c.time"});
+  out.push(.{name = "clock_t", module = "std.c.time"});
+  out.push(.{name = "pthread_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_attr_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_mutex_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_mutexattr_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_cond_t", module = "std.c.thread"});
+  out.push(.{name = "pthread_condattr_t", module = "std.c.thread"});
+  out.push(.{name = "pid_t", module = "std.c.process"});
+  out.push(.{name = "posix_spawn_file_actions_t", module = "std.c.process"});
+  ret out;
+}
+
+// The module that documents a C macro or typedef the language accepts
+// without a declaration of its own. Importing that module is what makes
+// the name available, so reading it is what earns the import its place.
+pub fun c_builtin_owner(str name) str {
+  let all = c_builtins();
+  defer all.free();
+  num i = 0;
+  for i < all.len {
+    CBuiltin b = all.get(i);
+    if equals(b.name, name) {
+      ret b.module;
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// True when any name the file reads is a C builtin the imported module
+// documents.
+fun _module_owns_a_read_builtin(str path, Set<str>* read) bin {
+  Vec<str> names = read.keys();
+  defer names.free();
+  num i = 0;
+  for i < names.len {
+    if equals(c_builtin_owner(names.get(i)), path) {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
+// True for a module whose purpose is to document the C names the
+// language accepts without a declaration.
+fun _module_documents_builtins(str path) bin {
+  fit path {
+    "std.c.def", "std.c.io", "std.c.mem", "std.c.limits", "std.c.time", "std.c.thread",
+    "std.c.process" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True when a module declares nothing of its own and exists to forward
+// what it imports, which is reason enough to import it.
+fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
+  // A module that documents C builtins declares nothing either, but it
+  // exists to name those, not to forward another module.
+  if _module_documents_builtins(path) {
+    ret false;
+  }
+  str resolved = resolve_import_path(importer, path);
+  if equals(resolved, "") {
+    ret false;
+  }
+  bin declares_something = false;
+  num i = 0;
+  for i < program.len {
+    Node* node = &program.data[i];
+    i = i + 1;
+    if !node.has_pos || !equals(node.pos.filename, resolved) {
+      continue;
+    }
+    fit node.kind {
+      .Function(_) -> { declares_something = true; }
+      .Compound(_) -> { declares_something = true; }
+      .Enum(_) -> { declares_something = true; }
+      .Quirk(_) -> { declares_something = true; }
+      .Variable(_) -> { declares_something = true; }
+      _ -> {}
+    }
+  }
+  ret !declares_something;
+}
+
+// True when the file compiled reads any name the imported module
+// declares. An import earns its place by what it brings in, which is
+// not always named after the module itself (`NULL` from `std.c.def`).
+fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) bin {
+  str resolved = resolve_import_path(importer, path);
+  if equals(resolved, "") {
+    ret false;
+  }
+  num i = 0;
+  for i < program.len {
+    Node* node = &program.data[i];
+    i = i + 1;
+    if !node.has_pos || !equals(node.pos.filename, resolved) {
+      continue;
+    }
+    fit node.kind {
+      .Function(f) -> {
+        if f.has_name && read.has(f.name) {
+          ret true;
+        }
+      }
+      .Compound(c) -> {
+        if read.has(c.name) {
+          ret true;
+        }
+      }
+      .Enum(e) -> {
+        if read.has(e.name) {
+          ret true;
+        }
+        for v : e.variants {
+          if read.has(v.name) {
+            ret true;
+          }
+        }
+      }
+      .Quirk(q) -> {
+        if read.has(q.name) {
+          ret true;
+        }
+      }
+      .Variable(v) -> {
+        if read.has(v.name) {
+          ret true;
+        }
+      }
+      // A module is just as used when only its type's methods are
+      // called: `r.is_err()` reads `std.result` as surely as naming
+      // `Result` does. A method is stored mangled, so it is the name as
+      // written that is looked for.
+      .Impl(block) -> {
+        if read.has(block.type_name) {
+          ret true;
+        }
+        for m : block.methods {
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(f) -> {
+              if f.has_name &&
+                read.has(_unmangled_method_name(f.name, block.type_name)) {
+                ret true;
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret false;
+}
+
+// A method's own name, with the type it is mangled with removed.
+fun _unmangled_method_name(str mangled, str type_name) str {
+  StringBuilder b = string_builder_init(len(type_name) + 2);
+  b.append(type_name);
+  b.append("__");
+  str prefix = b.build();
+  if starts_with(mangled, prefix) {
+    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+  }
+  ret mangled;
+}
+
+// True when anything a module offers is read. An import is written as a
+// dotted path, while what it brings in is read by the last name in that
+// path or by whatever the file calls it.
+fun _import_is_read(str path, Set<str>* read) bin {
+  if read.has(path) {
+    ret true;
+  }
+  Vec<str> parts = split(path, '.');
+  defer parts.free();
+  num i = 0;
+  for i < parts.len {
+    if read.has(parts.get(i)) {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
+// An `expect` asked for a warning that never fired: a claim the
+// program makes about itself that turned out not to be true. `pos`
+// is the `expect` statement's own position (not the warning site,
+// since there wasn't one), so a caller can point at the stale claim
+// itself rather than the top of the file.
+pub compound UnmetExpectation {
+  str message;
+  Pos pos;
+  bin has_pos;
+}
+
+// Reads a program and reports what it notices, or the `expect` that
+// never fired.
+pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str file) Result<Vec<Warning>, UnmetExpectation> {
+  Analysis state = _analysis_new();
+  state.report_unused = report_unused;
+  state.file = file;
+  // What each enum declares is read first, so a `fit` over one can be
+  // judged wherever it is written.
+  num e = 0;
+  for e < program.len {
+    Node* node = &program.data[e];
+    e = e + 1;
+    fit node.kind {
+      .Function(f) -> {
+        if f.has_name {
+          state.functions.put(f.name, f);
+        }
+      }
+      .Compound(c) -> { state.compound_decls.put(c.name, c); }
+      .Enum(decl) -> {
+        Vec<str> names;
+        names.init(decl.variants.len);
+        for v : decl.variants {
+          names.push(v.name);
+        }
+        state.enum_variants.put(decl.name, names);
+      }
+      _ -> {}
+    }
+  }
+
+  // A control written at the top level covers the whole file, so every
+  // one is read before anything is judged. Matches the reference
+  // compiler: a top-level `expect`/`allow` for an unused-declaration
+  // category is only registered when that category is actually being
+  // looked for, so it neither blocks compilation nor claims anything
+  // when `-warn-unused` is off.
+  num i = 0;
+  if report_unused {
+    for i < nodes.len {
+      Node* node = &nodes.data[i];
+      i = i + 1;
+      fit node.kind {
+        .StatementWarningControl(ctrl) -> { state.control(ctrl, node.pos); }
+        _ -> {}
+      }
+    }
+    state.check_unused_declarations(nodes, program);
+  }
+
+  i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    if !state.belongs_here(node) {
+      continue;
+    }
+    fit node.kind {
+      .Function(f) -> { state.walk_function(f); }
+      .Impl(block) -> {
+        for m : block.methods {
+          fit m.kind {
+            .Function(f) -> { state.walk_function(f); }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // An expectation that never fired is a claim the program makes about
+  // itself that is no longer true.
+  Vec<str> names = state.expected.keys();
+  defer names.free();
+  num k = 0;
+  for k < names.len {
+    str name = names.get(k);
+    k = k + 1;
+    // A warning `-warn-unused` did not turn detection on for is one this
+    // run never had a chance to emit, same as the reference compiler:
+    // the expectation still goes unmet, and unmet is still an error.
+    if !state.met.has(name) {
+      Vec<Warning> empty = state.found;
+      empty.free();
+      UnmetExpectation err;
+      err.message = format("expected warning '{str}' was not emitted", name);
+      err.has_pos = false;
+      err.pos.line = 0;
+      err.pos.col = 0;
+      err.pos.start_col = 0;
+      err.pos.end_col = 0;
+      err.pos.end_line = 0;
+      err.pos.filename = "";
+      let at = state.expected.at(name);
+      if at.is_some() {
+        err.pos = at.unwrap();
+        err.has_pos = true;
+      }
+      _free_analysis_scratch(&state);
+      ret .Err(err);
+    }
+  }
+
+  Vec<Warning> out = state.found;
+  _free_analysis_scratch(&state);
+  ret .Ok(out);
+}
+
+// Everything `Analysis` owns except `.found`, which each of `analyze`'s
+// own two exit paths above already carries out on its own. Shallow
+// only for `.functions`/`.compound_decls`/`.local_types`/
+// `.channel_element_types`: their values alias the AST `nodes`/
+// `program` (borrowed parameters, not this call's to free) or its own
+// token text, the same convention as everywhere else a Declaration or
+// its own fields get reused rather than copied. `.enum_variants`
+// values are the one exception - each `Vec<str>` is this call's own,
+// built fresh in the walk above - so those get freed individually
+// before the map itself.
+fun _free_analysis_scratch(Analysis* state) {
+  Vec<str> enum_names = state.enum_variants.keys();
+  defer enum_names.free();
+  num ei = 0;
+  for ei < enum_names.len {
+    Vec<str> variants = state.enum_variants.at(enum_names.get(ei)).unwrap();
+    variants.free();
+    ei = ei + 1;
+  }
+  state.enum_variants.free();
+  state.functions.free();
+  state.compound_decls.free();
+  state.local_types.free();
+  state.channel_element_types.free();
+  state.allowed.free();
+  state.expected.free();
+  state.met.free();
+}
+
+// Collects every name an expression or statement reads, so a declaration
+// that no one reads can be told apart from one that is used.
+fun _collect_reads(Node* node, Set<str>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Identifier(name) -> { out.add(name); }
+    .Expression(e) -> {
+      if e.has_left {
+        _collect_reads(e.left, out);
+      }
+      if e.has_right {
+        _collect_reads(e.right, out);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _collect_reads(inner, out); }
+    .Unary(u) -> { _collect_reads(u.operand, out); }
+    .Tenary(t) -> {
+      _collect_reads(t.cond, out);
+      _collect_reads(t.then_val, out);
+      _collect_reads(t.else_val, out);
+    }
+    .Bracket(items) -> { _collect_reads(items, out); }
+    .Panic(message) -> { _collect_reads(message, out); }
+    .CompoundInit(init) -> {
+      if init.has_dtype {
+        out.add(init.init_dtype.type_str);
+      }
+      for f : init.fields {
+        _collect_reads(f.value, out);
+      }
+    }
+    .Body(body) -> {
+      for s : body.statements {
+        _collect_reads(s, out);
+      }
+    }
+    .Variable(v) -> {
+      // The type a declaration names is read by naming it.
+      if v.var_type != nil {
+        out.add(v.var_type.type_str);
+        for g : v.var_type.generic_args {
+          out.add(g.type_str);
+        }
+      }
+      if v.has_val {
+        _collect_reads(v.val, out);
+      }
+    }
+    .StatementReturn(value) -> { _collect_reads(value, out); }
+    .StatementDefer(inner) -> { _collect_reads(inner, out); }
+    .StatementFork(call) -> { _collect_reads(call, out); }
+    .StatementIf(ifn) -> {
+      _collect_reads(ifn.condition, out);
+      _collect_reads(ifn.body, out);
+    }
+    .StatementElseIf(ein) -> {
+      _collect_reads(ein.condition, out);
+      _collect_reads(ein.body, out);
+    }
+    .StatementElse(body) -> { _collect_reads(body, out); }
+    .StatementAssert(a) -> {
+      _collect_reads(a.condition, out);
+      if a.has_message {
+        _collect_reads(a.message, out);
+      }
+    }
+    .StatementFit(f) -> {
+      _collect_reads(f.exp, out);
+      for branch : f.branches {
+        if branch.has_condition {
+          _collect_reads(branch.condition, out);
+        }
+        _collect_reads(branch.body, out);
+      }
+    }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if c.has_condition {
+            _collect_reads(c.condition, out);
+          }
+          _collect_reads(c.body, out);
+        }
+        .Range(r) -> {
+          _collect_reads(r.range_expr, out);
+          _collect_reads(r.body, out);
+        }
+        .Iter(it) -> {
+          _collect_reads(it.iterable, out);
+          _collect_reads(it.body, out);
+        }
+      }
+    }
+    _ -> {}
+  }
+}

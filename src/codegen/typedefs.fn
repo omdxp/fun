@@ -1,0 +1,128 @@
+// Fun-to-C builtin type name mapping and other pure, stateless codegen
+// lookup tables.
+
+imp std.string;
+imp std.io;
+imp ..parser.datatype_defs;
+
+// Maps a builtin Fun scalar type name to its C spelling. Sized/dynamic
+// ints (`iN`/`uN`) are handled separately by the caller via
+// `dynamic_int_type_to_c` before falling back here. Anything not
+// recognized (`void`, a user-defined type name, ...) is returned
+// unchanged, since it's already a valid C name.
+pub fun map_type_to_c(str type_str) str {
+  fit type_str {
+    "num" -> { ret "int64_t"; }
+    "dec" -> { ret "double"; }
+    "f32" -> { ret "float"; }
+    "f64" -> { ret "double"; }
+    "i8" -> { ret "int8_t"; }
+    "i16" -> { ret "int16_t"; }
+    "i32" -> { ret "int32_t"; }
+    "i64" -> { ret "int64_t"; }
+    "u8" -> { ret "uint8_t"; }
+    "u16" -> { ret "uint16_t"; }
+    "u32" -> { ret "uint32_t"; }
+    "u64" -> { ret "uint64_t"; }
+    "str" -> { ret "char*"; }
+    "bin" -> { ret "bool"; }
+    "chr" -> { ret "char"; }
+    "raw" -> { ret "void"; }
+    _ -> { ret type_str; }
+  }
+}
+
+// Returns `dyn`'s C spelling. An arbitrary bit-width int is
+// syntactically accepted by the parser but rare in practice, and C's
+// only native way to spell an exact odd width is C23's `_BitInt(N)`
+// extension - which isn't a safe universal choice: Ubuntu's default
+// GCC (13.x, as shipped by ubuntu-latest) doesn't recognize `_BitInt`
+// as a keyword at all, under any -std flag, and both Apple's and
+// mainline LLVM clang cap it at 128 bits regardless of platform. Any
+// width up to 128 rounds up to the smallest standard container that
+// holds it instead - `int8_t`/`uint8_t` through `int64_t`/`uint64_t`
+// for the four standard widths, `__int128`/`unsigned __int128` up to
+// 128 (a pre-C23 GNU/Clang extension both compilers have supported
+// for years, unlike `_BitInt`) - trading exact-width wraparound for
+// universal portability, which no test or example actually depends
+// on. Only a width past 128 (rare; `u256` in one example) still needs
+// `_BitInt(N)`, and stays gated on a new enough compiler until Fun has
+// its own wide-integer representation.
+pub fun dynamic_int_type_to_c(DynamicIntType dyn) str {
+  if dyn.bits <= 8 {
+    if dyn.is_signed {
+      ret "int8_t";
+    }
+    ret "uint8_t";
+  }
+  if dyn.bits <= 16 {
+    if dyn.is_signed {
+      ret "int16_t";
+    }
+    ret "uint16_t";
+  }
+  if dyn.bits <= 32 {
+    if dyn.is_signed {
+      ret "int32_t";
+    }
+    ret "uint32_t";
+  }
+  if dyn.bits <= 64 {
+    if dyn.is_signed {
+      ret "int64_t";
+    }
+    ret "uint64_t";
+  }
+  if dyn.bits <= 128 {
+    if dyn.is_signed {
+      ret "__int128";
+    }
+    ret "unsigned __int128";
+  }
+  if dyn.is_signed {
+    ret format("_BitInt({num})", dyn.bits);
+  }
+  ret format("unsigned _BitInt({num})", dyn.bits);
+}
+
+test "map_type_to_c maps builtin scalars to their C spellings" {
+  assert equals(map_type_to_c("num"), "int64_t"), "expected 'num' -> 'int64_t'";
+  assert equals(map_type_to_c("dec"), "double"), "expected 'dec' -> 'double'";
+  assert equals(map_type_to_c("str"), "char*"), "expected 'str' -> 'char*'";
+  assert equals(map_type_to_c("bin"), "bool"), "expected 'bin' -> 'bool'";
+  assert equals(map_type_to_c("chr"), "char"), "expected 'chr' -> 'char'";
+  assert equals(map_type_to_c("raw"), "void"), "expected 'raw' -> 'void'";
+}
+
+test "map_type_to_c passes an unrecognized name through unchanged" {
+  assert equals(map_type_to_c("void"), "void"), "expected 'void' to pass through unchanged";
+  assert equals(map_type_to_c("Point"), "Point"), "expected a user-defined type name to pass through unchanged";
+}
+
+test "dynamic_int_type_to_c maps the four standard widths" {
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 8}), "int8_t"), "expected i8 -> int8_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 32}), "uint32_t"), "expected u32 -> uint32_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 64}), "int64_t"), "expected i64 -> int64_t";
+}
+
+test "dynamic_int_type_to_c rounds a non-standard width up to the next standard container" {
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 24}), "int32_t"), "expected i24 -> int32_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 24}), "uint32_t"), "expected u24 -> uint32_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 6}), "int8_t"), "expected i6 -> int8_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 2}), "uint8_t"), "expected u2 -> uint8_t";
+}
+
+test "dynamic_int_type_to_c uses __int128 up to 128 bits, both signednesses" {
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 128}), "__int128"), "expected i128 -> __int128";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 128}),
+    "unsigned __int128"
+  ), "expected u128 -> unsigned __int128";
+}
+
+test "dynamic_int_type_to_c falls back to _BitInt(N) only past 128 bits" {
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 256}),
+    "unsigned _BitInt(256)"
+  ), "expected u256 -> unsigned _BitInt(256)";
+}

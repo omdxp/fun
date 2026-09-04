@@ -67,7 +67,7 @@
       "patterns": [
         {
           "name": "meta.type.generic.fun",
-          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(<[^>]+>)",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(<\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\s*\\*+)?(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*(?:\\s*\\*+)?)*\\s*>)",
           "captures": {
             "1": { "name": "entity.name.type.fun" },
             "2": { "name": "entity.name.type.parameters.fun" }

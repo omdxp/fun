@@ -11,6 +11,31 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 - Output channel: **Fun Language Server** (useful for debugging startup issues)
 - Bundled color theme: **Fun Web** (matches the reference website palette)
 
+## Snippets
+
+`fls` offers these directly in completion, snippet-aware clients included (works the same in any other editor `fls` is wired into, not just VS Code). Two kinds:
+
+**Type a real keyword to write its whole shape** — accepting `fun` writes a full declaration with the places to fill marked, not just the bare word:
+
+`fun`, `compound`, `enum`, `quirk`, `impl`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `imp`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
+
+**Short triggers for a common multi-line shape**, offered alongside ordinary completions:
+
+| Trigger | Writes |
+|---|---|
+| `main` | a program's entry point |
+| `mainio` | an entry point that prints |
+| `fore` | `for` each item |
+| `fori` | `for` each item, with its index |
+| `forw` | `for` while a condition holds |
+| `implq` | implement a quirk for a type |
+| `iferr` | return early when a `Result` failed |
+| `ifnone` | return early when an `Option` is empty |
+| `fitr` | `fit` over a `Result` |
+| `fito` | `fit` over an `Option` |
+| `vecnew` | a `Vec`, initialized and freed |
+| `mapnew` | a `Map`, initialized and freed |
+
 ## Requirements
 
 You need the Fun tooling installed:
@@ -25,7 +50,7 @@ For the **Debug** feature you also need:
 
 By default the extension will try, in order:
 
-1. Workspace-local binaries: `zig-out/bin/fls(.exe)` and `zig-out/bin/fun(.exe)`
+1. Workspace-local binaries: `fun-out/bin/fls(.exe)` and `fun-out/bin/fun(.exe)`
 2. Your system `PATH` (e.g. `fls`, `fun`)
 
 ## Getting Started
@@ -34,7 +59,7 @@ By default the extension will try, in order:
 2. Open a `.fn` file.
 3. If the server doesn’t start, open **View → Output** and select **Fun Language Server**.
 
-For local development builds, the extension prefers workspace binaries from `zig-out/bin` before falling back to executables on `PATH`.
+For local development builds, the extension prefers workspace binaries from `fun-out/bin` before falling back to executables on `PATH`.
 
 Optional: set **Preferences → Theme → Color Theme → Fun Web** to use the same code palette as the website.
 
@@ -44,7 +69,7 @@ These settings live under **Settings → Extensions → Fun**:
 
 - `fun.fls.path`
   - Path to the `fls` executable.
-  - Default: `fls` (falls back to `zig-out/bin/fls` when available)
+  - Default: `fls` (falls back to `fun-out/bin/fls` when available)
 - `fun.fls.funPath`
   - Optional path to the `fun` executable.
   - When set to a valid executable, it is passed to `fls` via the `FLS_FUN_PATH` environment variable.
@@ -67,6 +92,13 @@ Every `.fn` file that defines `fun main(` shows two buttons above it:
 - **▶ Run** — compiles and runs the file in an integrated terminal (equivalent to `fun -in file.fn`).
 - **⚙ Debug** — compiles with debug info, then launches the native debugger.
 
+Every `test "..."` block gets the same pair, scoped to just that one test:
+
+- **▶ Run Test** — compiles in test mode and runs only the named test in an integrated terminal (`fun -in file.fn -test -- "test name"`).
+- **⚙ Debug Test** — same compile, under the native debugger. Breakpoints inside the test (or in a function it calls) work exactly as in an ordinary Debug session.
+
+Every `fuzz "..."` block gets a **▶ Fuzz** button, which runs that one target (`fun -in file.fn -fuzz -fuzz-target "target name"`). There's no Debug variant for fuzzing: the fuzzing engine's own driver takes over the process and runs indefinitely, so attaching a debugger up front isn't useful the way it is for a single deterministic test — reproduce a crash fuzzing found from its saved input instead, then debug that.
+
 ### Debug experience
 
 Breakpoints are set directly on `.fn` source lines. When a breakpoint is hit:
@@ -76,19 +108,22 @@ Breakpoints are set directly on `.fn` source lines. When a breakpoint is hit:
 - **Watch** and **Debug Console** expressions also display Fun types.
 - Internal C boilerplate frames (e.g. async helpers) are marked as secondary and collapsed by default.
 
-### Debugging async functions
+### Debugging async functions and `fork`
 
-`await` expressions lower to a chain of C trampoline functions (`__fun_async_call_`, `__fun_async_spawn_`, `__fun_async_entry_`, then the real function body). The actual function call goes through `pthread_create` (or `CreateThread` on Windows) — which is opaque C runtime code the debugger cannot step through at the Fun source level.
+`await` expressions (and `fork`, which spawns an async function the same way) lower to a chain of C trampoline functions (`__fun_async_call_`, `__fun_async_spawn_`, `__fun_async_entry_`, then the real function body). The actual function call goes through `pthread_create` (or `CreateThread` on Windows) — which is opaque C runtime code the debugger cannot step through at the Fun source level.
 
-This means **step into on an `await` line will not automatically land inside the called async function**. Instead the debugger follows the C runtime path:
+This means **step into on an `await`/`fork` line will not automatically land inside the called async function**. Instead the debugger follows the C runtime path:
 
 ```
 await to_consumer.send_async(out);   // step into → enters trampoline C code
+fork worker(&wg);                    // same story
 ```
+
+Every line of the trampoline itself is still correctly attributed back to the async function's own declaration line (so stepping through it doesn't show garbage or unrelated source), but it's still generated C, not your function's own body.
 
 **The right way to debug async calls:**
 
-1. **Set a breakpoint inside the async function you want to inspect** (e.g. a line inside `send_async` in `channel.fn`). The debugger will break there when the spawned thread executes it, and you can step normally from that point.
+1. **Set a breakpoint inside the async function you want to inspect** (e.g. a line inside `send_async` in `channel.fn`, or inside the function `fork` spawns). The debugger will break there when the spawned thread executes it, and you can step normally from that point.
 2. Alternatively, set a breakpoint on the line *after* the `await` to resume once the call has returned.
 
 Step-over (`F10`) on an `await` line works correctly — it blocks until the async call completes and advances to the next Fun source line.
@@ -121,13 +156,15 @@ Open the Command Palette and run:
 - **Fun: Run** — run the current file
 - **Fun: Debug** — debug the current file
 
+The per-test/per-fuzz-target commands (**Run Test**, **Debug Test**, **Fuzz**) aren't in the Command Palette — they need a specific test/fuzz block's name, so they only appear as codelenses above each `test`/`fuzz` block (see [Run and Debug](#run-and-debug)).
+
 ## Troubleshooting
 
 **No hover / completions / diagnostics**
 
 - Verify `fls` is found:
   - Either ensure it’s on `PATH`, or set `fun.fls.path` to the full path.
-- If you’re building Fun from source, ensure `zig-out/bin` exists (or point settings at the built executables).
+- If you’re building Fun from source, ensure `fun-out/bin` exists (or point settings at the built executables).
 
 **Standard library isn’t found**
 

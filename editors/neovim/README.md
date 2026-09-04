@@ -31,7 +31,7 @@ Neovim 0.11 ships a built-in LSP client that no longer requires `nvim-lspconfig`
 vim.lsp.config("fls", {
   cmd = { "fls" },
   filetypes = { "fun" },
-  root_dir = vim.fs.root(0, { "build.zig", "build.zig.zon", ".git" }),
+  root_dir = vim.fs.root(0, { "fun.toml", ".git" }),
 })
 
 -- Enable it
@@ -72,7 +72,7 @@ If you are on Neovim < 0.11 and use [nvim-lspconfig](https://github.com/neovim/n
 require("lspconfig").fls.setup({
   cmd = { "fls" },
   filetypes = { "fun" },
-  root_dir = require("lspconfig.util").root_pattern("build.zig", "build.zig.zon", ".git"),
+  root_dir = require("lspconfig.util").root_pattern("fun.toml", ".git"),
 })
 ```
 

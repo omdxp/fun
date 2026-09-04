@@ -1,0 +1,342 @@
+// Semantic tokens.
+// 
+// A more precise layer over a client's own regex/TextMate
+// highlighting: what a token actually is (a function's own
+// declaration name, a type reference, a keyword styled like the
+// function it reads as), worked out from its own neighbors rather
+// than guessed from a pattern.
+
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp ..lexer.token;
+imp ..ast.ast;
+imp ..parser.datatype_defs;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.map;
+
+// The protocol's own token-type/modifier legend, in the exact order
+// each index below refers to. `initialize`'s own capabilities must
+// declare this same legend, or a client will show the wrong colors.
+// `defaultLibrary` marks a language primitive (`num`, `str`, `i7`,
+// ...) as distinct from every declared type - a `compound`/`enum`/
+// `quirk`, whether written in this project or the stdlib, is a
+// "type" like any other, uncolored differently by where it happens
+// to be declared.
+pub const str TOKEN_TYPES = `["keyword","comment","string","number","operator","function","variable","type","enumMember","boolean"]`;
+pub const str TOKEN_MODIFIERS = `["defaultLibrary"]`;
+
+// The protocol's own numbering, matching `TOKEN_TYPES`'s own order.
+enum TokenKind {
+  Keyword,
+  Comment,
+  String,
+  Number,
+  Operator,
+  Function,
+  Variable,
+  Type,
+  EnumMember,
+  Boolean,
+}
+
+// The full-document semantic tokens for `doc`, as the LSP result a
+// client is sent: one flat array, 5 numbers per emitted token (line
+// delta from the previous one, start-character delta, length, type,
+// modifier bitmask, always 0 here), the protocol's own encoding for
+// keeping the payload small on a large file.
+pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret `{"data":[]}`;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  // Every name declared `const`, anywhere in the merged program, not
+  // just this file - a const's own name is otherwise indistinguishable
+  // from a type's by shape alone (`NAME`/`Widget` are both a bare
+  // capitalized identifier), and the same set membership check covers
+  // both the declaration site and every later reference to it.
+  Map<str, bin> const_names;
+  const_names.init(16);
+  defer const_names.free();
+  if read.parsed {
+    _collect_const_names(&read.program.nodes, &const_names);
+  }
+
+  // Every enum variant's own declaration-site name token (`Circle` in
+  // `enum Shape { Circle(num), ... }`) - not the payload types inside
+  // its parens, and not the enum's own name - so it reads as an enum
+  // member rather than a called function despite the same `Name(`
+  // shape a variant with a payload has.
+  Vec<bin> variant_decl = _enum_variant_name_flags(&tokens);
+  defer variant_decl.free();
+
+  Vec<num> data;
+  data.init(tokens.len * 5);
+  num last_line = 0;
+  num last_start = 0;
+  bin have_last = false;
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    num idx = i;
+    i = i + 1;
+    if t.type == .NewLine {
+      continue;
+    }
+    num length = t.pos.end_col - t.pos.start_col;
+    if length <= 0 {
+      continue;
+    }
+    num ttype = _token_type_of(&tokens, idx, t, &const_names, &variant_decl);
+    if ttype < 0 {
+      continue;
+    }
+    // Both a lexer-keyword primitive (`num`, `str`, ...) and a
+    // dynamic-width one (`i7`, `u23`, ..., lexed as a plain
+    // identifier, see `_identifier_token_type` below) share the same
+    // name-based check, so this applies regardless of which token
+    // kind carried it.
+    num modifier = 0;
+    if ttype == TokenKind.Type &&
+      (keyword_is_datatype(token_word(t)) || !equals(c_builtin_owner(token_word(t)), "")) {
+      modifier = 1;
+    }
+
+    num line0 = t.pos.line - 1;
+    num start0 = t.pos.start_col - 1;
+    num delta_line = line0;
+    num delta_start = start0;
+    if have_last {
+      delta_line = line0 - last_line;
+      if delta_line == 0 {
+        delta_start = start0 - last_start;
+      }
+    }
+    data.push(delta_line);
+    data.push(delta_start);
+    data.push(length);
+    data.push(ttype);
+    data.push(modifier);
+    last_line = line0;
+    last_start = start0;
+    have_last = true;
+  }
+
+  StringBuilder b = string_builder_init(data.len * 3);
+  b.append(`{"data":[`);
+  num j = 0;
+  for j < data.len {
+    if j > 0 {
+      b.append(",");
+    }
+    b.append_num(data.get(j));
+    j = j + 1;
+  }
+  b.append("]}");
+  ret b.build();
+}
+
+// Every name declared `const` anywhere in `nodes`. A local `const`
+// inside a function body isn't reached here (`nodes` is the top-level
+// program only) - a narrower, separately-scoped gap, same tradeoff
+// `outline.fn`'s own top-level walks already accept.
+fun _collect_const_names(Vec<Node>* nodes, Map<str, bin>* out) {
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Variable(v) -> {
+        if v.is_const {
+          out.put(v.name, true);
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+// One flag per token in `tokens`, true at the index of an enum
+// variant's own declaration-site name (`Circle` in `enum Shape {
+// Circle(num), Square, }`) - the first identifier right after the
+// enum's own `{` or after a `,` at the variant list's own top level,
+// never a payload type sitting inside a variant's own parens.
+fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<bin> {
+  Vec<bin> flags;
+  flags.init(tokens.len);
+  num fi = 0;
+  for fi < tokens.len {
+    flags.push(false);
+    fi = fi + 1;
+  }
+
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if !token_is_keyword(t, "enum") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+      j = j + 1;
+    }
+    if j >= tokens.len {
+      break;
+    }
+    num depth = 1;
+    num paren_depth = 0;
+    bin expect_name = true;
+    num k = j + 1;
+    for k < tokens.len && depth > 0 {
+      Token tk = tokens.get(k);
+      if token_is_symbol(tk, '{') {
+        depth = depth + 1;
+      } elif token_is_symbol(tk, '}') {
+        depth = depth - 1;
+        if depth == 0 {
+          break;
+        }
+      } elif token_is_operator(tk, "(") {
+        paren_depth = paren_depth + 1;
+      } elif token_is_symbol(tk, ')') {
+        if paren_depth > 0 {
+          paren_depth = paren_depth - 1;
+        }
+      } elif token_is_operator(tk, ",") && paren_depth == 0 {
+        expect_name = true;
+        k = k + 1;
+        continue;
+      }
+      if paren_depth == 0 && expect_name && tk.type == .Identifier {
+        flags.set(k, true);
+        expect_name = false;
+      }
+      k = k + 1;
+    }
+    i = k;
+  }
+  ret flags;
+}
+
+// `t`'s own semantic type, or -1 for a token worth no highlight of
+// its own (a comment/string/number already read that way lexically
+// still gets one, since a client's own regex highlighting for those
+// is often less reliable than the lexer's real classification).
+fun _token_type_of(
+  Vec<Token>* tokens,
+  num idx,
+  Token t,
+  Map<str, bin>* const_names,
+  Vec<bin>* variant_decl
+) num {
+  fit t.type {
+    .Comment -> { ret TokenKind.Comment; }
+    .String -> { ret TokenKind.String; }
+    .Boolean -> { ret TokenKind.Boolean; }
+    .Number -> { ret TokenKind.Number; }
+    .Operator -> { ret TokenKind.Operator; }
+    .Symbol -> { ret TokenKind.Operator; }
+    .Keyword -> { ret _keyword_token_type(t); }
+    .Identifier -> { ret _identifier_token_type(tokens, idx, t, const_names, variant_decl); }
+    _ -> { ret -1; }
+  }
+}
+
+// `panic` reads as a function call (`panic("msg")`), never as a
+// control keyword, so it is styled like one rather than like `if`/
+// `ret`. A fixed-width primitive (`num`, `str`, ...) is a reserved
+// word but names a type, not a control construct, so it is styled
+// like any other type reference instead.
+fun _keyword_token_type(Token t) num {
+  str word = token_word(t);
+  if equals(word, "panic") {
+    ret TokenKind.Function;
+  }
+  if keyword_is_datatype(word) {
+    ret TokenKind.Type;
+  }
+  ret TokenKind.Keyword;
+}
+
+// An identifier's own type, read from its immediate neighbors and
+// from what was already collected about the whole program:
+// 
+// - a function's declaration name (after `fun`), an enum variant's
+// own declaration site (`variant_decl`) or a qualified/bare-dot
+// reference to one (`Enum.Circle`, `.Circle`, preceded by `.` and
+// capitalized - Fun's own convention never capitalizes a field or
+// method name, so this is unambiguous) both read as an enum
+// member, checked before the "any bare name immediately followed
+// by `(`" function-call rule below, since a variant with a payload
+// has that exact shape too
+// - any other bare name immediately followed by `(`, covering a
+// method's own declaration with no `fun` keyword of its own the
+// same way it covers an ordinary call
+// - a name already known to be `const` (`const_names`), regardless
+// of its own capitalization
+// - a dynamic-width sized integer (`i7`, `u23`, ...), never a lexer
+// keyword despite naming a primitive type the same way `num`/`str`
+// do
+// - otherwise Fun's own naming convention (a type is always
+// capitalized, a value never is) decides between a type reference
+// and a plain variable/field/parameter read
+fun _identifier_token_type(
+  Vec<Token>* tokens,
+  num idx,
+  Token t,
+  Map<str, bin>* const_names,
+  Vec<bin>* variant_decl
+) num {
+  let prev = token_before(tokens, idx);
+  if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
+    ret TokenKind.Function;
+  }
+
+  if variant_decl.get(idx) {
+    ret TokenKind.EnumMember;
+  }
+  str word = token_word(t);
+  if prev.is_some() && token_is_operator(prev.unwrap(), ".") && looks_like_type_name(word) {
+    ret TokenKind.EnumMember;
+  }
+
+  let next = token_after(tokens, idx + 1);
+  bin next_is_paren = next.is_some() && token_is_operator(next.unwrap(), "(");
+  // `fork` is a contextual keyword, lexed as a plain identifier like
+  // any other: `fork some_call(...)` is the statement, `fork(...)` is
+  // an ordinary call to a function literally named "fork" - the same
+  // lookahead the parser itself uses to tell them apart.
+  if equals(word, "fork") && !next_is_paren {
+    ret TokenKind.Keyword;
+  }
+  if next_is_paren {
+    ret TokenKind.Function;
+  }
+
+  // A C macro or typedef the language accepts without a declaration
+  // of its own overrides the naming-convention guess below: several
+  // are lowercase typedefs (`size_t`) that read like a value by that
+  // convention alone, and several are uppercase constants (`NULL`,
+  // `EOF`) that read like a type the same way.
+  if !equals(c_builtin_owner(word), "") {
+    if ends_with(word, "_t") || equals(word, "FILE") {
+      ret TokenKind.Type;
+    }
+    ret TokenKind.Variable;
+  }
+
+  if const_names.at(word).is_some() {
+    ret TokenKind.Variable;
+  }
+  if keyword_is_datatype(word) || looks_like_type_name(word) {
+    ret TokenKind.Type;
+  }
+  ret TokenKind.Variable;
+}

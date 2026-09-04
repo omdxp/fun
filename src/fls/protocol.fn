@@ -1,0 +1,179 @@
+// Language server transport.
+// 
+// A client and the server exchange JSON over standard input and output,
+// each message preceded by headers giving its length in bytes. Reading
+// one means reading headers up to a blank line, then exactly that many
+// bytes of body.
+
+imp std.string;
+imp std.option;
+imp std.io;
+imp std.c.mem;
+
+// The largest header line worth reading. A header far longer than this
+// is a client fault rather than something to grow a buffer for.
+const num MAX_HEADER_LINE = 1024;
+
+// One message as it arrives: the raw body, still to be parsed.
+pub compound Message {
+  str body;
+}
+
+// Reads the next message from `input`, or reports why it stopped. The
+// end of input is an ordinary outcome, not a failure.
+pub fun read_message(Sink* input) Option<Message> {
+  num length = -1;
+  for true {
+    str line = input.read_line_max(MAX_HEADER_LINE);
+    if line == nil {
+      ret .None;
+    }
+    str trimmed = trim(line);
+    free(line);
+    if equals(trimmed, "") {
+      // The blank line ends the headers; the body follows.
+      free(trimmed);
+      break;
+    }
+    if starts_with_ignore_case(trimmed, "content-length:") {
+      str raw_value = substr(trimmed, 15, len(trimmed) - 15);
+      str value = trim(raw_value);
+      free(raw_value);
+      length = parse_int(value);
+      free(value);
+    }
+    free(trimmed);
+  }
+  if length < 0 {
+    ret .None;
+  }
+  Message m;
+  m.body = input.read_bytes(length);
+  if m.body == nil {
+    ret .None;
+  }
+  ret .Some(m);
+}
+
+// True when `s` begins with `prefix`, whatever case each is written in.
+// A header name is not case sensitive.
+pub fun starts_with_ignore_case(str s, str prefix) bin {
+  if len(s) < len(prefix) {
+    ret false;
+  }
+  num i = 0;
+  for i < len(prefix) {
+    if to_lower_char(s[i]) != to_lower_char(prefix[i]) {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+fun to_lower_char(chr c) chr {
+  if c >= 'A' && c <= 'Z' {
+    ret (c - 'A') + 'a';
+  }
+  ret c;
+}
+
+// Writes `json` as one message, headers included, then frees it. A
+// client reads by length, so the message is flushed rather than left
+// in a buffer. Every one of this server's own call sites builds
+// `json` fresh right at the call (`response`/`error_response`/
+// `publish`/`notification`/`request_to_client`, each a `format(...)`
+// underneath, never a pass-through of something already owned
+// elsewhere) - the last thing done with it, so freeing it here rather
+// than asking every caller to remember to is what actually happens
+// consistently, not just what's supposed to.
+pub fun write_message(str json) {
+  Sink out = Sink.Stdout;
+  str wire = format("Content-Length: {num}\r\n\r\n{str}", len(json), json);
+  out.write(wire);
+  out.flush();
+  free(wire);
+  free(json);
+}
+
+// The reply to a request that succeeded.
+pub fun response(str id, str result_json) str {
+  ret format(`{"jsonrpc":"2.0","id":{str},"result":{str}}`, id, result_json);
+}
+
+// The reply to a request the server could not carry out.
+pub fun error_response(str id, num code, str message) str {
+  ret format(
+    `{"jsonrpc":"2.0","id":{str},"error":{"code":{num},"message":{str}}}`,
+    id,
+    code,
+    json_quote(message)
+  );
+}
+
+// A request the server sends without being asked, expecting a reply -
+// registering a dynamic capability (workspace file-watching) is the
+// only place fls sends one of these. `id` is a raw already-quoted
+// JSON id token (a fixed string literal works fine; nothing else the
+// server sends ever needs to correlate a reply back to it). The
+// client's own response arrives as an ordinary message with no
+// "method" field, which `handle` already ignores.
+pub fun request_to_client(str id, str method, str params_json) str {
+  ret format(`{"jsonrpc":"2.0","id":{str},"method":{str},"params":{str}}`, id, json_quote(method), params_json);
+}
+
+// A message the server sends without being asked, such as diagnostics.
+pub fun notification(str method, str params_json) str {
+  ret format(`{"jsonrpc":"2.0","method":{str},"params":{str}}`, json_quote(method), params_json);
+}
+
+// Writes `s` into `out` as a JSON string, with the characters JSON
+// reserves escaped - what almost every caller wants, quoting one
+// value on its way into a larger JSON object already being built;
+// `json_quote` below returns an owned copy instead, needed only where
+// `format`'s own `{str}` substitution wants a value in hand rather
+// than somewhere to write into. `s` is UTF-8 and `chr` is a signed C
+// `char`, so a byte >= 0x80 reads as negative; normalizing to its
+// true 0-255 value before the control-character check is what tells
+// a real C0 control character apart from an ordinary non-ASCII byte,
+// which must pass through unescaped.
+pub fun json_quote_into(StringBuilder* out, str s) {
+  out.append_char('"');
+  num i = 0;
+  num n = len(s);
+  for i < n {
+    let c = s[i];
+    i = i + 1;
+    num code = c;
+    if code < 0 {
+      code = code + 256;
+    }
+    if c == '"' {
+      out.append("\\\"");
+    } elif c == '\\' {
+      out.append("\\\\");
+    } elif c == '\n' {
+      out.append("\\n");
+    } elif c == '\r' {
+      out.append("\\r");
+    } elif c == '\t' {
+      out.append("\\t");
+    } elif code < 32 {
+      out.append("\\u");
+      str hex = to_hex(code, 4);
+      out.append(hex);
+      free(hex);
+    } else {
+      out.append_char(c);
+    }
+  }
+  out.append_char('"');
+}
+
+// `s` as a JSON string, escaped, as its own owned value the caller
+// must free.
+pub fun json_quote(str s) str {
+  StringBuilder b = string_builder_init(len(s) + 2);
+  json_quote_into(&b, s);
+  ret b.build();
+}

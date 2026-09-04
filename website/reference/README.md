@@ -10,8 +10,8 @@ Interactive local website for the Fun language with:
 ## Prerequisites
 
 - Node.js 20+
-- The Fun compiler binary at `zig-out/bin/fun`
-  - from repo root, run: `zig build`
+- The Fun compiler binary at `fun-out/bin/fun`
+  - from repo root, run: `fun build`
 
 ## Development
 
@@ -55,7 +55,7 @@ When browsing the Std Library tab, the hash updates automatically so module/symb
 
 The browser posts code to `/api/run`, the server writes a temp `.fn` file, and invokes:
 
-- `zig-out/bin/fun -in <temp-file>`
+- `fun-out/bin/fun -in <temp-file>`
 
 The process runs with `FUN_STDLIB_DIR` pointed at repo `stdlib/` so std imports resolve consistently.
 

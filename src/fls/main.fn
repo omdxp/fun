@@ -1,0 +1,34 @@
+// Language server entry point: serve one client over standard input and
+// output until it asks to stop.
+
+imp server;
+imp std.io;
+imp std.string;
+
+fun main(str[] args) num {
+  // Normally launched by an editor with no args, over stdio. `--version`
+  // and `--help` exist for installers and PATH debugging.
+  if args[1] != 0 {
+    str first = args[1];
+    if equals(first, "--version") || equals(first, "-v") {
+      // `PACKAGE_VERSION` is not declared in this file: `fun build`
+      // injects it as a top-level const ahead of every target it
+      // compiles, taken from this repository's own fun.toml.
+      println(format("fls {str}", PACKAGE_VERSION));
+      ret 0;
+    }
+    if equals(first, "--help") || equals(first, "-h") {
+      println(`Fun Language Server (fls)
+      `
+      `Usage:
+      `  fls            Run language server over stdio (LSP)
+      `  fls --version  Print version
+      `  fls --help     Show this help`);
+      ret 0;
+    }
+  }
+
+  Server s = server_new();
+  // A client writes its messages to this program's standard input.
+  ret s.serve(&Sink.Stdin);
+}

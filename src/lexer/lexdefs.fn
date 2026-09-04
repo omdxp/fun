@@ -1,0 +1,109 @@
+// Keyword/operator lookup tables the lexer depends on. These are pure,
+// self-contained lookup tables (not lexer state), so they live in their
+// own module rather than inside lexer.fn.
+// 
+// Sized integer types (`u8`, `i32`, `iN`/`uN`, `f32`/`f64`) are excluded
+// from `is_keyword` here; they lex as ordinary identifiers. A separate
+// `keyword_is_datatype` table, used by the parser for type-position
+// disambiguation, is where those get recognized.
+
+imp std.vec;
+
+// True if `s` is a reserved word.
+pub fun is_keyword(str s) bin {
+  fit s {
+    "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const", "defer",
+    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif",
+    "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue",
+    "allow", "expect", "assert", "panic", "test", "fuzz" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// Every reserved word, for the places that need to list them rather
+// than test one. Kept beside `is_keyword` so the two are read and
+// changed together.
+pub fun keywords() Vec<str> {
+  Vec<str> out;
+  out.init(40);
+  out.push("imp");
+  out.push("pub");
+  out.push("fun");
+  out.push("as");
+  out.push("enum");
+  out.push("compound");
+  out.push("quirk");
+  out.push("impl");
+  out.push("let");
+  out.push("const");
+  out.push("defer");
+  out.push("asm");
+  out.push("volatile");
+  out.push("arch");
+  out.push("void");
+  out.push("raw");
+  out.push("num");
+  out.push("dec");
+  out.push("str");
+  out.push("bin");
+  out.push("chr");
+  out.push("if");
+  out.push("elif");
+  out.push("else");
+  out.push("true");
+  out.push("false");
+  out.push("nil");
+  out.push("fit");
+  out.push("ret");
+  out.push("for");
+  out.push("async");
+  out.push("await");
+  out.push("break");
+  out.push("continue");
+  out.push("allow");
+  out.push("expect");
+  out.push("assert");
+  out.push("panic");
+  out.push("test");
+  out.push("fuzz");
+  ret out;
+}
+
+// True if `s` is `true` or `false`.
+pub fun is_boolean_keyword(str s) bin {
+  fit s {
+    "true", "false" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// An operator character that is always treated as a single-character unit
+// even when a longer run of operator characters might otherwise follow it
+// (e.g. `(` never combines with a following char into a multi-char op).
+pub fun op_treated_as_one(chr op) bin {
+  fit op {
+    '(', '[', ',', '*' -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// A character that may participate in a multi-character operator.
+pub fun is_single_operator(chr op) bin {
+  fit op {
+    '+', '-', '/', '*', '=', '>', '<', '|', '&', '^', '%', '~', '!', '(', '[', ',', '.', ':', '#', '$' -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// Every valid operator text (as opposed to `is_single_operator`, which
+// checks a single character that may be part of one).
+pub fun op_valid(str op) bin {
+  fit op {
+    "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=",
+    "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(",
+    "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$" -> { ret true; }
+    _ -> { ret false; }
+  }
+}

@@ -8,13 +8,9 @@
     "**/_fls_idx_*.fn": true,
     "**/__fls_unused__*.c": true
   },
-  "fun.fls.path": "${workspaceFolder}/zig-out/bin/fls",
-  "fun.fls.funPath": "${workspaceFolder}/zig-out/bin/fun",
+  "fun.fls.path": "${workspaceFolder}/fun-out/bin/fls",
+  "fun.fls.funPath": "${workspaceFolder}/fun-out/bin/fun",
+  "fun.fls.stdlibDir": "${workspaceFolder}/stdlib",
   "fun.fls.debugImports": true,
-  "fun.fls.debugDefinitions": true,
-  "zig.testArgs": [
-    "build",
-    "test",
-    "-Dtest-filter=${filter}"
-  ]
+  "fun.fls.debugDefinitions": true
 }

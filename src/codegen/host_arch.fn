@@ -1,0 +1,52 @@
+// Names the CPU architecture this machine's C compiler targets, backing
+// `asm arch` validation. Read from the host at runtime (`uname -m`, or
+// `PROCESSOR_ARCHITECTURE` on Windows) rather than baked into the
+// compiler binary at its own build time: a compiler-emitted prelude
+// symbol would need a bootstrap release that already defines it before
+// any commit that starts calling it could self-host, which is not
+// where this project can promise to always be.
+
+imp std.process;
+imp std.sys;
+imp std.string;
+imp std.vec;
+imp std.runtime_backend;
+
+pub fun host_arch_name() str {
+  if runtime_backend_is_windows() {
+    str env_arch = env_or("PROCESSOR_ARCHITECTURE", "");
+    ret _normalize_arch(env_arch);
+  }
+  Vec<str> argv;
+  argv.init(2);
+  argv.push("uname");
+  argv.push("-m");
+  str[] cargv = argv_from(&argv);
+  let result = run(cargv);
+  free_argv(cargv);
+  argv.free();
+  if result.is_err() {
+    ret "";
+  }
+  ret _normalize_arch(trim(result.unwrap().stdout_text));
+}
+
+// Lowercases and maps the handful of spellings each platform actually
+// uses to the names `asm arch` accepts, so callers compare against one
+// canonical set regardless of where the raw string came from.
+fun _normalize_arch(str src) str {
+  str lower = to_lower(trim(src));
+  if equals(lower, "x86_64") || equals(lower, "amd64") {
+    ret "x86_64";
+  }
+  if equals(lower, "aarch64") || equals(lower, "arm64") {
+    ret "aarch64";
+  }
+  if equals(lower, "i386") || equals(lower, "i686") || equals(lower, "x86") {
+    ret "x86";
+  }
+  if equals(lower, "arm") {
+    ret "arm";
+  }
+  ret lower;
+}

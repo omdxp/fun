@@ -1,0 +1,1491 @@
+// Hover and go to definition.
+// 
+// Both answer the same question first: what does the name under the
+// cursor refer to? Hover then spells that declaration back to the
+// reader, and go to definition says where it was written.
+
+imp protocol;
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp symbol_table;
+imp uri;
+imp imports;
+imp ..lexer.token;
+imp ..parser.datatype_defs;
+imp ..parser.import_resolver;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.io;
+imp std.fs;
+imp std.ctype;
+imp std.c.mem;
+
+// What a client is told when there is nothing to say.
+const str NO_HOVER = "null";
+const str NO_LOCATION = "[]";
+
+// The hover for the position `line`/`character` in `doc`, as the result
+// a client is sent.
+pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret NO_HOVER;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_HOVER;
+  }
+  Token t = found.unwrap();
+
+  fit t.type {
+    .Keyword -> {
+      if equals(token_word(t), "as") {
+        ret _hover_result(_as_keyword_doc(&tokens, t), span_of(t, doc.text));
+      }
+      str doc_text = keyword_doc(token_word(t));
+      if equals(doc_text, "") {
+        ret NO_HOVER;
+      }
+      ret _hover_result(doc_text, span_of(t, doc.text));
+    }
+    .Number -> {
+      fit t.data {
+        .Num(n) -> { ret _hover_result(_int_literal_doc(n), span_of(t, doc.text)); }
+        .Dec(d) -> { ret _hover_result(_dec_literal_doc(d), span_of(t, doc.text)); }
+        .Cval(c) -> { ret _hover_result(_char_literal_doc(c), span_of(t, doc.text)); }
+        _ -> { ret NO_HOVER; }
+      }
+    }
+    .Identifier -> {
+      // `fork` is not a lexer-level keyword (its recognition is
+      // contextual, parser-side), so it lexes as a plain identifier;
+      // checked here, before ordinary name resolution, since nothing
+      // named `fork` could ever be a real declared symbol anyway.
+      if equals(token_word(t), "fork") {
+        str fork_doc = keyword_doc("fork");
+        if !equals(fork_doc, "") {
+          ret _hover_result(fork_doc, span_of(t, doc.text));
+        }
+      }
+      // `sizeof` is recognized the same contextual way `fork` is:
+      // never a lexer keyword, just an identifier the parser treats
+      // specially at a call site, so it never resolves as a declared
+      // symbol either.
+      if equals(token_word(t), "sizeof") {
+        str sizeof_doc = keyword_doc("sizeof");
+        if !equals(sizeof_doc, "") {
+          ret _hover_result(sizeof_doc, span_of(t, doc.text));
+        }
+      }
+      // A sized integer type (`i7`, `u23`, ...) is recognized the
+      // same contextual way `fork` is: never a lexer keyword, just an
+      // identifier shape the parser accepts wherever a type is
+      // expected, so it never resolves as a declared symbol and would
+      // otherwise fall straight through to NO_HOVER like any other
+      // undeclared name.
+      let dynamic_int = parse_dynamic_int_datatype(token_word(t));
+      if dynamic_int.is_some() {
+        DynamicIntType dit = dynamic_int.unwrap();
+        str sign_word = "unsigned";
+        if dit.is_signed {
+          sign_word = "signed";
+        }
+        ret _hover_result(
+          _doc(
+          format("{str} x;", token_word(t)),
+          format("A {num}-bit {str} integer.", dit.bits, sign_word)
+          ),
+          span_of(t, doc.text)
+        );
+      }
+      // A C macro or typedef the language accepts without a
+      // declaration of its own (`NULL`, `size_t`, `EOF`, ...): never
+      // a real declared symbol either, and never represented as one
+      // in the AST at all, so ordinary resolution below would find
+      // nothing no matter what.
+      str builtin_module = c_builtin_owner(token_word(t));
+      if !equals(builtin_module, "") {
+        ret _hover_result(
+          _doc(
+          token_word(t),
+          format("A C builtin the language accepts without a declaration of its own, documented by {str}.", builtin_module)
+          ),
+          span_of(t, doc.text)
+        );
+      }
+      str target = import_target(&tokens, doc.path, line, character);
+      if !equals(target, "") {
+        ret _import_hover_result(target, span_of(t, doc.text));
+      }
+    }
+    _ -> { ret NO_HOVER; }
+  }
+
+  let declared = resolve_at(cache, doc, &tokens, t, line);
+  if declared.is_none() {
+    // Not a declared symbol at all, but it may still be an import
+    // alias (`imp std.c.math as cmath;`) used at a call site
+    // (`cmath.sqrt(...)`) rather than in the import statement itself,
+    // the only other shape `import_target` above doesn't already
+    // cover, since the cursor here isn't on the import path.
+    if read.parsed {
+      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      if !equals(alias_target, "") {
+        ret _import_hover_result(alias_target, span_of(t, doc.text));
+      }
+    }
+    ret NO_HOVER;
+  }
+  Declaration d = declared.unwrap();
+  // `let`'s own declared type never resolves in the parsed tree (see
+  // inlay_hints.fn's own file-level note on the __let_infer__
+  // sentinel), so a local's rendered detail otherwise shows that
+  // placeholder verbatim. Re-run the same best-effort inference
+  // inlayHint already does, using the declaration's own position to
+  // find the initializer, rather than showing the raw sentinel.
+  if read.parsed && starts_with(d.detail, "__let_infer__") {
+    // No type shown at all, rather than the internal sentinel leaked
+    // verbatim, when nothing below manages to resolve it either.
+    d.detail = d.name;
+    let name_tok = token_at(&tokens, d.pos.line - 1, d.pos.col - 1);
+    if name_tok.is_some() {
+      num name_idx = index_of_token(&tokens, name_tok.unwrap());
+      str inferred = infer_let_local_type(
+        &tokens,
+        name_idx,
+        &read.program.nodes,
+        doc.path,
+        d.pos.line
+      );
+      if !equals(inferred, "") {
+        d.detail = format("{str} {str}", inferred, d.name);
+      }
+    }
+  }
+  // A generic function's own callee name at a call site
+  // (`pick_first(100, 200)`, not `fun pick_first<T>(...)`'s own
+  // declaration) shows its signature specialized against that call's
+  // own arguments, not the bare unspecialized template - the same
+  // improvement `_call_return_type` already gives a `let`-inferred
+  // local reading the call's result, extended to hovering the callee
+  // itself. `d.kind == .Function` alone can't tell a call site from
+  // the declaration; `specialized_call_signature` does that itself
+  // (a `(` right after `t` means a call, `<` means the declaration).
+  if read.parsed {
+    fit d.kind {
+      .Function -> {
+        str specialized = specialized_call_signature(&tokens, d, t, &read.program.nodes, doc.path, line, 0);
+        if !equals(specialized, d.detail) {
+          d.detail = specialized;
+        }
+      }
+      _ -> {}
+    }
+  }
+  str source_text = "";
+  if equals(d.pos.filename, doc.path) {
+    source_text = doc.text;
+  } elif !equals(d.pos.filename, "") {
+    // A symbol declared in another file (reached through an `imp`)
+    // needs that file's own text, not the current document's, since
+    // its doc comment sits above the declaration wherever that file
+    // actually lives, not at the same line number here. Read fresh
+    // each time rather than cached, since this file isn't one the
+    // client has open for `didChange` to keep current.
+    str other_text = read_to_string(d.pos.filename);
+    if other_text != nil {
+      source_text = other_text;
+    }
+  }
+  str doc_comment = "";
+  // A parameter's own line is always its enclosing function's own
+  // declaration line, never one of its own - looking above it finds
+  // the function's own doc comment, not the parameter's, and showing
+  // it here reads as though the parameter carries a doc of its own.
+  if !equals(source_text, "") && d.kind != .Parameter {
+    doc_comment = doc_comment_above(source_text, d.pos.line);
+    // A field or variant with no leading block of its own falls back
+    // to a trailing same-line comment (`Circle(num), // meaning`),
+    // scoped to these two kinds since a trailing comment on a
+    // function/compound/etc. is rarely meant as its doc.
+    if equals(doc_comment, "") &&
+    (d.kind == .Field || d.kind == .Variant) {
+      doc_comment = doc_comment_trailing(source_text, d.pos.line);
+    }
+  }
+  StringBuilder b = string_builder_init(96);
+  if !equals(doc_comment, "") {
+    b.append(doc_comment);
+    b.append("\n\n");
+  }
+  b.append("```fun\n");
+  b.append(d.detail);
+  b.append("\n```");
+  if read.parsed {
+    str footer_text = _see_also_footer(&read.program.nodes, d, doc.path);
+    b.append(footer_text);
+    if !equals(footer_text, "") {
+      free(footer_text);
+    }
+  }
+  ret _hover_result(b.build(), span_of(t, doc.text));
+}
+
+// Where the name at `line`/`character` in `doc` was declared, as the
+// result a client is sent. A declaration in another file is named by its
+// own URI, which is how a jump leaves the document.
+pub fun definition(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+
+  str target = import_target(&tokens, doc.path, line, character);
+  if !equals(target, "") {
+    ret _file_start_location_result(target);
+  }
+
+  str builtin_module = c_builtin_owner(token_word(t));
+  if !equals(builtin_module, "") {
+    str module_path = resolve_import_path(doc.path, builtin_module);
+    if exists(module_path) {
+      ret _file_start_location_result(module_path);
+    }
+  }
+
+  let declared = resolve_at(cache, doc, &tokens, t, line);
+  if declared.is_none() {
+    // Not a declared symbol, but possibly an import alias used at a
+    // call site (`cmath.sqrt(...)`) rather than in the import
+    // statement itself. Mirrors hover's own fallback above.
+    if read.parsed {
+      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      if !equals(alias_target, "") {
+        ret _file_start_location_result(alias_target);
+      }
+    }
+    ret NO_LOCATION;
+  }
+  ret _location_result(doc, declared.unwrap());
+}
+
+// A jump straight to the start of `target_path` (a whole file or
+// README, not a specific declaration inside it). What an import path
+// segment or alias resolves to, which names a module, not a position
+// within one.
+fun _file_start_location_result(str target_path) str {
+  StringBuilder b = string_builder_init(96);
+  b.append("[{\"uri\":");
+  str target_uri = path_to_uri(target_path);
+  json_quote_into(&b, target_uri);
+  free(target_uri);
+  b.append(`,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]`);
+  ret b.build();
+}
+
+// `definition`, extended with a last-resort fallback: when the
+// current document's own transitively-merged program has nothing by
+// this name, a top-level declaration in any other document this
+// server already knows about (open, or already indexed) still counts.
+// Queries the persistent `symbols` table rather than re-walking every
+// other document's own AST. Triggers no workspace scan of its own —
+// `symbols.ensure_all` only re-parses documents `docs` already knows
+// about, matching the reference's own `findTypeDefinitionAnyDoc`;
+// walking the workspace root for files nobody's opened yet is
+// `_ensure_workspace_indexed`'s own job, done by the caller first.
+pub fun definition_workspace_wide(
+  AnalysisCache* cache,
+  Documents* docs,
+  WorkspaceSymbolTable* symbols,
+  Document doc,
+  num line,
+  num character
+) str {
+  str local = definition(cache, doc, line, character);
+  if !equals(local, NO_LOCATION) {
+    ret local;
+  }
+
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = read.tokens;
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+  str name = token_word(t);
+
+  symbols.ensure_all(cache, docs);
+  let bucket_opt = symbols.by_name.at(name);
+  if bucket_opt.is_none() {
+    ret NO_LOCATION;
+  }
+  Vec<IndexedDeclaration> bucket = bucket_opt.unwrap();
+  num i = 0;
+  for i < bucket.len {
+    IndexedDeclaration entry = bucket.get(i);
+    i = i + 1;
+    Declaration d = entry.decl;
+    // Restrict to true top-level declarations only (what
+    // lookup_top_level itself would have matched), not a field,
+    // variant, or method the table also indexes.
+    bin is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) &&
+      equals(
+      d.container,
+      ""
+    );
+    if !is_top_level {
+      continue;
+    }
+    if equals(d.pos.filename, doc.path) {
+      continue;
+    }
+    if !declaration_visible_from(d, doc.path) {
+      continue;
+    }
+    let other_doc = docs.at(entry.uri);
+    if other_doc.is_some() {
+      ret _location_result(other_doc.unwrap(), d);
+    }
+  }
+  ret NO_LOCATION;
+}
+
+// A single-element `Location[]`, the shape every definition-like
+// method answers with, pointing at `d`'s own declaration. `doc` is the
+// document the request was made against, reused directly when `d`
+// turns out to sit in that same file; a declaration reached through an
+// `imp` needs that other file's own text read fresh, the same
+// same-file-or-read pattern `hover()` uses for a doc comment.
+fun _location_result(Document doc, Declaration d) str {
+  if equals(d.pos.filename, "") {
+    ret NO_LOCATION;
+  }
+  str target_text = doc.text;
+  if !equals(d.pos.filename, doc.path) {
+    str other_text = read_to_string(d.pos.filename);
+    if other_text != nil {
+      target_text = other_text;
+    } else {
+      target_text = "";
+    }
+  }
+  Span s = span_of_pos(d.pos, len(d.name), target_text);
+  StringBuilder b = string_builder_init(160);
+  b.append("[{\"uri\":");
+  str decl_uri = path_to_uri(d.pos.filename);
+  json_quote_into(&b, decl_uri);
+  free(decl_uri);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.end);
+  b.append(`}}}]`);
+  ret b.build();
+}
+
+// Where the *type* of the name at `line`/`character` was declared,
+// rather than the name itself: hovering a compound name jumps to
+// itself (the same place plain `definition` would land), but hovering
+// a local/field/parameter/global jumps to what it was declared *as*,
+// the way an editor's "Go to Type Definition" is meant to work. `[]`
+// for anything whose type can't be resolved to a real declaration (a
+// primitive, an inferred `let` local, a function's own name).
+pub fun type_definition(AnalysisCache* cache, Document doc, num line, num character) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret NO_LOCATION;
+  }
+  Vec<Token> tokens = read.tokens;
+
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret NO_LOCATION;
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret NO_LOCATION; }
+  }
+
+  let declared = resolve_at(cache, doc, &tokens, t, line);
+  if declared.is_none() {
+    ret NO_LOCATION;
+  }
+  Declaration d = declared.unwrap();
+  fit d.kind {
+    .Compound -> { ret _location_result(doc, d); }
+    .Enum -> { ret _location_result(doc, d); }
+    .Quirk -> { ret _location_result(doc, d); }
+    _ -> {}
+  }
+
+  // `d.detail` reads as a full "name(args) RetType" signature for a
+  // function or method, not a bare "Type name" pair. Hovering the
+  // call itself (the closing hop of a chain like `c.own().rpm`, or a
+  // plain call anywhere) means its own declared return type, not
+  // whatever `bare_type_from_detail`'s "Type name" splitting would
+  // make of a whole signature.
+  str type_name = "";
+  if d.kind == .Function {
+    type_name = return_type_from_detail(d.detail);
+  } else {
+    type_name = bare_type_from_detail(d.detail);
+  }
+  if equals(type_name, "") {
+    ret NO_LOCATION;
+  }
+  let type_decl = lookup_top_level(&read.program.nodes, type_name);
+  if type_decl.is_none() {
+    ret NO_LOCATION;
+  }
+  ret _location_result(doc, type_decl.unwrap());
+}
+
+// What the name `t` refers to, judged from where it sits: a field when
+// it is reached through a dot, and otherwise a local, a parameter, or
+// something the program declares.
+pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
+  str name = token_word(t);
+  if equals(name, "") {
+    ret .None;
+  }
+
+  Analyzed read = cache.of(doc);
+  if !read.parsed {
+    ret .None;
+  }
+  ProgramMergeResult program = read.program;
+  num source_line = line + 1;
+
+  // A compound-literal's own field name (`Box<AsyncCounter>{v = q}`'s
+  // `v`), never reached through a dot at all, so it needs its own check
+  // ahead of the receiver-chain handling below rather than falling
+  // through to the bare-name lookup at the bottom of this function,
+  // which would resolve `v` as whatever unrelated top-level `v` this
+  // program happens to declare (or nothing at all).
+  str literal_type_name = "";
+  Vec<str> literal_args;
+  bin in_literal = compound_literal_field_context(tokens, t, &literal_type_name, &literal_args);
+  if in_literal {
+    let field = lookup_field(&program.nodes, literal_type_name, name, literal_args);
+    literal_args.free();
+    if field.is_some() {
+      ret field;
+    }
+  } else {
+    literal_args.free();
+  }
+
+  str receiver = _receiver_of(tokens, t);
+  // A plain identifier before the dot isn't the only shape a receiver
+  // takes: `a.f().g` has none (the token right before `.g` is `)`),
+  // but still needs the receiver branch below, since that's the only
+  // one that calls `chain_receiver_type` at all. `receiver` itself
+  // stays "" for this shape; `local_generic_args` below already
+  // tolerates that by finding no args, falling back to the
+  // unspecialized template the same way a deeper chain already does.
+  if !equals(receiver, "") || _preceded_by_dot(tokens, t) {
+    // Walks the whole dotted chain (`a.b.c`, `a.f().c`, any mix), not
+    // just the immediate `receiver` segment: `type_name_of_local(receiver,
+    // ...)` alone would fail here whenever the receiver is itself a
+    // field access or a call rather than a bare local, since neither
+    // was ever declared as one.
+    ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line, 0);
+    str type_name = found_receiver.type_name;
+    if !equals(type_name, "") {
+      // A name is called (`b.len()`), not read as a field (`b.len`),
+      // when a `(` immediately follows it: the two can otherwise
+      // collide (a method sharing its name with an unrelated field on
+      // the same compound), and a field always wins by being checked
+      // first below unless this looks ahead first.
+      bin is_call = false;
+      let after_name = token_after(tokens, index_of_token(tokens, t) + 1);
+      if after_name.is_some() && token_is_operator(after_name.unwrap(), "(") {
+        is_call = true;
+      }
+      if is_call {
+        // Specializes a generic method's own signature against the
+        // receiver's own concrete type arguments (`o.unwrap_or` on
+        // `Option<num>` shows `num`, not the bare template's own `T`),
+        // threaded all the way through by `chain_receiver` however deep
+        // the chain leading to the receiver is, not just for a bare
+        // local carrying them directly.
+        let method = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        if method.is_some() {
+          ret method;
+        }
+      }
+      let field = lookup_field(&program.nodes, type_name, name, found_receiver.generic_args);
+      if field.is_some() {
+        ret field;
+      }
+      if !is_call {
+        let method2 = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        if method2.is_some() {
+          ret method2;
+        }
+      }
+    }
+    // `receiver` might not be a local at all, but an enum type named
+    // directly (`OptionalInt.Some`), the qualified form of a fit
+    // destructuring pattern (or an ordinary variant-constructing call
+    // outside any fit, `ret OptionalInt.Some(v);`). A bare type name
+    // written this way carries no generic instantiation of its own to
+    // resolve, unlike a fit's own subject expression.
+    Vec<str> no_args;
+    no_args.init(0);
+    let qualified_variant = enum_variant_declaration(&program.nodes, receiver, name, no_args);
+    if qualified_variant.is_some() {
+      ret qualified_variant;
+    }
+  } elif _is_dot_shorthand(tokens, t) {
+    let variant = lookup_fit_variant(tokens, &program.nodes, name, doc.path, source_line);
+    if variant.is_some() {
+      ret variant;
+    }
+    // A bare `.Variant(...)` outside any fit, most commonly a `ret`'s
+    // own value (`ret .Ok(x);`): resolved against the enclosing
+    // function's own declared return type, substituting a generic
+    // instantiation's concrete type arguments so a payload declared
+    // as a bare type param in the template (`Ok(T)`) reads as the
+    // caller's actual type (`Ok(str)`).
+    if is_return_value(tokens, t) {
+      let rdt = enclosing_return_dtype(&program.nodes, doc.path, source_line);
+      if rdt.is_some() {
+        let rv = enum_variant_declaration_typed(&program.nodes, rdt.unwrap(), name);
+        if rv.is_some() {
+          ret rv;
+        }
+      }
+    }
+    // Every other shape a bare variant is legitimately written in:
+    // compared, assigned, or passed as a call argument.
+    str context_type = _dot_shorthand_context_type(tokens, &program.nodes, t, doc.path, source_line);
+    if !equals(context_type, "") {
+      Vec<str> no_args;
+      no_args.init(0);
+      let cv = enum_variant_declaration(&program.nodes, context_type, name, no_args);
+      if cv.is_some() {
+        ret cv;
+      }
+    }
+  }
+
+  let declared_field = lookup_field_at(&program.nodes, doc.path, source_line, name);
+  if declared_field.is_some() {
+    ret declared_field;
+  }
+
+  ret lookup(tokens, &program.nodes, name, doc.path, source_line);
+}
+
+// The name `t` is reached through, when it is written as `receiver.name`.
+// Empty when `t` stands on its own.
+fun _receiver_of(Vec<Token>* tokens, Token t) str {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret "";
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() {
+    ret "";
+  }
+  Token d = dot.unwrap();
+  if !token_is_operator(d, ".") {
+    ret "";
+  }
+  num dot_index = index_of_token(tokens, d);
+  if dot_index <= 0 {
+    ret "";
+  }
+  let before = token_before(tokens, dot_index);
+  if before.is_none() {
+    ret "";
+  }
+  Token b = before.unwrap();
+  fit b.type {
+    .Identifier -> { ret token_word(b); }
+    _ -> {}
+  }
+  ret "";
+}
+
+// True when `t` sits right after a `.` that itself continues a
+// chain: a call's own closing `)` before it (`f().t`), which
+// `_receiver_of` doesn't resolve to a name the way a plain identifier
+// receiver does. Deliberately narrower than "any dot before `t`":
+// a bare `.Variant` fit-pattern shorthand also has a dot right before
+// its name, but nothing meaningful before that dot, and must fall
+// through to `_is_dot_shorthand`'s own branch instead, not be
+// swallowed here into a receiver search that finds nothing.
+fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret false;
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
+    ret false;
+  }
+  num dot_idx = index_of_token(tokens, dot.unwrap());
+  let before_dot = token_before(tokens, dot_idx);
+  if before_dot.is_none() {
+    ret false;
+  }
+  Token bd = before_dot.unwrap();
+  fit bd.type {
+    .Identifier -> { ret true; }
+    _ -> {}
+  }
+  ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']');
+}
+
+// True when `t` is a bare `.Name` fit-pattern shorthand: directly
+// preceded by a `.` that is not itself preceded by an identifier (an
+// ordinary field or method access, which `_receiver_of` resolves
+// instead).
+fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  if index <= 0 {
+    ret false;
+  }
+  let dot = token_before(tokens, index);
+  if dot.is_none() {
+    ret false;
+  }
+  if !token_is_operator(dot.unwrap(), ".") {
+    ret false;
+  }
+  num dot_index = index_of_token(tokens, dot.unwrap());
+  if dot_index <= 0 {
+    ret true;
+  }
+  let before = token_before(tokens, dot_index);
+  if before.is_none() {
+    ret true;
+  }
+  fit before.unwrap().type {
+    .Identifier -> { ret false; }
+    _ -> {}
+  }
+  ret true;
+}
+
+// True when the nearest preceding token that could start a new
+// statement, walked back from `t`, is the `ret` keyword: `t` is (or
+// begins) a `ret`'s own value expression.
+pub fun is_return_value(Vec<Token>* tokens, Token t) bin {
+  num index = index_of_token(tokens, t);
+  num i = index - 1;
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if token_is_symbol(tok, ';') || token_is_symbol(tok, '{') || token_is_symbol(tok, '}') {
+      ret false;
+    }
+    fit tok.type {
+      .Keyword -> { ret equals(token_word(tok), "ret"); }
+      _ -> {}
+    }
+    i = i - 1;
+  }
+  ret false;
+}
+
+// The enum type a bare `.Variant` at `t` reads against, for every
+// shape besides a fit's own branch or a bare `ret` value (both
+// already resolved by the caller before this is ever reached): the
+// other side of an `==`/`!=` comparison or a plain `=` assignment
+// (`c == .Red`, `c = .Green`), or the declared parameter type at
+// whichever position it occupies in an enclosing call's own argument
+// list (`takesColor(.Red)`, `p.new(..., .Blue)`) - every context a
+// reader could write a bare variant shorthand in without it being
+// ambiguous, matching the language's own idiom (`enum_showcase.fn`
+// demonstrates every one of these as a headline feature). "" when
+// none of them apply.
+fun _dot_shorthand_context_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Token t,
+  str file,
+  num line
+) str {
+  num dot_idx = index_of_token(tokens, t) - 1;
+  for dot_idx >= 0 && !token_is_operator(tokens.get(dot_idx), ".") {
+    dot_idx = dot_idx - 1;
+  }
+  ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
+}
+
+// `_dot_shorthand_context_type`'s own logic, taking the dot's index
+// directly rather than deriving it by walking back from a variant
+// name token - what a caller needs when completing right after the
+// dot itself, before any of the variant's own name has been typed.
+pub fun dot_shorthand_context_type_at(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  num dot_idx,
+  str file,
+  num line
+) str {
+  num i = dot_idx - 1;
+  for i >= 0 && tokens.get(i).type == .NewLine {
+    i = i - 1;
+  }
+  if i < 0 {
+    ret "";
+  }
+  Token prev = tokens.get(i);
+
+  if token_is_operator(prev, "==") || token_is_operator(prev, "!=") ||
+    token_is_operator(prev, "=") {
+    let operand = token_before(tokens, i);
+    if operand.is_none() {
+      ret "";
+    }
+    Token last = operand.unwrap();
+    ret chain_ending_type(tokens, last, token_is_symbol(last, ')'), program, file, line);
+  }
+
+  if token_is_operator(prev, "(") || token_is_operator(prev, ",") {
+    ret _call_arg_expected_type(tokens, program, dot_idx, file, line);
+  }
+
+  ret "";
+}
+
+// The declared type of whichever parameter the argument starting at
+// `dot_idx` occupies, in the call whose own opening `(` is found by
+// walking backward from it depth-tracked (so a nested call inside an
+// earlier argument is never mistaken for the enclosing one). Reuses
+// the callee's own already-rendered "name(Type name, ...)" signature
+// (a plain function via `lookup_top_level`, a method through its own
+// receiver's type via `lookup_method`) rather than reading `DataType*`
+// params directly, the same string-based approach signature_help.fn
+// and inlay_hints.fn already share for this exact job.
+fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx, str file, num line) str {
+  num depth = 0;
+  num i = dot_idx - 1;
+  num open_idx = -1;
+  for i >= 0 {
+    Token tk = tokens.get(i);
+    if token_is_symbol(tk, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(tk, "(") {
+      if depth == 0 {
+        open_idx = i;
+        break;
+      }
+      depth = depth - 1;
+    }
+    i = i - 1;
+  }
+  if open_idx <= 0 {
+    ret "";
+  }
+
+  let callee_tok = token_before(tokens, open_idx);
+  if callee_tok.is_none() {
+    ret "";
+  }
+  Token callee = callee_tok.unwrap();
+  if callee.type != .Identifier {
+    ret "";
+  }
+  str callee_name = token_word(callee);
+
+  num arg_index = 0;
+  num pdepth = 0;
+  num j = open_idx + 1;
+  for j < dot_idx {
+    Token tk = tokens.get(j);
+    if token_is_operator(tk, "(") {
+      pdepth = pdepth + 1;
+    } elif token_is_symbol(tk, ')') {
+      pdepth = pdepth - 1;
+    } elif token_is_operator(tk, ",") && pdepth == 0 {
+      arg_index = arg_index + 1;
+    }
+    j = j + 1;
+  }
+
+  num callee_idx = index_of_token(tokens, callee);
+  let before_callee = token_before(tokens, callee_idx);
+  str signature = "";
+  if before_callee.is_some() && token_is_operator(before_callee.unwrap(), ".") {
+    // A method call: written arguments never include `self`, but the
+    // callee's own rendered signature does - shift the index to match.
+    arg_index = arg_index + 1;
+    let recv = token_before(tokens, callee_idx - 1);
+    if recv.is_none() {
+      ret "";
+    }
+    str receiver_type = chain_ending_type(tokens, recv.unwrap(), token_is_symbol(recv.unwrap(), ')'), program, file, line);
+    if equals(receiver_type, "") {
+      ret "";
+    }
+    Vec<str> no_args;
+    no_args.init(0);
+    let method = lookup_method(program, receiver_type, callee_name, no_args);
+    if method.is_none() {
+      ret "";
+    }
+    signature = method.unwrap().detail;
+  } else {
+    let f = lookup_top_level(program, callee_name);
+    if f.is_none() {
+      ret "";
+    }
+    signature = f.unwrap().detail;
+  }
+
+  Vec<str> params = split_signature_params(signature);
+  defer free_params_vec(&params);
+  if arg_index >= params.len {
+    ret "";
+  }
+  ret bare_type_from_detail(params.get(arg_index));
+}
+
+fun _hover_result(str markdown, Span s) str {
+  StringBuilder b = string_builder_init(len(markdown) + 96);
+  b.append(`{"contents":{"kind":"markdown","value":`);
+  json_quote_into(&b, markdown);
+  b.append(`},"range":{"start":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(s.line);
+  b.append(`,"character":`);
+  b.append_num(s.end);
+  b.append(`}}}`);
+  ret b.build();
+}
+
+// A "See also" footer linking the user-defined types mentioned in
+// `d`'s own signature: its own capitalized type-shaped words (Fun's
+// own convention, matching every builtin/C-typedef's lowercase
+// spelling), each resolved through the program's own top-level
+// declarations and rendered as a clickable file link. Skips a name
+// that doesn't resolve to anything real, resolves outside any file
+// (nothing to link to), or isn't visible from `current_file` (a
+// diamond import can pull a private cross-file declaration into the
+// merged program without `current_file` ever being able to name it
+// legitimately). "" when nothing resolves at all.
+fun _see_also_footer(Vec<Node>* program, Declaration d, str current_file) str {
+  Vec<str> names = _candidate_type_names(d.detail, d.name);
+  // Only the first `owned_count` elements are this call's own to
+  // free - every one `_candidate_type_names` itself produced. A
+  // possible extra entry below is `d.container`, which aliases the
+  // declaration's own field rather than a fresh copy.
+  num owned_count = names.len;
+  defer {
+    num fi = 0;
+    for fi < owned_count {
+      free(names.get(fi));
+      fi = fi + 1;
+    }
+    names.free();
+  }
+  // A field/method/variant's own container is worth linking even
+  // when its detail carries no type name of its own (a `num` field
+  // has nowhere else useful to point).
+  if !equals(d.container, "") && !equals(d.container, d.name) &&
+    !names.contains(d.container) {
+    names.push(d.container);
+  }
+  StringBuilder links = string_builder_init(64);
+  defer links.free();
+  num count = 0;
+  num i = 0;
+  for i < names.len && count < 8 {
+    str name = names.get(i);
+    i = i + 1;
+    let found = lookup_top_level(program, name);
+    if found.is_none() {
+      continue;
+    }
+    Declaration td = found.unwrap();
+    if equals(td.pos.filename, "") {
+      continue;
+    }
+    if !declaration_visible_from(td, current_file) {
+      continue;
+    }
+    if count > 0 {
+      links.append(", ");
+    }
+    links.append("[`");
+    links.append(name);
+    links.append("`](");
+    str target_uri = path_to_uri(td.pos.filename);
+    links.append(target_uri);
+    free(target_uri);
+    links.append("#L");
+    links.append_num(td.pos.line);
+    links.append(")");
+    count = count + 1;
+  }
+  if count == 0 {
+    ret "";
+  }
+  str links_text = links.build();
+  StringBuilder footer = string_builder_init(len(links_text) + 32);
+  footer.append("\n\n---\n\nSee also: ");
+  footer.append(links_text);
+  footer.append("\n");
+  free(links_text);
+  ret footer.build();
+}
+
+// The capitalized, identifier-shaped words in `detail` (a rendered
+// signature or type), Fun's own convention for a user-defined type
+// name as opposed to a builtin or C typedef (always spelled lower).
+// Deduplicated, and never `exclude_name` itself, so a hovered
+// symbol never "sees also" its own name.
+fun _candidate_type_names(str detail, str exclude_name) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num n = len(detail);
+  num i = 0;
+  for i < n {
+    chr c = detail[i];
+    if !is_upper(c) {
+      i = i + 1;
+      continue;
+    }
+    num start = i;
+    i = i + 1;
+    for i < n && (is_alnum(detail[i]) || detail[i] == '_') {
+      i = i + 1;
+    }
+    str word = substr(detail, start, i - start);
+    if equals(word, exclude_name) || out.contains(word) {
+      free(word);
+      continue;
+    }
+    out.push(word);
+  }
+  ret out;
+}
+
+// The hover for an import path segment resolved to `target`: a
+// README.md's own content verbatim, or a `.fn` module's own leading
+// doc comment.
+fun _import_hover_result(str target, Span s) str {
+  // A directory with no README of its own (a real namespace segment,
+  // just undocumented) still names something worth confirming, rather
+  // than falling through to no hover at all.
+  if is_dir(target) {
+    ret _hover_result(format("Directory: `{str}`", target), s);
+  }
+  str text = read_to_string(target);
+  if text == nil {
+    ret NO_HOVER;
+  }
+  str shown = text;
+  if !ends_with(target, "README.md") {
+    shown = leading_doc_comment(text);
+    if equals(shown, "") {
+      ret NO_HOVER;
+    }
+  }
+  ret _hover_result(shown, s);
+}
+
+// `as` reads two different ways depending on the statement it sits
+// in: naming an import alias (`imp mod as alias;`) or naming the
+// quirk an impl block implements (`impl Type as Quirk { ... }`).
+// Told apart by walking back from `t` past the identifiers and dots
+// that make up whatever comes before it, to the keyword that started
+// the statement.
+fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
+  str impl_doc = _doc(
+    `impl Type as Quirk { ... }`,
+    `Names the quirk an impl block implements for a type.`
+  );
+  str import_doc = _doc(
+    `imp module.path as alias;`,
+    `Binds an import to a different name, reached afterward as
+    `alias.name instead of the module's own leading segment.`
+  );
+  num i = index_of_token(tokens, t);
+  if i < 0 {
+    ret impl_doc;
+  }
+  i = i - 1;
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if tok.type == .Comment || tok.type == .NewLine {
+      i = i - 1;
+      continue;
+    }
+    if tok.type == .Identifier || token_is_operator(tok, ".") {
+      i = i - 1;
+      continue;
+    }
+    if token_is_keyword(tok, "imp") {
+      ret import_doc;
+    }
+    ret impl_doc;
+  }
+  ret impl_doc;
+}
+
+// `code` shown as a Fun snippet, with `prose` under it. A fence is
+// written as doubled backticks, which is how a raw string carries one.
+fun _doc(str code, str prose) str {
+  ret format(```````fun
+  `{str}
+  ```````
+  `{str}`, code, prose);
+}
+
+// An integer literal's own value spelled in decimal, hex, binary, and
+// octal, plus a note when it's exactly a power of two or one away
+// from one (the shape overflow boundaries, bitmasks, and buffer sizes
+// tend to take): `4294967295` reads a lot faster as "2^32 - 1" than as
+// a wall of nines.
+fun _int_literal_doc(num n) str {
+  bin negative = n < 0;
+  num magnitude = n;
+  if negative {
+    magnitude = 0 - magnitude;
+  }
+  str sign = "";
+  if negative {
+    sign = "-";
+  }
+  // Fenced, not plain prose: `_doc`'s own prose half renders as
+  // ordinary markdown, where a single `\n` is a soft line break (a
+  // space, not a line break per CommonMark) - a fence is what actually
+  // keeps each base on its own line.
+  StringBuilder prose = string_builder_init(96);
+  prose.append("```\ndecimal: ");
+  prose.append(sign);
+  prose.append(format_num(magnitude));
+  prose.append("\nhex:     ");
+  prose.append(sign);
+  prose.append("0x");
+  prose.append(to_hex(magnitude, 0));
+  prose.append("\nbinary:  ");
+  prose.append(sign);
+  prose.append("0b");
+  prose.append(_grouped(to_binary(magnitude, 0), 4));
+  prose.append("\noctal:   ");
+  prose.append(sign);
+  prose.append("0o");
+  prose.append(to_octal(magnitude, 0));
+  prose.append("\n```");
+
+  str note = _pow2_note(n);
+  if !equals(note, "") {
+    prose.append("\n\n");
+    prose.append(note);
+  }
+
+  ret _doc(format_num(n), prose.build());
+}
+
+// A decimal literal's own value, with a doc naming the type: unlike an
+// integer, showing it in another base isn't meaningful the reader
+// would actually reach for.
+fun _dec_literal_doc(dec d) str {
+  ret _doc(format_dec(d, 6), "A 64-bit floating-point literal.");
+}
+
+// A character literal's own byte value, the same three bases an
+// integer literal gets (a char is a single byte, arithmetic on it is
+// ordinary in Fun, so its numeric value is exactly as relevant here).
+fun _char_literal_doc(chr c) str {
+  num code = c;
+  StringBuilder prose = string_builder_init(48);
+  prose.append("```\ndecimal: ");
+  prose.append(format_num(code));
+  prose.append("\nhex:     0x");
+  prose.append(to_hex(code, 2));
+  prose.append("\nbinary:  0b");
+  prose.append(to_binary(code, 8));
+  prose.append("\n```");
+  str escaped = _escaped_char_display(c);
+  str title = format("'{str}'", escaped);
+  free(escaped);
+  str result = _doc(title, prose.build());
+  free(title);
+  ret result;
+}
+
+// `c` spelled the way a reader would write it in source, not the raw
+// byte itself - a control character (newline, tab, ...) embedded
+// directly into a fenced code block breaks the fence visually instead
+// of reading as the literal it represents.
+fun _escaped_char_display(chr c) str {
+  fit c {
+    '\n' -> { ret substr(`\n`, 0, 2); }
+    '\t' -> { ret substr(`\t`, 0, 2); }
+    '\r' -> { ret substr(`\r`, 0, 2); }
+    '\0' -> { ret substr(`\0`, 0, 2); }
+    '\\' -> { ret substr(`\\`, 0, 2); }
+    '\'' -> { ret substr(`\'`, 0, 2); }
+    _ -> { ret format("{chr}", c); }
+  }
+}
+
+// Groups `digits` into clusters of `size`, separated by `_`, right-
+// aligned (a leading partial group keeps whatever digits are left
+// over): `11111111111111111111111111111111` reads as
+// `11_1111_1111_1111_1111_1111_1111_1111` instead.
+fun _grouped(str digits, num size) str {
+  num n = len(digits);
+  if n <= size {
+    ret digits;
+  }
+  StringBuilder b = string_builder_init(n + n / size);
+  num first_group = n % size;
+  if first_group == 0 {
+    first_group = size;
+  }
+  b.append(substr(digits, 0, first_group));
+  num i = first_group;
+  for i < n {
+    b.append("_");
+    b.append(substr(digits, i, size));
+    i = i + size;
+  }
+  ret b.build();
+}
+
+// "= 2^k" when `n` is exactly a power of two, "= 2^k + 1" when it's
+// one more, or "= 2^k - 1" when it's one less (an unsigned type's own
+// max value, most often). "" for anything else, 0 and negative values
+// included - no power of two is zero or negative.
+fun _pow2_note(num n) str {
+  if n <= 0 {
+    ret "";
+  }
+  num k = _log2_exact(n);
+  if k >= 0 {
+    ret format("= 2^{num}", k);
+  }
+  num k_minus = _log2_exact(n - 1);
+  if k_minus >= 0 {
+    ret format("= 2^{num} + 1", k_minus);
+  }
+  num k_plus = _log2_exact(n + 1);
+  if k_plus >= 0 {
+    ret format("= 2^{num} - 1", k_plus);
+  }
+  ret "";
+}
+
+// `k` such that `2^k == v`, or -1 when `v` isn't exactly a power of
+// two (including 0 or negative, neither of which any power of two
+// equals).
+fun _log2_exact(num v) num {
+  if v <= 0 {
+    ret -1;
+  }
+  num k = 0;
+  num remaining = v;
+  for remaining > 1 {
+    if remaining % 2 != 0 {
+      ret -1;
+    }
+    remaining = remaining / 2;
+    k = k + 1;
+  }
+  ret k;
+}
+
+// What a keyword means, for the keywords whose meaning is not obvious
+// from the word itself.
+pub fun keyword_doc(str word) str {
+  if equals(word, "async") {
+    ret _doc(
+      `async fun name(...) Type { ... }`,
+      `Marks a function as asynchronous. Call it with await to wait for
+      `its result, or with fork to spawn it and carry on.`
+    );
+  }
+  if equals(word, "await") {
+    ret _doc(
+      `await some_async_call();`,
+      `Waits for an async call and yields its result. Only valid inside
+      `an async function.`
+    );
+  }
+  if equals(word, "fork") {
+    ret _doc(
+      `fork worker(args);`,
+      `Spawns a call as a virtual thread and carries on without its
+      `result. The target must be an async fun, and main waits for every
+      `fork before it exits.`
+    );
+  }
+  if equals(word, "sizeof") {
+    ret _doc(
+      `sizeof(Type)`,
+      `The size of a type in bytes, resolved at compile time. Stands for
+      `num wherever it is written.`
+    );
+  }
+  if equals(word, "nil") {
+    ret _doc(
+      `nil`,
+      `The empty pointer. Stands for any pointer type and for str, and
+      `compares with == and !=.`
+    );
+  }
+  if equals(word, "panic") {
+    ret _doc(
+      `panic("message")`,
+      `Prints the message and stops the program. Stands for whatever type
+      `is expected where it is written, so it can be returned, assigned,
+      `or passed as an argument.`
+    );
+  }
+  if equals(word, "fit") {
+    ret _doc(
+      `fit value {
+      `  .Variant(x) -> { ... }
+      `  _ -> { ... }
+      `}`,
+      `Matches a value against the shapes it can take, binding what a
+      `variant carries. Every variant must be covered, or _ must be.`
+    );
+  }
+  if equals(word, "defer") {
+    ret _doc(
+      `defer cleanup();`,
+      `Runs a statement when the enclosing scope ends, whichever way it
+      `ends.`
+    );
+  }
+  if equals(word, "imp") {
+    ret _doc(
+      `imp module.path;
+      `imp ..sibling.module;
+      `imp module.path as alias;`,
+      `Imports another module. A leading run of dots steps up out of the
+      `importing file's own directory. as gives it a shorter name to
+      `qualify its own symbols with.`
+    );
+  }
+  if equals(word, "impl") {
+    ret _doc(
+      `impl Type { ... }
+      `impl Type as Quirk { ... }`,
+      `Declares methods on a type, or implements a quirk for it.`
+    );
+  }
+  if equals(word, "quirk") {
+    ret _doc(
+      `quirk Named {
+      `  name() str;
+      `}`,
+      `A set of methods a type can implement, which a value can then be
+      `used through.`
+    );
+  }
+  if equals(word, "raw") {
+    ret _doc(`raw p;`, `An untyped pointer, for the places a real type cannot be written.`);
+  }
+  if equals(word, "ret") {
+    ret _doc(
+      `ret value;`,
+      `Returns from a function, with a value unless the function returns
+      `nothing.`
+    );
+  }
+  if equals(word, "test") {
+    ret _doc(
+      `test "what it does" {
+      `  assert condition, "message";
+      `}`,
+      `A test, run by fun -test and ignored by an ordinary build.`
+    );
+  }
+  if equals(word, "fuzz") {
+    ret _doc(
+      `fuzz "never crashes on arbitrary input" (raw* data, num len) {
+      `  ...
+      `}`,
+      `A fuzz test, run by fun -fuzz against random bytes. Must not crash
+      `or leak, however malformed the input.`
+    );
+  }
+  if equals(word, "pub") {
+    ret _doc(
+      `pub fun name(...) Type { ... }`,
+      `Marks a declaration visible outside the file it is written in.
+      `Without it, a function, type, or method is private to its own
+      `file.`
+    );
+  }
+  if equals(word, "fun") {
+    ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
+  }
+  if equals(word, "as") {
+    ret _doc(`impl Type as Quirk { ... }`, `Names the quirk an impl block implements for a type.`);
+  }
+  if equals(word, "enum") {
+    ret _doc(
+      `enum Name {
+      `  A,
+      `  B(num),
+      `}`,
+      `Declares a set of variants a value can be, each optionally
+      `carrying a payload. Matched with fit.`
+    );
+  }
+  if equals(word, "compound") {
+    ret _doc(
+      `compound Name {
+      `  num field;
+      `}`,
+      `Declares a type with a fixed set of named, typed fields. Its own
+      `impl block can give it methods, and it can implement a quirk.`
+    );
+  }
+  if equals(word, "let") {
+    ret _doc(`let x = value;`, `Declares a local with its type inferred from value.`);
+  }
+  if equals(word, "const") {
+    ret _doc(
+      `const num x = 5;`,
+      `Declares a binding that cannot be reassigned after its initial
+      `value.`
+    );
+  }
+  if equals(word, "asm") {
+    ret _doc(
+      `asm volatile(out y: "=r" = y; in x: "r" = x) "...";
+      `asm arch aarch64 { ... };`,
+      `Emits inline assembly. volatile forbids the optimizer from
+      `dropping or reordering it; arch restricts it to one target,
+      `compiled out on any other.`
+    );
+  }
+  if equals(word, "volatile") {
+    ret _doc(
+      `asm volatile(...) "...";`,
+      `Marks an asm block as having effects the optimizer must not
+      `assume away, forbidding it from being dropped or reordered.`
+    );
+  }
+  if equals(word, "arch") {
+    ret _doc(
+      `asm arch aarch64 { ... };`,
+      `Restricts an asm block to one target architecture; compiled out
+      `entirely on any other.`
+    );
+  }
+  if equals(word, "void") {
+    ret _doc(
+      `fun name() void { ... }`,
+      `The absence of a value, for a function that returns nothing.`
+    );
+  }
+  if equals(word, "num") {
+    ret _doc(`num x;`, `A 64-bit signed integer.`);
+  }
+  if equals(word, "dec") {
+    ret _doc(`dec x;`, `A 64-bit floating-point number.`);
+  }
+  if equals(word, "str") {
+    ret _doc(`str s;`, `A NUL-terminated byte string.`);
+  }
+  if equals(word, "bin") {
+    ret _doc(`bin flag;`, `A boolean: true or false.`);
+  }
+  if equals(word, "chr") {
+    ret _doc(`chr c;`, `A single byte, written as a character literal ('a').`);
+  }
+  if equals(word, "if") {
+    ret _doc(`if condition { ... }`, `Runs its body only when condition is true.`);
+  }
+  if equals(word, "elif") {
+    ret _doc(
+      `if a { ... } elif b { ... } else { ... }`,
+      `An else-if arm, tried in order when every earlier condition in
+      `the chain was false.`
+    );
+  }
+  if equals(word, "else") {
+    ret _doc(
+      `if condition { ... } else { ... }`,
+      `Runs when every earlier condition in the chain was false.`
+    );
+  }
+  if equals(word, "true") {
+    ret _doc(`bin flag = true;`, `The boolean literal for a true value.`);
+  }
+  if equals(word, "false") {
+    ret _doc(`bin flag = false;`, `The boolean literal for a false value.`);
+  }
+  if equals(word, "for") {
+    ret _doc(
+      `for condition { ... }
+      `for item : collection { ... }`,
+      `Loops while condition is true, or once per item of a collection.`
+    );
+  }
+  if equals(word, "break") {
+    ret _doc(`break;`, `Exits the innermost enclosing loop immediately.`);
+  }
+  if equals(word, "continue") {
+    ret _doc(`continue;`, `Skips to the next iteration of the innermost enclosing loop.`);
+  }
+  if equals(word, "allow") {
+    ret _doc(
+      `allow unused_variable;`,
+      `Silences a specific warning for the declaration or scope it
+      `precedes, deliberately overriding the usual warning-clean
+      `requirement.`
+    );
+  }
+  if equals(word, "expect") {
+    ret _doc(
+      `expect unused_variable;`,
+      `Asserts that a specific warning does fire here; a build fails if
+      `it doesn't. Used to test the compiler's own warning detection.`
+    );
+  }
+  if equals(word, "assert") {
+    ret _doc(
+      `assert condition, "message";`,
+      `Inside a test or fuzz block, fails it with message when condition
+      `is false.`
+    );
+  }
+  ret "";
+}

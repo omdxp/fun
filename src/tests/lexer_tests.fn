@@ -1,0 +1,173 @@
+// Lexer corpus, ported from the `lexer` suite. These run against the
+// tokenizer directly rather than through the emitted C.
+
+imp ..lexer.lexer;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+
+// Tokenizes `src`, aborting the test if the lexer itself rejects it.
+fun lex_ok(str src) Vec<Token> {
+  let r = tokenize(src, "test.fn");
+  assert !r.is_err(), "tokenize() returned an error";
+  ret r.unwrap();
+}
+
+// Returns the text a Comment, String, Identifier, Keyword or Operator token
+// carries, aborting the test for any other payload.
+fun tok_text(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> { panic("expected a text-carrying token"); }
+  }
+  ret "";
+}
+
+test "a fresh lex starts at the first character of the first line" {
+  // What the original asserted about a lexing object's initial fields is
+  // observable here as the position of the first token.
+  let lexed = tokenize("let x = 1;", "init.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+  assert tokens.len > 0, "expected at least one token";
+  Token first = tokens.get(0);
+  assert first.pos.line == 1, "expected the first line";
+  assert first.pos.start_col == 1, "expected the first column";
+  assert equals(first.pos.filename, "init.fn"), "expected the name it was read under";
+}
+
+test "a character read ahead of the cursor is put back, not consumed" {
+  // The original drove next_char/peek_char/push_char directly. What that
+  // machinery is for is visible in the result: deciding a token needs
+  // reading past its end, and what was read past must still lex.
+  let lexed = tokenize("p.x", "peek.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+  // A dot followed by a name is member access, three tokens: reading the
+  // character after the dot must not consume the name.
+  assert tokens.len == 3, "expected the name after the dot to survive as its own token";
+
+  let decimal = tokenize(".5", "peek2.fn");
+  assert decimal.is_ok(), "expected a leading-dot number to lex";
+  Vec<Token> dtokens = decimal.unwrap();
+  defer dtokens.free();
+  assert dtokens.len >= 1, "expected the number";
+  fit dtokens.get(0).type {
+    .Number -> {}
+    _ -> { panic("expected a leading dot to start a number when a digit follows"); }
+  }
+}
+
+test "lexes a line comment" {
+  let toks = lex_ok("// This is a comment\n");
+  assert toks.len >= 1, "expected at least the comment token";
+  assert toks.get(0).type == .Comment, "expected a Comment token";
+  assert equals(tok_text(toks.get(0)), " This is a comment"), "expected the comment body without the slashes";
+}
+
+test "lexes a string literal" {
+  let toks = lex_ok("\"Hello, World!\"");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert equals(tok_text(toks.get(0)), "Hello, World!"), "expected the body without the quotes";
+}
+
+test "lexes an inline raw string with no escape processing" {
+  let toks = lex_ok("`C:\\Users\\name\\file.txt`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "C:\\Users\\name\\file.txt"), "expected literal backslashes, not escape pairs";
+}
+
+test "lexes a raw string with an embedded double-quote" {
+  let toks = lex_ok("`she said \"hi\" and left`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "she said \"hi\" and left"), "expected the quotes preserved literally";
+}
+
+test "lexes a multi-line raw string block, implicitly closed" {
+  let toks = lex_ok("`line one\n  `line two\n  `line three\n;");
+  assert toks.len == 2, "expected the string then the trailing ';'";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "line one\nline two\nline three"), "expected lines joined with real newlines";
+  assert toks.get(1).type == .Symbol, "expected the ';' to stay a separate token";
+}
+
+test "lexes a multi-line raw string block, explicitly closed on the last line" {
+  let toks = lex_ok("`line A\n  `line B`;");
+  assert toks.len == 2, "expected the string then the trailing ';'";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "line A\nline B"), "expected lines joined with a real newline";
+  assert toks.get(1).type == .Symbol, "expected the ';' to stay a separate token";
+}
+
+test "lexes an integer literal" {
+  let toks = lex_ok("12345");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .Number, "expected a Number token";
+  fit toks.get(0).data {
+    .Num(n) -> { assert n == 12345, "expected the parsed value"; }
+    _ -> { panic("expected an integer payload"); }
+  }
+}
+
+test "lexes a mixed stream of numbers, operator, comment and string" {
+  let toks = lex_ok("123 + 456 // comment\n\"string\"");
+  assert toks.len == 6, "expected 6 tokens";
+  assert toks.get(0).type == .Number, "expected a Number token";
+  assert toks.get(1).type == .Operator, "expected an Operator token";
+  assert toks.get(2).type == .Number, "expected a Number token";
+  assert toks.get(3).type == .Comment, "expected a Comment token";
+  assert toks.get(4).type == .NewLine, "expected a NewLine token";
+  assert toks.get(5).type == .String, "expected a String token";
+}
+
+test "lexes multi-character operators via maximal munch" {
+  let toks = lex_ok("1==2!=3<=4>=5&&6||7..8...9->10");
+  Vec<str> ops;
+  ops.init(0);
+  defer ops.free();
+  for t : toks {
+    if t.type == .Operator {
+      ops.push(tok_text(t));
+    }
+  }
+  assert ops.len == 9, "expected 9 operator tokens";
+  assert equals(ops.get(0), "=="), "expected '=='";
+  assert equals(ops.get(1), "!="), "expected '!='";
+  assert equals(ops.get(2), "<="), "expected '<='";
+  assert equals(ops.get(3), ">="), "expected '>='";
+  assert equals(ops.get(4), "&&"), "expected '&&'";
+  assert equals(ops.get(5), "||"), "expected '||'";
+  assert equals(ops.get(6), ".."), "expected '..'";
+  assert equals(ops.get(7), "..."), "expected '...'";
+  assert equals(ops.get(8), "->"), "expected '->'";
+}
+
+test "a bare '=' followed by whitespace reports its own true end column" {
+  // The lookahead that checks for '==' written with a space in
+  // between ('x = = y') consumed the whitespace either way, but only
+  // pushed it back when that check failed to find another symbol
+  // entirely, never when it found something other than '='. A bare
+  // 'x = y' left '='s own end_col one column past where the token
+  // actually ends, bleeding the space into its reported span.
+  let toks = lex_ok("x = y;");
+  Vec<Token> ops;
+  ops.init(0);
+  defer ops.free();
+  for t : toks {
+    if t.type == .Operator && equals(tok_text(t), "=") {
+      ops.push(t);
+    }
+  }
+  assert ops.len == 1, "expected exactly one '=' operator token";
+  Token eq = ops.get(0);
+  assert eq.pos.end_col - eq.pos.start_col == 1, "expected '='s own span to be exactly one column wide";
+}

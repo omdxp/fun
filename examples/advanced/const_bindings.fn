@@ -4,11 +4,11 @@
 
 imp std.c.io;
 
-const num GREETING_REPEAT = 3;
+const GREETING_REPEAT = 3;
 pub const str GREETING = "hi";
 
 fun main() {
-  const num local_implicit = 10;
+  const local_implicit = 10;
   const str local_explicit_str = "local";
 
   num total = 0;

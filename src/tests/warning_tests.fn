@@ -1,0 +1,595 @@
+// Warning cases: a program, and what the analysis is expected to notice
+// about it.
+
+imp ..lexer.lexer;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.result;
+
+// Parses `src` and reports what the analysis notices, joined into one
+// string, or the message of the expectation that went unmet.
+fun notice(str src, bin report_unused) str {
+  let tokens = tokenize(src, "t.fn");
+  if tokens.is_err() {
+    ret "lex error";
+  }
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let failed = p.parse();
+  if failed.is_some() {
+    ret "parse error";
+  }
+  let found = analyze(&state.nodes, &state.nodes, report_unused, "t.fn");
+  if found.is_err() {
+    ret found.unwrap_err().message;
+  }
+  Vec<Warning> warnings = found.unwrap();
+  defer warnings.free();
+  StringBuilder b = string_builder_init(128);
+  num i = 0;
+  for i < warnings.len {
+    Warning w = warnings.get(i);
+    i = i + 1;
+    b.append(warning_id_name(w.id));
+    b.append(": ");
+    b.append(w.message);
+    b.append("\n");
+  }
+  ret b.build();
+}
+
+fun notices(str src, str needle, str label) {
+  assert contains(notice(src, false), needle), label;
+}
+
+fun notices_unused(str src, str needle, str label) {
+  assert contains(notice(src, true), needle), label;
+}
+
+fun says_nothing(str src, str label) {
+  assert equals(notice(src, false), ""), label;
+}
+
+test "returning the address of a local is noticed" {
+  notices(
+    `fun bad() num* {
+    `  num x = 1;
+    `  ret &x;
+    `}`,
+    "returning address of local variable",
+    "expected the address of a local to be noticed"
+  );
+  says_nothing(
+    `fun ok() num* {
+    `  num* p = nil;
+    `  ret p;
+    `}`,
+    "expected a pointer local to be returned quietly"
+  );
+}
+
+test "a statement after one that always exits is noticed" {
+  notices(
+    `fun main() num {
+    `  ret 0;
+    `  num x = 1;
+    `}`,
+    "unreachable",
+    "expected the unreachable statement to be noticed"
+  );
+}
+
+test "an assert that cannot fail is noticed" {
+  notices(
+    `fun main() {
+    `  assert true, "always";
+    `}`,
+    "always true",
+    "expected the constant assert to be noticed"
+  );
+}
+
+test "a control silences what it names, wherever it is written" {
+  says_nothing(
+    `fun main() num {
+    `  ret 0;
+    `  allow unreachable_code, "left in during a refactor";
+    `  num x = 1;
+    `}`,
+    "expected the control to cover the whole body"
+  );
+}
+
+test "an expectation that never fires is an error" {
+  assert contains(
+    notice(
+    `fun ok() num* {
+      `  expect return_local_ptr, "should fail when the warning disappears";
+      `  num* p = nil;
+      `  ret p;
+      `}`,
+    false
+    ),
+    "was not emitted"
+  ), "expected the unmet expectation to be reported";
+}
+
+test "a declaration nothing reads is noticed when asked" {
+  notices_unused(
+    `fun demo() void {
+    `  num value = 1;
+    `}`,
+    "unused variable 'value'",
+    "expected the unused local to be noticed"
+  );
+  says_nothing(
+    `fun demo() void {
+    `  num value = 1;
+    `}`,
+    "expected silence when unused declarations are not asked for"
+  );
+}
+
+test "a function that promises a value must hand one back" {
+  notices(
+    `fun f(num x) num {
+    `  num y = x;
+    `}`,
+    "without returning a value",
+    "expected the missing return to be noticed"
+  );
+  says_nothing(
+    `fun f(num x) num {
+    `  for true {
+    `    ret x;
+    `  }
+    `}`,
+    "expected a loop that never finishes to be accepted"
+  );
+}
+
+test "a fit that misses a case is noticed" {
+  notices(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `  }
+    `}`,
+    "does not handle",
+    "expected the missing variant to be noticed"
+  );
+  says_nothing(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `    Color.Green -> { ret; }
+    `  }
+    `}`,
+    "expected a fit covering every variant to be accepted"
+  );
+}
+
+test "a branch an earlier one already covers is noticed" {
+  notices(
+    `enum Color {
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  fit c {
+    `    Color.Red -> { ret; }
+    `    Color.Red -> { ret; }
+    `    Color.Green -> { ret; }
+    `  }
+    `}`,
+    "already covered",
+    "expected the duplicate branch to be noticed"
+  );
+}
+
+test "a literal a sized integer cannot hold is noticed" {
+  notices(
+    `fun main() {
+    `  u2 a = 5;
+    `}`,
+    "does not fit",
+    "expected the out-of-range literal to be noticed"
+  );
+  says_nothing(
+    `fun main() {
+    `  u8 a = 200;
+    `  i8 b = -100;
+    `}`,
+    "expected literals within range to be accepted"
+  );
+}
+
+test "a value several tasks write through is noticed" {
+  notices(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun bump(Counter* c) {
+    `  c.n = c.n + 1;
+    `}
+    `fun main() {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork bump(&counter);
+    `  }
+    `}`,
+    "write through it",
+    "expected the shared mutable capture to be noticed"
+  );
+  says_nothing(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun peek(Counter* c) {
+    `  let v = c.n;
+    `}
+    `fun main() {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork peek(&counter);
+    `  }
+    `}`,
+    "expected a read-only capture to be accepted"
+  );
+}
+
+test "sends beyond a channel's room with nothing receiving are noticed" {
+  notices(
+    `fun main() {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  c <- 2;
+    `  c <- 3;
+    `}`,
+    "nothing receiving",
+    "expected the over-send to be noticed"
+  );
+  says_nothing(
+    `fun main() {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  let x = <- c;
+    `  c <- 2;
+    `  let y = <- c;
+    `}`,
+    "expected sends a receive drains to be accepted"
+  );
+}
+
+test "a wait group created with no room, never grown before forking into it, is noticed" {
+  notices(
+    `async fun worker() {}
+    `fun main() {
+    `  let wg = wait_group_new(0);
+    `  for i : 0..4 {
+    `    fork worker();
+    `  }
+    `}`,
+    "never grown",
+    "expected the ungrown empty wait group to be noticed"
+  );
+  says_nothing(
+    `async fun worker() {}
+    `fun main() {
+    `  let wg = wait_group_new(0);
+    `  for i : 0..4 {
+    `    wg.add(1);
+    `    fork worker();
+    `  }
+    `}`,
+    "expected a wait group grown before forking to be accepted"
+  );
+}
+
+test "a fit written in shorthand is still checked for the variants it skips" {
+  // Every branch here names no enum, so what is being matched has to
+  // come from what the subject holds. Without that, a shorthand fit was
+  // never checked at all.
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant to be noticed";
+  assert contains(found, "S.B"), "expected the message to name what is missing";
+}
+
+test "a fit over a function parameter is checked exactly like one over a local" {
+  // local_types only ever registered a `.Variable` statement's own
+  // name, never a parameter's, so `fit`ing straight over what a
+  // function was handed (the single most common shape) silently
+  // skipped exhaustiveness checking entirely.
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant noticed for a parameter subject";
+  assert contains(found, "Shape.Square"), "expected the message to name what is missing";
+}
+
+test "a fit missing several variants names every one of them, not just the first" {
+  str src = `enum Shape {
+  `  Circle(num),
+  `  Square(num),
+  `  Triangle,
+  `}
+  `fun area(Shape s) num {
+  `  fit s {
+  `    .Circle(r) -> { ret r * r; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variants to be noticed";
+  assert contains(found, "'Shape.Square'"), "expected Square named";
+  assert contains(found, "'Shape.Triangle'"), "expected Triangle named too, in the same warning";
+  // Only one warning for the whole fit, not one per missing variant.
+  assert count(found, "fit_non_exhaustive") == 1, "expected every missing variant folded into a single warning";
+}
+
+test "a fit over num or a pointer with no catch-all is noticed" {
+  // Neither has a closed value set the way bin/enum do, so a catch-all
+  // is the only way to be exhaustive.
+  str num_src = `fun main() num {
+  `  num x = 1;
+  `  fit x {
+  `    1 -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(num_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for num";
+
+  str ptr_src = `imp std.c.mem;
+  `fun main() num {
+  `  raw* p = malloc(1);
+  `  fit p {
+  `    NULL -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(ptr_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for a pointer";
+}
+
+test "a fit over chr, str, or dec with no catch-all is noticed too, not just num and pointers" {
+  // Same reasoning as num/pointer above: none of these three have a
+  // closed value set either, so the same check applies.
+  str chr_src = `fun main() num {
+  `  chr c = 'a';
+  `  fit c {
+  `    'a', 'b' -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(chr_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for chr";
+
+  str str_src = `fun main() num {
+  `  str s = "x";
+  `  fit s {
+  `    "x" -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(str_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for str";
+
+  str dec_src = `fun main() num {
+  `  dec d = 1.0;
+  `  fit d {
+  `    1.0 -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert contains(notice(dec_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for dec";
+}
+
+test "a fit over bin with both true and false covered is not double-flagged by the catch-all check" {
+  // bin's own exhaustiveness is already decided by the truths counter
+  // above this check; bin falls through to here too once it passes
+  // (it names no enum), so the catch-all check must not re-flag it.
+  str src = `fun main() num {
+  `  bin b = true;
+  `  fit b {
+  `    true -> { ret 1; }
+  `    false -> { ret 0; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning when both truth values are covered";
+}
+
+test "a fit over bin with a catch-all after both truth values are already covered is noticed" {
+  str src = `fun main() num {
+  `  bin b = true;
+  `  fit b {
+  `    true -> { ret 1; }
+  `    false -> { ret 0; }
+  `    _ -> { ret 2; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "fit_unreachable_branch"), "expected the unreachable catch-all noticed";
+}
+
+test "a fit receiving from a channel is checked against the channel's own element type" {
+  // `fit <- ch { ... }` desugars to `ch.recv()` at parse time; the
+  // catch-all/enum check needs the channel's own generic element type,
+  // not the call's own literal return type, to notice a missing variant.
+  str src = `compound Channel<T> { T v; }
+  `impl Channel<T> { pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {
+  `  fit <- inbox {
+  `    Msg.Compute(v) -> { ret; }
+  `    Msg.Stop -> { ret; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing Msg.Result variant noticed on a channel receive";
+  assert contains(found, "Msg.Result"), "expected the message to name what is missing";
+}
+
+test "a fit receiving from a channel with every variant covered is not flagged" {
+  str src = `compound Channel<T> { T v; }
+  `impl Channel<T> { pub recv() T { ret self.v; } }
+  `enum Msg { Compute(num), Result(num), Stop }
+  `async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {
+  `  fit <- inbox {
+  `    Msg.Compute(v) -> { ret; }
+  `    Msg.Result(v) -> { ret; }
+  `    Msg.Stop -> { ret; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning once every variant is covered";
+}
+
+test "allow silences a shorthand fit's missing variant" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  allow fit_non_exhaustive, "only A matters here";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  assert !contains(notice(src, false), "fit_non_exhaustive"), "expected the warning silenced";
+}
+
+test "expect is met by a shorthand fit's missing variant" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_non_exhaustive, "this fit is deliberately partial";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert !contains(found, "fit_non_exhaustive:"), "expected the expectation to absorb it";
+  assert !contains(found, "was not emitted"), "expected the expectation met";
+}
+
+test "an unmet expect on a fit is an error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_non_exhaustive, "claims this fit is partial";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `  ret 0;
+  `}`;
+  // A claim a program makes about itself that is no longer true.
+  assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
+}
+
+test "a fit branch an earlier one already covers is noticed" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "fit_unreachable_branch"), "expected the repeated branch noticed";
+}
+
+test "allow silences a repeated fit branch" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  allow fit_unreachable_branch, "the repeat is deliberate";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  assert !contains(notice(src, false), "fit_unreachable_branch"), "expected allow to silence it";
+}
+
+test "expect is met by a repeated fit branch" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "this fit repeats a branch";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .A -> { ret 2; }
+  `    _ -> { ret 3; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert !contains(found, "fit_unreachable_branch:"), "expected the expectation to absorb it";
+  assert !contains(found, "was not emitted"), "expected the expectation met";
+}
+
+test "an unmet expect on an unreachable branch is an error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "claims a branch repeats";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `}`;
+  assert contains(notice(src, false), "was not emitted"), "expected the unmet expectation reported";
+}
+
+test "an unmet expect reports its own position, not the top of the file, and is a real error" {
+  str src = `enum S { A, B }
+  `fun main() num {
+  `  S s = .A;
+  `  expect fit_unreachable_branch, "claims a branch repeats";
+  `  fit s {
+  `    .A -> { ret 1; }
+  `    .B -> { ret 2; }
+  `  }
+  `}`;
+  let tokens = tokenize(src, "t.fn");
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  assert p.parse().is_none(), "expected the source to parse";
+  let found = analyze(&state.nodes, &state.nodes, false, "t.fn");
+  assert found.is_err(), "expected the unmet expectation to be an error";
+  UnmetExpectation err = found.unwrap_err();
+  assert err.has_pos, "expected a real position, not just a message";
+  // Line 4 (1-indexed), the `expect` statement's own line, not line 1.
+  assert err.pos.line == 4, "expected the expect statement's own line, not the top of the file";
+}

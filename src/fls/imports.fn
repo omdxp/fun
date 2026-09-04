@@ -1,0 +1,417 @@
+// Import hover and go to definition.
+// 
+// Hovering (or jumping to) a segment of an `imp` statement's own
+// dotted path answers the same question as any other declaration:
+// where does this lead. A segment resolving to a real file shows that
+// file's own leading doc comment (or jumps to it); one resolving to a
+// directory shows its README.md when it has one, the same as the
+// reference fls did.
+
+imp positions;
+imp symbols;
+imp protocol;
+imp documents;
+imp analysis;
+imp uri;
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..parser.import_resolver;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.fs;
+imp std.path;
+imp std.c.mem;
+
+// Where an `imp`-path segment at `line`/`character` (in a document
+// whose own path is `current_file`) leads: a resolved file path (a
+// real .fn module) or a directory's own README.md, when present. ""
+// when the cursor isn't on an import segment at all, or the segment
+// it's on doesn't resolve to anything real.
+pub fun import_target(Vec<Token>* tokens, str current_file, num line, num character) str {
+  let found = token_at(tokens, line, character);
+  if found.is_none() {
+    ret "";
+  }
+  Token t = found.unwrap();
+  fit t.type {
+    .Identifier -> {}
+    _ -> { ret ""; }
+  }
+  if !_is_import_segment(tokens, t) {
+    ret "";
+  }
+  str specifier = _specifier_through(tokens, t);
+  ret _resolve_specifier(current_file, specifier);
+}
+
+// Where a dotted import specifier (`std.c.io`, `..lexer.lexer`, a
+// whole or partial path as a reader would write it) leads: a resolved
+// file path, a directory's own README.md when it has one, or a bare
+// directory path when it doesn't (real but undocumented, like
+// `std.c`). "" when `specifier` doesn't resolve to anything real.
+fun _resolve_specifier(str current_file, str specifier) str {
+  if equals(specifier, "") {
+    ret "";
+  }
+  // `std` alone names the stdlib's own namespace prefix, not a real
+  // sibling file or subdirectory of the importing file's own
+  // directory. resolve_import_path only recognizes a `std.`-prefixed
+  // (dotted) path as a stdlib reference, so it's resolved through a
+  // known-existing stdlib file (`std.io`, always real) instead, taking
+  // the directory two levels up from it (past `io.fn` and past `std/`
+  // itself) to reach the stdlib root, where its own README lives.
+  if equals(specifier, "std") {
+    str anchor = resolve_import_path(current_file, "std.io");
+    str root_readme = path_join(dirname(dirname(anchor)), "README.md");
+    if exists(root_readme) {
+      ret root_readme;
+    }
+    ret "";
+  }
+  // Normalize separators so the returned path matches the node
+  // filenames stored by _parse_and_merge_source (which also normalizes
+  // via _normalize_path).  Without this, a Windows absolute path like
+  // "C:\...\stdlib/std/c/math.fn" would not compare equal to
+  // "C:/.../stdlib/std/c/math.fn" in _alias_module_completions.
+  str resolved = _normalize_path(resolve_import_path(current_file, specifier));
+  if exists(resolved) {
+    ret resolved;
+  }
+  // The specifier may name a directory rather than a file.
+  // resolve_import_path always assumes a trailing ".fn" module, so
+  // strip that back off and check. A directory with no README of its
+  // own (an intermediate namespace segment like `std.c`, real but
+  // undocumented) still names something real, so its own path is
+  // returned rather than "": callers show a minimal fallback for a
+  // directory target instead of trying to read it.
+  if ends_with(resolved, ".fn") {
+    str as_dir = substr(resolved, 0, len(resolved) - 3);
+    if is_dir(as_dir) {
+      str readme = path_join(as_dir, "README.md");
+      if exists(readme) {
+        ret readme;
+      }
+      ret as_dir;
+    }
+  }
+  ret "";
+}
+
+// What `imp path as name;` resolves to, when this document itself
+// declares that alias. Lets hovering or jumping from the alias at a
+// use site (`cmath.sqrt(...)`), not just from inside the import
+// statement that names it, lead somewhere too. Only this document's
+// own top-level statements are checked (`entry_nodes`, not the whole
+// transitively-merged program), since an alias is scoped to the file
+// that declares it. "" when `name` isn't a declared alias here.
+pub fun import_alias_target(Vec<Node>* entry_nodes, str current_file, str name) str {
+  num i = 0;
+  for i < entry_nodes.len {
+    Node n = entry_nodes.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Import(imp_node) -> {
+        if imp_node.has_alias && equals(imp_node.alias, name) {
+          ret _resolve_specifier(current_file, imp_node.path);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
+// The same thing `import_alias_target` answers, worked out from raw
+// tokens instead of a parsed program. A document mid-edit often fails
+// to parse at all, which is exactly when a reader is most likely to
+// be typing after an alias and wants a real answer rather than
+// nothing.
+pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == .Comment || tok.type == .NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 && j < tokens.len && token_is_keyword(tokens.get(j), "as") &&
+      j + 1 < tokens.len {
+      Token alias_tok = tokens.get(j + 1);
+      if alias_tok.type == .Identifier && equals(token_word(alias_tok), name) {
+        str specifier = _specifier_through(tokens, tokens.get(j - 1));
+        ret _resolve_specifier(current_file, specifier);
+      }
+    }
+    i = j;
+  }
+  ret "";
+}
+
+// Every `imp` statement's own dotted path in this document, resolved
+// to a real file, aliased or not, deduplicated. What a plain `imp
+// std.vec;` (no `as`) brings into scope unqualified can't be reached
+// through `import_alias_target`/`import_alias_target_from_tokens` at
+// all, since there's no alias name to look up by; a caller wanting
+// "everywhere this document could have gotten a name from" needs the
+// whole list instead.
+pub fun resolved_import_paths(Vec<Token>* tokens, str current_file) Vec<str> {
+  Vec<str> out;
+  out.init(4);
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == .Comment || tok.type == .NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 {
+      str specifier = _specifier_through(tokens, tokens.get(j - 1));
+      str resolved = _resolve_specifier(current_file, specifier);
+      if !equals(resolved, "") && !out.contains(resolved) {
+        out.push(resolved);
+      }
+    }
+    i = j;
+  }
+  ret out;
+}
+
+// One link per `imp` statement's own dotted path, spanning the whole
+// specifier and pointing at what it resolves to, the same target
+// `import_target` would give for a cursor anywhere in it. A client
+// renders these as clickable/hoverable ranges up front, without a
+// cursor ever landing on the path first the way hover/go-to-definition
+// need. Specifiers that don't resolve to anything real (a typo, or
+// something the parser accepts but the filesystem doesn't have) are
+// silently skipped, not reported as broken links.
+pub fun document_links(AnalysisCache* cache, Document doc) str {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret "[]";
+  }
+  Vec<Token>* tokens = &read.tokens;
+  str current_file = doc.path;
+  str doc_text = doc.text;
+  StringBuilder b = string_builder_init(128);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .Keyword || !equals(token_word(t), "imp") {
+      i = i + 1;
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len {
+      Token tok = tokens.get(j);
+      if tok.type == .Comment || tok.type == .NewLine {
+        j = j + 1;
+        continue;
+      }
+      bin extends = false;
+      fit tok.type {
+        .Identifier -> { extends = true; }
+        _ -> { extends = _is_dot_run_token(tok); }
+      }
+      if !extends {
+        break;
+      }
+      j = j + 1;
+    }
+    if j > i + 1 {
+      Token first = tokens.get(i + 1);
+      Token last = tokens.get(j - 1);
+      str specifier = _specifier_through(tokens, last);
+      str resolved = _resolve_specifier(current_file, specifier);
+      if !equals(resolved, "") {
+        num start_line = first.pos.line - 1;
+        num end_line = last.pos.line - 1;
+        num start_char = byte_col_to_utf16_char(doc_text, start_line, first.pos.start_col - 1);
+        num end_char = byte_col_to_utf16_char(doc_text, end_line, last.pos.end_col - 1);
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(`{"range":{"start":{"line":`);
+        b.append_num(start_line);
+        b.append(`,"character":`);
+        b.append_num(start_char);
+        b.append(`},"end":{"line":`);
+        b.append_num(end_line);
+        b.append(`,"character":`);
+        b.append_num(end_char);
+        b.append(`}},"target":`);
+        str target_uri = path_to_uri(resolved);
+        json_quote_into(&b, target_uri);
+        free(target_uri);
+        b.append("}");
+        free(resolved);
+      }
+    }
+    i = j;
+  }
+  b.append("]");
+  ret b.build();
+}
+
+// True when `t` sits somewhere in an `imp path.path;` statement's own
+// path, judged by walking back from it past dots and identifiers only
+// until the nearest keyword: `imp` means yes, anything else (or
+// running off the front of the file) means no.
+fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
+  num i = index_of_token(tokens, t);
+  if i < 0 {
+    ret false;
+  }
+  for i >= 0 {
+    Token tok = tokens.get(i);
+    if tok.type == .Comment || tok.type == .NewLine {
+      i = i - 1;
+      continue;
+    }
+    fit tok.type {
+      .Identifier -> {}
+      .Keyword -> { ret equals(token_word(tok), "imp"); }
+      _ -> {
+        if !_is_dot_run_token(tok) {
+          ret false;
+        }
+      }
+    }
+    i = i - 1;
+  }
+  ret false;
+}
+
+// The dotted specifier from the start of the import path through `t`
+// (inclusive), as a reader would write it. Hovering an intermediate
+// segment (`std` in `std.channel`) resolves only that much of it.
+fun _specifier_through(Vec<Token>* tokens, Token t) str {
+  num end = index_of_token(tokens, t);
+  if end < 0 {
+    ret "";
+  }
+  num start = end;
+  for start > 0 {
+    let prev = tokens.get(start - 1);
+    if prev.type == .Comment || prev.type == .NewLine {
+      start = start - 1;
+      continue;
+    }
+    bin extends = false;
+    fit prev.type {
+      .Identifier -> { extends = true; }
+      _ -> { extends = _is_dot_run_token(prev); }
+    }
+    if !extends {
+      break;
+    }
+    start = start - 1;
+  }
+  StringBuilder b = string_builder_init(32);
+  num i = start;
+  for i <= end {
+    Token tok = tokens.get(i);
+    if tok.type == .Comment || tok.type == .NewLine {
+      i = i + 1;
+      continue;
+    }
+    fit tok.type {
+      .Identifier -> { b.append(token_word(tok)); }
+      _ -> {
+        if _is_dot_run_token(tok) {
+          b.append(token_word(tok));
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// True for `.`, `..`, `...`: a run of dots lexes as one operator
+// token, not several, so a parent-traversal segment (`imp
+// ..lexer.lexer;`) needs its own check, not `token_is_operator(t,
+// ".")` alone, which only ever matches a single dot.
+fun _is_dot_run_token(Token t) bin {
+  if t.type != .Operator {
+    ret false;
+  }
+  str w = token_word(t);
+  if equals(w, "") {
+    ret false;
+  }
+  num i = 0;
+  for i < len(w) {
+    if w[i] != '.' {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// The contiguous `//`-prefixed comment lines starting at the very top
+// of `text` (a whole file's own text, unlike `doc_comment_above`,
+// which reads backward from a declaration elsewhere in it), with each
+// line's own `// ` prefix stripped and re-joined top to bottom. Empty
+// when the file doesn't open with one.
+pub fun leading_doc_comment(str text) str {
+  Vec<str> src_lines = split_lines(text);
+  StringBuilder b = string_builder_init(64);
+  num i = 0;
+  bin any = false;
+  for i < src_lines.len {
+    str t = trim(src_lines.get(i));
+    if !starts_with(t, "//") {
+      break;
+    }
+    str content = substr(t, 2, len(t) - 2);
+    if len(content) > 0 && content[0] == ' ' {
+      content = substr(content, 1, len(content) - 1);
+    }
+    if any {
+      b.append("\n");
+    }
+    b.append(content);
+    any = true;
+    i = i + 1;
+  }
+  ret b.build();
+}

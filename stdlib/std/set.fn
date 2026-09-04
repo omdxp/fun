@@ -2,7 +2,7 @@
 
 imp std.map;
 imp std.vec;
-imp std.c.io;
+imp std.string;
 imp std.quirks;
 imp std.option;
 
@@ -166,6 +166,15 @@ impl Set<T> as Clearable {
   }
 }
 
+impl Set<T> as Clonable<Set<T>> {
+  // Returns a shallow copy with independent backing storage.
+  pub clone() Set<T> {
+    Set<T> out;
+    out.map = self.map.clone();
+    ret out;
+  }
+}
+
 impl Set<num> as Display {
   // Render as `{1, 2, 3}` (elements are unordered).
   pub to_string() str {
@@ -187,13 +196,14 @@ impl Set<num> as Display {
             out[pos + 1] = ' ';
             pos = pos + 2;
           }
-          chr[24] cell;
-          let c = snprintf(cell, 24, "%lld", x);
+          str cell = format_num(x);
+          num c = len(cell);
           num k = 0;
           for k < c {
             out[pos + k] = cell[k];
             k = k + 1;
           }
+          free(cell);
           pos = pos + c;
           written = written + 1;
         }

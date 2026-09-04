@@ -1,0 +1,368 @@
+// Reads the `fun.toml` project manifest.
+// 
+// A package may build a library, one or more binaries, or both. Targets
+// can be declared explicitly, or left out entirely and discovered from
+// the conventional `src/lib.fn` and `src/main.fn` paths.
+// 
+// Only the subset of TOML the manifest needs is parsed: top-level
+// tables, arrays of tables, and quoted string values. Fun resolves
+// imports by path, so a manifest declares build targets, never an
+// import graph.
+
+imp ..ast.ast;
+imp std.string;
+imp std.toml;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+imp std.fs;
+imp std.c.mem;
+
+// A source file compiled to an executable.
+pub compound ExeTarget {
+  str name;
+  str path;
+}
+
+// A source file compiled as a library: checked and compiled to an
+// object, never linked, since it has no entry point.
+pub compound LibTarget {
+  str name;
+  str path;
+}
+
+// What a package builds.
+pub enum PackageKind {
+  // No target declared and none discovered.
+  Empty,
+  // A library only.
+  Lib,
+  // One or more executables only.
+  Exe,
+  // A library alongside one or more executables.
+  Mixed,
+}
+
+pub compound Manifest {
+  str package_name;
+  str version;
+  bin has_lib;
+  LibTarget lib;
+  Vec<ExeTarget> exes;
+}
+
+impl Manifest {
+  // What this package builds, once targets have been resolved.
+  pub kind() PackageKind {
+    if self.has_lib && self.exes.len > 0 {
+      ret .Mixed;
+    }
+    if self.has_lib {
+      ret .Lib;
+    }
+    if self.exes.len > 0 {
+      ret .Exe;
+    }
+    ret .Empty;
+  }
+
+  pub free() {
+    self.exes.free();
+  }
+}
+
+// Reads `text` as a manifest. Targets are taken exactly as declared;
+// see `resolve_targets` for filling in the conventional defaults.
+pub fun parse_manifest(str text) Result<Manifest, str> {
+  let doc = parse_document(text);
+  defer doc.free();
+
+  Manifest m;
+  m.package_name = "";
+  m.version = "";
+  m.has_lib = false;
+  m.lib.name = "";
+  m.lib.path = "";
+  m.exes.init(0);
+
+  let pkg = doc.table("package");
+  if pkg.is_none() {
+    ret .Err("fun.toml is missing its [package] table");
+  }
+  m.package_name = pkg.unwrap().get_str("name");
+  if equals(m.package_name, "") {
+    ret .Err("[package] is missing a `name`");
+  }
+  m.version = pkg.unwrap().get_str("version");
+  if equals(m.version, "") {
+    m.version = "0.0.0";
+  }
+
+  num ti = 0;
+  for ti < doc.tables.len {
+    str tname = doc.tables.get(ti).name;
+    if !equals(tname, "package") && !equals(tname, "lib") {
+      ret .Err(format("unknown table `[{str}]`", tname));
+    }
+    ti = ti + 1;
+  }
+  num ai = 0;
+  for ai < doc.array_tables.len {
+    str aname = doc.array_tables.get(ai).name;
+    if !equals(aname, "exe") {
+      ret .Err(format("unknown table `[[{str}]]`", aname));
+    }
+    ai = ai + 1;
+  }
+
+  let lib = doc.table("lib");
+  if lib.is_some() {
+    m.has_lib = true;
+    m.lib.name = lib.unwrap().get_str("name");
+    m.lib.path = lib.unwrap().get_str("path");
+  }
+
+  let exes = doc.array("exe");
+  defer exes.free();
+  num i = 0;
+  for i < exes.len {
+    str name = exes.get(i).get_str("name");
+    str path = exes.get(i).get_str("path");
+    if equals(name, "") {
+      ret .Err("an [[exe]] is missing a `name`");
+    }
+    if equals(path, "") {
+      ret .Err(format("[[exe]] `{str}` is missing a `path`", name));
+    }
+    ExeTarget e;
+    e.name = name;
+    e.path = path;
+    m.exes.push(e);
+    i = i + 1;
+  }
+
+  ret .Ok(m);
+}
+
+// Fills in whatever the manifest left implicit, relative to `root`:
+// a `[lib]` with no path uses `src/lib.fn`, and a manifest declaring no
+// targets at all picks up `src/lib.fn` and `src/main.fn` when they
+// exist, each named after the package.
+pub fun resolve_targets(Manifest* m, str root) {
+  str lib_path = _join(root, "src/lib.fn");
+  str main_path = _join(root, "src/main.fn");
+
+  if m.has_lib {
+    if equals(m.lib.path, "") {
+      m.lib.path = lib_path;
+    }
+    if equals(m.lib.name, "") {
+      m.lib.name = m.package_name;
+    }
+  }
+
+  if !m.has_lib && m.exes.len == 0 {
+    if exists(lib_path) {
+      m.has_lib = true;
+      m.lib.name = m.package_name;
+      m.lib.path = lib_path;
+    }
+    if exists(main_path) {
+      ExeTarget e;
+      e.name = m.package_name;
+      e.path = main_path;
+      m.exes.push(e);
+    }
+  }
+}
+
+// Joins a directory and a relative path. An empty root leaves `rel`
+// as-is, so a manifest read from the working directory keeps the plain
+// relative paths it declared.
+fun _join(str root, str rel) str {
+  if equals(root, "") || equals(root, ".") {
+    ret rel;
+  }
+  StringBuilder b = string_builder_init(32);
+  b.append(root);
+  if !ends_with(root, "/") {
+    b.append("/");
+  }
+  b.append(rel);
+  ret b.build();
+}
+
+// A constant supplied by the build rather than written in source.
+pub compound Define {
+  str name;
+  str value;
+}
+
+// The constants every build makes available to the program: the package
+// name and version, taken from the manifest.
+pub fun manifest_defines(Manifest* m) Vec<Define> {
+  Vec<Define> out;
+  out.init(0);
+  Define name;
+  name.name = "PACKAGE_NAME";
+  name.value = m.package_name;
+  out.push(name);
+  Define version;
+  version.name = "PACKAGE_VERSION";
+  version.value = m.version;
+  out.push(version);
+  ret out;
+}
+
+// Builds a `pub const str name = "value";` declaration, so a value known
+// only to the build is reachable from source as an ordinary constant.
+// Also used by fls (`analysis.fn`) to give a workspace's own
+// PACKAGE_NAME/PACKAGE_VERSION the same hover/completion/go-to-
+// definition support any other declared constant gets, rather than
+// leaving them invisible to source analysis the way a build-only
+// define otherwise would be.
+pub fun manifest_const_node(str name, str value) Node {
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "str";
+
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(.String(value));
+
+  VariableNode v;
+  v.var_type = dt;
+  v.name = name;
+  v.val = val;
+  v.has_val = true;
+  v.is_const = true;
+  ret node_new(.Variable(v));
+}
+
+test "parses a package with a single executable" {
+  str text = `[package]
+  `name = "demo"
+  `version = "1.2.3"
+  `
+  `[[exe]]
+  `name = "app"
+  `path = "src/main.fn"`;
+  let r = parse_manifest(text);
+  assert r.is_ok(), "expected the manifest to parse";
+  let m = r.unwrap();
+  assert equals(m.package_name, "demo"), "expected the package name";
+  assert equals(m.version, "1.2.3"), "expected the declared version";
+  assert m.exes.len == 1, "expected one executable target";
+  assert equals(m.exes.get(0).name, "app"), "expected the executable's name";
+  assert equals(m.exes.get(0).path, "src/main.fn"), "expected the executable's path";
+  assert m.kind() == .Exe, "expected an executable-only package";
+}
+
+test "parses several executables" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[[exe]]
+  `name = "one"
+  `path = "src/one.fn"
+  `
+  `[[exe]]
+  `name = "two"
+  `path = "src/two.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.exes.len == 2, "expected both executable targets";
+  assert equals(m.exes.get(1).name, "two"), "expected the second target";
+}
+
+test "parses a library-only package" {
+  str text = `[package]
+  `name = "mylib"
+  `
+  `[lib]
+  `path = "src/lib.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.has_lib, "expected a library target";
+  assert equals(m.lib.path, "src/lib.fn"), "expected the library path";
+  assert m.kind() == .Lib, "expected a library-only package";
+}
+
+test "parses a package building both a library and an executable" {
+  str text = `[package]
+  `name = "both"
+  `
+  `[lib]
+  `path = "src/lib.fn"
+  `
+  `[[exe]]
+  `name = "cli"
+  `path = "src/main.fn"`;
+  let m = parse_manifest(text).unwrap();
+  assert m.kind() == .Mixed, "expected a mixed package";
+  assert m.has_lib, "expected the library target";
+  assert m.exes.len == 1, "expected the executable target";
+}
+
+test "a version left out defaults to 0.0.0" {
+  str text = `[package]
+  `name = "demo"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.version, "0.0.0"), "expected the default version";
+  assert m.kind() == .Empty, "expected no targets before resolution";
+}
+
+test "comments and blank lines are ignored" {
+  str text = `# a leading comment
+  `[package]
+  `name = "demo" # trailing
+  `
+  `# another
+  `version = "0.1.0"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.package_name, "demo"), "expected the name without the comment";
+  assert equals(m.version, "0.1.0"), "expected the version";
+}
+
+test "a missing package name is rejected" {
+  str text = `[package]
+  `version = "0.1.0"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a manifest with no package name to be rejected";
+}
+
+test "an exe without a path is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[[exe]]
+  `name = "app"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected an exe with no path to be rejected";
+}
+
+test "a value keeps its quotes stripped" {
+  str text = `[package]
+  `name = "demo"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.package_name, "demo"), "expected the quotes to be stripped";
+}
+
+test "an unknown table is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[nope]
+  `key = "value"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected an unknown table to be rejected";
+}
+
+test "a lib with no path resolves to the conventional source file" {
+  str text = `[package]
+  `name = "mylib"
+  `
+  `[lib]`;
+  Manifest m = parse_manifest(text).unwrap();
+  resolve_targets(&m, "");
+  assert equals(m.lib.path, "src/lib.fn"), "expected the conventional library path";
+  assert equals(m.lib.name, "mylib"), "expected the library to take the package name";
+}

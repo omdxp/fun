@@ -1,0 +1,304 @@
+// Inlay hints.
+// 
+// Two kinds, both inline "ghost" text a reader never typed: a
+// `let`-inferred local's own resolved type right after its name, and
+// a call argument's own parameter name right before it.
+// 
+// `let`'s declared type never actually resolves in the parsed tree:
+// the parser leaves it as a permanent __let_infer__ sentinel, and
+// only codegen (embedding its own on-the-fly inference) ever turns
+// that into a real type, without writing it back anywhere fls can
+// read. Rather than reimplement that inference in full, this covers
+// the shapes a `let`'s own initializer most commonly takes: a
+// literal, a plain function call, or a method call.
+
+imp documents;
+imp analysis;
+imp positions;
+imp symbols;
+imp signature_help;
+imp protocol;
+imp ..lexer.token;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.ctype;
+imp std.c.mem;
+
+// Every `let name = value;` local within lines `start_line` through
+// `end_line` (both 0-indexed, inclusive) of `doc`, each as a type
+// hint positioned right after its own name.
+pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_line) str {
+  Analyzed read = cache.of(doc);
+  if !read.parsed || !read.lexed {
+    ret "[]";
+  }
+  Vec<Token> tokens = read.tokens;
+  ProgramMergeResult program = read.program;
+
+  StringBuilder b = string_builder_init(256);
+  b.append("[");
+  bin any = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .Keyword || !equals(token_word(t), "let") {
+      continue;
+    }
+    num src_line = t.pos.line;
+    num line0 = src_line - 1;
+    if line0 < start_line || line0 > end_line {
+      continue;
+    }
+    let name_tok_opt = token_after(&tokens, i);
+    if name_tok_opt.is_none() {
+      continue;
+    }
+    Token name_tok = name_tok_opt.unwrap();
+    fit name_tok.type {
+      .Identifier -> {}
+      _ -> { continue; }
+    }
+    num name_idx = index_of_token(&tokens, name_tok);
+    str type_part = infer_let_local_type(&tokens, name_idx, &program.nodes, doc.path, src_line);
+    if equals(type_part, "") {
+      continue;
+    }
+    if any {
+      b.append(",");
+    }
+    any = true;
+    b.append(`{"position":{"line":`);
+    b.append_num(line0);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(doc.text, line0, name_tok.pos.end_col - 1));
+    b.append(`},"label":`);
+    str let_label = format(": {str}", type_part);
+    json_quote_into(&b, let_label);
+    free(let_label);
+    b.append(`,"kind":1,"paddingLeft":true}`);
+  }
+
+  // Parameter-name hints at call sites: `f(name: value)`. Every
+  // identifier immediately followed by `(` that isn't a declaration
+  // is treated as a call, its callee resolved (plain function, or
+  // method through a receiver reached by a dot), and a hint placed at
+  // each argument the resolved signature has a name for.
+  num j = 0;
+  for j < tokens.len {
+    Token t = tokens.get(j);
+    j = j + 1;
+    fit t.type {
+      .Identifier -> {}
+      _ -> { continue; }
+    }
+    num src_line = t.pos.line;
+    num line0 = src_line - 1;
+    if line0 < start_line || line0 > end_line {
+      continue;
+    }
+    num name_idx = index_of_token(&tokens, t);
+    let lparen_opt = token_after(&tokens, name_idx + 1);
+    if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+      continue;
+    }
+    num lparen_idx = index_of_token(&tokens, lparen_opt.unwrap());
+    if _call_paren_is_declaration(&tokens, name_idx, lparen_idx) {
+      continue;
+    }
+
+    str callee_name = token_word(t);
+    let prev = token_before(&tokens, name_idx);
+    bin is_method = prev.is_some() && token_is_operator(prev.unwrap(), ".");
+    Option<Declaration> found = .None;
+    if is_method {
+      str type_name = chain_receiver_type(&tokens, t, &program.nodes, doc.path, src_line);
+      if !equals(type_name, "") {
+        Vec<str> no_args;
+        no_args.init(0);
+        found = lookup_method(&program.nodes, type_name, callee_name, no_args);
+      }
+    } else {
+      found = lookup_top_level(&program.nodes, callee_name);
+    }
+    if found.is_none() {
+      continue;
+    }
+    Declaration d = found.unwrap();
+    fit d.kind {
+      .Function -> {}
+      _ -> { continue; }
+    }
+    Vec<str> params = split_signature_params(d.detail);
+    defer free_params_vec(&params);
+    if params.len == 0 {
+      continue;
+    }
+    // A method's own rendered signature carries its implicit `self`
+    // as parameter 0, which a call site never writes out, skipped
+    // here the same way signature_help shifts its active-param index.
+    num param_offset = 0;
+    if is_method {
+      param_offset = 1;
+    }
+
+    num depth = 0;
+    num arg_index = 0;
+    bin expecting_arg = true;
+    num k = lparen_idx;
+    for k < tokens.len {
+      Token at = tokens.get(k);
+      k = k + 1;
+      bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+      bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+      if is_open {
+        depth = depth + 1;
+        if depth == 1 {
+          continue;
+        }
+      } elif is_close {
+        depth = depth - 1;
+        if depth == 0 {
+          break;
+        }
+        continue;
+      } elif depth == 1 && token_is_operator(at, ",") {
+        arg_index = arg_index + 1;
+        expecting_arg = true;
+        continue;
+      }
+      if depth != 1 || !expecting_arg {
+        continue;
+      }
+      if at.type == .Comment || at.type == .NewLine {
+        continue;
+      }
+      expecting_arg = false;
+      num param_index = arg_index + param_offset;
+      if param_index >= params.len {
+        continue;
+      }
+      str pname = param_name_from_piece(params.get(param_index));
+      if equals(pname, "") {
+        free(pname);
+        continue;
+      }
+      bin redundant = at.type == .Identifier && equals(token_word(at), pname);
+      if redundant {
+        free(pname);
+        continue;
+      }
+      if any {
+        b.append(",");
+      }
+      any = true;
+      b.append(`{"position":{"line":`);
+      b.append_num(at.pos.line - 1);
+      b.append(`,"character":`);
+      b.append_num(byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1));
+      b.append(`},"label":`);
+      str param_label = format("{str}:", pname);
+      json_quote_into(&b, param_label);
+      free(param_label);
+      free(pname);
+      b.append(`,"kind":2,"paddingRight":true}`);
+    }
+  }
+
+  b.append("]");
+  ret b.build();
+}
+
+// True when `name_idx`'s own `identifier(` is a declaration rather
+// than a call: preceded directly by `fun`/`pub`/`async`, or (for a
+// method written with no such keyword) sitting at a statement
+// boundary with only type-shaped tokens between the matching `)` and
+// a following `{`. Anything else, `;`/`.`/`=`/a bare expression
+// context, means this is a call.
+fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx) bin {
+  let prev = token_before(tokens, name_idx);
+  if prev.is_some() {
+    Token p = prev.unwrap();
+    if p.type == .Keyword &&
+      (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
+      token_word(p),
+      "async"
+    )) {
+      ret true;
+    }
+  }
+  bin at_stmt_boundary = prev.is_none();
+  if prev.is_some() {
+    Token p = prev.unwrap();
+    at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') ||
+      token_is_symbol(
+      p,
+      ';'
+    );
+  }
+  if !at_stmt_boundary {
+    ret false;
+  }
+
+  let rparen_opt = matching_rparen(tokens, lparen_idx);
+  if rparen_opt.is_none() {
+    ret false;
+  }
+  num k_idx = rparen_opt.unwrap() + 1;
+  let k_opt = token_after(tokens, k_idx);
+  num steps = 0;
+  for steps < 8 {
+    if k_opt.is_none() {
+      ret false;
+    }
+    Token k = k_opt.unwrap();
+    if token_is_symbol(k, '{') {
+      ret true;
+    }
+    bin typeish = k.type == .Identifier || k.type == .Keyword ||
+    token_is_operator(
+      k,
+      "*"
+    ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||
+      token_is_operator(
+      k,
+      "<"
+    ) || token_is_operator(k, ">") || token_is_operator(k, ",");
+    if !typeish {
+      ret false;
+    }
+    k_opt = token_after(tokens, index_of_token(tokens, k) + 1);
+    steps = steps + 1;
+  }
+  ret false;
+}
+
+// A parameter's own name from one rendered piece of a split signature
+// (`"str name"` -> `"name"`, `"Vec<T>* data"` -> `"data"`): the
+// trailing run of identifier characters, since a parameter's name is
+// always what a rendered "Type name" piece ends with - once a
+// defaulted parameter's own trailing " = value" is stripped first
+// (`"num cap = 8"` -> `"num cap"` -> `"cap"`), or the last run of
+// digits in a numeric default reads as the name instead. Shared with
+// `completion.fn`, which needs the same names to build a call
+// snippet's own tab stops.
+pub fun param_name_from_piece(str piece) str {
+  str name_part = piece;
+  num eq = index_of_str(piece, " = ");
+  bin name_part_owned = false;
+  if eq >= 0 {
+    name_part = substr(piece, 0, eq);
+    name_part_owned = true;
+  }
+  num end = len(name_part);
+  num start = end;
+  for start > 0 && (is_alnum(name_part[start - 1]) || name_part[start - 1] == '_') {
+    start = start - 1;
+  }
+  str result = substr(name_part, start, end - start);
+  if name_part_owned {
+    free(name_part);
+  }
+  ret result;
+}

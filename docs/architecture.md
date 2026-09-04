@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fun transpiles Fun source code to C. This architecture keeps the compiler implementation compact while allowing generated programs to build against widely available platform toolchains.
+Fun transpiles Fun source code to C. This architecture keeps the compiler implementation compact while allowing generated programs to build against widely available platform toolchains. The compiler and language server are themselves written in Fun and compile themselves.
 
 The project is organized around a clear front-end and code generation pipeline:
 
@@ -23,13 +23,17 @@ The language model includes default 64-bit numeric types (`num`, `dec`), fixed-w
 
 ## Repository Layout
 
-- `modules/`: compiler and tooling implementation modules
-- `cmd/`: executable entrypoints such as the CLI and language server binaries
+- `src/ast/`: the shared AST node types every other stage reads and produces
+- `src/lexer/`: tokenizes source input
+- `src/parser/`: builds the AST, resolves imports, and formats source
+- `src/semantics/`: type checking and warning analysis
+- `src/codegen/`: lowers a checked program to C
+- `src/cli/`: the `fun` command-line driver
+- `src/fls/`: the language server
+- `src/tests/`: parser, typecheck, code generation, CLI, warning, and end-to-end coverage
+- `stdlib/`: standard library source
 - `examples/`: runnable language and standard-library examples
-- `tests/`: parser, typecheck, code generation, CLI, warning, and end-to-end coverage
 
 ## Build System
 
-A single build entrypoint compiles the compiler, language server, examples, and tests, and drives the full validation suite.
-
-For module-level descriptions, see [modules/README.md](../modules/README.md).
+`fun build` reads [fun.toml](../fun.toml) and compiles the `[[exe]]` targets it declares (`fun`, `fls`) into `fun-out/bin/`. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full validation workflow.

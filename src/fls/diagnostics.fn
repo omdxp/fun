@@ -1,0 +1,307 @@
+// Diagnostics.
+// 
+// What a client shows in the margin is what the compiler would say
+// about the same text: the errors that stop it compiling, and the
+// warnings about what it probably did not mean. The text comes from
+// what the editor holds rather than from disk, so an unsaved edit is
+// judged as it stands.
+
+imp protocol;
+imp documents;
+imp analysis;
+imp ..ast.ast;
+imp ..parser.parse_state;
+imp ..parser.parser;
+imp ..parser.import_resolver;
+imp ..semantics.typecheck;
+imp ..semantics.warnings;
+imp std.string;
+imp std.vec;
+imp std.option;
+imp std.result;
+imp std.io;
+imp std.map;
+imp std.c.mem;
+
+// How seriously a client should take one finding.
+pub const num DIAG_SEVERITY_ERROR = 1;
+pub const num DIAG_SEVERITY_WARNING = 2;
+
+// One finding, in the terms a client understands.
+pub compound Diagnostic {
+  num line;
+  num col;
+  num end_line;
+  num end_col;
+  num severity;
+  str message;
+}
+
+// `diagnose`'s own result for one document revision, kept until a
+// newer one arrives.
+compound DiagnosedEntry {
+  num version;
+  Vec<Diagnostic> diagnostics;
+}
+
+// Caches `diagnose`'s result per document revision. Typechecking and
+// analyzing the whole merged program is the expensive part of
+// answering a diagnostics request, unlike `AnalysisCache`'s own
+// lex/parse step; the same revision is asked about more than once
+// (`didOpen`, then every unrelated request that happens to also
+// trigger a report) without its text changing in between.
+pub compound DiagnosticsCache {
+  Map<str, DiagnosedEntry> entries;
+}
+
+pub fun diagnostics_cache_new() DiagnosticsCache {
+  DiagnosticsCache c;
+  c.entries.init(8);
+  ret c;
+}
+
+impl DiagnosticsCache {
+  // Drops what was kept for a document a client closed.
+  pub forget(str document_uri) {
+    let found = self.entries.at(document_uri);
+    if found.is_some() {
+      found.unwrap().diagnostics.free();
+    }
+    self.entries.remove(document_uri);
+  }
+
+  pub free() {
+    self.entries.free();
+  }
+}
+
+// A shallow copy of `src`'s own elements: cheap next to a full
+// typecheck/analyze pass, and each `Diagnostic`'s own `message` is
+// never freed by `Vec.free()` (which only ever frees the backing
+// array), so sharing that string between the cached copy and what a
+// caller goes on to free carries no double-free risk.
+fun _clone_diagnostics(Vec<Diagnostic>* src) Vec<Diagnostic> {
+  Vec<Diagnostic> copy;
+  copy.init(src.len);
+  num i = 0;
+  for i < src.len {
+    copy.push(src.get(i));
+    i = i + 1;
+  }
+  ret copy;
+}
+
+// Everything wrong with `doc`, in the order a reader meets it. Cached
+// by `dcache` per document revision; a cache hit still returns an
+// independent copy, so a caller freeing what it gets back never
+// touches the cached original.
+pub fun diagnose(AnalysisCache* cache, DiagnosticsCache* dcache, Document doc) Vec<Diagnostic> {
+  let kept = dcache.entries.at(doc.uri);
+  if kept.is_some() {
+    DiagnosedEntry found = kept.unwrap();
+    if found.version == doc.version {
+      ret _clone_diagnostics(&found.diagnostics);
+    }
+    // A stale revision, about to be replaced below - freed first, or
+    // every edit leaks the whole previous diagnostics list for as
+    // long as the server keeps running.
+    found.diagnostics.free();
+  }
+
+  Vec<Diagnostic> out = _diagnose_uncached(cache, doc);
+
+  DiagnosedEntry fresh;
+  fresh.version = doc.version;
+  fresh.diagnostics = _clone_diagnostics(&out);
+  dcache.entries.put(doc.uri, fresh);
+
+  ret out;
+}
+
+fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
+  Vec<Diagnostic> out;
+  out.init(0);
+
+  // The text an editor holds is what to judge, so it is written where
+  // the compiler expects to find it before the imports are resolved.
+  str path = doc.path;
+  if equals(path, "") {
+    ret out;
+  }
+
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    out.push(_at_start(DIAG_SEVERITY_ERROR, "could not read this file"));
+    ret out;
+  }
+
+  ParseState state = parse_state_new(path, doc.text);
+  // A clone, not the cache's own tokens directly: this parse mutates
+  // its own token list in place (splitting a nested-generic `>>` into
+  // two `>` tokens grows and shifts it via Vec.insert), and aliasing
+  // the cache's buffer here was corrupting every other reader's view
+  // of it - hover, semantic tokens, everything sharing the same
+  // AnalysisCache entry - for as long as the server kept running.
+  state.tokens = read.tokens.clone();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  // This parse exists only to localize a parse error's own position
+  // (below); the real analysis further down reads `read.program`
+  // instead, already parsed and cached by `AnalysisCache.of()`. Freed
+  // on every exit from here, or every diagnose() call - one per edit,
+  // for as long as the server keeps running - leaks a whole discarded
+  // parse tree nothing ever looks at again.
+  let parse_failed = p.parse();
+  defer free_node_tree(&state.nodes);
+  defer state.tokens.free();
+  // Shallow only, matching `_entry_nodes`'s own cleanup of the same
+  // field: `GlobalSymbolInfo.symbol_name`/`.file_path` alias token
+  // text, not their own copies. `free_parse_state_internal` below
+  // doesn't touch this map at all.
+  defer state.global_symbols.free();
+  // `state`'s own scratch (scope chain, symbol tables, forward-type
+  // names) is never read past this function, so it is safe to free on
+  // every exit the same way `state.nodes` already is above - except
+  // `state.error_message`, which `free_parse_state_internal` also
+  // frees, and which the diagnostic built just below would otherwise
+  // still be pointing at. Copied into its own allocation first, so
+  // freeing `state` afterward can never leave `d.message` dangling.
+  defer free_parse_state_internal(&state);
+  if parse_failed.is_some() {
+    str message = "this file could not be read";
+    if state.has_error {
+      message = substr(state.error_message, 0, len(state.error_message));
+    }
+    Diagnostic d = _at_start(DIAG_SEVERITY_ERROR, message);
+    if state.has_error {
+      d.line = state.error_pos.line - 1;
+      d.col = state.error_pos.col - 1;
+      d.end_line = d.line;
+      d.end_col = d.col + 1;
+    }
+    out.push(d);
+    ret out;
+  }
+
+  // Checking needs what the file imports, which is read from disk. The
+  // file being edited is not: its text is what the client holds, which
+  // may not be what is saved.
+  if !read.parsed {
+    out.push(_at_start(DIAG_SEVERITY_ERROR, "this file's imports could not be resolved"));
+    ret out;
+  }
+  ProgramMergeResult program = read.program;
+
+  // A type error elsewhere in the file must not hide every unused-*
+  // diagnostic for the rest of it: `analyze` reads straight from the
+  // parsed nodes, independent of whatever typechecking got through, so
+  // it still runs below even when checking failed. The type error
+  // itself is recorded here and re-added once warnings are collected.
+  bin has_type_error = false;
+  Diagnostic type_error_diag = _at_start(DIAG_SEVERITY_ERROR, "");
+  let checked = typecheck_program(&program.nodes);
+  if checked.is_err() {
+    TypeError e = checked.unwrap_err();
+    has_type_error = true;
+    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, e.message);
+    if e.has_pos && equals(e.pos.filename, path) {
+      type_error_diag.line = e.pos.line - 1;
+      type_error_diag.col = e.pos.col - 1;
+      type_error_diag.end_line = type_error_diag.line;
+      type_error_diag.end_col = type_error_diag.col + 1;
+    }
+  }
+
+  // Warnings are reported for the file being edited, and asked for in
+  // full: an editor is where noticing an unused declaration helps.
+  let noticed = analyze(&program.entry_nodes, &program.nodes, true, path);
+  if has_type_error {
+    out.push(type_error_diag);
+  }
+  if noticed.is_err() {
+    // A genuine compile error (the CLI fails the build over this
+    // exact condition), not a mere warning - and reported right at
+    // the `expect` statement itself when it's in this file, not just
+    // file start.
+    UnmetExpectation ue = noticed.unwrap_err();
+    Diagnostic ue_diag = _at_start(DIAG_SEVERITY_ERROR, ue.message);
+    if ue.has_pos && equals(ue.pos.filename, path) {
+      ue_diag.line = ue.pos.line - 1;
+      ue_diag.col = ue.pos.col - 1;
+      ue_diag.end_line = ue_diag.line;
+      ue_diag.end_col = ue_diag.col + 1;
+    }
+    out.push(ue_diag);
+    ret out;
+  }
+  Vec<Warning> found = noticed.unwrap();
+  defer found.free();
+  num i = 0;
+  for i < found.len {
+    Warning w = found.get(i);
+    i = i + 1;
+    Diagnostic d = _at_start(
+      DIAG_SEVERITY_WARNING,
+      format("{str}: {str}", warning_id_name(w.id), w.message)
+    );
+    if w.has_pos {
+      d.line = w.pos.line - 1;
+      d.col = w.pos.col - 1;
+      d.end_line = d.line;
+      d.end_col = d.col + 1;
+    }
+    out.push(d);
+  }
+  ret out;
+}
+
+// A finding with no position of its own, which a client shows against
+// the start of the file.
+fun _at_start(num severity, str message) Diagnostic {
+  Diagnostic d;
+  d.line = 0;
+  d.col = 0;
+  d.end_line = 0;
+  d.end_col = 1;
+  d.severity = severity;
+  d.message = message;
+  ret d;
+}
+
+// The notification telling a client what is wrong with a document. An
+// empty list is what clears the margin, so it is sent as readily as a
+// list of findings. `text` is the document's own source, needed to
+// convert each finding's byte columns to the UTF-16 code units LSP
+// itself reports.
+pub fun publish(str document_uri, str text, Vec<Diagnostic>* found) str {
+  StringBuilder b = string_builder_init(256);
+  b.append(`{"uri":`);
+  json_quote_into(&b, document_uri);
+  b.append(`,"diagnostics":[`);
+  num i = 0;
+  for i < found.len {
+    Diagnostic d = found.get(i);
+    if i > 0 {
+      b.append(",");
+    }
+    i = i + 1;
+    b.append(`{"range":{"start":{"line":`);
+    b.append_num(d.line);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(text, d.line, d.col));
+    b.append(`},"end":{"line":`);
+    b.append_num(d.end_line);
+    b.append(`,"character":`);
+    b.append_num(byte_col_to_utf16_char(text, d.end_line, d.end_col));
+    b.append(`}},"severity":`);
+    b.append_num(d.severity);
+    b.append(`,"source":"fun","message":`);
+    json_quote_into(&b, d.message);
+    b.append("}");
+  }
+  b.append("]}");
+  str params_json = b.build();
+  str result = notification("textDocument/publishDiagnostics", params_json);
+  free(params_json);
+  ret result;
+}

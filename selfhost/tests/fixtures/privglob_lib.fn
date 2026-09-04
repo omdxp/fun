@@ -1,2 +1,0 @@
-num secret_g = 99;
-pub num shared_g = 7;

@@ -2,7 +2,6 @@
 
 imp std.c.mem;
 imp std.c.string;
-imp std.c.io;
 imp std.quirks;
 imp std.option;
 
@@ -286,18 +285,6 @@ impl Vec<T> {
     self.cap = self.len;
   }
 
-  // Returns a shallow copy with independent backing storage.
-  pub clone() Vec<T> {
-    Vec<T> out;
-    out.init(self.len);
-    num i = 0;
-    for i < self.len {
-      out.push(self.data[i]);
-      i = i + 1;
-    }
-    ret out;
-  }
-
   // Returns a new vector holding the elements in `[start, end)`, with both
   // indices clamped to the valid range.
   pub slice(num start, num end) Vec<T> {
@@ -370,6 +357,20 @@ impl Vec<T> as Clearable {
   // Removes all elements without freeing capacity.
   pub clear() {
     self.len = 0;
+  }
+}
+
+impl Vec<T> as Clonable<Vec<T>> {
+  // Returns a shallow copy with independent backing storage.
+  pub clone() Vec<T> {
+    Vec<T> out;
+    out.init(self.len);
+    num i = 0;
+    for i < self.len {
+      out.push(self.data[i]);
+      i = i + 1;
+    }
+    ret out;
   }
 }
 
@@ -560,6 +561,45 @@ impl Vec<T: num | dec> {
   }
 }
 
+// Writes `n`'s own decimal text directly into `out` at `pos` (no
+// separate heap allocation), returning the number of bytes written.
+// Kept local rather than reusing std.string's format_num: importing
+// std.string here would also pull its free join(Vec<str>*, str) back
+// in transitively, which collides with this file's own Vec<str>.join
+// method once both are visible in the same merged program.
+fun _write_num(str out, num pos, num n) num {
+  if n == 0 {
+    out[pos] = '0';
+    ret 1;
+  }
+  let neg = n < 0;
+  if neg {
+    n = 0 - n;
+  }
+  str digits = "0123456789";
+  num start = pos;
+  for n > 0 {
+    out[pos] = digits[n % 10];
+    n = n / 10;
+    pos = pos + 1;
+  }
+  if neg {
+    out[pos] = '-';
+    pos = pos + 1;
+  }
+  num written = pos - start;
+  num lo = start;
+  num hi = pos - 1;
+  for lo < hi {
+    let tmp = out[lo];
+    out[lo] = out[hi];
+    out[hi] = tmp;
+    lo = lo + 1;
+    hi = hi - 1;
+  }
+  ret written;
+}
+
 impl Vec<num> as Display {
   // Renders as a bracketed list, e.g. "[1, 2, 3]".
   pub to_string() str {
@@ -570,19 +610,12 @@ impl Vec<num> as Display {
     if out == nil {
       ret nil;
     }
-    chr[24] cell;
     num pos = 0;
     out[pos] = '[';
     pos = pos + 1;
     num i = 0;
     for i < self.len {
-      let written = snprintf(cell, 24, "%lld", self.data[i]);
-      num k = 0;
-      for k < written {
-        out[pos + k] = cell[k];
-        k = k + 1;
-      }
-      pos = pos + written;
+      pos = pos + _write_num(out, pos, self.data[i]);
       if i + 1 < self.len {
         out[pos] = ',';
         out[pos + 1] = ' ';

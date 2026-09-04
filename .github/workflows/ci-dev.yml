@@ -6,11 +6,8 @@ on:
     branches:
       - main
 
-env:
-  zig_version: 0.16.0
-
 jobs:
-  test:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -25,40 +22,60 @@ jobs:
             runtime_backend: windows
             lane: windows-native
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     env:
       FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
+      FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: actions/checkout@v4
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
         with:
-          version: ${{ env.zig_version }}
-      - name: Run all tests (including fls LSP) on ${{ matrix.lane }}
-        timeout-minutes: 35
-        run: zig build test --summary all
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - run: zig build run -- -in examples/test.fn # usingnamespace is not supported for incremental compilation
-  examples:
+          version: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up MSVC for Windows
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build fun and fls
+        timeout-minutes: 10
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build
+          else
+            FUN_STDLIB_DIR="$PWD/stdlib" fun build
+          fi
+      - name: Run the test suite on ${{ matrix.lane }}
+        timeout-minutes: 20
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test src/tests
+          else
+            export FUN_STDLIB_DIR="$PWD/stdlib"
+            ./fun-out/bin/fun test src/tests
+          fi
+      - name: Validate examples/
+        timeout-minutes: 20
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" FUN_EXE="$PWD/fun-out/bin/fun.exe" ./scripts/run_examples.sh
+          else
+            export FUN_STDLIB_DIR="$PWD/stdlib"
+            FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
+          fi
+  lint:
     runs-on: ubuntu-latest
     env:
       FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: actions/checkout@v4
+      - name: Set up fun
+        uses: omdxp/setup-fun@v1
         with:
-          version: ${{ env.zig_version }}
-      - run: zig build
-      - run: FUN_STDLIB_DIR="$GITHUB_WORKSPACE/stdlib" ./scripts/run_examples.sh
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: ${{ env.zig_version }}
-      - run: zig fmt --check .
+          version: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build fun
+        timeout-minutes: 10
+        run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
+      - run: FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun -fmt-check-all
