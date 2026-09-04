@@ -156,8 +156,10 @@ jobs:
         include:
           - target: x86_64-windows-gnu
             os: windows-latest
+            msvc_arch: x64
           - target: aarch64-windows-gnu
             os: windows-11-arm
+            msvc_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -224,11 +226,33 @@ jobs:
             throw "fun.toml's version ('$manifestVersion') does not match release tag ('$tag'). Bump the [package] version in fun.toml to $tag before tagging the release."
           }
 
+      - name: Set up MSVC toolchain (for lib.exe, bootstrap bridge below)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
       - name: Build fun and fls
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $env:FUN_STDLIB_DIR = "$PWD\stdlib"
+          # Bootstrap-generation bridge, not a fix for the real bug: the
+          # bootstrap fun binary resolved above is an already-released
+          # version, so it still carries the old, unconditional `-lm` on
+          # Windows this checkout's own src/cli/driver.fn just fixed -
+          # that fix only takes effect once THIS build produces a new
+          # binary compiled from the fixed source, which needs THIS
+          # build to succeed first. Give the old binary's `-lm` an empty
+          # archive to resolve against so it can get past its own bug
+          # long enough to build the fixed one; Windows has no real math
+          # library to link against regardless, so an empty one is the
+          # correct answer either way, not just a stand-in. Safe to drop
+          # this step and the matrix's msvc_arch field once a release
+          # built from the fixed driver.fn is the bootstrap source (any
+          # release after v0.50.3).
+          New-Item -ItemType Directory -Force -Path stub_libs | Out-Null
+          lib /OUT:stub_libs\m.lib | Out-Null
+          $env:LIB = "$PWD\stub_libs;$env:LIB"
           fun build
 
       - name: Build MSI + portable zip for ${{ matrix.target }}
