@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
-import { highlightFun } from "./utils/funHighlight";
+import HighlightedCode from "./components/HighlightedCode";
+import { copyTextToClipboard } from "./utils/clipboard";
+import { getSiteHighlighter } from "./utils/shikiHighlighter";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -61,8 +63,11 @@ type ReferenceContent = {
     available: string[];
   };
   docs: {
+    getStarted: string;
     language: string;
-    reference: string;
+    concurrency: string;
+    tooling: string;
+    platforms: string;
     stdlibReadme: string;
   };
   stdlib: StdModule[];
@@ -91,7 +96,7 @@ type DocSection = {
   title: string;
   level: number;
   content: string;
-  tab: Extract<TabKey, "language" | "reference">;
+  tab: DocTabKey;
 };
 
 type TocHeading = {
@@ -110,15 +115,24 @@ const EMPTY_CONTENT: ReferenceContent = {
     available: [DEFAULT_FUN_VERSION],
   },
   docs: {
+    getStarted: "",
     language: "",
-    reference: "",
+    concurrency: "",
+    tooling: "",
+    platforms: "",
     stdlibReadme: "",
   },
   stdlib: [],
   samples: [],
 };
 
-type TabKey = "language" | "reference" | "stdlib" | "playground";
+type DocTabKey =
+  | "getStarted"
+  | "language"
+  | "concurrency"
+  | "tooling"
+  | "platforms";
+type TabKey = DocTabKey | "stdlib" | "playground";
 
 function withBasePath(relativePath: string) {
   const base = import.meta.env.BASE_URL || "/";
@@ -130,14 +144,62 @@ function withBasePath(relativePath: string) {
 const isGithubPages =
   typeof window !== "undefined" &&
   window.location.hostname.endsWith("github.io");
+const DOC_TABS: Array<{
+  key: DocTabKey;
+  navLabel: string;
+  title: string;
+  lead: string;
+  sourcePath: string;
+}> = [
+  {
+    key: "getStarted",
+    navLabel: "Get Started",
+    title: "Get Started",
+    lead: "Install Fun, scaffold a project with fun init, and run your first program.",
+    sourcePath: "docs/get-started.md",
+  },
+  {
+    key: "language",
+    navLabel: "Language",
+    title: "Language",
+    lead: "Syntax, types, control flow, and everything else the language surface covers.",
+    sourcePath: "docs/language.md",
+  },
+  {
+    key: "concurrency",
+    navLabel: "Concurrency",
+    title: "Concurrency",
+    lead: "Async/await, virtual threads with fork, and channels.",
+    sourcePath: "docs/concurrency.md",
+  },
+  {
+    key: "tooling",
+    navLabel: "Tooling",
+    title: "Tooling",
+    lead: "Testing, fuzzing, formatting, the language server, editor support, and the full CLI.",
+    sourcePath: "docs/tooling.md",
+  },
+  {
+    key: "platforms",
+    navLabel: "Platforms & Compilers",
+    title: "Platforms & Compilers",
+    lead: "C compiler selection, runtime backends, and what's supported where.",
+    sourcePath: "docs/platforms.md",
+  },
+];
+
+const DOC_TAB_KEYS = new Set<string>(DOC_TABS.map((d) => d.key));
+function isDocTab(key: TabKey): key is DocTabKey {
+  return DOC_TAB_KEYS.has(key);
+}
+
 const TABS: Array<{
   key: TabKey;
   label: string;
   disabled?: boolean;
   tooltip?: string;
 }> = [
-  { key: "language", label: "Language Guide" },
-  { key: "reference", label: "Reference" },
+  ...DOC_TABS.map((dt) => ({ key: dt.key as TabKey, label: dt.navLabel })),
   { key: "stdlib", label: "Std Library" },
   {
     key: "playground",
@@ -176,66 +238,20 @@ function buildStdlibHash(
   return query ? `#stdlib?${query}` : "#stdlib";
 }
 
-/**
- * Copy `text` to the clipboard, throwing on failure so callers can show an
- * accurate "copied" vs "copy failed" state.
- *
- * The async Clipboard API only exists in a secure context (HTTPS or localhost);
- * over plain HTTP `navigator.clipboard` is undefined, so we fall back to the
- * legacy `execCommand('copy')`. That fallback returns a boolean and can silently
- * no-op — the previous code ignored the return and always reported success, so
- * the button said "Copied" while nothing was on the clipboard (the reported prod
- * bug). We now honor the boolean and reject when the copy did not happen.
- */
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textArea = document.createElement("textarea");
-  textArea.value = text;
-  textArea.setAttribute("readonly", "true");
-  textArea.style.position = "fixed";
-  textArea.style.top = "0";
-  textArea.style.left = "-9999px";
-  document.body.appendChild(textArea);
-  const selection = document.getSelection();
-  const previousRange =
-    selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
-  textArea.focus();
-  textArea.select();
-  // iOS Safari needs an explicit selection range.
-  textArea.setSelectionRange(0, textArea.value.length);
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } finally {
-    document.body.removeChild(textArea);
-    if (previousRange && selection) {
-      selection.removeAllRanges();
-      selection.addRange(previousRange);
-    }
-  }
-  if (!ok) {
-    throw new Error("Clipboard copy command was rejected by the browser");
-  }
-}
-
 function parseTabHash(hash: string): TabKey | null {
   const value = hash.startsWith("#") ? hash.slice(1) : hash;
   const [route] = value.split("?");
-  if (route === "language") return "language";
-  if (route === "reference") return "reference";
   if (route === "playground") return "playground";
   if (route === "stdlib") return "stdlib";
+  const docTab = DOC_TABS.find((d) => d.key === route);
+  if (docTab) return docTab.key;
   return null;
 }
 
 function getInitialHashState() {
   if (typeof window === "undefined") {
     return {
-      tab: "language" as TabKey,
+      tab: "getStarted" as TabKey,
       modulePath: "",
       symbolKey: "",
       detailKey: "",
@@ -272,7 +288,7 @@ function getInitialHashState() {
   }
 
   return {
-    tab: "language" as TabKey,
+    tab: "getStarted" as TabKey,
     modulePath: "",
     symbolKey: "",
     detailKey: "",
@@ -390,10 +406,7 @@ function normalizeModuleSummary(
   return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
 }
 
-function extractDocSections(
-  markdown: string,
-  tab: Extract<TabKey, "language" | "reference">,
-) {
+function extractDocSections(markdown: string, tab: DocTabKey) {
   const lines = markdown.split(/\r?\n/);
   const counts = new Map<string, number>();
   const sections: DocSection[] = [];
@@ -481,16 +494,21 @@ export default function App() {
   );
   const [selectedSymbolKey, setSelectedSymbolKey] = useState(initial.symbolKey);
   const [selectedDetailKey, setSelectedDetailKey] = useState(initial.detailKey);
+  const [modalContentTab, setModalContentTab] = useState<"module" | "symbol">(
+    initial.symbolKey ? "symbol" : "module",
+  );
   const [selectedDocAnchorKey, setSelectedDocAnchorKey] = useState(
     initial.docAnchorKey,
   );
   const [activeDocAnchorKey, setActiveDocAnchorKey] = useState("");
-  const [languageTocHeadings, setLanguageTocHeadings] = useState<TocHeading[]>(
-    [],
-  );
-  const [referenceTocHeadings, setReferenceTocHeadings] = useState<
-    TocHeading[]
-  >([]);
+  // Timestamp (ms) until which the scroll-spy observer below should not
+  // override activeDocAnchorKey - set right after an explicit scroll-to-
+  // anchor, whose target can otherwise get immediately outvoted by the
+  // observer's own "reading position" heuristic (see tryScroll).
+  const suppressScrollSpyUntilRef = useRef(0);
+  const [docTocHeadings, setDocTocHeadings] = useState<
+    Partial<Record<DocTabKey, TocHeading[]>>
+  >({});
   const [isStdlibModalOpen, setIsStdlibModalOpen] = useState(
     Boolean(initial.modulePath || initial.symbolKey),
   );
@@ -499,8 +517,31 @@ export default function App() {
   const [detailCopyKey, setDetailCopyKey] = useState("");
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  // The stdlib modal's mobile layout isn't a CSS reflow of the desktop
+  // one - it renders the symbol content before a collapsed symbol
+  // browser, so the two live as genuinely different JSX, picked here
+  // rather than fought over with `order`/media queries.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 980,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 980px)");
+    const handleChange = () => setIsNarrowViewport(mql.matches);
+    handleChange();
+    mql.addEventListener("change", handleChange);
+    return () => mql.removeEventListener("change", handleChange);
+  }, []);
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const stdlibModalCardRef = useRef<HTMLDivElement | null>(null);
+  // Mobile's module <-> symbol screens replace each other in place inside
+  // the same scrolling card, so without this a drill into a symbol from
+  // partway down a long symbol list opens already scrolled to that same
+  // offset instead of at the top of the new screen.
+  useEffect(() => {
+    if (!isNarrowViewport) return;
+    stdlibModalCardRef.current?.scrollTo({ top: 0 });
+  }, [modalContentTab, isNarrowViewport]);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
   const toggleTheme = () => {
@@ -518,7 +559,7 @@ export default function App() {
   };
 
   const goHome = () => {
-    setTab("language");
+    setTab("getStarted");
     setSearch("");
     setGlobalSearch("");
     setActiveGlobalResultIndex(-1);
@@ -526,6 +567,7 @@ export default function App() {
     setSelectedSymbolKey("");
     setSelectedDetailKey("");
     setSelectedDocAnchorKey("");
+    setActiveDocAnchorKey("");
     setIsStdlibModalOpen(false);
     setIsMobileDrawerOpen(false);
     setIsSearchModalOpen(false);
@@ -576,6 +618,12 @@ export default function App() {
       if (el) {
         el.scrollIntoView({ behavior, block: "start" });
         setActiveDocAnchorKey(el.id);
+        // A short section can put its own heading at the very top of the
+        // viewport (y=0) while the observer's active zone only starts
+        // 15% down, so the NEXT heading over ends up the only one it
+        // sees - suppress its updates briefly so the explicit target
+        // sticks until the user actually scrolls on their own.
+        suppressScrollSpyUntilRef.current = Date.now() + 900;
         if (selectedDocAnchorKey !== el.id) {
           setSelectedDocAnchorKey(el.id);
         }
@@ -590,21 +638,20 @@ export default function App() {
     tryScroll(0);
   };
 
-  const languageSections = useMemo(
-    () => extractDocSections(content.docs.language, "language"),
-    [content.docs.language],
-  );
-
-  const referenceSections = useMemo(
-    () => extractDocSections(content.docs.reference, "reference"),
-    [content.docs.reference],
-  );
+  const docSectionsByTab = useMemo(() => {
+    const out = {} as Record<DocTabKey, DocSection[]>;
+    for (const dt of DOC_TABS) {
+      // A picked historical version's content.json may predate this tab
+      // (its docs object won't have the field at all), not just be empty.
+      out[dt.key] = extractDocSections(content.docs[dt.key] ?? "", dt.key);
+    }
+    return out;
+  }, [content.docs]);
 
   const activeDocSections = useMemo(() => {
-    if (tab === "language") return languageTocHeadings;
-    if (tab === "reference") return referenceTocHeadings;
+    if (isDocTab(tab)) return docTocHeadings[tab] ?? [];
     return [] as TocHeading[];
-  }, [tab, languageTocHeadings, referenceTocHeadings]);
+  }, [tab, docTocHeadings]);
 
   const globalResults = useMemo(() => {
     const q = globalSearch.trim().toLowerCase();
@@ -612,28 +659,18 @@ export default function App() {
 
     const out: GlobalSearchResult[] = [];
 
-    for (const section of languageSections) {
-      if (!section.content.toLowerCase().includes(q)) continue;
-      out.push({
-        id: `doc:language:${section.id}`,
-        title: `Language Guide: ${section.title}`,
-        subtitle: formatSnippet(section.content, q),
-        group: "docs",
-        tab: "language",
-        docAnchorKey: section.id,
-      });
-    }
-
-    for (const section of referenceSections) {
-      if (!section.content.toLowerCase().includes(q)) continue;
-      out.push({
-        id: `doc:reference:${section.id}`,
-        title: `Reference: ${section.title}`,
-        subtitle: formatSnippet(section.content, q),
-        group: "docs",
-        tab: "reference",
-        docAnchorKey: section.id,
-      });
+    for (const dt of DOC_TABS) {
+      for (const section of docSectionsByTab[dt.key]) {
+        if (!section.content.toLowerCase().includes(q)) continue;
+        out.push({
+          id: `doc:${dt.key}:${section.id}`,
+          title: `${dt.navLabel}: ${section.title}`,
+          subtitle: formatSnippet(section.content, q),
+          group: "docs",
+          tab: dt.key,
+          docAnchorKey: section.id,
+        });
+      }
     }
 
     for (const sample of content.samples) {
@@ -710,7 +747,7 @@ export default function App() {
     }
 
     return out.slice(0, 40);
-  }, [globalSearch, content, languageSections, referenceSections]);
+  }, [globalSearch, content, docSectionsByTab]);
 
   const groupedGlobalResults = useMemo(() => {
     return {
@@ -874,10 +911,7 @@ export default function App() {
     setTab(result.tab);
     setIsMobileDrawerOpen(false);
     setIsSearchModalOpen(false);
-    if (
-      (result.tab === "language" || result.tab === "reference") &&
-      result.docAnchorKey
-    ) {
+    if (isDocTab(result.tab) && result.docAnchorKey) {
       setSelectedDocAnchorKey(result.docAnchorKey);
       window.setTimeout(() => {
         const headingTitle = result.title.includes(":")
@@ -1076,7 +1110,15 @@ export default function App() {
       const tabFromHash = parseTabHash(window.location.hash);
       if (tabFromHash && tabFromHash !== "stdlib") {
         setTab(tabFromHash);
-        setSelectedDocAnchorKey(params.get("anchor") ?? "");
+        const anchor = params.get("anchor") ?? "";
+        setSelectedDocAnchorKey(anchor);
+        // With no anchor to scroll to, reset scroll explicitly - the SPA
+        // swaps page content in place, so the browser won't do this on
+        // its own the way a real page navigation would.
+        if (!anchor) {
+          setActiveDocAnchorKey("");
+          window.scrollTo({ top: 0 });
+        }
         return;
       }
 
@@ -1102,7 +1144,7 @@ export default function App() {
 
     if (tab !== "stdlib") {
       const params = new URLSearchParams();
-      if ((tab === "language" || tab === "reference") && selectedDocAnchorKey) {
+      if (isDocTab(tab) && selectedDocAnchorKey) {
         params.set("anchor", selectedDocAnchorKey);
       }
       const q = params.toString();
@@ -1135,7 +1177,8 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
+    const activeTab = tab;
 
     const id = window.setTimeout(() => {
       const nodes = Array.from(
@@ -1155,24 +1198,34 @@ export default function App() {
         };
       });
 
-      if (tab === "language") {
-        setLanguageTocHeadings(next);
-      } else {
-        setReferenceTocHeadings(next);
-      }
+      setDocTocHeadings((prev) => ({ ...prev, [activeTab]: next }));
     }, 0);
 
     return () => window.clearTimeout(id);
   }, [tab, content]);
 
   useEffect(() => {
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
     if (!selectedDocAnchorKey) return;
     scrollToDocAnchor(selectedDocAnchorKey, "smooth");
+
+    // Code blocks render as plain text until the shared Shiki highlighter
+    // resolves, then re-render highlighted - often at a different height,
+    // which can shift an anchor scrolled to above out from under the
+    // viewport once that settles. Re-scroll (no animation, so it doesn't
+    // fight the one above) once highlighting is actually ready.
+    let cancelled = false;
+    getSiteHighlighter().then(() => {
+      if (cancelled) return;
+      scrollToDocAnchor(selectedDocAnchorKey, "auto");
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [tab, selectedDocAnchorKey, content]);
 
   useEffect(() => {
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
     if (typeof window === "undefined") return;
 
     const ids = activeDocSections.map((h) => h.id);
@@ -1184,6 +1237,8 @@ export default function App() {
 
     const observer = new IntersectionObserver(
       (entries) => {
+        if (Date.now() < suppressScrollSpyUntilRef.current) return;
+
         const visible = entries
           .filter((entry) => entry.isIntersecting)
           .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
@@ -1282,6 +1337,11 @@ export default function App() {
 
     setSelectedDetailKey("");
   }, [activeModule, activeSymbol, selectedDetailKey]);
+
+  useEffect(() => {
+    if (!isStdlibModalOpen) return;
+    setModalContentTab(selectedSymbolKey ? "symbol" : "module");
+  }, [selectedModulePath, selectedSymbolKey, isStdlibModalOpen]);
 
   useEffect(() => {
     if (!selectedDetailKey) return;
@@ -1479,34 +1539,70 @@ export default function App() {
           </div>
 
           <nav>
-            {TABS.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => {
-                  if (!t.disabled) {
-                    setTab(t.key);
-                    if (t.key !== "language" && t.key !== "reference") {
-                      setSelectedDocAnchorKey("");
+            {TABS.map((t) => {
+              const isActive = tab === t.key;
+              const subItems =
+                isActive && isDocTab(t.key)
+                  ? (docTocHeadings[t.key] ?? []).filter((h) => h.level <= 3)
+                  : [];
+              return (
+                <div className="nav-item" key={t.key}>
+                  <button
+                    onClick={() => {
+                      if (!t.disabled) {
+                        setTab(t.key);
+                        // A top-level nav click always means "go to the top
+                        // of this page" - never carry over a TOC anchor
+                        // selected on whichever page was open before, doc
+                        // tab or not, and never keep whatever scroll offset
+                        // that page had (the SPA swaps content in place, so
+                        // the browser has no reason to reset scroll itself).
+                        setSelectedDocAnchorKey("");
+                        setActiveDocAnchorKey("");
+                        setIsMobileDrawerOpen(false);
+                        if (typeof window !== "undefined") {
+                          window.scrollTo({ top: 0 });
+                        }
+                      }
+                    }}
+                    className={
+                      isActive
+                        ? "active" + (t.disabled ? " disabled" : "")
+                        : t.disabled
+                          ? "disabled"
+                          : ""
                     }
-                    setIsMobileDrawerOpen(false);
-                  }
-                }}
-                className={
-                  tab === t.key
-                    ? "active" + (t.disabled ? " disabled" : "")
-                    : t.disabled
-                      ? "disabled"
-                      : ""
-                }
-                disabled={!!t.disabled}
-                title={t.tooltip}
-                style={
-                  t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
-                }
-              >
-                {t.label}
-              </button>
-            ))}
+                    disabled={!!t.disabled}
+                    title={t.tooltip}
+                    style={
+                      t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
+                    }
+                  >
+                    {t.label}
+                  </button>
+                  {subItems.length > 0 && (
+                    <div className="nav-subitems">
+                      {subItems.map((h) => (
+                        <button
+                          key={h.id}
+                          type="button"
+                          className={`nav-subitem level-${Math.min(h.level, 3)} ${
+                            activeDocAnchorKey === h.id ? "active" : ""
+                          }`}
+                          onClick={() => {
+                            setSelectedDocAnchorKey(h.id);
+                            scrollToDocAnchor(h.id, "smooth");
+                            setIsMobileDrawerOpen(false);
+                          }}
+                        >
+                          {h.title}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </nav>
           <div className="meta muted">
             <a href={releaseUrl} target="_blank" rel="noreferrer">
@@ -1520,91 +1616,22 @@ export default function App() {
       </aside>
 
       <main>
-        {tab === "language" && (
-          <section className="panel">
-            <h1>Language Features</h1>
-            <p className="lead">
-              This page is sourced from docs/language.md and includes runnable
-              Fun code blocks.
-            </p>
-            <div className="doc-layout">
-              <div className="doc-main">
-                <MarkdownWithPlayground
-                  markdown={content.docs.language}
-                  sourcePath="docs/language.md"
-                  headingPrefix="language"
-                />
-              </div>
-              {languageTocHeadings.length > 0 && (
-                <aside
-                  className="doc-toc"
-                  aria-label="Language guide table of contents"
-                >
-                  <div className="doc-toc-title">On this page</div>
-                  {languageTocHeadings
-                    .filter((h) => h.level <= 3)
-                    .map((heading) => (
-                      <button
-                        key={heading.id}
-                        type="button"
-                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
-                          activeDocAnchorKey === heading.id ? "active" : ""
-                        }`}
-                        onClick={() => {
-                          setSelectedDocAnchorKey(heading.id);
-                          scrollToDocAnchor(heading.id, "smooth");
-                        }}
-                      >
-                        {heading.title}
-                      </button>
-                    ))}
-                </aside>
-              )}
-            </div>
-          </section>
-        )}
-
-        {tab === "reference" && (
-          <section className="panel">
-            <h1>Comprehensive Reference</h1>
-            <p className="lead">
-              Syntax, semantics, runtime behavior, and interop details.
-            </p>
-            <div className="doc-layout">
-              <div className="doc-main">
-                <MarkdownWithPlayground
-                  markdown={content.docs.reference}
-                  sourcePath="docs/reference.md"
-                  headingPrefix="reference"
-                />
-              </div>
-              {referenceTocHeadings.length > 0 && (
-                <aside
-                  className="doc-toc"
-                  aria-label="Reference table of contents"
-                >
-                  <div className="doc-toc-title">On this page</div>
-                  {referenceTocHeadings
-                    .filter((h) => h.level <= 3)
-                    .map((heading) => (
-                      <button
-                        key={heading.id}
-                        type="button"
-                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
-                          activeDocAnchorKey === heading.id ? "active" : ""
-                        }`}
-                        onClick={() => {
-                          setSelectedDocAnchorKey(heading.id);
-                          scrollToDocAnchor(heading.id, "smooth");
-                        }}
-                      >
-                        {heading.title}
-                      </button>
-                    ))}
-                </aside>
-              )}
-            </div>
-          </section>
+        {DOC_TABS.map(
+          (dt) =>
+            tab === dt.key && (
+              <section className="panel" key={dt.key}>
+                <h1>{dt.title}</h1>
+                <p className="lead">{dt.lead}</p>
+                <div className="doc-main">
+                  <MarkdownWithPlayground
+                    markdown={content.docs[dt.key] ?? ""}
+                    sourcePath={dt.sourcePath}
+                    headingPrefix={dt.key}
+                    dropLeadingH1
+                  />
+                </div>
+              </section>
+            ),
         )}
 
         {tab === "stdlib" && (
@@ -1679,9 +1706,12 @@ export default function App() {
                             }
                           >
                             <span className="badge">{s.kind}</span>
-                            <code className="fun-inline-code">
-                              {highlightFun(s.signature)}
-                            </code>
+                            <HighlightedCode
+                              code={s.signature}
+                              lang="fun"
+                              inline
+                              className="fun-inline-code"
+                            />
                             {s.kind === "method" && s.owner && (
                               <span className="muted">@ {s.owner}</span>
                             )}
@@ -1699,50 +1729,12 @@ export default function App() {
               ))}
             </div>
 
-            {isStdlibModalOpen && activeModule && (
-              <div
-                className="modal-backdrop"
-                onClick={(event) => {
-                  if (event.target === event.currentTarget) {
-                    closeStdlibModal();
-                  }
-                }}
-              >
-                <div className="modal-card" role="dialog" aria-modal="true">
-                  <div className="modal-head">
-                    <div>
-                      <div className="modal-eyebrow">Std Module</div>
-                      <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
-                      <p className="muted">
-                        {normalizeModuleSummary(activeModule.summary)}
-                      </p>
-                    </div>
-                    <div className="modal-actions">
-                      <button
-                        type="button"
-                        className="copy-link-btn"
-                        onClick={copyStdlibLink}
-                      >
-                        {copyStatus === "ok"
-                          ? "Copied"
-                          : copyStatus === "err"
-                            ? "Copy failed"
-                            : "Copy link"}
-                      </button>
-                      <button
-                        className="modal-close"
-                        type="button"
-                        onClick={closeStdlibModal}
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="modal-body">
-                    <div className="modal-sidebar">
-                      <div className="modal-section-title">Symbols</div>
-                      {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
+            {isStdlibModalOpen &&
+              activeModule &&
+              (() => {
+                const sidebarInner = (
+                  <>
+                    {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
                         <div className="symbol-group">
                           <div className="symbol-group-title muted small">
                             Public declarations
@@ -1777,30 +1769,66 @@ export default function App() {
                           </details>
                         );
                       })}
-                    </div>
+                  </>
+                );
 
-                    <div className="modal-content">
-                      {activeModule.docsMarkdown ? (
-                        <MarkdownWithPlayground
-                          markdown={activeModule.docsMarkdown}
-                          sourcePath={`stdlib/std/${activeModule.module}`}
-                          enableRunnableFunBlocks={false}
-                        />
-                      ) : (
-                        <p className="muted">No module-level docs found.</p>
-                      )}
+                const tabsStrip = activeModule.symbols.length > 0 && (
+                  <div
+                    className="modal-content-tabs"
+                    role="tablist"
+                    aria-label="Module detail view"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={modalContentTab === "module"}
+                      className={`modal-content-tab ${
+                        modalContentTab === "module" ? "active" : ""
+                      }`}
+                      onClick={() => setModalContentTab("module")}
+                    >
+                      Module
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={modalContentTab === "symbol"}
+                      className={`modal-content-tab ${
+                        modalContentTab === "symbol" ? "active" : ""
+                      }`}
+                      onClick={() => setModalContentTab("symbol")}
+                      disabled={!activeSymbol}
+                    >
+                      Symbol{activeSymbol ? `: ${activeSymbol.name}` : ""}
+                    </button>
+                  </div>
+                );
 
-                      {activeSymbol && (
-                        <article className="symbol-detail">
+                const moduleView = modalContentTab === "module" &&
+                  (activeModule.docsMarkdown ? (
+                    <MarkdownWithPlayground
+                      markdown={activeModule.docsMarkdown}
+                      sourcePath={`stdlib/std/${activeModule.module}`}
+                      enableRunnableFunBlocks={false}
+                    />
+                  ) : (
+                    <p className="muted">No module-level docs found.</p>
+                  ));
+
+                const symbolView = modalContentTab === "symbol" &&
+                  activeSymbol && (
+                    <article className="symbol-detail">
                           <h3>
                             {activeSymbol.name}{" "}
                             <span className="muted">
                               (line {activeSymbol.line})
                             </span>
                           </h3>
-                          <pre className="fun-block">
-                            <code>{highlightFun(activeSymbol.signature)}</code>
-                          </pre>
+                          <HighlightedCode
+                            code={activeSymbol.signature}
+                            lang="fun"
+                            className="fun-block"
+                          />
                           {activeSymbol.docsMarkdown ? (
                             <MarkdownWithPlayground
                               markdown={activeSymbol.docsMarkdown}
@@ -1857,11 +1885,11 @@ export default function App() {
                                           </button>
                                         </div>
                                       </div>
-                                      <pre className="fun-block">
-                                        <code>
-                                          {highlightFun(field.signature)}
-                                        </code>
-                                      </pre>
+                                      <HighlightedCode
+                                        code={field.signature}
+                                        lang="fun"
+                                        className="fun-block"
+                                      />
                                       {field.docsMarkdown ? (
                                         <MarkdownWithPlayground
                                           markdown={field.docsMarkdown}
@@ -1928,11 +1956,11 @@ export default function App() {
                                             </button>
                                           </div>
                                         </div>
-                                        <pre className="fun-block">
-                                          <code>
-                                            {highlightFun(member.signature)}
-                                          </code>
-                                        </pre>
+                                        <HighlightedCode
+                                          code={member.signature}
+                                          lang="fun"
+                                          className="fun-block"
+                                        />
                                         {member.docsMarkdown ? (
                                           <MarkdownWithPlayground
                                             markdown={member.docsMarkdown}
@@ -2023,12 +2051,108 @@ export default function App() {
                               </section>
                             )}
                         </article>
-                      )}
+                  );
+
+                const contentInner = (
+                  <>
+                    {tabsStrip}
+                    {moduleView}
+                    {symbolView}
+                  </>
+                );
+
+                return (
+                  <div
+                    className="modal-backdrop"
+                    onClick={(event) => {
+                      if (event.target === event.currentTarget) {
+                        closeStdlibModal();
+                      }
+                    }}
+                  >
+                    <div
+                      className="modal-card"
+                      role="dialog"
+                      aria-modal="true"
+                      ref={stdlibModalCardRef}
+                    >
+                      <div className="modal-head">
+                        <div>
+                          <div className="modal-eyebrow">Std Module</div>
+                          <h2>
+                            std/{activeModule.module.replace(/\.fn$/, "")}
+                          </h2>
+                          <p className="muted">
+                            {normalizeModuleSummary(activeModule.summary)}
+                          </p>
+                        </div>
+                        <div className="modal-actions">
+                          <button
+                            type="button"
+                            className="copy-link-btn"
+                            onClick={copyStdlibLink}
+                          >
+                            {copyStatus === "ok"
+                              ? "Copied"
+                              : copyStatus === "err"
+                                ? "Copy failed"
+                                : "Copy link"}
+                          </button>
+                          <button
+                            className="modal-close"
+                            type="button"
+                            onClick={closeStdlibModal}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="modal-body">
+                        {isNarrowViewport ? (
+                          <div className="modal-content mobile-modal-content">
+                            {modalContentTab === "symbol" && activeSymbol ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="modal-back-btn"
+                                  onClick={() => setModalContentTab("module")}
+                                >
+                                  ← std/{activeModule.module.replace(
+                                    /\.fn$/,
+                                    "",
+                                  )}
+                                </button>
+                                {symbolView}
+                              </>
+                            ) : (
+                              <>
+                                {moduleView}
+                                <div className="modal-section-title mobile-symbols-heading">
+                                  Symbols
+                                </div>
+                                {sidebarInner}
+                              </>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            <div className="modal-sidebar">
+                              <div className="modal-section-title">
+                                Symbols
+                              </div>
+                              {sidebarInner}
+                            </div>
+                            <div className="modal-content">
+                              {contentInner}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              </div>
-            )}
+                );
+              })()}
           </section>
         )}
 
@@ -2051,8 +2175,8 @@ export default function App() {
             {!isGithubPages && (
               <>
                 <div className="hint">
-                  Requires zig-out/bin/fun. If missing, run zig build in repo
-                  root first.
+                  Requires fun-out/bin/fun. If missing, run `fun build` in
+                  repo root first.
                 </div>
                 {content.samples.map((s) => (
                   <RunCodeBlock

@@ -44,9 +44,18 @@ const funVersion = rawFunVersion.startsWith("v")
 const publicVersionsRoot = path.join(siteRoot, "public", "versions");
 
 const docs = {
+  getStarted: await fs.readFile(
+    path.join(repoRoot, "docs/get-started.md"),
+    "utf8",
+  ),
   language: await fs.readFile(path.join(repoRoot, "docs/language.md"), "utf8"),
-  reference: await fs.readFile(
-    path.join(repoRoot, "docs/reference.md"),
+  concurrency: await fs.readFile(
+    path.join(repoRoot, "docs/concurrency.md"),
+    "utf8",
+  ),
+  tooling: await fs.readFile(path.join(repoRoot, "docs/tooling.md"), "utf8"),
+  platforms: await fs.readFile(
+    path.join(repoRoot, "docs/platforms.md"),
     "utf8",
   ),
   stdlibReadme: await fs.readFile(
@@ -54,6 +63,21 @@ const docs = {
     "utf8",
   ),
 };
+
+const generatedRoot = path.join(siteRoot, "src", "generated");
+await fs.mkdir(generatedRoot, { recursive: true });
+
+const highlightAssets = [
+  { src: "editors/vscode/syntaxes/fun.tmLanguage.json", dest: "fun.tmLanguage.json" },
+  { src: "editors/vscode/themes/fun-web-color-theme.json", dest: "fun-web-color-theme.json" },
+  { src: "editors/vscode/themes/fun-web-light-color-theme.json", dest: "fun-web-light-color-theme.json" },
+];
+for (const asset of highlightAssets) {
+  await fs.copyFile(
+    path.join(repoRoot, asset.src),
+    path.join(generatedRoot, asset.dest),
+  );
+}
 
 const stdRoot = path.join(repoRoot, "stdlib/std");
 
@@ -627,13 +651,14 @@ fun main() {
   {
     title: "Alias Imports",
     code: `// file: main.fn
+imp std.io;
 imp mod1 as one;
 imp mod2 as two;
 
 fun main() {
   num a = one.pick();
   num b = two.pick();
-  _ = a + b;
+  println_fmt("a+b={num}", a + b);
 }
 
 // file: mod1.fn
@@ -649,7 +674,7 @@ pub fun pick() num {
   },
   {
     title: "Compounds + Impl",
-    code: `imp std.c.io;
+    code: `imp std.io;
 
 compound Point {
   num x;
@@ -667,7 +692,7 @@ fun main() {
   Point p;
   p.x = 1; p.y = 2;
   p.move_by(3, 4);
-  printf("%d,%d\\n", p.x, p.y);
+  println_fmt("{num},{num}", p.x, p.y);
 }
 `,
   },

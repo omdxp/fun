@@ -1,13 +1,15 @@
+import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
-import { highlightFun } from "../utils/funHighlight";
+import HighlightedCode from "./HighlightedCode";
 
 type Props = {
   markdown: string;
   sourcePath?: string;
   headingPrefix?: string;
   enableRunnableFunBlocks?: boolean;
+  dropLeadingH1?: boolean;
 };
 
 const REPO_URL = (
@@ -65,6 +67,53 @@ function slugifyHeading(text: string) {
   return base || "section";
 }
 
+function cleanHeadingText(raw: string) {
+  return raw
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~]/g, "")
+    .trim();
+}
+
+/**
+ * Maps each heading's source line to its assigned id, computed once from
+ * the raw markdown text rather than during the h1-h6 render callbacks
+ * below. Assigning ids via a mutable counter *during render* is exactly
+ * the kind of impure render React 18 StrictMode double-invokes to catch:
+ * it calls each heading's render function twice, and a shared, mutated-
+ * in-place counter sees both calls, handing out a spurious "-2" suffix
+ * even for a heading with no real duplicate. This memo is a pure read at
+ * render time; the mutation happens only here, once, off the render path.
+ */
+function computeHeadingIdsByLine(markdown: string, headingPrefix?: string) {
+  const byLine = new Map<number, string>();
+  const counts = new Map<string, number>();
+  const lines = markdown.split(/\r?\n/);
+  let inFence = false;
+
+  lines.forEach((line, index) => {
+    if (/^```/.test(line.trim())) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+
+    const match = line.match(/^(#{1,6})\s+(.+)$/);
+    if (!match) return;
+
+    const title = cleanHeadingText(match[2]) || "section";
+    const slug = slugifyHeading(title);
+    const key = headingPrefix ? `${headingPrefix}-${slug}` : slug;
+    const seen = counts.get(key) ?? 0;
+    counts.set(key, seen + 1);
+    const id = seen === 0 ? key : `${key}-${seen + 1}`;
+    // remark positions are 1-indexed.
+    byLine.set(index + 1, id);
+  });
+
+  return byLine;
+}
+
 function flattenText(node: unknown): string {
   if (typeof node === "string" || typeof node === "number") {
     return String(node);
@@ -85,10 +134,7 @@ function flattenText(node: unknown): string {
 function buildHeadingPermalink(headingPrefix: string | undefined, id: string) {
   if (typeof window === "undefined") return "";
 
-  const route =
-    headingPrefix === "language" || headingPrefix === "reference"
-      ? headingPrefix
-      : "";
+  const route = headingPrefix ?? "";
 
   if (!route) {
     return `${window.location.origin}${window.location.pathname}${window.location.search}#${id}`;
@@ -123,22 +169,34 @@ export default function MarkdownWithPlayground({
   sourcePath,
   headingPrefix,
   enableRunnableFunBlocks = true,
+  dropLeadingH1 = false,
 }: Props) {
-  const headingCounts = new Map<string, number>();
+  // Each doc tab already renders its own <h1> + lead line from DOC_TABS in
+  // App.tsx; the source markdown also opens with its own top-level heading
+  // (useful when reading the file directly on GitHub). Rendered together
+  // that's the same title twice in a row, so the tab view drops the
+  // markdown's copy rather than stripping it from the source file itself.
+  const effectiveMarkdown = useMemo(() => {
+    if (!dropLeadingH1) return markdown;
+    return markdown.replace(/^#[^#][^\n]*\n+/, "");
+  }, [markdown, dropLeadingH1]);
 
-  const makeHeadingId = (text: string) => {
-    const slug = slugifyHeading(text);
-    const key = headingPrefix ? `${headingPrefix}-${slug}` : slug;
-    const seen = headingCounts.get(key) ?? 0;
-    headingCounts.set(key, seen + 1);
-    return seen === 0 ? key : `${key}-${seen + 1}`;
-  };
+  const headingIdsByLine = useMemo(
+    () => computeHeadingIdsByLine(effectiveMarkdown, headingPrefix),
+    [effectiveMarkdown, headingPrefix],
+  );
 
   const headingRenderer =
     (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") =>
-    (props: { children?: unknown }) => {
+    (props: {
+      children?: unknown;
+      node?: { position?: { start?: { line?: number } } };
+    }) => {
       const text = flattenText(props.children).trim();
-      const id = makeHeadingId(text || "section");
+      const line = props.node?.position?.start?.line;
+      const id =
+        (line !== undefined && headingIdsByLine.get(line)) ||
+        (headingPrefix ? `${headingPrefix}-section` : "section");
       const permalink = buildHeadingPermalink(headingPrefix, id);
       return (
         <Tag id={id} data-doc-heading="true">
@@ -167,6 +225,26 @@ export default function MarkdownWithPlayground({
       className="md-content"
       remarkPlugins={[remarkGfm]}
       components={{
+        // `code()` below already returns a full `<pre>` for every block
+        // form (a runnable block, a highlighted block, or the plain
+        // fallback) - without this override, react-markdown's own default
+        // `pre` wraps that in a second, unstyled `<pre>`, doubling the box
+        // around every fenced code block.
+        pre: (props) => <>{props.children}</>,
+        // A wide table needs to scroll horizontally rather than squeeze
+        // its columns, but `overflow-x: auto` directly on the <table>
+        // (its old home) forces `display: block`, which breaks the
+        // browser's own column-width distribution: a table narrower than
+        // its container no longer stretches to fill it, leaving a dead
+        // gap next to a header background sized to the content instead
+        // of the row. Scrolling lives on this wrapper div instead, so the
+        // table itself stays a real table and lays out its columns
+        // normally.
+        table: (props) => (
+          <div className="md-table-wrap">
+            <table>{props.children}</table>
+          </div>
+        ),
         h1: headingRenderer("h1"),
         h2: headingRenderer("h2"),
         h3: headingRenderer("h3"),
@@ -197,27 +275,47 @@ export default function MarkdownWithPlayground({
           const text = String(children).replace(/\n$/, "");
           const isBlock = Boolean(className);
           const isFun = className?.includes("language-fun");
+          const lang = className?.match(/language-(\w+)/)?.[1];
 
           if (isBlock && isFun && enableRunnableFunBlocks) {
             return <RunCodeBlock initialCode={text} />;
           }
 
+          if (isBlock && lang) {
+            return (
+              <HighlightedCode
+                code={text}
+                lang={lang}
+                className="md-pre"
+                showCopy
+              />
+            );
+          }
+
           if (isBlock) {
             return (
-              <pre className="md-pre">
-                <code>{text}</code>
-              </pre>
+              <HighlightedCode
+                code={text}
+                lang=""
+                className="md-pre"
+                showCopy
+              />
             );
           }
 
           const inlineText = String(children);
           return (
-            <code className="md-inline-code">{highlightFun(inlineText)}</code>
+            <HighlightedCode
+              code={inlineText}
+              lang="fun"
+              inline
+              className="md-inline-code"
+            />
           );
         },
       }}
     >
-      {markdown}
+      {effectiveMarkdown}
     </ReactMarkdown>
   );
 }

@@ -1,13 +1,15 @@
 # Fun Documentation
 
-This directory contains the primary project documentation for the language, compiler architecture, runtime behavior, and reference material.
+This directory contains the primary project documentation for the language, tooling, and compiler architecture. Each of the five topic files below also feeds a tab on the [public documentation site](https://omdxp.github.io/fun/).
 
 ## Documents
 
+- **get-started.md**: installation, `fun init`, the `fun.toml` manifest, and your first build/run
+- **language.md**: syntax, types, control flow, generics, and error handling
+- **concurrency.md**: async/await, `fork`, and channels
+- **tooling.md**: testing, fuzzing, formatting, the language server, editor support, and the full CLI
+- **platforms.md**: C compiler selection, runtime backends, and platform/target support
 - **architecture.md**: high-level implementation structure, compiler pipeline, and repository layout
-- **channel-runtime-conformance.md**: runtime backend compatibility, operational thresholds, and channel-related behavior notes
 - **faq.md**: common questions about the language, tooling, and development workflow
-- **language.md**: language overview and syntax-oriented documentation
-- **reference.md**: detailed reference for language constructs and standard-library usage
 
 For installation, quickstart, and repository-level navigation, start with the root [README.md](../README.md).

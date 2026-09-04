@@ -1,6 +1,11 @@
 import { useMemo, useRef, useState } from "react";
 
-import { highlightFun } from "../utils/funHighlight";
+import {
+  highlightToFragment,
+  parseStyleAttr,
+  useSiteHighlighter,
+} from "../utils/shikiHighlighter";
+import { copyTextToClipboard } from "../utils/clipboard";
 
 type Props = {
   initialCode: string;
@@ -19,6 +24,8 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
   const [stdout, setStdout] = useState("");
   const [stderr, setStderr] = useState("");
   const [isRunning, setIsRunning] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const previewRef = useRef<HTMLPreElement | null>(null);
   const configuredApiBase = (import.meta.env.VITE_RUN_API_BASE ?? "")
@@ -42,6 +49,7 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     }
 
     setIsRunning(true);
+    setHasRun(true);
     setStdout("");
     setStderr("");
     try {
@@ -60,7 +68,21 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     }
   };
 
-  const highlighted = useMemo(() => highlightFun(code), [code]);
+  const copyCode = async () => {
+    try {
+      await copyTextToClipboard(code);
+      setCopyStatus("ok");
+    } catch {
+      setCopyStatus("err");
+    }
+    window.setTimeout(() => setCopyStatus("idle"), 1600);
+  };
+
+  const highlighter = useSiteHighlighter();
+  const highlighted = useMemo(() => {
+    if (!highlighter) return null;
+    return highlightToFragment(highlighter, code, "fun");
+  }, [highlighter, code]);
   const syncScroll = () => {
     if (!editorRef.current || !previewRef.current) return;
     previewRef.current.scrollTop = editorRef.current.scrollTop;
@@ -72,6 +94,18 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
       <div className="run-block-header">
         <strong>{title ?? "Runnable Example"}</strong>
         <div className="run-actions">
+          <button
+            onClick={copyCode}
+            className="ghost"
+            type="button"
+            title="Copy code"
+          >
+            {copyStatus === "ok"
+              ? "Copied"
+              : copyStatus === "err"
+                ? "Copy failed"
+                : "Copy"}
+          </button>
           <button
             onClick={() => setCode(initialCode.trimEnd())}
             className="ghost"
@@ -104,8 +138,17 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
         </div>
       </div>
       <div className="run-editor">
-        <pre ref={previewRef} aria-hidden>
-          <code>{highlighted}</code>
+        <pre
+          ref={previewRef}
+          aria-hidden
+          className={highlighted ? "shiki" : undefined}
+          style={highlighted ? parseStyleAttr(highlighted.style) : undefined}
+        >
+          {highlighted ? (
+            <code dangerouslySetInnerHTML={{ __html: highlighted.innerHtml }} />
+          ) : (
+            <code>{code}</code>
+          )}
         </pre>
         <textarea
           ref={editorRef}
@@ -113,18 +156,21 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           onChange={(e) => setCode(e.target.value)}
           onScroll={syncScroll}
           spellCheck={false}
+          wrap="soft"
         />
       </div>
-      <div className="output-grid">
-        <div>
-          <div className="output-title">stdout</div>
-          <pre>{stdout || "(empty)"}</pre>
+      {hasRun && (
+        <div className="output-grid">
+          <div>
+            <div className="output-title">stdout</div>
+            <pre>{stdout || "(empty)"}</pre>
+          </div>
+          <div>
+            <div className="output-title">stderr</div>
+            <pre className={stderr ? "err" : ""}>{stderr || "(empty)"}</pre>
+          </div>
         </div>
-        <div>
-          <div className="output-title">stderr</div>
-          <pre className={stderr ? "err" : ""}>{stderr || "(empty)"}</pre>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

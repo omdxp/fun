@@ -106,6 +106,7 @@ aside {
   position: sticky;
   top: 0;
   height: 100vh;
+  overflow-y: auto;
   background: var(--aside-bg);
   backdrop-filter: blur(8px);
 }
@@ -204,9 +205,14 @@ aside {
   height: 38px;
   flex: none;
   object-fit: contain;
-  border-radius: 50%;
-  background: var(--brand-cream);
-  border: 1px solid var(--border-soft);
+  /* The mark has real alpha transparency and its own drawn edge - a
+     forced background box and circular crop fought that shape and left
+     visible seams. A soft shadow gives it lift instead. */
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.35));
+}
+
+:root[data-theme="light"] .brand-logo {
+  filter: drop-shadow(0 2px 4px rgba(22, 34, 74, 0.25));
 }
 
 .brand-text {
@@ -351,6 +357,7 @@ a:focus-visible {
 
 nav { display: grid; gap: 8px; margin-top: 18px; }
 nav button {
+  width: 100%;
   border: 1px solid var(--border-soft);
   background: var(--surface);
   color: var(--text);
@@ -367,10 +374,76 @@ nav button:focus-visible {
   outline-offset: 2px;
 }
 nav button.active {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--brand-navy), var(--accent-2));
-  color: #ffffff;
+  border-color: var(--border-strong);
+  background:
+    linear-gradient(90deg, rgba(226, 59, 78, 0.14), transparent 65%),
+    var(--surface-2);
+  color: var(--heading);
+  font-weight: 700;
   box-shadow: inset 3px 0 0 var(--brand-red);
+}
+
+.nav-item + .nav-item {
+  margin-top: 2px;
+}
+
+.nav-subitems {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 2px 14px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  animation: navSubitemsIn 140ms ease-out;
+}
+
+@keyframes navSubitemsIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.nav-subitem {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.nav-subitem.level-2 {
+  padding-left: 16px;
+}
+
+.nav-subitem.level-3 {
+  padding-left: 24px;
+  font-size: 12px;
+}
+
+.nav-subitem:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.nav-subitem.active {
+  background: var(--surface-3);
+  color: var(--heading);
+  font-weight: 700;
+}
+
+.nav-subitem:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 main { padding: clamp(18px, 2.6vw, 34px); min-width: 0; }
@@ -386,71 +459,8 @@ main { padding: clamp(18px, 2.6vw, 34px); min-width: 0; }
   box-shadow: var(--shadow);
 }
 
-.doc-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 18px;
-}
-
 .doc-main {
   min-width: 0;
-}
-
-.doc-toc {
-  position: -webkit-sticky;
-  position: sticky;
-  top: 18px;
-  align-self: start;
-  height: auto;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px;
-  background: var(--surface-2);
-  max-height: 75vh;
-  overflow-y: auto;
-}
-
-.doc-toc-title {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  margin-bottom: 8px;
-}
-
-.doc-toc-item {
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  border-left: 2px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  padding: 6px 8px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
-}
-
-.doc-toc-item.level-2 {
-  padding-left: 16px;
-}
-
-.doc-toc-item.level-3 {
-  padding-left: 24px;
-}
-
-.doc-toc-item:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-3);
-}
-
-.doc-toc-item.active {
-  border-color: transparent;
-  border-left-color: var(--brand-red);
-  background: var(--surface-3);
-  color: var(--heading);
-  font-weight: 600;
 }
 
 h1, h2, h3, h4, h5, h6 { color: var(--heading); }
@@ -474,13 +484,15 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .run-block-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(22, 34, 74, 0.55);
 }
-.run-actions { display: flex; gap: 8px; }
+.run-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .run-actions button {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
@@ -512,7 +524,8 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   border: none;
   border-radius: 0;
   color: #e9eeff;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   pointer-events: none;
 }
 
@@ -527,6 +540,8 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   -webkit-text-fill-color: transparent;
   font: 500 13px/1.5 var(--mono);
   padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   resize: vertical;
 }
 
@@ -534,27 +549,42 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: rgba(106, 164, 255, 0.35);
 }
 
-.tok-comment { color: #7f8db8; }
-.tok-string { color: #f1c38f; }
-.tok-number { color: #9de0ff; }
-.tok-operator { color: #8fb3ff; }
-.tok-custom-type { color: #b6a6ff; }
-.tok-function { color: #a9e4ff; }
-.tok-keyword { color: #7aa2ff; font-weight: 600; }
-.tok-type { color: #9bdc8a; }
-.tok-support-type { color: #7fe0c1; }
-.tok-boolean { color: #ffb3c0; }
+/* Shiki emits `--shiki-light`/`--shiki-dark` custom properties per token
+   (dual-theme mode, sourced directly from editors/vscode/themes/fun-web*)
+   with no plain `color` of its own - the consumer is expected to pick
+   light by default and switch to dark, normally keyed off a `.dark`
+   ancestor class. The site uses `data-theme` instead, so bridge the two.
+   Background is intentionally left alone: the existing `.md-pre`/`pre`/
+   `.run-editor` rules already provide the right surface per theme. */
+.shiki,
+.shiki span {
+  color: var(--shiki-light) !important;
+  font-weight: var(--shiki-light-font-weight, inherit) !important;
+  font-style: var(--shiki-light-font-style, inherit) !important;
+  text-decoration: var(--shiki-light-text-decoration, inherit) !important;
+}
 
-:root[data-theme="light"] .tok-comment { color: #6a78a0; }
-:root[data-theme="light"] .tok-string { color: #9a5b12; }
-:root[data-theme="light"] .tok-number { color: #1f6f9e; }
-:root[data-theme="light"] .tok-operator { color: #3f63c0; }
-:root[data-theme="light"] .tok-custom-type { color: #6a4fd0; }
-:root[data-theme="light"] .tok-function { color: #1e7fa8; }
-:root[data-theme="light"] .tok-keyword { color: #2f5bd0; }
-:root[data-theme="light"] .tok-type { color: #2e7d32; }
-:root[data-theme="light"] .tok-support-type { color: #0e8a6e; }
-:root[data-theme="light"] .tok-boolean { color: #c0325a; }
+:root[data-theme="dark"] .shiki,
+:root[data-theme="dark"] .shiki span {
+  color: var(--shiki-dark) !important;
+  font-weight: var(--shiki-dark-font-weight, inherit) !important;
+  font-style: var(--shiki-dark-font-style, inherit) !important;
+  text-decoration: var(--shiki-dark-text-decoration, inherit) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .shiki,
+  :root:not([data-theme="light"]) .shiki span {
+    color: var(--shiki-dark) !important;
+    font-weight: var(--shiki-dark-font-weight, inherit) !important;
+    font-style: var(--shiki-dark-font-style, inherit) !important;
+    text-decoration: var(--shiki-dark-text-decoration, inherit) !important;
+  }
+}
+
+.shiki-fallback {
+  color: var(--text);
+}
 
 .fun-inline-code,
 .fun-block code {
@@ -655,6 +685,48 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .md-pre { margin: 10px 0; }
+
+.code-block-shell {
+  position: relative;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(20, 26, 48, 0.85);
+  color: #dce6ff;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+
+.code-block-shell:hover .code-copy-btn,
+.code-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+/* Touch devices have no hover state to reveal this on - show it plainly
+   instead of hiding a control behind a gesture that doesn't exist here. */
+@media (hover: none) {
+  .code-copy-btn {
+    opacity: 1;
+  }
+}
+
+.code-copy-btn:hover { border-color: var(--accent); }
+
+:root[data-theme="light"] .code-copy-btn {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: var(--border-soft);
+  color: var(--text);
+}
 .md-inline-code {
   border: none;
   border-radius: 4px;
@@ -722,24 +794,41 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .md-content img,
 .md-content video,
-.md-content svg,
-.md-content table {
+.md-content svg {
   max-width: 100%;
 }
 
-.md-content table {
-  display: block;
+.md-table-wrap {
+  max-width: 100%;
   overflow-x: auto;
-  border-collapse: collapse;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 .md-content th,
 .md-content td {
-  border: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   padding: 6px 8px;
+  text-align: left;
+}
+
+.md-content tr:last-child td {
+  border-bottom: none;
 }
 
 .md-content th {
+  background: var(--surface-2);
+  position: sticky;
+  top: 0;
+}
+
+.md-content tbody tr:nth-child(even) td {
   background: var(--surface-2);
 }
 
@@ -826,6 +915,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .module-card {
+  min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: 12px;
   padding: 12px;
@@ -1116,6 +1206,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .modal-card {
   width: min(1100px, 100%);
+  height: min(88vh, 920px);
   max-height: min(88vh, 920px);
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
@@ -1132,6 +1223,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .search-modal-card {
   width: min(960px, 100%);
+  height: auto;
   max-height: min(82vh, 860px);
 }
 
@@ -1140,6 +1232,10 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+}
+
+.modal-head > div:first-child {
+  min-width: 0;
 }
 
 .modal-eyebrow {
@@ -1181,9 +1277,18 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   grid-template-columns: 280px 1fr;
   gap: 16px;
   min-height: 0;
+  /* Grid's default align-content:stretch inflates "auto" rows/columns to
+     fill any leftover space in the container - harmless on desktop where
+     the two columns naturally fill the fixed-height card, but on mobile's
+     single-column, two-row layout it stretched short content (a one-line
+     module summary) into a mysterious dead zone above the symbol browser
+     whenever the card itself was taller than its content. Rows should
+     size to their own content and leave any surplus at the end. */
+  align-content: start;
 }
 
 .modal-sidebar {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 12px;
@@ -1199,10 +1304,57 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .modal-content {
+  min-width: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   min-height: 0;
   padding-right: 6px;
+}
+
+.modal-content-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  margin: -2px -2px 14px;
+  padding: 2px 2px 0;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+
+.modal-content-tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.92rem;
+  padding: 8px 14px;
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.modal-content-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.modal-content-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.modal-content-tab.active {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+  box-shadow: inset 0 -3px 0 var(--brand-red);
+}
+
+.modal-content-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .search-modal-body {
@@ -1277,10 +1429,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 @media (max-width: 1280px) {
-  .doc-layout {
-    grid-template-columns: minmax(0, 1fr) 240px;
-  }
-
   .stdlib-grid {
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   }
@@ -1313,6 +1461,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     align-items: center;
     justify-content: center;
     min-height: 40px;
+    width: 96px;
     font-size: 12px;
   }
   .drawer-content {
@@ -1335,6 +1484,15 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .drawer-content .meta {
     margin-top: 12px;
   }
+  .nav-subitem {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    font-size: 13px;
+  }
+  .nav-subitem.level-3 {
+    font-size: 12.5px;
+  }
   main {
     padding: 16px;
   }
@@ -1342,38 +1500,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     padding: 16px;
   }
   .output-grid { grid-template-columns: 1fr; }
-  .doc-layout {
-    grid-template-columns: 1fr;
-  }
-  .doc-main {
-    order: 2;
-  }
-  .doc-toc {
-    order: 1;
-    display: block;
-    position: -webkit-sticky;
-    position: sticky;
-    top: 10px;
-    z-index: 5;
-    max-height: none;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    padding: 8px;
-  }
-  .doc-toc-title { display: none; }
-  .doc-toc-item {
-    display: inline-flex;
-    width: auto;
-    margin-right: 6px;
-    margin-bottom: 0;
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-  .doc-toc-item.level-2,
-  .doc-toc-item.level-3 {
-    padding-left: 10px;
-  }
   .stdlib-toolbar {
     grid-template-columns: 1fr;
     align-items: stretch;
@@ -1414,26 +1540,71 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     flex-wrap: wrap;
     justify-content: flex-start;
   }
+  .modal-backdrop {
+    padding: 0;
+  }
   .modal-card {
     width: 100%;
-    max-height: min(100dvh - 20px, 980px);
-    height: min(100dvh - 20px, 980px);
+    /* Always exactly the viewport height, whether the module screen (long
+       symbol list) or the symbol screen (sometimes just a few short lines)
+       is showing - height:auto here would shrink-wrap short content, and
+       the centered backdrop would float that short card in the middle of
+       the screen with visible backdrop above and below it. A fixed sheet
+       height with its own internal scroll (only engaging if content is
+       genuinely taller than the screen) keeps it full screen always. */
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    /* Reserve the scrollbar's width whether or not it's actually showing,
+       so drilling into a symbol (a shorter screen, often no scrollbar)
+       doesn't visibly narrow/widen the card versus the module screen. */
+    scrollbar-gutter: stable;
     padding: 14px;
-    border-radius: 14px;
+    /* Full-bleed and edge to edge at every mobile width, module screen or
+       symbol screen alike - a card that's sometimes inset and sometimes
+       edge to edge (previously only below 640px) reads as the layout
+       shifting size between the two drill-down screens. */
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
   }
   .modal-body {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 10px;
+    grid-template-rows: auto;
   }
-  .modal-sidebar {
-    border-radius: 12px;
-    max-height: 28vh;
-    padding: 10px;
-  }
-  .modal-content {
+  /* Mobile doesn't reflow the desktop sidebar+content grid at all - it's
+     a drill-down: the module screen (doc + full symbol list) and the
+     symbol screen (back button + one symbol's detail) are two distinct
+     views that replace each other via modalContentTab, never sharing the
+     card at once. See the isNarrowViewport branch in App.tsx. */
+  .mobile-modal-content {
+    overflow-y: visible;
     max-height: none;
     padding-right: 0;
+  }
+  .mobile-symbols-heading {
+    margin-top: 18px;
+  }
+  .modal-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-3);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    margin-bottom: 14px;
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    cursor: pointer;
+  }
+  .modal-back-btn:hover {
+    border-color: var(--accent);
+  }
+  .modal-back-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
   .symbol-detail {
     margin-top: 10px;
@@ -1451,11 +1622,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 @media (max-width: 640px) {
   .global-results {
     max-height: 45vh;
-  }
-
-  nav {
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
   }
 
   .compound-field-head {
@@ -1488,16 +1654,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     overflow: hidden;
   }
 
-  .modal-backdrop {
-    padding: 0;
-  }
-
   .modal-card {
-    height: 100dvh;
-    max-height: 100dvh;
-    border-radius: 0;
-    border-left: none;
-    border-right: none;
     padding: 12px;
   }
 
@@ -1516,10 +1673,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-  }
-
-  .modal-sidebar {
-    max-height: 32vh;
   }
 
   .symbol-pills {
@@ -1618,6 +1771,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .module-select,
   .symbol-pill,
   .copy-link-btn,
+  .run-actions button,
   nav button {
     min-height: 44px;
   }
@@ -1739,7 +1893,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   }
 
   .modal-sidebar {
-    max-height: 28vh;
     padding: 8px;
   }
 
@@ -1820,10 +1973,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .modal-close {
     min-height: 42px;
     justify-content: center;
-  }
-
-  .modal-sidebar {
-    max-height: 30vh;
   }
 }
 
