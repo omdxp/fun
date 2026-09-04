@@ -3572,6 +3572,26 @@ test "hover and completion resolve a local or parameter inside a test or fuzz bl
   assert contains(param_completion, `"label":"data"`), "expected the fuzz block's other parameter offered too";
 }
 
+test "hover on a fuzz block's own data and len parameters keeps the pointer depth and shadows the stdlib function" {
+  // Carried over as acceptance criteria for the fls port (see
+  // project_fls_fuzz_param_hover_bugs memory): `data` used to hover as
+  // `raw`, its pointer depth dropped, and `len` used to resolve to
+  // std.string's own `len` free function instead of the block's own
+  // parameter shadowing it.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fuzzhover.fn";
+  doc.path = "fuzzhover.fn";
+  doc.text = `fuzz "roundtrip" (raw* data, num len) {
+  `  num n = len;
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 0, 23), "raw* data"), "expected data's own pointer depth kept, not dropped to 'raw'";
+  assert contains(hover(&reads, doc, 1, 10), "num len"), "expected len to resolve to the block's own parameter, not the stdlib function";
+}
+
 test "completion offers an impl method's own parameters and body locals, scoped to that method" {
   // _declared had no .Impl case at all, and never walked into any
   // function's body for locals, only its own top-level args, so
