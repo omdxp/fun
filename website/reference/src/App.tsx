@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
 import HighlightedCode from "./components/HighlightedCode";
+import { copyTextToClipboard } from "./utils/clipboard";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -61,8 +62,11 @@ type ReferenceContent = {
     available: string[];
   };
   docs: {
+    getStarted: string;
     language: string;
-    reference: string;
+    concurrency: string;
+    tooling: string;
+    platforms: string;
     stdlibReadme: string;
   };
   stdlib: StdModule[];
@@ -91,7 +95,7 @@ type DocSection = {
   title: string;
   level: number;
   content: string;
-  tab: Extract<TabKey, "language" | "reference">;
+  tab: DocTabKey;
 };
 
 type TocHeading = {
@@ -110,15 +114,24 @@ const EMPTY_CONTENT: ReferenceContent = {
     available: [DEFAULT_FUN_VERSION],
   },
   docs: {
+    getStarted: "",
     language: "",
-    reference: "",
+    concurrency: "",
+    tooling: "",
+    platforms: "",
     stdlibReadme: "",
   },
   stdlib: [],
   samples: [],
 };
 
-type TabKey = "language" | "reference" | "stdlib" | "playground";
+type DocTabKey =
+  | "getStarted"
+  | "language"
+  | "concurrency"
+  | "tooling"
+  | "platforms";
+type TabKey = DocTabKey | "stdlib" | "playground";
 
 function withBasePath(relativePath: string) {
   const base = import.meta.env.BASE_URL || "/";
@@ -130,14 +143,62 @@ function withBasePath(relativePath: string) {
 const isGithubPages =
   typeof window !== "undefined" &&
   window.location.hostname.endsWith("github.io");
+const DOC_TABS: Array<{
+  key: DocTabKey;
+  navLabel: string;
+  title: string;
+  lead: string;
+  sourcePath: string;
+}> = [
+  {
+    key: "getStarted",
+    navLabel: "Get Started",
+    title: "Get Started",
+    lead: "Install Fun, scaffold a project with fun init, and run your first program.",
+    sourcePath: "docs/get-started.md",
+  },
+  {
+    key: "language",
+    navLabel: "Language",
+    title: "Language",
+    lead: "Syntax, types, control flow, and everything else the language surface covers.",
+    sourcePath: "docs/language.md",
+  },
+  {
+    key: "concurrency",
+    navLabel: "Concurrency",
+    title: "Concurrency",
+    lead: "Async/await, virtual threads with fork, and channels.",
+    sourcePath: "docs/concurrency.md",
+  },
+  {
+    key: "tooling",
+    navLabel: "Tooling",
+    title: "Tooling",
+    lead: "Testing, fuzzing, formatting, the language server, editor support, and the full CLI.",
+    sourcePath: "docs/tooling.md",
+  },
+  {
+    key: "platforms",
+    navLabel: "Platforms & Compilers",
+    title: "Platforms & Compilers",
+    lead: "C compiler selection, runtime backends, and what's supported where.",
+    sourcePath: "docs/platforms.md",
+  },
+];
+
+const DOC_TAB_KEYS = new Set<string>(DOC_TABS.map((d) => d.key));
+function isDocTab(key: TabKey): key is DocTabKey {
+  return DOC_TAB_KEYS.has(key);
+}
+
 const TABS: Array<{
   key: TabKey;
   label: string;
   disabled?: boolean;
   tooltip?: string;
 }> = [
-  { key: "language", label: "Language Guide" },
-  { key: "reference", label: "Reference" },
+  ...DOC_TABS.map((dt) => ({ key: dt.key as TabKey, label: dt.navLabel })),
   { key: "stdlib", label: "Std Library" },
   {
     key: "playground",
@@ -176,66 +237,20 @@ function buildStdlibHash(
   return query ? `#stdlib?${query}` : "#stdlib";
 }
 
-/**
- * Copy `text` to the clipboard, throwing on failure so callers can show an
- * accurate "copied" vs "copy failed" state.
- *
- * The async Clipboard API only exists in a secure context (HTTPS or localhost);
- * over plain HTTP `navigator.clipboard` is undefined, so we fall back to the
- * legacy `execCommand('copy')`. That fallback returns a boolean and can silently
- * no-op — the previous code ignored the return and always reported success, so
- * the button said "Copied" while nothing was on the clipboard (the reported prod
- * bug). We now honor the boolean and reject when the copy did not happen.
- */
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textArea = document.createElement("textarea");
-  textArea.value = text;
-  textArea.setAttribute("readonly", "true");
-  textArea.style.position = "fixed";
-  textArea.style.top = "0";
-  textArea.style.left = "-9999px";
-  document.body.appendChild(textArea);
-  const selection = document.getSelection();
-  const previousRange =
-    selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
-  textArea.focus();
-  textArea.select();
-  // iOS Safari needs an explicit selection range.
-  textArea.setSelectionRange(0, textArea.value.length);
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } finally {
-    document.body.removeChild(textArea);
-    if (previousRange && selection) {
-      selection.removeAllRanges();
-      selection.addRange(previousRange);
-    }
-  }
-  if (!ok) {
-    throw new Error("Clipboard copy command was rejected by the browser");
-  }
-}
-
 function parseTabHash(hash: string): TabKey | null {
   const value = hash.startsWith("#") ? hash.slice(1) : hash;
   const [route] = value.split("?");
-  if (route === "language") return "language";
-  if (route === "reference") return "reference";
   if (route === "playground") return "playground";
   if (route === "stdlib") return "stdlib";
+  const docTab = DOC_TABS.find((d) => d.key === route);
+  if (docTab) return docTab.key;
   return null;
 }
 
 function getInitialHashState() {
   if (typeof window === "undefined") {
     return {
-      tab: "language" as TabKey,
+      tab: "getStarted" as TabKey,
       modulePath: "",
       symbolKey: "",
       detailKey: "",
@@ -272,7 +287,7 @@ function getInitialHashState() {
   }
 
   return {
-    tab: "language" as TabKey,
+    tab: "getStarted" as TabKey,
     modulePath: "",
     symbolKey: "",
     detailKey: "",
@@ -390,10 +405,7 @@ function normalizeModuleSummary(
   return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
 }
 
-function extractDocSections(
-  markdown: string,
-  tab: Extract<TabKey, "language" | "reference">,
-) {
+function extractDocSections(markdown: string, tab: DocTabKey) {
   const lines = markdown.split(/\r?\n/);
   const counts = new Map<string, number>();
   const sections: DocSection[] = [];
@@ -488,12 +500,9 @@ export default function App() {
     initial.docAnchorKey,
   );
   const [activeDocAnchorKey, setActiveDocAnchorKey] = useState("");
-  const [languageTocHeadings, setLanguageTocHeadings] = useState<TocHeading[]>(
-    [],
-  );
-  const [referenceTocHeadings, setReferenceTocHeadings] = useState<
-    TocHeading[]
-  >([]);
+  const [docTocHeadings, setDocTocHeadings] = useState<
+    Partial<Record<DocTabKey, TocHeading[]>>
+  >({});
   const [isStdlibModalOpen, setIsStdlibModalOpen] = useState(
     Boolean(initial.modulePath || initial.symbolKey),
   );
@@ -521,7 +530,7 @@ export default function App() {
   };
 
   const goHome = () => {
-    setTab("language");
+    setTab("getStarted");
     setSearch("");
     setGlobalSearch("");
     setActiveGlobalResultIndex(-1);
@@ -593,21 +602,20 @@ export default function App() {
     tryScroll(0);
   };
 
-  const languageSections = useMemo(
-    () => extractDocSections(content.docs.language, "language"),
-    [content.docs.language],
-  );
-
-  const referenceSections = useMemo(
-    () => extractDocSections(content.docs.reference, "reference"),
-    [content.docs.reference],
-  );
+  const docSectionsByTab = useMemo(() => {
+    const out = {} as Record<DocTabKey, DocSection[]>;
+    for (const dt of DOC_TABS) {
+      // A picked historical version's content.json may predate this tab
+      // (its docs object won't have the field at all), not just be empty.
+      out[dt.key] = extractDocSections(content.docs[dt.key] ?? "", dt.key);
+    }
+    return out;
+  }, [content.docs]);
 
   const activeDocSections = useMemo(() => {
-    if (tab === "language") return languageTocHeadings;
-    if (tab === "reference") return referenceTocHeadings;
+    if (isDocTab(tab)) return docTocHeadings[tab] ?? [];
     return [] as TocHeading[];
-  }, [tab, languageTocHeadings, referenceTocHeadings]);
+  }, [tab, docTocHeadings]);
 
   const globalResults = useMemo(() => {
     const q = globalSearch.trim().toLowerCase();
@@ -615,28 +623,18 @@ export default function App() {
 
     const out: GlobalSearchResult[] = [];
 
-    for (const section of languageSections) {
-      if (!section.content.toLowerCase().includes(q)) continue;
-      out.push({
-        id: `doc:language:${section.id}`,
-        title: `Language Guide: ${section.title}`,
-        subtitle: formatSnippet(section.content, q),
-        group: "docs",
-        tab: "language",
-        docAnchorKey: section.id,
-      });
-    }
-
-    for (const section of referenceSections) {
-      if (!section.content.toLowerCase().includes(q)) continue;
-      out.push({
-        id: `doc:reference:${section.id}`,
-        title: `Reference: ${section.title}`,
-        subtitle: formatSnippet(section.content, q),
-        group: "docs",
-        tab: "reference",
-        docAnchorKey: section.id,
-      });
+    for (const dt of DOC_TABS) {
+      for (const section of docSectionsByTab[dt.key]) {
+        if (!section.content.toLowerCase().includes(q)) continue;
+        out.push({
+          id: `doc:${dt.key}:${section.id}`,
+          title: `${dt.navLabel}: ${section.title}`,
+          subtitle: formatSnippet(section.content, q),
+          group: "docs",
+          tab: dt.key,
+          docAnchorKey: section.id,
+        });
+      }
     }
 
     for (const sample of content.samples) {
@@ -713,7 +711,7 @@ export default function App() {
     }
 
     return out.slice(0, 40);
-  }, [globalSearch, content, languageSections, referenceSections]);
+  }, [globalSearch, content, docSectionsByTab]);
 
   const groupedGlobalResults = useMemo(() => {
     return {
@@ -877,10 +875,7 @@ export default function App() {
     setTab(result.tab);
     setIsMobileDrawerOpen(false);
     setIsSearchModalOpen(false);
-    if (
-      (result.tab === "language" || result.tab === "reference") &&
-      result.docAnchorKey
-    ) {
+    if (isDocTab(result.tab) && result.docAnchorKey) {
       setSelectedDocAnchorKey(result.docAnchorKey);
       window.setTimeout(() => {
         const headingTitle = result.title.includes(":")
@@ -1105,7 +1100,7 @@ export default function App() {
 
     if (tab !== "stdlib") {
       const params = new URLSearchParams();
-      if ((tab === "language" || tab === "reference") && selectedDocAnchorKey) {
+      if (isDocTab(tab) && selectedDocAnchorKey) {
         params.set("anchor", selectedDocAnchorKey);
       }
       const q = params.toString();
@@ -1138,7 +1133,8 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
+    const activeTab = tab;
 
     const id = window.setTimeout(() => {
       const nodes = Array.from(
@@ -1158,24 +1154,20 @@ export default function App() {
         };
       });
 
-      if (tab === "language") {
-        setLanguageTocHeadings(next);
-      } else {
-        setReferenceTocHeadings(next);
-      }
+      setDocTocHeadings((prev) => ({ ...prev, [activeTab]: next }));
     }, 0);
 
     return () => window.clearTimeout(id);
   }, [tab, content]);
 
   useEffect(() => {
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
     if (!selectedDocAnchorKey) return;
     scrollToDocAnchor(selectedDocAnchorKey, "smooth");
   }, [tab, selectedDocAnchorKey, content]);
 
   useEffect(() => {
-    if (tab !== "language" && tab !== "reference") return;
+    if (!isDocTab(tab)) return;
     if (typeof window === "undefined") return;
 
     const ids = activeDocSections.map((h) => h.id);
@@ -1493,7 +1485,7 @@ export default function App() {
                 onClick={() => {
                   if (!t.disabled) {
                     setTab(t.key);
-                    if (t.key !== "language" && t.key !== "reference") {
+                    if (!isDocTab(t.key)) {
                       setSelectedDocAnchorKey("");
                     }
                     setIsMobileDrawerOpen(false);
@@ -1528,91 +1520,48 @@ export default function App() {
       </aside>
 
       <main>
-        {tab === "language" && (
-          <section className="panel">
-            <h1>Language Features</h1>
-            <p className="lead">
-              This page is sourced from docs/language.md and includes runnable
-              Fun code blocks.
-            </p>
-            <div className="doc-layout">
-              <div className="doc-main">
-                <MarkdownWithPlayground
-                  markdown={content.docs.language}
-                  sourcePath="docs/language.md"
-                  headingPrefix="language"
-                />
-              </div>
-              {languageTocHeadings.length > 0 && (
-                <aside
-                  className="doc-toc"
-                  aria-label="Language guide table of contents"
-                >
-                  <div className="doc-toc-title">On this page</div>
-                  {languageTocHeadings
-                    .filter((h) => h.level <= 3)
-                    .map((heading) => (
-                      <button
-                        key={heading.id}
-                        type="button"
-                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
-                          activeDocAnchorKey === heading.id ? "active" : ""
-                        }`}
-                        onClick={() => {
-                          setSelectedDocAnchorKey(heading.id);
-                          scrollToDocAnchor(heading.id, "smooth");
-                        }}
-                      >
-                        {heading.title}
-                      </button>
-                    ))}
-                </aside>
-              )}
-            </div>
-          </section>
-        )}
-
-        {tab === "reference" && (
-          <section className="panel">
-            <h1>Comprehensive Reference</h1>
-            <p className="lead">
-              Syntax, semantics, runtime behavior, and interop details.
-            </p>
-            <div className="doc-layout">
-              <div className="doc-main">
-                <MarkdownWithPlayground
-                  markdown={content.docs.reference}
-                  sourcePath="docs/reference.md"
-                  headingPrefix="reference"
-                />
-              </div>
-              {referenceTocHeadings.length > 0 && (
-                <aside
-                  className="doc-toc"
-                  aria-label="Reference table of contents"
-                >
-                  <div className="doc-toc-title">On this page</div>
-                  {referenceTocHeadings
-                    .filter((h) => h.level <= 3)
-                    .map((heading) => (
-                      <button
-                        key={heading.id}
-                        type="button"
-                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
-                          activeDocAnchorKey === heading.id ? "active" : ""
-                        }`}
-                        onClick={() => {
-                          setSelectedDocAnchorKey(heading.id);
-                          scrollToDocAnchor(heading.id, "smooth");
-                        }}
-                      >
-                        {heading.title}
-                      </button>
-                    ))}
-                </aside>
-              )}
-            </div>
-          </section>
+        {DOC_TABS.map(
+          (dt) =>
+            tab === dt.key && (
+              <section className="panel" key={dt.key}>
+                <h1>{dt.title}</h1>
+                <p className="lead">{dt.lead}</p>
+                <div className="doc-layout">
+                  <div className="doc-main">
+                    <MarkdownWithPlayground
+                      markdown={content.docs[dt.key] ?? ""}
+                      sourcePath={dt.sourcePath}
+                      headingPrefix={dt.key}
+                    />
+                  </div>
+                  {(docTocHeadings[dt.key]?.length ?? 0) > 0 && (
+                    <aside
+                      className="doc-toc"
+                      aria-label={`${dt.title} table of contents`}
+                    >
+                      <div className="doc-toc-title">On this page</div>
+                      {(docTocHeadings[dt.key] ?? [])
+                        .filter((h) => h.level <= 3)
+                        .map((heading) => (
+                          <button
+                            key={heading.id}
+                            type="button"
+                            className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
+                              activeDocAnchorKey === heading.id ? "active" : ""
+                            }`}
+                            onClick={() => {
+                              setSelectedDocAnchorKey(heading.id);
+                              scrollToDocAnchor(heading.id, "smooth");
+                            }}
+                          >
+                            {heading.title}
+                          </button>
+                        ))}
+                    </aside>
+                  )}
+                </div>
+              </section>
+            ),
         )}
 
         {tab === "stdlib" && (
