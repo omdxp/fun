@@ -92,6 +92,13 @@ Every `.fn` file that defines `fun main(` shows two buttons above it:
 - **▶ Run** — compiles and runs the file in an integrated terminal (equivalent to `fun -in file.fn`).
 - **⚙ Debug** — compiles with debug info, then launches the native debugger.
 
+Every `test "..."` block gets the same pair, scoped to just that one test:
+
+- **▶ Run Test** — compiles in test mode and runs only the named test in an integrated terminal (`fun -in file.fn -test -- "test name"`).
+- **⚙ Debug Test** — same compile, under the native debugger. Breakpoints inside the test (or in a function it calls) work exactly as in an ordinary Debug session.
+
+Every `fuzz "..."` block gets a **▶ Fuzz** button, which runs that one target (`fun -in file.fn -fuzz -fuzz-target "target name"`). There's no Debug variant for fuzzing: the fuzzing engine's own driver takes over the process and runs indefinitely, so attaching a debugger up front isn't useful the way it is for a single deterministic test — reproduce a crash fuzzing found from its saved input instead, then debug that.
+
 ### Debug experience
 
 Breakpoints are set directly on `.fn` source lines. When a breakpoint is hit:
@@ -101,19 +108,22 @@ Breakpoints are set directly on `.fn` source lines. When a breakpoint is hit:
 - **Watch** and **Debug Console** expressions also display Fun types.
 - Internal C boilerplate frames (e.g. async helpers) are marked as secondary and collapsed by default.
 
-### Debugging async functions
+### Debugging async functions and `fork`
 
-`await` expressions lower to a chain of C trampoline functions (`__fun_async_call_`, `__fun_async_spawn_`, `__fun_async_entry_`, then the real function body). The actual function call goes through `pthread_create` (or `CreateThread` on Windows) — which is opaque C runtime code the debugger cannot step through at the Fun source level.
+`await` expressions (and `fork`, which spawns an async function the same way) lower to a chain of C trampoline functions (`__fun_async_call_`, `__fun_async_spawn_`, `__fun_async_entry_`, then the real function body). The actual function call goes through `pthread_create` (or `CreateThread` on Windows) — which is opaque C runtime code the debugger cannot step through at the Fun source level.
 
-This means **step into on an `await` line will not automatically land inside the called async function**. Instead the debugger follows the C runtime path:
+This means **step into on an `await`/`fork` line will not automatically land inside the called async function**. Instead the debugger follows the C runtime path:
 
 ```
 await to_consumer.send_async(out);   // step into → enters trampoline C code
+fork worker(&wg);                    // same story
 ```
+
+Every line of the trampoline itself is still correctly attributed back to the async function's own declaration line (so stepping through it doesn't show garbage or unrelated source), but it's still generated C, not your function's own body.
 
 **The right way to debug async calls:**
 
-1. **Set a breakpoint inside the async function you want to inspect** (e.g. a line inside `send_async` in `channel.fn`). The debugger will break there when the spawned thread executes it, and you can step normally from that point.
+1. **Set a breakpoint inside the async function you want to inspect** (e.g. a line inside `send_async` in `channel.fn`, or inside the function `fork` spawns). The debugger will break there when the spawned thread executes it, and you can step normally from that point.
 2. Alternatively, set a breakpoint on the line *after* the `await` to resume once the call has returned.
 
 Step-over (`F10`) on an `await` line works correctly — it blocks until the async call completes and advances to the next Fun source line.
@@ -145,6 +155,8 @@ Open the Command Palette and run:
 - **Fun: Show Language Server Output**
 - **Fun: Run** — run the current file
 - **Fun: Debug** — debug the current file
+
+The per-test/per-fuzz-target commands (**Run Test**, **Debug Test**, **Fuzz**) aren't in the Command Palette — they need a specific test/fuzz block's name, so they only appear as codelenses above each `test`/`fuzz` block (see [Run and Debug](#run-and-debug)).
 
 ## Troubleshooting
 
