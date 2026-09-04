@@ -59,7 +59,8 @@ pub compound Options {
   // Report declarations nothing reads.
   bin warn_unused;
   // Like `warn_unused`, but keeps reporting them even when the file has
-  // an unrelated type error elsewhere (used by fls).
+  // an unrelated type error elsewhere. fls's own diagnose() implements
+  // the identical idea separately, for the editor rather than the CLI.
   bin warn_unused_lenient;
   // Print the parsed AST before compiling.
   bin show_ast;
@@ -1144,7 +1145,8 @@ pub fun run_tests(
   bin no_exec,
   str out_override,
   bin warn_unused,
-  bin warn_unused_lenient
+  bin warn_unused_lenient,
+  bin keep_c
 ) num {
   Vec<Define> defines;
   defines.init(0);
@@ -1184,7 +1186,9 @@ pub fun run_tests(
 
   str exe = default_exe_path(input, ".test");
   let cc_code = compile_c_to_exe(c_path, exe, debug_info);
-  remove_file(c_path);
+  if !keep_c {
+    remove_file(c_path);
+  }
   if cc_code != 0 {
     ret 1;
   }
@@ -1208,7 +1212,8 @@ pub fun run_fuzz(
   bin no_exec,
   str out_override,
   bin warn_unused,
-  bin warn_unused_lenient
+  bin warn_unused_lenient,
+  bin keep_c
 ) num {
   Vec<Define> defines;
   defines.init(0);
@@ -1248,7 +1253,9 @@ pub fun run_fuzz(
 
   str exe = default_exe_path(input, ".fuzz");
   let cc_code = compile_c_to_fuzz_exe(c_path, exe, debug_info);
-  remove_file(c_path);
+  if !keep_c {
+    remove_file(c_path);
+  }
   if cc_code != 0 {
     ret 1;
   }

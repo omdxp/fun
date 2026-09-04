@@ -723,13 +723,22 @@ wait to avoid warning on slow-but-live operations.
 
 ## CLI
 ```
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-fuzz] [-fuzz-target <name>] [-help]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-version] [-- <program args>]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
 fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
+- `-no-exec`/`-outf`/`-out` apply the same way under `-test`/`-fuzz` (both the
+  single-file and `test`/`fuzz` subcommand forms) as they do for a plain
+  compile: `-no-exec` stops right after writing the C file instead of also
+  compiling and running it, `-out` names where it's written, and `-outf`
+  (or naming `-out` at all) keeps it afterward instead of deleting it once
+  compiled. This is what the VS Code extension's own Debug Test command
+  relies on to get just the C file to compile and debug itself.
+- `-warn-unused`/`-warn-unused-lenient` also apply under `-test`/`-fuzz`,
+  both forms.
 
 ## Errors and Warnings
 - Type mismatches, unknown symbols, and incomplete quirk implementations are errors.
