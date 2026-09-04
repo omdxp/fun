@@ -488,8 +488,15 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
       argv_args.push("-g0");
     }
     argv_args.push("-pthread");
-    argv_args.push("-lm");
-    if runtime_backend_is_windows() {
+    // Windows has no standalone math library to link against (its math
+    // functions already live in the CRT); clang there still links via
+    // lld-link in MSVC-ABI mode even without `cl.exe` itself, and that
+    // linker resolves `-lm` by searching for a literal `m.lib`, which
+    // doesn't exist on Windows at all - unlike POSIX, where `-lm` is
+    // always required and always resolves against a real libm.
+    if !runtime_backend_is_windows() {
+      argv_args.push("-lm");
+    } else {
       argv_args.push("-lws2_32");
     }
   }
