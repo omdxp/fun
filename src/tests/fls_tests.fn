@@ -1429,6 +1429,45 @@ test "an outline lists what a file declares, by kind" {
   assert contains(out, `"name":"helper","kind":12`), "expected the function";
 }
 
+test "an outline nests a compound's own fields and its impl's own methods as one tree, not two flat lists" {
+  // User-reported (stdlib/std/vec.fn): fields and methods showed
+  // neither nested under their own compound in the editor's outline -
+  // document_symbols returned the protocol's flat, deprecated
+  // SymbolInformation form (a containerName string, no real parent-
+  // child structure), which a client has to guess a tree back from
+  // using range containment; every entry here shared close to the
+  // same range, so nothing reliable to guess from. Fixed by returning
+  // the real nested DocumentSymbol form, with fields, variants, and an
+  // impl's own methods (wherever the impl block itself sits in the
+  // file) as actual JSON children of their own compound/enum entry.
+  str src = `compound Buffer {
+  `  num len;
+  `  num cap;
+  `}
+  `impl Buffer {
+  `  pub push(num n) { self.len = self.len + n; }
+  `  pub clear() { self.len = 0; }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///nested.fn";
+  doc.path = "nested.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(&reads, doc);
+  num buffer_at = index_of_str(out, `"name":"Buffer"`);
+  assert buffer_at >= 0, "expected Buffer's own entry";
+  num children_at = index_of_str(out, `"children":[`);
+  assert children_at > buffer_at, "expected a children array right on Buffer's own entry";
+  str children_text = substr(out, children_at, len(out) - children_at);
+  assert contains(children_text, `"name":"len","kind":8`), "expected len nested as a field";
+  assert contains(children_text, `"name":"cap","kind":8`), "expected cap nested as a field";
+  assert contains(children_text, `"name":"push","kind":6`), "expected push nested as a method";
+  assert contains(children_text, `"name":"clear","kind":6`), "expected clear nested as a method";
+}
+
 test "a method is listed under the name it was written as" {
   str src = `compound Buffer {
   `  num len;
@@ -1446,10 +1485,13 @@ test "a method is listed under the name it was written as" {
 
   str out = document_symbols(&reads, doc);
   // A method is stored mangled, as `Buffer__clear`; an outline shows the
-  // name in the source, with the type beside it.
+  // name in the source, nested under Buffer's own entry.
   assert contains(out, `"name":"clear","kind":6`), "expected the written name";
   assert !contains(out, "Buffer__clear"), "expected the mangling not to reach the client";
-  assert contains(out, `"containerName":"Buffer"`), "expected the type it belongs to";
+  assert contains(out, `"name":"Buffer","kind":23`), "expected Buffer's own entry";
+  num buffer_at = index_of_str(out, `"name":"Buffer"`);
+  num clear_at = index_of_str(out, `"name":"clear"`);
+  assert buffer_at >= 0 && clear_at > buffer_at, "expected clear nested inside Buffer's own children";
 }
 
 test "a quirk impl's method is listed under the name it was written as, not either mangled segment" {
@@ -1477,9 +1519,13 @@ test "a quirk impl's method is listed under the name it was written as, not eith
   doc.version = 1;
 
   str out = document_symbols(&reads, doc);
-  assert contains(out, `"name":"len","kind":6,"containerName":"Buffer"`), "expected the written name, not a mangled remainder";
+  assert contains(out, `"name":"len","kind":6`), "expected the written name, not a mangled remainder";
   assert !contains(out, "Sized__len"), "expected no quirk-mangled remainder to leak through";
   assert !contains(out, "Buffer__Sized__len"), "expected no fully mangled name to leak through";
+  num buffer_at = index_of_str(out, `"name":"Buffer"`);
+  assert buffer_at >= 0, "expected Buffer's own entry";
+  str after_buffer = substr(out, buffer_at, len(out) - buffer_at);
+  assert contains(after_buffer, `"name":"len","kind":6`), "expected the impl's own method nested inside Buffer's own children, not just Sized's own signature";
 }
 
 test "each field and variant in an outline carries its own position, not the whole declaration's" {
@@ -1507,13 +1553,13 @@ test "each field and variant in an outline carries its own position, not the who
   doc.version = 1;
 
   str out = document_symbols(&reads, doc);
-  assert contains(out, `"name":"x","kind":8,"containerName":"Point","location":{"uri":"file:///positions.fn","range":{"start":{"line":1`), "expected x's own line, not Point's";
-  assert contains(out, `"name":"y","kind":8,"containerName":"Point","location":{"uri":"file:///positions.fn","range":{"start":{"line":2`), "expected y's own line, not Point's";
-  assert contains(out, `"name":"Red","kind":22,"containerName":"Color","location":{"uri":"file:///positions.fn","range":{"start":{"line":5`), "expected Red's own line, not Color's";
-  assert contains(out, `"name":"Green","kind":22,"containerName":"Color","location":{"uri":"file:///positions.fn","range":{"start":{"line":6`), "expected Green's own line, not Color's";
+  assert contains(out, `"name":"x","kind":8,"range":{"start":{"line":1`), "expected x's own line, not Point's";
+  assert contains(out, `"name":"y","kind":8,"range":{"start":{"line":2`), "expected y's own line, not Point's";
+  assert contains(out, `"name":"Red","kind":22,"range":{"start":{"line":5`), "expected Red's own line, not Color's";
+  assert contains(out, `"name":"Green","kind":22,"range":{"start":{"line":6`), "expected Green's own line, not Color's";
 }
 
-test "an outline carries a location a client can jump to" {
+test "an outline entry carries a range and a selectionRange a client can jump to" {
   str src = `fun helper() num { ret 1; }`;
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -1523,11 +1569,12 @@ test "an outline carries a location a client can jump to" {
   doc.text = src;
   doc.version = 1;
 
-  // The flat form of the reply is what the protocol reads by default,
-  // and every entry in it carries its own location.
+  // The nested DocumentSymbol form carries a range/selectionRange pair
+  // directly on each entry, not a separate SymbolInformation-style
+  // location wrapper.
   str out = document_symbols(&reads, doc);
-  assert contains(out, `"location"`), "expected a location on the entry";
-  assert contains(out, `"uri":"file:///loc.fn"`), "expected the document's own uri";
+  assert contains(out, `"range"`), "expected a range on the entry";
+  assert contains(out, `"selectionRange"`), "expected a selectionRange on the entry";
 }
 
 test "a ranged edit against a document with no baseline is refused, not applied against a guess" {

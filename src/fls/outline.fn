@@ -3,10 +3,19 @@
 // What a file declares, in the order it declares it, so a client can
 // show an outline and jump around by name.
 // 
-// The list is sent as the flat form the protocol allows, each entry
-// carrying its own location. The nested form omits locations, and a
-// client that reads the reply as the flat one then has nothing to jump
-// to.
+// `textDocument/documentSymbol` is sent as the protocol's own nested
+// `DocumentSymbol` tree (a field/variant/quirk-method-signature under
+// its own compound/enum/quirk, an impl's own method under whichever
+// compound or enum it targets), not the flat, deprecated
+// `SymbolInformation` form: a client would otherwise have to guess the
+// same tree back from a flat list's ranges, which is exactly the
+// "fields and methods don't show under their compound" bug this once
+// was - two entries at the very same position (a field and its
+// compound, which carried no position of its own before) gave a client
+// nothing reliable to guess containment from. Every mainstream client
+// (this project targets) supports the nested form; `workspace/symbol`
+// has no such nested variant in the protocol at all, so `workspace_symbols`
+// below stays flat.
 
 imp documents;
 imp analysis;
@@ -14,7 +23,6 @@ imp symbols;
 imp symbol_table;
 imp positions;
 imp protocol;
-imp uri;
 imp ..ast.ast;
 imp ..parser.import_resolver;
 imp std.string;
@@ -36,17 +44,21 @@ enum OutlineKind {
   Struct = 23,
 }
 
-// One entry in the outline.
+// One entry in the outline: a `DocumentSymbol`. `range` and
+// `selectionRange` are the same span (the name itself) - nothing in the
+// AST tracks a whole declaration's own end position (where its closing
+// brace sits) to report a wider one, and the protocol only requires
+// `range` to contain `selectionRange`, which a single span trivially
+// does.
 compound OutlineEntry {
   str name;
   OutlineKind kind;
-  // The type a method or field belongs to, which a client shows beside
-  // the name; empty for a declaration that stands on its own.
-  str container;
   Pos pos;
+  Vec<OutlineEntry> children;
 }
 
-// Everything `doc` declares, as the result a client is sent.
+// Everything `doc` declares, as the nested `DocumentSymbol[]` tree the
+// protocol's own hierarchical form expects.
 pub fun document_symbols(AnalysisCache* cache, Document doc) str {
   Analyzed read = cache.of(doc);
   if !read.parsed {
@@ -59,38 +71,53 @@ pub fun document_symbols(AnalysisCache* cache, Document doc) str {
   defer found.free();
   _collect(&program.entry_nodes, doc.path, &found);
 
-  str document_uri = path_to_uri(doc.path);
   StringBuilder b = string_builder_init(256);
   b.append("[");
   num i = 0;
   for i < found.len {
-    OutlineEntry s = found.get(i);
     if i > 0 {
       b.append(",");
     }
+    _write_entry(&b, found.get(i), doc.text);
     i = i + 1;
-    Span span = span_of_pos(s.pos, len(s.name), doc.text);
-    b.append(`{"name":`);
-    json_quote_into(&b, s.name);
-    b.append(`,"kind":`);
-    b.append_num(s.kind);
-    b.append(`,"containerName":`);
-    json_quote_into(&b, s.container);
-    b.append(`,"location":{"uri":`);
-    json_quote_into(&b, document_uri);
-    b.append(`,"range":{"start":{"line":`);
-    b.append_num(span.line);
-    b.append(`,"character":`);
-    b.append_num(span.start);
-    b.append(`},"end":{"line":`);
-    b.append_num(span.line);
-    b.append(`,"character":`);
-    b.append_num(span.end);
-    b.append("}}}}");
   }
   b.append("]");
-  free(document_uri);
   ret b.build();
+}
+
+// Writes one `DocumentSymbol`, recursing into its own `children`.
+fun _write_entry(StringBuilder* b, OutlineEntry s, str text) {
+  Span span = span_of_pos(s.pos, len(s.name), text);
+  b.append(`{"name":`);
+  json_quote_into(b, s.name);
+  b.append(`,"kind":`);
+  b.append_num(s.kind);
+  b.append(`,"range":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"selectionRange":{"start":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.start);
+  b.append(`},"end":{"line":`);
+  b.append_num(span.line);
+  b.append(`,"character":`);
+  b.append_num(span.end);
+  b.append(`}},"children":[`);
+  num i = 0;
+  for i < s.children.len {
+    if i > 0 {
+      b.append(",");
+    }
+    _write_entry(b, s.children.get(i), text);
+    i = i + 1;
+  }
+  b.append("]}");
 }
 
 // `d`'s own protocol `SymbolKind`, mirroring `_collect`'s own
@@ -256,9 +283,23 @@ fun _is_subsequence(str needle, str haystack) bin {
   ret ni == nlen;
 }
 
-// What `nodes` declares in `file`, in source order. Only the file's own
-// declarations are listed: what it imports belongs to the outline of the
-// file that declares it.
+// What `nodes` declares in `file`, in source order, as a tree - a
+// field under its own compound, a variant under its own enum, a
+// method-signature under its own quirk, an impl's own method under
+// whichever compound or enum it targets. Only the file's own top-level
+// declarations are listed: what it imports belongs to the outline of
+// the file that declares it.
+// 
+// Two passes, since an impl targeting a compound or enum can (and
+// commonly does) appear anywhere relative to that declaration's own
+// position in the file: the first collects every compound/enum/quirk/
+// function/global this file declares, with its own directly-nested
+// children (fields, variants, quirk method signatures); the second
+// walks every impl block and nests its methods under the matching
+// compound/enum entry the first pass already built, falling back to a
+// plain top-level entry when the type an impl targets isn't declared
+// in this same file (so a method never just disappears - it's simply
+// not nested under a declaration this document doesn't have).
 fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
   num i = 0;
   for i < nodes.len {
@@ -274,7 +315,7 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
         }
       }
       .Compound(c) -> {
-        out.push(_entry(c.name, .Struct, n.pos));
+        OutlineEntry e = _entry(c.name, .Struct, n.pos);
         num f = 0;
         for f < c.fields.len {
           CompoundField cf = c.fields.get(f);
@@ -283,24 +324,69 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
           if cf.has_pos {
             field_pos = cf.pos;
           }
-          out.push(_entry_in(cf.name, .Field, c.name, field_pos));
+          e.children.push(_entry(cf.name, .Field, field_pos));
         }
+        out.push(e);
       }
-      .Enum(e) -> {
-        out.push(_entry(e.name, .Enumeration, n.pos));
+      .Enum(en) -> {
+        OutlineEntry e = _entry(en.name, .Enumeration, n.pos);
         num v = 0;
-        for v < e.variants.len {
-          EnumVariant variant = e.variants.get(v);
+        for v < en.variants.len {
+          EnumVariant variant = en.variants.get(v);
           v = v + 1;
           Pos variant_pos = n.pos;
           if variant.has_pos {
             variant_pos = variant.pos;
           }
-          out.push(_entry_in(variant.name, .EnumMember, e.name, variant_pos));
+          e.children.push(_entry(variant.name, .EnumMember, variant_pos));
         }
+        out.push(e);
       }
-      .Quirk(q) -> { out.push(_entry(q.name, .Interface, n.pos)); }
+      .Quirk(q) -> {
+        OutlineEntry e = _entry(q.name, .Interface, n.pos);
+        num qm = 0;
+        for qm < q.methods.len {
+          QuirkMethodSig m = q.methods.get(qm);
+          qm = qm + 1;
+          // Neither carries its own position in the tree - unlike a
+          // compound field or an enum variant, falls back to the
+          // quirk's own.
+          e.children.push(_entry(m.name, .Method, n.pos));
+        }
+        out.push(e);
+      }
+      .Variable(v) -> {
+        OutlineKind kind = .Variable;
+        if v.is_const {
+          kind = .Constant;
+        }
+        out.push(_entry(v.name, kind, n.pos));
+      }
+      _ -> {}
+    }
+  }
+
+  num j = 0;
+  for j < nodes.len {
+    Node n = nodes.get(j);
+    j = j + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
       .Impl(block) -> {
+        num target_idx = -1;
+        num oi = 0;
+        for oi < out.len {
+          if equals(out.get(oi).name, block.type_name) {
+            target_idx = oi;
+          }
+          oi = oi + 1;
+        }
+        str quirk_name = "";
+        if block.has_quirk_name {
+          quirk_name = block.quirk_name;
+        }
         num m = 0;
         for m < block.methods.len {
           Node* method = block.methods.get(m);
@@ -315,28 +401,22 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
                 // `Type__method` or, for a quirk impl,
                 // `Type__Quirk__method`; a reader wants the name they
                 // wrote, not either mangled form.
-                str quirk_name = "";
-                if block.has_quirk_name {
-                  quirk_name = block.quirk_name;
-                }
-                out.push(_entry_in(
+                OutlineEntry me = _entry(
                   _method_name(f.name, block.type_name, quirk_name),
                   .Method,
-                  block.type_name,
                   method.pos
-                ));
+                );
+                if target_idx >= 0 {
+                  OutlineEntry* target = &out.data[target_idx];
+                  target.children.push(me);
+                } else {
+                  out.push(me);
+                }
               }
             }
             _ -> {}
           }
         }
-      }
-      .Variable(v) -> {
-        OutlineKind kind = .Variable;
-        if v.is_const {
-          kind = .Constant;
-        }
-        out.push(_entry(v.name, kind, n.pos));
       }
       _ -> {}
     }
@@ -369,14 +449,10 @@ fun _method_name(str mangled, str type_name, str quirk_name) str {
 }
 
 fun _entry(str name, OutlineKind kind, Pos pos) OutlineEntry {
-  ret _entry_in(name, kind, "", pos);
-}
-
-fun _entry_in(str name, OutlineKind kind, str container, Pos pos) OutlineEntry {
   OutlineEntry s;
   s.name = name;
   s.kind = kind;
-  s.container = container;
   s.pos = pos;
+  s.children.init(0);
   ret s;
 }
