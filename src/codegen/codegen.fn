@@ -1224,6 +1224,16 @@ impl Codegen {
     resolved_field_type_names.init(0);
     Vec<bin> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
+    // Each field's substituted, structural `DataType` (generic_args
+    // included), passed to `record_compound_typed` below instead of
+    // `record_compound` - a later chained field access like `list.head`
+    // needs `.generic_args` intact on `head`'s recorded type to itself
+    // infer a generic function call's type parameter (`print_list<T>`
+    // called with `list.head`); the flat name-only registration
+    // `record_compound` produces has no `generic_args` for that
+    // inference to read.
+    Vec<DataType> resolved_field_dtypes;
+    resolved_field_dtypes.init(0);
     // Star count for each field's C declaration: an array-decayed field
     // substituting a pointer-typed argument needs both the array decay's
     // star and the argument's pointer depth (`Vec<Node*>`'s `data` field
@@ -1234,6 +1244,19 @@ impl Codegen {
     // Pass 1: resolve every field's substituted type before `self.state`
     // is swapped to the scratch buffer below, so a nested instantiation
     // still splices against the real buffer.
+    // Held for the whole loop below (not just the nested-generic branch
+    // that used to set the first three of these per-field): every
+    // field's substituted `DataType` is now built from this same
+    // context, via `resolve_type_subst`.
+    let prev_subst_params = self.type_subst_param_names;
+    let prev_subst_arg_names = self.type_subst_arg_type_strs;
+    let prev_subst_arg_ptrs = self.type_subst_arg_is_pointer;
+    let prev_subst_arg_dtypes = self.type_subst_arg_dtypes;
+    self.type_subst_param_names = type_params;
+    self.type_subst_arg_type_strs = arg_type_names;
+    self.type_subst_arg_is_pointer = arg_is_pointer;
+    self.type_subst_arg_dtypes = arg_dtypes;
+
     num fi = 0;
     for fi < field_names.len {
       str ftype = field_type_names.get(fi);
@@ -1245,6 +1268,9 @@ impl Codegen {
       if fptr {
         ptr_depth = 1;
       }
+      let field_dt = field_dtypes.get(fi);
+      let subst_field_dt = self.resolve_type_subst(*field_dt);
+      resolved_field_dtypes.push(subst_field_dt);
       num pi = 0;
       for pi < type_params.len {
         if equals(type_params.get(pi), ftype) {
@@ -1266,18 +1292,8 @@ impl Codegen {
       // reuse the substitution machinery a generic impl method's body
       // gets.
       if !matched_bare_param {
-        let field_dt = field_dtypes.get(fi);
         if field_dt.generic_args.len > 0 {
-          let prev_params = self.type_subst_param_names;
-          let prev_arg_names = self.type_subst_arg_type_strs;
-          let prev_arg_ptrs = self.type_subst_arg_is_pointer;
-          self.type_subst_param_names = type_params;
-          self.type_subst_arg_type_strs = arg_type_names;
-          self.type_subst_arg_is_pointer = arg_is_pointer;
           let nested_name = self.resolve_type_name(*field_dt);
-          self.type_subst_param_names = prev_params;
-          self.type_subst_arg_type_strs = prev_arg_names;
-          self.type_subst_arg_is_pointer = prev_arg_ptrs;
           if nested_name.is_some() {
             resolved_type = nested_name.unwrap();
             resolved_ptr = dtype_is_pointer(*field_dt) || fptr;
@@ -1307,6 +1323,11 @@ impl Codegen {
       resolved_field_ptr_depth.push(ptr_depth);
       fi = fi + 1;
     }
+
+    self.type_subst_param_names = prev_subst_params;
+    self.type_subst_arg_type_strs = prev_subst_arg_names;
+    self.type_subst_arg_is_pointer = prev_subst_arg_ptrs;
+    self.type_subst_arg_dtypes = prev_subst_arg_dtypes;
 
     // Pass 2: write the struct body verbatim from the resolved vectors
     // above, so no further resolution (and no recursive instantiation)
@@ -1369,11 +1390,12 @@ impl Codegen {
     self.state = saved_state;
     self.emit_hoisted(typedef_scratch.out.build());
 
-    self.record_compound(
+    self.record_compound_typed(
       mangled_name,
       resolved_field_names,
       resolved_field_type_names,
-      resolved_field_is_pointer
+      resolved_field_is_pointer,
+      resolved_field_dtypes
     );
     self.maybe_instantiate_generic_impl_methods(
       dt.type_str,
@@ -7064,11 +7086,19 @@ impl Codegen {
       .Variable(v) -> {
         self.state.write_indent();
         // `let NAME = <expr>;` (the `__let_infer__` sentinel from
-        // `parse_let`) always emits GNU C's `__auto_type`, letting the C
-        // compiler do the real inference. `infer_let_expr_type` is tried
-        // only for this codegen's own bookkeeping, so a later shorthand
-        // or method call on `NAME` resolves; when it infers nothing,
-        // `NAME` simply isn't a known local afterward.
+        // `parse_let`) writes `infer_let_expr_type`'s resolved Fun type
+        // when it can determine one, so the binding's C type matches its
+        // *declared* Fun type rather than whatever native C type its
+        // initializer expression happens to carry (a bodiless FFI
+        // declaration like `pub fun htons(num hostshort) num;` really
+        // links against libc's own `uint16_t htons(uint16_t)` - letting
+        // `__auto_type` see through to that real C prototype silently
+        // narrows the local to 16 bits and corrupts later 64-bit
+        // arithmetic on it, even though `num prt = htons(x);` with an
+        // explicit annotation was always correct). GNU C's `__auto_type`
+        // is still the fallback whenever inference can't determine a
+        // type at all, so unusual expression shapes this can't type
+        // still resolve exactly as before.
         bin is_let = equals(v.var_type.type_str, "__let_infer__");
         bin have_resolved = false;
         str resolved_name = "";
@@ -7144,25 +7174,32 @@ impl Codegen {
         if let_is_bracket_literal {
           self.state.write(let_lit_elem_c_type);
         } elif is_let {
-          if self.msvc_mode && v.has_val {
-            let msvc_idt_opt = self.infer_let_expr_type(v.val);
-            if msvc_idt_opt.is_some() {
-              let msvc_idt = msvc_idt_opt.unwrap();
-              let msvc_wt = self.write_type(msvc_idt);
-              if msvc_wt.is_some() {
-                let msvc_subst = self.resolve_type_subst(msvc_idt);
-                resolved_name = msvc_wt.unwrap();
-                resolved_ptr = dtype_is_pointer(msvc_subst);
-                resolved_dtype = .Some(msvc_subst);
+          bin let_resolved_via_infer = false;
+          if v.has_val {
+            let let_idt_opt = self.infer_let_expr_type(v.val);
+            if let_idt_opt.is_some() {
+              let let_idt = let_idt_opt.unwrap();
+              let let_wt = self.write_type(let_idt);
+              if let_wt.is_some() {
+                let let_subst = self.resolve_type_subst(let_idt);
+                resolved_name = let_wt.unwrap();
+                resolved_ptr = dtype_is_pointer(let_subst);
+                resolved_dtype = .Some(let_subst);
                 have_resolved = true;
-              } else {
-                self.state.write("int64_t");
+                let_resolved_via_infer = true;
               }
-            } else {
-              self.state.write("int64_t");
             }
-          } else {
-            self.state.write("__auto_type");
+          }
+          if !let_resolved_via_infer {
+            // MSVC has no `__auto_type` escape hatch, so a local whose
+            // type genuinely can't be inferred still needs a concrete
+            // (if imprecise) C type; every other target can just let
+            // the C compiler do the real inference instead of guessing.
+            if self.msvc_mode {
+              self.state.write("int64_t");
+            } else {
+              self.state.write("__auto_type");
+            }
           }
         } else {
           let wt = self.write_type(*v.var_type);
@@ -10739,12 +10776,28 @@ impl Codegen {
         // For `let m = f[0];` with a pointer-typed `f`, C's `pointer[0]`
         // is `*pointer`, a value of the pointee's type. Also handles field
         // array subscripts like `self.workers[i]` where the field's element
-        // type is resolved through the field chain.
+        // type is resolved through the field chain. A *scalar* `str`
+        // receiver is a special case within that: Fun doesn't treat it as
+        // a pointer type at all despite its `char*` C spelling (see
+        // `write_type`'s own `str` handling), so `p`/`is_pointer` reads
+        // false for it, meaning it would otherwise skip the pointer-elem
+        // branch below entirely - indexing it yields one `chr`, not
+        // another `str`. A `str[]`/`Vec<str>` receiver's element type
+        // name is *also* the bare string "str", but array-decays to a
+        // real pointer (`p`/`is_pointer` true there), so it still needs
+        // the pointer-elem branch below, unchanged: indexing that one
+        // really does yield a `str` element, not a `chr`.
         if equals(e.op, "[]") && e.has_left {
           fit e.left.kind {
             .Identifier(recv_name) -> {
               let t = self.lookup_local_type_name(recv_name);
               let p = self.lookup_local_is_pointer(recv_name);
+              if t.is_some() && equals(t.unwrap(), "str") && p.is_some() &&
+              !p.unwrap() {
+                DataType dt = dtype_new();
+                dt.type_str = "chr";
+                ret .Some(dt);
+              }
               if t.is_some() && p.is_some() && p.unwrap() {
                 DataType dt = dtype_new();
                 dt.type_str = t.unwrap();
@@ -10757,6 +10810,11 @@ impl Codegen {
               let chain = self.resolve_field_chain(e.left);
               if chain.is_some() {
                 let cr = chain.unwrap();
+                if equals(cr.type_name, "str") && !cr.is_pointer {
+                  DataType dt = dtype_new();
+                  dt.type_str = "chr";
+                  ret .Some(dt);
+                }
                 if cr.dtype.is_some() {
                   ret .Some(cr.dtype.unwrap());
                 }
@@ -13306,7 +13364,7 @@ test "emit_statement emits a variable declaration with an initializer" {
   assert equals(st.out.build(), "int64_t x = 5;\n"), "expected 'int64_t x = 5;\\n'";
 }
 
-test "emit_statement emits a 'let' declaration as '__auto_type', inferring its type from a plain function call" {
+test "emit_statement infers a 'let' declaration's type from a plain function call's declared return type" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -13351,7 +13409,7 @@ test "emit_statement emits a 'let' declaration as '__auto_type', inferring its t
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
-  assert equals(st.out.build(), "__auto_type r = mk();\n"), "expected '__auto_type', not the '__let_infer__' sentinel, in the emitted C";
+  assert equals(st.out.build(), "int64_t r = mk();\n"), "expected the C type resolved from mk's own declared return type, not '__auto_type' or the '__let_infer__' sentinel, in the emitted C - __auto_type would see through to a bodiless FFI function's real, possibly narrower, native C return type instead of the function's declared Fun type";
   assert equals(g.lookup_local_type_name("r").unwrap(), "num"), "expected 'r' inferred as 'num' from mk's own declared return type, so a later fit/field access on 'r' still resolves";
 }
 
@@ -13409,7 +13467,7 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
-  assert equals(st.out.build(), "__auto_type ct = self->current_token;\n"), "expected '__auto_type', not the '__let_infer__' sentinel, in the emitted C";
+  assert equals(st.out.build(), "Token ct = self->current_token;\n"), "expected the C type resolved from 'current_token's own declared field type, not '__auto_type' or the '__let_infer__' sentinel, in the emitted C";
   assert equals(g.lookup_local_type_name("ct").unwrap(), "Token"), "expected 'ct' inferred as 'Token' from 'self.current_token's own declared field type, so a later 'ct.pos' read still resolves";
 }
 
@@ -13647,7 +13705,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   let out = st.out.build();
-  assert contains(out, "__auto_type last = Holder__get(&h);"), "expected '__auto_type', not '__let_infer__', in the emitted C";
+  assert contains(out, "Option last = Holder__get(&h);"), "expected the C type resolved from Holder__get's own declared return type, not '__auto_type' or '__let_infer__', in the emitted C";
   assert contains(out, "if (last.tag == Option_Some)"), "expected the fit's bare '.Some' pattern resolved against Option, inferred from Holder__get's own declared return type";
 }
 

@@ -3242,7 +3242,7 @@ fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, nu
         if !covers_body(n, td.body, file, line) {
           continue;
         }
-        let found = _lookup_in_body(td.body, name, program, file, line);
+        let found = _lookup_in_body(tokens, td.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -3259,7 +3259,7 @@ fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, nu
         if param.is_some() {
           ret param;
         }
-        let found = _lookup_in_body(fz.body, name, program, file, line);
+        let found = _lookup_in_body(tokens, fz.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -3331,7 +3331,7 @@ fun _lookup_in_function(
     }
   }
   if f.has_body {
-    let found = _lookup_in_body(f.body, name, program, file, line);
+    let found = _lookup_in_body(tokens, f.body, name, program, file, line);
     if found.is_some() {
       ret found;
     }
@@ -3557,7 +3557,14 @@ fun _last_line(Node* body) num {
 
 // A variable declared anywhere in `body`, including inside a nested
 // block, since a name is in scope for everything that follows it.
-fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+fun _lookup_in_body(
+  Vec<Token>* tokens,
+  Node* body,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
   if body == nil {
     ret .None;
   }
@@ -3576,7 +3583,7 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        let found = _lookup_in_body(block.statements.get(i), name, program, file, line);
+        let found = _lookup_in_body(tokens, block.statements.get(i), name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -3602,7 +3609,7 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
         if start > 0 && !(line >= start && line <= last) {
           continue;
         }
-        let found = _lookup_in_body(branch.body, name, program, file, line);
+        let found = _lookup_in_body(tokens, branch.body, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -3619,13 +3626,14 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
           if equals(fr.index_name, name) {
             ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
           }
-          ret _lookup_in_body(fr.body, name, program, file, line);
+          ret _lookup_in_body(tokens, fr.body, name, program, file, line);
         }
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";
           bin is_map = fi.has_index_name &&
             _for_iter_map_kv(
+            tokens,
             fi.iterable,
             program,
             file,
@@ -3643,7 +3651,7 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
           if equals(fi.item_name, name) {
             str item_type = map_value;
             if !is_map {
-              item_type = _for_iter_item_type(fi.iterable, program, file, line);
+              item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
             }
             str detail = name;
             if !equals(item_type, "") {
@@ -3651,15 +3659,15 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
             }
             ret .Some(_declaration(name, .Local, detail, body.pos));
           }
-          ret _lookup_in_body(fi.body, name, program, file, line);
+          ret _lookup_in_body(tokens, fi.body, name, program, file, line);
         }
-        .Cond(fc) -> { ret _lookup_in_body(fc.body, name, program, file, line); }
+        .Cond(fc) -> { ret _lookup_in_body(tokens, fc.body, name, program, file, line); }
       }
     }
     _ -> {
       let nested = single_nested_body(body);
       if nested.is_some() {
-        ret _lookup_in_body(nested.unwrap(), name, program, file, line);
+        ret _lookup_in_body(tokens, nested.unwrap(), name, program, file, line);
       }
     }
   }
@@ -3676,7 +3684,85 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
 // and this returns false for anything else (a Vec/Set/array, or
 // deeper than a bare local), leaving the existing index-is-num
 // assumption alone for those.
+// The full declared-type detail string ("Vec<num> ps", "num[] arr",
+// "Map<str, num> counts") of a for-loop's own iterable expression, for
+// either a bare local (`for x : arr`) or a one-level field chain
+// (`for x : self.arr`) - the two shapes a for-loop's iterable actually
+// takes in practice. Unlike `_expr_type_name`, which deliberately
+// strips generic args for its own `fit`-subject purpose, this keeps
+// them intact: `_for_iter_item_type`/`_for_iter_map_kv` need the
+// iterable's own element/key/value types, not just its bare base name.
+// `tokens` (real, not `nil`) is what lets a `let`-declared iterable's
+// type resolve through `_lookup_local`'s own `__let_infer__` handling,
+// instead of leaving it unresolved.
+fun _for_iter_declared_detail(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* iterable,
+  str file,
+  num line
+) str {
+  if iterable == nil {
+    ret "";
+  }
+  fit iterable.kind {
+    .Identifier(s) -> {
+      let found = _lookup_local(tokens, program, s, file, line);
+      if found.is_none() {
+        ret "";
+      }
+      Declaration d = found.unwrap();
+      // A `let`-declared iterable's AST-recorded type is still the
+      // unresolved `__let_infer__` sentinel at this point - `d.detail`
+      // reads that literal text, not an actual type, unless resolved
+      // here the same way `type_name_of_local` already does for every
+      // other `let`-inference call site in this file. Kept as "Type
+      // name" detail text (generic args intact), not bare-stripped
+      // like `type_name_of_local`'s own return: `_for_iter_item_type`/
+      // `_for_iter_map_kv` read the element/key/value type back out of
+      // it with `bare_type_from_detail`/`generic_args_of_detail`.
+      if tokens != nil && starts_with(d.detail, "__let_infer__") {
+        let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
+        if name_tok.is_none() {
+          ret "";
+        }
+        num name_idx = index_of_token(tokens, name_tok.unwrap());
+        str inferred = infer_let_local_type(tokens, name_idx, program, file, d.pos.line);
+        if equals(inferred, "") {
+          ret "";
+        }
+        ret format("{str} {str}", inferred, s);
+      }
+      ret d.detail;
+    }
+    .Expression(fe) -> {
+      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
+        fe.right == nil {
+        ret "";
+      }
+      str base_type = _expr_type_name(tokens, program, fe.left, file, line);
+      if equals(base_type, "") {
+        ret "";
+      }
+      fit fe.right.kind {
+        .Identifier(field_name) -> {
+          Vec<str> no_args;
+          no_args.init(0);
+          let field = lookup_field(program, base_type, field_name, no_args);
+          if field.is_none() {
+            ret "";
+          }
+          ret field.unwrap().detail;
+        }
+        _ -> { ret ""; }
+      }
+    }
+    _ -> { ret ""; }
+  }
+}
+
 pub fun _for_iter_map_kv(
+  Vec<Token>* tokens,
   Node* iterable,
   Vec<Node>* program,
   str file,
@@ -3686,35 +3772,27 @@ pub fun _for_iter_map_kv(
 ) bin {
   *out_key_type = "";
   *out_value_type = "";
-  if iterable == nil {
+  str detail = _for_iter_declared_detail(tokens, program, iterable, file, line);
+  if equals(detail, "") {
     ret false;
   }
-  fit iterable.kind {
-    .Identifier(s) -> {
-      let found = _lookup_local(nil, program, s, file, line);
-      if found.is_none() {
-        ret false;
-      }
-      str declared = bare_type_from_detail(found.unwrap().detail);
-      bin is_map = equals(declared, "Map");
-      free(declared);
-      if !is_map {
-        ret false;
-      }
-      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
-      if args.len < 2 {
-        _free_str_vec_deep(&args);
-        ret false;
-      }
-      str key_arg = args.get(0);
-      str value_arg = args.get(1);
-      *out_key_type = substr(key_arg, 0, len(key_arg));
-      *out_value_type = substr(value_arg, 0, len(value_arg));
-      _free_str_vec_deep(&args);
-      ret true;
-    }
-    _ -> { ret false; }
+  str declared = bare_type_from_detail(detail);
+  bin is_map = equals(declared, "Map");
+  free(declared);
+  if !is_map {
+    ret false;
   }
+  Vec<str> args = generic_args_of_detail(detail);
+  if args.len < 2 {
+    _free_str_vec_deep(&args);
+    ret false;
+  }
+  str key_arg = args.get(0);
+  str value_arg = args.get(1);
+  *out_key_type = substr(key_arg, 0, len(key_arg));
+  *out_value_type = substr(value_arg, 0, len(value_arg));
+  _free_str_vec_deep(&args);
+  ret true;
 }
 
 // A for-each loop's own iterable, best-effort: a bare local's own
@@ -3728,35 +3806,33 @@ pub fun _for_iter_map_kv(
 // - just the key type, the first generic arg - correct as-is; the
 // two-binding form (`for k, v :: m`) needs `_for_iter_map_kv` instead,
 // since that one also needs the VALUE type for the second binding.
-pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num line) str {
-  if iterable == nil {
+pub fun _for_iter_item_type(
+  Vec<Token>* tokens,
+  Node* iterable,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
+  str detail = _for_iter_declared_detail(tokens, program, iterable, file, line);
+  if equals(detail, "") {
     ret "";
   }
-  fit iterable.kind {
-    .Identifier(s) -> {
-      let found = _lookup_local(nil, program, s, file, line);
-      if found.is_none() {
-        ret "";
-      }
-      str declared = bare_type_from_detail(found.unwrap().detail);
-      if ends_with(declared, "[]") {
-        str elem = substr(declared, 0, len(declared) - 2);
-        free(declared);
-        ret elem;
-      }
-      free(declared);
-      Vec<str> args = generic_args_of_detail(found.unwrap().detail);
-      if args.len == 0 {
-        _free_str_vec_deep(&args);
-        ret "";
-      }
-      str first = args.get(0);
-      str out = substr(first, 0, len(first));
-      _free_str_vec_deep(&args);
-      ret out;
-    }
-    _ -> { ret ""; }
+  str declared = bare_type_from_detail(detail);
+  if ends_with(declared, "[]") {
+    str elem = substr(declared, 0, len(declared) - 2);
+    free(declared);
+    ret elem;
   }
+  free(declared);
+  Vec<str> args = generic_args_of_detail(detail);
+  if args.len == 0 {
+    _free_str_vec_deep(&args);
+    ret "";
+  }
+  str first = args.get(0);
+  str out = substr(first, 0, len(first));
+  _free_str_vec_deep(&args);
+  ret out;
 }
 
 // The type name of an arbitrary expression, as far as `fit_subject_type`

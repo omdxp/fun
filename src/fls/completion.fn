@@ -10,7 +10,6 @@ imp analysis;
 imp symbols;
 imp imports;
 imp navigation;
-imp signature_help;
 imp inlay_hints;
 imp protocol;
 imp ..ast.ast;
@@ -234,7 +233,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     ret _reply(&items);
   }
 
-  _declared(&program.nodes, doc.path, source_line, &items, snippets);
+  _declared(&tokens, &program.nodes, doc.path, source_line, &items, snippets);
   _reserved(&items, snippets);
   _c_builtin_completions(&items);
   _abbreviations(&items, snippets);
@@ -1951,7 +1950,14 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippet
 
 // What the program declares, plus the parameters and locals of the
 // function or impl method the cursor sits in.
-fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snippets) {
+fun _declared(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Vec<Item>* items,
+  bin snippets
+) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1965,7 +1971,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if !covers(n, f, file, line) {
           continue;
         }
-        _collect_function_scope(f, items, program, file, line);
+        _collect_function_scope(tokens, f, items, program, file, line);
       }
       .Impl(im) -> {
         // A method's own bare name is never itself a completable
@@ -1984,7 +1990,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
               if !covers(*m, mf, file, line) {
                 continue;
               }
-              _collect_function_scope(mf, items, program, file, line);
+              _collect_function_scope(tokens, mf, items, program, file, line);
             }
             _ -> {}
           }
@@ -1994,7 +2000,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
         if !covers_body(n, td.body, file, line) {
           continue;
         }
-        _collect_locals(td.body, items, program, file, line);
+        _collect_locals(tokens, td.body, items, program, file, line);
       }
       .Fuzz(fz) -> {
         if !covers_body(n, fz.body, file, line) {
@@ -2020,7 +2026,7 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
             _ -> {}
           }
         }
-        _collect_locals(fz.body, items, program, file, line);
+        _collect_locals(tokens, fz.body, items, program, file, line);
       }
       .Compound(c) -> {
         items.push(
@@ -2046,7 +2052,14 @@ fun _declared(Vec<Node>* program, str file, num line, Vec<Item>* items, bin snip
 // `f`'s own parameters, plus every local declared anywhere in its
 // body, including inside a nested if/for/fit: a name is in scope for
 // the rest of the function once declared, wherever that is.
-fun _collect_function_scope(FunctionNode f, Vec<Item>* items, Vec<Node>* program, str file, num line) {
+fun _collect_function_scope(
+  Vec<Token>* tokens,
+  FunctionNode f,
+  Vec<Item>* items,
+  Vec<Node>* program,
+  str file,
+  num line
+) {
   num a = 0;
   for a < f.args.len {
     Node* arg = f.args.get(a);
@@ -2064,7 +2077,7 @@ fun _collect_function_scope(FunctionNode f, Vec<Item>* items, Vec<Node>* program
     }
   }
   if f.has_body {
-    _collect_locals(f.body, items, program, file, line);
+    _collect_locals(tokens, f.body, items, program, file, line);
   }
 }
 
@@ -2075,7 +2088,14 @@ fun _collect_function_scope(FunctionNode f, Vec<Item>* items, Vec<Node>* program
 // bindings (`.Circle(r)`'s own `r`) against the fit's own subject
 // type, the same way hover already does via `fit_subject_type`/
 // `variant_payload_type` — every other case ignores them.
-fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, num line) {
+fun _collect_locals(
+  Vec<Token>* tokens,
+  Node* body,
+  Vec<Item>* items,
+  Vec<Node>* program,
+  str file,
+  num line
+) {
   if body == nil {
     ret;
   }
@@ -2088,14 +2108,15 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        _collect_locals(block.statements.get(i), items, program, file, line);
+        _collect_locals(tokens, block.statements.get(i), items, program, file, line);
         i = i + 1;
       }
     }
     .StatementFit(fs) -> {
-      // `nil`: `_collect_locals` has no tokens of its own to thread
-      // here either (same deeper gap noted in symbols.fn's own
-      // `_lookup_fit_binding`).
+      // `nil`: this specific pair still has no tokens threaded to it -
+      // a separate, pre-existing gap in the enum/generic-arg resolution
+      // itself (see symbols.fn's own `_lookup_fit_binding`), not the
+      // for-loop one this function's `.StatementFor` case below fixes.
       str enum_name = fit_subject_type(nil, program, fs.exp, file, line);
       Vec<str> concrete_args = fit_subject_generic_args(nil, program, fs.exp, file, line);
       num i = 0;
@@ -2114,7 +2135,7 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
             bi = bi + 1;
           }
         }
-        _collect_locals(branch.body, items, program, file, line);
+        _collect_locals(tokens, branch.body, items, program, file, line);
       }
     }
     // A `for`'s own loop variable, bound by the statement itself
@@ -2124,13 +2145,13 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
       fit fk {
         .Range(fr) -> {
           items.push(_item(fr.index_name, .Variable, "num"));
-          _collect_locals(fr.body, items, program, file, line);
+          _collect_locals(tokens, fr.body, items, program, file, line);
         }
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";
           bin is_map = fi.has_index_name &&
-            _for_iter_map_kv(fi.iterable, program, file, line, &map_key, &map_value);
+            _for_iter_map_kv(tokens, fi.iterable, program, file, line, &map_key, &map_value);
           if fi.has_index_name {
             str index_type = "num";
             if is_map {
@@ -2140,18 +2161,18 @@ fun _collect_locals(Node* body, Vec<Item>* items, Vec<Node>* program, str file, 
           }
           str item_type = map_value;
           if !is_map {
-            item_type = _for_iter_item_type(fi.iterable, program, file, line);
+            item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
           }
           items.push(_item(fi.item_name, .Variable, item_type));
-          _collect_locals(fi.body, items, program, file, line);
+          _collect_locals(tokens, fi.body, items, program, file, line);
         }
-        .Cond(fc) -> { _collect_locals(fc.body, items, program, file, line); }
+        .Cond(fc) -> { _collect_locals(tokens, fc.body, items, program, file, line); }
       }
     }
     _ -> {
       let nested = single_nested_body(body);
       if nested.is_some() {
-        _collect_locals(nested.unwrap(), items, program, file, line);
+        _collect_locals(tokens, nested.unwrap(), items, program, file, line);
       }
     }
   }
