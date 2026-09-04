@@ -290,13 +290,13 @@ pub fun compiler_is_msvc(str cc) bin {
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
 // program.
-pub fun compile_to_c(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, false, false, "");
+pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info);
 }
 
 // Lowers `input` to C, reporting declarations nothing reads.
-pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines) Result<bin, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, true, false, "");
+pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info);
 }
 
 // Lowers `input` to C, emitting a test runner in place of the program's
@@ -311,7 +311,8 @@ pub fun compile_to_c_mode(
   bin test_mode,
   bin warn_unused,
   bin fuzz_mode,
-  str fuzz_target
+  str fuzz_target,
+  bin debug_info
 ) Result<bin, str> {
   let parsed = parse_program_with_imports(input);
   if parsed.is_err() {
@@ -397,6 +398,7 @@ pub fun compile_to_c_mode(
   cg.fuzz_mode = fuzz_mode;
   cg.fuzz_target = fuzz_target;
   cg.msvc_mode = compiler_is_msvc(c_compiler());
+  cg.debug_info = debug_info;
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -990,7 +992,7 @@ pub fun build_project(bin debug_info) num {
   if m.has_lib {
     make_dir_all("fun-out/lib");
     str c_path = path_join("fun-out/lib", format("{str}.c", m.lib.name));
-    let lowered = compile_to_c(m.lib.path, c_path, &defines);
+    let lowered = compile_to_c(m.lib.path, c_path, &defines, debug_info);
     if lowered.is_err() {
       writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
       ret 1;
@@ -1007,7 +1009,7 @@ pub fun build_project(bin debug_info) num {
     ExeTarget* e = &m.exes.data[i];
     make_dir_all("fun-out/bin");
     str c_path = path_join("fun-out/bin", format("{str}.c", e.name));
-    let lowered = compile_to_c(e.path, c_path, &defines);
+    let lowered = compile_to_c(e.path, c_path, &defines, debug_info);
     if lowered.is_err() {
       writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
       ret 1;
@@ -1117,7 +1119,7 @@ pub fun run_tests(str input, Vec<str>* args, bin debug_info) num {
   }
 
   str c_path = default_c_path(input, ".test.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "");
+  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "", debug_info);
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
@@ -1153,7 +1155,7 @@ pub fun run_fuzz(str input, str target, Vec<str>* args, bin debug_info) num {
   }
 
   str c_path = default_c_path(input, ".fuzz.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, false, false, true, target);
+  let lowered = compile_to_c_mode(input, c_path, &defines, false, false, true, target, debug_info);
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
     ret 1;
@@ -1197,7 +1199,7 @@ fun _run_tests_captured(str input, bin debug_info) SuiteTestResult {
   }
 
   str c_path = default_c_path(input, ".test.c");
-  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "");
+  let lowered = compile_to_c_mode(input, c_path, &defines, true, false, false, "", debug_info);
   if lowered.is_err() {
     bad.captured = format("[Error]\n{str}", lowered.unwrap_err());
     ret bad;
@@ -1492,7 +1494,7 @@ pub fun run_fuzz_suite(str root, bin debug_info) num {
       }
 
       str c_path = default_c_path(path, ".fuzz.c");
-      let lowered = compile_to_c_mode(path, c_path, &defines, false, false, true, target);
+      let lowered = compile_to_c_mode(path, c_path, &defines, false, false, true, target, debug_info);
       if lowered.is_err() {
         writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
         failed = failed + 1;

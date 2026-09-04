@@ -49,6 +49,43 @@ pub fun transpile_source(str src) Result<str, str> {
   ret .Ok(cst.out.build());
 }
 
+// `transpile_source`, with `-g` debug-info emission (`#line` directives)
+// turned on.
+pub fun transpile_source_with_debug_info(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  g.debug_info = true;
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(cst.out.build());
+}
+
+// `emit_c`, with `-g` debug-info emission turned on.
+pub fun emit_c_with_debug_info(str src, str label) str {
+  let r = transpile_source_with_debug_info(src);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the source";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
 // Transpiles `src`, aborting with `label` when any stage rejects it.
 pub fun emit_c(str src, str label) str {
   let r = transpile_source(src);

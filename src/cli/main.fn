@@ -162,7 +162,8 @@ fun main(str[] args) num {
     false,
     opts.warn_unused,
     false,
-    ""
+    "",
+    opts.debug_info
   );
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());

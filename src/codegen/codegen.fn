@@ -470,6 +470,11 @@ pub compound Codegen {
   // exactly one target.
   str fuzz_target;
   bin in_main;
+  // Emit `#line` directives (`-g`) so a native debugger shows and steps
+  // through the original `.fn` source, not the generated C. Applies
+  // equally in ordinary, test, and fuzz mode - all three lower to the
+  // same statement-emission path this flag gates.
+  bin debug_info;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -584,6 +589,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.fuzz_mode = false;
+  g.debug_info = false;
   g.fuzz_target = "";
   g.in_main = false;
   ret g;
@@ -6889,6 +6895,9 @@ impl Codegen {
   // them errors rather than emitting an invalid lone fragment.
   pub emit_statement(Node node) Option<CodegenErrorKind> {
     self.mark_node(node);
+    if node.has_pos {
+      self.state.set_pending_line_directive(node.pos);
+    }
     fit node.kind {
       .StatementReturn(exp) -> {
         // `main` always emits as `int main(...)` regardless of its
@@ -8872,6 +8881,9 @@ impl Codegen {
         _ -> {}
       }
       if is_if {
+        if stmt.has_pos {
+          self.state.set_pending_line_directive(stmt.pos);
+        }
         self.state.write_indent();
         num next_i = i;
         let cherr = self.emit_if_chain(stmts, i, &next_i);
@@ -12441,6 +12453,7 @@ impl Codegen {
   // top-level functions, so a function calling a method needs no forward
   // declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
+    self.state.debug_info = self.debug_info;
     self.all_nodes = nodes;
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.

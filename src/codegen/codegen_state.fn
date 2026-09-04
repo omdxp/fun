@@ -2,16 +2,31 @@
 // indentation depth.
 
 imp std.string;
+imp ..lexer.token;
 
 pub compound CodegenState {
   StringBuilder out;
   num indent_level;
+  // Debug-info emission (`-g`): a `#line N "file"` directive naming
+  // `pending_line_directive` is flushed at the next `write_indent`,
+  // anchoring the C line that follows back to the Fun source position
+  // that produced it, so a native debugger (lldb/gdb) shows and steps
+  // through the original `.fn` source rather than the generated C.
+  // `write_indent` runs at the start of every statement's own line
+  // (each statement writes its own trailing newline before the next
+  // one's `write_indent` call), which is exactly where a `#line`
+  // directive is valid C - it must start its own line.
+  bin debug_info;
+  bin has_pending_line_directive;
+  Pos pending_line_directive;
 }
 
 pub fun codegen_state_new() CodegenState {
   CodegenState st;
   st.out = string_builder_init(256);
   st.indent_level = 0;
+  st.debug_info = false;
+  st.has_pending_line_directive = false;
   ret st;
 }
 
@@ -21,14 +36,63 @@ impl CodegenState {
     self.out.append(s);
   }
 
-  // Emits the current indentation, 4 spaces per level.
+  // Marks `pos` as the source position the next line of C written
+  // should be anchored to. A no-op when debug info isn't enabled.
+  pub set_pending_line_directive(Pos pos) {
+    if !self.debug_info {
+      ret;
+    }
+    self.pending_line_directive = pos;
+    self.has_pending_line_directive = true;
+  }
+
+  // Emits the current indentation, 4 spaces per level, flushing a
+  // pending `#line` directive first when debug info is enabled.
   pub write_indent() {
+    if self.debug_info && self.has_pending_line_directive {
+      self.has_pending_line_directive = false;
+      self.write_line_directive(self.pending_line_directive);
+    }
     num i = 0;
     for i < self.indent_level {
       self.out.append("    ");
       i = i + 1;
     }
   }
+
+  // Writes a `#line N "file"` directive for `pos`, unconditionally
+  // (callers that already checked `debug_info` use this directly; most
+  // should go through `write_indent`'s own flush instead).
+  pub write_line_directive(Pos pos) {
+    self.out.append("#line ");
+    self.out.append_num(pos.line);
+    self.out.append(" \"");
+    self.out.append(_escaped_line_directive_path(pos.filename));
+    self.out.append("\"\n");
+  }
+}
+
+// A `#line` directive's own filename argument is a C string literal, so
+// a backslash in the path (a Windows drive-relative path, most likely)
+// needs escaping - otherwise the C compiler reads it as an escape
+// sequence instead of a literal path character.
+fun _escaped_line_directive_path(str path) str {
+  if index_of_char(path, '\\') < 0 {
+    ret path;
+  }
+  StringBuilder b = string_builder_init(len(path) + 4);
+  num i = 0;
+  num n = len(path);
+  for i < n {
+    chr c = path[i];
+    if c == '\\' {
+      b.append("\\\\");
+    } else {
+      b.append_char(c);
+    }
+    i = i + 1;
+  }
+  ret b.build();
 }
 
 test "codegen_state_new starts with an empty buffer at indent 0" {

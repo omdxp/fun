@@ -257,3 +257,48 @@ test "main always emits an int return type" {
   let out = emit_c(src, "main always emits an int return type");
   assert contains(out, "int main("), "expected main to be declared int";
 }
+
+test "debug info off emits no #line directives at all" {
+  str src = `fun main() num {
+  `  num x = 1;
+  `  ret x;
+  `}`;
+  let out = emit_c(src, "debug info off emits no #line directives at all");
+  assert !contains(out, "#line"), "expected no #line directive without -g";
+}
+
+test "debug info on anchors each statement back to its own source line" {
+  // User-reported: breakpoints and step-by-step debugging did nothing in
+  // the self-hosted compiler, unlike the original Zig one. The Zig
+  // transpiler emitted a `#line N "file"` directive before each C
+  // statement so a native debugger's DWARF info points at the real .fn
+  // source; codegen.fn never had any such mechanism, so -g compiled fine
+  // but produced a binary with no source mapping for the debugger to
+  // follow at all.
+  str src = `fun main() num {
+  `  num x = 1;
+  `  num y = 2;
+  `  ret x + y;
+  `}`;
+  let out = emit_c_with_debug_info(src, "debug info on anchors each statement back to its own source line");
+  assert contains(out, `#line 2 "test.fn"`), "expected line 2's own directive before x's declaration";
+  assert contains(out, `#line 3 "test.fn"`), "expected line 3's own directive before y's declaration";
+  assert contains(out, `#line 4 "test.fn"`), "expected line 4's own directive before the ret";
+}
+
+test "debug info on anchors an if statement's own header line too" {
+  // StatementIf/ElseIf/Else are chained together by emit_if_chain,
+  // reached from emit_statements directly rather than through
+  // emit_statement (the general per-statement hook) - a separate case
+  // that needed its own explicit directive.
+  str src = `fun main() num {
+  `  num x = 1;
+  `  if x == 1 {
+  `    ret 1;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_debug_info(src, "debug info on anchors an if statement's own header line too");
+  assert contains(out, `#line 3 "test.fn"`), "expected the if statement's own line";
+  assert contains(out, `#line 4 "test.fn"`), "expected the ret inside its body";
+}
