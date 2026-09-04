@@ -536,8 +536,8 @@ fun _infer_global_const_type(Node* val) str {
 // The declaration of `name` as seen from `file` at `line`: a parameter
 // or local of the function that line sits in, before anything the whole
 // program shares.
-pub fun lookup(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
-  let local = _lookup_local(program, name, file, line);
+pub fun lookup(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+  let local = _lookup_local(tokens, program, name, file, line);
   if local.is_some() {
     ret local;
   }
@@ -943,7 +943,7 @@ fun _param_type_from_piece(str piece) str {
 // best-effort inference `type_name_of_local` already falls back to
 // for the bare type name.
 pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Vec<str> {
-  let found = _lookup_local(program, name, file, line);
+  let found = _lookup_local(tokens, program, name, file, line);
   if found.is_none() {
     Vec<str> empty;
     empty.init(0);
@@ -1217,7 +1217,7 @@ pub fun looks_like_type_name(str name) bin {
 // when `tokens` is available to re-run the same best-effort inference
 // `inlay_hints.fn` uses to display it.
 pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) str {
-  let found = _lookup_local(program, name, file, line);
+  let found = _lookup_local(tokens, program, name, file, line);
   if found.is_none() {
     ret "";
   }
@@ -2597,7 +2597,7 @@ fun _infer_type_primary(
       // downstream extends this into a following binary operator.
       let bracket_opt = token_after(tokens, idx + 1);
       if bracket_opt.is_some() && token_is_operator(bracket_opt.unwrap(), "[") {
-        let base_decl = lookup(program, name, file, line);
+        let base_decl = lookup(tokens, program, name, file, line);
         if base_decl.is_some() {
           str base_type = bare_type_from_detail(base_decl.unwrap().detail);
           if equals(base_type, "str") {
@@ -2913,7 +2913,7 @@ fun _infer_type_primary(
       // own initializer (bounded by `depth`), so a short chain of
       // plain copies resolves all the way through instead of only the
       // first hop.
-      let existing = lookup(program, name, file, line);
+      let existing = lookup(tokens, program, name, file, line);
       if existing.is_none() {
         ret "";
       }
@@ -2969,7 +2969,7 @@ fun _full_declared_type(Declaration d) str {
 }
 
 // A parameter or local of the function containing `line` in `file`.
-fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2979,7 +2979,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if !covers(n, f, file, line) {
           continue;
         }
-        let found = _lookup_in_function(f, name, program, file, line);
+        let found = _lookup_in_function(tokens, f, name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -2997,7 +2997,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
               if !covers(*m, f, file, line) {
                 continue;
               }
-              let found = _lookup_in_function(f, name, program, file, line);
+              let found = _lookup_in_function(tokens, f, name, program, file, line);
               if found.is_some() {
                 ret found;
               }
@@ -3014,7 +3014,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if found.is_some() {
           ret found;
         }
-        let found_binding = _lookup_fit_binding(td.body, name, program, file, line);
+        let found_binding = _lookup_fit_binding(tokens, td.body, name, program, file, line);
         if found_binding.is_some() {
           ret found_binding;
         }
@@ -3031,7 +3031,7 @@ fun _lookup_local(Vec<Node>* program, str name, str file, num line) Option<Decla
         if found.is_some() {
           ret found;
         }
-        let found_binding = _lookup_fit_binding(fz.body, name, program, file, line);
+        let found_binding = _lookup_fit_binding(tokens, fz.body, name, program, file, line);
         if found_binding.is_some() {
           ret found_binding;
         }
@@ -3074,7 +3074,14 @@ fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
 // the top level or reached as one of an impl block's own methods
 // (which are `FunctionNode`s just the same, only nested one level
 // deeper in the program's own node list).
-fun _lookup_in_function(FunctionNode f, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+fun _lookup_in_function(
+  Vec<Token>* tokens,
+  FunctionNode f,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
   num a = 0;
   for a < f.args.len {
     Node* arg = f.args.get(a);
@@ -3096,7 +3103,7 @@ fun _lookup_in_function(FunctionNode f, str name, Vec<Node>* program, str file, 
     if found.is_some() {
       ret found;
     }
-    let found_binding = _lookup_fit_binding(f.body, name, program, file, line);
+    let found_binding = _lookup_fit_binding(tokens, f.body, name, program, file, line);
     if found_binding.is_some() {
       ret found_binding;
     }
@@ -3445,7 +3452,7 @@ pub fun _for_iter_map_kv(
   }
   fit iterable.kind {
     .Identifier(s) -> {
-      let found = _lookup_local(program, s, file, line);
+      let found = _lookup_local(nil, program, s, file, line);
       if found.is_none() {
         ret false;
       }
@@ -3488,7 +3495,7 @@ pub fun _for_iter_item_type(Node* iterable, Vec<Node>* program, str file, num li
   }
   fit iterable.kind {
     .Identifier(s) -> {
-      let found = _lookup_local(program, s, file, line);
+      let found = _lookup_local(nil, program, s, file, line);
       if found.is_none() {
         ret "";
       }
@@ -3596,21 +3603,46 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
           if !callee.has_left || callee.left == nil {
             ret "";
           }
-          bin is_recv = false;
+          str method_name = "";
           fit callee.right.kind {
-            .Identifier(m) -> {
-              if equals(m, "recv") {
-                is_recv = true;
-              }
-            }
+            .Identifier(m) -> { method_name = m; }
             _ -> {}
           }
-          if !is_recv {
+          if equals(method_name, "") {
             ret "";
           }
+          // `try_recv(T* out) num` declares a raw status-code return,
+          // unrelated to what a fit over it actually matches: the
+          // element type written through its out-parameter. `recv() T`
+          // has no such mismatch (its declared return already is the
+          // element type), so it needs no special case - the general
+          // method-lookup path below resolves it the same way.
+          if equals(method_name, "try_recv") {
+            fit callee.left.kind {
+              .Identifier(chan_name) -> {
+                ret _first_generic_arg_of_local(program, chan_name, file, line);
+              }
+              _ -> {}
+            }
+            ret "";
+          }
+          // Any other method call (`ch.recv_result()`, and generally):
+          // the method's own declared return type, substituted against
+          // the receiver's own concrete generic args when known - same
+          // resolution `chain_receiver` uses elsewhere in this file for
+          // a chain ending in a call, just entered from the subject's
+          // own AST node rather than a token position.
           fit callee.left.kind {
-            .Identifier(chan_name) -> {
-              ret _first_generic_arg_of_local(program, chan_name, file, line);
+            .Identifier(recv_name) -> {
+              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
+              if equals(recv_type, "") {
+                ret "";
+              }
+              Vec<str> concrete_args = local_generic_args(tokens, program, recv_name, file, line);
+              let m = lookup_method(program, recv_type, method_name, concrete_args);
+              if m.is_some() {
+                ret _bare_return_type(m.unwrap().detail);
+              }
             }
             _ -> {}
           }
@@ -3666,6 +3698,46 @@ pub fun fit_subject_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* s
             ret args;
           }
         }
+        // A method call (`ch.recv_result()`): the same receiver-type
+        // substitution `fit_subject_type` uses for the bare enum name
+        // above, just reading the args back out instead. `lookup_method`
+        // already substitutes the receiver's own concrete generic args
+        // into the whole signature (including the return type) when
+        // given them, so the args read directly off the result are
+        // already concrete, not the method's own template params.
+        .Expression(callee) -> {
+          if !equals(callee.op, ".") || !callee.has_right || callee.right == nil {
+            ret empty;
+          }
+          if !callee.has_left || callee.left == nil {
+            ret empty;
+          }
+          str method_name = "";
+          fit callee.right.kind {
+            .Identifier(m) -> { method_name = m; }
+            _ -> {}
+          }
+          if equals(method_name, "") || equals(method_name, "try_recv") {
+            ret empty;
+          }
+          fit callee.left.kind {
+            .Identifier(recv_name) -> {
+              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
+              if equals(recv_type, "") {
+                ret empty;
+              }
+              Vec<str> recv_args = local_generic_args(tokens, program, recv_name, file, line);
+              let m = lookup_method(program, recv_type, method_name, recv_args);
+              if m.is_some() {
+                str rtype_text2 = _return_type_text(m.unwrap().detail);
+                Vec<str> args2 = generic_args_of_detail(rtype_text2);
+                free(rtype_text2);
+                ret args2;
+              }
+            }
+            _ -> {}
+          }
+        }
         _ -> {}
       }
       ret empty;
@@ -3678,7 +3750,7 @@ pub fun fit_subject_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* s
 // declared type, as written (`Job` from `Channel<Job>`). "" when
 // `name` isn't found, or its declared type isn't generic.
 fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line) str {
-  let found = _lookup_local(program, name, file, line);
+  let found = _lookup_local(nil, program, name, file, line);
   if found.is_none() {
     ret "";
   }
@@ -4159,7 +4231,14 @@ pub fun variant_payload_type(
 // within that arm: its pattern through the end of its body. Its type
 // is the matching positional payload type of whichever variant the
 // arm's own condition names, resolved against the fit's subject.
-fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num line) Option<Declaration> {
+fun _lookup_fit_binding(
+  Vec<Token>* tokens,
+  Node* body,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
   if body == nil {
     ret .None;
   }
@@ -4167,7 +4246,7 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        let found = _lookup_fit_binding(block.statements.get(i), name, program, file, line);
+        let found = _lookup_fit_binding(tokens, block.statements.get(i), name, program, file, line);
         if found.is_some() {
           ret found;
         }
@@ -4197,14 +4276,9 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
             k = k + 1;
           }
           if idx >= 0 {
-            // `nil`, not the real token stream: `_lookup_fit_binding`
-            // is reached through `_lookup_local`, which has no tokens
-            // of its own to thread here (a deeper, separate gap - see
-            // `lookup_fit_variant`'s own `tokens` param for the
-            // shallow case this was fixed for).
-            str enum_name = fit_subject_type(nil, program, f.exp, file, line);
+            str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
             if !equals(enum_name, "") {
-              Vec<str> concrete_args = fit_subject_generic_args(nil, program, f.exp, file, line);
+              Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);
               let payload_type = variant_payload_type(
                 program,
                 enum_name,
@@ -4243,7 +4317,7 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
             }
           }
         }
-        let nested = _lookup_fit_binding(br.body, name, program, file, line);
+        let nested = _lookup_fit_binding(tokens, br.body, name, program, file, line);
         if nested.is_some() {
           ret nested;
         }
@@ -4252,7 +4326,7 @@ fun _lookup_fit_binding(Node* body, str name, Vec<Node>* program, str file, num 
     _ -> {
       let single = single_nested_body(body);
       if single.is_some() {
-        ret _lookup_fit_binding(single.unwrap(), name, program, file, line);
+        ret _lookup_fit_binding(tokens, single.unwrap(), name, program, file, line);
       }
     }
   }

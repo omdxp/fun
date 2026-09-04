@@ -750,7 +750,7 @@ test "a local name wins over a function of the same name" {
 
   // `len` is a parameter here, not the standard library's function, and
   // resolving from the inside out is what tells them apart.
-  let found = lookup(&program.nodes, "len", "hover.fn", 4);
+  let found = lookup(nil, &program.nodes, "len", "hover.fn", 4);
   assert found.is_some(), "expected the name to resolve";
   assert equals(found.unwrap().detail, "num len"), "expected the parameter, not a function";
 }
@@ -2650,6 +2650,47 @@ test "hover resolves a fit arm's own payload binding when the subject is a plain
 
   assert contains(hover(&reads, doc, 11, 14), "Box doc"), "expected the call's own concrete Ok payload type, not a bare T";
   assert contains(hover(&reads, doc, 12, 15), "Oops e"), "expected the call's own concrete Err payload type, not a bare E";
+}
+
+test "hovering a fit arm's own payload binding resolves when the subject is a let-inferred local" {
+  // `_lookup_fit_binding` is reached through `_lookup_local`, which had
+  // no `tokens` parameter to pass down to `fit_subject_type`, so it was
+  // always called with a hardcoded nil there. Harmless for a subject
+  // with an explicit declared type (nothing needs the token stream to
+  // read `v.var_type.type_str` directly), but a `let`-inferred subject
+  // needs the real tokens to re-derive its own type at all - without
+  // them, `type_name_of_local` fell through to the `__let_infer__`
+  // sentinel itself, so nothing about the fit could resolve and every
+  // arm's payload binding hovered as nothing at all. `lookup`, its
+  // three callers, and every other function along that chain now
+  // thread the real tokens all the way down. Also exercises a method
+  // call subject (`ch.recv_result()`), which `fit_subject_type` never
+  // handled generically before (only a hardcoded "recv" case).
+  str src = `compound Channel<T> { T v; }
+  `enum RecvResult<T> {
+  `  Ok(T),
+  `  Closed,
+  `}
+  `impl Channel<T> {
+  `  recv_result() RecvResult<T> { ret RecvResult.Closed; }
+  `}
+  `fun main() {
+  `  Channel<num> ch;
+  `  let r = ch.recv_result();
+  `  fit r {
+  `    RecvResult.Ok(v) -> { _ = v; }
+  `    RecvResult.Closed -> {}
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letfitbind.fn";
+  doc.path = "letfitbind.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
 test "hover on an enum variant shows its own tag value, auto-incrementing across an explicit override" {

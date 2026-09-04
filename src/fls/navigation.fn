@@ -586,7 +586,7 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     ret declared_field;
   }
 
-  ret lookup(&program.nodes, name, doc.path, source_line);
+  ret lookup(tokens, &program.nodes, name, doc.path, source_line);
 }
 
 // The name `t` is reached through, when it is written as `receiver.name`.
