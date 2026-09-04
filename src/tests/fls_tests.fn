@@ -1037,6 +1037,40 @@ test "go-to-definition on a compound field or enum variant lands on its own decl
   assert contains(variant_def, `"line":6`), "expected the variant's own declaration line, not the enum's";
 }
 
+test "go-to-definition on a quirk-typed receiver's method lands on the method's own line, not the quirk's" {
+  // User-reported. QuirkMethodSig carried no position of its own -
+  // quirk_method_declaration fell back to the whole quirk node's
+  // position, so a receiver typed AS the quirk (not a concrete impl)
+  // always jumped to the quirk's own name line instead of the method
+  // signature inside it. Fixed by giving QuirkMethodSig a real `pos`,
+  // set from the method name token in the parser.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkdef.fn";
+  doc.path = "quirkdef.fn";
+  doc.text = `compound Counter {
+  `  num base;
+  `}
+  `quirk AsyncCounter {
+  `  async add(num x) num;
+  `}
+  `impl Counter as AsyncCounter {
+  `  async add(num x) num { ret self.base + x; }
+  `}
+  `async fun main() {
+  `  Counter c;
+  `  AsyncCounter q = &c;
+  `  let out = await q.add(1);
+  `}`;
+  doc.version = 1;
+
+  // 'add' is declared on line 4 (0-indexed) inside the quirk, not the
+  // quirk's own line 3.
+  str method_def = definition(&reads, doc, 12, 20);
+  assert contains(method_def, `"line":4`), "expected the quirk method's own declaration line, not the quirk's";
+}
+
 test "go-to-definition on a call prefers the method over a same-named field on the same compound" {
   // resolve_at tried lookup_field before ever considering lookup_method,
   // unconditionally - a compound with a field and a quirk-impl method

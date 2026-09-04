@@ -838,7 +838,7 @@ pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_
           QuirkMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            Declaration d = _declaration(method_name, .Function, _render_quirk_method(ms), n.pos);
+            Declaration d = _declaration(method_name, .Function, _render_quirk_method(ms), ms.pos);
             d.container = quirk_name;
             ret .Some(d);
           }

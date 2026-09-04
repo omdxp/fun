@@ -5864,6 +5864,7 @@ impl Parser {
       ms.rtype = rtype;
       ms.args = margs;
       ms.is_async = method_is_async;
+      ms.pos = mname_tok.unwrap().pos;
       methods.push(ms);
     }
 

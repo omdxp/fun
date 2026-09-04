@@ -493,6 +493,7 @@ pub compound QuirkMethodSig {
   DataType* rtype;
   Vec<QuirkArg> args;
   bin is_async;
+  Pos pos;
 }
 
 pub fun quirk_method_sig_new() QuirkMethodSig {
