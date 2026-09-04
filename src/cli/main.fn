@@ -42,6 +42,19 @@ fun main(str[] args) num {
     println(help_text());
     ret 0;
   }
+  // Checked once, ahead of every dispatch branch below (test/fuzz
+  // included, both spellings) rather than only the plain-compile
+  // fallthrough at the bottom of this function - `-ast -test` used to
+  // silently print nothing at all, since run_tests/run_fuzz return
+  // before ever reaching that check. Guarded the same way a single
+  // real input file already has to be for any of those branches to do
+  // anything; a directory-suite form (no single file, an empty/invalid
+  // `-in`) has no one AST to print, so it's simply skipped here rather
+  // than special-cased.
+  if opts.show_ast && !equals(opts.input, "") && ends_with(opts.input, ".fn") &&
+    exists(opts.input) {
+    print_ast_for(opts.input);
+  }
   if equals(opts.subcommand, "build") {
     ret build_project(opts.debug_info);
   }
@@ -143,10 +156,6 @@ fun main(str[] args) num {
       ret _fail(done.unwrap_err());
     }
     ret 0;
-  }
-
-  if opts.show_ast {
-    print_ast_for(opts.input);
   }
 
   // `-out` names the generated C file, defaulting to the input's own
