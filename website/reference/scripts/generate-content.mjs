@@ -13,8 +13,30 @@ function parseFunVersion(zon) {
   return m[1];
 }
 
-const zonRaw = await fs.readFile(path.join(repoRoot, "build.zig.zon"), "utf8");
-const rawFunVersion = process.env.FUN_VERSION || parseFunVersion(zonRaw);
+function parseFunVersionFromToml(toml) {
+  const m = toml.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!m) return "0.0.0";
+  return m[1];
+}
+
+async function readRepoVersion() {
+  try {
+    const zonRaw = await fs.readFile(
+      path.join(repoRoot, "build.zig.zon"),
+      "utf8",
+    );
+    return parseFunVersion(zonRaw);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    const tomlRaw = await fs.readFile(
+      path.join(repoRoot, "fun.toml"),
+      "utf8",
+    );
+    return parseFunVersionFromToml(tomlRaw);
+  }
+}
+
+const rawFunVersion = process.env.FUN_VERSION || (await readRepoVersion());
 const funVersion = rawFunVersion.startsWith("v")
   ? rawFunVersion.slice(1)
   : rawFunVersion;

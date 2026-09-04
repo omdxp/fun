@@ -8,10 +8,21 @@ const siteRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(siteRoot, "../..");
 
 async function readFunVersion() {
-  const zon = await fs.readFile(path.join(repoRoot, "build.zig.zon"), "utf8");
-  const m = zon.match(/\.version\s*=\s*"([^"]+)"/);
-  if (!m) throw new Error("Could not parse .version from build.zig.zon");
-  return m[1];
+  try {
+    const zon = await fs.readFile(
+      path.join(repoRoot, "build.zig.zon"),
+      "utf8",
+    );
+    const m = zon.match(/\.version\s*=\s*"([^"]+)"/);
+    if (!m) throw new Error("Could not parse .version from build.zig.zon");
+    return m[1];
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    const toml = await fs.readFile(path.join(repoRoot, "fun.toml"), "utf8");
+    const m = toml.match(/^version\s*=\s*"([^"]+)"/m);
+    if (!m) throw new Error("Could not parse version from fun.toml");
+    return m[1];
+  }
 }
 
 const rawVersion = process.env.FUN_VERSION || (await readFunVersion());
