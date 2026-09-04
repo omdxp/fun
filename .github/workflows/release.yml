@@ -252,14 +252,26 @@ jobs:
           # release after v0.50.3).
           # `lib.exe /OUT:m.lib` with no input .obj files exits 0 but
           # writes nothing at all - it needs at least one input to
-          # produce output, so it can't create an empty archive this
-          # way. Writing the archive directly sidesteps that: the
-          # standard ar/COFF archive format's own magic signature,
-          # `!<arch>\n`, with nothing after it, is by itself a complete,
-          # valid, zero-member archive - exactly an "empty library",
-          # which is what's actually wanted here anyway.
+          # produce output. Writing a bare ar/COFF magic signature
+          # (`!<arch>\n`) by hand instead is a valid *Unix* empty
+          # archive, but not a valid *MS-COFF* one: lld-link's stricter
+          # validation there rejected it outright (LNK1107, "invalid or
+          # corrupt file"). Compiling one real (if empty) object file
+          # and archiving that is what actually produces a properly
+          # structured library, functionally empty either way - no
+          # symbols in it, since none are needed.
           New-Item -ItemType Directory -Force -Path stub_libs | Out-Null
-          [System.IO.File]::WriteAllBytes("$PWD\stub_libs\m.lib", [System.Text.Encoding]::ASCII.GetBytes("!<arch>`n"))
+          "// intentionally empty: only exists to give lib.exe one real object to archive" |
+            Out-File -FilePath stub_libs\empty.c -Encoding ascii
+          & cl.exe /nologo /c stub_libs\empty.c /Fo:stub_libs\empty.obj
+          if ($LASTEXITCODE -ne 0) {
+            throw "cl.exe failed to compile the stub object (exit $LASTEXITCODE)"
+          }
+          $libExe = (Get-Command lib.exe -ErrorAction Stop).Source
+          & $libExe /OUT:stub_libs\m.lib /NOLOGO stub_libs\empty.obj
+          if ($LASTEXITCODE -ne 0) {
+            throw "lib.exe failed to create stub_libs\m.lib (exit $LASTEXITCODE)"
+          }
           if (-not (Test-Path stub_libs\m.lib)) {
             throw "stub_libs\m.lib was not created"
           }
