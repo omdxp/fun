@@ -1415,6 +1415,67 @@ test "a method is listed under the name it was written as" {
   assert contains(out, `"containerName":"Buffer"`), "expected the type it belongs to";
 }
 
+test "a quirk impl's method is listed under the name it was written as, not either mangled segment" {
+  // A quirk impl's own method is stored mangled as `Buffer__Sized__len`
+  // (type and quirk both); an outline used to strip only the leading
+  // `Buffer__`, leaking the quirk-prefixed remainder `Sized__len`
+  // straight through. User-reported (screenshot of stdlib/std/vec.fn's
+  // own outline, `impl Vec<T> as Sized` methods showing as flat,
+  // wrongly named entries).
+  str src = `quirk Sized {
+  `  len() num;
+  `}
+  `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer as Sized {
+  `  len() num { ret self.len; }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkmethod.fn";
+  doc.path = "quirkmethod.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(&reads, doc);
+  assert contains(out, `"name":"len","kind":6,"containerName":"Buffer"`), "expected the written name, not a mangled remainder";
+  assert !contains(out, "Sized__len"), "expected no quirk-mangled remainder to leak through";
+  assert !contains(out, "Buffer__Sized__len"), "expected no fully mangled name to leak through";
+}
+
+test "each field and variant in an outline carries its own position, not the whole declaration's" {
+  // _collect reported every field of a compound (and every variant of
+  // an enum) at the SAME position - the compound/enum's own node -
+  // even though CompoundField and EnumVariant both carry their own
+  // real position from the parser. Several same-range entries in a
+  // flat SymbolInformation reply reads as a garbled, wrongly nested
+  // outline client-side (user-reported, stdlib/std/vec.fn: a field
+  // showing as a container for unrelated top-level functions).
+  str src = `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `enum Color {
+  `  Red,
+  `  Green,
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///positions.fn";
+  doc.path = "positions.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(&reads, doc);
+  assert contains(out, `"name":"x","kind":8,"containerName":"Point","location":{"uri":"file:///positions.fn","range":{"start":{"line":1`), "expected x's own line, not Point's";
+  assert contains(out, `"name":"y","kind":8,"containerName":"Point","location":{"uri":"file:///positions.fn","range":{"start":{"line":2`), "expected y's own line, not Point's";
+  assert contains(out, `"name":"Red","kind":22,"containerName":"Color","location":{"uri":"file:///positions.fn","range":{"start":{"line":5`), "expected Red's own line, not Color's";
+  assert contains(out, `"name":"Green","kind":22,"containerName":"Color","location":{"uri":"file:///positions.fn","range":{"start":{"line":6`), "expected Green's own line, not Color's";
+}
+
 test "an outline carries a location a client can jump to" {
   str src = `fun helper() num { ret 1; }`;
   AnalysisCache reads = analysis_cache_new();
