@@ -371,6 +371,90 @@ test "a quirk is not what a let infers" {
   );
 }
 
+test "a bare enum-variant shorthand ambiguous between two enums is rejected, not left to crash codegen" {
+  // Neither enum's name is written anywhere, so nothing tells codegen
+  // which one `.Same` means; this used to sail through typechecking
+  // unflagged and crash codegen far later with a generic "unsupported
+  // node" internal error instead of a real diagnostic.
+  str msg = check(
+    `enum A {
+    `  Same
+    `}
+    `enum B {
+    `  Same
+    `}
+    `fun main() {
+    `  let v = .Same;
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg, "ambiguous"), "expected the ambiguity named in the message";
+  assert contains(msg, "A"), "expected the first candidate enum named";
+  assert contains(msg, "B"), "expected the second candidate enum named";
+
+  // The same ambiguity, but through a payload-carrying call shorthand
+  // (`.Same(5)`, parsed as a call whose callee is the dot-shorthand) -
+  // a different AST shape than the bare case above, same underlying gap.
+  str msg2 = check(
+    `enum C {
+    `  Same(num)
+    `}
+    `enum D {
+    `  Same(num)
+    `}
+    `fun main() {
+    `  let v = .Same(5);
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg2, "ambiguous"), "expected the ambiguity named for the payload-carrying shorthand too";
+}
+
+test "a bare enum-variant shorthand naming no enum at all is rejected with its own message" {
+  str msg = check(
+    `enum A {
+    `  Real
+    `}
+    `fun main() {
+    `  let v = .Typo;
+    `  _ = v;
+    `}`
+  );
+  assert contains(msg, "no enum declares a variant named 'Typo'"), "expected a message naming the unknown variant";
+}
+
+test "a bare enum-variant shorthand unambiguous across the program still infers fine" {
+  accepts(
+    `enum A {
+    `  Only
+    `}
+    `fun main() {
+    `  let v = .Only;
+    `  _ = v;
+    `}`,
+    "expected the single owning enum to resolve without an explicit type"
+  );
+}
+
+test "an ambiguous variant name with an explicit declared type is not flagged" {
+  // The declared type on the left resolves it outright; the ambiguity
+  // check only applies to a fully `let`-inferred initializer, which has
+  // nothing else to lean on.
+  accepts(
+    `enum A {
+    `  Same
+    `}
+    `enum B {
+    `  Same
+    `}
+    `fun main() {
+    `  A v = .Same;
+    `  _ = v;
+    `}`,
+    "expected an explicit declared type to disambiguate on its own"
+  );
+}
+
 test "an enum with no payloads reads as a number" {
   accepts(
     `enum Color {
@@ -1083,5 +1167,50 @@ test "a for loop's own two-variable form types a Map's key/value pair, not an al
     `  ret 0;
     `}`,
     "expected the map's own key type on the first name and value type on the second"
+  );
+}
+
+test "a name declared twice at top level is rejected, even across different kinds" {
+  // Fun's transitive, non-scoped import model merges every declaration
+  // into one flat program before codegen, so two top-level names that
+  // collide - even a function and a global variable, never checked
+  // against each other before - reach the C compiler as the same
+  // symbol. User-reported (examples/error_cases/duplicate_symbols.fn):
+  // this used to sail through typechecking and crash with a raw
+  // "redefinition of 'x'" error from the C compiler instead of a real
+  // diagnostic.
+  str fn_vs_global = check(
+    `pub num x = 1;
+    `pub fun x() num { ret 2; }
+    `fun main() {}`
+  );
+  assert contains(fn_vs_global, "already declared"), "expected a function colliding with a global variable to be rejected";
+
+  // Two global variables sharing a name in the SAME file are already
+  // rejected earlier, by the parser's own scope tracking - covered
+  // separately, and not exercising this check at all. The gap this
+  // fixes is specifically cross-file (see the multi-file reproduction
+  // in examples/error_cases/duplicate_symbols.fn, where two files
+  // never share a parse pass to catch it that way).
+
+  str fn_vs_fn = check(
+    `pub fun z() num { ret 1; }
+    `pub fun z() num { ret 2; }
+    `fun main() {}`
+  );
+  assert contains(fn_vs_fn, "already declared"), "expected two functions sharing a name to be rejected even when neither is ever called";
+
+  str compound_vs_enum = check(
+    `compound W { num v; }
+    `enum W { A }
+    `fun main() {}`
+  );
+  assert contains(compound_vs_enum, "already declared"), "expected a compound colliding with an enum to be rejected";
+
+  accepts(
+    `pub num only_once = 1;
+    `pub fun distinct_name() num { ret 1; }
+    `fun main() {}`,
+    "expected two ordinarily distinct top-level names not to be flagged"
   );
 }

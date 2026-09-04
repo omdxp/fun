@@ -450,6 +450,52 @@ fun _free_fn_sig(FnSig* sig) {
 
 // Frees a whole `Map<str, FnSig>`: every signature's own scratch
 // (`_free_fn_sig`), then the map itself.
+fun _free_variant_owners_map(Map<str, Vec<str>>* owners) {
+  Vec<str> names = owners.keys();
+  defer names.free();
+  for name : names {
+    Vec<str> bucket = owners.at(name).unwrap();
+    for owner : bucket {
+      free(owner);
+    }
+    bucket.free();
+  }
+  owners.free();
+}
+
+// The variant name a bare enum-variant shorthand initializer names,
+// whether payload-less (`.Same`) or carrying one (`.Same(5)`, parsed as
+// a call whose callee is the same dot-shorthand shape). `.None` for
+// anything else, including an already-qualified `Enum.Variant` (which
+// names its own enum directly and needs no resolution here).
+fun _bare_enum_shorthand_variant(Node* val) Option<str> {
+  if val == nil {
+    ret .None;
+  }
+  fit val.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left {
+        ret _bare_enum_shorthand_variant(e.left);
+      }
+      if equals(e.op, ".") && e.has_left && e.has_right {
+        bin left_is_blank = false;
+        fit e.left.kind {
+          .Blank -> { left_is_blank = true; }
+          _ -> {}
+        }
+        if left_is_blank {
+          fit e.right.kind {
+            .Identifier(name) -> { ret .Some(name); }
+            _ -> {}
+          }
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret .None;
+}
+
 fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   Vec<str> names = fns.keys();
   defer names.free();
@@ -565,8 +611,24 @@ fun _signature_of_quirk_method(QuirkMethodSig m) FnSig {
 }
 
 // What the checker carries while walking one program.
+// Where a top-level name was first declared, and what it was: a
+// function, a global variable, a compound, or an enum. Every one of
+// these lowers to its own top-level C symbol or typedef, so two of them
+// sharing a name is a real collision regardless of which kinds they
+// are - not just two functions, or two globals.
+compound TopLevelSite {
+  str kind;
+  str file;
+  num line;
+}
+
 compound Checker {
   Map<str, FnSig> fns;
+  // Every function/global-variable/compound/enum name declared so far,
+  // to catch two of them sharing a name before codegen ever runs - the
+  // C compiler would otherwise be the one to notice, far from the
+  // actual cause and in terms the program's own source never used.
+  Map<str, TopLevelSite> declared_at;
   // The quirks a program declares. A pointer to a compound that
   // implements one stands where the quirk is expected.
   Set<str> quirks;
@@ -579,6 +641,11 @@ compound Checker {
   // Every enum the program declares, whether or not its variants carry
   // payloads. `plain_enums` holds only the ones that read as numbers.
   Set<str> enum_names;
+  // Every enum name that declares a variant by that name, keyed by the
+  // variant's own bare name (`"Some"` -> `["Option", "Result"]`).
+  // Resolving a bare shorthand (`.Some`) with no declared type to lean
+  // on needs to know whether exactly one enum owns that name.
+  Map<str, Vec<str>> variant_owners;
   // What each declared compound holds, and what each type and quirk
   // declares as methods.
   Map<str, CompoundInfo> compounds;
@@ -602,10 +669,12 @@ fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
   c.fns.init(32);
+  c.declared_at.init(32);
   c.quirks = set_init("", 16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
   c.enum_names = set_init("", 16);
+  c.variant_owners.init(16);
   c.compounds.init(16);
   c.methods.init(16);
   c.current_file = "";
@@ -2423,6 +2492,48 @@ impl Checker {
       CheckedType value = self.infer(v.val, env);
       // A `let` takes the type of its value rather than checking one.
       if is_unknown(declared) {
+        // A bare enum-variant shorthand (`let v = .Same;`) has no
+        // declared type to resolve against, so it falls back to
+        // whichever single enum in the whole program owns that variant
+        // name (codegen's own resolve_unique_enum_for_variant does the
+        // same lookup for real, once this passes). Zero or several
+        // owners is not something a fallback can guess through, so it
+        // is reported here rather than left to surface as a codegen
+        // internal error far from the actual cause.
+        let bare_variant = _bare_enum_shorthand_variant(v.val);
+        if bare_variant.is_some() {
+          str variant_name = bare_variant.unwrap();
+          let owners_opt = self.variant_owners.at(variant_name);
+          if owners_opt.is_none() {
+            self.fail(
+              format("no enum declares a variant named '{str}'", variant_name),
+              stmt
+            );
+            ret;
+          }
+          Vec<str> owners = owners_opt.unwrap();
+          if owners.len > 1 {
+            StringBuilder ob = string_builder_init(32);
+            num oi = 0;
+            for oi < owners.len {
+              if oi > 0 {
+                ob.append(", ");
+              }
+              ob.append(owners.get(oi));
+              oi = oi + 1;
+            }
+            self.fail(
+              format(
+              "cannot infer an enum type for '.{str}': ambiguous between {str} (give '{str}' an explicit declared type)",
+              variant_name,
+              ob.build(),
+              v.name
+              ),
+              stmt
+            );
+            ret;
+          }
+        }
         // A quirk names a contract rather than a type a value can be
         // stored as, so it cannot be what a `let` infers.
         if self.quirks.has(value.name) {
@@ -2630,14 +2741,51 @@ impl Checker {
   }
 }
 
+// Registers `name` as declared at `node`, as `kind` (a human-readable
+// label: "a function", "a global variable", "a compound", "an enum"),
+// failing `checker` when another declaration already claimed it - a
+// function, a global variable, a compound, and an enum each lower to
+// their own top-level C symbol or typedef, so any two of them sharing a
+// name collide regardless of whether they are the same kind. True when
+// this failed (the caller should stop and return the error).
+fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node) bin {
+  let existing = checker.declared_at.at(name);
+  if existing.is_some() {
+    TopLevelSite site = existing.unwrap();
+    checker.fail(
+      format(
+      "'{str}' is already declared as {str} in {str}:{num}",
+      name,
+      site.kind,
+      site.file,
+      site.line
+      ),
+      node
+    );
+    ret true;
+  }
+  TopLevelSite site;
+  site.kind = kind;
+  site.file = "";
+  site.line = 0;
+  if node.has_pos {
+    site.file = node.pos.filename;
+    site.line = node.pos.line;
+  }
+  checker.declared_at.put(name, site);
+  ret false;
+}
+
 // Checks a whole program, reporting the first type error it finds.
 pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
   Checker checker = _checker_new();
   defer _free_fn_sig_map(&checker.fns);
+  defer checker.declared_at.free();
   defer checker.quirks.free();
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
+  defer _free_variant_owners_map(&checker.variant_owners);
   defer _free_compound_info_map(&checker.compounds);
   defer _free_method_tables(&checker.methods);
   defer checker.active_type_params.free();
@@ -2649,6 +2797,9 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
     fit node.kind {
       .Function(f) -> {
         if f.has_name {
+          if _check_duplicate_top_level(&checker, f.name, "a function", node) {
+            ret .Err(checker.error);
+          }
           FnSig sig = _signature_of(f);
           sig.is_public = node.flags.is_public;
           if node.has_pos {
@@ -2678,6 +2829,9 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         checker.methods.put(q.name, table);
       }
       .Variable(v) -> {
+        if _check_duplicate_top_level(&checker, v.name, "a global variable", node) {
+          ret .Err(checker.error);
+        }
         GlobalInfo info;
         info.is_public = node.flags.is_public;
         info.file = "";
@@ -2687,6 +2841,9 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         checker.globals.put(v.name, info);
       }
       .Enum(e) -> {
+        if _check_duplicate_top_level(&checker, e.name, "an enum", node) {
+          ret .Err(checker.error);
+        }
         // No variants lowers to an empty C `enum`, which is invalid;
         // rejected here rather than left for the C compiler to explain.
         if e.variants.len == 0 {
@@ -2703,8 +2860,25 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         if !carries_data {
           checker.plain_enums.add(e.name);
         }
+        for v : e.variants {
+          str owner = substr(e.name, 0, len(e.name));
+          let existing = checker.variant_owners.at(v.name);
+          if existing.is_some() {
+            Vec<str> owners = existing.unwrap();
+            owners.push(owner);
+            checker.variant_owners.put(v.name, owners);
+          } else {
+            Vec<str> owners2;
+            owners2.init(2);
+            owners2.push(owner);
+            checker.variant_owners.put(v.name, owners2);
+          }
+        }
       }
       .Compound(c) -> {
+        if _check_duplicate_top_level(&checker, c.name, "a compound", node) {
+          ret .Err(checker.error);
+        }
         CompoundInfo info;
         info.is_public = node.flags.is_public;
         info.file = "";
