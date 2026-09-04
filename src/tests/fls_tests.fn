@@ -2198,6 +2198,29 @@ test "hover on a sized array local shows its own declared size, not a bare '[]'"
   assert contains(hover(&reads, doc, 2, 9), "num[] dyn"), "expected a bare '[]' to stay bare, not gain a wrong size";
 }
 
+test "hover on a module-alias-qualified type shows it written the way it was, not the internal mangled name" {
+  // User-reported: `imp std.log as l;` then `l.Logger logger` hovered
+  // as "l__Logger logger" - parser.fn's own parse_datatype mangles a
+  // qualified type's type_str to "l__Logger" for symbol lookup, and
+  // fls's own render_type showed that internal form verbatim instead
+  // of demangling it back for display.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliastype.fn";
+  doc.path = "aliastype.fn";
+  doc.text = `imp std.log as l;
+  `fun main() {
+  `  l.Logger logger = l.logger_init(l.LogLevel.Debug);
+  `  _ = logger;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 11);
+  assert contains(hovered, "l.Logger logger"), "expected the type written the way it was, alias and all";
+  assert !contains(hovered, "l__Logger"), "expected no internal mangled name leaking through";
+}
+
 test "hovering a number literal shows decimal/hex/binary/octal each on its own line, not run together" {
   // User-reported: the whole breakdown rendered on one run-together
   // line, since a single '\n' in plain markdown prose is a soft line
@@ -3380,6 +3403,46 @@ test "inlay hints substitute a generic function's own type parameter from the ca
   assert !contains(hints, `"label":": T"`), "expected no raw, unsubstituted type parameter in any hint";
   assert contains(hints, `"position":{"line":12,"character":14},"label":": num"`), "expected the num instantiation substituted";
   assert contains(hints, `"position":{"line":15,"character":16},"label":": Point"`), "expected the Point instantiation substituted";
+}
+
+test "a generic function's return substitutes against a compound-shaped parameter, not just a bare type param" {
+  // `swap_pair<L, R>(Pair<L, R> p) Pair<R, L>` never matches a call
+  // argument's type here, since neither declared parameter is itself
+  // a bare type param - only Pair's own generic args are. Before this
+  // fix, `_call_return_type` only matched a parameter whose whole
+  // declared type equaled one type param name, so `swapped` hovered
+  // as the raw "Pair<R, L>" and `pick_left(pair)`/`pick_left(swapped)`
+  // both showed the bare "L", never resolving to a concrete type at
+  // all. examples/advanced/generic_inference_after_init.fn.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///swappair.fn";
+  doc.path = "swappair.fn";
+  doc.text = `compound Pair<L, R> {
+  `  L left;
+  `  R right;
+  `}
+  `fun make_pair<L, R>(L left, R right) Pair<L, R> {
+  `  ret Pair<L, R>{left = left, right = right};
+  `}
+  `fun pick_left<L, R>(Pair<L, R> p) L {
+  `  ret p.left;
+  `}
+  `fun swap_pair<L, R>(Pair<L, R> p) Pair<R, L> {
+  `  ret Pair<R, L>{left = p.right, right = p.left};
+  `}
+  `fun main() {
+  `  let pair = make_pair(7, "hi");
+  `  let swapped = swap_pair(pair);
+  `  let left_num = pick_left(pair);
+  `  let left_str = pick_left(swapped);
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 15, 6), "Pair<str, num> swapped"), "expected swap_pair's own two type params substituted from Pair's own field args, not left raw";
+  assert contains(hover(&reads, doc, 16, 6), "num left_num"), "expected pick_left's bare return substituted through a compound parameter";
+  assert contains(hover(&reads, doc, 17, 6), "str left_str"), "expected pick_left substituted again against the swapped pair's own args";
 }
 
 test "hover on a generic function's own callee name specializes its signature against the call's own arguments" {

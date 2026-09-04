@@ -84,7 +84,9 @@ pub fun render_type(DataType* dt) str {
     ret "";
   }
   StringBuilder b = string_builder_init(32);
-  b.append(_base_type_name(dt));
+  str base_name = _base_type_name(dt);
+  b.append(base_name);
+  free(base_name);
 
   if dt.generic_args.len > 0 {
     b.append("<");
@@ -150,16 +152,50 @@ pub fun render_type(DataType* dt) str {
 
 fun _base_type_name(DataType* dt) str {
   fit dt.kind {
-    .Void -> { ret "void"; }
-    .Raw -> { ret "raw"; }
-    .Chr -> { ret "chr"; }
-    .Str -> { ret "str"; }
-    .Dec -> { ret "dec"; }
-    .Num -> { ret "num"; }
-    .Bin -> { ret "bin"; }
+    .Void -> { ret substr("void", 0, 4); }
+    .Raw -> { ret substr("raw", 0, 3); }
+    .Chr -> { ret substr("chr", 0, 3); }
+    .Str -> { ret substr("str", 0, 3); }
+    .Dec -> { ret substr("dec", 0, 3); }
+    .Num -> { ret substr("num", 0, 3); }
+    .Bin -> { ret substr("bin", 0, 3); }
     _ -> {}
   }
-  ret dt.type_str;
+  ret _demangled_alias_type_name(dt.type_str);
+}
+
+// A module-alias-qualified type's own internal name, written the way a
+// reader wrote it rather than the mangled form the parser keeps
+// internally for symbol lookup (`imp std.log as l;` then `l.Logger`
+// parses `type_str` to "l__Logger" - parser.fn's own
+// `parse_datatype`). Left alone for a generic instantiation's own
+// mangled name (`Vec__num`, `Box__Node_ptr1`), whose first segment is
+// always the container's own declared PascalCase name, never a
+// lowercase import alias - the two mangling schemes share the same
+// "__" separator, so this only touches a name whose segment before it
+// reads like an alias.
+fun _demangled_alias_type_name(str type_str) str {
+  num sep = index_of_str(type_str, "__");
+  if sep <= 0 {
+    ret substr(type_str, 0, len(type_str));
+  }
+  bin looks_like_alias = is_lower(type_str[0]);
+  num i = 1;
+  for looks_like_alias && i < sep {
+    if !(is_alnum(type_str[i]) || type_str[i] == '_') {
+      looks_like_alias = false;
+    }
+    i = i + 1;
+  }
+  if !looks_like_alias {
+    ret substr(type_str, 0, len(type_str));
+  }
+  str prefix = substr(type_str, 0, sep);
+  str suffix = substr(type_str, sep + 2, len(type_str) - sep - 2);
+  str result = format("{str}.{str}", prefix, suffix);
+  free(prefix);
+  free(suffix);
+  ret result;
 }
 
 // A function as its signature reads, without its body.
@@ -1581,23 +1617,57 @@ fun _call_return_type(
       continue;
     }
     str ptype = _param_type_from_piece(params.get(arg_idx));
-    num tpi = 0;
-    for tpi < type_params.len {
-      if equals(ptype, type_params.get(tpi)) {
-        str existing = resolved.get(tpi);
-        if equals(existing, "") {
-          // Not freed when unresolved: `_infer_type`'s own "" result
-          // is typically a literal, not a heap allocation (see the
-          // note on `_infer_type`'s own binary-operator combination,
-          // the same reasoning applies here).
-          str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
-          if !equals(arg_type, "") {
-            free(existing);
-            resolved.set(tpi, arg_type);
+    if index_of_char(ptype, '<') >= 0 {
+      // A compound-shaped parameter (`Pair<L, R> p`), matched against
+      // the argument's own concrete generic args position-by-position
+      // rather than against the whole type name at once (`swap_pair`,
+      // `pick_left`: the parameter is never itself a bare type param
+      // here, only its own arguments are).
+      Vec<str> param_generic_args = generic_args_of_detail(ptype);
+      str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
+      if !equals(arg_type, "") {
+        Vec<str> arg_generic_args = generic_args_of_detail(arg_type);
+        if arg_generic_args.len == param_generic_args.len {
+          num mi = 0;
+          for mi < param_generic_args.len {
+            num tpk = 0;
+            for tpk < type_params.len {
+              if equals(param_generic_args.get(mi), type_params.get(tpk)) {
+                str existing2 = resolved.get(tpk);
+                if equals(existing2, "") {
+                  str got = arg_generic_args.get(mi);
+                  free(existing2);
+                  resolved.set(tpk, substr(got, 0, len(got)));
+                }
+              }
+              tpk = tpk + 1;
+            }
+            mi = mi + 1;
           }
         }
+        _free_str_vec_deep(&arg_generic_args);
+        free(arg_type);
       }
-      tpi = tpi + 1;
+      _free_str_vec_deep(&param_generic_args);
+    } else {
+      num tpi = 0;
+      for tpi < type_params.len {
+        if equals(ptype, type_params.get(tpi)) {
+          str existing = resolved.get(tpi);
+          if equals(existing, "") {
+            // Not freed when unresolved: `_infer_type`'s own "" result
+            // is typically a literal, not a heap allocation (see the
+            // note on `_infer_type`'s own binary-operator combination,
+            // the same reasoning applies here).
+            str arg_type2 = _infer_type(tokens, at, program, file, line, nil, depth + 1);
+            if !equals(arg_type2, "") {
+              free(existing);
+              resolved.set(tpi, arg_type2);
+            }
+          }
+        }
+        tpi = tpi + 1;
+      }
     }
     free(ptype);
   }
