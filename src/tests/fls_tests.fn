@@ -1037,6 +1037,43 @@ test "go-to-definition on a compound field or enum variant lands on its own decl
   assert contains(variant_def, `"line":6`), "expected the variant's own declaration line, not the enum's";
 }
 
+test "go-to-definition on a call prefers the method over a same-named field on the same compound" {
+  // resolve_at tried lookup_field before ever considering lookup_method,
+  // unconditionally - a compound with a field and a quirk-impl method
+  // sharing one name (a plausible getter-over-its-own-backing-field
+  // shape) always resolved `b.len()` to the FIELD, since a field call
+  // was never distinguished from a field read by whether a '(' follows.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///namecollide.fn";
+  doc.path = "namecollide.fn";
+  doc.text = `quirk Sized {
+  `  len() num;
+  `}
+  `compound Buffer {
+  `  num len;
+  `}
+  `impl Buffer as Sized {
+  `  len() num { ret self.len; }
+  `}
+  `fun main() {
+  `  Buffer b;
+  `  b.len = 3;
+  `  num r = b.len();
+  `  _ = r;
+  `}`;
+  doc.version = 1;
+
+  // Field read: 'len' at line 11 ('  b.len = 3;') lands on the field, line 4.
+  str field_read = definition(&reads, doc, 11, 4);
+  assert contains(field_read, `"line":4`), "expected the field's own declaration line for a plain read";
+
+  // Method call: 'len' at line 12 ('  num r = b.len();') lands on the method, line 7 - not the field.
+  str method_call = definition(&reads, doc, 12, 12);
+  assert contains(method_call, `"line":7`), "expected the method's own declaration line for a call, not the field's";
+}
+
 test "field and variant doc comments: a leading block scopes to just the field, a trailing comment is the fallback" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

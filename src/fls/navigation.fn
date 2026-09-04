@@ -503,19 +503,37 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line, 0);
     str type_name = found_receiver.type_name;
     if !equals(type_name, "") {
+      // A name is called (`b.len()`), not read as a field (`b.len`),
+      // when a `(` immediately follows it: the two can otherwise
+      // collide (a method sharing its name with an unrelated field on
+      // the same compound), and a field always wins by being checked
+      // first below unless this looks ahead first.
+      bin is_call = false;
+      let after_name = token_after(tokens, index_of_token(tokens, t) + 1);
+      if after_name.is_some() && token_is_operator(after_name.unwrap(), "(") {
+        is_call = true;
+      }
+      if is_call {
+        // Specializes a generic method's own signature against the
+        // receiver's own concrete type arguments (`o.unwrap_or` on
+        // `Option<num>` shows `num`, not the bare template's own `T`),
+        // threaded all the way through by `chain_receiver` however deep
+        // the chain leading to the receiver is, not just for a bare
+        // local carrying them directly.
+        let method = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        if method.is_some() {
+          ret method;
+        }
+      }
       let field = lookup_field(&program.nodes, type_name, name, found_receiver.generic_args);
       if field.is_some() {
         ret field;
       }
-      // Specializes a generic method's own signature against the
-      // receiver's own concrete type arguments (`o.unwrap_or` on
-      // `Option<num>` shows `num`, not the bare template's own `T`),
-      // threaded all the way through by `chain_receiver` however deep
-      // the chain leading to the receiver is, not just for a bare
-      // local carrying them directly.
-      let method = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
-      if method.is_some() {
-        ret method;
+      if !is_call {
+        let method2 = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        if method2.is_some() {
+          ret method2;
+        }
       }
     }
     // `receiver` might not be a local at all, but an enum type named
