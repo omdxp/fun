@@ -719,7 +719,7 @@ behavior.
   imports, and incomplete quirk implementations are compile errors.
 - Pointer-return, `fit` exhaustiveness, redundant `fit` branches,
   unreachable statements, constant assertions, and optional unused-*
-  diagnostics are emitted as warnings (see Warning Controls below).
+  diagnostics are emitted as warnings (see [Warning Controls](#language?anchor=language-warning-controls) below).
 
 ## Warning Controls
 

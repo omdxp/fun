@@ -233,8 +233,8 @@ The official VS Code extension is published on the Visual Studio
 Marketplace. Vim, Neovim, Emacs, and JetBrains setup notes are available
 in `editors/README.md` in the repository.
 
-This repository maps `.fn` files to Zig highlighting on GitHub itself via
-`.gitattributes` (GitHub Linguist has no native Fun grammar yet).
+GitHub Linguist has no native Fun grammar yet, so `.fn` files render as
+plain text in the GitHub UI.
 
 ## CLI
 
@@ -278,10 +278,10 @@ quick orientation.
 - `std.collections`: collection quirks (`len`/`is_empty`).
 - `std.string`: string helpers.
 - `std.channel`/`std.task`/`std.sync`: the concurrency primitives covered
-  in Concurrency.
+  in [Concurrency](#concurrency).
 - `std.runtime_backend`/`std.thread_runtime`/`std.sync_runtime` and their
   `*_backend_posix`/`*_backend_windows` modules: the backend-selection
-  machinery covered in Platforms & Compilers.
+  machinery covered in [Platforms & Compilers](#platforms).
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/
   `Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`,
   Option-returning accessors, and `to_string`/`stringify`.

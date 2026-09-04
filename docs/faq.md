@@ -24,10 +24,12 @@ The [examples/](../examples/) directory contains language, standard-library, imp
 
 Use these documents depending on what you need:
 
-- [language.md](language.md) for the language overview
-- [reference.md](reference.md) for the reference material
+- [get-started.md](get-started.md) for installation, `fun init`, and your first build/run
+- [language.md](language.md) for syntax, types, and control flow
+- [concurrency.md](concurrency.md) for async/await, `fork`, and channels
+- [tooling.md](tooling.md) for testing, fuzzing, formatting, and the CLI
+- [platforms.md](platforms.md) for C compiler selection and runtime backends
 - [architecture.md](architecture.md) for implementation structure
-- [channel-runtime-conformance.md](channel-runtime-conformance.md) for backend/runtime behavior details
 
 ## How do I contribute?
 

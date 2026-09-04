@@ -150,7 +150,7 @@ Vim, Neovim, Emacs, JetBrains, and Sublime setup notes are available in [editors
 
 ### GitHub Syntax Highlighting
 
-This repository maps `.fn` files to Zig highlighting on GitHub via [/.gitattributes](.gitattributes). Native Fun highlighting can be added upstream by contributing a Fun definition and TextMate grammar to GitHub Linguist.
+GitHub Linguist has no native Fun grammar yet, so `.fn` files render as plain text in the GitHub UI. Native Fun highlighting can be added upstream by contributing a Fun definition and TextMate grammar to GitHub Linguist.
 
 ## Documentation
 

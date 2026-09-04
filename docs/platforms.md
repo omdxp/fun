@@ -23,7 +23,7 @@ Examples:
 `fun fuzz` does NOT use `FUN_CC`/`FUN_CC_ARGS`, it needs a compiler whose
 toolchain bundles a coverage-guided fuzzing runtime specifically, which
 has nothing to do with your ordinary build compiler, so it has its own
-separate `FUN_FUZZ_CC` override instead (see Fuzzing, in Tooling).
+separate `FUN_FUZZ_CC` override instead (see [Fuzzing](#tooling?anchor=tooling-fuzzing), in Tooling).
 
 ### Windows notes
 
@@ -51,8 +51,8 @@ $env:FUN_CC_ARGS = ""
 
 ## Platform & Target Support
 
-Fun has two runtime backends, POSIX and Windows (see Runtime Backend
-Selection above), and is built, tested, and released across the
+Fun has two runtime backends, POSIX and Windows (see [Runtime Backend
+Selection](#platforms?anchor=platforms-runtime-backend-selection) above), and is built, tested, and released across the
 following platforms.
 
 ### Runtime backends
@@ -71,7 +71,7 @@ following platforms.
 | Windows | `windows-latest` | Yes |
 
 CI runs on x86_64 runners only; there is no aarch64 CI test lane for any
-platform (see the release matrix below for where aarch64 is covered, as
+platform (see the [release matrix](#platforms?anchor=platforms-release-artifacts) below for where aarch64 is covered, as
 a release build, not a test).
 
 ### Release artifacts
@@ -94,7 +94,7 @@ built but not exercised against the test suite before release.
 An arbitrary width up to 128 bits (`i72`, `u100`, and so on) compiles
 everywhere: Fun emits the nearest standard container (`int8_t` through
 `int64_t`, or `__int128`/`unsigned __int128`), both long-supported
-GNU/Clang extensions regardless of platform. See Types, in Language, for
+GNU/Clang extensions regardless of platform. See [Types](#language?anchor=language-types), in Language, for
 the full numeric type table.
 
 A width past 128 bits, rare in practice (`u256` being the one example in

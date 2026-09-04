@@ -364,7 +364,7 @@ function buildDebugConfig(
 // DAP type-remapping tracker — C types → Fun types in Variables/Evaluate
 // ---------------------------------------------------------------------------
 
-/** Exact C type → Fun type reverse mapping, mirroring transpiler.zig map_type_to_c(). */
+/** Exact C type → Fun type reverse mapping, mirroring codegen/typedefs.fn's map_type_to_c(). */
 const C_TO_FUN_TYPES: ReadonlyMap<string, string> = new Map([
   // Numeric primitives
   ["int64_t", "num"],
