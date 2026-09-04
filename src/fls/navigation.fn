@@ -486,6 +486,25 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
   ProgramMergeResult program = read.program;
   num source_line = line + 1;
 
+  // A compound-literal's own field name (`Box<AsyncCounter>{v = q}`'s
+  // `v`), never reached through a dot at all, so it needs its own check
+  // ahead of the receiver-chain handling below rather than falling
+  // through to the bare-name lookup at the bottom of this function,
+  // which would resolve `v` as whatever unrelated top-level `v` this
+  // program happens to declare (or nothing at all).
+  str literal_type_name = "";
+  Vec<str> literal_args;
+  bin in_literal = compound_literal_field_context(tokens, t, &literal_type_name, &literal_args);
+  if in_literal {
+    let field = lookup_field(&program.nodes, literal_type_name, name, literal_args);
+    literal_args.free();
+    if field.is_some() {
+      ret field;
+    }
+  } else {
+    literal_args.free();
+  }
+
   str receiver = _receiver_of(tokens, t);
   // A plain identifier before the dot isn't the only shape a receiver
   // takes: `a.f().g` has none (the token right before `.g` is `)`),

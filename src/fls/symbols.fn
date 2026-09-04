@@ -666,6 +666,99 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> conc
   ret .None;
 }
 
+// Whether `field_tok` sits at a compound-literal's own `field = value`
+// position (`Box<AsyncCounter>{v = q}`'s own `v`, `.{ v = q }`'s own
+// `v`, or plain `Box{v = q}`'s own `v`), and if so, the literal's own
+// compound name and explicit generic args - "" and empty when the
+// literal is a bare `.{...}` shorthand (its own type comes from
+// context, not resolvable from the tokens alone). Purely token-based,
+// walking backward from `field_tok` to the nearest unmatched `{` and
+// whatever names it, the same style `_infer_type_primary`'s own
+// (forward-facing) compound-literal handling already uses rather than
+// a real AST-position lookup - `CompoundInitField` carries no position
+// of its own to look up by.
+pub fun compound_literal_field_context(
+  Vec<Token>* tokens,
+  Token field_tok,
+  str* out_name,
+  Vec<str>* out_args
+) bin {
+  *out_name = "";
+  out_args.init(2);
+  num idx = index_of_token(tokens, field_tok);
+  let after = token_after(tokens, idx + 1);
+  if after.is_none() || !token_is_operator(after.unwrap(), "=") {
+    ret false;
+  }
+  num depth = 0;
+  num cursor = idx;
+  num open_brace_idx = -1;
+  for true {
+    let prev = token_before(tokens, cursor);
+    if prev.is_none() {
+      ret false;
+    }
+    cursor = index_of_token(tokens, prev.unwrap());
+    if token_is_symbol(prev.unwrap(), '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(prev.unwrap(), '{') {
+      if depth == 0 {
+        open_brace_idx = cursor;
+        break;
+      }
+      depth = depth - 1;
+    }
+  }
+  let before_brace = token_before(tokens, open_brace_idx);
+  if before_brace.is_none() {
+    ret false;
+  }
+  if token_is_operator(before_brace.unwrap(), ">") {
+    num angle_depth = 0;
+    num acursor = index_of_token(tokens, before_brace.unwrap());
+    num open_angle_idx = -1;
+    for true {
+      let aprev = token_before(tokens, acursor);
+      if aprev.is_none() {
+        ret false;
+      }
+      acursor = index_of_token(tokens, aprev.unwrap());
+      if token_is_operator(aprev.unwrap(), ">") {
+        angle_depth = angle_depth + 1;
+      } elif token_is_operator(aprev.unwrap(), "<") {
+        if angle_depth == 0 {
+          open_angle_idx = acursor;
+          break;
+        }
+        angle_depth = angle_depth - 1;
+      } elif angle_depth == 0 && aprev.unwrap().type == .Identifier {
+        out_args.push(token_word(aprev.unwrap()));
+      }
+    }
+    let name_tok = token_before(tokens, open_angle_idx);
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
+      ret false;
+    }
+    // Collected right-to-left; flip to source order.
+    num lo = 0;
+    num hi = out_args.len - 1;
+    for lo < hi {
+      let tmp = out_args.get(lo);
+      out_args.set(lo, out_args.get(hi));
+      out_args.set(hi, tmp);
+      lo = lo + 1;
+      hi = hi - 1;
+    }
+    *out_name = token_word(name_tok.unwrap());
+    ret true;
+  }
+  if before_brace.unwrap().type == .Identifier {
+    *out_name = token_word(before_brace.unwrap());
+    ret true;
+  }
+  ret false;
+}
+
 // The method `method_name` declared in an `impl` block targeting
 // `type_name`. Unlike a field or an enum variant, a method keeps its
 // own real declaration position, so go-to-definition lands on the
@@ -710,7 +803,14 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
       _ -> {}
     }
   }
-  ret .None;
+  // `type_name` names a quirk directly, not a concrete type with its own
+  // impl block, whenever the receiver itself is quirk-typed (`AsyncCounter
+  // q = &c;` then `q.add(...)`, or a quirk-typed parameter/return) - no
+  // `impl` block is ever literally named after a quirk (`impl Counter as
+  // AsyncCounter`'s own type_name is "Counter"), so the search above
+  // always comes back empty for one and needs this fallback to resolve
+  // at all.
+  ret quirk_method_declaration(program, type_name, method_name);
 }
 
 // The signature `quirk_name` requires for `method_name`, as declared
@@ -1306,6 +1406,19 @@ compound ChainSeg {
   // branch), to locate its own argument list in `tokens` for generic
   // call-site substitution (`_call_return_type`).
   Token tok;
+  // Set for a segment that is a whole parenthesized sub-expression
+  // (`(pack(q).v).add(1)`'s own `(pack(q).v)`), rather than a bare
+  // identifier or call - `tok` then names the sub-expression's own
+  // last token (`v`, not a callee name), and `paren_is_call` says
+  // whether that inner tail is itself a call, both needed to resolve
+  // the group's own type through `chain_ending_receiver` instead of
+  // the ordinary local/top-level-call lookup a plain first segment
+  // gets. Always the chain's own first segment when set, since a
+  // parenthesized group's own closing `)` ends the leftward walk -
+  // whatever precedes its matching `(` (a keyword like `await`,
+  // another operator, or nothing) is not part of this chain.
+  bin is_paren_group;
+  bin paren_is_call;
 }
 
 // The index of the `(` matching the `)` at `rparen_idx`, scanning
@@ -1421,7 +1534,7 @@ fun _walk_forward_chain(
     let after_member = token_after(tokens, member_idx + 1);
     bin is_call = after_member.is_some() && token_is_operator(after_member.unwrap(), "(");
     if is_call {
-      let m = _lookup_method_or_quirk(program, current_type, member_name, current_args);
+      let m = lookup_method(program, current_type, member_name, current_args);
       if m.is_none() {
         ret "";
       }
@@ -1454,30 +1567,6 @@ fun _walk_forward_chain(
 }
 
 // `lookup_method`, falling back to `quirk_method_declaration` when
-// `type_name` names a quirk rather than a concrete type: a field or
-// local typed as a quirk (`AsyncCounter q = &c;`, or a generic
-// compound field like `Box<AsyncCounter>.v`) has no `impl` block of
-// its own targeting the quirk's own name - the quirk's declared
-// signature is the correct answer for dispatch through a value typed
-// as the quirk itself, the same shape `hover`'s own quirk-method
-// handling already resolves for a direct quirk-typed local (this just
-// extends that to the chain-walking path). Not specialized against
-// `concrete_args`: a quirk method's own signature is written directly
-// against the quirk's method params, with no compound-generic
-// substitution to apply.
-fun _lookup_method_or_quirk(
-  Vec<Node>* program,
-  str type_name,
-  str method_name,
-  Vec<str> concrete_args
-) Option<Declaration> {
-  let m = lookup_method(program, type_name, method_name, concrete_args);
-  if m.is_some() {
-    ret m;
-  }
-  ret quirk_method_declaration(program, type_name, method_name);
-}
-
 // `f`'s own return type, substituted when it's a bare generic type
 // parameter (`fun pick_first<T>(T a, T b) T`) and the call at
 // `name_tok` in `tokens` supplies a resolvable concrete type for it:
@@ -1942,15 +2031,46 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
         break;
       }
       let callee = token_before(tokens, lparen.unwrap());
-      if callee.is_none() {
+      bin callee_is_ident = false;
+      if callee.is_some() {
+        fit callee.unwrap().type {
+          .Identifier -> { callee_is_ident = true; }
+          _ -> {}
+        }
+      }
+      if callee_is_ident {
+        seg_tok = callee.unwrap();
+        is_call = true;
+      } else {
+        // A plain parenthesized sub-expression (`(pack(q).v).add(1)`'s
+        // own `(pack(q).v)`), not a call: nothing immediately before
+        // the `(` reads as a callee identifier (`await`, another
+        // operator, or the very start of the expression). Resolves
+        // the whole group as one segment via `chain_ending_receiver`
+        // on its own inner tail token, and stops the leftward walk
+        // here rather than `break`-ing with nothing collected -
+        // whatever precedes the outer `(` isn't part of this chain.
+        let inner_last = token_before(tokens, index_of_token(tokens, seg_tok));
+        if inner_last.is_none() {
+          break;
+        }
+        bin inner_is_call = false;
+        let after_inner = token_after(
+          tokens,
+          index_of_token(tokens, inner_last.unwrap()) + 1
+        );
+        if after_inner.is_some() && token_is_operator(after_inner.unwrap(), "(") {
+          inner_is_call = true;
+        }
+        ChainSeg pseg;
+        pseg.name = "";
+        pseg.is_call = false;
+        pseg.tok = inner_last.unwrap();
+        pseg.is_paren_group = true;
+        pseg.paren_is_call = inner_is_call;
+        segments.push(pseg);
         break;
       }
-      fit callee.unwrap().type {
-        .Identifier -> {}
-        _ -> { break; }
-      }
-      seg_tok = callee.unwrap();
-      is_call = true;
     } else {
       fit seg_tok.type {
         .Identifier -> {}
@@ -1961,6 +2081,8 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
     seg.name = token_word(seg_tok);
     seg.is_call = is_call;
     seg.tok = seg_tok;
+    seg.is_paren_group = false;
+    seg.paren_is_call = false;
     segments.push(seg);
     cursor = index_of_token(tokens, seg_tok);
   }
@@ -2002,6 +2124,18 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
         free(first_rtype_text);
       }
     }
+  } elif first.is_paren_group {
+    ChainReceiver inner = chain_ending_receiver(
+      tokens,
+      first.tok,
+      first.paren_is_call,
+      program,
+      file,
+      line,
+      depth + 1
+    );
+    current_type = inner.type_name;
+    current_args = inner.generic_args;
   } else {
     current_type = type_name_of_local(tokens, program, first.name, file, line);
     current_args = local_generic_args(tokens, program, first.name, file, line);
@@ -2019,7 +2153,7 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
       // the method lookup, so a stdlib container's own `get`/`unwrap`
       // returns its concrete element type here too, not the bare
       // unspecialized template.
-      let m = _lookup_method_or_quirk(program, current_type, seg.name, current_args);
+      let m = lookup_method(program, current_type, seg.name, current_args);
       if m.is_none() {
         ret empty;
       }
@@ -2147,7 +2281,7 @@ pub fun chain_ending_receiver(
     // `chain_receiver`, however deep the chain leading to it) are
     // what let a stdlib container's own method resolve its concrete
     // element type here, not just a bare local's.
-    let m = _lookup_method_or_quirk(program, receiver.type_name, name, receiver.generic_args);
+    let m = lookup_method(program, receiver.type_name, name, receiver.generic_args);
     if m.is_none() {
       ret empty;
     }
@@ -2202,6 +2336,30 @@ pub fun matching_rbrace(Vec<Token>* tokens, num lbrace_idx) Option<num> {
       }
     }
     i = i + 1;
+  }
+  ret .None;
+}
+
+// The index of the `{` matching the `}` at `rbrace_idx`, depth-tracked
+// backward - `matching_rbrace`'s own counterpart, for walking from
+// inside a brace group back to where it opened.
+pub fun matching_lbrace(Vec<Token>* tokens, num rbrace_idx) Option<num> {
+  num depth = 0;
+  num i = rbrace_idx;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '{') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    if i == 0 {
+      break;
+    }
+    i = i - 1;
   }
   ret .None;
 }

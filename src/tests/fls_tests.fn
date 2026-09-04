@@ -2776,6 +2776,124 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
+test "hover resolves a quirk-typed receiver's own method, not just a concrete one" {
+  // User-reported. lookup_method only ever searched impl blocks by
+  // their own type_name, which is always the concrete implementing
+  // type (impl Counter as AsyncCounter's own type_name is "Counter",
+  // never "AsyncCounter") - a receiver declared as the quirk itself
+  // (AsyncCounter q = &c; q.add(1)) has no impl block literally named
+  // after it, so this came back empty no matter what. Every one of
+  // this function's 8 call sites across hover, go-to-definition, inlay
+  // hints, and signature help shared the same gap; fixed once, inside
+  // lookup_method itself, by falling back to quirk_method_declaration
+  // (which already existed for exactly this, just never consulted from
+  // any of them).
+  str src = `compound Counter {
+  `  num base;
+  `}
+  `quirk AsyncCounter {
+  `  async add(num x) num;
+  `}
+  `impl Counter as AsyncCounter {
+  `  async add(num x) num { ret self.base + x; }
+  `}
+  `async fun main() {
+  `  Counter c;
+  `  c.base = 41;
+  `  AsyncCounter q = &c;
+  `  let out = await q.add(1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkreceiver.fn";
+  doc.path = "quirkreceiver.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 13, 21), "async add(num x) num"), "expected the quirk-typed receiver's own method to resolve";
+}
+
+test "hover resolves a method called on a parenthesized receiver chain, not just a bare one" {
+  // User-reported (examples/advanced/async_quirk_await_parenthesized_receiver.fn).
+  // chain_receiver's own backward walk always assumed a ')' immediately
+  // before a '.' meant a function call (looking for a callee identifier
+  // right before the matching '('), so `(pack(q).v).add(1)` - a plain
+  // parenthesized grouping, not a call - found "await" there instead of
+  // an identifier and gave up on the whole chain. Fixed by recognizing
+  // a ')' with no callee identifier before its matching '(' as a
+  // parenthesized sub-expression instead, resolved through
+  // chain_ending_receiver on its own inner tail token.
+  str src = `compound Counter {
+  `  num base;
+  `}
+  `quirk AsyncCounter {
+  `  async add(num x) num;
+  `}
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Counter as AsyncCounter {
+  `  async add(num x) num { ret self.base + x; }
+  `}
+  `fun pack(AsyncCounter q) Box<AsyncCounter> {
+  `  ret Box<AsyncCounter>{v = q};
+  `}
+  `async fun main() {
+  `  Counter c;
+  `  c.base = 41;
+  `  AsyncCounter q = &c;
+  `  let out = await (pack(q).v).add(1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///parenreceiver.fn";
+  doc.path = "parenreceiver.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 19, 31), "async add(num x) num"), "expected the method on a parenthesized receiver chain to resolve";
+}
+
+test "hover resolves a compound-literal's own field name, generic instantiation included" {
+  // User-reported (same file: `Box<AsyncCounter>{v = q}`'s own `v`).
+  // CompoundInitField carries no position of its own in the AST, and
+  // nothing in fls had any handling for a compound-literal field name
+  // at all - resolved purely from the tokens (matching how
+  // _infer_type_primary's own forward-facing compound-literal handling
+  // already works), walking backward from the field name to the
+  // nearest unmatched '{' and whatever names it: a bare identifier
+  // (`Point{x = 1}`), or explicit generic args (`Box<AsyncCounter>{v =
+  // q}`, substituting T -> AsyncCounter). A `.{...}` shorthand literal
+  // is left alone - its own type comes from context, not from the
+  // tokens here.
+  str src = `compound Box<T> {
+  `  T v;
+  `}
+  `compound Counter {
+  `  num base;
+  `}
+  `quirk AsyncCounter {
+  `  async add(num x) num;
+  `}
+  `impl Counter as AsyncCounter {
+  `  async add(num x) num { ret self.base + x; }
+  `}
+  `fun pack(AsyncCounter q) Box<AsyncCounter> {
+  `  ret Box<AsyncCounter>{v = q};
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///literalfield.fn";
+  doc.path = "literalfield.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 13, 24), "AsyncCounter v"), "expected the field's own type, substituted from the literal's explicit generic arg";
+}
+
 test "hover on an enum variant shows its own tag value, auto-incrementing across an explicit override" {
   str src = `enum Shape {
   `  Circle(num),
