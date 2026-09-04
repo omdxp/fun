@@ -1,7 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
-import { highlightFun } from "../utils/funHighlight";
+import HighlightedCode from "./HighlightedCode";
 
 type Props = {
   markdown: string;
@@ -197,9 +197,14 @@ export default function MarkdownWithPlayground({
           const text = String(children).replace(/\n$/, "");
           const isBlock = Boolean(className);
           const isFun = className?.includes("language-fun");
+          const lang = className?.match(/language-(\w+)/)?.[1];
 
           if (isBlock && isFun && enableRunnableFunBlocks) {
             return <RunCodeBlock initialCode={text} />;
+          }
+
+          if (isBlock && lang) {
+            return <HighlightedCode code={text} lang={lang} className="md-pre" />;
           }
 
           if (isBlock) {
@@ -212,7 +217,12 @@ export default function MarkdownWithPlayground({
 
           const inlineText = String(children);
           return (
-            <code className="md-inline-code">{highlightFun(inlineText)}</code>
+            <HighlightedCode
+              code={inlineText}
+              lang="fun"
+              inline
+              className="md-inline-code"
+            />
           );
         },
       }}

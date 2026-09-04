@@ -1,6 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 
-import { highlightFun } from "../utils/funHighlight";
+import {
+  highlightToFragment,
+  parseStyleAttr,
+  useSiteHighlighter,
+} from "../utils/shikiHighlighter";
 
 type Props = {
   initialCode: string;
@@ -60,7 +64,11 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     }
   };
 
-  const highlighted = useMemo(() => highlightFun(code), [code]);
+  const highlighter = useSiteHighlighter();
+  const highlighted = useMemo(() => {
+    if (!highlighter) return null;
+    return highlightToFragment(highlighter, code, "fun");
+  }, [highlighter, code]);
   const syncScroll = () => {
     if (!editorRef.current || !previewRef.current) return;
     previewRef.current.scrollTop = editorRef.current.scrollTop;
@@ -104,8 +112,17 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
         </div>
       </div>
       <div className="run-editor">
-        <pre ref={previewRef} aria-hidden>
-          <code>{highlighted}</code>
+        <pre
+          ref={previewRef}
+          aria-hidden
+          className={highlighted ? "shiki" : undefined}
+          style={highlighted ? parseStyleAttr(highlighted.style) : undefined}
+        >
+          {highlighted ? (
+            <code dangerouslySetInnerHTML={{ __html: highlighted.innerHtml }} />
+          ) : (
+            <code>{code}</code>
+          )}
         </pre>
         <textarea
           ref={editorRef}

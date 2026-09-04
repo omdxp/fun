@@ -534,27 +534,42 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: rgba(106, 164, 255, 0.35);
 }
 
-.tok-comment { color: #7f8db8; }
-.tok-string { color: #f1c38f; }
-.tok-number { color: #9de0ff; }
-.tok-operator { color: #8fb3ff; }
-.tok-custom-type { color: #b6a6ff; }
-.tok-function { color: #a9e4ff; }
-.tok-keyword { color: #7aa2ff; font-weight: 600; }
-.tok-type { color: #9bdc8a; }
-.tok-support-type { color: #7fe0c1; }
-.tok-boolean { color: #ffb3c0; }
+/* Shiki emits `--shiki-light`/`--shiki-dark` custom properties per token
+   (dual-theme mode, sourced directly from editors/vscode/themes/fun-web*)
+   with no plain `color` of its own - the consumer is expected to pick
+   light by default and switch to dark, normally keyed off a `.dark`
+   ancestor class. The site uses `data-theme` instead, so bridge the two.
+   Background is intentionally left alone: the existing `.md-pre`/`pre`/
+   `.run-editor` rules already provide the right surface per theme. */
+.shiki,
+.shiki span {
+  color: var(--shiki-light) !important;
+  font-weight: var(--shiki-light-font-weight, inherit) !important;
+  font-style: var(--shiki-light-font-style, inherit) !important;
+  text-decoration: var(--shiki-light-text-decoration, inherit) !important;
+}
 
-:root[data-theme="light"] .tok-comment { color: #6a78a0; }
-:root[data-theme="light"] .tok-string { color: #9a5b12; }
-:root[data-theme="light"] .tok-number { color: #1f6f9e; }
-:root[data-theme="light"] .tok-operator { color: #3f63c0; }
-:root[data-theme="light"] .tok-custom-type { color: #6a4fd0; }
-:root[data-theme="light"] .tok-function { color: #1e7fa8; }
-:root[data-theme="light"] .tok-keyword { color: #2f5bd0; }
-:root[data-theme="light"] .tok-type { color: #2e7d32; }
-:root[data-theme="light"] .tok-support-type { color: #0e8a6e; }
-:root[data-theme="light"] .tok-boolean { color: #c0325a; }
+:root[data-theme="dark"] .shiki,
+:root[data-theme="dark"] .shiki span {
+  color: var(--shiki-dark) !important;
+  font-weight: var(--shiki-dark-font-weight, inherit) !important;
+  font-style: var(--shiki-dark-font-style, inherit) !important;
+  text-decoration: var(--shiki-dark-text-decoration, inherit) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .shiki,
+  :root:not([data-theme="light"]) .shiki span {
+    color: var(--shiki-dark) !important;
+    font-weight: var(--shiki-dark-font-weight, inherit) !important;
+    font-style: var(--shiki-dark-font-style, inherit) !important;
+    text-decoration: var(--shiki-dark-text-decoration, inherit) !important;
+  }
+}
+
+.shiki-fallback {
+  color: var(--text);
+}
 
 .fun-inline-code,
 .fun-block code {
@@ -1116,6 +1131,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .modal-card {
   width: min(1100px, 100%);
+  height: min(88vh, 920px);
   max-height: min(88vh, 920px);
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
@@ -1132,6 +1148,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .search-modal-card {
   width: min(960px, 100%);
+  height: auto;
   max-height: min(82vh, 860px);
 }
 
@@ -1203,6 +1220,52 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   overscroll-behavior: contain;
   min-height: 0;
   padding-right: 6px;
+}
+
+.modal-content-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  margin: -2px -2px 14px;
+  padding: 2px 2px 0;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+
+.modal-content-tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.92rem;
+  padding: 8px 14px;
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.modal-content-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.modal-content-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.modal-content-tab.active {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+  box-shadow: inset 0 -3px 0 var(--brand-red);
+}
+
+.modal-content-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .search-modal-body {
@@ -1434,6 +1497,10 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .modal-content {
     max-height: none;
     padding-right: 0;
+  }
+  .modal-content-tab {
+    padding: 7px 10px;
+    font-size: 0.86rem;
   }
   .symbol-detail {
     margin-top: 10px;

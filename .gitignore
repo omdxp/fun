@@ -4,7 +4,7 @@ node_modules/
 *.c
 website/reference/dist/
 website/reference/dist-server/
-website/reference/src/generated/content.json
+website/reference/src/generated/
 website/reference/public/versions/
 
 # Example-run scratch output written to the repo root by std demo programs

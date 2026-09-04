@@ -55,6 +55,21 @@ const docs = {
   ),
 };
 
+const generatedRoot = path.join(siteRoot, "src", "generated");
+await fs.mkdir(generatedRoot, { recursive: true });
+
+const highlightAssets = [
+  { src: "editors/vscode/syntaxes/fun.tmLanguage.json", dest: "fun.tmLanguage.json" },
+  { src: "editors/vscode/themes/fun-web-color-theme.json", dest: "fun-web-color-theme.json" },
+  { src: "editors/vscode/themes/fun-web-light-color-theme.json", dest: "fun-web-light-color-theme.json" },
+];
+for (const asset of highlightAssets) {
+  await fs.copyFile(
+    path.join(repoRoot, asset.src),
+    path.join(generatedRoot, asset.dest),
+  );
+}
+
 const stdRoot = path.join(repoRoot, "stdlib/std");
 
 async function walk(dir) {

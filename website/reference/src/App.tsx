@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
-import { highlightFun } from "./utils/funHighlight";
+import HighlightedCode from "./components/HighlightedCode";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -481,6 +481,9 @@ export default function App() {
   );
   const [selectedSymbolKey, setSelectedSymbolKey] = useState(initial.symbolKey);
   const [selectedDetailKey, setSelectedDetailKey] = useState(initial.detailKey);
+  const [modalContentTab, setModalContentTab] = useState<"module" | "symbol">(
+    initial.symbolKey ? "symbol" : "module",
+  );
   const [selectedDocAnchorKey, setSelectedDocAnchorKey] = useState(
     initial.docAnchorKey,
   );
@@ -1284,6 +1287,11 @@ export default function App() {
   }, [activeModule, activeSymbol, selectedDetailKey]);
 
   useEffect(() => {
+    if (!isStdlibModalOpen) return;
+    setModalContentTab(selectedSymbolKey ? "symbol" : "module");
+  }, [selectedModulePath, selectedSymbolKey, isStdlibModalOpen]);
+
+  useEffect(() => {
     if (!selectedDetailKey) return;
     if (typeof window === "undefined") return;
 
@@ -1679,9 +1687,12 @@ export default function App() {
                             }
                           >
                             <span className="badge">{s.kind}</span>
-                            <code className="fun-inline-code">
-                              {highlightFun(s.signature)}
-                            </code>
+                            <HighlightedCode
+                              code={s.signature}
+                              lang="fun"
+                              inline
+                              className="fun-inline-code"
+                            />
                             {s.kind === "method" && s.owner && (
                               <span className="muted">@ {s.owner}</span>
                             )}
@@ -1780,17 +1791,50 @@ export default function App() {
                     </div>
 
                     <div className="modal-content">
-                      {activeModule.docsMarkdown ? (
-                        <MarkdownWithPlayground
-                          markdown={activeModule.docsMarkdown}
-                          sourcePath={`stdlib/std/${activeModule.module}`}
-                          enableRunnableFunBlocks={false}
-                        />
-                      ) : (
-                        <p className="muted">No module-level docs found.</p>
+                      {activeModule.symbols.length > 0 && (
+                        <div
+                          className="modal-content-tabs"
+                          role="tablist"
+                          aria-label="Module detail view"
+                        >
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={modalContentTab === "module"}
+                            className={`modal-content-tab ${
+                              modalContentTab === "module" ? "active" : ""
+                            }`}
+                            onClick={() => setModalContentTab("module")}
+                          >
+                            Module
+                          </button>
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={modalContentTab === "symbol"}
+                            className={`modal-content-tab ${
+                              modalContentTab === "symbol" ? "active" : ""
+                            }`}
+                            onClick={() => setModalContentTab("symbol")}
+                            disabled={!activeSymbol}
+                          >
+                            Symbol{activeSymbol ? `: ${activeSymbol.name}` : ""}
+                          </button>
+                        </div>
                       )}
 
-                      {activeSymbol && (
+                      {modalContentTab === "module" &&
+                        (activeModule.docsMarkdown ? (
+                          <MarkdownWithPlayground
+                            markdown={activeModule.docsMarkdown}
+                            sourcePath={`stdlib/std/${activeModule.module}`}
+                            enableRunnableFunBlocks={false}
+                          />
+                        ) : (
+                          <p className="muted">No module-level docs found.</p>
+                        ))}
+
+                      {modalContentTab === "symbol" && activeSymbol && (
                         <article className="symbol-detail">
                           <h3>
                             {activeSymbol.name}{" "}
@@ -1798,9 +1842,11 @@ export default function App() {
                               (line {activeSymbol.line})
                             </span>
                           </h3>
-                          <pre className="fun-block">
-                            <code>{highlightFun(activeSymbol.signature)}</code>
-                          </pre>
+                          <HighlightedCode
+                            code={activeSymbol.signature}
+                            lang="fun"
+                            className="fun-block"
+                          />
                           {activeSymbol.docsMarkdown ? (
                             <MarkdownWithPlayground
                               markdown={activeSymbol.docsMarkdown}
@@ -1857,11 +1903,11 @@ export default function App() {
                                           </button>
                                         </div>
                                       </div>
-                                      <pre className="fun-block">
-                                        <code>
-                                          {highlightFun(field.signature)}
-                                        </code>
-                                      </pre>
+                                      <HighlightedCode
+                                        code={field.signature}
+                                        lang="fun"
+                                        className="fun-block"
+                                      />
                                       {field.docsMarkdown ? (
                                         <MarkdownWithPlayground
                                           markdown={field.docsMarkdown}
@@ -1928,11 +1974,11 @@ export default function App() {
                                             </button>
                                           </div>
                                         </div>
-                                        <pre className="fun-block">
-                                          <code>
-                                            {highlightFun(member.signature)}
-                                          </code>
-                                        </pre>
+                                        <HighlightedCode
+                                          code={member.signature}
+                                          lang="fun"
+                                          className="fun-block"
+                                        />
                                         {member.docsMarkdown ? (
                                           <MarkdownWithPlayground
                                             markdown={member.docsMarkdown}
