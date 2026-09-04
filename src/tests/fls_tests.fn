@@ -2856,6 +2856,49 @@ test "hover resolves a method called on a parenthesized receiver chain, not just
   assert contains(hover(&reads, doc, 19, 31), "async add(num x) num"), "expected the method on a parenthesized receiver chain to resolve";
 }
 
+test "hover resolves a method on a chain whose own paren group ends in a dereferenced call" {
+  // User-reported (examples/advanced/async_quirk_await_pointer_receiver.fn,
+  // `let out3 = await ((*ptr(&b)).v).add(1);`). The parenthesized-group fix
+  // above only handled a group whose own inner tail was a nameable
+  // identifier (a bare local or field); here the outer group's inner tail
+  // is itself another paren group, `(*ptr(&b))`, whose own content is a
+  // dereferenced call - its tail token is `ptr(&b)`'s own closing ')',
+  // not an identifier chain_ending_receiver can resolve directly. Fixed by
+  // recognizing that ')' and recovering the call's callee identifier
+  // instead, the same way the outer walk already does for a real call.
+  str src = `compound Counter {
+  `  num base;
+  `}
+  `quirk AsyncCounter {
+  `  async add(num x) num;
+  `}
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Counter as AsyncCounter {
+  `  async add(num x) num { ret self.base + x; }
+  `}
+  `fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {
+  `  ret b;
+  `}
+  `async fun main() {
+  `  Counter c;
+  `  c.base = 41;
+  `  AsyncCounter q = &c;
+  `  Box<AsyncCounter> b = Box<AsyncCounter>{v = q};
+  `  let out = await ((*ptr(&b)).v).add(1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///doubleparen.fn";
+  doc.path = "doubleparen.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 20, 34), "async add(num x) num"), "expected the method on a paren group ending in a dereferenced call to resolve";
+}
+
 test "hover resolves a compound-literal's own field name, generic instantiation included" {
   // User-reported (same file: `Box<AsyncCounter>{v = q}`'s own `v`).
   // CompoundInitField carries no position of its own in the AST, and

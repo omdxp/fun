@@ -791,7 +791,13 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
                 if im.has_type_params {
                   signature = specialize_signature(signature, im.type_params, concrete_args);
                 }
-                Declaration d = _declaration_vis(method_name, .Function, signature, method.pos, method.flags.is_public);
+                Declaration d = _declaration_vis(
+                  method_name,
+                  .Function,
+                  signature,
+                  method.pos,
+                  method.flags.is_public
+                );
                 d.container = type_name;
                 ret .Some(d);
               }
@@ -1272,7 +1278,13 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
               if n.pos.line > best_line {
                 best_line = n.pos.line;
                 str signature = render_function_named(f, name, false);
-                best = _declaration_vis(name, .Function, signature, method.pos, method.flags.is_public);
+                best = _declaration_vis(
+                  name,
+                  .Function,
+                  signature,
+                  method.pos,
+                  method.flags.is_public
+                );
                 best.container = im.type_name;
                 found = true;
               }
@@ -2006,7 +2018,14 @@ pub fun chain_receiver_type(Vec<Token>* tokens, Token t, Vec<Node>* program, str
 // argument-type recursion (see `_call_return_type`), threaded through
 // from whichever caller is already tracking it (0 for one, like
 // `chain_receiver_type` above, that isn't).
-pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file, num line, num depth) ChainReceiver {
+pub fun chain_receiver(
+  Vec<Token>* tokens,
+  Token t,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth
+) ChainReceiver {
   ChainReceiver empty;
   empty.type_name = "";
   empty.generic_args.init(0);
@@ -2050,22 +2069,46 @@ pub fun chain_receiver(Vec<Token>* tokens, Token t, Vec<Node>* program, str file
         // on its own inner tail token, and stops the leftward walk
         // here rather than `break`-ing with nothing collected -
         // whatever precedes the outer `(` isn't part of this chain.
-        let inner_last = token_before(tokens, index_of_token(tokens, seg_tok));
-        if inner_last.is_none() {
+        let inner_last_raw = token_before(tokens, index_of_token(tokens, seg_tok));
+        if inner_last_raw.is_none() {
           break;
         }
+        Token inner_tok = inner_last_raw.unwrap();
         bin inner_is_call = false;
-        let after_inner = token_after(
-          tokens,
-          index_of_token(tokens, inner_last.unwrap()) + 1
-        );
-        if after_inner.is_some() && token_is_operator(after_inner.unwrap(), "(") {
+        // The group's own tail can itself be a call's closing paren
+        // (`(*ptr(&b))`'s inner content is `*ptr(&b)`, ending in
+        // `ptr(&b)`'s own `)`, not a nameable identifier) - a leading
+        // unary `*`/`&` never changes the tail, since field lookups
+        // already resolve through a pointer to its pointee, so only
+        // the callee itself needs recovering here.
+        if token_is_symbol(inner_tok, ')') {
+          let inner_lparen = _matching_lparen(tokens, index_of_token(tokens, inner_tok));
+          if inner_lparen.is_none() {
+            break;
+          }
+          let inner_callee = token_before(tokens, inner_lparen.unwrap());
+          bin inner_callee_is_ident = false;
+          if inner_callee.is_some() {
+            fit inner_callee.unwrap().type {
+              .Identifier -> { inner_callee_is_ident = true; }
+              _ -> {}
+            }
+          }
+          if !inner_callee_is_ident {
+            break;
+          }
+          inner_tok = inner_callee.unwrap();
           inner_is_call = true;
+        } else {
+          let after_inner = token_after(tokens, index_of_token(tokens, inner_tok) + 1);
+          if after_inner.is_some() && token_is_operator(after_inner.unwrap(), "(") {
+            inner_is_call = true;
+          }
         }
         ChainSeg pseg;
         pseg.name = "";
         pseg.is_call = false;
-        pseg.tok = inner_last.unwrap();
+        pseg.tok = inner_tok;
         pseg.is_paren_group = true;
         pseg.paren_is_call = inner_is_call;
         segments.push(pseg);
@@ -2492,7 +2535,16 @@ fun _infer_type(
     ret "";
   }
   num end_idx = -1;
-  str base_type = _infer_type_primary(tokens, val_tok, program, file, line, out_args, depth, &end_idx);
+  str base_type = _infer_type_primary(
+    tokens,
+    val_tok,
+    program,
+    file,
+    line,
+    out_args,
+    depth,
+    &end_idx
+  );
   if equals(base_type, "") || end_idx < 0 {
     ret base_type;
   }
@@ -2502,7 +2554,10 @@ fun _infer_type(
   }
   Token op_tok = op_tok_opt.unwrap();
   bin is_arith = token_is_operator(op_tok, "+") || token_is_operator(op_tok, "-") ||
-    token_is_operator(op_tok, "*") || token_is_operator(op_tok, "/");
+    token_is_operator(
+    op_tok,
+    "*"
+  ) || token_is_operator(op_tok, "/");
   if !is_arith {
     ret base_type;
   }
@@ -2610,7 +2665,15 @@ fun _infer_type_primary(
         if inner_opt.is_none() {
           ret "";
         }
-        str inner_type = _infer_type(tokens, inner_opt.unwrap(), program, file, line, out_args, depth + 1);
+        str inner_type = _infer_type(
+          tokens,
+          inner_opt.unwrap(),
+          program,
+          file,
+          line,
+          out_args,
+          depth + 1
+        );
         if equals(inner_type, "") {
           ret "";
         }
@@ -2796,7 +2859,10 @@ fun _infer_type_primary(
                 let payload_paren = token_after(tokens, variant_idx + 1);
                 if payload_paren.is_some() &&
                   token_is_operator(payload_paren.unwrap(), "(") {
-                  let payload_close = matching_rparen(tokens, index_of_token(tokens, payload_paren.unwrap()));
+                  let payload_close = matching_rparen(
+                    tokens,
+                    index_of_token(tokens, payload_paren.unwrap())
+                  );
                   if payload_close.is_some() {
                     end_idx = payload_close.unwrap();
                   }
@@ -2854,7 +2920,15 @@ fun _infer_type_primary(
         }
       }
       if index_of_token(tokens, last_tok) != idx || last_is_call {
-        let ending = chain_ending_receiver(tokens, last_tok, last_is_call, program, file, line, depth);
+        let ending = chain_ending_receiver(
+          tokens,
+          last_tok,
+          last_is_call,
+          program,
+          file,
+          line,
+          depth
+        );
         if out_args != nil {
           *out_args = ending.generic_args;
         }
@@ -3551,7 +3625,14 @@ fun _lookup_in_body(Node* body, str name, Vec<Node>* program, str file, num line
           str map_key = "";
           str map_value = "";
           bin is_map = fi.has_index_name &&
-            _for_iter_map_kv(fi.iterable, program, file, line, &map_key, &map_value);
+            _for_iter_map_kv(
+            fi.iterable,
+            program,
+            file,
+            line,
+            &map_key,
+            &map_value
+          );
           if fi.has_index_name && equals(fi.index_name, name) {
             str index_type = "num";
             if is_map {
@@ -3834,7 +3915,13 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
 // hover most needs. "" for the field-access and channel-receive
 // shapes `fit_subject_type` also covers, matching what
 // `local_generic_args` itself only resolves for a bare identifier.
-pub fun fit_subject_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* subject, str file, num line) Vec<str> {
+pub fun fit_subject_generic_args(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* subject,
+  str file,
+  num line
+) Vec<str> {
   Vec<str> empty;
   empty.init(0);
   if subject == nil {
@@ -4534,7 +4621,13 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
     fit n.kind {
       .Function(f) -> {
         if f.has_name && !equals(f.name, "") {
-          out.push(_declaration_vis(f.name, .Function, render_function(f), n.pos, n.flags.is_public));
+          out.push(_declaration_vis(
+            f.name,
+            .Function,
+            render_function(f),
+            n.pos,
+            n.flags.is_public
+          ));
         }
       }
       .Compound(c) -> {
