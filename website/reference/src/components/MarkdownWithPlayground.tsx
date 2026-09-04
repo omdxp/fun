@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
@@ -65,6 +66,53 @@ function slugifyHeading(text: string) {
   return base || "section";
 }
 
+function cleanHeadingText(raw: string) {
+  return raw
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~]/g, "")
+    .trim();
+}
+
+/**
+ * Maps each heading's source line to its assigned id, computed once from
+ * the raw markdown text rather than during the h1-h6 render callbacks
+ * below. Assigning ids via a mutable counter *during render* is exactly
+ * the kind of impure render React 18 StrictMode double-invokes to catch:
+ * it calls each heading's render function twice, and a shared, mutated-
+ * in-place counter sees both calls, handing out a spurious "-2" suffix
+ * even for a heading with no real duplicate. This memo is a pure read at
+ * render time; the mutation happens only here, once, off the render path.
+ */
+function computeHeadingIdsByLine(markdown: string, headingPrefix?: string) {
+  const byLine = new Map<number, string>();
+  const counts = new Map<string, number>();
+  const lines = markdown.split(/\r?\n/);
+  let inFence = false;
+
+  lines.forEach((line, index) => {
+    if (/^```/.test(line.trim())) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+
+    const match = line.match(/^(#{1,6})\s+(.+)$/);
+    if (!match) return;
+
+    const title = cleanHeadingText(match[2]) || "section";
+    const slug = slugifyHeading(title);
+    const key = headingPrefix ? `${headingPrefix}-${slug}` : slug;
+    const seen = counts.get(key) ?? 0;
+    counts.set(key, seen + 1);
+    const id = seen === 0 ? key : `${key}-${seen + 1}`;
+    // remark positions are 1-indexed.
+    byLine.set(index + 1, id);
+  });
+
+  return byLine;
+}
+
 function flattenText(node: unknown): string {
   if (typeof node === "string" || typeof node === "number") {
     return String(node);
@@ -121,21 +169,22 @@ export default function MarkdownWithPlayground({
   headingPrefix,
   enableRunnableFunBlocks = true,
 }: Props) {
-  const headingCounts = new Map<string, number>();
-
-  const makeHeadingId = (text: string) => {
-    const slug = slugifyHeading(text);
-    const key = headingPrefix ? `${headingPrefix}-${slug}` : slug;
-    const seen = headingCounts.get(key) ?? 0;
-    headingCounts.set(key, seen + 1);
-    return seen === 0 ? key : `${key}-${seen + 1}`;
-  };
+  const headingIdsByLine = useMemo(
+    () => computeHeadingIdsByLine(markdown, headingPrefix),
+    [markdown, headingPrefix],
+  );
 
   const headingRenderer =
     (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") =>
-    (props: { children?: unknown }) => {
+    (props: {
+      children?: unknown;
+      node?: { position?: { start?: { line?: number } } };
+    }) => {
       const text = flattenText(props.children).trim();
-      const id = makeHeadingId(text || "section");
+      const line = props.node?.position?.start?.line;
+      const id =
+        (line !== undefined && headingIdsByLine.get(line)) ||
+        (headingPrefix ? `${headingPrefix}-section` : "section");
       const permalink = buildHeadingPermalink(headingPrefix, id);
       return (
         <Tag id={id} data-doc-heading="true">

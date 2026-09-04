@@ -4,6 +4,7 @@ import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
 import HighlightedCode from "./components/HighlightedCode";
 import { copyTextToClipboard } from "./utils/clipboard";
+import { getSiteHighlighter } from "./utils/shikiHighlighter";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -500,6 +501,11 @@ export default function App() {
     initial.docAnchorKey,
   );
   const [activeDocAnchorKey, setActiveDocAnchorKey] = useState("");
+  // Timestamp (ms) until which the scroll-spy observer below should not
+  // override activeDocAnchorKey - set right after an explicit scroll-to-
+  // anchor, whose target can otherwise get immediately outvoted by the
+  // observer's own "reading position" heuristic (see tryScroll).
+  const suppressScrollSpyUntilRef = useRef(0);
   const [docTocHeadings, setDocTocHeadings] = useState<
     Partial<Record<DocTabKey, TocHeading[]>>
   >({});
@@ -538,6 +544,7 @@ export default function App() {
     setSelectedSymbolKey("");
     setSelectedDetailKey("");
     setSelectedDocAnchorKey("");
+    setActiveDocAnchorKey("");
     setIsStdlibModalOpen(false);
     setIsMobileDrawerOpen(false);
     setIsSearchModalOpen(false);
@@ -588,6 +595,12 @@ export default function App() {
       if (el) {
         el.scrollIntoView({ behavior, block: "start" });
         setActiveDocAnchorKey(el.id);
+        // A short section can put its own heading at the very top of the
+        // viewport (y=0) while the observer's active zone only starts
+        // 15% down, so the NEXT heading over ends up the only one it
+        // sees - suppress its updates briefly so the explicit target
+        // sticks until the user actually scrolls on their own.
+        suppressScrollSpyUntilRef.current = Date.now() + 900;
         if (selectedDocAnchorKey !== el.id) {
           setSelectedDocAnchorKey(el.id);
         }
@@ -1074,7 +1087,15 @@ export default function App() {
       const tabFromHash = parseTabHash(window.location.hash);
       if (tabFromHash && tabFromHash !== "stdlib") {
         setTab(tabFromHash);
-        setSelectedDocAnchorKey(params.get("anchor") ?? "");
+        const anchor = params.get("anchor") ?? "";
+        setSelectedDocAnchorKey(anchor);
+        // With no anchor to scroll to, reset scroll explicitly - the SPA
+        // swaps page content in place, so the browser won't do this on
+        // its own the way a real page navigation would.
+        if (!anchor) {
+          setActiveDocAnchorKey("");
+          window.scrollTo({ top: 0 });
+        }
         return;
       }
 
@@ -1164,6 +1185,20 @@ export default function App() {
     if (!isDocTab(tab)) return;
     if (!selectedDocAnchorKey) return;
     scrollToDocAnchor(selectedDocAnchorKey, "smooth");
+
+    // Code blocks render as plain text until the shared Shiki highlighter
+    // resolves, then re-render highlighted - often at a different height,
+    // which can shift an anchor scrolled to above out from under the
+    // viewport once that settles. Re-scroll (no animation, so it doesn't
+    // fight the one above) once highlighting is actually ready.
+    let cancelled = false;
+    getSiteHighlighter().then(() => {
+      if (cancelled) return;
+      scrollToDocAnchor(selectedDocAnchorKey, "auto");
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [tab, selectedDocAnchorKey, content]);
 
   useEffect(() => {
@@ -1179,6 +1214,8 @@ export default function App() {
 
     const observer = new IntersectionObserver(
       (entries) => {
+        if (Date.now() < suppressScrollSpyUntilRef.current) return;
+
         const visible = entries
           .filter((entry) => entry.isIntersecting)
           .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
@@ -1485,10 +1522,18 @@ export default function App() {
                 onClick={() => {
                   if (!t.disabled) {
                     setTab(t.key);
-                    if (!isDocTab(t.key)) {
-                      setSelectedDocAnchorKey("");
-                    }
+                    // A top-level nav click always means "go to the top of
+                    // this page" - never carry over a TOC anchor selected
+                    // on whichever page was open before, doc tab or not,
+                    // and never keep whatever scroll offset that page had
+                    // (the SPA swaps content in place, so the browser has
+                    // no reason to reset scroll on its own).
+                    setSelectedDocAnchorKey("");
+                    setActiveDocAnchorKey("");
                     setIsMobileDrawerOpen(false);
+                    if (typeof window !== "undefined") {
+                      window.scrollTo({ top: 0 });
+                    }
                   }
                 }}
                 className={
