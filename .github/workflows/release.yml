@@ -54,10 +54,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve bootstrap fun version
+        id: bootstrap_fun
+        # `latest` is wrong here the instant this release itself is the
+        # newest published one: publishing sets "latest" before this
+        # workflow runs, so a release with no assets yet would bootstrap
+        # from itself and fail with "asset not found". Bootstrap from the
+        # newest OTHER release instead, regardless of publish order.
+        run: |
+          set -euo pipefail
+          resolved="$(gh api "repos/${{ github.repository }}/releases" --jq \
+            '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name // "latest"')"
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+
       - name: Set up fun
         uses: omdxp/setup-fun@v1
         with:
-          version: latest
+          version: ${{ steps.bootstrap_fun.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check fun.toml's version matches the release tag
@@ -133,10 +149,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve bootstrap fun version
+        id: bootstrap_fun
+        shell: powershell
+        # `latest` is wrong here the instant this release itself is the
+        # newest published one: publishing sets "latest" before this
+        # workflow runs, so a release with no assets yet would bootstrap
+        # from itself and fail with "asset not found". Bootstrap from the
+        # newest OTHER release instead, regardless of publish order.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resolved = gh api "repos/${{ github.repository }}/releases" --jq '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name // "latest"'
+          if (-not $resolved) { $resolved = "latest" }
+          "version=$resolved" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+
       - name: Set up fun
         uses: omdxp/setup-fun@v1
         with:
-          version: latest
+          version: ${{ steps.bootstrap_fun.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install WiX Toolset (v3)
