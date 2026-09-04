@@ -997,7 +997,7 @@ pub fun load_manifest() Result<Manifest, str> {
 // Compiles every target the manifest declares, writing executables to
 // `fun-out/bin`. A library has no entry point, so it is compiled to an
 // object under `fun-out/lib` to prove it builds, never linked.
-pub fun build_project(bin debug_info) num {
+pub fun build_project(bin debug_info, Vec<Define>* extra_defines) num {
   let loaded = load_manifest();
   if loaded.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
@@ -1014,7 +1014,11 @@ pub fun build_project(bin debug_info) num {
     ret 1;
   }
 
-  Vec<Define> defines = manifest_defines(&m);
+  // Re-reads and re-parses fun.toml a second time (already loaded as
+  // `m` above, needed for `m.kind()`/`m.has_lib`/... below) rather than
+  // hand-merging `-D` in again here - `fun build` isn't a hot path, and
+  // reusing the one shared merge point matters more than the extra read.
+  Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
 
   if m.has_lib {
