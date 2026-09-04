@@ -60,11 +60,20 @@ jobs:
         # newest published one: publishing sets "latest" before this
         # workflow runs, so a release with no assets yet would bootstrap
         # from itself and fail with "asset not found". Bootstrap from the
-        # newest OTHER release instead, regardless of publish order.
+        # newest OTHER release instead, regardless of publish order. The
+        # jq filter itself carries no embedded double quotes on purpose -
+        # PowerShell's native-argument passing to a non-.NET executable
+        # (gh.exe here) can silently strip embedded double quotes, which
+        # previously turned `// "latest"` into a bare `latest` and made
+        # gojq try to call it as a zero-arg function. The empty/null
+        # fallback is handled here in the shell instead.
         run: |
           set -euo pipefail
           resolved="$(gh api "repos/${{ github.repository }}/releases" --jq \
-            '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name // "latest"')"
+            '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name')"
+          if [ -z "$resolved" ] || [ "$resolved" = "null" ]; then
+            resolved="latest"
+          fi
           echo "version=$resolved" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -156,11 +165,18 @@ jobs:
         # newest published one: publishing sets "latest" before this
         # workflow runs, so a release with no assets yet would bootstrap
         # from itself and fail with "asset not found". Bootstrap from the
-        # newest OTHER release instead, regardless of publish order.
+        # newest OTHER release instead, regardless of publish order. The
+        # jq filter itself carries no embedded double quotes on purpose -
+        # (legacy) Windows PowerShell's native-argument passing to a
+        # non-.NET executable (gh.exe here) silently strips embedded
+        # double quotes, which previously turned `// "latest"` into a
+        # bare `latest` and made gojq try to call it as a zero-arg
+        # function ("function not defined: latest/0"). The empty/null
+        # fallback is handled here in PowerShell instead.
         run: |
           $ErrorActionPreference = 'Stop'
-          $resolved = gh api "repos/${{ github.repository }}/releases" --jq '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name // "latest"'
-          if (-not $resolved) { $resolved = "latest" }
+          $resolved = gh api "repos/${{ github.repository }}/releases" --jq '[.[] | select(.draft == false and .tag_name != env.RELEASE_TAG)] | .[0].tag_name'
+          if (-not $resolved -or $resolved -eq "null") { $resolved = "latest" }
           "version=$resolved" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -351,6 +367,68 @@ jobs:
             artifacts/**/fun-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# =============================================================
+# VS Code Extension Publish Job
+# Gated on the compiler release itself succeeding - a Marketplace
+# version can never be deleted once published (only superseded by a
+# newer one), so this must never run ahead of knowing the matching
+# compiler/fls binaries actually built and uploaded.
+# =============================================================
+
+  publish-vscode-extension:
+    name: Publish VS Code extension
+    needs: [upload-release-assets]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          cd editors/vscode
+          npm ci
+
+      - name: Set extension version to match release
+        run: |
+          RAW_TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          VERSION=$(echo "$RAW_TAG" | sed 's/^v//')
+          if [ -z "$VERSION" ]; then
+            echo "Could not determine VERSION (release tag/ref was empty)" >&2
+            exit 1
+          fi
+          cd editors/vscode
+          npm version --no-git-tag-version "$VERSION"
+
+      - name: Build extension (TypeScript)
+        run: |
+          cd editors/vscode
+          npm run compile
+
+      - name: Publish VS Code extension
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          cd editors/vscode
+          # README contains relative links like ../../CONTRIBUTING.md; vsce needs base URLs to rewrite them.
+          RAW_TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          BASE_CONTENT_URL="https://github.com/${{ github.repository }}/blob/${RAW_TAG}"
+          BASE_IMAGES_URL="https://raw.githubusercontent.com/${{ github.repository }}/${RAW_TAG}"
+          npx vsce package --allow-missing-repository --skip-license --allow-star-activation --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
+          VSIX_PATH=$(ls -1 *.vsix | head -n 1)
+          npx vsce publish --no-git-tag-version --pat "$VSCE_PAT" --packagePath "$VSIX_PATH" --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun-language-vsix
+          path: editors/vscode/*.vsix
 
   build-reference-site:
     name: Build reference website
