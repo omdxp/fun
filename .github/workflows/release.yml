@@ -46,9 +46,14 @@ jobs:
           - target: aarch64-linux-gnu
             os: ubuntu-24.04-arm
           - target: x86_64-macos
-            os: macos-13
+            # macos-13 (the last Intel-hardware runner image) was retired
+            # in December 2025. macos-15-intel is GitHub's replacement:
+            # Intel-architecture jobs running on macOS 15 hardware, kept
+            # around specifically for x86_64 builds like this one until
+            # Intel support ends entirely in August 2027.
+            os: macos-15-intel
           - target: aarch64-macos
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository

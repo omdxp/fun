@@ -80,8 +80,8 @@ a release build, not a test).
 |---|---|---|
 | Linux x86_64 | `ubuntu-24.04` | tarball + `install.sh` |
 | Linux aarch64 | `ubuntu-24.04-arm` | tarball + `install.sh` |
-| macOS x86_64 | `macos-13` | tarball + `install.sh` |
-| macOS aarch64 | `macos-14` | tarball + `install.sh` |
+| macOS x86_64 | `macos-15-intel` | tarball + `install.sh` |
+| macOS aarch64 | `macos-15` | tarball + `install.sh` |
 | Windows x86_64 | `windows-latest` | `.msi` + portable `.zip` |
 | Windows aarch64 | `windows-11-arm` | `.msi` + portable `.zip` |
 
