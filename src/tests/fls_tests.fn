@@ -1468,6 +1468,42 @@ test "an outline nests a compound's own fields and its impl's own methods as one
   assert contains(children_text, `"name":"clear","kind":6`), "expected clear nested as a method";
 }
 
+test "an outline nests a concrete-instantiation impl's own methods under the base compound too" {
+  // User-reported (stdlib/std/vec.fn): impl Vec<str> { ... } and impl
+  // Vec<num> as Display { ... } both still showed their own methods
+  // flat, even after nesting an ordinary impl's methods worked. A
+  // concrete-instantiation impl (targeting one specific generic
+  // argument, not the bare template) mangles its own type_name to
+  // Buffer__str, which the top-level Buffer entry (bare name) never
+  // matches; concrete_dtype carries the un-mangled base name for
+  // exactly this lookup. impl Buffer<T: num | dec> - constrained but
+  // still generic, not a concrete instantiation - already worked, since
+  // its own type_name stays bare.
+  str src = `compound Buffer<T> {
+  `  T v;
+  `}
+  `impl Buffer<str> {
+  `  pub upper() str { ret self.v; }
+  `}
+  `impl Buffer<T: num | dec> {
+  `  pub doubled() T { ret self.v; }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///concreteimpl.fn";
+  doc.path = "concreteimpl.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = document_symbols(&reads, doc);
+  num buffer_at = index_of_str(out, `"name":"Buffer"`);
+  assert buffer_at >= 0, "expected Buffer's own entry";
+  str after_buffer = substr(out, buffer_at, len(out) - buffer_at);
+  assert contains(after_buffer, `"name":"upper","kind":6`), "expected the concrete-instantiation impl's own method nested under Buffer";
+  assert contains(after_buffer, `"name":"doubled","kind":6`), "expected the constrained-generic impl's own method nested under Buffer too";
+}
+
 test "a method is listed under the name it was written as" {
   str src = `compound Buffer {
   `  num len;

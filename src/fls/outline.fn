@@ -375,10 +375,21 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
     }
     fit n.kind {
       .Impl(block) -> {
+        // A concrete-instantiation impl (`impl Vec<str> { ... }`) mangles
+        // its own `type_name` to `Vec__str`, which the top-level entry
+        // (bare `Vec`) never matches; `concrete_dtype` carries the
+        // un-mangled base name for exactly this purpose. A constrained
+        // but still-generic impl (`impl Vec<T: num | dec> { ... }`)
+        // keeps `type_name` bare already and has no `concrete_dtype` at
+        // all, so it needs no special casing here.
+        str target_name = block.type_name;
+        if block.has_concrete_dtype {
+          target_name = block.concrete_dtype.type_str;
+        }
         num target_idx = -1;
         num oi = 0;
         for oi < out.len {
-          if equals(out.get(oi).name, block.type_name) {
+          if equals(out.get(oi).name, target_name) {
             target_idx = oi;
           }
           oi = oi + 1;
