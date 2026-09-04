@@ -142,6 +142,22 @@ jobs:
       - name: Install WiX Toolset (v3)
         run: choco install wixtoolset -y
 
+      - name: Make WiX Toolset available on PATH
+        # choco updates the machine PATH in the registry, but this job's
+        # own process doesn't pick that up mid-run - reliable on the x64
+        # runner, not on windows-11-arm, where heat/candle/light are
+        # otherwise not found later in this same job. Resolving the
+        # install location directly and appending it via GITHUB_PATH
+        # works on both regardless of why the implicit refresh differs.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $heat = Get-ChildItem -Path 'C:\Program Files*\WiX Toolset*', 'C:\ProgramData\chocolatey\lib\wixtoolset*' -Recurse -Filter heat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $heat) {
+            throw "heat.exe not found after installing WiX Toolset"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $heat.DirectoryName
+
       - name: Check fun.toml's version matches the release tag
         shell: powershell
         run: |
