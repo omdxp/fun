@@ -1,7 +1,4 @@
-.zig-cache
 .fun-cache
-zig-out
-zig-cache
 node_modules/
 # Generated C, wherever a build or a manual `-out` puts it.
 *.c
