@@ -251,7 +251,15 @@ jobs:
           # built from the fixed driver.fn is the bootstrap source (any
           # release after v0.50.3).
           New-Item -ItemType Directory -Force -Path stub_libs | Out-Null
-          lib /OUT:stub_libs\m.lib | Out-Null
+          $libExe = (Get-Command lib.exe -ErrorAction Stop).Source
+          Write-Host "Using $libExe to create an empty stub m.lib"
+          & $libExe /OUT:stub_libs\m.lib /NOLOGO
+          if ($LASTEXITCODE -ne 0) {
+            throw "lib.exe failed to create stub_libs\m.lib (exit $LASTEXITCODE)"
+          }
+          if (-not (Test-Path stub_libs\m.lib)) {
+            throw "stub_libs\m.lib was not created"
+          }
           $env:LIB = "$PWD\stub_libs;$env:LIB"
           fun build
 
