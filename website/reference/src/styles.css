@@ -484,13 +484,15 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .run-block-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(22, 34, 74, 0.55);
 }
-.run-actions { display: flex; gap: 8px; }
+.run-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .run-actions button {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
@@ -710,6 +712,14 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   opacity: 1;
 }
 
+/* Touch devices have no hover state to reveal this on - show it plainly
+   instead of hiding a control behind a gesture that doesn't exist here. */
+@media (hover: none) {
+  .code-copy-btn {
+    opacity: 1;
+  }
+}
+
 .code-copy-btn:hover { border-color: var(--accent); }
 
 :root[data-theme="light"] .code-copy-btn {
@@ -905,6 +915,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .module-card {
+  min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: 12px;
   padding: 12px;
@@ -1223,6 +1234,10 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   gap: 16px;
 }
 
+.modal-head > div:first-child {
+  min-width: 0;
+}
+
 .modal-eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.14em;
@@ -1262,9 +1277,18 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   grid-template-columns: 280px 1fr;
   gap: 16px;
   min-height: 0;
+  /* Grid's default align-content:stretch inflates "auto" rows/columns to
+     fill any leftover space in the container - harmless on desktop where
+     the two columns naturally fill the fixed-height card, but on mobile's
+     single-column, two-row layout it stretched short content (a one-line
+     module summary) into a mysterious dead zone above the symbol browser
+     whenever the card itself was taller than its content. Rows should
+     size to their own content and leave any surplus at the end. */
+  align-content: start;
 }
 
 .modal-sidebar {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 12px;
@@ -1280,6 +1304,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .modal-content {
+  min-width: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   min-height: 0;
@@ -1436,6 +1461,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     align-items: center;
     justify-content: center;
     min-height: 40px;
+    width: 96px;
     font-size: 12px;
   }
   .drawer-content {
@@ -1457,6 +1483,15 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   }
   .drawer-content .meta {
     margin-top: 12px;
+  }
+  .nav-subitem {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    font-size: 13px;
+  }
+  .nav-subitem.level-3 {
+    font-size: 12.5px;
   }
   main {
     padding: 16px;
@@ -1505,30 +1540,71 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     flex-wrap: wrap;
     justify-content: flex-start;
   }
+  .modal-backdrop {
+    padding: 0;
+  }
   .modal-card {
     width: 100%;
-    max-height: min(100dvh - 20px, 980px);
-    height: min(100dvh - 20px, 980px);
+    /* Always exactly the viewport height, whether the module screen (long
+       symbol list) or the symbol screen (sometimes just a few short lines)
+       is showing - height:auto here would shrink-wrap short content, and
+       the centered backdrop would float that short card in the middle of
+       the screen with visible backdrop above and below it. A fixed sheet
+       height with its own internal scroll (only engaging if content is
+       genuinely taller than the screen) keeps it full screen always. */
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    /* Reserve the scrollbar's width whether or not it's actually showing,
+       so drilling into a symbol (a shorter screen, often no scrollbar)
+       doesn't visibly narrow/widen the card versus the module screen. */
+    scrollbar-gutter: stable;
     padding: 14px;
-    border-radius: 14px;
+    /* Full-bleed and edge to edge at every mobile width, module screen or
+       symbol screen alike - a card that's sometimes inset and sometimes
+       edge to edge (previously only below 640px) reads as the layout
+       shifting size between the two drill-down screens. */
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
   }
   .modal-body {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 10px;
+    grid-template-rows: auto;
   }
-  .modal-sidebar {
-    border-radius: 12px;
-    max-height: 28vh;
-    padding: 10px;
-  }
-  .modal-content {
+  /* Mobile doesn't reflow the desktop sidebar+content grid at all - it's
+     a drill-down: the module screen (doc + full symbol list) and the
+     symbol screen (back button + one symbol's detail) are two distinct
+     views that replace each other via modalContentTab, never sharing the
+     card at once. See the isNarrowViewport branch in App.tsx. */
+  .mobile-modal-content {
+    overflow-y: visible;
     max-height: none;
     padding-right: 0;
   }
-  .modal-content-tab {
-    padding: 7px 10px;
+  .mobile-symbols-heading {
+    margin-top: 18px;
+  }
+  .modal-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-3);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    margin-bottom: 14px;
+    font-family: var(--mono);
     font-size: 0.86rem;
+    cursor: pointer;
+  }
+  .modal-back-btn:hover {
+    border-color: var(--accent);
+  }
+  .modal-back-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
   .symbol-detail {
     margin-top: 10px;
@@ -1546,11 +1622,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 @media (max-width: 640px) {
   .global-results {
     max-height: 45vh;
-  }
-
-  nav {
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
   }
 
   .compound-field-head {
@@ -1583,16 +1654,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     overflow: hidden;
   }
 
-  .modal-backdrop {
-    padding: 0;
-  }
-
   .modal-card {
-    height: 100dvh;
-    max-height: 100dvh;
-    border-radius: 0;
-    border-left: none;
-    border-right: none;
     padding: 12px;
   }
 
@@ -1611,10 +1673,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-  }
-
-  .modal-sidebar {
-    max-height: 32vh;
   }
 
   .symbol-pills {
@@ -1713,6 +1771,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .module-select,
   .symbol-pill,
   .copy-link-btn,
+  .run-actions button,
   nav button {
     min-height: 44px;
   }
@@ -1834,7 +1893,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   }
 
   .modal-sidebar {
-    max-height: 28vh;
     padding: 8px;
   }
 
@@ -1915,10 +1973,6 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .modal-close {
     min-height: 42px;
     justify-content: center;
-  }
-
-  .modal-sidebar {
-    max-height: 30vh;
   }
 }
 

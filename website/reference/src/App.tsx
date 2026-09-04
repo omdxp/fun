@@ -517,8 +517,31 @@ export default function App() {
   const [detailCopyKey, setDetailCopyKey] = useState("");
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  // The stdlib modal's mobile layout isn't a CSS reflow of the desktop
+  // one - it renders the symbol content before a collapsed symbol
+  // browser, so the two live as genuinely different JSX, picked here
+  // rather than fought over with `order`/media queries.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 980,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 980px)");
+    const handleChange = () => setIsNarrowViewport(mql.matches);
+    handleChange();
+    mql.addEventListener("change", handleChange);
+    return () => mql.removeEventListener("change", handleChange);
+  }, []);
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const stdlibModalCardRef = useRef<HTMLDivElement | null>(null);
+  // Mobile's module <-> symbol screens replace each other in place inside
+  // the same scrolling card, so without this a drill into a symbol from
+  // partway down a long symbol list opens already scrolled to that same
+  // offset instead of at the top of the new screen.
+  useEffect(() => {
+    if (!isNarrowViewport) return;
+    stdlibModalCardRef.current?.scrollTo({ top: 0 });
+  }, [modalContentTab, isNarrowViewport]);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
   const toggleTheme = () => {
@@ -1604,6 +1627,7 @@ export default function App() {
                     markdown={content.docs[dt.key] ?? ""}
                     sourcePath={dt.sourcePath}
                     headingPrefix={dt.key}
+                    dropLeadingH1
                   />
                 </div>
               </section>
@@ -1705,50 +1729,12 @@ export default function App() {
               ))}
             </div>
 
-            {isStdlibModalOpen && activeModule && (
-              <div
-                className="modal-backdrop"
-                onClick={(event) => {
-                  if (event.target === event.currentTarget) {
-                    closeStdlibModal();
-                  }
-                }}
-              >
-                <div className="modal-card" role="dialog" aria-modal="true">
-                  <div className="modal-head">
-                    <div>
-                      <div className="modal-eyebrow">Std Module</div>
-                      <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
-                      <p className="muted">
-                        {normalizeModuleSummary(activeModule.summary)}
-                      </p>
-                    </div>
-                    <div className="modal-actions">
-                      <button
-                        type="button"
-                        className="copy-link-btn"
-                        onClick={copyStdlibLink}
-                      >
-                        {copyStatus === "ok"
-                          ? "Copied"
-                          : copyStatus === "err"
-                            ? "Copy failed"
-                            : "Copy link"}
-                      </button>
-                      <button
-                        className="modal-close"
-                        type="button"
-                        onClick={closeStdlibModal}
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="modal-body">
-                    <div className="modal-sidebar">
-                      <div className="modal-section-title">Symbols</div>
-                      {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
+            {isStdlibModalOpen &&
+              activeModule &&
+              (() => {
+                const sidebarInner = (
+                  <>
+                    {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
                         <div className="symbol-group">
                           <div className="symbol-group-title muted small">
                             Public declarations
@@ -1783,54 +1769,55 @@ export default function App() {
                           </details>
                         );
                       })}
-                    </div>
+                  </>
+                );
 
-                    <div className="modal-content">
-                      {activeModule.symbols.length > 0 && (
-                        <div
-                          className="modal-content-tabs"
-                          role="tablist"
-                          aria-label="Module detail view"
-                        >
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={modalContentTab === "module"}
-                            className={`modal-content-tab ${
-                              modalContentTab === "module" ? "active" : ""
-                            }`}
-                            onClick={() => setModalContentTab("module")}
-                          >
-                            Module
-                          </button>
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={modalContentTab === "symbol"}
-                            className={`modal-content-tab ${
-                              modalContentTab === "symbol" ? "active" : ""
-                            }`}
-                            onClick={() => setModalContentTab("symbol")}
-                            disabled={!activeSymbol}
-                          >
-                            Symbol{activeSymbol ? `: ${activeSymbol.name}` : ""}
-                          </button>
-                        </div>
-                      )}
+                const tabsStrip = activeModule.symbols.length > 0 && (
+                  <div
+                    className="modal-content-tabs"
+                    role="tablist"
+                    aria-label="Module detail view"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={modalContentTab === "module"}
+                      className={`modal-content-tab ${
+                        modalContentTab === "module" ? "active" : ""
+                      }`}
+                      onClick={() => setModalContentTab("module")}
+                    >
+                      Module
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={modalContentTab === "symbol"}
+                      className={`modal-content-tab ${
+                        modalContentTab === "symbol" ? "active" : ""
+                      }`}
+                      onClick={() => setModalContentTab("symbol")}
+                      disabled={!activeSymbol}
+                    >
+                      Symbol{activeSymbol ? `: ${activeSymbol.name}` : ""}
+                    </button>
+                  </div>
+                );
 
-                      {modalContentTab === "module" &&
-                        (activeModule.docsMarkdown ? (
-                          <MarkdownWithPlayground
-                            markdown={activeModule.docsMarkdown}
-                            sourcePath={`stdlib/std/${activeModule.module}`}
-                            enableRunnableFunBlocks={false}
-                          />
-                        ) : (
-                          <p className="muted">No module-level docs found.</p>
-                        ))}
+                const moduleView = modalContentTab === "module" &&
+                  (activeModule.docsMarkdown ? (
+                    <MarkdownWithPlayground
+                      markdown={activeModule.docsMarkdown}
+                      sourcePath={`stdlib/std/${activeModule.module}`}
+                      enableRunnableFunBlocks={false}
+                    />
+                  ) : (
+                    <p className="muted">No module-level docs found.</p>
+                  ));
 
-                      {modalContentTab === "symbol" && activeSymbol && (
-                        <article className="symbol-detail">
+                const symbolView = modalContentTab === "symbol" &&
+                  activeSymbol && (
+                    <article className="symbol-detail">
                           <h3>
                             {activeSymbol.name}{" "}
                             <span className="muted">
@@ -2064,12 +2051,108 @@ export default function App() {
                               </section>
                             )}
                         </article>
-                      )}
+                  );
+
+                const contentInner = (
+                  <>
+                    {tabsStrip}
+                    {moduleView}
+                    {symbolView}
+                  </>
+                );
+
+                return (
+                  <div
+                    className="modal-backdrop"
+                    onClick={(event) => {
+                      if (event.target === event.currentTarget) {
+                        closeStdlibModal();
+                      }
+                    }}
+                  >
+                    <div
+                      className="modal-card"
+                      role="dialog"
+                      aria-modal="true"
+                      ref={stdlibModalCardRef}
+                    >
+                      <div className="modal-head">
+                        <div>
+                          <div className="modal-eyebrow">Std Module</div>
+                          <h2>
+                            std/{activeModule.module.replace(/\.fn$/, "")}
+                          </h2>
+                          <p className="muted">
+                            {normalizeModuleSummary(activeModule.summary)}
+                          </p>
+                        </div>
+                        <div className="modal-actions">
+                          <button
+                            type="button"
+                            className="copy-link-btn"
+                            onClick={copyStdlibLink}
+                          >
+                            {copyStatus === "ok"
+                              ? "Copied"
+                              : copyStatus === "err"
+                                ? "Copy failed"
+                                : "Copy link"}
+                          </button>
+                          <button
+                            className="modal-close"
+                            type="button"
+                            onClick={closeStdlibModal}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="modal-body">
+                        {isNarrowViewport ? (
+                          <div className="modal-content mobile-modal-content">
+                            {modalContentTab === "symbol" && activeSymbol ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="modal-back-btn"
+                                  onClick={() => setModalContentTab("module")}
+                                >
+                                  ← std/{activeModule.module.replace(
+                                    /\.fn$/,
+                                    "",
+                                  )}
+                                </button>
+                                {symbolView}
+                              </>
+                            ) : (
+                              <>
+                                {moduleView}
+                                <div className="modal-section-title mobile-symbols-heading">
+                                  Symbols
+                                </div>
+                                {sidebarInner}
+                              </>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            <div className="modal-sidebar">
+                              <div className="modal-section-title">
+                                Symbols
+                              </div>
+                              {sidebarInner}
+                            </div>
+                            <div className="modal-content">
+                              {contentInner}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              </div>
-            )}
+                );
+              })()}
           </section>
         )}
 
@@ -2092,8 +2175,8 @@ export default function App() {
             {!isGithubPages && (
               <>
                 <div className="hint">
-                  Requires zig-out/bin/fun. If missing, run zig build in repo
-                  root first.
+                  Requires fun-out/bin/fun. If missing, run `fun build` in
+                  repo root first.
                 </div>
                 {content.samples.map((s) => (
                   <RunCodeBlock

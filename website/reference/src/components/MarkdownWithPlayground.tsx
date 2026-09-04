@@ -9,6 +9,7 @@ type Props = {
   sourcePath?: string;
   headingPrefix?: string;
   enableRunnableFunBlocks?: boolean;
+  dropLeadingH1?: boolean;
 };
 
 const REPO_URL = (
@@ -168,10 +169,21 @@ export default function MarkdownWithPlayground({
   sourcePath,
   headingPrefix,
   enableRunnableFunBlocks = true,
+  dropLeadingH1 = false,
 }: Props) {
+  // Each doc tab already renders its own <h1> + lead line from DOC_TABS in
+  // App.tsx; the source markdown also opens with its own top-level heading
+  // (useful when reading the file directly on GitHub). Rendered together
+  // that's the same title twice in a row, so the tab view drops the
+  // markdown's copy rather than stripping it from the source file itself.
+  const effectiveMarkdown = useMemo(() => {
+    if (!dropLeadingH1) return markdown;
+    return markdown.replace(/^#[^#][^\n]*\n+/, "");
+  }, [markdown, dropLeadingH1]);
+
   const headingIdsByLine = useMemo(
-    () => computeHeadingIdsByLine(markdown, headingPrefix),
-    [markdown, headingPrefix],
+    () => computeHeadingIdsByLine(effectiveMarkdown, headingPrefix),
+    [effectiveMarkdown, headingPrefix],
   );
 
   const headingRenderer =
@@ -303,7 +315,7 @@ export default function MarkdownWithPlayground({
         },
       }}
     >
-      {markdown}
+      {effectiveMarkdown}
     </ReactMarkdown>
   );
 }
