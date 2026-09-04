@@ -226,7 +226,7 @@ jobs:
             throw "fun.toml's version ('$manifestVersion') does not match release tag ('$tag'). Bump the [package] version in fun.toml to $tag before tagging the release."
           }
 
-      - name: Set up MSVC toolchain (for lib.exe, bootstrap bridge below)
+      - name: Set up MSVC toolchain (matches ci-dev.yml's own Windows setup)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
@@ -250,13 +250,16 @@ jobs:
           # this step and the matrix's msvc_arch field once a release
           # built from the fixed driver.fn is the bootstrap source (any
           # release after v0.50.3).
+          # `lib.exe /OUT:m.lib` with no input .obj files exits 0 but
+          # writes nothing at all - it needs at least one input to
+          # produce output, so it can't create an empty archive this
+          # way. Writing the archive directly sidesteps that: the
+          # standard ar/COFF archive format's own magic signature,
+          # `!<arch>\n`, with nothing after it, is by itself a complete,
+          # valid, zero-member archive - exactly an "empty library",
+          # which is what's actually wanted here anyway.
           New-Item -ItemType Directory -Force -Path stub_libs | Out-Null
-          $libExe = (Get-Command lib.exe -ErrorAction Stop).Source
-          Write-Host "Using $libExe to create an empty stub m.lib"
-          & $libExe /OUT:stub_libs\m.lib /NOLOGO
-          if ($LASTEXITCODE -ne 0) {
-            throw "lib.exe failed to create stub_libs\m.lib (exit $LASTEXITCODE)"
-          }
+          [System.IO.File]::WriteAllBytes("$PWD\stub_libs\m.lib", [System.Text.Encoding]::ASCII.GetBytes("!<arch>`n"))
           if (-not (Test-Path stub_libs\m.lib)) {
             throw "stub_libs\m.lib was not created"
           }
