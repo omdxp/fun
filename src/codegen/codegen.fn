@@ -9115,7 +9115,7 @@ impl Codegen {
         if arg_dtypes.len == 0 {
           self.state.write("void");
         }
-        self.state.write(");\n");
+        self.state.write_line_pinned(");\n", node.pos);
 
         StringBuilder pnb = string_builder_init(32);
         pnb.append("__fun_async_payload_");
@@ -9126,7 +9126,7 @@ impl Codegen {
         // the return type is `void`.
         self.state.write("typedef struct ");
         self.state.write(payload_name);
-        self.state.write(" {\n");
+        self.state.write_line_pinned(" {\n", node.pos);
         num ai = 0;
         for ai < arg_names.len {
           self.state.write("  ");
@@ -9137,7 +9137,7 @@ impl Codegen {
           if awt.is_some() {
             ret awt;
           }
-          self.state.write(";\n");
+          self.state.write_line_pinned(";\n", node.pos);
           ai = ai + 1;
         }
         if !is_void {
@@ -9146,21 +9146,21 @@ impl Codegen {
           if rwt.is_none() {
             ret .Some(.UnsupportedNode);
           }
-          self.state.write(" __result;\n");
+          self.state.write_line_pinned(" __result;\n", node.pos);
         }
         self.state.write("} ");
         self.state.write(payload_name);
-        self.state.write(";\n");
+        self.state.write_line_pinned(";\n", node.pos);
 
         // 2. Entry trampoline: runs on the spawned thread.
         self.state.write("static void* __fun_async_entry_");
         self.state.write(emit_name);
-        self.state.write("(void* __arg) {\n");
+        self.state.write_line_pinned("(void* __arg) {\n", node.pos);
         self.state.write("  ");
         self.state.write(payload_name);
         self.state.write("* __payload = (");
         self.state.write(payload_name);
-        self.state.write("*)__arg;\n");
+        self.state.write_line_pinned("*)__arg;\n", node.pos);
         self.state.write("  ");
         if !is_void {
           self.state.write("__payload->__result = ");
@@ -9176,20 +9176,20 @@ impl Codegen {
           self.state.write(format_num(ai));
           ai = ai + 1;
         }
-        self.state.write(");\n");
-        self.state.write("  return NULL;\n");
-        self.state.write("}\n");
+        self.state.write_line_pinned(");\n", node.pos);
+        self.state.write_line_pinned("  return NULL;\n", node.pos);
+        self.state.write_line_pinned("}\n", node.pos);
 
         // 3. Spawn helper.
         self.state.write("static int __fun_async_spawn_");
         self.state.write(emit_name);
         self.state.write("(");
         self.state.write(payload_name);
-        self.state.write("* __payload, __fun_thread_t* __thr) {\n");
+        self.state.write_line_pinned("* __payload, __fun_thread_t* __thr) {\n", node.pos);
         self.state.write("  return __fun_thread_start(__thr, __fun_async_entry_");
         self.state.write(emit_name);
-        self.state.write(", __payload);\n");
-        self.state.write("}\n");
+        self.state.write_line_pinned(", __payload);\n", node.pos);
+        self.state.write_line_pinned("}\n", node.pos);
 
         // 4. Await helper: join, extract the result, free the payload.
         self.state.write("static ");
@@ -9201,21 +9201,21 @@ impl Codegen {
         self.state.write(emit_name);
         self.state.write("(");
         self.state.write(payload_name);
-        self.state.write("* __payload, __fun_thread_t __thr) {\n");
-        self.state.write("  (void)__fun_thread_join(__thr);\n");
+        self.state.write_line_pinned("* __payload, __fun_thread_t __thr) {\n", node.pos);
+        self.state.write_line_pinned("  (void)__fun_thread_join(__thr);\n", node.pos);
         if is_void {
-          self.state.write("  free(__payload);\n");
+          self.state.write_line_pinned("  free(__payload);\n", node.pos);
         } else {
           self.state.write("  ");
           let rwt2 = self.write_type(*f.rtype);
           if rwt2.is_none() {
             ret .Some(.UnsupportedNode);
           }
-          self.state.write(" __result = __payload->__result;\n");
-          self.state.write("  free(__payload);\n");
-          self.state.write("  return __result;\n");
+          self.state.write_line_pinned(" __result = __payload->__result;\n", node.pos);
+          self.state.write_line_pinned("  free(__payload);\n", node.pos);
+          self.state.write_line_pinned("  return __result;\n", node.pos);
         }
-        self.state.write("}\n");
+        self.state.write_line_pinned("}\n", node.pos);
 
         // 5. Call helper: what `await expr` lowers to. Degrades to a
         // direct synchronous call on malloc or spawn failure.
@@ -9243,12 +9243,12 @@ impl Codegen {
         if arg_names.len == 0 {
           self.state.write("void");
         }
-        self.state.write(") {\n");
+        self.state.write_line_pinned(") {\n", node.pos);
         self.state.write("  ");
         self.state.write(payload_name);
         self.state.write("* __payload = malloc(sizeof(");
         self.state.write(payload_name);
-        self.state.write("));\n");
+        self.state.write_line_pinned("));\n", node.pos);
         self.state.write("  if (__payload == NULL) { ");
         if !is_void {
           self.state.write("return ");
@@ -9267,20 +9267,20 @@ impl Codegen {
         if is_void {
           self.state.write(" return;");
         }
-        self.state.write(" }\n");
+        self.state.write_line_pinned(" }\n", node.pos);
         ai = 0;
         for ai < arg_names.len {
           self.state.write("  __payload->__arg");
           self.state.write(format_num(ai));
           self.state.write(" = ");
           self.state.write(arg_names.get(ai));
-          self.state.write(";\n");
+          self.state.write_line_pinned(";\n", node.pos);
           ai = ai + 1;
         }
-        self.state.write("  __fun_thread_t __thr;\n");
+        self.state.write_line_pinned("  __fun_thread_t __thr;\n", node.pos);
         self.state.write("  int __rc = __fun_async_spawn_");
         self.state.write(emit_name);
-        self.state.write("(__payload, &__thr);\n");
+        self.state.write_line_pinned("(__payload, &__thr);\n", node.pos);
         self.state.write("  if (__rc != 0) { free(__payload); ");
         if !is_void {
           self.state.write("return ");
@@ -9299,17 +9299,17 @@ impl Codegen {
         if is_void {
           self.state.write(" return;");
         }
-        self.state.write(" }\n");
+        self.state.write_line_pinned(" }\n", node.pos);
         if is_void {
           self.state.write("  __fun_async_await_");
           self.state.write(emit_name);
-          self.state.write("(__payload, __thr);\n");
+          self.state.write_line_pinned("(__payload, __thr);\n", node.pos);
         } else {
           self.state.write("  return __fun_async_await_");
           self.state.write(emit_name);
-          self.state.write("(__payload, __thr);\n");
+          self.state.write_line_pinned("(__payload, __thr);\n", node.pos);
         }
-        self.state.write("}\n\n");
+        self.state.write_line_pinned("}\n\n", node.pos);
 
         // 6. Fork support, emitted only when `fork` is used anywhere in
         // the program. Reuses the payload struct above; the entry runs
@@ -9320,12 +9320,12 @@ impl Codegen {
         if self.uses_fork {
           self.state.write("static void __fun_fork_entry_");
           self.state.write(emit_name);
-          self.state.write("(void* __arg) {\n");
+          self.state.write_line_pinned("(void* __arg) {\n", node.pos);
           self.state.write("  ");
           self.state.write(payload_name);
           self.state.write("* __payload = (");
           self.state.write(payload_name);
-          self.state.write("*)__arg;\n");
+          self.state.write_line_pinned("*)__arg;\n", node.pos);
           self.state.write("  ");
           self.state.write(emit_name);
           self.state.write("(");
@@ -9338,9 +9338,9 @@ impl Codegen {
             self.state.write(format_num(ai));
             ai = ai + 1;
           }
-          self.state.write(");\n");
-          self.state.write("  free(__payload);\n");
-          self.state.write("}\n");
+          self.state.write_line_pinned(");\n", node.pos);
+          self.state.write_line_pinned("  free(__payload);\n", node.pos);
+          self.state.write_line_pinned("}\n", node.pos);
 
           self.state.write("static void __fun_fork_call_");
           self.state.write(emit_name);
@@ -9361,12 +9361,12 @@ impl Codegen {
           if arg_names.len == 0 {
             self.state.write("void");
           }
-          self.state.write(") {\n");
+          self.state.write_line_pinned(") {\n", node.pos);
           self.state.write("  ");
           self.state.write(payload_name);
           self.state.write("* __payload = malloc(sizeof(");
           self.state.write(payload_name);
-          self.state.write("));\n");
+          self.state.write_line_pinned("));\n", node.pos);
           self.state.write("  if (__payload == NULL) { ");
           self.state.write(emit_name);
           self.state.write("(");
@@ -9378,20 +9378,20 @@ impl Codegen {
             self.state.write(arg_names.get(ai));
             ai = ai + 1;
           }
-          self.state.write("); return; }\n");
+          self.state.write_line_pinned("); return; }\n", node.pos);
           ai = 0;
           for ai < arg_names.len {
             self.state.write("  __payload->__arg");
             self.state.write(format_num(ai));
             self.state.write(" = ");
             self.state.write(arg_names.get(ai));
-            self.state.write(";\n");
+            self.state.write_line_pinned(";\n", node.pos);
             ai = ai + 1;
           }
           self.state.write("  __fun_go(__fun_fork_entry_");
           self.state.write(emit_name);
-          self.state.write(", __payload);\n");
-          self.state.write("}\n\n");
+          self.state.write_line_pinned(", __payload);\n", node.pos);
+          self.state.write_line_pinned("}\n\n", node.pos);
         }
         ret .None;
       }

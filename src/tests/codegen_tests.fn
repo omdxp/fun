@@ -302,3 +302,34 @@ test "debug info on anchors an if statement's own header line too" {
   assert contains(out, `#line 3 "test.fn"`), "expected the if statement's own line";
   assert contains(out, `#line 4 "test.fn"`), "expected the ret inside its body";
 }
+
+test "debug info pins every line of an async function's synthesized trampoline back to its own declaration" {
+  // The original Zig transpiler's own emit_async_function_support
+  // equivalent re-pinned every hand-written C line of an async
+  // function's entry/spawn/await trampoline back to the function's own
+  // declaration line, rather than let the C preprocessor's line count
+  // drift forward into unrelated source (blank lines, the next
+  // declaration) as each line advances past the last #line directive.
+  // codegen.fn's own port of the general per-statement mechanism didn't
+  // reach this code at all, since it hand-writes many C lines per
+  // self.state.write call rather than going through write_indent once
+  // per statement - a real, separate gap from the ordinary-statement
+  // case, closed by write_line_pinned re-anchoring every line inside a
+  // multi-line write back to one fixed position.
+  str src = `imp std.task;
+  `async fun worker(WaitGroup* wg) {
+  `  wg.done();
+  `}`;
+  let out = emit_c_with_debug_info(src, "debug info pins every line of an async function's synthesized trampoline back to its own declaration");
+  assert contains(out, "__fun_async_entry_worker"), "expected the entry trampoline to be emitted";
+  // Every line from the payload struct through the await helper - not
+  // just the ordinary function body - should carry line 2 (worker's own
+  // declaration), not drift onto whatever line comes after it.
+  num entry_at = index_of_str(out, "__fun_async_entry_worker(void* __arg)");
+  assert entry_at >= 0, "expected the entry trampoline's own definition";
+  num after_entry = index_of_str(substr(out, entry_at, len(out) - entry_at), "return NULL;");
+  assert after_entry >= 0, "expected the entry trampoline's own body";
+  str entry_body = substr(out, entry_at, after_entry);
+  assert !contains(entry_body, `#line 3`), "expected no line inside the trampoline to drift past worker's own declaration line";
+  assert contains(out, `#line 2 "test.fn"`), "expected the trampoline's own lines pinned to worker's declaration";
+}

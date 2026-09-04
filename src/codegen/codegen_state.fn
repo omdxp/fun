@@ -70,6 +70,38 @@ impl CodegenState {
     self.out.append(_escaped_line_directive_path(pos.filename));
     self.out.append("\"\n");
   }
+
+  // Writes `s` (which may itself span several C lines, each written in
+  // one call rather than one `write_indent` per line - a synthesized
+  // helper function's own hand-written body, not an ordinary statement)
+  // re-anchoring every line inside it back to the single Fun source
+  // position `pos`. Without this, a debugger's line counter drifts
+  // forward from `pos` into whatever source happens to sit at
+  // `pos.line + 1`, `+ 2`, and so on as the C preprocessor's own line
+  // count advances past each `#line` directive - blank lines, comments,
+  // the next declaration - landing stops on unrelated code instead of
+  // just showing `pos` repeated. A no-op pass-through when debug info
+  // is off.
+  pub write_line_pinned(str s, Pos pos) {
+    if !self.debug_info {
+      self.out.append(s);
+      ret;
+    }
+    num start = 0;
+    num i = 0;
+    num n = len(s);
+    for i < n {
+      if s[i] == '\n' {
+        self.out.append(substr(s, start, i - start + 1));
+        self.write_line_directive(pos);
+        start = i + 1;
+      }
+      i = i + 1;
+    }
+    if start < n {
+      self.out.append(substr(s, start, n - start));
+    }
+  }
 }
 
 // A `#line` directive's own filename argument is a C string literal, so
