@@ -115,11 +115,16 @@ jobs:
           # behavior fix landing in the same release as its own
           # bootstrap source (as happens here almost every release)
           # wouldn't be reflected in the shipped binary at all. The
-          # second pass uses the just-built (this checkout's own) fun
-          # to rebuild itself and fls, so what ships actually reflects
-          # today's source, not last release's.
+          # second pass must call ./fun-out/bin/fun explicitly, by
+          # path: `fun build` installs its output under this checkout's
+          # own fun-out/bin/, entirely separate from wherever setup-fun
+          # installed the bootstrap binary PATH still resolves bare
+          # `fun` to - a second bare `fun build` silently reruns the
+          # exact same bootstrap binary a second time, proving nothing
+          # new (confirmed: it reproduced the identical fls.c error
+          # twice before this used the explicit path).
           fun build
-          fun build
+          ./fun-out/bin/fun build
 
       - name: Build install bundle for ${{ matrix.target }}
         run: |
@@ -291,14 +296,20 @@ jobs:
           # from this checkout's current source, needing the -lm bridge
           # above since IT still carries the old, unconditional -lm.
           fun build
-          # Second pass: what just got built already has today's fixes
-          # baked in (this checkout's own driver.fn no longer emits -lm
-          # on Windows at all, so the stub above is inert here, along
-          # with any other compiler-behavior fix landing in this same
-          # release) - rebuilding once more with it is what makes the
-          # shipped binary actually reflect today's source rather than
-          # the bootstrap's.
-          fun build
+          # Second pass must call .\fun-out\bin\fun.exe explicitly, by
+          # path: `fun build` installs its output under this checkout's
+          # own fun-out\bin\, entirely separate from wherever setup-fun
+          # installed the bootstrap binary PATH still resolves bare
+          # `fun` to - a second bare `fun build` silently reruns the
+          # exact same bootstrap binary a second time, proving nothing
+          # new (confirmed: it reproduced the identical fls.c error
+          # twice before this used the explicit path). What just got
+          # built already has today's fixes baked in (this checkout's
+          # own driver.fn no longer emits -lm on Windows at all, so the
+          # stub above is inert for this second pass), so rebuilding
+          # once more with it is what makes the shipped binary actually
+          # reflect today's source rather than the bootstrap's.
+          .\fun-out\bin\fun.exe build
 
       - name: Build MSI + portable zip for ${{ matrix.target }}
         shell: powershell
