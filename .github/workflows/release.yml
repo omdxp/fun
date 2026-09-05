@@ -308,8 +308,13 @@ jobs:
           # own driver.fn no longer emits -lm on Windows at all, so the
           # stub above is inert for this second pass), so rebuilding
           # once more with it is what makes the shipped binary actually
-          # reflect today's source rather than the bootstrap's.
-          .\fun-out\bin\fun.exe build
+          # reflect today's source rather than the bootstrap's. Windows
+          # won't let a running .exe overwrite its own file in place
+          # (unlike POSIX, which happily unlinks a running binary) -
+          # running the second pass from a copy elsewhere means its
+          # own output path (fun-out\bin\fun.exe) is free to write to.
+          Copy-Item fun-out\bin\fun.exe stage2-fun.exe
+          .\stage2-fun.exe build
 
       - name: Build MSI + portable zip for ${{ matrix.target }}
         shell: powershell
