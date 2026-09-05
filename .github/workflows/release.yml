@@ -180,10 +180,8 @@ jobs:
         include:
           - target: x86_64-windows-gnu
             os: windows-latest
-            msvc_arch: x64
           - target: aarch64-windows-gnu
             os: windows-11-arm
-            msvc_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -250,67 +248,19 @@ jobs:
             throw "fun.toml's version ('$manifestVersion') does not match release tag ('$tag'). Bump the [package] version in fun.toml to $tag before tagging the release."
           }
 
-      - name: Set up MSVC toolchain (matches ci-dev.yml's own Windows setup)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.msvc_arch }}
-
       - name: Build fun and fls
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $env:FUN_STDLIB_DIR = "$PWD\stdlib"
-          # Bootstrap-generation bridge, not a fix for the real bug: the
-          # bootstrap fun binary resolved above is an already-released
-          # version, so it still carries the old, unconditional `-lm` on
-          # Windows this checkout's own src/cli/driver.fn just fixed -
-          # that fix only takes effect once THIS build produces a new
-          # binary compiled from the fixed source, which needs THIS
-          # build to succeed first. Give the old binary's `-lm` an empty
-          # archive to resolve against so it can get past its own bug
-          # long enough to build the fixed one; Windows has no real math
-          # library to link against regardless, so an empty one is the
-          # correct answer either way, not just a stand-in. Safe to drop
-          # this step and the matrix's msvc_arch field once a release
-          # built from the fixed driver.fn is the bootstrap source (any
-          # release after v0.50.3).
-          # `lib.exe /OUT:m.lib` with no input .obj files exits 0 but
-          # writes nothing at all - it needs at least one input to
-          # produce output. Writing a bare ar/COFF magic signature
-          # (`!<arch>\n`) by hand instead is a valid *Unix* empty
-          # archive, but not a valid *MS-COFF* one: lld-link's stricter
-          # validation there rejected it outright (LNK1107, "invalid or
-          # corrupt file"). Compiling one real (if empty) object file
-          # and archiving that is what actually produces a properly
-          # structured library, functionally empty either way - no
-          # symbols in it, since none are needed.
-          New-Item -ItemType Directory -Force -Path stub_libs | Out-Null
-          "// intentionally empty: only exists to give lib.exe one real object to archive" |
-            Out-File -FilePath stub_libs\empty.c -Encoding ascii
-          & cl.exe /nologo /c stub_libs\empty.c /Fo:stub_libs\empty.obj
-          if ($LASTEXITCODE -ne 0) {
-            throw "cl.exe failed to compile the stub object (exit $LASTEXITCODE)"
-          }
-          $libExe = (Get-Command lib.exe -ErrorAction Stop).Source
-          & $libExe /OUT:stub_libs\m.lib /NOLOGO stub_libs\empty.obj
-          if ($LASTEXITCODE -ne 0) {
-            throw "lib.exe failed to create stub_libs\m.lib (exit $LASTEXITCODE)"
-          }
-          if (-not (Test-Path stub_libs\m.lib)) {
-            throw "stub_libs\m.lib was not created"
-          }
-          $env:LIB = "$PWD\stub_libs;$env:LIB"
           # A standard 3-stage bootstrap (same reasoning GCC/rustc use
           # theirs for) - see the POSIX build's own step for the full
-          # rationale. Stage 0 (the old bootstrap binary) needs the
-          # -lm bridge above; stages 1 and 2 don't, since what stage 0
-          # builds already has today's driver.fn fix compiled in.
-          # Each stage must be invoked by its own explicit path (bare
-          # `fun build` would just silently rerun stage 0 via PATH
-          # instead of advancing), and, on Windows specifically, from a
-          # copy of the previous stage's binary rather than the file
-          # in place - Windows won't let a running .exe overwrite its
-          # own file (unlike POSIX, which happily unlinks a running
+          # rationale. Each stage must be invoked by its own explicit
+          # path (bare `fun build` would just silently rerun stage 0 via
+          # PATH instead of advancing), and, on Windows specifically,
+          # from a copy of the previous stage's binary rather than the
+          # file in place - Windows won't let a running .exe overwrite
+          # its own file (unlike POSIX, which happily unlinks a running
           # binary), so building from a copy elsewhere leaves the
           # in-place path free for the new stage's own output.
           fun build
