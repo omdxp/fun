@@ -425,7 +425,7 @@ pub fun compile_to_c_mode(
   cg.test_mode = test_mode;
   cg.fuzz_mode = fuzz_mode;
   cg.fuzz_target = fuzz_target;
-  cg.msvc_mode = compiler_is_msvc(c_compiler());
+  cg.msvc_mode = compiler_is_msvc(resolve_c_compiler());
   cg.debug_info = debug_info;
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
@@ -514,6 +514,44 @@ fun _default_cc_candidates() Vec<str> {
     out.push("cc");
   }
   ret out;
+}
+
+// Which C compiler will actually receive the generated C, resolved the
+// same way `compile_c_to_exe` itself will pick one: `FUN_CC`'s exact
+// value if set, otherwise the first of `_default_cc_candidates()` found
+// on PATH. Exists so codegen's own msvc-mode decision and the real
+// compile step can never disagree about which compiler is in play -
+// `c_compiler()`'s own hardcoded platform guess ("cl" on Windows) names
+// a DIFFERENT compiler than the one actually used whenever clang (tried
+// first, and normally present) is found, silently mismatching codegen's
+// emitted C shape against the compiler that actually receives it. Falls
+// back to `c_compiler()`'s own guess only when nothing on PATH matches
+// any candidate at all, the same last resort `compile_c_to_exe` reaches
+// before giving up.
+pub fun resolve_c_compiler() str {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret override_cc;
+  }
+  Vec<str> candidates = _default_cc_candidates();
+  defer candidates.free();
+  num i = 0;
+  for i < candidates.len {
+    str cc = candidates.get(i);
+    i = i + 1;
+    Vec<str> probe_args;
+    probe_args.init(2);
+    probe_args.push(cc);
+    probe_args.push("--version");
+    str[] probe_argv = argv_from(&probe_args);
+    let probe_result = run(probe_argv);
+    free_argv(probe_argv);
+    probe_args.free();
+    if probe_result.is_ok() {
+      ret cc;
+    }
+  }
+  ret c_compiler();
 }
 
 // Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
@@ -985,6 +1023,27 @@ test "the msvc compiler is recognized by name" {
   assert compiler_is_msvc("cl.exe"), "expected cl.exe to be msvc";
   assert !compiler_is_msvc("cc"), "expected cc to be gcc-style";
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
+}
+
+test "resolve_c_compiler honors FUN_CC verbatim" {
+  set_env("FUN_CC", "some-made-up-cc");
+  assert equals(resolve_c_compiler(), "some-made-up-cc"), "expected the exact override, unresolved against PATH";
+  clear_env("FUN_CC");
+}
+
+// Regression test: `cg.msvc_mode` used to come from `c_compiler()`'s own
+// hardcoded platform guess ("cl" on Windows), a DIFFERENT decision than
+// `compile_c_to_exe`'s own candidate search (clang tried first, and
+// normally present even on Windows) actually uses to pick a compiler -
+// silently mismatching codegen's emitted C shape against the compiler
+// that would actually receive it, on any machine where clang exists but
+// isn't literally named "cl". `resolve_c_compiler` runs that same
+// search itself, so it can never name a compiler `compile_c_to_exe`
+// wouldn't also pick.
+test "resolve_c_compiler finds a real compiler on PATH, not just a platform guess" {
+  clear_env("FUN_CC");
+  let resolved = resolve_c_compiler();
+  assert !equals(resolved, ""), "expected some compiler to resolve on this machine";
 }
 
 // Reads `./fun.toml` and fills in whatever it left implicit.

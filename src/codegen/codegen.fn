@@ -225,6 +225,16 @@ pub compound Codegen {
   Vec<Vec<bin>> compound_field_is_pointer;
   // Each field's full, un-mangled declared type, when known.
   Vec<Vec<Option<DataType>>> compound_field_dtype;
+  // Every top-level `const`'s name and declared type, so a reference to
+  // one (as a plain identifier, anywhere a program can see it, not just
+  // inside the function that happens to be emitting right now) resolves
+  // its type the same way a local's already does. Whole-program and
+  // persistent, unlike `local_names` and friends, which `emit_function`
+  // resets at the start of every function - a top-level const is in
+  // scope everywhere, not just the one function that happened to be
+  // compiling first.
+  Vec<str> top_level_const_names;
+  Vec<str> top_level_const_type_names;
   // Every impl method's owning type, bare name, and fully mangled
   // call-site name. A plain impl's method mangles to `Type__method`; a
   // quirk-implementing impl's mangles to `Type__Quirk__method`.
@@ -504,6 +514,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.compound_field_type_names.init(0);
   g.compound_field_is_pointer.init(0);
   g.compound_field_dtype.init(0);
+  g.top_level_const_names.init(0);
+  g.top_level_const_type_names.init(0);
   g.impl_method_owner_type.init(0);
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
@@ -10398,6 +10410,39 @@ impl Codegen {
     ret .None;
   }
 
+  // Pre-registers every top-level `const`'s name and declared type,
+  // emitting no C - the same shape `register_function_signatures` does
+  // for functions, run once before any body so a reference to one
+  // resolves regardless of source order or which function is currently
+  // being emitted.
+  register_top_level_consts(Vec<Node> nodes) {
+    for n : nodes {
+      fit n.kind {
+        .Variable(v) -> {
+          if v.is_const {
+            self.top_level_const_names.push(v.name);
+            self.top_level_const_type_names.push(v.var_type.type_str);
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Looks up `name`'s declared type among registered top-level consts.
+  // `.None` when `name` isn't one - a local, a function, or genuinely
+  // unknown.
+  lookup_top_level_const_type(str name) Option<str> {
+    num i = 0;
+    for i < self.top_level_const_names.len {
+      if equals(self.top_level_const_names.get(i), name) {
+        ret .Some(self.top_level_const_type_names.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Looks up `fn_name`'s declared return type. `.None` means it isn't
   // registered: unknown, a method, or a generic function.
   lookup_function_rtype(str fn_name) Option<DataType*> {
@@ -10437,7 +10482,17 @@ impl Codegen {
   // chain; anything else is rejected rather than guessed.
   infer_arg_type_name(Node* arg) Option<str> {
     fit arg.kind {
-      .Identifier(name) -> { ret self.lookup_local_type_name(name); }
+      .Identifier(name) -> {
+        let local_t = self.lookup_local_type_name(name);
+        if local_t.is_some() {
+          ret local_t;
+        }
+        // Not a local (or a local of this name doesn't exist in the
+        // function currently emitting) - a top-level `const` is in
+        // scope everywhere, so it's still a legitimate reference, just
+        // not one `lookup_local_type_name` (function-scoped) can see.
+        ret self.lookup_top_level_const_type(name);
+      }
       .Number(data) -> {
         fit data {
           .Num(_) -> { ret .Some("num"); }
@@ -10672,15 +10727,25 @@ impl Codegen {
       .Identifier(name) -> {
         let t = self.lookup_local_type_name(name);
         let p = self.lookup_local_is_pointer(name);
-        if t.is_none() || p.is_none() {
-          ret .None;
+        if t.is_some() && p.is_some() {
+          DataType dt = dtype_new();
+          dt.type_str = t.unwrap();
+          if p.unwrap() {
+            dt.pointer_depth = 1;
+          }
+          ret .Some(dt);
         }
-        DataType dt = dtype_new();
-        dt.type_str = t.unwrap();
-        if p.unwrap() {
-          dt.pointer_depth = 1;
+        // Not a local - a top-level `const` is in scope everywhere, so
+        // it's still a legitimate reference. Never pointer-typed: same
+        // convention as everywhere else in this file (`str` included,
+        // despite its own `char*` C spelling).
+        let top_const_t = self.lookup_top_level_const_type(name);
+        if top_const_t.is_some() {
+          DataType const_dt = dtype_new();
+          const_dt.type_str = top_const_t.unwrap();
+          ret .Some(const_dt);
         }
-        ret .Some(dt);
+        ret .None;
       }
       // A bare array literal has no declared type to read. Without this,
       // `arr` would never be recorded as a known local and a later
@@ -12519,6 +12584,7 @@ impl Codegen {
     self.c_shadow_names = collect_c_shadow_names(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
+    self.register_top_level_consts(nodes);
     // Registers every quirk's declaration, pure bookkeeping with no C
     // text: a generic one, before anything referencing a concrete
     // instantiation of it as a bare type needs to resolve it, and a
