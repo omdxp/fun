@@ -18,10 +18,10 @@ $env:Path = "$PWD\\bin;" + $env:Path
 
 Compiler configuration
 - This portable package does not set environment variables automatically.
-- By default, fun tries platform compilers.
-- Recommended stable setup:
-  $env:FUN_CC = "zig"
-  $env:FUN_CC_ARGS = "cc"
+- By default, fun tries clang, then gcc, then cl, using the first one it
+  finds on PATH.
+- To override, set FUN_CC (and optionally FUN_CC_ARGS) yourself, e.g.:
+  $env:FUN_CC = "cl"
 
 Language Server (fls)
 - The package also includes the Fun language server: .\bin\fls.exe

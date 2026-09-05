@@ -50,20 +50,6 @@
           Permanent="no"
           System="yes"
           Value="[INSTALLFOLDER]share\fun" />
-        <Environment
-          Id="SetFunCc"
-          Name="FUN_CC"
-          Action="set"
-          Permanent="no"
-          System="yes"
-          Value="zig" />
-        <Environment
-          Id="SetFunCcArgs"
-          Name="FUN_CC_ARGS"
-          Action="set"
-          Permanent="no"
-          System="yes"
-          Value="cc" />
       </Component>
     </DirectoryRef>
 
