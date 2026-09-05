@@ -108,7 +108,18 @@ jobs:
       - name: Build fun and fls
         run: |
           set -euo pipefail
-          FUN_STDLIB_DIR="$PWD/stdlib" fun build
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          # The bootstrap fun binary resolved above is an already-
+          # released version, so building just once only proves ITS
+          # compiled-in behavior, not this checkout's - a compiler
+          # behavior fix landing in the same release as its own
+          # bootstrap source (as happens here almost every release)
+          # wouldn't be reflected in the shipped binary at all. The
+          # second pass uses the just-built (this checkout's own) fun
+          # to rebuild itself and fls, so what ships actually reflects
+          # today's source, not last release's.
+          fun build
+          fun build
 
       - name: Build install bundle for ${{ matrix.target }}
         run: |
@@ -276,6 +287,17 @@ jobs:
             throw "stub_libs\m.lib was not created"
           }
           $env:LIB = "$PWD\stub_libs;$env:LIB"
+          # First pass: the old bootstrap binary rebuilds itself and fls
+          # from this checkout's current source, needing the -lm bridge
+          # above since IT still carries the old, unconditional -lm.
+          fun build
+          # Second pass: what just got built already has today's fixes
+          # baked in (this checkout's own driver.fn no longer emits -lm
+          # on Windows at all, so the stub above is inert here, along
+          # with any other compiler-behavior fix landing in this same
+          # release) - rebuilding once more with it is what makes the
+          # shipped binary actually reflect today's source rather than
+          # the bootstrap's.
           fun build
 
       - name: Build MSI + portable zip for ${{ matrix.target }}
