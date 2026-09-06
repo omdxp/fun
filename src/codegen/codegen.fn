@@ -11970,9 +11970,12 @@ impl Codegen {
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
       // Windows defaults to a 1 MB thread stack, which the parser's recursive
       // descent exhausts before its own depth guard fires on deeply-nested
-      // expressions.  Request 8 MB to match the Linux/macOS default so the
-      // guard, not the OS, rejects pathological input.
-      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:8388608\")\n#endif\n");
+      // expressions.  Linux/macOS both default to 8 MB, which is enough for a
+      // single transpile call.  On Windows, committed stack pages are never
+      // decommitted, so running the full test suite (hundreds of sequential
+      // transpile calls) accumulates a high-water mark that exceeds 8 MB.
+      // Reserve 64 MB so the suite fits today and has ample room to grow.
+      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:67108864\")\n#endif\n");
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
