@@ -328,6 +328,12 @@ pub compound FunctionNode {
   // (`fun f<T: num | str>` -> [["num"], ["str"]]), parallel to type_params.
   Vec<Vec<str>> type_param_forced_insts;
   bin has_type_param_forced_insts;
+  // Each type param's own declared constraint, index-aligned with
+  // type_params (`fun f<T: num | str>` -> [["num", "str"]]); empty per
+  // param when unconstrained. For display (hover, signatures), unlike
+  // type_param_forced_insts' combined Cartesian product.
+  Vec<Vec<str>> type_param_constraints;
+  bin has_type_param_constraints;
   Vec<Node*> args;
   bin has_args;
   bin is_async;
@@ -346,6 +352,8 @@ pub fun function_node_new() FunctionNode {
   f.has_type_params = false;
   f.type_param_forced_insts.init(0);
   f.has_type_param_forced_insts = false;
+  f.type_param_constraints.init(0);
+  f.has_type_param_constraints = false;
   f.args.init(0);
   f.has_args = false;
   f.is_async = false;
@@ -466,6 +474,10 @@ pub compound CompoundNode {
   bin has_type_params;
   Vec<Vec<str>> type_param_forced_insts;
   bin has_type_param_forced_insts;
+  // Each type param's own declared constraint, index-aligned with
+  // type_params; see FunctionNode's own field of the same name.
+  Vec<Vec<str>> type_param_constraints;
+  bin has_type_param_constraints;
 }
 
 pub fun compound_node_new() CompoundNode {
@@ -476,6 +488,8 @@ pub fun compound_node_new() CompoundNode {
   c.has_type_params = false;
   c.type_param_forced_insts.init(0);
   c.has_type_param_forced_insts = false;
+  c.type_param_constraints.init(0);
+  c.has_type_param_constraints = false;
   ret c;
 }
 
@@ -584,6 +598,10 @@ pub compound ImplNode {
   bin has_type_params;
   Vec<Vec<str>> type_param_forced_insts;
   bin has_type_param_forced_insts;
+  // Each type param's own declared constraint, index-aligned with
+  // type_params; see FunctionNode's own field of the same name.
+  Vec<Vec<str>> type_param_constraints;
+  bin has_type_param_constraints;
   // Bare quirk name (`Iterator`, `To`, ...), even when the `as` clause names
   // a concrete instantiation (`as Iterator<num>`). Absent for a plain impl
   // block (`impl Type { ... }`).
@@ -613,6 +631,8 @@ pub fun impl_node_new() ImplNode {
   i.has_type_params = false;
   i.type_param_forced_insts.init(0);
   i.has_type_param_forced_insts = false;
+  i.type_param_constraints.init(0);
+  i.has_type_param_constraints = false;
   i.quirk_name = "";
   i.has_quirk_name = false;
   i.quirk_concrete_instantiation = "";

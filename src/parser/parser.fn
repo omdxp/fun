@@ -542,15 +542,17 @@ impl ParseState {
   // constraint set (e.g. `<T: num | dec, U: a | b>` produces all four
   // `[T, U]` pairings). Constraint names are captured as plain strings,
   // not interpreted here.
-  pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>>* out_forced_insts) Option<ParseErrorKind> {
+  pub parse_type_params_with_constraints(
+    Vec<str>* out_params,
+    Vec<Vec<str>>* out_forced_insts,
+    Vec<Vec<str>>* out_param_constraints
+  ) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
       ret .None;
     }
     self.token_next(); // consume '<'
 
-    Vec<Vec<str>> param_constraints;
-    param_constraints.init(0);
     bin has_constraints = false;
 
     for true {
@@ -595,7 +597,7 @@ impl ParseState {
           break;
         }
       }
-      param_constraints.push(constraints);
+      out_param_constraints.push(constraints);
 
       if self.next_token_is_operator(",") {
         self.token_next();
@@ -624,7 +626,8 @@ impl ParseState {
       initial.init(0);
       combos.push(initial);
 
-      for pc : param_constraints {
+      Vec<Vec<str>> pc_all = *out_param_constraints;
+      for pc : pc_all {
         Vec<Vec<str>> new_combos;
         new_combos.init(0);
         for existing : combos {
@@ -3385,9 +3388,12 @@ impl Parser {
     type_params.init(0);
     Vec<Vec<str>> type_param_forced_insts;
     type_param_forced_insts.init(0);
+    Vec<Vec<str>> type_param_constraints;
+    type_param_constraints.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
-      &type_param_forced_insts
+      &type_param_forced_insts,
+      &type_param_constraints
     );
     if tperr.is_some() {
       ret tperr;
@@ -3398,6 +3404,8 @@ impl Parser {
         curtp.has_type_params = type_params.len > 0;
         curtp.type_param_forced_insts = type_param_forced_insts;
         curtp.has_type_param_forced_insts = type_param_forced_insts.len > 0;
+        curtp.type_param_constraints = type_param_constraints;
+        curtp.has_type_param_constraints = type_param_constraints.len > 0;
         fn_node_ptr.kind = .Function(curtp);
       }
       _ -> {}
@@ -5448,9 +5456,12 @@ impl Parser {
     type_params.init(0);
     Vec<Vec<str>> type_param_forced_insts;
     type_param_forced_insts.init(0);
+    Vec<Vec<str>> type_param_constraints;
+    type_param_constraints.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
-      &type_param_forced_insts
+      &type_param_forced_insts,
+      &type_param_constraints
     );
     if tperr.is_some() {
       ret tperr;
@@ -5534,6 +5545,8 @@ impl Parser {
     cn.has_type_params = type_params.len > 0;
     cn.type_param_forced_insts = type_param_forced_insts;
     cn.has_type_param_forced_insts = type_param_forced_insts.len > 0;
+    cn.type_param_constraints = type_param_constraints;
+    cn.has_type_param_constraints = type_param_constraints.len > 0;
 
     Node node = node_new(.Compound(cn));
     node.pos = name_tok.unwrap().pos;
@@ -5576,7 +5589,13 @@ impl Parser {
     type_params.init(0);
     Vec<Vec<str>> unused_forced_insts;
     unused_forced_insts.init(0);
-    let tperr = self.state.parse_type_params_with_constraints(&type_params, &unused_forced_insts);
+    Vec<Vec<str>> unused_param_constraints;
+    unused_param_constraints.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(
+      &type_params,
+      &unused_forced_insts,
+      &unused_param_constraints
+    );
     if tperr.is_some() {
       ret tperr;
     }
@@ -5739,7 +5758,13 @@ impl Parser {
     type_params.init(0);
     Vec<Vec<str>> unused_forced_insts;
     unused_forced_insts.init(0);
-    let tperr = self.state.parse_type_params_with_constraints(&type_params, &unused_forced_insts);
+    Vec<Vec<str>> unused_param_constraints;
+    unused_param_constraints.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(
+      &type_params,
+      &unused_forced_insts,
+      &unused_param_constraints
+    );
     if tperr.is_some() {
       ret tperr;
     }
@@ -5924,6 +5949,8 @@ impl Parser {
     type_params.init(0);
     Vec<Vec<str>> type_param_forced_insts;
     type_param_forced_insts.init(0);
+    Vec<Vec<str>> type_param_constraints;
+    type_param_constraints.init(0);
     str type_name = base_type_name;
     DataType* impl_concrete_dt = nil;
     bin has_impl_concrete_dt = false;
@@ -5932,7 +5959,8 @@ impl Parser {
       if self.state.impl_generic_args_are_params() {
         let tperr = self.state.parse_type_params_with_constraints(
           &type_params,
-          &type_param_forced_insts
+          &type_param_forced_insts,
+          &type_param_constraints
         );
         if tperr.is_some() {
           ret tperr;
@@ -5952,7 +5980,8 @@ impl Parser {
     } else {
       let tperr = self.state.parse_type_params_with_constraints(
         &type_params,
-        &type_param_forced_insts
+        &type_param_forced_insts,
+        &type_param_constraints
       );
       if tperr.is_some() {
         ret tperr;
@@ -5960,6 +5989,7 @@ impl Parser {
     }
     bin has_type_params = type_params.len > 0;
     bin has_type_param_forced_insts = type_param_forced_insts.len > 0;
+    bin has_type_param_constraints = type_param_constraints.len > 0;
 
     let peek_after_type = self.state.token_peek_next();
 
@@ -6043,6 +6073,8 @@ impl Parser {
     impln.has_type_params = has_type_params;
     impln.type_param_forced_insts = type_param_forced_insts;
     impln.has_type_param_forced_insts = has_type_param_forced_insts;
+    impln.type_param_constraints = type_param_constraints;
+    impln.has_type_param_constraints = has_type_param_constraints;
     impln.quirk_name = quirk_name;
     impln.has_quirk_name = has_quirk_name;
     impln.quirk_concrete_instantiation = quirk_concrete_instantiation;
@@ -6136,9 +6168,12 @@ impl Parser {
     method_type_params.init(0);
     Vec<Vec<str>> method_type_param_forced_insts;
     method_type_param_forced_insts.init(0);
+    Vec<Vec<str>> method_type_param_constraints;
+    method_type_param_constraints.init(0);
     let mtperr = self.state.parse_type_params_with_constraints(
       &method_type_params,
-      &method_type_param_forced_insts
+      &method_type_param_forced_insts,
+      &method_type_param_constraints
     );
     if mtperr.is_some() {
       ret mtperr;
@@ -6149,6 +6184,8 @@ impl Parser {
         curmtp.has_type_params = method_type_params.len > 0;
         curmtp.type_param_forced_insts = method_type_param_forced_insts;
         curmtp.has_type_param_forced_insts = method_type_param_forced_insts.len > 0;
+        curmtp.type_param_constraints = method_type_param_constraints;
+        curmtp.has_type_param_constraints = method_type_param_constraints.len > 0;
         fn_node_ptr.kind = .Function(curmtp);
       }
       _ -> {}

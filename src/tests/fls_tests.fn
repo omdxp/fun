@@ -5363,3 +5363,42 @@ test "a client that does not understand a skeleton is sent none" {
   assert !contains(out, `"insertTextFormat"`), "expected no snippet";
   assert !contains(out, `"label":"iferr"`), "expected no trigger, which is only its expansion";
 }
+
+test "hover resolves a field name inside a bare '.{...}' compound-literal shorthand" {
+  // `compound_literal_field_context` already resolved a typed literal
+  // (`Node<num>{value = 2}`) and a named one (`Node{value = 2}`), but
+  // fell through for the bare `.{...}` shorthand, whose own type comes
+  // from the surrounding declaration rather than its own tokens.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///literalshorthand.fn";
+  doc.path = "literalshorthand.fn";
+  doc.text = `compound Node<T> {
+  `  T value;
+  `  Node<T>* next;
+  `}
+  `fun main() {
+  `  Node<num> n1 = .{value = 2, next = nil};
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 20);
+  assert contains(hovered, "num value"), "expected the literal's own 'value' field to resolve, generic arg substituted";
+}
+
+test "hover on a generic compound shows each type param's own constraint" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///constrainedgeneric.fn";
+  doc.path = "constrainedgeneric.fn";
+  doc.text = `compound Node<T: dec | num> {
+  `  T value;
+  `  Node<T>* next;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 10);
+  assert contains(hovered, "Node<T: dec | num>"), "expected the constraint to render alongside the type param, not just 'T'";
+}
