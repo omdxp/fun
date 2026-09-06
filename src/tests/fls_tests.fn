@@ -5386,3 +5386,19 @@ test "hover resolves a field name inside a bare '.{...}' compound-literal shorth
   str hovered = hover(&reads, doc, 5, 20);
   assert contains(hovered, "num value"), "expected the literal's own 'value' field to resolve, generic arg substituted";
 }
+
+test "hover on a generic compound shows each type param's own constraint" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///constrainedgeneric.fn";
+  doc.path = "constrainedgeneric.fn";
+  doc.text = `compound Node<T: dec | num> {
+  `  T value;
+  `  Node<T>* next;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 10);
+  assert contains(hovered, "Node<T: dec | num>"), "expected the constraint to render alongside the type param, not just 'T'";
+}

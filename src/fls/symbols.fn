@@ -215,7 +215,17 @@ pub fun render_function(FunctionNode f) str {
 // (function, compound, enum, quirk), so a compound/enum/quirk's own
 // hover shows its type params the same way a function's already does,
 // not just "compound Box" with no `<T>` at all.
-fun _append_type_params(StringBuilder* b, bin has_type_params, Vec<str>* type_params) {
+// `type_param_constraints`, when not nil, is index-aligned with
+// `type_params`: each entry's own declared constraint types
+// (`<T: dec | num>` -> `["dec", "num"]` at T's own index), rendered as
+// `T: dec | num` rather than the bare name. nil or an empty entry at a
+// given index renders that param bare, as before.
+fun _append_type_params(
+  StringBuilder* b,
+  bin has_type_params,
+  Vec<str>* type_params,
+  Vec<Vec<str>>* type_param_constraints
+) {
   if !has_type_params || type_params.len == 0 {
     ret;
   }
@@ -226,6 +236,20 @@ fun _append_type_params(StringBuilder* b, bin has_type_params, Vec<str>* type_pa
       b.append(", ");
     }
     b.append(type_params.get(t));
+    if type_param_constraints != nil && t < type_param_constraints.len {
+      let constraint = type_param_constraints.get(t);
+      if constraint.len > 0 {
+        b.append(": ");
+        num ci = 0;
+        for ci < constraint.len {
+          if ci > 0 {
+            b.append(" | ");
+          }
+          b.append(constraint.get(ci));
+          ci = ci + 1;
+        }
+      }
+    }
     t = t + 1;
   }
   b.append(">");
@@ -240,7 +264,7 @@ pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
     b.append("fun ");
   }
   b.append(name);
-  _append_type_params(&b, f.has_type_params, &f.type_params);
+  _append_type_params(&b, f.has_type_params, &f.type_params, &f.type_param_constraints);
   b.append("(");
   num i = 0;
   for i < f.args.len {
@@ -561,7 +585,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("compound ");
           b.append(c.name);
-          _append_type_params(&b, c.has_type_params, &c.type_params);
+          _append_type_params(&b, c.has_type_params, &c.type_params, &c.type_param_constraints);
           ret .Some(_declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -570,7 +594,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("enum ");
           b.append(e.name);
-          _append_type_params(&b, e.has_type_params, &e.type_params);
+          _append_type_params(&b, e.has_type_params, &e.type_params, nil);
           ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -579,7 +603,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("quirk ");
           b.append(q.name);
-          _append_type_params(&b, q.has_type_params, &q.type_params);
+          _append_type_params(&b, q.has_type_params, &q.type_params, nil);
           ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -4749,7 +4773,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder cb = string_builder_init(32);
         cb.append("compound ");
         cb.append(c.name);
-        _append_type_params(&cb, c.has_type_params, &c.type_params);
+        _append_type_params(&cb, c.has_type_params, &c.type_params, &c.type_param_constraints);
         out.push(_declaration_vis(c.name, .Compound, cb.build(), n.pos, n.flags.is_public));
         num f = 0;
         for f < c.fields.len {
@@ -4774,7 +4798,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder eb = string_builder_init(32);
         eb.append("enum ");
         eb.append(e.name);
-        _append_type_params(&eb, e.has_type_params, &e.type_params);
+        _append_type_params(&eb, e.has_type_params, &e.type_params, nil);
         out.push(_declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public));
         num v = 0;
         for v < e.variants.len {
@@ -4805,7 +4829,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder qb = string_builder_init(32);
         qb.append("quirk ");
         qb.append(q.name);
-        _append_type_params(&qb, q.has_type_params, &q.type_params);
+        _append_type_params(&qb, q.has_type_params, &q.type_params, nil);
         out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
       }
       .Impl(im) -> {
