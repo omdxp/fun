@@ -5118,21 +5118,31 @@ impl Codegen {
               va_decl_sb.append("    ");
               va_disp_indent_ii = va_disp_indent_ii + 1;
             }
+            StringBuilder va_hoist_var_sb = string_builder_init(24);
+            va_hoist_var_sb.append("__fun_va_");
+            va_hoist_var_sb.append(format_num(va_call_id));
+            va_hoist_var_sb.append("_");
+            va_hoist_var_sb.append(format_num(va_i));
+            str va_hoist_var_name = va_hoist_var_sb.build();
             va_decl_sb.append("char* __fun_disp_");
             va_decl_sb.append(format_num(va_call_id));
             va_decl_sb.append("_");
             va_decl_sb.append(format_num(va_i));
             va_decl_sb.append(" = ");
-            va_decl_sb.append(va_disp_fn.get(va_i));
-            va_decl_sb.append("(");
             if va_disp_by_ref.get(va_i) {
-              va_decl_sb.append("&");
+              va_decl_sb.append(va_disp_fn.get(va_i));
+              va_decl_sb.append("(&");
+              va_decl_sb.append(va_hoist_var_name);
+              va_decl_sb.append(");\n");
+            } else {
+              // A pointer-typed Display value can be nil; print "nil" rather than calling to_string on a null self.
+              va_decl_sb.append(va_hoist_var_name);
+              va_decl_sb.append(" != NULL ? ");
+              va_decl_sb.append(va_disp_fn.get(va_i));
+              va_decl_sb.append("(");
+              va_decl_sb.append(va_hoist_var_name);
+              va_decl_sb.append(") : fmt_str(\"nil\");\n");
             }
-            va_decl_sb.append("__fun_va_");
-            va_decl_sb.append(format_num(va_call_id));
-            va_decl_sb.append("_");
-            va_decl_sb.append(format_num(va_i));
-            va_decl_sb.append(");\n");
           }
           str va_decl_text = va_decl_sb.build();
           let va_hoist_save = self.hoist_insert_pos;
@@ -5239,17 +5249,27 @@ impl Codegen {
             }
             self.state.write("; ");
             if va_is_display.get(va_i) {
+              StringBuilder va_gnu_var_sb = string_builder_init(24);
+              va_gnu_var_sb.append("__fun_va_");
+              va_gnu_var_sb.append(format_num(va_i));
+              str va_gnu_var_name = va_gnu_var_sb.build();
               self.state.write("char* __fun_disp_");
               self.state.write(format_num(va_i));
               self.state.write(" = ");
-              self.state.write(va_disp_fn.get(va_i));
-              self.state.write("(");
               if va_disp_by_ref.get(va_i) {
-                self.state.write("&");
+                self.state.write(va_disp_fn.get(va_i));
+                self.state.write("(&");
+                self.state.write(va_gnu_var_name);
+                self.state.write("); ");
+              } else {
+                // Same nil guard as the hoisted path above.
+                self.state.write(va_gnu_var_name);
+                self.state.write(" != NULL ? ");
+                self.state.write(va_disp_fn.get(va_i));
+                self.state.write("(");
+                self.state.write(va_gnu_var_name);
+                self.state.write(") : fmt_str(\"nil\"); ");
               }
-              self.state.write("__fun_va_");
-              self.state.write(format_num(va_i));
-              self.state.write("); ");
             }
             va_i = va_i + 1;
           }
@@ -5333,13 +5353,21 @@ impl Codegen {
             self.state.write("_");
             self.state.write(format_num(vp_i));
           } elif self.msvc_mode {
-            self.state.write(va_disp_fn.get(vp_i));
-            self.state.write("(");
             if va_disp_by_ref.get(vp_i) {
-              self.state.write("&");
+              self.state.write(va_disp_fn.get(vp_i));
+              self.state.write("(&");
+              self.state.write(gnu_msvc_va_texts.get(vp_i));
+              self.state.write(")");
+            } else {
+              // Same nil guard as the GNU paths.
+              self.state.write("((");
+              self.state.write(gnu_msvc_va_texts.get(vp_i));
+              self.state.write(") != NULL ? ");
+              self.state.write(va_disp_fn.get(vp_i));
+              self.state.write("(");
+              self.state.write(gnu_msvc_va_texts.get(vp_i));
+              self.state.write(") : fmt_str(\"nil\"))");
             }
-            self.state.write(gnu_msvc_va_texts.get(vp_i));
-            self.state.write(")");
           } else {
             self.state.write("__fun_disp_");
             self.state.write(format_num(vp_i));
