@@ -669,17 +669,21 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> conc
 // Whether `field_tok` sits at a compound-literal's own `field = value`
 // position (`Box<AsyncCounter>{v = q}`'s own `v`, `.{ v = q }`'s own
 // `v`, or plain `Box{v = q}`'s own `v`), and if so, the literal's own
-// compound name and explicit generic args - "" and empty when the
-// literal is a bare `.{...}` shorthand (its own type comes from
-// context, not resolvable from the tokens alone). Purely token-based,
-// walking backward from `field_tok` to the nearest unmatched `{` and
-// whatever names it, the same style `_infer_type_primary`'s own
-// (forward-facing) compound-literal handling already uses rather than
-// a real AST-position lookup - `CompoundInitField` carries no position
-// of its own to look up by.
+// compound name and explicit generic args. A bare `.{...}` shorthand
+// carries no type of its own in its tokens, so that case resolves it
+// from the surrounding assignment/declaration instead, the same way a
+// bare `.Variant` shorthand resolves its enum from context. Otherwise
+// purely token-based, walking backward from `field_tok` to the nearest
+// unmatched `{` and whatever names it, the same style
+// `_infer_type_primary`'s own (forward-facing) compound-literal
+// handling already uses rather than a real AST-position lookup -
+// `CompoundInitField` carries no position of its own to look up by.
 pub fun compound_literal_field_context(
   Vec<Token>* tokens,
   Token field_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
   str* out_name,
   Vec<str>* out_args
 ) bin {
@@ -754,6 +758,41 @@ pub fun compound_literal_field_context(
   }
   if before_brace.unwrap().type == .Identifier {
     *out_name = token_word(before_brace.unwrap());
+    ret true;
+  }
+  if token_is_operator(before_brace.unwrap(), ".") {
+    // Bare `.{...}` shorthand: resolve its type the same way a bare
+    // `.Variant` shorthand resolves its enum, from whatever it's being
+    // assigned or compared to.
+    num dot_idx = index_of_token(tokens, before_brace.unwrap());
+    num ci = dot_idx - 1;
+    for ci >= 0 && tokens.get(ci).type == .NewLine {
+      ci = ci - 1;
+    }
+    if ci < 0 {
+      ret false;
+    }
+    Token prev = tokens.get(ci);
+    bin is_assign_like = token_is_operator(prev, "=") || token_is_operator(prev, "==") ||
+      token_is_operator(prev, "!=");
+    if !is_assign_like {
+      ret false;
+    }
+    let operand = token_before(tokens, ci);
+    if operand.is_none() {
+      ret false;
+    }
+    Token last = operand.unwrap();
+    let receiver = chain_ending_receiver(tokens, last, token_is_symbol(last, ')'), program, file, line, 0);
+    if equals(receiver.type_name, "") {
+      ret false;
+    }
+    *out_name = receiver.type_name;
+    num gi = 0;
+    for gi < receiver.generic_args.len {
+      out_args.push(receiver.generic_args.get(gi));
+      gi = gi + 1;
+    }
     ret true;
   }
   ret false;

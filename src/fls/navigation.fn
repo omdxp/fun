@@ -494,7 +494,15 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
   // program happens to declare (or nothing at all).
   str literal_type_name = "";
   Vec<str> literal_args;
-  bin in_literal = compound_literal_field_context(tokens, t, &literal_type_name, &literal_args);
+  bin in_literal = compound_literal_field_context(
+    tokens,
+    t,
+    &program.nodes,
+    doc.path,
+    source_line,
+    &literal_type_name,
+    &literal_args
+  );
   if in_literal {
     let field = lookup_field(&program.nodes, literal_type_name, name, literal_args);
     literal_args.free();
