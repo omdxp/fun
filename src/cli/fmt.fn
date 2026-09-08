@@ -287,6 +287,26 @@ fun _is_closing(str text) bin {
   ret equals(text, ")") || equals(text, "]");
 }
 
+// True when `text` is one of the postfix (left-operanded) unary
+// operators: `x++`/`x--`, or the propagation operators `x?`/`x!`.
+// Mirrors the parser's own `is_left_operanded_unary_operator`.
+fun _is_postfix_unary_op(str text) bin {
+  ret equals(text, "++") || equals(text, "--") || equals(text, "?") || equals(text, "!");
+}
+
+// True when `prev` reads as a complete value a postfix operator could
+// attach to directly: a literal/identifier, or a closing `)`/`]` ending
+// a call, index, or parenthesized group. `++`/`--`/`?`/`!` also have a
+// prefix reading (`++x`, `!x`), told apart the same way the parser
+// tells them apart: whether a value already precedes the operator.
+fun _is_postfix_operand_end(Token prev) bin {
+  if prev.type == .Identifier || prev.type == .Number || prev.type == .String ||
+    prev.type == .Boolean {
+    ret true;
+  }
+  ret _is_closing(token_text(prev));
+}
+
 // True for a token that reads as a type: a builtin type keyword, or a
 // name written in the leading-capital style types are written in.
 fun _is_type_token(Token t) bin {
@@ -662,6 +682,13 @@ fun _needs_space_at(
 
   // An operand written against a prefix operator belongs to it.
   if prev_unary {
+    ret false;
+  }
+  // A postfix operator (`x++`/`x--`/`x?`/`x!`) is written against its
+  // own operand rather than the value that follows it - `!`/`++`/`--`
+  // also have a prefix reading (`!x`, `++x`), told apart the same way
+  // the parser tells them apart: whether a value already precedes them.
+  if _is_postfix_unary_op(c) && _is_postfix_operand_end(prev) {
     ret false;
   }
   if equals(p, "imp") {

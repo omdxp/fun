@@ -11403,6 +11403,26 @@ impl Codegen {
       // resolves `pb`'s chain first, then drops one level of
       // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
+        // `let v = expr?;`/`let v = expr!;`: `v`'s own type is `T`, the
+        // propagated value's own generic arg (`expr`'s `Option<T>`/
+        // `Result<T,E>`), not the whole Option/Result - needed so a
+        // later `fit v { .Variant -> ... }` on `v` can resolve its own
+        // shorthand variants.
+        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+          let prop_r_opt = self.resolve_field_chain(u.operand);
+          if prop_r_opt.is_none() {
+            ret .None;
+          }
+          let prop_r = prop_r_opt.unwrap();
+          if prop_r.dtype.is_none() {
+            ret .None;
+          }
+          let prop_dt = prop_r.dtype.unwrap();
+          if prop_dt.generic_args.len == 0 {
+            ret .None;
+          }
+          ret .Some(*prop_dt.generic_args.get(0));
+        }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
           u.indirection_depth != 1 {
           ret .None;

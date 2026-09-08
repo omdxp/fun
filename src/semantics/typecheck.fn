@@ -593,6 +593,13 @@ fun _method_leaf_name(str declared, str type_name) str {
   for i + 1 < len(declared) {
     if declared[i] == '_' && declared[i + 1] == '_' {
       cut = i + 2;
+      // Skips past the whole separator just matched, rather than just
+      // one char: a leaf name that itself starts with `_` (`_next_inner`)
+      // mangles to three underscores in a row (`Box___next_inner`), and
+      // advancing by 1 would re-match the second/third as its own
+      // separator, cutting one underscore too many off the leaf name.
+      i = i + 2;
+      continue;
     }
     i = i + 1;
   }
@@ -600,6 +607,22 @@ fun _method_leaf_name(str declared, str type_name) str {
     ret declared;
   }
   ret substr(declared, cut, len(declared) - cut);
+}
+
+test "_method_leaf_name keeps a leaf name's own leading underscore" {
+  // Regression: a leaf name starting with `_` (a private method,
+  // `_next_inner`) mangles to three underscores in a row at the
+  // boundary (`Box___next_inner`); the scan used to re-match the
+  // second/third underscore as its own separator, stripping the leaf's
+  // own leading `_` and registering it under the wrong key.
+  assert equals(_method_leaf_name("Box___next_inner", "Box"), "_next_inner"),
+  "expected the leaf's own leading underscore to survive";
+  assert equals(_method_leaf_name("Box__half", "Box"), "half"),
+  "expected an ordinary (non-underscore) leaf name to still strip cleanly";
+  assert equals(_method_leaf_name("Box__Lenable__wrap", "Box"), "wrap"),
+  "expected a quirk-mangled name to still cut at its last separator";
+  assert equals(_method_leaf_name("Box__Lenable___wrap", "Box"), "_wrap"),
+  "expected a quirk-mangled name whose leaf also starts with '_' to keep it too";
 }
 
 // The signature a quirk's method declaration promises.

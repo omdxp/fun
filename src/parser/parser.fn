@@ -1660,6 +1660,55 @@ impl Parser {
     }
   }
 
+  // Rewrites `node = (a . Unary(postfix_op, b))` in place to
+  // `Unary(postfix_op, (a . b))`: a postfix `?`/`!`/`++`/`--` that a naive
+  // left-to-right build attached to just `b` (the RHS of `.`), rather
+  // than to the whole `.`-continuation chain it's meant to close off.
+  // `self.half()?` builds as `self . (half()?)` before this runs (`.`'s
+  // RHS parse, recursing through `parse_expressionable`, doesn't stop at
+  // a trailing postfix unary the way it stops at nothing else); this
+  // pulls the `Unary` back out to wrap the whole `self.half()`, leaving
+  // `(a . b)` = `self . half()` for the ordinary `.`-vs-`()` rotation
+  // below to fix up in turn. Scoped to `op == "."`: for `()`/`[]`, a
+  // `Unary` on the right is a real call argument or index expression
+  // (`foo(x?)`, `arr[x?]`), already correctly shaped, not this bug.
+  // Returns whether a hoist happened, so the caller knows `node` is no
+  // longer an `Expression`.
+  pub parse_node_hoist_postfix_unary_right(Node* node) bin {
+    fit node.kind {
+      .Expression(exp) -> {
+        if !exp.has_left || !exp.has_right || !equals(exp.op, ".") {
+          ret false;
+        }
+        fit exp.right.kind {
+          .Unary(ru) -> {
+            if !ru.is_left_operanded_unary {
+              ret false;
+            }
+            ExprNode new_inner_e = expr_node_new();
+            new_inner_e.left = exp.left;
+            new_inner_e.has_left = true;
+            new_inner_e.right = ru.operand;
+            new_inner_e.has_right = true;
+            new_inner_e.op = exp.op;
+
+            Node* new_inner = malloc(sizeof(Node));
+            *new_inner = node_new(.Expression(new_inner_e));
+            new_inner.pos = node.pos;
+            new_inner.has_pos = true;
+
+            UnaryNode new_u = ru;
+            new_u.operand = new_inner;
+            node.kind = .Unary(new_u);
+            ret true;
+          }
+          _ -> { ret false; }
+        }
+      }
+      _ -> { ret false; }
+    }
+  }
+
   // Recursively reorders `node` and its descendants for correct operator
   // precedence, after the naive left-to-right expression build. Applies two
   // independent fixups. First, when the right child is an `Expression` the
@@ -1674,6 +1723,17 @@ impl Parser {
     fit node.kind {
       .Expression(exp) -> {
         if !exp.has_left || !exp.has_right {
+          ret;
+        }
+
+        // Checked first, before `_is_expression_kind` below (which never
+        // matches a `.Unary` right side, so this shape would otherwise
+        // never trigger any rotation at all).
+        if self.parse_node_hoist_postfix_unary_right(node) {
+          fit node.kind {
+            .Unary(u) -> { self.parse_reorder_expression(u.operand); }
+            _ -> {}
+          }
           ret;
         }
 
@@ -7847,6 +7907,56 @@ test "'await f()?' propagates the awaited result, not 'await' propagating first"
           assert equals(inner.op, "await"), "expected '?' to wrap the whole 'await f()'";
         }
         _ -> { panic("expected the '?' operand to be the 'await' unary"); }
+      }
+    }
+    _ -> { panic("expected the outermost node to be the '?' Unary"); }
+  }
+}
+
+test "'self.half()?' propagates the whole method-call chain, not just 'half()'" {
+  // Regression: the naive left-to-right build first produces `self .
+  // (half()?)` - the RHS-of-'.' parse recurses all the way through its
+  // own trailing postfix continuation, so `?` attaches to `half()`
+  // alone rather than to `self.half()`. `parse_reorder_expression` never
+  // corrected it either: its rotation only re-examines an `Expression`
+  // right side, and a `.Unary` (what `?`/`!`/`++`/`--` build) isn't one,
+  // so the shape passed through unrotated.
+  // `parse_node_hoist_postfix_unary_right` hoists the '?' back out to
+  // wrap the properly-rotated '(self.half)()' chain instead.
+  Vec<str> names;
+  names.init(0);
+  names.push("self");
+  ParseState st = _state_with_declared("self.half()?", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'self.half()?' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert equals(u.op, "?"), "expected the outermost node to be the '?' propagation";
+      assert u.is_left_operanded_unary, "expected '?' to be postfix";
+      fit u.operand.kind {
+        .Expression(call_e) -> {
+          assert equals(call_e.op, "()"), "expected '?' to wrap the whole call, not just parts of it";
+          fit call_e.left.kind {
+            .Expression(dot_e) -> {
+              assert equals(dot_e.op, "."), "expected the call's own left to be 'self.half'";
+              fit dot_e.left.kind {
+                .Identifier(s) -> {
+                  assert equals(s, "self"), "expected 'self' as the receiver";
+                }
+                _ -> { panic("expected 'self' as the '.' left side"); }
+              }
+              fit dot_e.right.kind {
+                .Identifier(m) -> {
+                  assert equals(m, "half"), "expected 'half' as the method name";
+                }
+                _ -> { panic("expected 'half' as the '.' right side"); }
+              }
+            }
+            _ -> { panic("expected the call's own left to be a '.' Expression"); }
+          }
+        }
+        _ -> { panic("expected the '?' operand to be the whole '()' call"); }
       }
     }
     _ -> { panic("expected the outermost node to be the '?' Unary"); }

@@ -424,3 +424,38 @@ test "a wrapped chain followed by an already-multi-line nested call keeps the ca
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "\n  ) {"), "expected the nested call's own closing paren back at the if's own indent, not one level deeper";
 }
+
+test "postfix '++'/'--'/'?'/'!' stay glued to their own operand, not spaced like a binary operator" {
+  // Regression: `_needs_space_at` had no postfix-unary case at all, so
+  // every one of these (already true for `++`/`--`, before `?`/`!`
+  // existed to expose it) formatted with a wrong leading space
+  // (`x ++`), as if postfix were a binary operator.
+  str src = `imp std.c.io;
+  `imp std.option;
+  `imp std.result;
+  `fun half(num x) Option<num> { ret .Some(x); }
+  `fun to_result(num x) Result<num, str> { ret .Ok(x); }
+  `fun main() num {
+  `  num x = 1;
+  `  x++;
+  `  x--;
+  `  num a = half(x)?;
+  `  num b = to_result(x)!;
+  `  _ = a;
+  `  _ = b;
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n  x++;\n"), "expected 'x++' with no space";
+  assert contains(got, "\n  x--;\n"), "expected 'x--' with no space";
+  assert contains(got, "half(x)?;"), "expected 'half(x)?' with no space before '?'";
+  assert contains(got, "to_result(x)!;"), "expected 'to_result(x)!' with no space before '!'";
+}
+
+test "prefix '!' still keeps its own leading space, unaffected by the postfix fix" {
+  str src = `fun test_not(bin a, bin b) bin {
+  `  ret !a && !b;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "ret !a && !b;"), "expected prefix '!' to stay spaced before, glued after, unchanged";
+}

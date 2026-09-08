@@ -1375,3 +1375,28 @@ test "prefix '!' on a bool is unaffected by postfix '?'/'!' handling" {
     "expected prefix logical-NOT on a bool to still typecheck"
   );
 }
+
+test "postfix '!' propagates through a private (leading-underscore) method call on self" {
+  // Regression: `_method_leaf_name` mis-parsed a private method's own
+  // mangled name (`Box___inner`, three underscores where the leaf's own
+  // leading `_` meets the `Type__` separator), registering it under the
+  // wrong lookup key. Silent elsewhere (a call through an unresolved
+  // receiver just types as unknown), it surfaced here because
+  // propagation checks the operand's type by name right away.
+  accepts(
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `compound Box { num v; }
+    `impl Box {
+    `  _inner() Result<num, str> {
+    `    if self.v < 0 { ret .Err("negative"); }
+    `    ret .Ok(self.v);
+    `  }
+    `  outer() Result<num, str> {
+    `    num v = self._inner()!;
+    `    ret .Ok(v);
+    `  }
+    `}
+    `fun main() {}`,
+    "expected '!' to unwrap a private method call through 'self' and typecheck cleanly"
+  );
+}

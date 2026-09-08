@@ -1268,3 +1268,52 @@ test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU st
   assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted";
   assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
 }
+
+test "postfix '?'/'!' propagate through a 'self.method()' call, not just a plain function call" {
+  // Regression, two independent bugs found chasing this exact idiom:
+  // (1) a parser precedence bug where 'self.half()?' built as
+  // 'self.(half()?)' - '?' attaching only to 'half()', not the whole
+  // chain; (2) a private (leading-underscore) method's mangled name
+  // resolving to the wrong lookup key. Both fixed at the root
+  // (parser.fn's reorder pass, typecheck.fn's `_method_leaf_name`); this
+  // proves the real end-to-end idiom compiles and runs correctly.
+  str src = `imp std.c.io;
+  `imp std.option;
+  `imp std.result;
+  `compound Box { num v; }
+  `impl Box {
+  `  half() Option<num> {
+  `    if self.v % 2 == 1 { ret .None; }
+  `    ret .Some(self.v / 2);
+  `  }
+  `  _to_result() Result<num, str> {
+  `    if self.v < 0 { ret .Err("negative"); }
+  `    ret .Ok(self.v);
+  `  }
+  `  describe_option() Option<num> {
+  `    num v = self.half()?;
+  `    ret .Some(v + 100);
+  `  }
+  `  describe_result() Result<num, str> {
+  `    num v = self._to_result()!;
+  `    ret .Ok(v + 100);
+  `  }
+  `}
+  `fun main() num {
+  `  Box even = .{v = 8};
+  `  Box odd = .{v = 7};
+  `  printf(
+  `    "%lld %d %lld\n",
+  `    even.describe_option().unwrap(),
+  `    odd.describe_option().is_none(),
+  `    even.describe_result().unwrap()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_self_method",
+    "postfix '?'/'!' propagate through a 'self.method()' call"
+  );
+  assert contains(out, "104 1 108"), "expected both the '.Some' and '.Ok' paths to unwrap, and the '.None' path to propagate";
+}
