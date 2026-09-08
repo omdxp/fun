@@ -1227,3 +1227,57 @@ test "a name declared twice at top level is rejected, even across different kind
     "expected two ordinarily distinct top-level names not to be flagged"
   );
 }
+
+test "a function passed by name to a function-typed parameter is checked against its declared signature" {
+  rejects(
+    `fun bad_cmp(str a, str b) num { ret 0; }
+    `fun apply(fun(num, num) num cb) num { ret cb(1, 2); }
+    `fun main() { num r = apply(bad_cmp); }`,
+    "expected a mismatched callback's own signature to be rejected"
+  );
+  accepts(
+    `fun good_cmp(num a, num b) num { ret a - b; }
+    `fun apply(fun(num, num) num cb) num { ret cb(1, 2); }
+    `fun main() { num r = apply(good_cmp); }`,
+    "expected a correctly-typed callback to pass"
+  );
+}
+
+test "calling through a function-typed parameter is checked against its own declared signature" {
+  rejects(
+    `fun apply(fun(num, num) num cb) num { ret cb("bad", "call"); }
+    `fun main() {}`,
+    "expected the call through the parameter itself to be checked, not just what's passed to it"
+  );
+  accepts(
+    `fun apply(fun(num, num) num cb) num { ret cb(1, 2); }
+    `fun main() {}`,
+    "expected a correctly-typed call through the parameter to pass"
+  );
+}
+
+test "a generic method's own comparator is checked against T, the receiver's real type substituted in" {
+  // `check()` parses one file with no import resolution, so this
+  // declares its own tiny generic-container shape (the same as
+  // `Vec<T>.sort_by`'s) rather than importing the real `std.vec`.
+  rejects(
+    `compound Box<T> { T v; }
+    `impl Box<T> { apply_cmp(fun(T, T) num cmp) num { ret cmp(self.v, self.v); } }
+    `fun bad_cmp(str a, str b) num { ret 0; }
+    `fun main() {
+    `  Box<num> b = .{v = 1};
+    `  b.apply_cmp(bad_cmp);
+    `}`,
+    "expected a comparator typed for the wrong element type to be rejected"
+  );
+  accepts(
+    `compound Box<T> { T v; }
+    `impl Box<T> { apply_cmp(fun(T, T) num cmp) num { ret cmp(self.v, self.v); } }
+    `fun good_cmp(num a, num b) num { ret a - b; }
+    `fun main() {
+    `  Box<num> b = .{v = 1};
+    `  b.apply_cmp(good_cmp);
+    `}`,
+    "expected a comparator typed for the receiver's real element type to pass"
+  );
+}

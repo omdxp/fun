@@ -1730,6 +1730,38 @@ impl Codegen {
         if !f.has_rtype {
           ret .Some(.InvalidNode);
         }
+        // A function returning a function pointer (`fun name() fun(T)
+        // R`) needs C's own nested declarator, `R (*name(args))(T)` -
+        // the return type's own `(*name(...))(...)` wraps the whole
+        // parameter list rather than sitting in front of it.
+        if f.rtype.has_fn_sig {
+          let rsig = f.rtype.fn_sig;
+          let rrt = self.write_type(*rsig.rtype);
+          if rrt.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          self.state.write(" (*");
+          self.state.write(new_name);
+          self.state.write("(");
+          let perr = self.emit_prototype_params(f);
+          if perr.is_some() {
+            ret perr;
+          }
+          self.state.write("))(");
+          bin rfirst = true;
+          for rp : rsig.params {
+            if !rfirst {
+              self.state.write(", ");
+            }
+            rfirst = false;
+            let rpt = self.write_type(*rp);
+            if rpt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+          }
+          self.state.write(");\n");
+          ret .None;
+        }
         let rt = self.write_type(*f.rtype);
         if rt.is_none() {
           ret .Some(.UnsupportedNode);
@@ -1743,63 +1775,76 @@ impl Codegen {
         self.state.write(" ");
         self.state.write(new_name);
         self.state.write("(");
-        if f.has_args && f.args.len > 0 {
-          bin first = true;
-          for arg : f.args {
-            if !first {
-              self.state.write(", ");
-            }
-            first = false;
-            fit arg.kind {
-              .Variable(v) -> {
-                if v.var_type.has_fn_sig {
-                  let sig = v.var_type.fn_sig;
-                  let prt = self.write_type(*sig.rtype);
-                  if prt.is_none() {
-                    ret .Some(.UnsupportedNode);
-                  }
-                  self.state.write(" (*");
-                  self.state.write(v.name);
-                  self.state.write(")(");
-                  bin pfirst = true;
-                  for p : sig.params {
-                    if !pfirst {
-                      self.state.write(", ");
-                    }
-                    pfirst = false;
-                    let pt = self.write_type(*p);
-                    if pt.is_none() {
-                      ret .Some(.UnsupportedNode);
-                    }
-                  }
-                  self.state.write(")");
-                } else {
-                  // An unsized array parameter's decay star must be added
-                  // here too, or the prototype and the definition
-                  // disagree; see `emit_function_param`.
-                  bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
-                  let wt = self.write_type(*v.var_type);
-                  if wt.is_none() {
-                    ret .Some(.UnsupportedNode);
-                  }
-                  if arr_as_ptr {
-                    self.state.write("*");
-                  }
-                  self.state.write(" ");
-                  self.state.write(v.name);
-                }
-              }
-              _ -> { ret .Some(.InvalidNode); }
-            }
-          }
-        } else {
-          self.state.write("void");
+        let perr2 = self.emit_prototype_params(f);
+        if perr2.is_some() {
+          ret perr2;
         }
         self.state.write(");\n");
         ret .None;
       }
       _ -> { ret .Some(.InvalidNode); }
     }
+  }
+
+  // The `(param1, param2)` portion of a plain function's own prototype,
+  // shared by the ordinary and function-pointer-returning shapes above -
+  // the parameter list itself doesn't change with the return type.
+  // `void` for none, matching C's own convention (an empty `()` means
+  // "unspecified", not "no parameters").
+  emit_prototype_params(FunctionNode f) Option<CodegenErrorKind> {
+    if !f.has_args || f.args.len == 0 {
+      self.state.write("void");
+      ret .None;
+    }
+    bin first = true;
+    for arg : f.args {
+      if !first {
+        self.state.write(", ");
+      }
+      first = false;
+      fit arg.kind {
+        .Variable(v) -> {
+          if v.var_type.has_fn_sig {
+            let sig = v.var_type.fn_sig;
+            let prt = self.write_type(*sig.rtype);
+            if prt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+            self.state.write(" (*");
+            self.state.write(v.name);
+            self.state.write(")(");
+            bin pfirst = true;
+            for p : sig.params {
+              if !pfirst {
+                self.state.write(", ");
+              }
+              pfirst = false;
+              let pt = self.write_type(*p);
+              if pt.is_none() {
+                ret .Some(.UnsupportedNode);
+              }
+            }
+            self.state.write(")");
+          } else {
+            // An unsized array parameter's decay star must be added
+            // here too, or the prototype and the definition disagree;
+            // see `emit_function_param`.
+            bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+            let wt = self.write_type(*v.var_type);
+            if wt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+            if arr_as_ptr {
+              self.state.write("*");
+            }
+            self.state.write(" ");
+            self.state.write(v.name);
+          }
+        }
+        _ -> { ret .Some(.InvalidNode); }
+      }
+    }
+    ret .None;
   }
 
   // Forward-declares an async generic impl method's
@@ -5938,6 +5983,40 @@ impl Codegen {
   // chain `resolve_field_chain` can resolve; anything else is rejected
   // rather than guessed. A receiver whose resolved type is a known quirk
   // dispatches dynamically through its vtable instead.
+  // Calls a function-typed field held on `recv` (`recv.field_name(args)`
+  // where `field_name` names a `fun(T1, T2) R` field, not a method): C
+  // reads a value's own function-pointer field through the same `.`/`->`
+  // a plain field read already uses, then calls it, `(*recv.field_name)`
+  // implicit in the member-access-then-call syntax already written
+  // exactly this way.
+  emit_fn_sig_field_call(ChainResolution recv, str field_name, Node* args_node) Option<CodegenErrorKind> {
+    self.state.write(recv.text);
+    if recv.is_pointer {
+      self.state.write("->");
+    } else {
+      self.state.write(".");
+    }
+    self.state.write(field_name);
+    self.state.write("(");
+    Vec<Node*> args;
+    args.init(0);
+    defer args.free();
+    self.flatten_call_args(args_node, &args);
+    num i = 0;
+    for arg : args {
+      if i > 0 {
+        self.state.write(", ");
+      }
+      i = i + 1;
+      let aerr = self.emit_expr(*arg);
+      if aerr.is_some() {
+        ret aerr;
+      }
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(.InvalidNode);
@@ -5955,6 +6034,20 @@ impl Codegen {
 
     if self.quirk_names.contains(recv_r.type_name) {
       ret self.emit_quirk_dispatch_call(recv_r, method_name, args_node);
+    }
+
+    // `recv.name(...)` reaches a real method by this name first, but a
+    // compound can also declare a plain field holding a callable
+    // function pointer (`fun(T1, T2) R name;`) - called the same way a
+    // method is written, but as a value held in the receiver, not a
+    // dispatch on its type. Checked ahead of method resolution since
+    // nothing else distinguishes the two calling conventions.
+    let field_info = self.lookup_compound_field(recv_r.type_name, method_name);
+    if field_info.is_some() {
+      let finfo = field_info.unwrap();
+      if finfo.dtype.is_some() && finfo.dtype.unwrap().has_fn_sig {
+        ret self.emit_fn_sig_field_call(recv_r, method_name, args_node);
+      }
     }
 
     Vec<Node*> args;
@@ -7144,6 +7237,18 @@ impl Codegen {
         str resolved_name = "";
         bin resolved_ptr = false;
         Option<DataType> resolved_dtype = .None;
+        // A function-typed local (`fun(T1, T2) R name = ...;`) writes
+        // its own name inside the declarator (`R (*name)(T1, T2)`), the
+        // same shape a function-typed field or parameter already does,
+        // so the plain "type, then space, then name" writing below
+        // doesn't apply to it at all.
+        bin fn_sig_local = v.var_type.has_fn_sig;
+        if fn_sig_local {
+          let wnt = self.write_named_type(*v.var_type, v.name);
+          if wnt.is_some() {
+            ret wnt;
+          }
+        }
 
         // An unsized array local (`T[] new_data = malloc(...);`) decays
         // to a pointer, like an unsized array field, unless it's
@@ -7179,7 +7284,7 @@ impl Codegen {
           v.var_type.type_str,
           "str"
         ));
-        if v.is_const && !const_is_ptr_binding {
+        if v.is_const && !const_is_ptr_binding && !fn_sig_local {
           self.state.write("const ");
         }
 
@@ -7188,154 +7293,158 @@ impl Codegen {
         // which would decay to a pointer at initialization.
         // `emit_for_iter`'s raw-array fast path depends on
         // `sizeof(arr)/sizeof(arr[0])` giving the real element count, so
-        // that decay would cut iteration to a single element.
-        bin let_is_bracket_literal = false;
-        str let_lit_elem_c_type = "int64_t";
-        num let_lit_depth = 1;
-        if is_let && v.has_val {
-          fit v.val.kind {
-            .Bracket(bracket_inner) -> {
-              let_is_bracket_literal = true;
-              let_lit_elem_c_type = self.infer_array_literal_elem_c_type(bracket_inner);
-              let alit_info = self.infer_array_literal_elem_type_and_depth(v.val);
-              if alit_info.is_some() {
-                let alit = alit_info.unwrap();
-                let_lit_depth = alit.depth;
-                if self.msvc_mode {
-                  self.record_local_arr_dims(v.name, alit.dims);
-                }
-              } else {
-                let_lit_depth = self.array_literal_nesting_depth(v.val);
-              }
-            }
-            _ -> {}
-          }
-        }
-        if let_is_bracket_literal {
-          self.state.write(let_lit_elem_c_type);
-        } elif is_let {
-          bin let_resolved_via_infer = false;
-          if v.has_val {
-            let let_idt_opt = self.infer_let_expr_type(v.val);
-            if let_idt_opt.is_some() {
-              let let_idt = let_idt_opt.unwrap();
-              let let_wt = self.write_type(let_idt);
-              if let_wt.is_some() {
-                let let_subst = self.resolve_type_subst(let_idt);
-                resolved_name = let_wt.unwrap();
-                resolved_ptr = dtype_is_pointer(let_subst);
-                resolved_dtype = .Some(let_subst);
-                have_resolved = true;
-                let_resolved_via_infer = true;
-              }
-            }
-          }
-          if !let_resolved_via_infer {
-            // MSVC has no `__auto_type` escape hatch, so a local whose
-            // type genuinely can't be inferred still needs a concrete
-            // (if imprecise) C type; every other target can just let
-            // the C compiler do the real inference instead of guessing.
-            if self.msvc_mode {
-              self.state.write("int64_t");
-            } else {
-              self.state.write("__auto_type");
-            }
-          }
-        } else {
-          let wt = self.write_type(*v.var_type);
-          if wt.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
-          let subst_dt = self.resolve_type_subst(*v.var_type);
-          resolved_name = wt.unwrap();
-          resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
-          // The array decay's pointer level is always additional to
-          // whatever `write_type` wrote for `subst_dt`'s pointer depth,
-          // even when `subst_dt` is itself a pointer.
-          if arr_as_ptr {
-            self.state.write("*");
-          }
-          resolved_dtype = .Some(subst_dt);
-          have_resolved = true;
-          // MSVC: record per-dimension sizes for multi-dim arrays with a
-          // bracket-literal initialiser so `emit_for_iter` can emit the
-          // correct pointer-to-array type in the generated C for loop.
-          if self.msvc_mode && v.var_type.is_array && v.var_type.array_depth > 1 && v.has_val {
+        // that decay would cut iteration to a single element. None of
+        // this applies to a function-typed local, whose type and name
+        // are already fully written above.
+        if !fn_sig_local {
+          bin let_is_bracket_literal = false;
+          str let_lit_elem_c_type = "int64_t";
+          num let_lit_depth = 1;
+          if is_let && v.has_val {
             fit v.val.kind {
-              .Bracket(_) -> {
-                let arr_alit = self.infer_array_literal_elem_type_and_depth(v.val);
-                if arr_alit.is_some() {
-                  self.record_local_arr_dims(v.name, arr_alit.unwrap().dims);
+              .Bracket(bracket_inner) -> {
+                let_is_bracket_literal = true;
+                let_lit_elem_c_type = self.infer_array_literal_elem_c_type(bracket_inner);
+                let alit_info = self.infer_array_literal_elem_type_and_depth(v.val);
+                if alit_info.is_some() {
+                  let alit = alit_info.unwrap();
+                  let_lit_depth = alit.depth;
+                  if self.msvc_mode {
+                    self.record_local_arr_dims(v.name, alit.dims);
+                  }
+                } else {
+                  let_lit_depth = self.array_literal_nesting_depth(v.val);
                 }
               }
               _ -> {}
             }
           }
-        }
-        if v.is_const && const_is_ptr_binding {
-          self.state.write(" const");
-        }
-        self.state.write(" ");
-        self.state.write(v.name);
-        // An array declarator (`[24]`, `[]`) lands after the name in C,
-        // unlike every other type modifier above.
-        // `let_is_bracket_literal` needs its own path, since a `let` has
-        // no `v.var_type.array_brackets` to read: a leading `[]` whose
-        // count C infers from the initializer, plus inner dimensions from
-        // `emit_multidim_inner_declarators`. Skipped entirely for
-        // `arr_as_ptr`, already decayed to a `*` above.
-        if let_is_bracket_literal {
-          self.state.write("[]");
-          if let_lit_depth > 1 {
-            self.emit_multidim_inner_declarators(v.val, let_lit_depth - 1);
-          }
-        } elif !is_let && !arr_as_ptr && v.var_type.is_array {
-          if v.var_type.array_brackets.len > 0 {
-            for bnode : v.var_type.array_brackets {
-              self.state.write("[");
-              fit bnode.kind {
-                .Bracket(inner) -> {
-                  let berr = self.emit_expr(*inner);
-                  if berr.is_some() {
-                    ret berr;
-                  }
-                }
-                _ -> {
-                  let berr = self.emit_expr(*bnode);
-                  if berr.is_some() {
-                    ret berr;
-                  }
+          if let_is_bracket_literal {
+            self.state.write(let_lit_elem_c_type);
+          } elif is_let {
+            bin let_resolved_via_infer = false;
+            if v.has_val {
+              let let_idt_opt = self.infer_let_expr_type(v.val);
+              if let_idt_opt.is_some() {
+                let let_idt = let_idt_opt.unwrap();
+                let let_wt = self.write_type(let_idt);
+                if let_wt.is_some() {
+                  let let_subst = self.resolve_type_subst(let_idt);
+                  resolved_name = let_wt.unwrap();
+                  resolved_ptr = dtype_is_pointer(let_subst);
+                  resolved_dtype = .Some(let_subst);
+                  have_resolved = true;
+                  let_resolved_via_infer = true;
                 }
               }
-              self.state.write("]");
             }
-          } elif v.var_type.array_depth > 1 {
-            // A multi-dimensional array with no explicit bracket sizes
-            // (`num[][] matrix = [[1, 2], [3, 4]];`). The leading
-            // dimension stays `[]`, but every other needs an explicit
-            // size (`T[][N]` is legal C, `T[][]` is not), derived from
-            // the initializer's shape. Falls back to `[]` per dimension
-            // when there's no bracket literal to derive sizes from.
-            self.state.write("[]");
-            bin wrote_inner_dims = false;
-            if v.has_val {
+            if !let_resolved_via_infer {
+              // MSVC has no `__auto_type` escape hatch, so a local whose
+              // type genuinely can't be inferred still needs a concrete
+              // (if imprecise) C type; every other target can just let
+              // the C compiler do the real inference instead of guessing.
+              if self.msvc_mode {
+                self.state.write("int64_t");
+              } else {
+                self.state.write("__auto_type");
+              }
+            }
+          } else {
+            let wt = self.write_type(*v.var_type);
+            if wt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+            let subst_dt = self.resolve_type_subst(*v.var_type);
+            resolved_name = wt.unwrap();
+            resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
+            // The array decay's pointer level is always additional to
+            // whatever `write_type` wrote for `subst_dt`'s pointer depth,
+            // even when `subst_dt` is itself a pointer.
+            if arr_as_ptr {
+              self.state.write("*");
+            }
+            resolved_dtype = .Some(subst_dt);
+            have_resolved = true;
+            // MSVC: record per-dimension sizes for multi-dim arrays with a
+            // bracket-literal initialiser so `emit_for_iter` can emit the
+            // correct pointer-to-array type in the generated C for loop.
+            if self.msvc_mode && v.var_type.is_array && v.var_type.array_depth > 1 && v.has_val {
               fit v.val.kind {
                 .Bracket(_) -> {
-                  self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
-                  wrote_inner_dims = true;
+                  let arr_alit = self.infer_array_literal_elem_type_and_depth(v.val);
+                  if arr_alit.is_some() {
+                    self.record_local_arr_dims(v.name, arr_alit.unwrap().dims);
+                  }
                 }
                 _ -> {}
               }
             }
-            if !wrote_inner_dims {
-              num mdim_d = 1;
-              for mdim_d < v.var_type.array_depth {
-                self.state.write("[]");
-                mdim_d = mdim_d + 1;
-              }
-            }
-          } else {
+          }
+          if v.is_const && const_is_ptr_binding {
+            self.state.write(" const");
+          }
+          self.state.write(" ");
+          self.state.write(v.name);
+          // An array declarator (`[24]`, `[]`) lands after the name in C,
+          // unlike every other type modifier above.
+          // `let_is_bracket_literal` needs its own path, since a `let` has
+          // no `v.var_type.array_brackets` to read: a leading `[]` whose
+          // count C infers from the initializer, plus inner dimensions from
+          // `emit_multidim_inner_declarators`. Skipped entirely for
+          // `arr_as_ptr`, already decayed to a `*` above.
+          if let_is_bracket_literal {
             self.state.write("[]");
+            if let_lit_depth > 1 {
+              self.emit_multidim_inner_declarators(v.val, let_lit_depth - 1);
+            }
+          } elif !is_let && !arr_as_ptr && v.var_type.is_array {
+            if v.var_type.array_brackets.len > 0 {
+              for bnode : v.var_type.array_brackets {
+                self.state.write("[");
+                fit bnode.kind {
+                  .Bracket(inner) -> {
+                    let berr = self.emit_expr(*inner);
+                    if berr.is_some() {
+                      ret berr;
+                    }
+                  }
+                  _ -> {
+                    let berr = self.emit_expr(*bnode);
+                    if berr.is_some() {
+                      ret berr;
+                    }
+                  }
+                }
+                self.state.write("]");
+              }
+            } elif v.var_type.array_depth > 1 {
+              // A multi-dimensional array with no explicit bracket sizes
+              // (`num[][] matrix = [[1, 2], [3, 4]];`). The leading
+              // dimension stays `[]`, but every other needs an explicit
+              // size (`T[][N]` is legal C, `T[][]` is not), derived from
+              // the initializer's shape. Falls back to `[]` per dimension
+              // when there's no bracket literal to derive sizes from.
+              self.state.write("[]");
+              bin wrote_inner_dims = false;
+              if v.has_val {
+                fit v.val.kind {
+                  .Bracket(_) -> {
+                    self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
+                    wrote_inner_dims = true;
+                  }
+                  _ -> {}
+                }
+              }
+              if !wrote_inner_dims {
+                num mdim_d = 1;
+                for mdim_d < v.var_type.array_depth {
+                  self.state.write("[]");
+                  mdim_d = mdim_d + 1;
+                }
+              }
+            } else {
+              self.state.write("[]");
+            }
           }
         }
         if v.has_val {
@@ -9548,10 +9657,18 @@ impl Codegen {
         // suspended for the swap, so a nested hoisted emission splices
         // into the real buffer.
         bin is_main = equals(emit_name, "main");
+        // A function returning a function pointer (`fun name() fun(T)
+        // R`) writes a nested C declarator, `R (*name(args))(T)`, built
+        // separately below from `f.rtype.fn_sig` - this initial write is
+        // only for `current_fn_rtype_name`/`_dt`, the body's own
+        // bookkeeping of what the function *really* returns (the whole
+        // `fun(T) R` value, not `R` alone), so it's suppressed the same
+        // way `main`'s own forced `int` suppresses its real Fun rtype.
+        bin suppress_direct_rtype_write = is_main || f.rtype.has_fn_sig;
         CodegenState rtype_scratch = codegen_state_new();
         CodegenState* saved_rtype_state = self.state;
         let saved_rtype_hoist_pos = self.hoist_insert_pos;
-        if is_main {
+        if suppress_direct_rtype_write {
           self.state = &rtype_scratch;
           self.hoist_insert_pos = .None;
         }
@@ -9564,7 +9681,7 @@ impl Codegen {
         if dtype_is_array_as_pointer(*f.rtype) {
           self.state.write("*");
         }
-        if is_main {
+        if suppress_direct_rtype_write {
           self.state = saved_rtype_state;
           self.hoist_insert_pos = saved_rtype_hoist_pos;
         }
@@ -9596,7 +9713,15 @@ impl Codegen {
         if is_main {
           self.state.write("int");
         }
-        self.state.write(" ");
+        if f.rtype.has_fn_sig {
+          let inner_rt = self.write_type(*f.rtype.fn_sig.rtype);
+          if inner_rt.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          self.state.write(" (*");
+        } else {
+          self.state.write(" ");
+        }
         self.state.write(emit_name);
         self.state.write("(");
         if is_main && (!f.has_args || f.args.len == 0) {
@@ -9631,6 +9756,23 @@ impl Codegen {
             self.state.write(", ");
           }
           self.state.write("const char* __fun_vtags, ...");
+        }
+        // A function returning a function pointer closes the outer
+        // `name(args)` with the inner `(P1, P2)` its returned pointer
+        // itself takes, completing `R (*name(args))(P1, P2)`.
+        if f.rtype.has_fn_sig {
+          self.state.write("))(");
+          bin rpfirst = true;
+          for rp : f.rtype.fn_sig.params {
+            if !rpfirst {
+              self.state.write(", ");
+            }
+            rpfirst = false;
+            let rpt = self.write_type(*rp);
+            if rpt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+          }
         }
         // A bodyless function emits as a bare prototype, relying on the
         // library definition being linked in separately. An empty `{ }`
@@ -10165,6 +10307,18 @@ impl Codegen {
         self.state.write(" {\n");
         for f : c.fields {
           self.state.write("  ");
+          if f.dtype.has_fn_sig {
+            let wnt = self.write_named_type(*f.dtype, f.name);
+            if wnt.is_some() {
+              ret wnt;
+            }
+            self.state.write(";\n");
+            field_names.push(f.name);
+            field_type_names.push(f.dtype.type_str);
+            field_is_pointer.push(false);
+            field_dtypes.push(self.resolve_type_subst(*f.dtype));
+            continue;
+          }
           let wt = self.write_type(*f.dtype);
           if wt.is_none() {
             ret .Some(.UnsupportedNode);

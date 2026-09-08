@@ -518,28 +518,45 @@ fun main() {
 - Works for free functions and methods, including generic, `async`, and
   pointer-receiver methods.
 
-### Function-type parameters
+### Function values
 
-A parameter can accept a function by name and be called through it,
-using `fun(T1, T2, ...) R` as the parameter's type:
+`fun(T1, T2, ...) R` names the type of a function taking `T1, T2, ...`
+and returning `R` (omit `R` for a `void` function). A function value is
+written as a bare reference to a named function, and works as a
+parameter, a local variable, a function's own return type, and a
+compound field:
 
 ```fun
 imp std.io;
 
 fun add(num a, num b) num { ret a + b; }
 fun apply(num a, num b, fun(num, num) num cb) num { ret cb(a, b); }
+fun get_op() fun(num, num) num { ret add; }
+
+compound Ops {
+  fun(num, num) num op;
+}
 
 fun main() {
   println_fmt("result={num}", apply(2, 3, add)); // 5
+
+  fun(num, num) num f = get_op();
+  println_fmt("result={num}", f(4, 5)); // 9
+
+  Ops o = .{op = add};
+  println_fmt("result={num}", o.op(6, 7)); // 13
 }
 ```
 
-Calls through the parameter (`cb(a, b)`) are checked against the declared
-signature. Passing a function by name as the argument is not itself
-signature-checked at the call site yet, a real mismatch surfaces as a C
-compiler error. Only supported as a parameter type today (not a return
-type, local, or compound field); used by `Vec<T>.sort_by(cmp)` for custom
-comparators.
+Every call site is checked against the declared signature: arity, every
+parameter type, and the return type must match. This holds whether the
+function value is passed by name as an argument, called through a
+parameter inside the function that received it, or called through a
+compound field, and a generic method's own type parameter (`Vec<T>`'s `T`
+in `sort_by(cmp)`) is substituted with the receiver's real type first. A
+mismatch is a compile error, caught before it can reach the C compiler.
+`Vec<T>.sort_by(cmp)` is the standard library's own use of this, for
+custom comparators.
 
 ### `missing_return`
 

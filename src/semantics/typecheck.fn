@@ -33,6 +33,12 @@ pub compound CheckedType {
   // The arguments a generic instantiation supplied, in the order the
   // type declares its parameters.
   Vec<CheckedType> generic_args;
+  // A function-typed value's own declared signature (`fun(T1, T2) R`),
+  // carried through so a value bound to it (a name referencing a known
+  // top-level function, or another function-typed local) can be checked
+  // against it, rather than degrading to unknown.
+  bin has_fn_sig;
+  FnTypeSig* fn_sig;
 }
 
 pub fun checked_unknown() CheckedType {
@@ -45,6 +51,8 @@ pub fun checked_unknown() CheckedType {
   t.is_panic_literal = false;
   t.name = "";
   t.generic_args.init(0);
+  t.has_fn_sig = false;
+  t.fn_sig = nil;
   ret t;
 }
 
@@ -80,6 +88,8 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
     t.generic_args.push(checked_from_dtype(dt.generic_args.get(i)));
     i = i + 1;
   }
+  t.has_fn_sig = dt.has_fn_sig;
+  t.fn_sig = dt.fn_sig;
   ret t;
 }
 
@@ -279,6 +289,15 @@ pub compound FnSig {
   Vec<str> type_params;
   Vec<Vec<str>> bounds;
   Vec<str> arg_params;
+}
+
+// A method call's own resolved signature, alongside the receiver's own
+// checked type (its generic args among them), needed to substitute a
+// generic method's type parameters into a nested function-typed
+// parameter's own signature.
+pub compound MethodResolution {
+  FnSig sig;
+  CheckedType receiver;
 }
 
 // What a top-level variable offers, and where it was declared.
@@ -1654,6 +1673,19 @@ impl Checker {
   // The signature a call through a receiver resolves to, if the checker
   // can name both the receiver's type and the method.
   resolve_method_call(ExprNode callee, TypeEnv* env) Option<FnSig> {
+    let found = self.resolve_method_call_with_receiver(callee, env);
+    if found.is_none() {
+      ret .None;
+    }
+    ret .Some(found.unwrap().sig);
+  }
+
+  // `resolve_method_call`, also carrying the receiver's own checked type
+  // (its generic args among them) - needed to substitute a generic
+  // method's own type parameters, `Vec<T>.sort_by`'s `T` among them,
+  // into a function-typed parameter's nested signature before it can be
+  // compared against an argument's real one.
+  resolve_method_call_with_receiver(ExprNode callee, TypeEnv* env) Option<MethodResolution> {
     if !callee.has_left || !callee.has_right {
       ret .None;
     }
@@ -1665,7 +1697,14 @@ impl Checker {
     if equals(method, "") {
       ret .None;
     }
-    ret self.receiver_method(receiver, method);
+    let sig = self.receiver_method(receiver, method);
+    if sig.is_none() {
+      ret .None;
+    }
+    MethodResolution found;
+    found.sig = sig.unwrap();
+    found.receiver = receiver;
+    ret .Some(found);
   }
 
   // True when a call through a receiver reaches an async method, or one
@@ -1696,13 +1735,13 @@ impl Checker {
     if !e.has_left {
       ret checked_unknown();
     }
-    Option<FnSig> resolved = .None;
+    Option<MethodResolution> resolved = .None;
     str method = "";
     fit e.left.kind {
       .Expression(callee) -> {
         if equals(callee.op, ".") {
           method = _callee_name(callee.right);
-          resolved = self.resolve_method_call(callee, env);
+          resolved = self.resolve_method_call_with_receiver(callee, env);
         }
       }
       _ -> {}
@@ -1718,13 +1757,25 @@ impl Checker {
       self.check_receiver_has_method(node, e, method, env);
       ret checked_unknown();
     }
-    FnSig sig = resolved.unwrap();
+    MethodResolution found = resolved.unwrap();
+    FnSig sig = found.sig;
     self.check_visibility(method, sig.file, sig.is_public, "method", node);
     if sig.is_async && !awaited {
       self.fail(format("call to async method '{str}' needs await", method), node);
       ret checked_unknown();
     }
-    self.check_arguments(node, method, sig, args, env);
+    // A function-typed parameter naming the enclosing compound's own
+    // type param (`Vec<T>.sort_by`'s `T`), not the method's own -
+    // `sig.type_params` is empty for a non-generic method like this one.
+    Vec<str> receiver_type_params;
+    receiver_type_params.init(0);
+    let compound_info = self.compounds.at(self.canonical_type_name(found.receiver.name));
+    if compound_info.is_some() {
+      for p : compound_info.unwrap().type_params {
+        receiver_type_params.push(p);
+      }
+    }
+    self.check_arguments(node, method, sig, args, env, &receiver_type_params, &found.receiver.generic_args);
     ret sig.rtype;
   }
 
@@ -1913,10 +1964,81 @@ impl Checker {
     }
   }
 
+  // Whether the top-level function `got` (already resolved from `self.fns`)
+  // can stand in for a `fun(T1, T2) R`-typed parameter declared as
+  // `want`: same arity, and every parameter/return type assignable the
+  // same way an ordinary argument is. `want`'s own parameter/return
+  // types are written `DataType`s, converted through `checked_from_dtype`
+  // to compare against `got`'s already-checked ones; `type_params`/
+  // `generic_args` substitute a generic method's own type parameter
+  // (`Vec<T>.sort_by`'s `T`) with the receiver's real one (`Vec<num>`'s
+  // `num`) before either side is compared, since `want` is written
+  // against the unsubstituted template.
+  _fn_sig_matches(FnTypeSig* want, FnSig got, Vec<str>* type_params, Vec<CheckedType>* generic_args) bin {
+    if got.is_variadic || want.params.len != got.args.len {
+      ret false;
+    }
+    num i = 0;
+    for i < want.params.len {
+      let want_param = substitute(checked_from_dtype(want.params.get(i)), type_params, generic_args);
+      if !self.assignable(want_param, got.args.get(i)) {
+        ret false;
+      }
+      i = i + 1;
+    }
+    let want_rtype = substitute(checked_from_dtype(want.rtype), type_params, generic_args);
+    ret self.assignable(want_rtype, got.rtype);
+  }
+
+  // Checks every function-typed parameter's own argument (a bare name,
+  // `list.sort_by(my_cmp)`) against its declared signature, rather than
+  // letting an unresolved identifier degrade to unknown. True (and
+  // reports) on the first mismatch found, so the caller can stop.
+  check_fn_sig_args(
+    Node* node,
+    str name,
+    FnSig sig,
+    Vec<Node*>* args,
+    Vec<str>* type_params,
+    Vec<CheckedType>* generic_args
+  ) bin {
+    num i = 0;
+    for i < args.len && i < sig.args.len {
+      CheckedType want = sig.args.get(i);
+      i = i + 1;
+      if !want.has_fn_sig {
+        continue;
+      }
+      fit args.get(i - 1).kind {
+        .Identifier(fname) -> {
+          let known = self.fns.at(fname);
+          if known.is_some() &&
+            !self._fn_sig_matches(want.fn_sig, known.unwrap(), type_params, generic_args) {
+            self.fail(
+              format("argument {num} of '{str}': '{str}' does not match the expected signature", i, name, fname),
+              args.get(i - 1)
+            );
+            ret true;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
   // Checks the arguments of a call against what the callee declares. A
   // generic callee's parameters stand for whatever the call supplies,
   // so only the shape of such a call is checked.
-  check_arguments(Node* node, str name, FnSig sig, Vec<Node*>* args, TypeEnv* env) {
+  check_arguments(
+    Node* node,
+    str name,
+    FnSig sig,
+    Vec<Node*>* args,
+    TypeEnv* env,
+    Vec<str>* type_params,
+    Vec<CheckedType>* generic_args
+  ) {
     if !sig.is_variadic {
       if args.len > sig.args.len {
         self.fail(format("too many arguments to '{str}'", name), node);
@@ -1927,6 +2049,15 @@ impl Checker {
         ret;
       }
     }
+    // Checked ahead of the generic/plain split below, since a generic
+    // callee's OWN type-param bounds are checked instead of its
+    // ordinary argument types (see check_type_bounds), but a
+    // function-typed parameter's declared signature isn't a type-param
+    // bound at all - `Vec<T>.sort_by(cmp)`'s `cmp` needs this checked
+    // regardless of `sort_by` being generic in `T`.
+    if self.check_fn_sig_args(node, name, sig, args, type_params, generic_args) {
+      ret;
+    }
     if sig.is_generic {
       self.check_type_bounds(node, name, sig, args, env);
       ret;
@@ -1934,6 +2065,10 @@ impl Checker {
     num i = 0;
     for i < args.len && i < sig.args.len {
       CheckedType want = sig.args.get(i);
+      if want.has_fn_sig {
+        i = i + 1;
+        continue;
+      }
       CheckedType got = self.infer(args.get(i), env);
       if !self.assignable(want, got) {
         self.fail(
@@ -2155,11 +2290,46 @@ impl Checker {
     }
     let known = self.fns.at(name);
     if known.is_none() {
-      // A name bound in scope holds a function rather than naming one.
-      if env.lookup(name).is_none() {
+      // A name bound in scope holds a function rather than naming one -
+      // a function-typed parameter, most commonly. Its own declared
+      // signature is checked the same way a real function's would be.
+      let local = env.lookup(name);
+      if local.is_none() {
         self.fail(format("no function named '{str}'", name), node);
+        ret checked_unknown();
       }
-      ret checked_unknown();
+      let callee = local.unwrap();
+      if !callee.has_fn_sig {
+        ret checked_unknown();
+      }
+      let fsig = callee.fn_sig;
+      if args.len != fsig.params.len {
+        self.fail(
+          format("'{str}' expects {num} arguments, got {num}", name, fsig.params.len, args.len),
+          node
+        );
+        ret checked_unknown();
+      }
+      num ci = 0;
+      for ci < fsig.params.len {
+        let want = checked_from_dtype(fsig.params.get(ci));
+        let got = self.infer(args.get(ci), env);
+        if !self.assignable(want, got) {
+          self.fail(
+            format(
+            "argument {num} of '{str}' expects {str}, found {str}",
+            ci + 1,
+            name,
+            type_name(want),
+            type_name(got)
+            ),
+            args.get(ci)
+          );
+          ret checked_unknown();
+        }
+        ci = ci + 1;
+      }
+      ret checked_from_dtype(fsig.rtype);
     }
     FnSig sig = known.unwrap();
     if sig.ambiguous {
@@ -2174,7 +2344,9 @@ impl Checker {
       self.fail(format("call to async function '{str}' needs await", name), node);
       ret checked_unknown();
     }
-    self.check_arguments(node, name, sig, &args, env);
+    Vec<CheckedType> no_generic_args;
+    no_generic_args.init(0);
+    self.check_arguments(node, name, sig, &args, env, &sig.type_params, &no_generic_args);
     ret sig.rtype;
   }
 }

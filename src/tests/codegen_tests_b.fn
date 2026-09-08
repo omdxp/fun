@@ -1136,3 +1136,27 @@ test "reaudit: defer that mutates a returned variable does not corrupt the value
   assert contains(out, "__fun_defer_ret = (x + 1)"), "expected the return value snapshotted first";
   assert contains(out, "return __fun_defer_ret"), "expected the snapshot to be returned";
 }
+
+test "a function value works as a local, a function's own return type, and a compound field, not just a parameter" {
+  str src = `imp std.io;
+  `fun add(num a, num b) num { ret a + b; }
+  `fun get_op() fun(num, num) num { ret add; }
+  `compound Ops { fun(num, num) num op; }
+  `fun main() num {
+  `  fun(num, num) num f = add;
+  `  println_fmt("{}", f(2, 3));
+  `  fun(num, num) num g = get_op();
+  `  println_fmt("{}", g(4, 5));
+  `  Ops o = .{op = add};
+  `  println_fmt("{}", o.op(6, 7));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "fn_value_positions",
+    "a function value works as a local, a return type, and a compound field"
+  );
+  assert contains(out, "5"), "expected the local's own call to add correctly";
+  assert contains(out, "9"), "expected the return-type-position value's own call to add correctly";
+  assert contains(out, "13"), "expected the compound field's own call, not a method dispatch, to add correctly";
+}

@@ -3474,7 +3474,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+            .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
             _ -> {}
           }
         }
@@ -5141,7 +5141,7 @@ impl Parser {
         .Sval(s) -> { kw = s; }
         _ -> {}
       }
-      if keyword_is_datatype(kw) {
+      if keyword_is_datatype(kw) || equals(kw, "fun") {
         ret self._parse_bare_type_variable_declaration(false);
       }
       if equals(kw, "let") {
@@ -5854,7 +5854,7 @@ impl Parser {
           }
           if rt.type == .Keyword {
             fit rt.data {
-              .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+              .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
               _ -> {}
             }
           }
@@ -6266,7 +6266,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+            .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
             _ -> {}
           }
         }
