@@ -295,6 +295,42 @@ pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
   ret b.build();
 }
 
+// `f`'s own type alone, as written for a function-typed value
+// (`fun(T1, T2) R`, param names and `f`'s own name both dropped) -
+// what a reference to `f` as a value, rather than a declaration of
+// it, is typed as. `render_function_named` renders `f`'s own
+// declaration, name included, which is a different thing to show for
+// `let g = f;`'s own inferred type than for `f`'s own hover.
+pub fun render_function_type_only(FunctionNode f) str {
+  StringBuilder b = string_builder_init(32);
+  b.append("fun(");
+  num i = 0;
+  for i < f.args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    fit f.args.get(i).kind {
+      .Variable(v) -> {
+        str type_text = render_type(v.var_type);
+        b.append(type_text);
+        free(type_text);
+      }
+      _ -> {}
+    }
+    i = i + 1;
+  }
+  b.append(")");
+  if f.has_rtype {
+    let rendered = render_type(f.rtype);
+    if !equals(rendered, "") && !equals(rendered, "void") {
+      b.append(" ");
+      b.append(rendered);
+    }
+    free(rendered);
+  }
+  ret b.build();
+}
+
 fun _render_param(Node* arg) str {
   if arg == nil {
     ret "";
@@ -3214,6 +3250,29 @@ fun _infer_type_primary(
         ret "";
       }
       Declaration existing_decl = existing.unwrap();
+      // A function's own `detail` is its whole declaration rendered
+      // (`fun add(num a, num b) num`), ending in its return type, not
+      // its own name - `_full_declared_type` assumes the latter (true
+      // for a variable/field/param's "Type name" shape), so a bare
+      // reference to a function used as a value renders its own type
+      // instead, `fun(num, num) num`.
+      if existing_decl.kind == .Function {
+        num efi = 0;
+        for efi < program.len {
+          Node en = program.get(efi);
+          efi = efi + 1;
+          fit en.kind {
+            .Function(ef) -> {
+              if equals(bare_method_name(ef.name), name) {
+                *out_end_idx = idx;
+                ret render_function_type_only(ef);
+              }
+            }
+            _ -> {}
+          }
+        }
+        ret "";
+      }
       str existing_type = _full_declared_type(existing_decl);
       if !equals(existing_type, "__let_infer__") {
         *out_end_idx = idx;

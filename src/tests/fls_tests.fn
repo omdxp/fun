@@ -5475,3 +5475,25 @@ test "completion never triggers on a '.' typed inside a comment" {
   str out = completion(&reads, doc, 1, 10, false);
   assert equals(out, "[]"), "expected no completion at all for a '.' inside a comment";
 }
+
+test "hover on a 'let'-inferred function value shows the value's own type, not the referenced function's declaration" {
+  // `_full_declared_type` assumed every declaration's rendered detail
+  // ends with the declaration's own name (true for a variable/field/
+  // param's "Type name" shape), but a function's own detail ends
+  // with its return type instead, its name sitting in the middle
+  // ("fun add(num a, num b) num") - stripping the wrong trailing
+  // characters produced "fun add(num a, num b) g" for `let g = add;`.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letfnvalue.fn";
+  doc.path = "letfnvalue.fn";
+  doc.text = `fun add(num a, num b) num { ret a + b; }
+  `fun main() {
+  `  let g = add;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 6);
+  assert contains(hovered, "fun(num, num) num g"), "expected the local's own function-value type, not add's own declaration text";
+}
