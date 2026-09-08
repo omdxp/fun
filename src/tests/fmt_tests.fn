@@ -459,3 +459,29 @@ test "prefix '!' still keeps its own leading space, unaffected by the postfix fi
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "ret !a && !b;"), "expected prefix '!' to stay spaced before, glued after, unchanged";
 }
+
+test "a postfix '?'/'!' followed by another unary-capable operator ('*') stays a binary continuation" {
+  // Regression: `_is_unary_prefix` didn't know a postfix '?'/'!'/'++'/
+  // '--' immediately before '*' is itself a complete value, so
+  // 'half(x)? * 2' formatted as 'half(x)? *2' - '*' misread as a fresh
+  // prefix dereference glued to its own operand, the same misreading
+  // '*' already gets right after a closing ')'/']' or an identifier.
+  // '!' is resolved by looking one token further back, since it shares
+  // its text with prefix logical-NOT ('!*x', not '! *x').
+  str src = `imp std.option;
+  `imp std.result;
+  `fun half(num x) Option<num> { ret .Some(x); }
+  `fun to_result(num x) Result<num, str> { ret .Ok(x); }
+  `fun main() num {
+  `  num a = half(1)? * 2;
+  `  num b = to_result(1)! * 2;
+  `  bin p = !*nil;
+  `  bin q = !!true;
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "half(1)? * 2;"), "expected postfix '?' before '*' to keep binary spacing";
+  assert contains(got, "to_result(1)! * 2;"), "expected postfix '!' before '*' to keep binary spacing";
+  assert contains(got, "!*nil;"), "expected double-prefix '!*' to stay glued, unaffected by the fix";
+  assert contains(got, "!!true;"), "expected double-prefix '!!' to stay glued, unaffected by the fix";
+}

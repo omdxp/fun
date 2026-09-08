@@ -6896,6 +6896,25 @@ impl Codegen {
               let rt = self.lookup_function_rtype(fn_name);
               if rt.is_some() {
                 call_rtype = .Some(*rt.unwrap());
+              } elif inner_e.has_right {
+                // A generic function template isn't in the plain
+                // registry `lookup_function_rtype` reads (same gap
+                // `infer_arg_type_name` already works around); its
+                // substituted return type comes from the same
+                // instantiation a real call site triggers.
+                Vec<Node*> gcall_args;
+                gcall_args.init(0);
+                self.flatten_call_args(inner_e.right, &gcall_args);
+                Vec<DataType*> no_explicit_gargs;
+                no_explicit_gargs.init(0);
+                let ginst = self.maybe_instantiate_generic_function(
+                  fn_name,
+                  gcall_args,
+                  no_explicit_gargs
+                );
+                if ginst.is_some() {
+                  call_rtype = .Some(ginst.unwrap().rtype);
+                }
               }
             }
             .Expression(recv_e) -> {

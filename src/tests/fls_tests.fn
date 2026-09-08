@@ -5561,3 +5561,28 @@ test "hover on a let-bound '?' propagation shows the unwrapped type, and complet
   assert contains(comp, `"label":"y"`), "expected Point's own field 'y' to be offered";
   assert !contains(comp, `"label":"get"`), "expected filtering to Point's own members, not every name in scope";
 }
+
+test "hover on a let-bound '?' propagation resolves a generic compound instantiation, not the bare template" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///propgeneric.fn";
+  doc.path = "propgeneric.fn";
+  doc.text = `imp std.option;
+  `compound Box<T> { T v; }
+  `fun get_box() Option<Box<num>> { ret .None; }
+  `fun main() Option<Box<num>> {
+  `  let b = get_box()?;
+  `  num v = b.v;
+  `  ret .None;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 6);
+  assert contains(hovered, "b"), "expected a hover result for 'b'";
+  assert !contains(hovered, "Option"), "expected the unwrapped instantiation, not the whole Option";
+
+  str comp = completion(&reads, doc, 5, 12, false);
+  assert contains(comp, `"label":"v"`), "expected Box<num>'s own field 'v' to be offered";
+  assert !contains(comp, `"label":"get_box"`), "expected filtering to Box<num>'s own members, not every name in scope";
+}
