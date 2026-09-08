@@ -10739,6 +10739,20 @@ impl Codegen {
         }
         ret .None;
       }
+      .Unary(u) -> {
+        // `&x` takes a pointer to the inner value: add one pointer level so
+        // a generic call like `print_list(&l)` can read `l`'s generic_args
+        // and infer T from them.
+        if equals(u.op, "&") {
+          let inner = self.infer_arg_dtype(u.operand);
+          if inner.is_some() {
+            DataType dt = inner.unwrap();
+            dt.pointer_depth = dt.pointer_depth + 1;
+            ret .Some(dt);
+          }
+        }
+        ret .None;
+      }
       _ -> { ret .None; }
     }
   }
@@ -10753,6 +10767,14 @@ impl Codegen {
   infer_let_expr_type(Node* val) Option<DataType> {
     fit val.kind {
       .Identifier(name) -> {
+        // Prefer the full structural DataType (generic_args intact) so a
+        // later `let copy = l; print_list(&copy)` chain can still infer T.
+        let dt_opt = self.lookup_local_dtype(name);
+        if dt_opt.is_some() {
+          ret .Some(dt_opt.unwrap());
+        }
+        // Fall back to the flat name+pointer for locals registered without
+        // a full DataType (record_local rather than record_local_typed).
         let t = self.lookup_local_type_name(name);
         let p = self.lookup_local_is_pointer(name);
         if t.is_some() && p.is_some() {
