@@ -1366,7 +1366,7 @@ impl Checker {
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
       .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
       .CompoundInit(init) -> { ret self.infer_compound_init(node, init, env); }
-      .Unary(u) -> { ret self.infer_unary(u, env); }
+      .Unary(u) -> { ret self.infer_unary(node, u, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
     }
@@ -1455,9 +1455,16 @@ impl Checker {
     ret t;
   }
 
-  infer_unary(UnaryNode u, TypeEnv* env) CheckedType {
+  infer_unary(Node* node, UnaryNode u, TypeEnv* env) CheckedType {
     if equals(u.op, "await") {
       ret self.check_await(u, env);
+    }
+    // `x?`/`x!`: Option/Result propagation. Checked ahead of the
+    // ordinary operand inference below since a failed propagation
+    // check should report on the whole unary node, not fall through to
+    // treating '!' as logical-NOT.
+    if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+      ret self.infer_propagation(node, u, env);
     }
     CheckedType operand = self.infer(u.operand, env);
     if equals(u.op, "&") {
@@ -1477,6 +1484,48 @@ impl Checker {
       ret checked_of(.Bin);
     }
     ret operand;
+  }
+
+  // `x?` propagates a `.None` from `x: Option<T>`, evaluating to `T`
+  // on `.Some`; `x!` propagates a `.Err(e)` from `x: Result<T,E>` (the
+  // enclosing function's own error type must be exactly `E`, no
+  // conversion), evaluating to `T` on `.Ok`. Real codegen lowering
+  // happens later, in emit_expr's own `.Unary` handling; this only
+  // validates and infers the resulting type.
+  infer_propagation(Node* node, UnaryNode u, TypeEnv* env) CheckedType {
+    CheckedType operand = self.infer(u.operand, env);
+    bin is_option = equals(u.op, "?");
+    str want_name = "Option";
+    if !is_option {
+      want_name = "Result";
+    }
+    if !equals(operand.name, want_name) {
+      self.fail(format("'{str}' used on a non-{str} expression", u.op, want_name), node);
+      ret checked_unknown();
+    }
+    if !equals(self.rtype.name, want_name) {
+      self.fail(
+        format("'{str}' used outside a function returning {str}<...>", u.op, want_name),
+        node
+      );
+      ret checked_unknown();
+    }
+    if !is_option {
+      str operand_e = type_name(operand.generic_args.get(1));
+      str rtype_e = type_name(self.rtype.generic_args.get(1));
+      if !equals(operand_e, rtype_e) {
+        self.fail(
+          format(
+          "'!' propagates {str}, but the enclosing function returns Result<_, {str}>",
+          operand_e,
+          rtype_e
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+    }
+    ret operand.generic_args.get(0);
   }
 
   // The type a binary operator produces, checking a call's arguments

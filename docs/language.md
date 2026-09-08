@@ -280,6 +280,55 @@ fun main() {
 - The same `fit_non_exhaustive` check applies: cover every variant or add
   a `_` catch-all.
 
+### Option/Result Propagation
+
+Sugar over `std.option`/`std.result`, replacing the repeated
+check-then-unwrap shape with a single postfix operator:
+
+```fun
+imp std.option;
+imp std.result;
+
+fun half(num x) Option<num> {
+  if x % 2 == 1 { ret .None; }
+  ret .Some(x / 2);
+}
+
+fun to_result(num x) Result<num, str> {
+  if x < 0 { ret .Err("negative"); }
+  ret .Ok(x);
+}
+
+fun combine(num x) Option<num> {
+  num a = half(x)?;         // .None short-circuits: returns .None here
+  ret .Some(a + 1);
+}
+
+fun combine_result(num x) Result<num, str> {
+  num a = to_result(x)!;    // .Err(e) short-circuits: returns .Err(e) here
+  ret .Ok(a + 1);
+}
+```
+
+- `expr?` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`; `.None`
+  returns `.None` from the enclosing function immediately. The enclosing
+  function must itself return `Option<...>`.
+- `expr!` unwraps a `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(e)`
+  returns `.Err(e)` from the enclosing function immediately. The
+  enclosing function must return `Result<_, E>` with the exact same
+  error type; there is no automatic conversion between error types.
+- Both work anywhere an expression is legal, not just statement-final: a
+  `let` initializer, a call argument, a chained access (`half(x)?.field`),
+  nested inside another expression.
+- `foo()!=x` still lexes as the `!=` comparison operator (a space-free
+  `!` immediately before `=` always folds), so it never means "propagate,
+  then compare"; write `foo()! == x` if propagation was intended.
+- This is pure sugar: the equivalent `if`/`ret` form still works
+  everywhere and is what these operators expand to.
+- `fit expr? { ... }`/`fit expr! { ... }` (a propagation used directly as
+  a `fit` subject) is not supported; bind it with `let` first (`let v =
+  expr?; fit v { ... }`).
+
 ## Compounds & Quirks
 
 Compounds are like C structs, and can have methods via `impl`.

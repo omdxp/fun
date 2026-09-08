@@ -275,6 +275,9 @@ quick orientation.
 - `std.option`/`std.result`: generic `Option<T>` and `Result<T, E>`
   containers (`ok`/`err`/`err_kind`/`err_error` are fixed to `E = Error`;
   a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`).
+  The postfix `expr?`/`expr!` operators unwrap either one and propagate
+  `.None`/`.Err(e)` up automatically; see [Option/Result Propagation](
+  language.md#optionresult-propagation).
 - `std.collections`: collection quirks (`len`/`is_empty`).
 - `std.string`: string helpers.
 - `std.channel`/`std.task`/`std.sync`: the concurrency primitives covered

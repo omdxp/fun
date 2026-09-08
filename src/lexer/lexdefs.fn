@@ -82,7 +82,7 @@ pub fun is_boolean_keyword(str s) bin {
 // (e.g. `(` never combines with a following char into a multi-char op).
 pub fun op_treated_as_one(chr op) bin {
   fit op {
-    '(', '[', ',', '*' -> { ret true; }
+    '(', '[', ',', '*', '?' -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -90,7 +90,7 @@ pub fun op_treated_as_one(chr op) bin {
 // A character that may participate in a multi-character operator.
 pub fun is_single_operator(chr op) bin {
   fit op {
-    '+', '-', '/', '*', '=', '>', '<', '|', '&', '^', '%', '~', '!', '(', '[', ',', '.', ':', '#', '$' -> {
+    '+', '-', '/', '*', '=', '>', '<', '|', '&', '^', '%', '~', '!', '(', '[', ',', '.', ':', '#', '$', '?' -> {
       ret true;
     }
     _ -> { ret false; }
@@ -103,7 +103,7 @@ pub fun op_valid(str op) bin {
   fit op {
     "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=",
     "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(",
-    "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$" -> { ret true; }
+    "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$", "?" -> { ret true; }
     _ -> { ret false; }
   }
 }

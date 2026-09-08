@@ -30,6 +30,30 @@ const str NO_LOCATION = "[]";
 
 // The hover for the position `line`/`character` in `doc`, as the result
 // a client is sent.
+// Whether `t` sits right after a value (a name, a literal, or a closing
+// `)`/`]`), the same left-operand-presence test the parser itself uses
+// to tell a postfix operator (`x!`) from a prefix one (`!x`) at this
+// exact token.
+fun _is_postfix_position(Vec<Token>* tokens, Token t) bin {
+  let prev = token_before(tokens, index_of_token(tokens, t));
+  if prev.is_none() {
+    ret false;
+  }
+  Token p = prev.unwrap();
+  // A number/string/chr/bool literal is never itself an Option/Result
+  // value, so it's left out here - propagation after one could never
+  // typecheck anyway, and this is a best-effort hover heuristic, not a
+  // full re-parse. An identifier (a name or a call's own callee) or a
+  // closing `)`/`]` (a call result or an index) both realistically are.
+  if p.type == .Identifier {
+    ret true;
+  }
+  if token_is_symbol(p, ')') || token_is_symbol(p, ']') {
+    ret true;
+  }
+  ret false;
+}
+
 pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   Analyzed read = cache.of(doc);
   if !read.lexed {
@@ -53,6 +77,25 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         ret NO_HOVER;
       }
       ret _hover_result(doc_text, span_of(t, doc.text));
+    }
+    .Operator -> {
+      str op_word = token_word(t);
+      if equals(op_word, "?") {
+        str q_doc = keyword_doc("?");
+        if !equals(q_doc, "") {
+          ret _hover_result(q_doc, span_of(t, doc.text));
+        }
+      }
+      // `!` is ambiguous with prefix logical-NOT; only the postfix
+      // reading (immediately after a value: a name, a literal, or a
+      // closing `)`/`]`) is propagation.
+      if equals(op_word, "!") && _is_postfix_position(&tokens, t) {
+        str bang_doc = keyword_doc("!");
+        if !equals(bang_doc, "") {
+          ret _hover_result(bang_doc, span_of(t, doc.text));
+        }
+      }
+      ret NO_HOVER;
     }
     .Number -> {
       fit t.data {
@@ -1264,6 +1307,23 @@ pub fun keyword_doc(str word) str {
       `sizeof(Type)`,
       `The size of a type in bytes, resolved at compile time. Stands for
       `num wherever it is written.`
+    );
+  }
+  if equals(word, "?") {
+    ret _doc(
+      `expr?`,
+      `Option propagation. If expr (an Option<T>) is .None, returns
+      `.None from the enclosing function immediately; otherwise
+      `evaluates to the wrapped value.`
+    );
+  }
+  if equals(word, "!") {
+    ret _doc(
+      `expr!`,
+      `Result propagation. If expr (a Result<T, E>) is .Err(e), returns
+      `.Err(e) from the enclosing function immediately (the enclosing
+      `function's own error type must be exactly E); otherwise
+      `evaluates to the wrapped value.`
     );
   }
   if equals(word, "nil") {

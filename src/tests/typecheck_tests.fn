@@ -1281,3 +1281,97 @@ test "a generic method's own comparator is checked against T, the receiver's rea
     "expected a comparator typed for the receiver's real element type to pass"
   );
 }
+
+// `check()` parses one file with no import resolution, so these declare
+// their own `Option<T>`/`Result<T,E>` shapes (same field order as
+// `std.option`/`std.result`) rather than importing the real ones.
+test "postfix '?' unwraps an Option to its wrapped value, propagating '.None' up" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() Option<num> {
+    `  num v = half(4)?;
+    `  ret .Some(v);
+    `}`,
+    "expected '?' to unwrap Option<num> to num and typecheck cleanly"
+  );
+}
+
+test "postfix '!' unwraps a Result to its wrapped value, propagating '.Err' up" {
+  accepts(
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `fun half(num x) Result<num, str> {
+    `  if x < 0 { ret .Err("negative"); }
+    `  ret .Ok(x);
+    `}
+    `fun main() Result<num, str> {
+    `  num v = half(4)!;
+    `  ret .Ok(v);
+    `}`,
+    "expected '!' to unwrap Result<num, str> to num and typecheck cleanly"
+  );
+}
+
+test "postfix '?' on a non-Option expression is rejected" {
+  rejects(
+    `fun main() num {
+    `  num v = 4?;
+    `  ret v;
+    `}`,
+    "expected '?' on a plain num to be rejected"
+  );
+}
+
+test "postfix '!' on a non-Result expression is rejected" {
+  rejects(
+    `fun main() num {
+    `  num v = 4!;
+    `  ret v;
+    `}`,
+    "expected '!' on a plain num to be rejected"
+  );
+}
+
+test "postfix '?' outside a function returning Option is rejected" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() num {
+    `  num v = half(4)?;
+    `  ret v;
+    `}`,
+    "expected '?' inside a function not returning Option<...> to be rejected"
+  );
+}
+
+test "postfix '!' with a mismatched error type is rejected" {
+  rejects(
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `fun half(num x) Result<num, str> {
+    `  if x < 0 { ret .Err("negative"); }
+    `  ret .Ok(x);
+    `}
+    `fun main() Result<num, num> {
+    `  num v = half(4)!;
+    `  ret .Ok(v);
+    `}`,
+    "expected '!' propagating Result<_, str> inside a function returning Result<_, num> to be rejected"
+  );
+}
+
+test "prefix '!' on a bool is unaffected by postfix '?'/'!' handling" {
+  accepts(
+    `fun main() {
+    `  bin b = true;
+    `  bin out = !b;
+    `  _ = out;
+    `}`,
+    "expected prefix logical-NOT on a bool to still typecheck"
+  );
+}

@@ -472,6 +472,9 @@ pub compound Codegen {
   // Incremented for each variadic call that uses the hoist path so each
   // call's temporaries get a unique prefix in the surrounding scope.
   num va_call_counter;
+  // Incremented for each `?`/`!` propagation, so each one's own hoisted
+  // temp gets a unique name in the surrounding scope.
+  num try_call_counter;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
   bin fuzz_mode;
@@ -571,6 +574,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
   g.va_call_counter = 0;
+  g.try_call_counter = 0;
   g.hoist_scratch_depth = 0;
   // Matches `g.state`, so `self.state == self.root_state` is already
   // true for the very first function, not just after the first nested
@@ -4253,6 +4257,192 @@ impl Codegen {
     ret self.emit_expr(cond);
   }
 
+  // Lowers `x?`/`x!` (Option/Result propagation) into real C control
+  // flow. `x?` (`x: Option<T>`) evaluates to the wrapped value on
+  // `.Some`, or returns `.None` from the enclosing function immediately
+  // on `.None`; `x!` (`x: Result<T,E>`) is the same shape over
+  // `.Ok`/`.Err(e)`. Reuses this codegen's own established GNU
+  // statement-expression / MSVC-hoist split (see the vararg/format
+  // machinery this mirrors) rather than inventing new hoisting
+  // infrastructure, and reuses `emit_enum_variant_construction`/the
+  // tag-only construction shape already used for a real `ret .Err(x);`/
+  // `ret .None;` to build the early-return value, rather than
+  // hand-writing new compound-literal text.
+  emit_propagation(UnaryNode u) Option<CodegenErrorKind> {
+    bin is_option = equals(u.op, "?");
+    str none_or_err = "Err";
+    str some_or_ok = "Ok";
+    if is_option {
+      none_or_err = "None";
+      some_or_ok = "Some";
+    }
+
+    // `resolve_field_chain`, not `infer_arg_type_name`: the latter
+    // returns a call's raw, unsubstituted declared return type name
+    // (`"Option"`, no generic args baked in) since it exists for
+    // vararg runtime tagging, where that's enough. This needs the
+    // fully resolved, mangled instantiation (`"Option__num"`) to match
+    // the tag constants and struct type this operand's value actually
+    // has, the same resolution `resolve_type_subst`/`resolve_type_name`
+    // already give a chain's own ending type elsewhere in this file.
+    let operand_chain = self.resolve_field_chain(u.operand);
+    if operand_chain.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    str operand_enum_name = operand_chain.unwrap().type_name;
+
+    self.try_call_counter = self.try_call_counter + 1;
+    num try_id = self.try_call_counter;
+    StringBuilder try_name_sb = string_builder_init(24);
+    try_name_sb.append("__fun_try_");
+    try_name_sb.append(format_num(try_id));
+    str try_name = try_name_sb.build();
+
+    // Render the operand's own C text once (never twice: it may have
+    // side effects), into a scratch buffer so it can be spliced into
+    // either the inline GNU form or a hoisted declaration.
+    CodegenState try_scratch = codegen_state_new();
+    CodegenState* try_saved_state = self.state;
+    let try_saved_hoist_pos = self.hoist_insert_pos;
+    let try_saved_stmt_pos = self.current_stmt_start_pos;
+    if self.hoist_scratch_depth == 0 {
+      self.root_state = self.state;
+      self.root_hoist_pos = self.hoist_insert_pos;
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+    }
+    self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+    self.state = &try_scratch;
+    self.hoist_insert_pos = .None;
+    self.current_stmt_start_pos = .None;
+    let operand_err = self.emit_expr(*u.operand);
+    self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+    self.state = try_saved_state;
+    if self.hoist_scratch_depth == 0 {
+      self.hoist_insert_pos = self.root_hoist_pos;
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+    } else {
+      self.hoist_insert_pos = try_saved_hoist_pos;
+      self.current_stmt_start_pos = try_saved_stmt_pos;
+    }
+    if operand_err.is_some() {
+      ret operand_err;
+    }
+    str operand_text = try_scratch.out.build();
+
+    // The early-return value's own text: `((Option){ .tag =
+    // Option_None })` (no payload), or `((Result){ .tag = Result_Err,
+    // .payload.Err = { ._0 = (<try_name>.payload.Err._0) } })` - built
+    // through the same emission this codegen already uses for a real
+    // `ret .None;`/`ret .Err(x);`, so a generic instantiation's mangled
+    // enum name is handled automatically.
+    CodegenState early_ret_scratch = codegen_state_new();
+    CodegenState* early_ret_saved_state = self.state;
+    self.state = &early_ret_scratch;
+    str early_ret_text = "";
+    if is_option {
+      self.state.write("((");
+      self.state.write(self.current_fn_rtype_name);
+      self.state.write("){ .tag = ");
+      self.state.write(self.current_fn_rtype_name);
+      self.state.write("_None })");
+      early_ret_text = early_ret_scratch.out.build();
+      self.state = early_ret_saved_state;
+    } else {
+      StringBuilder err_payload_sb = string_builder_init(32);
+      err_payload_sb.append(try_name);
+      err_payload_sb.append(".payload.Err._0");
+      Node* err_payload_node = malloc(sizeof(Node));
+      *err_payload_node = node_new(.Identifier(err_payload_sb.build()));
+      let ctor_err = self.emit_enum_variant_construction(
+        self.current_fn_rtype_name,
+        "Err",
+        err_payload_node
+      );
+      early_ret_text = early_ret_scratch.out.build();
+      self.state = early_ret_saved_state;
+      if ctor_err.is_some() {
+        ret ctor_err;
+      }
+    }
+
+    bin use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+    if !self.msvc_mode {
+      // GNU statement expression: evaluate once, branch, continue with
+      // the unwrapped payload.
+      self.state.write("({ __auto_type ");
+      self.state.write(try_name);
+      self.state.write(" = (");
+      self.state.write(operand_text);
+      self.state.write("); if (");
+      self.state.write(try_name);
+      self.state.write(".tag == ");
+      self.state.write(operand_enum_name);
+      self.state.write("_");
+      self.state.write(none_or_err);
+      self.state.write(") { return ");
+      self.state.write(early_ret_text);
+      self.state.write("; } ");
+      self.state.write(try_name);
+      self.state.write(".payload.");
+      self.state.write(some_or_ok);
+      self.state.write("._0; })");
+      ret .None;
+    }
+    if !use_hoist {
+      // MSVC with no known statement start (e.g. nested inside another
+      // hoisted construct's own scratch evaluation): there is no C
+      // expression form of "conditionally return" without GNU
+      // statement expressions, and no statement to hoist before -
+      // reported as a real codegen error rather than emitting silently
+      // wrong C.
+      ret .Some(.UnsupportedNode);
+    }
+    StringBuilder try_decl_sb = string_builder_init(64);
+    num try_indent_ii = 0;
+    for try_indent_ii < self.state.indent_level {
+      try_decl_sb.append("    ");
+      try_indent_ii = try_indent_ii + 1;
+    }
+    try_decl_sb.append(operand_enum_name);
+    try_decl_sb.append(" ");
+    try_decl_sb.append(try_name);
+    try_decl_sb.append(" = ");
+    try_decl_sb.append(operand_text);
+    try_decl_sb.append(";\n");
+    num try_if_indent_ii = 0;
+    for try_if_indent_ii < self.state.indent_level {
+      try_decl_sb.append("    ");
+      try_if_indent_ii = try_if_indent_ii + 1;
+    }
+    try_decl_sb.append("if (");
+    try_decl_sb.append(try_name);
+    try_decl_sb.append(".tag == ");
+    try_decl_sb.append(operand_enum_name);
+    try_decl_sb.append("_");
+    try_decl_sb.append(none_or_err);
+    try_decl_sb.append(") { return ");
+    try_decl_sb.append(early_ret_text);
+    try_decl_sb.append("; }\n");
+    str try_decl_text = try_decl_sb.build();
+    let try_hoist_save = self.hoist_insert_pos;
+    let try_splice_pos = self.current_stmt_start_pos;
+    self.hoist_insert_pos = try_splice_pos;
+    self.emit_hoisted(try_decl_text);
+    if try_splice_pos.is_some() {
+      try_hoist_save = adjust_pos_after_splice(
+        try_hoist_save,
+        try_splice_pos.unwrap(),
+        len(try_decl_text)
+      );
+    }
+    self.hoist_insert_pos = try_hoist_save;
+    self.state.write(try_name);
+    self.state.write(".payload.");
+    self.state.write(some_or_ok);
+    self.state.write("._0");
+    ret .None;
+  }
+
   pub emit_expr(Node node) Option<CodegenErrorKind> {
     self.mark_node(node);
     fit node.kind {
@@ -4460,6 +4650,9 @@ impl Codegen {
       .Unary(u) -> {
         if equals(u.op, "await") {
           ret self.emit_await(u.operand);
+        }
+        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+          ret self.emit_propagation(u);
         }
         self.state.write("(");
         if u.is_left_operanded_unary {

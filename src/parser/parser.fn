@@ -7752,6 +7752,107 @@ test "parse_expressionable_root parses a postfix unary followed by a binary cont
   }
 }
 
+test "parse_expressionable_root parses postfix '?' and '!' propagation" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("a?", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a?' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert equals(u.op, "?"), "expected op '?'";
+      assert u.is_left_operanded_unary, "expected a postfix (left-operanded) unary";
+      fit u.operand.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected operand 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+
+  ParseState st2 = _state_with_declared("b!", names);
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_expressionable_root().is_none(), "expected 'b!' to parse";
+  let top2 = st2.nodes.get(st2.nodes.len - 1);
+  fit top2.kind {
+    .Unary(u2) -> {
+      assert equals(u2.op, "!"), "expected op '!'";
+      assert u2.is_left_operanded_unary, "expected a postfix (left-operanded) unary, not logical-NOT";
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "postfix '?'/'!' work in full expression position, not just statement-final" {
+  Vec<str> names;
+  names.init(0);
+  names.push("f");
+  names.push("x");
+  names.push("y");
+
+  // Nested inside a call argument.
+  ParseState st = _state_with_declared("f(x?, y)", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'f(x?, y)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> { assert equals(e.op, "()"), "expected the outer node to be a call"; }
+    _ -> { panic("expected a call Expression node"); }
+  }
+
+  // Chained: field access right after the propagation.
+  ParseState st2 = _state_with_declared("x?.y", names);
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_expressionable_root().is_none(), "expected 'x?.y' to parse";
+  let top2 = st2.nodes.get(st2.nodes.len - 1);
+  fit top2.kind {
+    .Expression(e2) -> {
+      assert equals(e2.op, "."), "expected the outer node to be the '.y' field access";
+      fit e2.left.kind {
+        .Unary(u2) -> {
+          assert equals(u2.op, "?"), "expected the '.' access's own left side to be 'x?'";
+        }
+        _ -> { panic("expected a Unary '?' node on the left of '.'"); }
+      }
+    }
+    _ -> { panic("expected an Expression '.' node"); }
+  }
+}
+
+test "'await f()?' propagates the awaited result, not 'await' propagating first" {
+  // `await`'s own operand parse is bounded (stop_at_binary_op), but `?`/
+  // `!` are not postfix-continuation exclusions the same way `.`/`(`/`[`
+  // are, so a following '?' attaches to the whole 'await f()', not to
+  // 'f()' alone inside the await.
+  Vec<str> names;
+  names.init(0);
+  names.push("f");
+  ParseState st = _state_with_declared("await f()?", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_expressionable_root().is_none(), "expected 'await f()?' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert equals(u.op, "?"), "expected the outermost node to be the '?' propagation";
+      assert u.is_left_operanded_unary, "expected '?' to be postfix";
+      fit u.operand.kind {
+        .Unary(inner) -> {
+          assert equals(inner.op, "await"), "expected '?' to wrap the whole 'await f()'";
+        }
+        _ -> { panic("expected the '?' operand to be the 'await' unary"); }
+      }
+    }
+    _ -> { panic("expected the outermost node to be the '?' Unary"); }
+  }
+}
+
 test "parse_expressionable_root parses a unary operand followed by a binary continuation" {
   // `parse_for_normal_unary`/`parse_for_indirection_unary` bound their
   // operand parse with `stop_at_binary_op`, so a prefix unary binds

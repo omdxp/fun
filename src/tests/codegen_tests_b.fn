@@ -1160,3 +1160,111 @@ test "a function value works as a local, a function's own return type, and a com
   assert contains(out, "9"), "expected the return-type-position value's own call to add correctly";
   assert contains(out, "13"), "expected the compound field's own call, not a method dispatch, to add correctly";
 }
+
+test "postfix '?' unwraps a let-bound Option and propagates '.None', both observed at runtime" {
+  str src = `imp std.c.io;
+  `imp std.option;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  Option<num> a = describe(8);
+  `  Option<num> b = describe(7);
+  `  printf("%lld %d\n", a.unwrap(), b.is_none());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_option_let",
+    "postfix '?' unwraps a let-bound Option and propagates '.None'"
+  );
+  assert contains(out, "104 1"), "expected the '.Some' path unwrapped and the '.None' path propagated";
+}
+
+test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observed at runtime" {
+  str src = `imp std.c.io;
+  `imp std.result;
+  `fun half(num x) Result<num, str> {
+  `  if x % 2 == 1 { ret .Err("odd"); }
+  `  ret .Ok(x / 2);
+  `}
+  `fun describe(num x) Result<num, str> {
+  `  num v = half(x)!;
+  `  ret .Ok(v + 100);
+  `}
+  `fun main() num {
+  `  Result<num, str> a = describe(8);
+  `  Result<num, str> b = describe(7);
+  `  printf("%lld %s\n", a.unwrap(), b.unwrap_err());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_result_let",
+    "postfix '!' unwraps a let-bound Result and propagates '.Err'"
+  );
+  assert contains(out, "104 odd"), "expected the '.Ok' path unwrapped and the '.Err' path propagated";
+}
+
+test "postfix '?'/'!' work fully inline, nested in a compound literal field, not just let-bound" {
+  str src = `imp std.c.io;
+  `imp std.option;
+  `imp std.result;
+  `compound Wrapped { num v; }
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun to_result(num x) Result<num, str> {
+  `  if x < 0 { ret .Err("negative"); }
+  `  ret .Ok(x);
+  `}
+  `fun make_option(num x) Option<Wrapped> {
+  `  ret .Some(Wrapped{v = half(x)?});
+  `}
+  `fun make_result(num x) Result<Wrapped, str> {
+  `  ret .Ok(Wrapped{v = to_result(x)!});
+  `}
+  `fun main() num {
+  `  Wrapped w1 = make_option(8).unwrap();
+  `  Wrapped w2 = make_result(3).unwrap();
+  `  printf("%lld %lld\n", w1.v, w2.v);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_inline_nested",
+    "postfix '?'/'!' work fully inline, nested in a compound literal field"
+  );
+  assert contains(out, "4 3"), "expected both inline propagations to unwrap correctly, nested in the literal";
+}
+
+test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
+  str src = `imp std.c.io;
+  `imp std.option;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  Option<num> a = describe(8);
+  `  printf("%lld\n", a.unwrap());
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "propagation_option_msvc",
+    "postfix '?' hoists a temp and guard under MSVC codegen"
+  );
+  assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted";
+  assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
+}

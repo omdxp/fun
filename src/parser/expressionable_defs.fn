@@ -150,9 +150,10 @@ pub fun is_indirection_operator(str op) bin {
   ret equals(op, "*");
 }
 
-// True if `op` is a left-operanded (postfix) unary operator: `x++`/`x--`.
+// True if `op` is a left-operanded (postfix) unary operator: `x++`/`x--`,
+// or the propagation operators `x?` (Option) / `x!` (Result).
 pub fun is_left_operanded_unary_operator(str op) bin {
-  ret equals(op, "++") || equals(op, "--");
+  ret equals(op, "++") || equals(op, "--") || equals(op, "?") || equals(op, "!");
 }
 
 // True if `t` is an `Operator` token that, appearing after a complete
@@ -237,9 +238,11 @@ test "is_indirection_operator only matches '*'" {
   assert !is_indirection_operator("&"), "'&' should not be the indirection operator";
 }
 
-test "is_left_operanded_unary_operator only matches ++/--" {
+test "is_left_operanded_unary_operator matches ++/--/?/!" {
   assert is_left_operanded_unary_operator("++"), "'++' should be left-operanded";
   assert is_left_operanded_unary_operator("--"), "'--' should be left-operanded";
+  assert is_left_operanded_unary_operator("?"), "'?' should be left-operanded";
+  assert is_left_operanded_unary_operator("!"), "'!' should be left-operanded";
   assert !is_left_operanded_unary_operator("-"), "'-' should not be left-operanded";
 }
 

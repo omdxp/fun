@@ -130,6 +130,49 @@ pub fun transpile_file(str path) Result<str, str> {
   ret .Ok(st.out.build());
 }
 
+// `transpile_file`, with the MSVC codegen path forced on regardless of
+// `FUN_CC` or the host platform. Lets a test prove the MSVC-specific
+// hoist shape (no GNU statement expressions) without needing an actual
+// MSVC host to run it on.
+pub fun transpile_file_forcing_msvc(str path) Result<str, str> {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  CodegenState st = codegen_state_new();
+  Codegen cg = codegen_new(&st);
+  cg.msvc_mode = true;
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+  if cg.transpile(merged.nodes).is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(st.out.build());
+}
+
+// `emit_c_with_imports`, with the MSVC codegen path forced on. `name`
+// must be unique across tests, since the file is staged and removed the
+// same way.
+pub fun emit_c_with_imports_forcing_msvc(str src, str name, str label) str {
+  StringBuilder pb = string_builder_init(32);
+  pb.append("src/tests/fixtures/");
+  pb.append(name);
+  pb.append(".fn");
+  str path = pb.build();
+
+  assert write_string(path, src), format("{str}: could not stage {str}", label, path);
+  let r = transpile_file_forcing_msvc(path);
+  remove_file(path);
+  if r.is_err() {
+    allow assert_constant, "reports the stage that rejected the staged source";
+    assert false, format("{str}: {str}", label, r.unwrap_err());
+  }
+  ret r.unwrap();
+}
+
 // Transpiles the entry file at `path`, aborting with `label` when any
 // stage rejects it.
 pub fun emit_file(str path, str label) str {

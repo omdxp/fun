@@ -5497,3 +5497,67 @@ test "hover on a 'let'-inferred function value shows the value's own type, not t
   str hovered = hover(&reads, doc, 2, 6);
   assert contains(hovered, "fun(num, num) num g"), "expected the local's own function-value type, not add's own declaration text";
 }
+
+test "hover on '?' and postfix '!' shows propagation doc text, prefix '!' does not" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document opt_doc;
+  opt_doc.uri = "file:///propq.fn";
+  opt_doc.path = "propq.fn";
+  opt_doc.text = `imp std.option;
+  `fun get() Option<num> { ret .None; }
+  `fun main() Option<num> {
+  `  num v = get()?;
+  `  ret .Some(v);
+  `}
+  `fun notprop() {
+  `  bin b = !true;
+  `}`;
+  opt_doc.version = 1;
+
+  str hov_q = hover(&reads, opt_doc, 3, 15);
+  assert contains(hov_q, "Option propagation"), "expected postfix '?' to show propagation doc";
+
+  str hov_prefix_bang = hover(&reads, opt_doc, 7, 12);
+  assert equals(hov_prefix_bang, "null"), "expected prefix '!' (logical NOT) to get no hover, not propagation doc";
+
+  Document res_doc;
+  res_doc.uri = "file:///propbang.fn";
+  res_doc.path = "propbang.fn";
+  res_doc.text = `imp std.result;
+  `fun get() Result<num, str> { ret .Err("x"); }
+  `fun main() Result<num, str> {
+  `  num v = get()!;
+  `  ret .Ok(v);
+  `}`;
+  res_doc.version = 1;
+
+  str hov_bang = hover(&reads, res_doc, 3, 15);
+  assert contains(hov_bang, "Result propagation"), "expected postfix '!' to show propagation doc";
+}
+
+test "hover on a let-bound '?' propagation shows the unwrapped type, and completion on it is filtered" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///propunwrap.fn";
+  doc.path = "propunwrap.fn";
+  doc.text = `imp std.option;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Option<Point> {
+  `  let p = get()?;
+  `  num vx = p.x;
+  `  ret .None;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 6);
+  assert contains(hovered, "Point p"), "expected p's own type to be Point, not Option<Point>";
+
+  str comp = completion(&reads, doc, 5, 13, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' to be offered";
+  assert contains(comp, `"label":"y"`), "expected Point's own field 'y' to be offered";
+  assert !contains(comp, `"label":"get"`), "expected filtering to Point's own members, not every name in scope";
+}

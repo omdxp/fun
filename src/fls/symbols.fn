@@ -2653,6 +2653,25 @@ fun _infer_type(
     ret base_type;
   }
   Token op_tok = op_tok_opt.unwrap();
+  // `x?`/`x!`: the postfix mirror of the `await` prefix case above -
+  // unwraps to the propagated value's own type (Option<T>/Result<T,E>'s
+  // own T, already collected into `out_args` by the call/chain
+  // resolution just above), rather than leaving the whole Option/Result
+  // type as the answer. Best-effort like the rest of this file: `T`
+  // itself might be its own generic type, whose own args aren't tracked
+  // here, so `out_args` is cleared rather than left stale.
+  if (token_is_operator(op_tok, "?") || token_is_operator(op_tok, "!")) &&
+  out_args != nil && out_args.len > 0 {
+    str unwrapped = out_args.get(0);
+    out_args.init(0);
+    end_idx = index_of_token(tokens, op_tok);
+    let after_prop = token_after(tokens, end_idx + 1);
+    if after_prop.is_none() {
+      ret unwrapped;
+    }
+    op_tok = after_prop.unwrap();
+    base_type = unwrapped;
+  }
   bin is_arith = token_is_operator(op_tok, "+") || token_is_operator(op_tok, "-") ||
     token_is_operator(
     op_tok,
