@@ -9,6 +9,7 @@ imp std.string;
 imp std.option;
 imp std.io;
 imp std.c.mem;
+imp std.runtime_backend;
 
 // The largest header line worth reading. A header far longer than this
 // is a client fault rather than something to grow a buffer for.
@@ -89,7 +90,16 @@ fun to_lower_char(chr c) chr {
 // consistently, not just what's supposed to.
 pub fun write_message(str json) {
   Sink out = Sink.Stdout;
-  str wire = format("Content-Length: {num}\r\n\r\n{str}", len(json), json);
+  // Windows opens stdout in text mode: the CRT translates \n → \r\n on
+  // write, so the \r\n\r\n header separator must be sent as bare \n\n to
+  // arrive correctly on the wire.  On POSIX stdout is always binary, so
+  // \r\n is written literally.
+  str wire;
+  if runtime_backend_is_windows() {
+    wire = format("Content-Length: {num}\n\n{str}", len(json), json);
+  } else {
+    wire = format("Content-Length: {num}\r\n\r\n{str}", len(json), json);
+  }
   out.write(wire);
   out.flush();
   free(wire);
