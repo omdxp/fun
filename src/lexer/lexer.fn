@@ -796,7 +796,11 @@ impl Lexer {
   // Reads the next token, or `None` at end of input, and records it onto
   // `self.tokens` (see the field doc comment for why).
   next() Result<Option<Token>, Error> {
-    let opt = self._next_inner()!;
+    let r = self._next_inner();
+    if r.is_err() {
+      ret r;
+    }
+    let opt = r.unwrap();
     fit opt {
       .Some(t) -> { self.tokens.push(t); }
       .None -> {}
