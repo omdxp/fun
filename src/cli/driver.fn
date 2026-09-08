@@ -331,11 +331,7 @@ pub fun compile_to_c_mode(
   bin debug_info,
   bin warn_unused_lenient
 ) Result<bin, str> {
-  let parsed = parse_program_with_imports(input);
-  if parsed.is_err() {
-    ret .Err(parsed.unwrap_err());
-  }
-  let merged = parsed.unwrap();
+  let merged = parse_program_with_imports(input)!;
 
   // Injected ahead of the program's own declarations, so anything in it
   // can refer to them.
