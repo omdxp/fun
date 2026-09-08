@@ -5419,3 +5419,59 @@ test "hover on a 'let'-inferred top-level const shows its character-literal type
   str hovered = hover(&reads, doc, 0, 6);
   assert contains(hovered, "chr CHAR"), "expected the character-literal const to hover as chr";
 }
+
+test "completion offers 'sizeof', never a real lexer keyword but contextual at a call site" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sizeofcompletion.fn";
+  doc.path = "sizeofcompletion.fn";
+  doc.text = `imp std.c.mem;
+  `fun main() {
+  `  raw* p = malloc(
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 2, 18, false);
+  assert contains(out, `"label":"sizeof"`), "expected sizeof to be offered even though it's never a lexer keyword";
+}
+
+test "completion on 'self.' filters to the enclosing impl's own members, even while the document does not parse" {
+  // A bare 'self.' with nothing after it is itself a parse error, the
+  // exact moment a reader triggers completion for it - the same
+  // instant `_receiver_type_from_tokens` has no 'Type name' token to
+  // read self's type from, since it's an implicit parameter.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///selfcompletion.fn";
+  doc.path = "selfcompletion.fn";
+  doc.text = `compound Node {
+  `  num value;
+  `}
+  `impl Node {
+  `  show() {
+  `    self.
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 5, 9, false);
+  assert contains(out, `"label":"value"`), "expected the enclosing impl's own field to be offered";
+  assert !contains(out, `"label":"quirk"`), "expected filtering to the impl's own members, not every reserved word in scope";
+}
+
+test "completion never triggers on a '.' typed inside a comment" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dotcomment.fn";
+  doc.path = "dotcomment.fn";
+  doc.text = `fun main() {
+  `  // self.
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 1, 10, false);
+  assert equals(out, "[]"), "expected no completion at all for a '.' inside a comment";
+}

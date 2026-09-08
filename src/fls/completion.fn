@@ -7,6 +7,7 @@
 
 imp documents;
 imp analysis;
+imp positions;
 imp symbols;
 imp imports;
 imp navigation;
@@ -83,6 +84,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   }
   Vec<Token> tokens = read.tokens;
 
+  // A `.` typed inside a `//` comment carries no meaning; without this,
+  // it reads as a bare, receiver-less trigger and dumps every top-level
+  // name in scope.
+  if position_in_comment(&tokens, line, character) {
+    ret "[]";
+  }
+
   num source_line = line + 1;
   str receiver = _receiver_before(&tokens, line, character);
 
@@ -133,7 +141,16 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
         // self-reference `_bare_type_name` covers once there is a
         // tree. Either way, what that type declares is read the same
         // token-only way an alias's module already is above.
-        str local_type = _receiver_type_from_tokens(&tokens, receiver);
+        // `self` is the one receiver with no declaration token of its
+        // own to find this way - its type comes from the enclosing
+        // impl block instead.
+        str local_type = "";
+        if equals(receiver, "self") {
+          local_type = _enclosing_impl_type_from_tokens(&tokens, line, character);
+        }
+        if equals(local_type, "") {
+          local_type = _receiver_type_from_tokens(&tokens, receiver);
+        }
         if equals(local_type, "") {
           local_type = receiver;
         }
@@ -632,6 +649,68 @@ fun _next_real_index(Vec<Token>* tokens, num i) num {
 // heart, with an optional pointer star (`Node* n`) or a balanced
 // generic argument list (`Vec<str> lines`, nesting included) sitting
 // between the two. "" when no such spot exists.
+// The enclosing `impl <Type> { ... }`'s own type name, read the same
+// token-only way as everything else in this fallback path - what
+// `self` itself resolves to inside a method body, which (unlike an
+// ordinary local) carries no `Type name` declaration token of its own
+// for `_receiver_type_from_tokens` to find. Walks outward brace by
+// brace from `line`/`character` (the method body's own braces, an
+// `if`/`for` nested inside it, and so on) until one is an `impl`
+// block's own opening brace, the same depth-tracked outward walk
+// `_enclosing_fit_subject_type_from_tokens` already uses to find an
+// enclosing `fit`.
+fun _enclosing_impl_type_from_tokens(Vec<Token>* tokens, num line, num character) str {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num cursor_idx = -1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .NewLine && t.type != .Comment && t.pos.line == source_line &&
+      t.pos.end_col <= source_col {
+      cursor_idx = i;
+    }
+    i = i + 1;
+  }
+  if cursor_idx < 0 {
+    ret "";
+  }
+  num depth = 0;
+  num j = cursor_idx;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+      j = j - 1;
+      continue;
+    }
+    if token_is_symbol(t, '{') {
+      if depth > 0 {
+        depth = depth - 1;
+        j = j - 1;
+        continue;
+      }
+      num k = j - 1;
+      for k >= 0 {
+        if token_is_keyword(tokens.get(k), "impl") {
+          if k + 1 < tokens.len && tokens.get(k + 1).type == .Identifier {
+            ret token_word(tokens.get(k + 1));
+          }
+          break;
+        }
+        k = k - 1;
+      }
+      // Not an impl's own opening brace (the method's own, or an
+      // if/for nested in it) - keep walking outward, there may still
+      // be a real enclosing impl further out.
+      j = j - 1;
+      continue;
+    }
+    j = j - 1;
+  }
+  ret "";
+}
+
 fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
   num i = 0;
   for i < tokens.len {
@@ -2195,6 +2274,11 @@ fun _reserved(Vec<Item>* items, bin snippets) {
     }
     items.push(_snippet_item(word, .Keyword, "declaration", skeleton));
   }
+  // Never lexer keywords (see hover's own `keyword_doc`, which already
+  // special-cases both), just identifiers the parser treats specially
+  // at a call site, so `keywords()` above never lists them.
+  items.push(_item("sizeof", .Keyword, "the size of a type in bytes"));
+  items.push(_item("fork", .Keyword, "spawns an async call, no wait"));
 }
 
 // Every C macro or typedef the language accepts without a declaration

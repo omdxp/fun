@@ -182,6 +182,28 @@ pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line)
   ret .Some(last.insert_pos);
 }
 
+// Whether `line`/`character` falls inside a `//` comment's own span. A
+// trigger character typed there (a `.` among them) carries no meaning
+// and should never be treated as one - unlike an ordinary position with
+// no real token, which can legitimately mean "right after a trigger,
+// nothing typed yet."
+pub fun position_in_comment(Vec<Token>* tokens, num line, num character) bin {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .Comment || t.pos.line != source_line {
+      continue;
+    }
+    if source_col >= t.pos.start_col && source_col <= t.pos.end_col {
+      ret true;
+    }
+  }
+  ret false;
+}
+
 // True for a token that is only there for the reader.
 fun _is_trivia(Token t) bin {
   fit t.type {
