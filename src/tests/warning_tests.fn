@@ -593,3 +593,56 @@ test "an unmet expect reports its own position, not the top of the file, and is 
   // Line 4 (1-indexed), the `expect` statement's own line, not line 1.
   assert err.pos.line == 4, "expected the expect statement's own line, not the top of the file";
 }
+
+test "a missing_return warning reports the function's own declaration line, not the top of the file" {
+  str src = `imp std.io;
+  `
+  `fun main() num {
+  `  println("hi");
+  `}`;
+  let tokens = tokenize(src, "t.fn");
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  assert p.parse().is_none(), "expected the source to parse";
+  let found = analyze(&state.nodes, &state.nodes, false, "t.fn");
+  assert found.is_ok(), "expected analysis to succeed";
+  Vec<Warning> warnings = found.unwrap();
+  defer warnings.free();
+  bin saw_it = false;
+  num i = 0;
+  for i < warnings.len {
+    Warning w = warnings.get(i);
+    i = i + 1;
+    if w.id == .MissingReturn {
+      saw_it = true;
+      assert w.has_pos, "expected a real position, not just a message";
+      // Line 3 (1-indexed), 'fun main() num {', not line 1.
+      assert w.pos.line == 3, "expected the function's own declaration line, not the top of the file";
+    }
+  }
+  assert saw_it, "expected a missing_return warning to fire";
+}
+
+test "an unused top-level const is noticed, a used one is not" {
+  notices_unused(
+    `const str NAME = "unused";
+    `fun main() num {
+    `  ret 0;
+    `}`,
+    "unused constant 'NAME'",
+    "expected the unread top-level const to be flagged"
+  );
+  assert !contains(
+    notice(
+    `const str NAME = "used";
+      `fun main() num {
+      `  println(NAME);
+      `  ret 0;
+      `}`,
+    true
+    ),
+    "unused constant"
+  ), "expected the read top-level const not to be flagged";
+}

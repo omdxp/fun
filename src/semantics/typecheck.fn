@@ -2929,6 +2929,14 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
         checker.check_quirk_conformance(block, node);
         checker.check_impl(block, nodes);
       }
+      .Variable(v) -> {
+        checker.current_file = "";
+        if node.has_pos {
+          checker.current_file = node.pos.filename;
+        }
+        TypeEnv global_env = type_env_new();
+        checker.check_variable(node, v, &global_env);
+      }
       _ -> {}
     }
     if checker.failed {

@@ -5402,3 +5402,20 @@ test "hover on a generic compound shows each type param's own constraint" {
   str hovered = hover(&reads, doc, 0, 10);
   assert contains(hovered, "Node<T: dec | num>"), "expected the constraint to render alongside the type param, not just 'T'";
 }
+
+test "hover on a 'let'-inferred top-level const shows its character-literal type" {
+  // `_infer_global_const_type` had arms for .Number/.String/.Boolean but
+  // not .Character, the node kind a bare 'c' literal actually parses to
+  // (not .Number(.Cval(...))), so a chr-typed const's hover showed no
+  // type at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///charconst.fn";
+  doc.path = "charconst.fn";
+  doc.text = "const CHAR = 'c';\nfun main() {}\n";
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 6);
+  assert contains(hovered, "chr CHAR"), "expected the character-literal const to hover as chr";
+}

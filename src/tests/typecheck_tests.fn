@@ -51,6 +51,19 @@ test "a value must fit the type it initializes" {
   );
 }
 
+test "a top-level const must fit its own declared type, not just a local variable" {
+  rejects(
+    `const str NAME = 1;
+    `fun main() {}`,
+    "expected a top-level const to be checked against its declared type"
+  );
+  accepts(
+    `const str NAME = "ok";
+    `fun main() {}`,
+    "expected a correctly-typed top-level const to pass"
+  );
+}
+
 test "a decimal does not narrow into a whole number on its own" {
   rejects(
     `fun main() {

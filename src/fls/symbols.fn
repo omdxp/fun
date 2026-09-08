@@ -553,6 +553,7 @@ fun _infer_global_const_type(Node* val) str {
     }
     .String(_) -> { ret "str"; }
     .Boolean(_) -> { ret "bin"; }
+    .Character(_) -> { ret "chr"; }
     _ -> { ret ""; }
   }
 }

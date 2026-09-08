@@ -1339,7 +1339,7 @@ impl Analysis {
 
   // Walks one function, with the names it declares tracked so a returned
   // address can be recognized as pointing at one of them.
-  walk_function(FunctionNode f) {
+  walk_function(FunctionNode f, Node* decl) {
     if !f.has_body {
       ret;
     }
@@ -1382,7 +1382,7 @@ impl Analysis {
         self.report(
           .MissingReturn,
           format("function '{str}' can finish without returning a value", f.name),
-          f.body
+          decl
         );
       }
     }
@@ -1538,6 +1538,11 @@ impl Analysis {
         .Compound(c) -> {
           if !node.flags.is_public && !read.has(c.name) {
             self.report(.UnusedCompound, format("unused compound '{str}'", c.name), node);
+          }
+        }
+        .Variable(v) -> {
+          if v.is_const && !node.flags.is_public && !read.has(v.name) {
+            self.report(.UnusedVariable, format("unused constant '{str}'", v.name), node);
           }
         }
         _ -> {}
@@ -1866,11 +1871,11 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str fil
       continue;
     }
     fit node.kind {
-      .Function(f) -> { state.walk_function(f); }
+      .Function(f) -> { state.walk_function(f, node); }
       .Impl(block) -> {
         for m : block.methods {
           fit m.kind {
-            .Function(f) -> { state.walk_function(f); }
+            .Function(f) -> { state.walk_function(f, m); }
             _ -> {}
           }
         }
