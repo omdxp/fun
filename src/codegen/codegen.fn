@@ -12148,6 +12148,18 @@ impl Codegen {
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     ``);
+    // Switch stdin and stdout to binary mode so that binary-framed
+    // protocols over stdio pipes (e.g. LSP) are not garbled by the
+    // CRLF translation that Windows applies to text-mode streams.
+    // A no-op stub is emitted on non-Windows so the call is always safe.
+    self.state.write(`#ifdef _WIN32
+    `#include <io.h>
+    `#include <fcntl.h>
+    `static void set_binary_stdio(void) { _setmode(_fileno(stdin), _O_BINARY); _setmode(_fileno(stdout), _O_BINARY); }
+    `#else
+    `static void set_binary_stdio(void) {}
+    `#endif
+    ``);
     // Suspends the calling thread for whole seconds, used by
     // std.time's sleep_seconds. Not a direct libc binding since POSIX's
     // nanosleep has no Windows equivalent under the same name; Windows

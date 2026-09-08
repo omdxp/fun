@@ -34,6 +34,11 @@ pub fun stderr_stream() FILE*;
 // The FILE* for the process's standard input stream.
 pub fun stdin_stream() FILE*;
 
+// Switch stdin and stdout to binary mode on Windows, suppressing the
+// CRLF translation that breaks binary-framed protocols over stdio pipes.
+// Emits a no-op stub on non-Windows; safe to call unconditionally.
+pub fun set_binary_stdio();
+
 // Formats output into buffer `dst`. Returns the number of characters
 // written (excluding the trailing NUL), or negative on error (C semantics).
 pub fun sprintf(str dst, str fmt, ...) num;
