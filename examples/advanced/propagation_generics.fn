@@ -1,0 +1,103 @@
+// Postfix `?`/`!` unwrap any Option<T>/Result<T, E>, not just T = num or
+// str: a compound, a generic compound, a stdlib container, or a custom
+// error type all work the same way.
+
+imp std.c.io;
+imp std.option;
+imp std.result;
+imp std.vec;
+
+compound Point {
+  num x;
+  num y;
+}
+
+compound Box<T> {
+  T v;
+}
+
+compound ParseError {
+  num line;
+  str reason;
+}
+
+fun find_point(num id) Option<Point> {
+  if id < 0 {
+    ret .None;
+  }
+  ret .Some(Point{x = id, y = id * 2});
+}
+
+// `T` unwraps to a compound value, not a primitive - `let` infers `p`'s
+// own type as `Point`, so `p.x`/`p.y` resolve without an explicit
+// annotation.
+fun locate(num id) Option<Point> {
+  let p = find_point(id)?;
+  ret .Some(Point{x = p.x + 1, y = p.y + 1});
+}
+
+fun boxed(num id) Result<Box<num>, str> {
+  if id < 0 {
+    ret .Err("bad id");
+  }
+  ret .Ok(Box<num>{v = id});
+}
+
+// `T` here is itself a generic instantiation (`Box<num>`).
+fun unbox(num id) Result<Box<num>, str> {
+  Box<num> b = boxed(id)!;
+  ret .Ok(b);
+}
+
+fun parse_line(num id) Result<num, ParseError> {
+  if id < 0 {
+    ret .Err(ParseError{line = id, reason = "negative id"});
+  }
+  ret .Ok(id * 10);
+}
+
+// `!` propagates a custom compound error, not just `str`.
+fun parse_and_double(num id) Result<num, ParseError> {
+  num v = parse_line(id)!;
+  ret .Ok(v * 2);
+}
+
+fun find_list(num n) Option<Vec<num>> {
+  if n < 0 {
+    ret .None;
+  }
+  Vec<num> v;
+  v.init(4);
+  v.push(n);
+  v.push(n * 2);
+  ret .Some(v);
+}
+
+// `T` here is a stdlib generic container (`Vec<num>`).
+fun sum_list(num n) Option<num> {
+  Vec<num> list = find_list(n)?;
+  num total = 0;
+  for x : list {
+    total = total + x;
+  }
+  ret .Some(total);
+}
+
+fun main() num {
+  Point p = locate(5).unwrap();
+  printf("locate: %lld %lld, none=%d\n", p.x, p.y, locate(-1).is_none());
+
+  Box<num> b = unbox(7).unwrap();
+  printf("unbox: %lld\n", b.v);
+
+  let ok = parse_and_double(3);
+  let failed = parse_and_double(-2);
+  printf("parse_and_double ok: %lld\n", ok.unwrap());
+  fit failed {
+    .Ok(v) -> { printf("unexpected ok: %lld\n", v); }
+    .Err(e) -> { printf("parse_and_double err: line=%lld reason=%s\n", e.line, e.reason); }
+  }
+
+  printf("sum_list: %lld, none=%d\n", sum_list(5).unwrap(), sum_list(-1).is_none());
+  ret 0;
+}

@@ -35,6 +35,7 @@ fun -in examples/<example>.fn
 - let_quirk_explicit_ok.fn
 - main_exit_status.fn
 - plain_impl.fn
+- propagation_basic.fn
 - return_heap_ptr_ok.fn
 - return_local_ptr_warning.fn
 - sizeof_all_types.fn
@@ -56,6 +57,7 @@ fun -in examples/<example>.fn
 - advanced/async_quirk_await_function_receiver.fn
 - advanced/async_quirk_await_generic_wrapper.fn
 - advanced/generic_inference_after_init.fn
+- advanced/propagation_generics.fn
 - advanced/async_quirk_await_indexed_receiver.fn
 - advanced/async_quirk_await_nested_receiver.fn
 - advanced/async_quirk_await_parenthesized_receiver.fn

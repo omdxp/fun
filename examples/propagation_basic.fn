@@ -1,0 +1,100 @@
+// Postfix `?`/`!`: sugar over `std.option`/`std.result` that replaces the
+// repeated check-then-unwrap shape with one operator.
+// 
+// `expr?` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`; `.None`
+// returns `.None` from the enclosing function immediately. `expr!` does
+// the same for `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(e)`
+// returns `.Err(e)` immediately (the enclosing function's own error
+// type must match `E` exactly). Both work anywhere an expression is
+// legal, not just statement-final.
+
+imp std.c.io;
+imp std.option;
+imp std.result;
+
+fun half(num x) Option<num> {
+  if x % 2 == 1 {
+    ret .None;
+  }
+  ret .Some(x / 2);
+}
+
+// `?` unwraps `half(x)`'s `Option<num>` to a plain `num`; an odd input
+// short-circuits with `.None` before `combine` ever reaches its own
+// `ret`. `let` infers `a`'s own type as `num`, not `Option<num>`.
+fun combine(num x) Option<num> {
+  let a = half(x)?;
+  ret .Some(a + 1);
+}
+
+// Same shape for `!`/`Result`: `half_result`'s error type (`str`) must
+// match `combine_result`'s own error type exactly - no conversion.
+fun half_result(num x) Result<num, str> {
+  if x < 0 {
+    ret .Err("negative");
+  }
+  ret .Ok(x / 2);
+}
+
+fun combine_result(num x) Result<num, str> {
+  num a = half_result(x)!;
+  ret .Ok(a + 1);
+}
+
+// Both operators work fully inline, not just bound to a `let` first.
+fun double_then_check(num x) Option<num> {
+  ret .Some(half(x)? * 2);
+}
+
+compound Account {
+  num balance;
+}
+
+impl Account {
+  // A private helper another method on the same type calls through
+  // `self`; `?`/`!` propagate through a method-call chain the same way
+  // they do through a plain function call.
+  _checked_balance() Result<num, str> {
+    if self.balance < 0 {
+      ret .Err("negative balance");
+    }
+    ret .Ok(self.balance);
+  }
+
+  withdraw(num amount) Result<num, str> {
+    num bal = self._checked_balance()!;
+    if amount > bal {
+      ret .Err("insufficient funds");
+    }
+    ret .Ok(bal - amount);
+  }
+}
+
+fun main() num {
+  Option<num> a = combine(8);
+  Option<num> b = combine(7);
+  printf("combine: %lld none=%d\n", a.unwrap(), b.is_none());
+
+  Result<num, str> c = combine_result(10);
+  Result<num, str> d = combine_result(-3);
+  fit d {
+    .Ok(v) -> { printf("combine_result: %lld ok\n", v); }
+    .Err(e) -> { printf("combine_result: err=%s\n", e); }
+  }
+  printf("combine_result ok: %lld\n", c.unwrap());
+
+  printf("double_then_check: %lld\n", double_then_check(6).unwrap());
+
+  Account acc = .{balance = 100};
+  Result<num, str> withdrawn = acc.withdraw(30);
+  printf("withdraw: %lld\n", withdrawn.unwrap());
+
+  Account overdrawn = .{balance = -5};
+  Result<num, str> failed = overdrawn.withdraw(10);
+  fit failed {
+    .Ok(v) -> { printf("unexpected ok: %lld\n", v); }
+    .Err(e) -> { printf("withdraw failed: %s\n", e); }
+  }
+
+  ret 0;
+}
