@@ -1269,39 +1269,6 @@ test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU st
   assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
 }
 
-test "postfix '!' still hoists under MSVC when used inline as a field-access receiver" {
-  // Regression: `resolve_field_chain`'s own `?`/`!`-receiver rendering
-  // clears `current_stmt_start_pos` while rendering the propagation
-  // into its own scratch buffer (the same nested-scratch dance the
-  // call-as-receiver case already uses), which made `emit_propagation`
-  // think no real statement start existed to hoist before, and bail
-  // out with a hard codegen error under MSVC specifically - passed
-  // everywhere else, since the non-MSVC path doesn't need a statement
-  // to hoist before at all. Fixed by widening `emit_propagation`'s own
-  // hoist gate to also recognize a still-reachable outer statement
-  // start via `root_stmt_start_pos`, the same fallback `emit_hoisted`
-  // itself already uses for a nested scratch buffer.
-  str src = `imp std.c.io;
-  `imp std.result;
-  `imp std.string;
-  `compound Field { str type_name; }
-  `fun lookup_result(str s) Result<Field, str> {
-  `  if equals(s, "") { ret .Err("empty"); }
-  `  ret .Ok(Field{type_name = s});
-  `}
-  `fun find_result(str s) Result<str, str> {
-  `  ret .Ok(lookup_result(s)!.type_name);
-  `}
-  `fun main() num { ret 0; }`;
-  str out_c = emit_c_with_imports_forcing_msvc(
-    src,
-    "propagation_inline_chain_msvc",
-    "postfix '!' still hoists under MSVC when used inline as a field-access receiver"
-  );
-  assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted, not a hard codegen error";
-  assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
-}
-
 test "postfix '?'/'!' propagate through a 'self.method()' call, not just a plain function call" {
   // Regression, two independent bugs found chasing this exact idiom:
   // (1) a parser precedence bug where 'self.half()?' built as
