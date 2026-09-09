@@ -1445,9 +1445,14 @@ impl Analysis {
   check_unused_declarations(Vec<Node>* nodes, Vec<Node>* program) {
     Set<str> read = set_init("", 64);
     defer read.free();
+    // Collect reads from the merged program rather than from entry_nodes:
+    // entry_nodes is re-parsed without global_symbols, so it is truncated
+    // to import-only when the file uses user-defined compound types as
+    // variable types or initializers. program is the full merged result,
+    // parsed with global_symbols, and always contains all declarations.
     num i = 0;
-    for i < nodes.len {
-      Node* node = &nodes.data[i];
+    for i < program.len {
+      Node* node = &program.data[i];
       i = i + 1;
       if !self.belongs_here(node) {
         continue;
@@ -1665,7 +1670,7 @@ fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
   if _module_documents_builtins(path) {
     ret false;
   }
-  str resolved = resolve_import_path(importer, path);
+  str resolved = _normalize_path(resolve_import_path(importer, path));
   if equals(resolved, "") {
     ret false;
   }
@@ -1693,7 +1698,7 @@ fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
 // declares. An import earns its place by what it brings in, which is
 // not always named after the module itself (`NULL` from `std.c.def`).
 fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) bin {
-  str resolved = resolve_import_path(importer, path);
+  str resolved = _normalize_path(resolve_import_path(importer, path));
   if equals(resolved, "") {
     ret false;
   }
