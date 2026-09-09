@@ -4061,15 +4061,88 @@ pub fun _for_iter_item_type(
   ret out;
 }
 
+// A `?`/`!`-propagated operand's own unwrapped type: `T` out of
+// `Option<T>`/`Result<T, E>`, resolved two ways: a bare local's own
+// declared generic type, or a plain/method call's own declared return
+// type. Shared by `fit_subject_type`'s own bare-propagation-as-subject
+// case and `_expr_type_name`'s (a propagation chained into a further
+// field access, `expr?.field`), both needing the exact same
+// resolution just entered from a different AST shape one level up.
+fun _propagated_operand_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* operand,
+  str file,
+  num line
+) str {
+  fit operand.kind {
+    .Identifier(name) -> {
+      let found = _lookup_local(nil, program, name, file, line);
+      if found.is_some() {
+        ret _first_generic_arg_of_detail(found.unwrap().detail);
+      }
+    }
+    .Expression(inner) -> {
+      if equals(inner.op, "()") && inner.has_left && inner.left != nil {
+        fit inner.left.kind {
+          .Identifier(callee_name) -> {
+            let f = lookup_top_level(program, callee_name);
+            if f.is_some() {
+              ret _first_generic_arg_of_detail(_return_type_text(f.unwrap().detail));
+            }
+          }
+          .Expression(callee) -> {
+            if equals(callee.op, ".") && callee.has_right && callee.right != nil &&
+              callee.has_left && callee.left != nil {
+              str method_name2 = "";
+              fit callee.right.kind {
+                .Identifier(m) -> { method_name2 = m; }
+                _ -> {}
+              }
+              if !equals(method_name2, "") {
+                fit callee.left.kind {
+                  .Identifier(recv_name2) -> {
+                    str recv_type2 = type_name_of_local(tokens, program, recv_name2, file, line);
+                    if !equals(recv_type2, "") {
+                      Vec<str> concrete_args2 = local_generic_args(
+                        tokens,
+                        program,
+                        recv_name2,
+                        file,
+                        line
+                      );
+                      let m2 = lookup_method(program, recv_type2, method_name2, concrete_args2);
+                      if m2.is_some() {
+                        ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
+                      }
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
 // The type name of an arbitrary expression, as far as `fit_subject_type`
 // needs to resolve one: a bare identifier's own declared type, or (for
 // `base.field`) `base`'s own type resolved the same way, then that
-// field's own declared type on it. Covers the shape a fit subject most
-// commonly takes in this codebase's own source (`fit n.kind { ... }`,
-// `fit node.data { ... }`), which a bare identifier alone never did.
-// "" for anything deeper (a call, an index, a chain more than one dot
-// long) — narrower than `chain_ending_type`'s own token-based walk on
-// purpose, since this operates on the already-parsed AST a fit
+// field's own declared type on it. `base` itself may be a `?`/`!`-
+// propagated operand (`get()?.field`), unwrapped through the same
+// resolution a bare-propagation fit subject already gets. Covers the
+// shape a fit subject most commonly takes in this codebase's own
+// source (`fit n.kind { ... }`, `fit node.data { ... }`,
+// `fit covering_fit(...)?.kind { ... }`), which a bare identifier
+// alone never did. "" for anything deeper (an index, a chain more than
+// one dot long), narrower than `chain_ending_type`'s own token-based
+// walk on purpose, since this operates on the already-parsed AST a fit
 // statement carries, not a token stream.
 fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) str {
   if expr == nil {
@@ -4077,6 +4150,13 @@ fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file
   }
   fit expr.kind {
     .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
+    .Unary(u) -> {
+      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
+        u.operand != nil {
+        ret _propagated_operand_type(tokens, program, u.operand, file, line);
+      }
+      ret "";
+    }
     .Expression(fe) -> {
       if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
         fe.right == nil {
@@ -4209,60 +4289,7 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
       // since `T` itself (not the outer Option/Result) is what's needed.
       if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
         u.operand != nil {
-        fit u.operand.kind {
-          .Identifier(name) -> {
-            let found = _lookup_local(nil, program, name, file, line);
-            if found.is_some() {
-              ret _first_generic_arg_of_detail(found.unwrap().detail);
-            }
-          }
-          .Expression(inner) -> {
-            if equals(inner.op, "()") && inner.has_left && inner.left != nil {
-              fit inner.left.kind {
-                .Identifier(callee_name) -> {
-                  let f = lookup_top_level(program, callee_name);
-                  if f.is_some() {
-                    ret _first_generic_arg_of_detail(_return_type_text(f.unwrap().detail));
-                  }
-                }
-                .Expression(callee) -> {
-                  if equals(callee.op, ".") && callee.has_right && callee.right != nil &&
-                    callee.has_left && callee.left != nil {
-                    str method_name2 = "";
-                    fit callee.right.kind {
-                      .Identifier(m) -> { method_name2 = m; }
-                      _ -> {}
-                    }
-                    if !equals(method_name2, "") {
-                      fit callee.left.kind {
-                        .Identifier(recv_name2) -> {
-                          str recv_type2 = type_name_of_local(tokens, program, recv_name2, file, line);
-                          if !equals(recv_type2, "") {
-                            Vec<str> concrete_args2 = local_generic_args(
-                              tokens,
-                              program,
-                              recv_name2,
-                              file,
-                              line
-                            );
-                            let m2 = lookup_method(program, recv_type2, method_name2, concrete_args2);
-                            if m2.is_some() {
-                              ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
-                            }
-                          }
-                        }
-                        _ -> {}
-                      }
-                    }
-                  }
-                }
-                _ -> {}
-              }
-            }
-          }
-          _ -> {}
-        }
-        ret "";
+        ret _propagated_operand_type(tokens, program, u.operand, file, line);
       }
       if u.has_indirection && u.operand != nil {
         fit u.operand.kind {

@@ -5644,6 +5644,39 @@ test "hover resolves a field access chained onto a propagation whose unwrapped t
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' even when Point is behind a pointer";
 }
 
+test "hover on a fit destructuring binding resolves through a propagated field-access subject" {
+  // Regression: `_expr_type_name` (what `fit_subject_type` delegates
+  // to for a `base.field` subject) had no case at all for `base` being
+  // a `?`/`!`-propagated operand - it fell straight to its own
+  // catch-all "", so `fit get()?.kind { .Leaf(n) -> ... }` resolved no
+  // enum for the fit at all, meaning neither `.Leaf`/`.Branch`
+  // shorthand completion nor a destructuring binding's own type (`n`
+  // here) ever resolved. Same root cause the exhaustiveness-checker
+  // fix in warning_tests.fn hits from the typecheck side; this is the
+  // fls side, found on the exact real statement that surfaced it,
+  // symbols.fn's own `fit covering_fit(...)?.kind { .StatementFit(f)
+  // -> ... }`.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropdestructure.fn";
+  doc.path = "inlinepropdestructure.fn";
+  doc.text = `imp std.option;
+  `enum Kind { Leaf(num), Branch(num) }
+  `compound Node { Kind kind; }
+  `fun get() Option<Node*> { ret .None; }
+  `fun describe() Option<num> {
+  `  fit get()?.kind {
+  `    .Leaf(n) -> { ret .Some(n); }
+  `    .Branch(n) -> { ret .Some(n); }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 6, 10);
+  assert contains(hovered, "num n"), "expected the destructuring binding 'n' to resolve through the propagated field-access subject";
+}
+
 test "dot-completion offers a propagated receiver's own unwrapped-type members, with no intermediate 'let'" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

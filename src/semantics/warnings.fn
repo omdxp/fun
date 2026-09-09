@@ -1168,43 +1168,22 @@ impl Analysis {
     }
   }
 
-  // The type a `fit`'s subject ultimately reads from, taken from what its
-  // identifier was declared as (`local_types` carries a trailing `*` for
-  // a pointer-typed local). `fit *self` matches what the pointer holds,
-  // not the pointer itself, so an explicit deref strips one level.
+  // The type a `fit`'s subject ultimately reads from - an identifier, a
+  // single-level pointer deref, a field access, or a `?`/`!`-propagated
+  // call's own unwrapped return type, any mix (`fit self.node?.kind`).
+  // `fit *self` matches what the pointer holds, not the pointer itself.
   _fit_subject_type(FitStmtNode f) str {
     if f.exp == nil {
       ret "";
     }
-    Node* subject = f.exp;
-    bin deref = false;
-    fit subject.kind {
-      .Unary(u) -> {
-        if equals(u.op, "*") && u.operand != nil {
-          subject = u.operand;
-          deref = true;
-        }
-      }
-      _ -> {}
-    }
-    fit subject.kind {
-      .Identifier(name) -> {
-        let declared = self.local_types.at(name);
-        if declared.is_none() {
-          ret "";
-        }
-        str type_name = declared.unwrap();
-        if deref && ends_with(type_name, "*") {
-          type_name = substr(type_name, 0, len(type_name) - 1);
-        }
-        ret type_name;
-      }
-      _ -> {}
+    str resolved = self._resolve_node_type(f.exp);
+    if !equals(resolved, "") {
+      ret resolved;
     }
     // `fit <- ch { ... }` desugars to `ch.recv()` at parse time - what
     // it matches is the channel's own element type, not the call's
     // return value read literally.
-    str channel = _method_receiver(subject, "recv");
+    str channel = _method_receiver(f.exp, "recv");
     if !equals(channel, "") {
       let elem = self.channel_element_types.at(channel);
       if elem.is_some() {
@@ -1212,6 +1191,119 @@ impl Analysis {
       }
     }
     ret "";
+  }
+
+  // `_fit_subject_type`'s own recursive resolver, reused for any
+  // sub-expression a field access or a propagation's own operand needs
+  // resolved (`b.kind`'s own `b`, `get()?.kind`'s own `get()`), not
+  // just the fit's own top-level subject.
+  _resolve_node_type(Node* n) str {
+    if n == nil {
+      ret "";
+    }
+    fit n.kind {
+      .Identifier(name) -> {
+        let declared = self.local_types.at(name);
+        if declared.is_some() {
+          ret declared.unwrap();
+        }
+      }
+      .Unary(u) -> {
+        if equals(u.op, "*") && !u.is_left_operanded_unary && u.operand != nil {
+          str inner = self._resolve_node_type(u.operand);
+          if equals(inner, "") {
+            ret "";
+          }
+          if ends_with(inner, "*") {
+            ret substr(inner, 0, len(inner) - 1);
+          }
+          ret inner;
+        }
+        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
+          u.operand != nil {
+          ret self._resolve_propagation_type(u.operand);
+        }
+      }
+      .Expression(e) -> {
+        if equals(e.op, ".") && e.has_left && e.has_right {
+          str recv_type = self._resolve_node_type(e.left);
+          if equals(recv_type, "") {
+            ret "";
+          }
+          if ends_with(recv_type, "*") {
+            recv_type = substr(recv_type, 0, len(recv_type) - 1);
+          }
+          str field_name = "";
+          fit e.right.kind {
+            .Identifier(fname) -> { field_name = fname; }
+            _ -> {}
+          }
+          if equals(field_name, "") {
+            ret "";
+          }
+          let info = self.compound_decls.at(recv_type);
+          if info.is_none() {
+            ret "";
+          }
+          CompoundNode c = info.unwrap();
+          for field : c.fields {
+            if equals(field.name, field_name) && field.dtype != nil {
+              ret self._dtype_type_name(*field.dtype);
+            }
+          }
+        }
+      }
+      _ -> {}
+    }
+    ret "";
+  }
+
+  // A propagation's own operand, resolved to what `?`/`!` unwraps it
+  // to - a plain function call's own declared `Option<T>`/`Result<T,
+  // E>` return type's first generic argument, `T`. Best-effort like
+  // the rest of this resolver: `local_types` stores a bare type name
+  // with no generic args attached, so a propagated bare local or
+  // method-call operand isn't tracked with enough to unwrap and
+  // resolves to "" instead of guessing.
+  _resolve_propagation_type(Node* operand) str {
+    bin is_call = false;
+    str callee_name = "";
+    fit operand.kind {
+      .Expression(ce) -> {
+        if equals(ce.op, "()") && ce.has_left {
+          fit ce.left.kind {
+            .Identifier(name) -> {
+              is_call = true;
+              callee_name = name;
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+    if !is_call {
+      ret "";
+    }
+    let known = self.functions.at(callee_name);
+    if known.is_none() {
+      ret "";
+    }
+    FunctionNode fn = known.unwrap();
+    if !fn.has_rtype || fn.rtype == nil || fn.rtype.generic_args.len == 0 {
+      ret "";
+    }
+    ret self._dtype_type_name(*fn.rtype.generic_args.get(0));
+  }
+
+  // A `DataType`'s own bare type name, with a trailing `*` appended for
+  // a pointer - the same "type_str[+*]" spelling `local_types` already
+  // stores locals under.
+  _dtype_type_name(DataType dt) str {
+    if dt.pointer_depth > 0 || dt.flags.is_pointer {
+      ret format("{str}*", dt.type_str);
+    }
+    ret dt.type_str;
   }
 
   // Records `name`'s own element type when `dtype` declares it as a

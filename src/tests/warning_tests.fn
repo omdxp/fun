@@ -339,6 +339,47 @@ test "a fit over a function parameter is checked exactly like one over a local" 
   assert contains(found, "Shape.Square"), "expected the message to name what is missing";
 }
 
+test "a fit over a field access is checked, not just a bare identifier" {
+  // Regression: `_fit_subject_type` only ever resolved a bare
+  // `.Identifier` (or a single deref of one), so `fit base.field`
+  // silently skipped exhaustiveness checking entirely, no matter how
+  // many variants a real program's own fit statements over `x.kind`
+  // shaped subjects left unhandled.
+  str src = `enum Shape { Circle, Square }
+  `compound Box { Shape kind; }
+  `fun describe(Box b) num {
+  `  fit b.kind {
+  `    .Circle -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant noticed for a field-access subject";
+  assert contains(found, "Shape.Square"), "expected the message to name what is missing";
+}
+
+test "a fit over a propagated field access is checked too" {
+  // Same root cause as the field-access case just above, one layer
+  // deeper: `get()?.kind` never reached the field-access resolver at
+  // all, since `_fit_subject_type` had no case for a `?`/`!`-
+  // propagated operand either. Found reviewing symbols.fn's own
+  // `fit covering_fit(...)?.kind { ... }`, whose missing `_ ->` arms
+  // would otherwise never have been checked at all.
+  str src = `imp std.option;
+  `enum Shape { Circle, Square }
+  `compound Box { Shape kind; }
+  `fun get() Option<Box*> { ret .None; }
+  `fun describe() Option<num> {
+  `  fit get()?.kind {
+  `    .Circle -> { ret .Some(1); }
+  `  }
+  `  ret .Some(0);
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant noticed through the propagated field-access subject";
+  assert contains(found, "Shape.Square"), "expected the message to name what is missing";
+}
+
 test "a fit missing several variants names every one of them, not just the first" {
   str src = `enum Shape {
   `  Circle(num),
