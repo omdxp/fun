@@ -5619,6 +5619,31 @@ test "hover resolves a field access chained inline onto a propagation, with no i
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' to Point's own field type";
 }
 
+test "hover resolves a field access chained onto a propagation whose unwrapped type is a pointer" {
+  // Regression: `chain_receiver`'s own propagation case read the
+  // unwrapped generic arg's raw text directly (`Point*` for
+  // `Option<Point*>`), which a field lookup by bare type name doesn't
+  // match - the pointer star was never stripped, so hover silently
+  // returned nothing whenever the propagated Option/Result's own T was
+  // itself a pointer type. Found reviewing symbols.fn's own
+  // `covering_fit(...)?.kind` (covering_fit returns Option<Node*>).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlineproppointer.fn";
+  doc.path = "inlineproppointer.fn";
+  doc.text = `imp std.option;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point*> { ret .None; }
+  `fun main() Option<num> {
+  `  ret .Some(get()?.x);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 19);
+  assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' even when Point is behind a pointer";
+}
+
 test "dot-completion offers a propagated receiver's own unwrapped-type members, with no intermediate 'let'" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

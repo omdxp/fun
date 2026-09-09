@@ -2356,7 +2356,11 @@ pub fun chain_receiver(
       depth + 1
     );
     if prop_inner.generic_args.len > 0 {
-      current_type = prop_inner.generic_args.get(0);
+      // The raw generic-arg text carries a pointer star as written
+      // (`Node*` for `Option<Node*>`), which a field/method lookup by
+      // bare type name doesn't expect - stripped the same way any other
+      // pointer-spelled type name is bared elsewhere in this file.
+      current_type = _bare_type_expr(prop_inner.generic_args.get(0));
     }
     current_args.init(0);
   } else {
