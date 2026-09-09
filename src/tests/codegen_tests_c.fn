@@ -623,6 +623,121 @@ test "every branch of an exhaustive fit can render through Display" {
   assert contains(out, "Shape_Line"), "expected both variants emitted";
 }
 
+test "an explicit '{ptr}' shows the raw pointer even when the pointee implements Display" {
+  // Regression: a vararg's own Display-dispatch decision only looked at
+  // the argument's type, never at which placeholder the format string
+  // used for that position - so a pointer whose pointee implements
+  // Display always rendered through to_string(), even when the format
+  // string explicitly wrote '{ptr}' asking for the raw address. '{}'
+  // (a bare placeholder) still prefers Display, unaffected.
+  str src = `imp std.io;
+  `imp std.quirks;
+  `compound Point {
+  `  num x;
+  `}
+  `impl Point as Display {
+  `  pub to_string() str { ret "point"; }
+  `}
+  `fun main() num {
+  `  Point p;
+  `  p.x = 1;
+  `  println_fmt("{ptr}", &p);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "ptr_placeholder_skips_display",
+    "an explicit '{ptr}' shows the raw pointer even when the pointee implements Display"
+  );
+  // `Point__Display__to_string` is always defined for the impl itself,
+  // regardless of any particular call site - the real check is that
+  // this call site's own vararg binding doesn't route through it.
+  assert !contains(out, "Point__Display__to_string(&p)"), "expected this call site to skip Display dispatch for an explicit '{ptr}'";
+  assert contains(out, "__fun_va_0 = (&p)"), "expected the raw pointer itself to be bound, not a Display-dispatched string";
+}
+
+test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
+  StringBuilder src_b = string_builder_init(256);
+  src_b.append("imp std.io;\n");
+  src_b.append("imp std.quirks;\n");
+  src_b.append("compound Node {\n");
+  src_b.append("  num v;\n");
+  src_b.append("  Node* next;\n");
+  src_b.append("}\n");
+  src_b.append("impl Node as Display {\n");
+  src_b.append("  pub to_string() str {\n");
+  src_b.append("    ret format(`n={} next={ptr}`, self.v, self.next);\n");
+  src_b.append("  }\n");
+  src_b.append("}\n");
+  src_b.append("fun main() num {\n");
+  src_b.append("  Node a;\n");
+  src_b.append("  a.v = 1;\n");
+  src_b.append("  a.next = nil;\n");
+  src_b.append("  Node b;\n");
+  src_b.append("  b.v = 2;\n");
+  src_b.append("  b.next = &a;\n");
+  src_b.append("  println_fmt(\"{}\", &b);\n");
+  src_b.append("  ret 0;\n");
+  src_b.append("}\n");
+  str src = src_b.build();
+  let out = emit_c_with_imports(
+    src,
+    "ptr_placeholder_raw_string",
+    "'{ptr}' skips Display even nested inside a raw (backtick) format string"
+  );
+  assert contains(out, "Node__Display__to_string("), "expected the outer bare '{}' to still dispatch through Display";
+  assert contains(out, "fmt_raw("), "expected the inner '{ptr}' (in a backtick-delimited format string) to skip Display too";
+}
+
+test "'{ptr}' vs Display renders correctly at runtime" {
+  str src = `imp std.io;
+  `imp std.quirks;
+  `compound Point {
+  `  num x;
+  `}
+  `impl Point as Display {
+  `  pub to_string() str { ret "point"; }
+  `}
+  `fun main() num {
+  `  Point p;
+  `  p.x = 1;
+  `  println_fmt("{}", &p);
+  `  println_fmt("{ptr}", &p);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "ptr_placeholder_runtime",
+    "'{ptr}' vs Display renders correctly at runtime"
+  );
+  assert contains(out, "point"), "expected the bare '{}' line to render through Display";
+  assert contains(out, "0x"), "expected the '{ptr}' line to render a raw address instead";
+}
+
+test "'{ptr}' skips Display under MSVC codegen too, not just the GNU path" {
+  str src = `imp std.io;
+  `imp std.quirks;
+  `compound Point {
+  `  num x;
+  `}
+  `impl Point as Display {
+  `  pub to_string() str { ret "point"; }
+  `}
+  `fun main() num {
+  `  Point p;
+  `  p.x = 1;
+  `  println_fmt("{ptr}", &p);
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "ptr_placeholder_msvc",
+    "'{ptr}' skips Display under MSVC codegen too"
+  );
+  assert !contains(out_c, "Point__Display__to_string(&p)"), "expected this call site to skip Display dispatch under MSVC too";
+  assert contains(out_c, "fmt_raw("), "expected the raw-pointer formatter to be used instead";
+}
+
 test "a private name in one file does not collide with the same name in another" {
   // Sibling files on disk, which is the only way a cross-file collision
   // can happen at all.

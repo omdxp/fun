@@ -5035,6 +5035,61 @@ impl Codegen {
     ret .Some(count);
   }
 
+  // The placeholder type word (`str`/`num`/`dec`/`bin`/`chr`/`ptr`/`raw`)
+  // at each vararg position `fmt` requests, in order; `""` for a bare
+  // `{}` or anything unparseable at that position. Used so an explicit
+  // `{ptr}`/`{raw}` can force raw-pointer formatting for that argument
+  // even when its own type would otherwise prefer `Display` dispatch -
+  // see the call site in `emit_call`'s variadic-argument loop.
+  _format_placeholder_types(str fmt) Vec<str> {
+    Vec<str> out;
+    out.init(4);
+    num i = 0;
+    num n = len(fmt);
+    for i < n {
+      chr c = fmt[i];
+      if c == '{' {
+        if i + 1 < n && fmt[i + 1] == '{' {
+          i = i + 2;
+          continue;
+        }
+        if i + 1 < n && fmt[i + 1] == '}' {
+          out.push("");
+          i = i + 2;
+          continue;
+        }
+        if i + 4 < n && fmt[i + 4] == '}' {
+          chr a = fmt[i + 1];
+          chr b2 = fmt[i + 2];
+          chr d = fmt[i + 3];
+          str word = "";
+          if a == 's' && b2 == 't' && d == 'r' {
+            word = "str";
+          } elif a == 'n' && b2 == 'u' && d == 'm' {
+            word = "num";
+          } elif a == 'd' && b2 == 'e' && d == 'c' {
+            word = "dec";
+          } elif a == 'b' && b2 == 'i' && d == 'n' {
+            word = "bin";
+          } elif a == 'c' && b2 == 'h' && d == 'r' {
+            word = "chr";
+          } elif a == 'p' && b2 == 't' && d == 'r' {
+            word = "ptr";
+          } elif a == 'r' && b2 == 'a' && d == 'w' {
+            word = "raw";
+          }
+          if !equals(word, "") {
+            out.push(word);
+            i = i + 5;
+            continue;
+          }
+        }
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
+
   // Emits a call `callee(arg1, arg2, ...)`: a plain-identifier callee (an
   // ordinary free-function call) directly, or delegates to
   // `emit_method_call` when the callee is a `.`-Expression
@@ -5222,6 +5277,32 @@ impl Codegen {
         }
         ret .None;
       }
+      // A literal `format`/`print_fmt`/`println_fmt` format string names
+      // its own placeholder type per vararg position; an explicit
+      // `{ptr}`/`{raw}` there means "show the raw pointer", overriding
+      // what `resolve_display_dispatch` below would otherwise prefer
+      // whenever the argument's own type happens to implement `Display`
+      // (a bare `{}`, or any other function's varargs entirely, keep
+      // today's type-driven preference - `_format_placeholder_types`
+      // reports "" for a position it can't determine). Scanned the same
+      // way whether the literal is raw (backtick) or not: raw only
+      // means escape sequences aren't processed, not that `{`/`}` read
+      // any differently here - unlike `count_format_placeholders`'
+      // own reference-parity exclusion above, which isn't about this.
+      Vec<str> va_placeholder_types;
+      va_placeholder_types.init(0);
+      defer va_placeholder_types.free();
+      if fixed_len == 1 &&
+        (equals(callee_name, "format") || equals(callee_name, "print_fmt") ||
+        equals(callee_name, "println_fmt")) {
+        fit args.get(0).kind {
+          .String(fmt_str0) -> {
+            va_placeholder_types = self._format_placeholder_types(fmt_str0);
+          }
+          _ -> {}
+        }
+      }
+
       // Resolved once per position and reused across the three loops
       // below: binding, tag string, and pass-through argument.
       Vec<bin> va_is_display;
@@ -5235,8 +5316,13 @@ impl Codegen {
       defer va_disp_by_ref.free();
       num vd_i = 0;
       for vd_i < var_len {
+        bin force_raw = false;
+        if vd_i < va_placeholder_types.len {
+          str ph_word = va_placeholder_types.get(vd_i);
+          force_raw = equals(ph_word, "ptr") || equals(ph_word, "raw");
+        }
         let disp = self.resolve_display_dispatch(args.get(fixed_len + vd_i));
-        if disp.is_some() {
+        if !force_raw && disp.is_some() {
           let d = disp.unwrap();
           va_is_display.push(true);
           va_disp_fn.push(d.fn_name);
