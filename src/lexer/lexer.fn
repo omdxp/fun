@@ -413,11 +413,7 @@ impl Lexer {
 
     self._read_exponent(&b);
 
-    let res = self._finish_number_from_string(b.build());
-    if res.is_err() {
-      ret res;
-    }
-    let out = res.unwrap();
+    Token out = self._finish_number_from_string(b.build())!;
     Pos p = start;
     self._finish_pos(&p);
     out.pos = p;
@@ -796,11 +792,7 @@ impl Lexer {
   // Reads the next token, or `None` at end of input, and records it onto
   // `self.tokens` (see the field doc comment for why).
   next() Result<Option<Token>, Error> {
-    let r = self._next_inner();
-    if r.is_err() {
-      ret r;
-    }
-    let opt = r.unwrap();
+    let opt = self._next_inner()!;
     fit opt {
       .Some(t) -> { self.tokens.push(t); }
       .None -> {}

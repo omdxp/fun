@@ -331,11 +331,7 @@ pub fun compile_to_c_mode(
   bin debug_info,
   bin warn_unused_lenient
 ) Result<bin, str> {
-  let parsed = parse_program_with_imports(input);
-  if parsed.is_err() {
-    ret .Err(parsed.unwrap_err());
-  }
-  let merged = parsed.unwrap();
+  let merged = parse_program_with_imports(input)!;
 
   // Injected ahead of the program's own declarations, so anything in it
   // can refer to them.
@@ -1051,11 +1047,7 @@ pub fun load_manifest() Result<Manifest, str> {
   if !exists("fun.toml") {
     ret .Err("no fun.toml in this directory");
   }
-  let parsed = parse_manifest(read_to_string("fun.toml"));
-  if parsed.is_err() {
-    ret .Err(parsed.unwrap_err());
-  }
-  Manifest m = parsed.unwrap();
+  Manifest m = parse_manifest(read_to_string("fun.toml"))!;
   resolve_targets(&m, "");
   ret .Ok(m);
 }
@@ -1791,11 +1783,7 @@ pub fun format_file(str path) Result<bin, str> {
     ret .Err(format("no such file: {str}", path));
   }
   str src = read_to_string(path);
-  let formatted = format_source(src, path);
-  if formatted.is_err() {
-    ret .Err(formatted.unwrap_err());
-  }
-  str out = formatted.unwrap();
+  str out = format_source(src, path)!;
   if equals(out, src) {
     ret .Ok(false);
   }
@@ -1888,11 +1876,7 @@ pub fun format_file_and_imports(str path) Result<num, str> {
     }
     seen.add(current);
 
-    let done = format_file(current);
-    if done.is_err() {
-      ret .Err(done.unwrap_err());
-    }
-    if done.unwrap() {
+    if format_file(current)! {
       changed = changed + 1;
     }
 

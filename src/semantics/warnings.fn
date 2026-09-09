@@ -434,11 +434,7 @@ fun _literal_value(Node* node) Option<num> {
       if !equals(u.op, "-") {
         ret .None;
       }
-      let inner = _literal_value(u.operand);
-      if inner.is_none() {
-        ret .None;
-      }
-      ret .Some(0 - inner.unwrap());
+      ret .Some(0 - _literal_value(u.operand)?);
     }
     _ -> { ret .None; }
   }
@@ -548,14 +544,11 @@ fun _channel_capacity(Node* value) Option<num> {
       if args.len < 2 {
         ret .None;
       }
-      let room = _literal_value(args.get(1));
-      if room.is_none() {
-        ret .None;
-      }
-      if room.unwrap() < 1 {
+      let room = _literal_value(args.get(1))?;
+      if room < 1 {
         ret .Some(1);
       }
-      ret room;
+      ret .Some(room);
     }
     _ -> { ret .None; }
   }

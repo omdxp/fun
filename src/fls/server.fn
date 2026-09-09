@@ -852,13 +852,9 @@ impl Server {
     if equals(document_uri, "") {
       ret .None;
     }
-    let doc = self.docs.at(document_uri);
-    if doc.is_none() {
-      ret .None;
-    }
     JsonValue position = _field(params, "position");
     Request r;
-    r.doc = doc.unwrap();
+    r.doc = self.docs.at(document_uri)?;
     r.line = _number_field(position, "line");
     // The client sends a UTF-16 code unit count; everything downstream
     // (token_at, position-based lookups) works in byte columns, matching

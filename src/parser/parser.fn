@@ -4562,11 +4562,7 @@ impl Parser {
       op.expr = expr;
       list.push(op);
 
-      let peek_tok = self.state.token_peek_next();
-      if peek_tok.is_none() {
-        ret .None;
-      }
-      let pt = peek_tok.unwrap();
+      let pt = self.state.token_peek_next()?;
       if token_is_symbol(pt, ',') || token_is_operator(pt, ",") {
         self.state.token_next();
         continue;
@@ -4601,11 +4597,7 @@ impl Parser {
       }
       list.push(cname);
 
-      let peek_tok = self.state.token_peek_next();
-      if peek_tok.is_none() {
-        ret .None;
-      }
-      let pt = peek_tok.unwrap();
+      let pt = self.state.token_peek_next()?;
       if token_is_symbol(pt, ',') || token_is_operator(pt, ",") {
         self.state.token_next();
         continue;

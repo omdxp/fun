@@ -939,11 +939,7 @@ impl Codegen {
   // lookup must use the returned name. Returns `.None` when `dt` is a
   // generic instantiation that can't be resolved.
   pub write_type(DataType dt) Option<str> {
-    let resolved = self.resolve_type_name(dt);
-    if resolved.is_none() {
-      ret .None;
-    }
-    str resolved_name = resolved.unwrap();
+    str resolved_name = self.resolve_type_name(dt)?;
     self.write_type_name(resolved_name);
     let rdt = self.resolve_type_subst(dt);
     num ptr_depth = rdt.pointer_depth;
@@ -1178,11 +1174,7 @@ impl Codegen {
       if arg.generic_args.len > 0 {
         // Resolved (and, on first use, emitted) first, so it's already
         // hoisted before the outer type's mangled name is built.
-        let nested_name = self.resolve_type_name(*arg);
-        if nested_name.is_none() {
-          ret .None;
-        }
-        arg_name = nested_name.unwrap();
+        arg_name = self.resolve_type_name(*arg)?;
       }
       name_sb.append("__");
       name_sb.append(arg_name);
@@ -4975,25 +4967,18 @@ impl Codegen {
     if !eligible {
       ret .None;
     }
-    let r_opt = self.resolve_field_chain(expr);
-    if r_opt.is_none() {
-      ret .None;
-    }
-    let r = r_opt.unwrap();
+    let r = self.resolve_field_chain(expr)?;
     if r.is_call_result {
       ret .None;
     }
-    let fn_name_opt = self.lookup_impl_method(r.type_name, "to_string");
-    if fn_name_opt.is_none() {
-      ret .None;
-    }
+    str fn_name = self.lookup_impl_method(r.type_name, "to_string")?;
     // Same as `emit_method_call`'s dispatch: ensures a forward prototype
     // exists for a plain impl method and, harmlessly when inapplicable, a
     // generic compound's mangled instantiation.
     self.ensure_plain_impl_method_prototype_emitted(r.type_name, "to_string");
     self.ensure_generic_impl_method_emitted(r.type_name, "to_string", "");
     DisplayResolution res;
-    res.fn_name = fn_name_opt.unwrap();
+    res.fn_name = fn_name;
     res.pass_by_ref = !r.is_pointer;
     ret .Some(res);
   }
@@ -6144,10 +6129,7 @@ impl Codegen {
           ret self.resolve_quirk_coerce_addressed_type(e.left);
         }
         if equals(e.op, ".") && e.has_left && e.has_right {
-          let recv_r_opt = self.resolve_field_chain(e.left);
-          if recv_r_opt.is_none() {
-            ret .None;
-          }
+          let recv_r = self.resolve_field_chain(e.left)?;
           str field_name = "";
           fit e.right.kind {
             .Identifier(n) -> { field_name = n; }
@@ -6156,11 +6138,8 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          let field_info = self.lookup_compound_field(recv_r_opt.unwrap().type_name, field_name);
-          if field_info.is_none() {
-            ret .None;
-          }
-          ret .Some(field_info.unwrap().type_name);
+          let field_info = self.lookup_compound_field(recv_r.type_name, field_name)?;
+          ret .Some(field_info.type_name);
         }
       }
       _ -> {}
@@ -6998,10 +6977,7 @@ impl Codegen {
             ret .None;
           }
           let rdt = self.resolve_type_subst(call_rtype.unwrap());
-          let resolved_name_opt = self.resolve_type_name(rdt);
-          if resolved_name_opt.is_none() {
-            ret .None;
-          }
+          let resolved_name = self.resolve_type_name(rdt)?;
 
           // `hoist_insert_pos`/`current_stmt_start_pos` are suspended for
           // this scratch-buffer swap, so a nested hoisted emission
@@ -7057,7 +7033,7 @@ impl Codegen {
           // for a plain field read that never needs addressing.
           ChainResolution r;
           r.text = call_scratch.out.build();
-          r.type_name = resolved_name_opt.unwrap();
+          r.type_name = resolved_name;
           r.is_pointer = dtype_is_pointer(rdt);
           r.dtype = .Some(rdt);
           r.is_call_result = true;
@@ -7161,16 +7137,8 @@ impl Codegen {
           .Identifier(name) -> { field_name = name; }
           _ -> { ret .None; }
         }
-        let recv_r_opt = self.resolve_field_chain(inner_e.left);
-        if recv_r_opt.is_none() {
-          ret .None;
-        }
-        let recv_r = recv_r_opt.unwrap();
-        let field_info_opt = self.lookup_compound_field(recv_r.type_name, field_name);
-        if field_info_opt.is_none() {
-          ret .None;
-        }
-        let field_info = field_info_opt.unwrap();
+        let recv_r = self.resolve_field_chain(inner_e.left)?;
+        let field_info = self.lookup_compound_field(recv_r.type_name, field_name)?;
         StringBuilder sb = string_builder_init(8);
         sb.append(recv_r.text);
         if recv_r.is_pointer {
@@ -7198,15 +7166,66 @@ impl Codegen {
       // `pointer_depth`, since a dereferenced pointer is a plain value.
       // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
+        // `expr?.field`/`expr!.field`: the propagated value used inline
+        // as a receiver, with no intermediate `let` binding. Rendered
+        // the same way a call-as-receiver is (through the ordinary
+        // `emit_expr` path, which already lowers `?`/`!` itself, into a
+        // scratch buffer), resolved to its own unwrapped type the same
+        // way `infer_let_expr_type`'s own `?`/`!` case does.
+        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+          let operand_chain = self.resolve_field_chain(u.operand)?;
+          let operand_dt = operand_chain.dtype?;
+          if operand_dt.generic_args.len == 0 {
+            ret .None;
+          }
+          let t_dt = *operand_dt.generic_args.get(0);
+          let t_name = self.resolve_type_name(t_dt)?;
+
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          CodegenState prop_scratch = codegen_state_new();
+          CodegenState* saved_prop_state = self.state;
+          let saved_prop_hoist_pos = self.hoist_insert_pos;
+          let saved_prop_stmt_start_pos = self.current_stmt_start_pos;
+          let prev_prop_suppress = self.suppress_generic_impl_method_draining;
+          self.state = &prop_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
+          let perr = self.emit_expr(*recv);
+          self.state = saved_prop_state;
+          self.hoist_insert_pos = saved_prop_hoist_pos;
+          self.current_stmt_start_pos = saved_prop_stmt_start_pos;
+          self.suppress_generic_impl_method_draining = prev_prop_suppress;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+            self.hoist_insert_pos = self.root_hoist_pos;
+          }
+          if !prev_prop_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
+          if perr.is_some() {
+            ret .None;
+          }
+
+          ChainResolution r0;
+          r0.text = prop_scratch.out.build();
+          r0.type_name = t_name;
+          r0.is_pointer = dtype_is_pointer(t_dt);
+          r0.dtype = .Some(t_dt);
+          r0.is_call_result = true;
+          ret .Some(r0);
+        }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
           u.indirection_depth != 1 {
           ret .None;
         }
-        let recv_r_opt = self.resolve_field_chain(u.operand);
-        if recv_r_opt.is_none() {
-          ret .None;
-        }
-        let recv_r = recv_r_opt.unwrap();
+        let recv_r = self.resolve_field_chain(u.operand)?;
         if !recv_r.is_pointer {
           ret .None;
         }
@@ -7242,11 +7261,7 @@ impl Codegen {
   // resolved declared type, so the caller (`emit_field_access`) can
   // decide `.`/`->` for the next link in a chain it's emitting inline.
   emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
-    let resolved = self.resolve_field_chain(recv);
-    if resolved.is_none() {
-      ret .None;
-    }
-    let r = resolved.unwrap();
+    let r = self.resolve_field_chain(recv)?;
     self.state.write(r.text);
     FieldTypeInfo info;
     info.type_name = r.type_name;
@@ -10947,11 +10962,8 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(callee_name) -> {
-            let rt = self.lookup_function_rtype(callee_name);
-            if rt.is_none() {
-              ret .None;
-            }
-            ret .Some(rt.unwrap().type_str);
+            let rt = self.lookup_function_rtype(callee_name)?;
+            ret .Some(rt.type_str);
           }
           _ -> {
             // Method call (`receiver.method(args)`): resolve via the chain
@@ -11023,11 +11035,7 @@ impl Codegen {
         let first = elems.get(0);
         fit first.kind {
           .Bracket(_) -> {
-            let sub = self.infer_array_literal_elem_type_and_depth(first);
-            if sub.is_none() {
-              ret .None;
-            }
-            let s = sub.unwrap();
+            let s = self.infer_array_literal_elem_type_and_depth(first)?;
             ArrayLiteralElemInfo r;
             r.type_name = s.type_name;
             r.depth = s.depth + 1;
@@ -11041,12 +11049,8 @@ impl Codegen {
             ret .Some(r);
           }
           _ -> {
-            let tn = self.infer_arg_type_name(first);
-            if tn.is_none() {
-              ret .None;
-            }
             ArrayLiteralElemInfo r;
-            r.type_name = tn.unwrap();
+            r.type_name = self.infer_arg_type_name(first)?;
             r.depth = 1;
             r.dims.init(1);
             r.dims.push(elems.len);
@@ -11167,11 +11171,7 @@ impl Codegen {
       // `arr` would never be recorded as a known local and a later
       // `for x : arr` would reject it as an unrecognized iterable.
       .Bracket(_) -> {
-        let info = self.infer_array_literal_elem_type_and_depth(val);
-        if info.is_none() {
-          ret .None;
-        }
-        let i = info.unwrap();
+        let i = self.infer_array_literal_elem_type_and_depth(val)?;
         DataType dt = dtype_new();
         dt.type_str = i.type_name;
         dt.is_array = true;
@@ -11237,11 +11237,7 @@ impl Codegen {
         // read needs. Without it `ct` is never a known local and any
         // further field access off it is rejected.
         if equals(e.op, ".") {
-          let chain = self.resolve_field_chain(val);
-          if chain.is_none() {
-            ret .None;
-          }
-          let r = chain.unwrap();
+          let r = self.resolve_field_chain(val)?;
           // Keeps the structural type, whose generic arguments a later
           // `for x : value` needs.
           if r.dtype.is_some() {
@@ -11335,11 +11331,8 @@ impl Codegen {
                       fn_name,
                       gargs,
                       e.generic_args
-                    );
-                    if ginst.is_none() {
-                      ret .None;
-                    }
-                    ret .Some(ginst.unwrap().rtype);
+                    )?;
+                    ret .Some(ginst.rtype);
                   }
                   _ -> {}
                 }
@@ -11409,11 +11402,7 @@ impl Codegen {
               }
               ret .None;
             }
-            let rt = self.lookup_impl_method_rtype(recv_r.type_name, method_name);
-            if rt.is_none() {
-              ret .None;
-            }
-            ret .Some(*rt.unwrap());
+            ret .Some(*(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?));
           }
           _ -> { ret .None; }
         }
@@ -11428,15 +11417,8 @@ impl Codegen {
         // later `fit v { .Variant -> ... }` on `v` can resolve its own
         // shorthand variants.
         if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          let prop_r_opt = self.resolve_field_chain(u.operand);
-          if prop_r_opt.is_none() {
-            ret .None;
-          }
-          let prop_r = prop_r_opt.unwrap();
-          if prop_r.dtype.is_none() {
-            ret .None;
-          }
-          let prop_dt = prop_r.dtype.unwrap();
+          let prop_r = self.resolve_field_chain(u.operand)?;
+          let prop_dt = prop_r.dtype?;
           if prop_dt.generic_args.len == 0 {
             ret .None;
           }
@@ -11446,11 +11428,7 @@ impl Codegen {
           u.indirection_depth != 1 {
           ret .None;
         }
-        let recv_r_opt = self.resolve_field_chain(u.operand);
-        if recv_r_opt.is_none() {
-          ret .None;
-        }
-        let recv_r = recv_r_opt.unwrap();
+        let recv_r = self.resolve_field_chain(u.operand)?;
         if !recv_r.is_pointer {
           ret .None;
         }

@@ -79,11 +79,7 @@ compound CallSite {
 // the cursor is inside, then reads the identifier (and its own
 // receiver, if reached through a dot) immediately before it.
 fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite> {
-  let anchor = _token_index_at_or_before(tokens, line, character);
-  if anchor.is_none() {
-    ret .None;
-  }
-  num i = anchor.unwrap();
+  num i = _token_index_at_or_before(tokens, line, character)?;
   num depth = 0;
   num commas = 0;
   for i >= 0 {
@@ -104,11 +100,7 @@ fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite
     ret .None;
   }
   // `i` now indexes the opening `(` itself.
-  let callee_tok = token_before(tokens, i);
-  if callee_tok.is_none() {
-    ret .None;
-  }
-  Token ct = callee_tok.unwrap();
+  Token ct = token_before(tokens, i)?;
   fit ct.type {
     .Identifier -> {}
     _ -> { ret .None; }

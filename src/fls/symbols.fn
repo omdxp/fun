@@ -4303,11 +4303,7 @@ pub fun enclosing_body(Vec<Node>* program, str file, num line) Option<Node*> {
 // fuzz block's own body can carry one just as well), whose braces
 // cover `line` in `file`.
 pub fun covering_fit(Vec<Node>* program, str file, num line) Option<Node*> {
-  let body = enclosing_body(program, file, line);
-  if body.is_none() {
-    ret .None;
-  }
-  ret _find_covering_fit(body.unwrap(), line);
+  ret _find_covering_fit(enclosing_body(program, file, line)?, line);
 }
 
 // Descends into every nested block a statement can hide one inside,
@@ -4596,11 +4592,8 @@ fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataT
 // `file`, resolved against the enclosing `fit` statement's subject
 // type.
 pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
-  let found = covering_fit(program, file, line);
-  if found.is_none() {
-    ret .None;
-  }
-  fit found.unwrap().kind {
+  let found = covering_fit(program, file, line)?;
+  fit found.kind {
     .StatementFit(f) -> {
       str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
       if equals(enum_name, "") {
