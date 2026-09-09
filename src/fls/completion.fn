@@ -1466,7 +1466,63 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str
 // fit's own, or the subject is something deeper than these three.
 fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file, AnalysisCache* cache) str {
   num a = _prev_real_index(tokens, brace_idx);
-  if a < 0 || tokens.get(a).type != .Identifier {
+  if a < 0 {
+    ret "";
+  }
+  // `fit x? { ... }`/`fit x! { ... }`: a propagation used directly as
+  // the fit subject. Covers only the bare-identifier operand
+  // (`fit x? {`, immediately after `fit`) - the same generic-arg lookup
+  // a channel receive's own subject already uses above, since `x`'s own
+  // declared `Option<T>`/`Result<T, E>` type is what carries `T`. A call
+  // or chain operand here would need the AST-driven `fit_subject_type`
+  // instead, which already covers this case; this token-only fallback
+  // only runs while the document doesn't parse.
+  if token_is_operator(tokens.get(a), "?") || token_is_operator(tokens.get(a), "!") {
+    num prop_subj = _prev_real_index(tokens, a);
+    if prop_subj < 0 {
+      ret "";
+    }
+    if token_is_symbol(tokens.get(prop_subj), ')') {
+      // `fit some_call(...)? { ... }`: walk back to the matching '(' and
+      // the callee name right before it, then resolve the callee's own
+      // declared return type the same way `_first_generic_arg_of_local_
+      // from_tokens` reads a local's declared type just below.
+      num pdepth = 1;
+      num k = _prev_real_index(tokens, prop_subj);
+      for k >= 0 && pdepth > 0 {
+        if token_is_symbol(tokens.get(k), ')') {
+          pdepth = pdepth + 1;
+        } elif token_is_operator(tokens.get(k), "(") {
+          pdepth = pdepth - 1;
+        }
+        if pdepth == 0 {
+          break;
+        }
+        k = _prev_real_index(tokens, k);
+      }
+      if pdepth != 0 || k < 0 {
+        ret "";
+      }
+      num callee_idx = _prev_real_index(tokens, k);
+      if callee_idx < 0 || tokens.get(callee_idx).type != .Identifier {
+        ret "";
+      }
+      num call_fit_kw = _prev_real_index(tokens, callee_idx);
+      if call_fit_kw < 0 || !token_is_keyword(tokens.get(call_fit_kw), "fit") {
+        ret "";
+      }
+      ret _first_generic_arg_of_function_from_tokens(tokens, token_word(tokens.get(callee_idx)));
+    }
+    if tokens.get(prop_subj).type != .Identifier {
+      ret "";
+    }
+    num prop_fit_kw = _prev_real_index(tokens, prop_subj);
+    if prop_fit_kw < 0 || !token_is_keyword(tokens.get(prop_fit_kw), "fit") {
+      ret "";
+    }
+    ret _first_generic_arg_of_local_from_tokens(tokens, token_word(tokens.get(prop_subj)));
+  }
+  if tokens.get(a).type != .Identifier {
     ret "";
   }
   num b = _prev_real_index(tokens, a);
@@ -1492,6 +1548,73 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
     ret "";
   }
   ret _operand_type_from_tokens(tokens, a, current_file, cache);
+}
+
+// A named top-level function's own declared return type's first
+// generic argument, read straight off the tokens - `Color` from
+// `fun pick(bin want) Option<Color> {`. What a fit subject's own
+// propagated call operand needs while the document doesn't parse
+// (`fit pick(want)? { . }`), since there is no declaration token to
+// walk back from the way a local's own already has just below.
+fun _first_generic_arg_of_function_from_tokens(Vec<Token>* tokens, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "fun") {
+      num name_idx = _next_real_index(tokens, i);
+      if name_idx >= 0 && tokens.get(name_idx).type == .Identifier &&
+        equals(token_word(tokens.get(name_idx)), name) {
+        num paren_start = _next_real_index(tokens, name_idx);
+        if paren_start >= 0 && token_is_operator(tokens.get(paren_start), "<") {
+          num gdepth = 1;
+          num g = _next_real_index(tokens, paren_start);
+          for g >= 0 && gdepth > 0 {
+            if token_is_operator(tokens.get(g), "<") {
+              gdepth = gdepth + 1;
+            } elif token_is_operator(tokens.get(g), ">") {
+              gdepth = gdepth - 1;
+            }
+            if gdepth == 0 {
+              break;
+            }
+            g = _next_real_index(tokens, g);
+          }
+          paren_start = _next_real_index(tokens, g);
+        }
+        if paren_start >= 0 && token_is_operator(tokens.get(paren_start), "(") {
+          num pdepth = 1;
+          num m = _next_real_index(tokens, paren_start);
+          for m >= 0 && pdepth > 0 {
+            if token_is_operator(tokens.get(m), "(") {
+              pdepth = pdepth + 1;
+            } elif token_is_symbol(tokens.get(m), ')') {
+              pdepth = pdepth - 1;
+            }
+            if pdepth == 0 {
+              break;
+            }
+            m = _next_real_index(tokens, m);
+          }
+          // The return type (`Option<Color>`) sits between the params'
+          // closing ')' and the body's own '{', so the brace isn't the
+          // very next token - it's the next '{' reached at all, since a
+          // return type never itself contains one.
+          num brace_idx = _next_real_index(tokens, m);
+          for brace_idx >= 0 && !token_is_symbol(tokens.get(brace_idx), '{') {
+            brace_idx = _next_real_index(tokens, brace_idx);
+          }
+          if brace_idx >= 0 && token_is_symbol(tokens.get(brace_idx), '{') {
+            str arg = _first_generic_arg_before(tokens, brace_idx);
+            if !equals(arg, "") {
+              ret arg;
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
 }
 
 // `name`'s own declared type's first generic argument, read straight

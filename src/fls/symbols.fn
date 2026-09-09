@@ -4115,6 +4115,71 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
     // name, the same one `self`'s own declared `JsonValue*` reduces to
     // once dereferenced, so no separate stripping is needed here.
     .Unary(u) -> {
+      // `fit expr? { ... }`/`fit expr! { ... }`: a propagation used
+      // directly as the fit subject, with no intermediate `let`. The
+      // subject's own type for `.Variant` shorthand purposes is `T` out
+      // of the operand's `Option<T>`/`Result<T, E>`, resolved the same
+      // two ways the `.Expression(dot_e)`/`()` case above resolves a
+      // plain call vs. a method call's own return type - just reading
+      // the full generic detail string instead of `_bare_return_type`,
+      // since `T` itself (not the outer Option/Result) is what's needed.
+      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
+        u.operand != nil {
+        fit u.operand.kind {
+          .Identifier(name) -> {
+            let found = _lookup_local(nil, program, name, file, line);
+            if found.is_some() {
+              ret _first_generic_arg_of_detail(found.unwrap().detail);
+            }
+          }
+          .Expression(inner) -> {
+            if equals(inner.op, "()") && inner.has_left && inner.left != nil {
+              fit inner.left.kind {
+                .Identifier(callee_name) -> {
+                  let f = lookup_top_level(program, callee_name);
+                  if f.is_some() {
+                    ret _first_generic_arg_of_detail(_return_type_text(f.unwrap().detail));
+                  }
+                }
+                .Expression(callee) -> {
+                  if equals(callee.op, ".") && callee.has_right && callee.right != nil &&
+                    callee.has_left && callee.left != nil {
+                    str method_name2 = "";
+                    fit callee.right.kind {
+                      .Identifier(m) -> { method_name2 = m; }
+                      _ -> {}
+                    }
+                    if !equals(method_name2, "") {
+                      fit callee.left.kind {
+                        .Identifier(recv_name2) -> {
+                          str recv_type2 = type_name_of_local(tokens, program, recv_name2, file, line);
+                          if !equals(recv_type2, "") {
+                            Vec<str> concrete_args2 = local_generic_args(
+                              tokens,
+                              program,
+                              recv_name2,
+                              file,
+                              line
+                            );
+                            let m2 = lookup_method(program, recv_type2, method_name2, concrete_args2);
+                            if m2.is_some() {
+                              ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
+                            }
+                          }
+                        }
+                        _ -> {}
+                      }
+                    }
+                  }
+                }
+                _ -> {}
+              }
+            }
+          }
+          _ -> {}
+        }
+        ret "";
+      }
       if u.has_indirection && u.operand != nil {
         fit u.operand.kind {
           .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
@@ -4218,16 +4283,26 @@ fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line
     ret "";
   }
   Declaration d = found.unwrap();
-  num open = index_of_char(d.detail, '<');
+  ret _first_generic_arg_of_detail(d.detail);
+}
+
+// The first generic argument in a declared-type string like
+// `"Option<Color>"` or `"Map<str, num>"` (`"Color"`/`"str"`
+// respectively), `""` when `detail` carries no generics at all.
+// Shared by `_first_generic_arg_of_local` above and by
+// `fit_subject_type`'s own `?`/`!`-propagation case below, both of
+// which need `T` out of an `Option<T>`/`Result<T, E>` detail string.
+fun _first_generic_arg_of_detail(str detail) str {
+  num open = index_of_char(detail, '<');
   if open < 0 {
     ret "";
   }
   num depth = 0;
   num i = open;
-  num n = len(d.detail);
+  num n = len(detail);
   num end = -1;
   for i < n {
-    chr c = d.detail[i];
+    chr c = detail[i];
     if c == '<' {
       depth = depth + 1;
     } elif c == '>' {
@@ -4245,7 +4320,7 @@ fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line
   if end < 0 {
     ret "";
   }
-  ret trim(substr(d.detail, open + 1, end - open - 1));
+  ret trim(substr(detail, open + 1, end - open - 1));
 }
 
 // The body of whichever function-like construct - a plain function,

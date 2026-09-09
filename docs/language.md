@@ -678,6 +678,25 @@ fun main() {
 Missing variants may produce `fit_non_exhaustive` unless `_` is present.
 See Enums above for `fit` over data-carrying (tagged-union) enums.
 
+`fit` matches one subject at a time; it has no multi-value/tuple form. A
+comma inside one arm's condition (`0, 1 -> { ... }`) is not that - it's
+an OR of several patterns against the same single subject. To match on
+several values together, build a short combined key first and `fit` on
+that:
+
+```fun
+str key = format("{chr}{chr}{chr}", a, b, c);
+fit key {
+  "str" -> { ... }
+  "num" -> { ... }
+  _ -> { ... }
+}
+```
+
+which reads far more clearly than an `if a == .. && b == .. && c == ..
+{ ... } elif ...` chain once there are more than two or three
+combinations to cover.
+
 ## Defer
 
 - **Purpose**: run cleanup logic automatically when the current lexical

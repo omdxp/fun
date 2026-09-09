@@ -4770,6 +4770,60 @@ test "a bare '.Variant' shorthand completes to a channel's own element type's va
   assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 }
 
+test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a propagation, with no intermediate 'let'" {
+  str src = `imp std.option;
+  `enum Color { Red, Green, Blue }
+  `fun pick(bin want) Option<Color> {
+  `  if !want { ret .None; }
+  `  ret .Some(.Green);
+  `}
+  `fun describe(bin want) Option<str> {
+  `  fit pick(want)? {
+  `    . -> { ret .Some("x"); }
+  `  }
+  `  ret .None;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fitpropagation.fn";
+  doc.path = "fitpropagation.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot on 'fit pick(want)? { . -> ... }': the fit
+  // subject is a propagation with no intermediate 'let', so its own
+  // type for shorthand purposes is 'pick's declared 'Option<Color>'
+  // unwrapped to 'Color', not the outer Option itself.
+  str out = completion(&reads, doc, 8, 5, false);
+  assert contains(out, `"label":"Red","kind":20`), "expected Color's own variants through the propagated subject's unwrapped type";
+  assert contains(out, `"label":"Green","kind":20`), "expected every variant";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
+test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a propagated bare local, while the document does not parse" {
+  str src = `imp std.option;
+  `enum Color { Red, Green, Blue }
+  `fun describe(Option<Color> c) num {
+  `  fit c? {
+  `    .
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fitpropagationunparsed.fn";
+  doc.path = "fitpropagationunparsed.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Same shape as above, but the document is intentionally left
+  // unterminated (one closing brace short), exercising the token-only
+  // fallback specifically rather than the AST-driven path.
+  str out = completion(&reads, doc, 4, 5, false);
+  assert contains(out, `"label":"Blue","kind":20`), "expected Color's own variants through the propagated bare local, token-only";
+  assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
+}
+
 test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
   str src = `enum Shape {
   `  Circle(num),

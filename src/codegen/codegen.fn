@@ -5015,24 +5015,19 @@ impl Codegen {
           ret .None;
         }
         if i + 4 < n && fmt[i + 4] == '}' {
-          chr a = fmt[i + 1];
-          chr b = fmt[i + 2];
-          chr d = fmt[i + 3];
+          // Three placeholder chars read as one combined key and matched
+          // in a single `fit`, rather than an `a == .. && b == .. && d ==
+          // ..` chain per word - `fit` only matches one value at a time,
+          // so a short key built from the three chars is the idiom that
+          // stands in for real multi-value matching here.
+          StringBuilder word_key = string_builder_init(3);
+          word_key.append_char(fmt[i + 1]);
+          word_key.append_char(fmt[i + 2]);
+          word_key.append_char(fmt[i + 3]);
           bin matched = false;
-          if a == 's' && b == 't' && d == 'r' {
-            matched = true;
-          } elif a == 'n' && b == 'u' && d == 'm' {
-            matched = true;
-          } elif a == 'd' && b == 'e' && d == 'c' {
-            matched = true;
-          } elif a == 'b' && b == 'i' && d == 'n' {
-            matched = true;
-          } elif a == 'c' && b == 'h' && d == 'r' {
-            matched = true;
-          } elif a == 'p' && b == 't' && d == 'r' {
-            matched = true;
-          } elif a == 'r' && b == 'a' && d == 'w' {
-            matched = true;
+          fit word_key.build() {
+            "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { matched = true; }
+            _ -> {}
           }
           if matched {
             count = count + 1;
@@ -5070,26 +5065,20 @@ impl Codegen {
           continue;
         }
         if i + 4 < n && fmt[i + 4] == '}' {
-          chr a = fmt[i + 1];
-          chr b2 = fmt[i + 2];
-          chr d = fmt[i + 3];
-          str word = "";
-          if a == 's' && b2 == 't' && d == 'r' {
-            word = "str";
-          } elif a == 'n' && b2 == 'u' && d == 'm' {
-            word = "num";
-          } elif a == 'd' && b2 == 'e' && d == 'c' {
-            word = "dec";
-          } elif a == 'b' && b2 == 'i' && d == 'n' {
-            word = "bin";
-          } elif a == 'c' && b2 == 'h' && d == 'r' {
-            word = "chr";
-          } elif a == 'p' && b2 == 't' && d == 'r' {
-            word = "ptr";
-          } elif a == 'r' && b2 == 'a' && d == 'w' {
-            word = "raw";
+          // Same combined-key idiom as `count_format_placeholders` above:
+          // the three placeholder chars, read as one key, are already the
+          // exact word to store, so no branch chain is needed at all.
+          StringBuilder word_key2 = string_builder_init(3);
+          word_key2.append_char(fmt[i + 1]);
+          word_key2.append_char(fmt[i + 2]);
+          word_key2.append_char(fmt[i + 3]);
+          str word = word_key2.build();
+          bin known_word = false;
+          fit word {
+            "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { known_word = true; }
+            _ -> {}
           }
-          if !equals(word, "") {
+          if known_word {
             out.push(word);
             i = i + 5;
             continue;
