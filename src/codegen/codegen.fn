@@ -4357,7 +4357,18 @@ impl Codegen {
       }
     }
 
-    bin use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+    // A known local statement start hoists directly before it; failing
+    // that, a real outer statement start still reachable through
+    // `root_stmt_start_pos` (this propagation itself sitting inside
+    // another construct's own nested scratch render, e.g. `x?.field`
+    // resolved as a receiver) still hoists correctly - `emit_hoisted`
+    // already routes a `.None` `hoist_insert_pos` through
+    // `root_hoist_pos`/`root_state` whenever `hoist_scratch_depth > 0`,
+    // this only widens the gate that used to bail out before ever
+    // reaching it.
+    bin use_hoist = self.msvc_mode &&
+      (self.current_stmt_start_pos.is_some() ||
+      (self.hoist_scratch_depth > 0 && self.root_stmt_start_pos.is_some()));
     if !self.msvc_mode {
       // GNU statement expression: evaluate once, branch, continue with
       // the unwrapped payload.
