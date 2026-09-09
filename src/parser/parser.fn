@@ -1165,6 +1165,37 @@ impl ParseState {
   }
 }
 
+// A binding-name diagnostic for `tok`: names the specific reserved word
+// when `tok` is a keyword token rather than the identifier a binding
+// position expects (a parameter, a `let`, a fit destructuring bind),
+// instead of a bare "expected identifier" that reads as a parser bug
+// rather than a keyword collision. `fallback` covers anything else (a
+// symbol, an operator, end of input) and every keyword uniformly,
+// rather than special-casing individual reserved words one at a time.
+fun report_expected_identifier(ParseState* state, Option<Token> tok, str fallback) {
+  if tok.is_none() {
+    state.err(fallback);
+    ret;
+  }
+  let t = tok.unwrap();
+  if t.type != .Keyword {
+    state.err(fallback);
+    ret;
+  }
+  str kw = "";
+  fit t.data {
+    .Sval(s) -> { kw = s; }
+    _ -> {}
+  }
+  if equals(kw, "") {
+    state.err(fallback);
+    ret;
+  }
+  str msg = format("'{str}' is a reserved word and cannot be used as a name here", kw);
+  state.err(msg);
+  free(msg);
+}
+
 // The parser's state, layered on top of the shared `ParseState`: a pointer
 // back to that shared state plus the fields that are genuinely
 // parser-local (current body/function context for `binded` stamping,
@@ -2835,7 +2866,7 @@ impl Parser {
     }
     let ident_tok = tok.unwrap();
     if ident_tok.type != .Identifier {
-      self.state.err("expected identifier");
+      report_expected_identifier(self.state, .Some(ident_tok), "expected identifier");
       ret .Some(.InvalidIdentifier);
     }
     str name = "";
@@ -3943,7 +3974,7 @@ impl Parser {
     for !self.state.next_token_is_symbol(')') {
       let bt = self.state.token_next();
       if bt.is_none() || bt.unwrap().type != .Identifier {
-        self.state.err("expected binding name in fit destructuring pattern");
+        report_expected_identifier(self.state, bt, "expected binding name in fit destructuring pattern");
         ret .Some(.InvalidIdentifier);
       }
       str bname = "";
@@ -10266,6 +10297,27 @@ test "parse_fit_statement rejects a non-identifier destructuring binding" {
   Parser p = parser_new(&st);
   let err = p.parse_fit_statement();
   assert err.is_some(), "expected an error for a non-identifier binding name";
+}
+
+test "parse_fit_statement names the reserved word when a destructuring binding collides with a keyword" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { .Circle(imp) -> { } }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fit_statement();
+  assert err.is_some(), "expected an error for a reserved-word binding name";
+  assert contains(st.error_message, "'imp' is a reserved word"), "expected the diagnostic to name the reserved word, not a bare 'expected identifier'";
+}
+
+test "parse_function names the reserved word when a parameter collides with a keyword" {
+  ParseState st = _state_from("fun register_impl(num raw) num { ret raw; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_some(), "expected an error for a reserved-word parameter name";
+  assert contains(st.error_message, "'raw' is a reserved word"), "expected the diagnostic to name the reserved word, not a bare 'expected identifier'";
 }
 
 test "parse_fit_statement rejects an assignment used as a branch pattern" {
