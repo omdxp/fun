@@ -718,7 +718,7 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
     _ -> {}
   }
   ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']') ||
-    token_is_operator(bd, "?") || token_is_operator(bd, "!");
+  token_is_operator(bd, "?") || token_is_operator(bd, "!");
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
