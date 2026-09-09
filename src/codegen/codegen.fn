@@ -123,6 +123,17 @@ pub compound Codegen {
   // caller read a generic argument's structure instead of
   // reverse-engineering it from a mangled name.
   Vec<Option<DataType>> local_dtype;
+  // A top-level `Variable`'s own name/pointer-ness/declared type, the
+  // same shape as `local_names` and friends but never reset per
+  // function: a global is declared once and visible to every function
+  // body's own receiver resolution afterward, unlike a local which only
+  // lives for the one function it was reset for. Populated once, by
+  // `emit_global_variable`, before any function or impl body is
+  // transpiled - see its own comment on `pub transpile`'s pass order.
+  Vec<str> global_names;
+  Vec<bin> global_is_pointer;
+  Vec<str> global_type_name;
+  Vec<Option<DataType>> global_dtype;
   // Sparse record of a multi-dimensional array's iteration variable,
   // mapping it back to the root array name and how many `[0]` levels
   // separate it. A nested loop's length bound can't be computed from the
@@ -497,6 +508,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.local_is_pointer.init(0);
   g.local_type_name.init(0);
   g.local_dtype.init(0);
+  g.global_names.init(0);
+  g.global_is_pointer.init(0);
+  g.global_type_name.init(0);
+  g.global_dtype.init(0);
   g.local_multidim_names.init(0);
   g.local_multidim_roots.init(0);
   g.local_multidim_depths.init(0);
@@ -3535,11 +3550,36 @@ impl Codegen {
     self.local_dtype.push(.Some(dtype));
   }
 
+  // Like `record_local_typed`, but for a top-level `Variable` - see the
+  // separate `global_names` etc. fields for why these can't share the
+  // per-function `local_names` vecs.
+  record_global_typed(str name, str type_name, bin is_pointer, DataType dtype) {
+    self.global_names.push(name);
+    self.global_is_pointer.push(is_pointer);
+    self.global_type_name.push(type_name);
+    self.global_dtype.push(.Some(dtype));
+  }
+
+  // `name`'s index in `global_names`, or -1. A shared helper since all
+  // three `lookup_local_*` functions fall back to the same global search
+  // once the (per-function, more-recent-shadows) local search misses.
+  _global_var_index(str name) num {
+    num i = self.global_names.len - 1;
+    for i >= 0 {
+      if equals(self.global_names.get(i), name) {
+        ret i;
+      }
+      i = i - 1;
+    }
+    ret -1;
+  }
+
   // Looks up whether `name` was recorded as a pointer local. `.None`
   // means `name` isn't a known local. Searches backward, most recently
   // recorded first, so a local shadowing an earlier one of the same name
   // wins; there is no block-scope popping, so both entries live in the
-  // same flat list.
+  // same flat list. Falls back to a global variable of the same name
+  // when no local shadows it.
   lookup_local_is_pointer(str name) Option<bin> {
     num i = self.local_names.len - 1;
     for i >= 0 {
@@ -3547,6 +3587,10 @@ impl Codegen {
         ret .Some(self.local_is_pointer.get(i));
       }
       i = i - 1;
+    }
+    let gi = self._global_var_index(name);
+    if gi >= 0 {
+      ret .Some(self.global_is_pointer.get(gi));
     }
     ret .None;
   }
@@ -3562,6 +3606,10 @@ impl Codegen {
       }
       i = i - 1;
     }
+    let gi = self._global_var_index(name);
+    if gi >= 0 {
+      ret .Some(self.global_type_name.get(gi));
+    }
     ret .None;
   }
 
@@ -3576,6 +3624,10 @@ impl Codegen {
         ret self.local_dtype.get(i);
       }
       i = i - 1;
+    }
+    let gi = self._global_var_index(name);
+    if gi >= 0 {
+      ret self.global_dtype.get(gi);
     }
     ret .None;
   }
@@ -10941,6 +10993,19 @@ impl Codegen {
           if arr_as_ptr {
             self.state.write("*");
           }
+          // Mirrors the local-variable declaration site's own
+          // `record_local_typed` call: without this, a global is
+          // emitted correctly (its own typedef included) but stays
+          // invisible to `resolve_field_chain` as a receiver, so
+          // `_global.method()` anywhere in any function body fails with
+          // an unsupported-node codegen error.
+          let subst_dt = self.resolve_type_subst(*v.var_type);
+          self.record_global_typed(
+            v.name,
+            wt.unwrap(),
+            dtype_is_pointer(subst_dt) || arr_as_ptr,
+            subst_dt
+          );
         }
         if v.is_const && const_is_ptr_binding {
           self.state.write(" const");

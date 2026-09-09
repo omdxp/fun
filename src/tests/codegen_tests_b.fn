@@ -1576,3 +1576,44 @@ test "'&' on an enum-variant shorthand emits an explicit type for the hoisted te
   assert contains(out_c, "Sink __fun_recv_tmp"), "expected the temp to be declared with the resolved enum type";
   assert !contains(out_c, "__auto_type __fun_recv_tmp"), "expected no '__auto_type' hoist for an enum constant, which loses its type to 'int'";
 }
+
+test "a method dispatches on a global compound variable, not just a local" {
+  // Regression: a top-level 'Variable' was emitted correctly (its own
+  // typedef included) but never registered into the same local_names/
+  // local_type_name/local_dtype tracking a function body's own receiver
+  // resolution reads, so '_b.method()' anywhere failed as an unsupported
+  // node, regardless of whether the type was generic.
+  str src = `imp std.c.io;
+  `compound Box { num v; }
+  `impl Box {
+  `  pub set(num x) { self.v = x; }
+  `  pub get() num { ret self.v; }
+  `}
+  `Box _b;
+  `fun main() num {
+  `  _b.set(5);
+  `  printf("%lld\n", _b.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "global_compound_method", "a method dispatches on a global compound variable");
+  assert contains(out, "5"), "expected the global's own method call to dispatch and mutate correctly";
+}
+
+test "a method dispatches on a global generic compound instantiation" {
+  // The exact backlog shape: 'Map<str, num> _seen;' at module scope
+  // compiled, but '_seen.init(8)' failed in C with 'no member named
+  // init' since the instantiation's methods were never reachable from
+  // a global receiver. Same root cause and fix as the plain-compound
+  // case above, exercised against a real generic instantiation.
+  str src = `imp std.c.io;
+  `imp std.map;
+  `Map<str, num> _seen;
+  `fun main() num {
+  `  _seen.init(8);
+  `  _seen.put("a", 1);
+  `  printf("%lld\n", _seen.len);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "global_generic_method", "a method dispatches on a global generic compound instantiation");
+  assert contains(out, "1"), "expected 'init'/'put' to dispatch on the global Map instantiation and 'len' to read back correctly";
+}
