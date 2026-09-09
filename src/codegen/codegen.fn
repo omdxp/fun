@@ -4677,8 +4677,13 @@ impl Codegen {
           if oerr2.is_some() {
             ret oerr2;
           }
+        } elif equals(u.op, "&") {
+          let aerr = self.emit_address_of(u.operand);
+          if aerr.is_some() {
+            ret aerr;
+          }
         } else {
-          // Prefix (`-x`, `!x`, `~x`, `&x`).
+          // Prefix (`-x`, `!x`, `~x`).
           self.state.write(u.op);
           let oerr3 = self.emit_expr(*u.operand);
           if oerr3.is_some() {
@@ -6089,6 +6094,65 @@ impl Codegen {
     }
   }
 
+  // Emits `&operand`'s operand text, hoisting it into an addressable
+  // temp first whenever it would otherwise render as a C rvalue -
+  // `&make()` (a call's own return value) and `&.Stdout` (a bare or
+  // qualified enum-variant construction) both fail to compile
+  // otherwise ("cannot take the address of an rvalue"), since neither
+  // shape is an lvalue in C. `resolve_field_chain` already flags a call
+  // receiver's own rvalue-ness via `is_call_result`; anything it can't
+  // resolve at all (it exists only to walk lvalue-shaped chains -
+  // identifiers, field access, indexing, calls) is assumed to be a
+  // value construction and hoisted the same way, typed from
+  // `expected_enum_type` when a caller (a call argument's own expected
+  // parameter type, typically) has already set it for this exact
+  // operand.
+  emit_address_of(Node* operand) Option<CodegenErrorKind> {
+    let r_opt = self.resolve_field_chain(operand);
+    if r_opt.is_some() {
+      let r = r_opt.unwrap();
+      if r.is_call_result {
+        str tmp_name = self.hoist_call_result_to_temp(r.text, r.type_name, r.is_pointer);
+        self.state.write("&");
+        self.state.write(tmp_name);
+        ret .None;
+      }
+      self.state.write("&");
+      self.state.write(r.text);
+      ret .None;
+    }
+    if self.hoist_scratch_depth == 0 {
+      self.root_state = self.state;
+      self.root_hoist_pos = self.hoist_insert_pos;
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+    }
+    self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+    CodegenState addr_scratch = codegen_state_new();
+    CodegenState* saved_addr_state = self.state;
+    let saved_addr_hoist_pos = self.hoist_insert_pos;
+    let saved_addr_stmt_start_pos = self.current_stmt_start_pos;
+    self.state = &addr_scratch;
+    self.hoist_insert_pos = .None;
+    self.current_stmt_start_pos = .None;
+    let operand_err = self.emit_expr(*operand);
+    self.state = saved_addr_state;
+    self.hoist_insert_pos = saved_addr_hoist_pos;
+    self.current_stmt_start_pos = saved_addr_stmt_start_pos;
+    self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+    if self.hoist_scratch_depth == 0 {
+      self.hoist_insert_pos = self.root_hoist_pos;
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+    }
+    if operand_err.is_some() {
+      ret operand_err;
+    }
+    str operand_text = addr_scratch.out.build();
+    str tmp_name2 = self.hoist_call_result_to_temp(operand_text, self.expected_enum_type, false);
+    self.state.write("&");
+    self.state.write(tmp_name2);
+    ret .None;
+  }
+
   // Hoists a call expression's rendered text (`recv_r.text`, an rvalue)
   // into a fresh temp spliced right before the current statement,
   // returning the temp's name. Shared by `emit_method_call` (which
@@ -6096,8 +6160,13 @@ impl Codegen {
   // `emit_quirk_dispatch_call` (which reads the same rvalue twice, once
   // for `.vtable` and once for `.self`; without hoisting it, that
   // silently runs the call twice at runtime).
-  // `recv_type_name`/`recv_is_pointer`: when non-empty and
-  // `self.msvc_mode`, emits an explicit C type instead of `__auto_type`.
+  // `recv_type_name`/`recv_is_pointer`: when non-empty, emits an
+  // explicit C type instead of `__auto_type` - not only under
+  // `self.msvc_mode` (which needs it, having no `__auto_type` at all),
+  // but always when a real type is known, since `__auto_type` silently
+  // collapses a plain enum's own constant to its C-level `int` type
+  // even under GNU/Clang, breaking `&tmp` against an `EnumName*`
+  // parameter the same way MSVC would fail outright.
   hoist_call_result_to_temp(str call_text, str recv_type_name, bin recv_is_pointer) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
@@ -6111,7 +6180,7 @@ impl Codegen {
       recv_tmp_stmt_sb.append("    ");
       recv_tmp_ii = recv_tmp_ii + 1;
     }
-    if self.msvc_mode && !equals(recv_type_name, "") {
+    if !equals(recv_type_name, "") {
       recv_tmp_stmt_sb.append(map_type_to_c(recv_type_name));
       if recv_is_pointer {
         recv_tmp_stmt_sb.append("*");

@@ -1510,3 +1510,69 @@ test "a method call dispatches on an indexed element reached through a field cha
   );
   assert contains(out, "22"), "expected the method call on 'self.tables.data[i]' to dispatch correctly";
 }
+
+test "'&' on a call result hoists an addressable temp instead of emitting invalid C" {
+  // Regression: the plain prefix-unary branch for '&' just wrote
+  // "&" + the operand's own emit_expr text with no addressability
+  // check, unlike emit_method_call's own receiver handling a few lines
+  // below it, which already knew to hoist a call result into a temp
+  // first. '&make()' compiled to '&make()' directly, an rvalue address
+  // C rejects outright.
+  str src = `imp std.c.io;
+  `compound Box { num v; }
+  `fun make(num x) Box { ret Box{v = x}; }
+  `fun takes(Box* b) num { ret b.v; }
+  `fun main() num {
+  `  printf("%lld\n", takes(&make(7)));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "address_of_call_result",
+    "'&' on a call result hoists an addressable temp"
+  );
+  assert contains(out, "7"), "expected the hoisted temp's address to reach 'takes' correctly";
+}
+
+test "'&' on a bare or qualified enum-variant shorthand hoists an addressable, correctly-typed temp" {
+  // Regression: even once hoisted, a plain C enum constant like
+  // 'Sink_Stdout' has type 'int' per the C standard, not 'enum Sink' -
+  // so hoisting it through '__auto_type' (this codegen's usual choice)
+  // silently produced an 'int*' temp, incompatible with a 'Sink*'
+  // parameter. The hoist needs to use the resolved enum type explicitly
+  // when it's known, not just under MSVC.
+  str src = `imp std.c.io;
+  `enum Sink { Stdout, Stderr }
+  `fun takes(Sink* s) num {
+  `  fit *s {
+  `    .Stdout -> { ret 1; }
+  `    .Stderr -> { ret 2; }
+  `  }
+  `}
+  `fun main() num {
+  `  printf("%lld\n", takes(&.Stdout));
+  `  printf("%lld\n", takes(&Sink.Stderr));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "address_of_enum_shorthand",
+    "'&' on a bare or qualified enum-variant shorthand hoists a correctly-typed temp"
+  );
+  assert contains(out, "1"), "expected the bare '&.Stdout' shorthand to resolve and dispatch correctly";
+  assert contains(out, "2"), "expected the qualified '&Sink.Stderr' shorthand to resolve and dispatch correctly";
+}
+
+test "'&' on an enum-variant shorthand emits an explicit type for the hoisted temp, not '__auto_type'" {
+  str src = `imp std.c.io;
+  `enum Sink { Stdout, Stderr }
+  `fun takes(Sink* s) num { ret 0; }
+  `fun main() num { ret takes(&.Stdout); }`;
+  str out_c = emit_c_with_imports(
+    src,
+    "address_of_enum_shorthand_explicit_type",
+    "'&' on an enum-variant shorthand emits an explicit type for the hoisted temp"
+  );
+  assert contains(out_c, "Sink __fun_recv_tmp"), "expected the temp to be declared with the resolved enum type";
+  assert !contains(out_c, "__auto_type __fun_recv_tmp"), "expected no '__auto_type' hoist for an enum constant, which loses its type to 'int'";
+}
