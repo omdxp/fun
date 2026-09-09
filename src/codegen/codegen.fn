@@ -4357,7 +4357,18 @@ impl Codegen {
       }
     }
 
-    bin use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+    // A known local statement start hoists directly before it; failing
+    // that, a real outer statement start still reachable through
+    // `root_stmt_start_pos` (this propagation itself sitting inside
+    // another construct's own nested scratch render, e.g. `x?.field`
+    // resolved as a receiver) still hoists correctly - `emit_hoisted`
+    // already routes a `.None` `hoist_insert_pos` through
+    // `root_hoist_pos`/`root_state` whenever `hoist_scratch_depth > 0`,
+    // this only widens the gate that used to bail out before ever
+    // reaching it.
+    bin use_hoist = self.msvc_mode &&
+      (self.current_stmt_start_pos.is_some() ||
+      (self.hoist_scratch_depth > 0 && self.root_stmt_start_pos.is_some()));
     if !self.msvc_mode {
       // GNU statement expression: evaluate once, branch, continue with
       // the unwrapped payload.
@@ -5314,6 +5325,12 @@ impl Codegen {
       Vec<bin> va_disp_by_ref;
       va_disp_by_ref.init(var_len);
       defer va_disp_by_ref.free();
+      // Tracks `{ptr}`/`{raw}` positions so MSVC can emit the correct `'p'`
+      // tag character and `void*` declaration type for those slots (GNU mode
+      // uses `__fun_tag`'s `_Generic` which handles pointers automatically).
+      Vec<bin> va_is_force_raw;
+      va_is_force_raw.init(var_len);
+      defer va_is_force_raw.free();
       num vd_i = 0;
       for vd_i < var_len {
         bin force_raw = false;
@@ -5321,6 +5338,7 @@ impl Codegen {
           str ph_word = va_placeholder_types.get(vd_i);
           force_raw = equals(ph_word, "ptr") || equals(ph_word, "raw");
         }
+        va_is_force_raw.push(force_raw);
         let disp = self.resolve_display_dispatch(args.get(fixed_len + vd_i));
         if !force_raw && disp.is_some() {
           let d = disp.unwrap();
@@ -5403,6 +5421,14 @@ impl Codegen {
           if equals(va_c_type, "void") {
             va_c_type = "void*";
           }
+          // `{ptr}`/`{raw}` forced-raw slots: declare as `void*` so the
+          // MSVC tag string and runtime dispatch (`'p'` → `fmt_raw`) are
+          // correct. `__fun_tag`'s `_Generic` handles this automatically in
+          // GNU mode, but MSVC's pre-resolved tag string needs an explicit
+          // `void*` type to produce the right `'p'` tag character below.
+          if va_is_force_raw.get(va_i) {
+            va_c_type = "void*";
+          }
           va_resolved_ctypes.push(va_c_type);
           StringBuilder va_decl_sb = string_builder_init(64);
           num va_indent_ii = 0;
@@ -5418,6 +5444,9 @@ impl Codegen {
           va_decl_sb.append(" = ");
           if va_is_chr_literal {
             va_decl_sb.append("(char)");
+          }
+          if va_is_force_raw.get(va_i) {
+            va_decl_sb.append("(void*)");
           }
           va_decl_sb.append(va_expr_text);
           va_decl_sb.append(";\n");
@@ -5516,6 +5545,13 @@ impl Codegen {
               va_chr_sb.append("(char)");
               va_chr_sb.append(va_expr_m);
               gnu_msvc_va_texts.push(va_chr_sb.build());
+            } elif va_is_force_raw.get(va_i) {
+              // `{ptr}`/`{raw}`: cast to `void*` so the runtime reads it
+              // as a raw pointer via the `'p'` tag (→ `fmt_raw`).
+              StringBuilder va_raw_sb = string_builder_init(len(va_expr_m) + 8);
+              va_raw_sb.append("(void*)");
+              va_raw_sb.append(va_expr_m);
+              gnu_msvc_va_texts.push(va_raw_sb.build());
             } else {
               gnu_msvc_va_texts.push(va_expr_m);
             }
@@ -5526,6 +5562,11 @@ impl Codegen {
               va_m_c_type = map_type_to_c(va_m_type_opt.unwrap());
             }
             if equals(va_m_c_type, "void") {
+              va_m_c_type = "void*";
+            }
+            // `{ptr}`/`{raw}` slots use `void*` so the MSVC tag
+            // string emits `'p'` (→ `fmt_raw` in the runtime).
+            if va_is_force_raw.get(va_i) {
               va_m_c_type = "void*";
             }
             va_resolved_ctypes.push(va_m_c_type);
@@ -5623,6 +5664,11 @@ impl Codegen {
               self.state.write("b");
             } elif equals(ctype_for_tag, "char") {
               self.state.write("c");
+            } elif equals(ctype_for_tag, "void*") {
+              // `void*` is produced by force-raw (`{ptr}`/`{raw}`) slots and
+              // by the `void` → `void*` coercion above; both cases pass a raw
+              // pointer, so the `'p'` tag (→ `fmt_raw`) is correct.
+              self.state.write("p");
             } else {
               self.state.write("n");
             }
@@ -7252,6 +7298,69 @@ impl Codegen {
       // `pointer_depth`, since a dereferenced pointer is a plain value.
       // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
+        // `expr?.field`/`expr!.field`: the propagated value used inline
+        // as a receiver, with no intermediate `let` binding. Rendered
+        // the same way a call-as-receiver is (through the ordinary
+        // `emit_expr` path, which already lowers `?`/`!` itself, into a
+        // scratch buffer), resolved to its own unwrapped type the same
+        // way `infer_let_expr_type`'s own `?`/`!` case does.
+        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+          let operand_chain = self.resolve_field_chain(u.operand)?;
+          let operand_dt = operand_chain.dtype?;
+          if operand_dt.generic_args.len == 0 {
+            ret .None;
+          }
+          let t_dt = *operand_dt.generic_args.get(0);
+          let t_name = self.resolve_type_name(t_dt)?;
+
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            // `hoist_insert_pos` may have been advanced past file-scope
+            // forward prototypes emitted while resolving the operand's type
+            // in `resolve_field_chain(u.operand)` above - using it here
+            // would place the propagation temp at file scope instead of
+            // inside the function body. `current_stmt_start_pos` is
+            // correctly adjusted after any such splices and always stays
+            // inside the enclosing function body, so it's the right hoist
+            // target for the ?/! temp and guard that follow.
+            self.root_hoist_pos = self.current_stmt_start_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          CodegenState prop_scratch = codegen_state_new();
+          CodegenState* saved_prop_state = self.state;
+          let saved_prop_hoist_pos = self.hoist_insert_pos;
+          let saved_prop_stmt_start_pos = self.current_stmt_start_pos;
+          let prev_prop_suppress = self.suppress_generic_impl_method_draining;
+          self.state = &prop_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
+          let perr = self.emit_expr(*recv);
+          self.state = saved_prop_state;
+          self.hoist_insert_pos = saved_prop_hoist_pos;
+          self.current_stmt_start_pos = saved_prop_stmt_start_pos;
+          self.suppress_generic_impl_method_draining = prev_prop_suppress;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+            self.hoist_insert_pos = self.root_hoist_pos;
+          }
+          if !prev_prop_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
+          if perr.is_some() {
+            ret .None;
+          }
+
+          ChainResolution r0;
+          r0.text = prop_scratch.out.build();
+          r0.type_name = t_name;
+          r0.is_pointer = dtype_is_pointer(t_dt);
+          r0.dtype = .Some(t_dt);
+          r0.is_call_result = true;
+          ret .Some(r0);
+        }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
           u.indirection_depth != 1 {
           ret .None;
