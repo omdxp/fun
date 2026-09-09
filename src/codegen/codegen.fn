@@ -10171,6 +10171,20 @@ impl Codegen {
           self.current_fn_body_start_pos.is_none();
         if owns_fn_body_start_pos {
           self.current_fn_body_start_pos = .Some(self.state.out.len());
+          // Explicitly synced to the same fresh position, not just
+          // cleared to `.None` - a lazily-triggered generic method's own
+          // drain (`drain_pending_generic_impl_methods`) can leave
+          // `hoist_insert_pos` advanced past wherever its own last
+          // splice landed, and nothing re-syncs it to a new statement
+          // the way `current_stmt_start_pos` is (`emit_statements` arms
+          // that per statement, but never touches this). Left alone, a
+          // leftover position from whichever function most recently
+          // triggered a drain survives into this one, and gets reused
+          // as a splice target if it happens to read as numerically
+          // "before" this function's own start - which nests a full
+          // definition inside the wrong, unrelated function's own
+          // already-closed braces instead of this one's.
+          self.hoist_insert_pos = .Some(self.state.out.len());
         }
         // Fresh per function, and not scoped to nested blocks, so an
         // inner `{ }` shadowing an outer local of the same name isn't

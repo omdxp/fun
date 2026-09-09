@@ -1617,3 +1617,20 @@ test "a method dispatches on a global generic compound instantiation" {
   str out = run_source(src, "global_generic_method", "a method dispatches on a global generic compound instantiation");
   assert contains(out, "1"), "expected 'init'/'put' to dispatch on the global Map instantiation and 'len' to read back correctly";
 }
+
+// A `hoist_insert_pos` leak (a lazily-triggered generic method's own
+// queued drain, spliced through a stale position left over from a
+// *previous* top-level function's own drain, once it happens to read
+// as numerically "before" the next function's own start) was root-
+// caused and fixed directly in this file's own self-compile - see
+// [[project_hoist_position_leak_bug]] in memory and the fix's own
+// comment on `owns_fn_body_start_pos` in `codegen.fn`. No isolated
+// unit repro survived several attempts: the bug depends on
+// accumulated compile-wide state (which generics are already
+// instantiated, exactly where prior splices left every tracked
+// position) that a small, self-contained test program doesn't
+// reproduce, even mirroring the trigger shape closely. The real,
+// reliable regression guard is the full two-pass self-compile bootstrap
+// this repo's own CI already runs on every push, since the fix lives
+// in the exact code path any future generic-method drain goes through
+// regardless of what triggers it.
