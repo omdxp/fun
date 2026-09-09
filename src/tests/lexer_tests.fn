@@ -108,6 +108,25 @@ test "lexes a multi-line raw string block, explicitly closed on the last line" {
   assert toks.get(1).type == .Symbol, "expected the ';' to stay a separate token";
 }
 
+test "a doubled backtick escapes to one literal backtick, inline" {
+  let toks = lex_ok("`a``b`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(tok_text(toks.get(0)), "a`b"), "expected the doubled backtick to decode to one literal backtick, not end the string";
+}
+
+test "a doubled backtick escapes to one literal backtick, across a multi-line raw string" {
+  let toks = lex_ok("`fenced ``word``\n  `line two`;");
+  assert toks.len == 2, "expected the string then the trailing ';'";
+  assert toks.get(0).type == .String, "expected a String token";
+  assert toks.get(0).is_raw_string, "expected the raw-string flag";
+  assert equals(
+    tok_text(toks.get(0)),
+    "fenced `word`\nline two"
+  ), "expected doubled backticks decoded on both lines, joined with a real newline";
+}
+
 test "lexes an integer literal" {
   let toks = lex_ok("12345");
   assert toks.len == 1, "expected 1 token";
