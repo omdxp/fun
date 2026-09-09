@@ -24,7 +24,7 @@ contexts:
     - match: \b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\b)
       captures:
         1: entity.name.type.fun
-    - match: (->|::|\+=|-=|\*=|/=|%=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!&|^~.])
+    - match: (->|::|\+=|-=|\*=|/=|%=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!?&|^~.])
       scope: keyword.operator.fun
     - match: (;|,|:)
       scope: punctuation.separator.fun

@@ -8,7 +8,7 @@ syn match funType "\v\<(i|u)[1-9][0-9]*\>"
 syn match funCustomType "\v\<(compound|quirk|enum|impl)\s+\zs[A-Za-z_][A-Za-z0-9_]*\>"
 syn match funCustomType "\v\<[A-Za-z_][A-Za-z0-9_]*\ze\s*<[^>]+>"
 syn match funCustomType "\v\<[A-Z][A-Za-z0-9_]*\>\ze\s*(\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\>"
-syn match funOperator "\v(->|::|\+=|-=|\*=|/=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!&|^~.])"
+syn match funOperator "\v(->|::|\+=|-=|\*=|/=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!?&|^~.])"
 syn match funOperator "%="
 syn match funOperator "\v[;,:]"
 syn keyword funSupportType size_t ptrdiff_t ssize_t intptr_t uintptr_t int8_t uint8_t int16_t uint16_t int32_t uint32_t int64_t uint64_t time_t clock_t

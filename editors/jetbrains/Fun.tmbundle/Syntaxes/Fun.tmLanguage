@@ -152,7 +152,7 @@
         <string>keyword.operator.fun</string>
         <key>match</key>
         <string>
-          (-&gt;|::|\+=|-=|\*=|/=|%=|==|!=|&lt;=|&gt;=|&amp;&amp;|\|\||&lt;&lt;|&gt;&gt;|\+\+|--|[+\-*/%=&lt;&gt;!&amp;|^~.])</string>
+          (-&gt;|::|\+=|-=|\*=|/=|%=|==|!=|&lt;=|&gt;=|&amp;&amp;|\|\||&lt;&lt;|&gt;&gt;|\+\+|--|[+\-*/%=&lt;&gt;!?&amp;|^~.])</string>
       </dict>
       <dict>
         <key>name</key>
