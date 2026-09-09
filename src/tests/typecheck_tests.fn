@@ -1400,3 +1400,25 @@ test "postfix '!' propagates through a private (leading-underscore) method call 
     "expected '!' to unwrap a private method call through 'self' and typecheck cleanly"
   );
 }
+
+test "a duplicate compound name reports which kind and where, not a bare error" {
+  str msg = check(
+    `compound Shared { num x; }
+    `compound Shared { str y; }
+    `fun main() {}`
+  );
+  assert contains(msg, "'Shared' is already declared as a compound"), "expected the diagnostic to name the symbol and its kind";
+}
+
+test "a duplicate top-level name reports across different kinds too, not just matching ones" {
+  // Same underlying check as the compound case above:
+  // '_check_duplicate_top_level' is keyed by name alone, since a
+  // function, a global variable, a compound, and an enum all lower to
+  // the same top-level C symbol/typedef namespace regardless of kind.
+  str msg = check(
+    `compound Shared { num x; }
+    `fun Shared() num { ret 0; }
+    `fun main() {}`
+  );
+  assert contains(msg, "'Shared' is already declared as a compound"), "expected the diagnostic to name the earlier declaration's own kind";
+}
