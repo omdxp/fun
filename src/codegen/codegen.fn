@@ -7160,13 +7160,15 @@ impl Codegen {
           r.is_call_result = true;
           ret .Some(r);
         }
-        // An indexed receiver (`arr[0].getV()`), for a fixed-size array
-        // local: the element is what is addressed, so its type is what
-        // the array itself is already tracked under (see
-        // `resolve_quirk_coerce_addressed_type`'s array case, which
-        // reads the same thing for `&arr[i]`). Only a bare array
-        // identifier is handled; a further chain (`self.arr[0]`) is not
-        // attempted.
+        // An indexed receiver (`arr[0].getV()`): the element is what is
+        // addressed, so its type is what the base being indexed is
+        // itself tracked under (see `resolve_quirk_coerce_addressed_
+        // type`'s array case, which reads the same thing for `&arr[i]`).
+        // A bare local base resolves directly; any further chain
+        // (`self.arr[0]`, `v.data[0]`, a call's own result indexed) goes
+        // through the ordinary receiver resolution just below it, so the
+        // same array-vs-pointer element rule applies to whatever that
+        // resolves to instead of only a bare local's own declaration.
         if equals(inner_e.op, "[]") && inner_e.has_left {
           str elem_type_name = "";
           bin elem_is_pointer = false;
@@ -7198,7 +7200,25 @@ impl Codegen {
                 have_elem = true;
               }
             }
-            _ -> {}
+            _ -> {
+              let base_r_opt = self.resolve_field_chain(inner_e.left);
+              if base_r_opt.is_some() {
+                let base_r = base_r_opt.unwrap();
+                elem_type_name = base_r.type_name;
+                elem_dtype = base_r.dtype;
+                if base_r.dtype.is_some() {
+                  let bdt = base_r.dtype.unwrap();
+                  if bdt.is_array {
+                    elem_is_pointer = dtype_is_pointer(bdt);
+                  } else {
+                    elem_is_pointer = bdt.pointer_depth > 1;
+                  }
+                } else {
+                  elem_is_pointer = base_r.is_pointer;
+                }
+                have_elem = true;
+              }
+            }
           }
           if !have_elem {
             ret .None;

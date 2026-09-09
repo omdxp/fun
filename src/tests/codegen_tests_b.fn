@@ -1474,3 +1474,39 @@ test "'fit expr!' evaluates a propagated subject exactly once under MSVC codegen
   assert contains(out_c, "__fit_subj"), "expected the unwrapped value to be hoisted into its own fit-subject temp";
   assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
 }
+
+test "a method call dispatches on an indexed element reached through a field chain, not just a bare array local" {
+  // Regression: `resolve_field_chain`'s own indexed-receiver case
+  // resolved the element type only for a bare array/pointer local
+  // (`arr[0].method()`), leaving any further chain unresolved
+  // ('no member named ...' once compiled) - exactly the shape
+  // `self.tables.data[i].free()` needed real code to work around by
+  // binding a pointer first. Generalized to resolve the base being
+  // indexed through the ordinary receiver path instead of only a
+  // bare local's own declaration.
+  str src = `imp std.c.io;
+  `imp std.vec;
+  `compound Box { num v; }
+  `impl Box {
+  `  pub describe() num { ret self.v; }
+  `}
+  `compound Holder { Vec<Box> tables; }
+  `impl Holder {
+  `  pub add(num v) { self.tables.push(Box{v = v}); }
+  `  pub show(num i) num { ret self.tables.data[i].describe(); }
+  `}
+  `fun main() num {
+  `  Holder h;
+  `  h.tables.init(4);
+  `  h.add(11);
+  `  h.add(22);
+  `  printf("%lld\n", h.show(1));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "method_on_indexed_field_chain",
+    "a method call dispatches on an indexed element reached through a field chain"
+  );
+  assert contains(out, "22"), "expected the method call on 'self.tables.data[i]' to dispatch correctly";
+}
