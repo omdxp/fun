@@ -7166,61 +7166,6 @@ impl Codegen {
       // `pointer_depth`, since a dereferenced pointer is a plain value.
       // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
-        // `expr?.field`/`expr!.field`: the propagated value used inline
-        // as a receiver, with no intermediate `let` binding. Rendered
-        // the same way a call-as-receiver is (through the ordinary
-        // `emit_expr` path, which already lowers `?`/`!` itself, into a
-        // scratch buffer), resolved to its own unwrapped type the same
-        // way `infer_let_expr_type`'s own `?`/`!` case does.
-        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          let operand_chain = self.resolve_field_chain(u.operand)?;
-          let operand_dt = operand_chain.dtype?;
-          if operand_dt.generic_args.len == 0 {
-            ret .None;
-          }
-          let t_dt = *operand_dt.generic_args.get(0);
-          let t_name = self.resolve_type_name(t_dt)?;
-
-          if self.hoist_scratch_depth == 0 {
-            self.root_state = self.state;
-            self.root_hoist_pos = self.hoist_insert_pos;
-            self.root_stmt_start_pos = self.current_stmt_start_pos;
-          }
-          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState prop_scratch = codegen_state_new();
-          CodegenState* saved_prop_state = self.state;
-          let saved_prop_hoist_pos = self.hoist_insert_pos;
-          let saved_prop_stmt_start_pos = self.current_stmt_start_pos;
-          let prev_prop_suppress = self.suppress_generic_impl_method_draining;
-          self.state = &prop_scratch;
-          self.hoist_insert_pos = .None;
-          self.current_stmt_start_pos = .None;
-          self.suppress_generic_impl_method_draining = true;
-          let perr = self.emit_expr(*recv);
-          self.state = saved_prop_state;
-          self.hoist_insert_pos = saved_prop_hoist_pos;
-          self.current_stmt_start_pos = saved_prop_stmt_start_pos;
-          self.suppress_generic_impl_method_draining = prev_prop_suppress;
-          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
-          if self.hoist_scratch_depth == 0 {
-            self.current_stmt_start_pos = self.root_stmt_start_pos;
-            self.hoist_insert_pos = self.root_hoist_pos;
-          }
-          if !prev_prop_suppress && !self.draining_generic_impl_methods {
-            self.drain_pending_generic_impl_methods();
-          }
-          if perr.is_some() {
-            ret .None;
-          }
-
-          ChainResolution r0;
-          r0.text = prop_scratch.out.build();
-          r0.type_name = t_name;
-          r0.is_pointer = dtype_is_pointer(t_dt);
-          r0.dtype = .Some(t_dt);
-          r0.is_call_result = true;
-          ret .Some(r0);
-        }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
           u.indirection_depth != 1 {
           ret .None;
