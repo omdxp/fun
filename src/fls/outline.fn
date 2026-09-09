@@ -418,8 +418,7 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
                   method.pos
                 );
                 if target_idx >= 0 {
-                  OutlineEntry* target = &out.data[target_idx];
-                  target.children.push(me);
+                  out.data[target_idx].children.push(me);
                 } else {
                   out.push(me);
                 }

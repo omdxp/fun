@@ -367,8 +367,7 @@ impl TypeEnv {
     Binding b;
     b.type = type;
     b.is_const = is_const;
-    Map<str, Binding>* scope = &self.scopes.data[self.scopes.len - 1];
-    scope.put(name, b);
+    self.scopes.data[self.scopes.len - 1].put(name, b);
   }
 
   // What `name` is bound to, searching inner scopes first.
@@ -376,8 +375,7 @@ impl TypeEnv {
     num i = self.scopes.len;
     for i > 0 {
       i = i - 1;
-      Map<str, Binding>* scope = &self.scopes.data[i];
-      let found = scope.at(name);
+      let found = self.scopes.data[i].at(name);
       if found.is_some() {
         ret found;
       }
@@ -2915,14 +2913,13 @@ impl Checker {
     env.push();
     num g = 0;
     for g < nodes.len {
-      Node* global = &nodes.data[g];
-      g = g + 1;
-      fit global.kind {
+      fit nodes.data[g].kind {
         .Variable(v) -> {
           env.bind(v.name, checked_from_dtype(v.var_type), v.is_const);
         }
         _ -> {}
       }
+      g = g + 1;
     }
     env.push();
     if !equals(self_type, "") {

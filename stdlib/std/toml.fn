@@ -218,15 +218,13 @@ impl TomlDoc {
     self.values.free();
     num i = 0;
     for i < self.tables.len {
-      TomlTable* t = &self.tables.data[i];
-      t.free();
+      self.tables.data[i].free();
       i = i + 1;
     }
     self.tables.free();
     num j = 0;
     for j < self.array_tables.len {
-      TomlTable* a = &self.array_tables.data[j];
-      a.free();
+      self.array_tables.data[j].free();
       j = j + 1;
     }
     self.array_tables.free();
@@ -368,11 +366,9 @@ fun _route_line(TomlDoc* out, str line, num section, num index) {
     ret;
   }
   if section == 1 {
-    TomlTable* t = &out.tables.data[index];
-    t.values.put(key, _classify(value_text));
+    out.tables.data[index].values.put(key, _classify(value_text));
   } else {
-    TomlTable* a = &out.array_tables.data[index];
-    a.values.put(key, _classify(value_text));
+    out.array_tables.data[index].values.put(key, _classify(value_text));
   }
 }
 

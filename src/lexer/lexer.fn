@@ -816,8 +816,7 @@ impl Lexer {
       // marked as being followed by some, which is what tells a pointer
       // or generic-argument spelling apart from an operator.
       if self.tokens.len > 0 {
-        Token* last = &self.tokens.data[self.tokens.len - 1];
-        last.whitespace = true;
+        self.tokens.data[self.tokens.len - 1].whitespace = true;
       }
       self._advance();
       ret self._next_inner();
