@@ -717,7 +717,8 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
     .Identifier -> { ret true; }
     _ -> {}
   }
-  ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']');
+  ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']') ||
+    token_is_operator(bd, "?") || token_is_operator(bd, "!");
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
@@ -757,10 +758,25 @@ fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
 pub fun is_return_value(Vec<Token>* tokens, Token t) bin {
   num index = index_of_token(tokens, t);
   num i = index - 1;
+  // Bounded by the nearest enclosing '(' too, not just ';'/'{'/'}':
+  // `ret .Some(get()?.x)` walking back from `x`'s own dot hits no
+  // statement boundary before reaching `ret`, but the value in
+  // question is `.Some`'s own argument, not the `ret`'s direct value -
+  // an unmatched '(' (one with no ')' already counted against it while
+  // walking backward) marks exactly that nesting.
+  num paren_depth = 0;
   for i >= 0 {
     Token tok = tokens.get(i);
     if token_is_symbol(tok, ';') || token_is_symbol(tok, '{') || token_is_symbol(tok, '}') {
       ret false;
+    }
+    if token_is_symbol(tok, ')') {
+      paren_depth = paren_depth + 1;
+    } elif token_is_operator(tok, "(") {
+      if paren_depth == 0 {
+        ret false;
+      }
+      paren_depth = paren_depth - 1;
     }
     fit tok.type {
       .Keyword -> { ret equals(token_word(tok), "ret"); }

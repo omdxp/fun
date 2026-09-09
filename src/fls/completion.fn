@@ -214,6 +214,19 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     }
   }
 
+  str propagation_type = _propagation_receiver_type_before(
+    &tokens,
+    line,
+    character,
+    &program.nodes,
+    doc.path,
+    source_line
+  );
+  if !equals(propagation_type, "") {
+    _members_of(&program.nodes, propagation_type, &items, snippets);
+    ret _reply(&items);
+  }
+
   if !equals(receiver, "") {
     // After a dot, only what the receiver actually has is worth
     // offering; the reserved words are not. Walks the whole dotted
@@ -1711,6 +1724,98 @@ fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file,
   // than the current document (`fit n.kind { ... }`, this
   // codebase's own dominant idiom for matching an AST node's kind).
   ret _field_type_from_imports(tokens, current_file, cache, base_type, field_name);
+}
+
+// The propagated operand's own unwrapped type, when the token right
+// before the completion-triggering dot is `?`/`!` (`get()?.`, `x?.`).
+// `_receiver_before`/`_receiver_token_before` both reset to empty the
+// moment they see a non-identifier token, so neither ever reaches this
+// shape - and even if they did, `_receiver_own_type`'s own field-lookup
+// approach needs a real name to look up, which a propagation operator
+// isn't. Resolved the same way `chain_receiver`'s own propagation case
+// is (the operand's own chain-ending type, unwrapped one level), just
+// entered from the dot position directly rather than from an already-
+// typed token after it, since nothing is typed yet here. "" when the
+// dot isn't preceded by a propagation at all.
+fun _propagation_receiver_type_before(
+  Vec<Token>* tokens,
+  num line,
+  num character,
+  Vec<Node>* program,
+  str file,
+  num src_line
+) str {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  Option<Token> last_dot = .None;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    if token_is_operator(t, ".") {
+      last_dot = .Some(t);
+    } else {
+      last_dot = .None;
+    }
+  }
+  if last_dot.is_none() {
+    ret "";
+  }
+  let prop_opt = token_before(tokens, index_of_token(tokens, last_dot.unwrap()));
+  if prop_opt.is_none() {
+    ret "";
+  }
+  Token pt = prop_opt.unwrap();
+  if !token_is_operator(pt, "?") && !token_is_operator(pt, "!") {
+    ret "";
+  }
+  let operand_opt = token_before(tokens, index_of_token(tokens, pt));
+  if operand_opt.is_none() {
+    ret "";
+  }
+  Token op_tail = operand_opt.unwrap();
+  bin op_is_call = false;
+  if token_is_symbol(op_tail, ')') {
+    // Matches the closing paren backward to find the callee - inline
+    // rather than reusing `symbols.fn`'s own private `_matching_lparen`,
+    // which isn't visible outside that file.
+    num depth = 1;
+    num j = index_of_token(tokens, op_tail) - 1;
+    for j >= 0 && depth > 0 {
+      if token_is_symbol(tokens.get(j), ')') {
+        depth = depth + 1;
+      } elif token_is_operator(tokens.get(j), "(") {
+        depth = depth - 1;
+      }
+      if depth == 0 {
+        break;
+      }
+      j = j - 1;
+    }
+    if depth == 0 && j > 0 {
+      let callee_opt = token_before(tokens, j);
+      if callee_opt.is_some() {
+        fit callee_opt.unwrap().type {
+          .Identifier -> {
+            op_is_call = true;
+            op_tail = callee_opt.unwrap();
+          }
+          _ -> {}
+        }
+      }
+    }
+  }
+  let inner = chain_ending_receiver(tokens, op_tail, op_is_call, program, file, src_line, 0);
+  if inner.generic_args.len == 0 {
+    ret "";
+  }
+  ret inner.generic_args.get(0);
 }
 
 // The name a dot immediately before the cursor is reached through, or

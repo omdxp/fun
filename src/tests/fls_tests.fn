@@ -5591,6 +5591,54 @@ test "hover on '?' and postfix '!' shows propagation doc text, prefix '!' does n
   assert contains(hov_bang, "Result propagation"), "expected postfix '!' to show propagation doc";
 }
 
+test "hover resolves a field access chained inline onto a propagation, with no intermediate 'let'" {
+  // Regression: `get()?.x` (a `?`-propagated call used directly as a
+  // receiver) never resolved in hover at all - `chain_receiver`'s own
+  // backward walk had no case for a `?`/`!` operator sitting where an
+  // identifier or a call's own ')' normally would, so it broke off the
+  // chain immediately with nothing collected. Also fixed a real,
+  // unrelated bug found isolating this: `is_return_value` walked back
+  // to `ret` with no bound at an enclosing '(', so a propagation nested
+  // inside another call's own argument list (`ret .Some(get()?.x);`)
+  // was wrongly treated as the `ret`'s own direct bare-shorthand value,
+  // resolving against the *enclosing function's* return type instead.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlineprop.fn";
+  doc.path = "inlineprop.fn";
+  doc.text = `imp std.option;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Option<num> {
+  `  ret .Some(get()?.x);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 4, 19);
+  assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' to Point's own field type";
+}
+
+test "dot-completion offers a propagated receiver's own unwrapped-type members, with no intermediate 'let'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropcomp.fn";
+  doc.path = "inlinepropcomp.fn";
+  doc.text = `imp std.option;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Option<num> {
+  `  ret .Some(get()?.x);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 4, 19, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' to be offered through the propagated receiver";
+  assert contains(comp, `"label":"y"`), "expected every field, not just the one already written";
+  assert !contains(comp, `"label":"Some"`), "expected Point's own fields, not Option's own shorthand variants";
+}
+
 test "hover on a let-bound '?' propagation shows the unwrapped type, and completion on it is filtered" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

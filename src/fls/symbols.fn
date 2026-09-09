@@ -1531,6 +1531,16 @@ compound ChainSeg {
   // another operator, or nothing) is not part of this chain.
   bin is_paren_group;
   bin paren_is_call;
+  // Set for a `?`/`!`-propagated operand used directly as a receiver
+  // (`get()?.field`, `x?.field`), with no intermediate `let`. Same
+  // "always the chain's own first segment" contract as `is_paren_
+  // group`: `tok` names the propagated operand's own last token (the
+  // call's `)`, or a bare identifier), and `propagation_is_call` says
+  // whether that's a call, both needed to resolve the operand's own
+  // type through `chain_ending_receiver` before unwrapping one level
+  // (`Option<T>`/`Result<T, E>` to `T`) for the rest of the chain.
+  bin is_propagation;
+  bin propagation_is_call;
 }
 
 // The index of the `(` matching the `)` at `rparen_idx`, scanning
@@ -2144,6 +2154,52 @@ pub fun chain_receiver(
     }
     Token seg_tok = before_dot.unwrap();
     bin is_call = false;
+    if token_is_operator(seg_tok, "?") || token_is_operator(seg_tok, "!") {
+      // `get()?.field`/`x?.field`: the propagated operand used directly
+      // as this segment's own receiver, with no intermediate `let`.
+      // Resolves like a plain chain ending (the same machinery a `ret
+      // get()?;` or a `let`-bound propagation already goes through),
+      // then unwraps one level for the rest of the walk above it - same
+      // "always the first segment" contract as the paren-group case
+      // right below, since whatever precedes the operand here isn't
+      // part of this chain either.
+      let prop_operand = token_before(tokens, index_of_token(tokens, seg_tok));
+      if prop_operand.is_none() {
+        break;
+      }
+      Token prop_tail = prop_operand.unwrap();
+      bin prop_is_call = false;
+      if token_is_symbol(prop_tail, ')') {
+        let prop_lparen = _matching_lparen(tokens, index_of_token(tokens, prop_tail));
+        if prop_lparen.is_some() {
+          let prop_callee = token_before(tokens, prop_lparen.unwrap());
+          if prop_callee.is_some() {
+            fit prop_callee.unwrap().type {
+              // `chain_ending_receiver` expects `last_tok` to be the
+              // callee's own name token when `last_is_call` is set (it
+              // reads `token_word(last_tok)` to look the callee up), not
+              // the closing paren - reassigned here the same way the
+              // paren-group case above does for its own inner call tail.
+              .Identifier -> {
+                prop_is_call = true;
+                prop_tail = prop_callee.unwrap();
+              }
+              _ -> {}
+            }
+          }
+        }
+      }
+      ChainSeg propseg;
+      propseg.name = "";
+      propseg.is_call = false;
+      propseg.tok = prop_tail;
+      propseg.is_paren_group = false;
+      propseg.paren_is_call = false;
+      propseg.is_propagation = true;
+      propseg.propagation_is_call = prop_is_call;
+      segments.push(propseg);
+      break;
+    }
     if token_is_symbol(seg_tok, ')') {
       let lparen = _matching_lparen(tokens, index_of_token(tokens, seg_tok));
       if lparen.is_none() {
@@ -2211,6 +2267,8 @@ pub fun chain_receiver(
         pseg.tok = inner_tok;
         pseg.is_paren_group = true;
         pseg.paren_is_call = inner_is_call;
+        pseg.is_propagation = false;
+        pseg.propagation_is_call = false;
         segments.push(pseg);
         break;
       }
@@ -2226,6 +2284,8 @@ pub fun chain_receiver(
     seg.tok = seg_tok;
     seg.is_paren_group = false;
     seg.paren_is_call = false;
+    seg.is_propagation = false;
+    seg.propagation_is_call = false;
     segments.push(seg);
     cursor = index_of_token(tokens, seg_tok);
   }
@@ -2279,6 +2339,26 @@ pub fun chain_receiver(
     );
     current_type = inner.type_name;
     current_args = inner.generic_args;
+  } elif first.is_propagation {
+    // The propagated operand's own resolved type (`Option`/`Result`,
+    // plus its generic args) unwraps one level for the rest of the
+    // chain: `T` out of `Option<T>`, best-effort like every other
+    // token-only resolution in this file (a further-generic `T` isn't
+    // tracked past this point, so `current_args` is cleared rather than
+    // left stale).
+    ChainReceiver prop_inner = chain_ending_receiver(
+      tokens,
+      first.tok,
+      first.propagation_is_call,
+      program,
+      file,
+      line,
+      depth + 1
+    );
+    if prop_inner.generic_args.len > 0 {
+      current_type = prop_inner.generic_args.get(0);
+    }
+    current_args.init(0);
   } else {
     current_type = type_name_of_local(tokens, program, first.name, file, line);
     current_args = local_generic_args(tokens, program, first.name, file, line);
