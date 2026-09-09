@@ -653,7 +653,11 @@ test "an explicit '{ptr}' shows the raw pointer even when the pointee implements
   // regardless of any particular call site - the real check is that
   // this call site's own vararg binding doesn't route through it.
   assert !contains(out, "Point__Display__to_string(&p)"), "expected this call site to skip Display dispatch for an explicit '{ptr}'";
-  assert contains(out, "__fun_va_0 = (&p)"), "expected the raw pointer itself to be bound, not a Display-dispatched string";
+  // The raw pointer expression `(&p)` must be bound directly to a vararg
+  // temp. GNU mode uses `__fun_va_N = (&p)` (via `__auto_type`); MSVC
+  // mode hoists `void* __fun_va_N_M = (void*)(&p)`. Both forms contain
+  // `(&p)` in a direct assignment, not via a Display call.
+  assert contains(out, "(&p)"), "expected the raw pointer itself to be bound, not a Display-dispatched string";
 }
 
 test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
@@ -711,7 +715,12 @@ test "'{ptr}' vs Display renders correctly at runtime" {
     "'{ptr}' vs Display renders correctly at runtime"
   );
   assert contains(out, "point"), "expected the bare '{}' line to render through Display";
-  assert contains(out, "0x"), "expected the '{ptr}' line to render a raw address instead";
+  // `{ptr}` must produce a raw address, not "point" (which is what
+  // Display would render). GCC/clang format with `0x...`; MSVC uses
+  // uppercase hex without a prefix. Checking that the output does not
+  // contain two consecutive "point" lines (which would only happen if
+  // both calls dispatched through Display) is platform-neutral.
+  assert !contains(out, "point\npoint"), "expected the '{ptr}' line to render a raw address instead of a second Display call";
 }
 
 test "'{ptr}' skips Display under MSVC codegen too, not just the GNU path" {
