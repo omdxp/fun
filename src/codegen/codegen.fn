@@ -8923,6 +8923,53 @@ impl Codegen {
           subj_name = fit_subj_name1;
           subj_type = resolved_await_rtype;
           subj_is_pointer = false;
+        } elif u.is_left_operanded_unary &&
+          (equals(u.op, "?") || equals(u.op, "!")) {
+          // `fit expr?`/`fit expr!` (a propagation used directly as a fit
+          // subject, with no intermediate `let`): resolves the operand's
+          // own `Option<T>`/`Result<T,E>` instantiation to find `T` (the
+          // same lookup `resolve_field_chain`'s own `?`/`!`-as-receiver
+          // case uses), then hoists a `__fit_subjN` temp holding the
+          // propagated-and-unwrapped value by delegating straight to
+          // `emit_expr`, which already lowers `?`/`!` itself on both the
+          // GNU statement-expression and MSVC hoisted-temp-and-guard
+          // paths. The propagation is evaluated exactly once this way,
+          // regardless of how many branches below reference the subject.
+          let operand_chain_p = self.resolve_field_chain(u.operand);
+          if operand_chain_p.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          let operand_dt_opt = operand_chain_p.unwrap().dtype;
+          if operand_dt_opt.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          let operand_dt = operand_dt_opt.unwrap();
+          if operand_dt.generic_args.len == 0 {
+            ret .Some(.UnsupportedNode);
+          }
+          let t_dt_p = *operand_dt.generic_args.get(0);
+          let t_name_p = self.resolve_type_name(t_dt_p);
+          if t_name_p.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          let fit_subj_name_p = self.next_fit_subj_name();
+          if self.msvc_mode {
+            self.state.write(map_type_to_c(t_name_p.unwrap()));
+          } else {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
+          self.state.write(fit_subj_name_p);
+          self.state.write(" = ");
+          let perr2 = self.emit_expr(*f.exp);
+          if perr2.is_some() {
+            ret perr2;
+          }
+          self.state.write(";\n");
+          self.state.write_indent();
+          subj_name = fit_subj_name_p;
+          subj_type = t_name_p;
+          subj_is_pointer = false;
         } elif u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
           ret .Some(.UnsupportedNode);
         } else {

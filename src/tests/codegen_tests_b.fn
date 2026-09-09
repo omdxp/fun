@@ -1395,3 +1395,82 @@ test "postfix '?'/'!' chain a further field access inline, with no intermediate 
   assert contains(out, "x"), "expected the '?' chain to resolve Field's own 'type_name'";
   assert contains(out, "err: empty"), "expected the '!' chain to propagate the '.Err' before reaching the field access";
 }
+
+test "'fit expr?'/'fit expr!' match directly on a propagated subject, with no intermediate 'let'" {
+  str src = `imp std.c.io;
+  `imp std.option;
+  `imp std.result;
+  `enum Color { Red, Green, Blue }
+  `fun pick_option(bin want) Option<Color> {
+  `  if !want { ret .None; }
+  `  ret .Some(.Green);
+  `}
+  `fun pick_result(bin want) Result<Color, str> {
+  `  if !want { ret .Err("no color"); }
+  `  ret .Ok(.Blue);
+  `}
+  `fun describe_option(bin want) Option<str> {
+  `  fit pick_option(want)? {
+  `    .Red -> { ret .Some("red"); }
+  `    .Green -> { ret .Some("green"); }
+  `    .Blue -> { ret .Some("blue"); }
+  `  }
+  `}
+  `fun describe_result(bin want) Result<str, str> {
+  `  fit pick_result(want)! {
+  `    .Red -> { ret .Ok("red"); }
+  `    .Green -> { ret .Ok("green"); }
+  `    .Blue -> { ret .Ok("blue"); }
+  `  }
+  `}
+  `fun main() num {
+  `  printf("%s\n", describe_option(true).unwrap());
+  `  printf("%d\n", describe_option(false).is_none());
+  `  printf("%s\n", describe_result(true).unwrap());
+  `  printf("%d\n", describe_result(false).is_err());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "fit_propagation_subject",
+    "'fit expr?'/'fit expr!' match directly on a propagated subject"
+  );
+  assert contains(out, "green"), "expected the '.Some(.Green)' subject to dispatch to the '.Green' arm";
+  assert contains(out, "1\n"), "expected the '.None' input to propagate before ever reaching the fit";
+  assert contains(out, "blue"), "expected the '.Ok(.Blue)' subject to dispatch to the '.Blue' arm";
+  assert contains(out, "blue\n1"), "expected the '.Err' input to propagate before ever reaching the fit";
+}
+
+test "'fit expr!' evaluates a propagated subject exactly once under MSVC codegen" {
+  // Regression guard: `fit`'s enum-shorthand branch dispatch reads the
+  // subject's tag once per arm it checks, so a naive implementation that
+  // spliced the propagation's own rendered text in as the subject
+  // (rather than hoisting it once into its own `__fit_subjN` temp, the
+  // same as every other fit-subject kind) would re-run the guard/early-
+  // return on every arm check - wrong under MSVC specifically, where the
+  // hoisted form has no statement-expression to wrap repeated evaluation
+  // safely.
+  str src = `imp std.c.io;
+  `imp std.result;
+  `enum Color { Red, Green, Blue }
+  `fun pick_result(bin want) Result<Color, str> {
+  `  if !want { ret .Err("no color"); }
+  `  ret .Ok(.Blue);
+  `}
+  `fun describe_result(bin want) Result<str, str> {
+  `  fit pick_result(want)! {
+  `    .Red -> { ret .Ok("red"); }
+  `    .Green -> { ret .Ok("green"); }
+  `    .Blue -> { ret .Ok("blue"); }
+  `  }
+  `}
+  `fun main() num { ret 0; }`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "fit_propagation_subject_msvc",
+    "'fit expr!' evaluates a propagated subject exactly once under MSVC codegen"
+  );
+  assert contains(out_c, "__fun_try_"), "expected the propagation's own temp and guard to be hoisted";
+  assert contains(out_c, "__fit_subj"), "expected the unwrapped value to be hoisted into its own fit-subject temp";
+  assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
+}

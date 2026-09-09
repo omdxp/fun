@@ -325,9 +325,18 @@ fun combine_result(num x) Result<num, str> {
   then compare"; write `foo()! == x` if propagation was intended.
 - This is pure sugar: the equivalent `if`/`ret` form still works
   everywhere and is what these operators expand to.
-- `fit expr? { ... }`/`fit expr! { ... }` (a propagation used directly as
-  a `fit` subject) is not supported; bind it with `let` first (`let v =
-  expr?; fit v { ... }`).
+- A propagation can also be used directly as a `fit` subject
+  (`fit expr? { ... }`/`fit expr! { ... }`), with no intermediate `let`
+  needed:
+
+  ```fun
+  fun describe(num x) Option<str> {
+    fit half(x)? {
+      0 -> { ret .Some("zero"); }
+      _ -> { ret .Some("nonzero"); }
+    }
+  }
+  ```
 
 ## Compounds & Quirks
 

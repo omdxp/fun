@@ -70,6 +70,16 @@ impl Account {
   }
 }
 
+// A propagation can also be used directly as a `fit` subject, with no
+// intermediate `let` needed: `half(x)?` is unwrapped once, then matched
+// against `0`/`_` the same way any other `fit` subject would be.
+fun describe(num x) Option<str> {
+  fit half(x)? {
+    0 -> { ret .Some("zero"); }
+    _ -> { ret .Some("nonzero"); }
+  }
+}
+
 fun main() num {
   Option<num> a = combine(8);
   Option<num> b = combine(7);
@@ -84,6 +94,7 @@ fun main() num {
   printf("combine_result ok: %lld\n", c.unwrap());
 
   printf("double_then_check: %lld\n", double_then_check(6).unwrap());
+  printf("describe: %s %s\n", describe(4).unwrap(), describe(0).unwrap());
 
   Account acc = .{balance = 100};
   Result<num, str> withdrawn = acc.withdraw(30);
