@@ -1815,7 +1815,10 @@ fun _propagation_receiver_type_before(
   if inner.generic_args.len == 0 {
     ret "";
   }
-  ret inner.generic_args.get(0);
+  // The raw generic-arg text carries a pointer star as written
+  // (`Node*` for `Option<Node*>`), which `_members_of`'s own lookup by
+  // bare type name doesn't expect.
+  ret bare_type_expr(inner.generic_args.get(0));
 }
 
 // The name a dot immediately before the cursor is reached through, or

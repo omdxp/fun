@@ -5664,6 +5664,33 @@ test "dot-completion offers a propagated receiver's own unwrapped-type members, 
   assert !contains(comp, `"label":"Some"`), "expected Point's own fields, not Option's own shorthand variants";
 }
 
+test "dot-completion offers a propagated receiver's own members when the unwrapped type is a pointer" {
+  // Regression: `_propagation_receiver_type_before` read the unwrapped
+  // generic arg's raw text directly (`Point*` for `Option<Point*>`),
+  // which `_members_of`'s own lookup by bare type name doesn't match -
+  // the star was never stripped, so completion silently offered
+  // nothing whenever the propagated Option/Result's own T was itself a
+  // pointer type. Same root cause as the hover regression just above,
+  // fixed in the same pass (both routed the raw generic-arg text into a
+  // type-name lookup with no stripping).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropcomppointer.fn";
+  doc.path = "inlinepropcomppointer.fn";
+  doc.text = `imp std.option;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point*> { ret .None; }
+  `fun main() Option<num> {
+  `  ret .Some(get()?.x);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 4, 19, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' through the propagated pointer receiver";
+  assert contains(comp, `"label":"y"`), "expected every field, not just the one already written";
+}
+
 test "hover on a let-bound '?' propagation shows the unwrapped type, and completion on it is filtered" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

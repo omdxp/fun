@@ -1444,7 +1444,7 @@ pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str
     if equals(inferred, "") {
       ret "";
     }
-    ret _bare_type_expr(inferred);
+    ret bare_type_expr(inferred);
   }
   ret bare_type_from_detail(d.detail);
 }
@@ -1453,7 +1453,7 @@ pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str
 // spelling removed: up to the first `<`, stars stripped. `type_expr`
 // is already just a type on its own, not a "Type name" pair (see
 // `bare_type_from_detail` for that shape).
-fun _bare_type_expr(str type_expr) str {
+pub fun bare_type_expr(str type_expr) str {
   str written = type_expr;
   bin owned = false;
   num cut = index_of_char(written, '<');
@@ -1480,7 +1480,7 @@ pub fun bare_type_from_detail(str detail) str {
   if space <= 0 {
     ret "";
   }
-  ret _bare_type_expr(substr(detail, 0, space));
+  ret bare_type_expr(substr(detail, 0, space));
 }
 
 // The bare return type of a rendered function/method signature
@@ -1492,7 +1492,7 @@ pub fun return_type_from_detail(str signature) str {
   if close < 0 {
     ret "";
   }
-  ret _bare_type_expr(trim(substr(signature, close + 1, len(signature) - close - 1)));
+  ret bare_type_expr(trim(substr(signature, close + 1, len(signature) - close - 1)));
 }
 
 // `return_type_from_detail`, but keeping the pointer star and any
@@ -1633,7 +1633,7 @@ fun _walk_forward_chain(
   num* out_end_idx,
   Vec<str>* out_args
 ) str {
-  str current_type = _bare_type_expr(start_type);
+  str current_type = bare_type_expr(start_type);
   Vec<str> current_args = generic_args_of_detail(start_type);
   str current_full = start_type;
   num cursor = from_idx;
@@ -2360,7 +2360,7 @@ pub fun chain_receiver(
       // (`Node*` for `Option<Node*>`), which a field/method lookup by
       // bare type name doesn't expect - stripped the same way any other
       // pointer-spelled type name is bared elsewhere in this file.
-      current_type = _bare_type_expr(prop_inner.generic_args.get(0));
+      current_type = bare_type_expr(prop_inner.generic_args.get(0));
     }
     current_args.init(0);
   } else {
@@ -4359,8 +4359,9 @@ pub fun fit_subject_generic_args(
 }
 
 // The first generic type argument of local/parameter `name`'s own
-// declared type, as written (`Job` from `Channel<Job>`). "" when
-// `name` isn't found, or its declared type isn't generic.
+// declared type, bare (`Job` from `Channel<Job>`, `Job` from
+// `Channel<Job*>` too). "" when `name` isn't found, or its declared
+// type isn't generic.
 fun _first_generic_arg_of_local(Vec<Node>* program, str name, str file, num line) str {
   let found = _lookup_local(nil, program, name, file, line);
   if found.is_none() {
@@ -4404,7 +4405,10 @@ fun _first_generic_arg_of_detail(str detail) str {
   if end < 0 {
     ret "";
   }
-  ret trim(substr(detail, open + 1, end - open - 1));
+  // Bared the same way any other extracted generic-arg text is
+  // (`bare_type_expr`): every caller looks this up as a plain type
+  // name, which a pointer star (`Node*` from `Option<Node*>`) breaks.
+  ret bare_type_expr(trim(substr(detail, open + 1, end - open - 1)));
 }
 
 // The body of whichever function-like construct - a plain function,
