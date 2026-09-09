@@ -30,5 +30,5 @@ fun main(str[] args) num {
 
   Server s = server_new();
   // A client writes its messages to this program's standard input.
-  ret s.serve(&Sink.Stdin);
+  ret s.serve(&.Stdin);
 }
