@@ -1634,3 +1634,26 @@ test "a method dispatches on a global generic compound instantiation" {
 // this repo's own CI already runs on every push, since the fix lives
 // in the exact code path any future generic-method drain goes through
 // regardless of what triggers it.
+
+test "chaining a field access directly onto a Vec<T*>.get(...) call uses '->', not '.'" {
+  // parser.fn's own file-level comment used to warn that this exact
+  // shape could emit '.' instead of '->' and fail to compile, forcing
+  // real code to bind the call result to a 'let' first. Verified fixed
+  // (likely a side effect of this session's other resolve_field_chain/
+  // method-dispatch-on-a-returned-value work) - the comment is removed,
+  // this locks the capability in with a real test.
+  str src = `imp std.c.io;
+  `imp std.vec;
+  `compound Item { num v; }
+  `fun main() num {
+  `  Vec<Item*> items;
+  `  items.init(2);
+  `  Item i1;
+  `  i1.v = 5;
+  `  items.push(&i1);
+  `  printf("%lld\n", items.get(0).v);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "vec_ptr_get_field_chain", "chaining a field access directly onto a Vec<T*>.get(...) call");
+  assert contains(out, "5"), "expected the field read through the pointer-typed Vec element to work directly";
+}

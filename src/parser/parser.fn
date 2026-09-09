@@ -2,9 +2,7 @@
 // expression grammar, every statement and top-level declaration form,
 // and the top-level `parse()` loop that ties them into a whole file.
 // `asm`/inline-assembly is not parsed; the lexer defers raw asm-body
-// lexing to match. Note: chaining `.field` directly onto a
-// `Vec<T*>.get(...)` call can emit `.` instead of `->` and fail to
-// compile, so bind the call result to a `let` first.
+// lexing to match.
 
 imp parse_state;
 imp datatype_defs;
