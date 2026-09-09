@@ -4329,11 +4329,38 @@ impl Codegen {
     // the tag constants and struct type this operand's value actually
     // has, the same resolution `resolve_type_subst`/`resolve_type_name`
     // already give a chain's own ending type elsewhere in this file.
-    let operand_chain = self.resolve_field_chain(u.operand);
-    if operand_chain.is_none() {
-      ret .Some(.UnsupportedNode);
+    // 
+    // A call operand specifically goes through `_resolve_call_rtype`
+    // directly instead of the general `resolve_field_chain`: the
+    // latter's own call-branch also renders the call's full text (for
+    // its `.text`, unused here), which - since that render walks into
+    // the call's own arguments - evaluates a propagation nested in one
+    // of them a second time. `_resolve_call_rtype` is the exact same
+    // type resolution with that unneeded, unsafe render skipped.
+    str operand_enum_name = "";
+    bin resolved_operand_type = false;
+    fit u.operand.kind {
+      .Expression(inner_e) -> {
+        if equals(inner_e.op, "()") && inner_e.has_left {
+          let call_rdt = self._resolve_call_rtype(inner_e);
+          if call_rdt.is_some() {
+            let call_name = self.resolve_type_name(call_rdt.unwrap());
+            if call_name.is_some() {
+              operand_enum_name = call_name.unwrap();
+              resolved_operand_type = true;
+            }
+          }
+        }
+      }
+      _ -> {}
     }
-    str operand_enum_name = operand_chain.unwrap().type_name;
+    if !resolved_operand_type {
+      let operand_chain = self.resolve_field_chain(u.operand);
+      if operand_chain.is_none() {
+        ret .Some(.UnsupportedNode);
+      }
+      operand_enum_name = operand_chain.unwrap().type_name;
+    }
 
     self.try_call_counter = self.try_call_counter + 1;
     num try_id = self.try_call_counter;
@@ -4482,7 +4509,36 @@ impl Codegen {
     let try_hoist_save = self.hoist_insert_pos;
     let try_splice_pos = self.current_stmt_start_pos;
     self.hoist_insert_pos = try_splice_pos;
+    // A nested propagation (this one's own operand, evaluated from
+    // inside another propagation's own suspended scratch render) has
+    // `current_stmt_start_pos` cleared, same as `hoist_insert_pos`
+    // above - `emit_hoisted`'s own `hoist_scratch_depth > 0` fallback
+    // then routes through `root_hoist_pos` instead, but that field
+    // tracks a *different* mechanism's own splice point (the generic-
+    // method-drain queue's own incrementally-advancing position,
+    // correctly anchored before the whole enclosing function so a full
+    // definition never nests inside it) - not what a propagation's own
+    // temp-and-guard needs, which belongs inside the function body, at
+    // the real enclosing statement `root_stmt_start_pos` already
+    // tracks correctly. Temporarily substituting it in for the
+    // duration of this one splice keeps the two mechanisms from
+    // colliding over the same field.
+    bin routed_via_root_stmt = false;
+    let saved_root_hoist_for_prop = self.root_hoist_pos;
+    if try_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
+      self.root_stmt_start_pos.is_some() {
+      self.root_hoist_pos = self.root_stmt_start_pos;
+      routed_via_root_stmt = true;
+    }
     self.emit_hoisted(try_decl_text);
+    // `emit_hoisted`'s own root-routed splice already advances
+    // `root_stmt_start_pos` correctly on its own; only the temporary
+    // substitution of `root_hoist_pos` needs undoing, so the generic-
+    // method-drain mechanism's own unrelated tracking through that
+    // field is never touched by a propagation's own splice.
+    if routed_via_root_stmt {
+      self.root_hoist_pos = saved_root_hoist_for_prop;
+    }
     if try_splice_pos.is_some() {
       try_hoist_save = adjust_pos_after_splice(
         try_hoist_save,
@@ -7086,6 +7142,118 @@ impl Codegen {
   // first. `.None` means the shape isn't resolvable and the caller must
   // not guess. Enum-variant and bare-shorthand shapes never appear
   // mid-chain, so only plain field access is handled.
+  // A call-as-receiver's own resolved return type, type-only: no text
+  // is rendered and no scratch-buffer swap happens, unlike
+  // `resolve_field_chain`'s own call-branch (which needs this exact
+  // same resolution, then separately renders the call's own text for
+  // `.text`). Safe to call from within another evaluation already in
+  // progress without risking a second, redundant render of anything
+  // nested inside the call (its own arguments, which may carry their
+  // own further calls or propagations) - `emit_propagation` uses this
+  // directly for exactly that reason, instead of going through
+  // `resolve_field_chain` purely to read `.type_name` off it.
+  _resolve_call_rtype(ExprNode inner_e) Option<DataType> {
+    Option<DataType> call_rtype = .None;
+    fit inner_e.left.kind {
+      .Identifier(fn_name) -> {
+        let rt = self.lookup_function_rtype(fn_name);
+        if rt.is_some() {
+          call_rtype = .Some(*rt.unwrap());
+        } elif inner_e.has_right {
+          Vec<Node*> gcall_args;
+          gcall_args.init(0);
+          self.flatten_call_args(inner_e.right, &gcall_args);
+          Vec<DataType*> no_explicit_gargs;
+          no_explicit_gargs.init(0);
+          let ginst = self.maybe_instantiate_generic_function(
+            fn_name,
+            gcall_args,
+            no_explicit_gargs
+          );
+          if ginst.is_some() {
+            call_rtype = .Some(ginst.unwrap().rtype);
+          }
+        }
+      }
+      .Expression(recv_e) -> {
+        if equals(recv_e.op, ".") && recv_e.has_left && recv_e.has_right {
+          str method_name = "";
+          fit recv_e.right.kind {
+            .Identifier(n) -> { method_name = n; }
+            _ -> {}
+          }
+          // `alias.func(args)`, a plain function call qualified by an
+          // import alias, shares the `.`-`()` AST shape of a method
+          // call. When `recv_e.left` is a known alias rather than a
+          // receiver, `method_name` is the callee's bare name and
+          // resolves via the plain-function lookup.
+          bin left_is_known_alias2 = false;
+          if !equals(method_name, "") {
+            fit recv_e.left.kind {
+              .Identifier(lname2) -> {
+                if self.import_aliases.contains(lname2) &&
+                  self.lookup_local_type_name(lname2).is_none() {
+                  left_is_known_alias2 = true;
+                }
+              }
+              _ -> {}
+            }
+          }
+          if left_is_known_alias2 {
+            let alias_rt = self.lookup_function_rtype(method_name);
+            if alias_rt.is_some() {
+              call_rtype = .Some(*alias_rt.unwrap());
+            }
+          } elif !equals(method_name, "") {
+            let recv_r_opt = self.resolve_field_chain(recv_e.left);
+            if recv_r_opt.is_some() {
+              let recv_r2 = recv_r_opt.unwrap();
+              // A method declaring its own generic type param needs
+              // the combined substitution
+              // `maybe_instantiate_generic_impl_method_own_params`
+              // builds; `lookup_impl_method_rtype` below only knows
+              // the raw unsubstituted template return type.
+              if inner_e.has_right &&
+                self.impl_method_has_own_type_params(recv_r2.type_name, method_name) {
+                Vec<Node*> own_args;
+                own_args.init(0);
+                self.flatten_call_args(inner_e.right, &own_args);
+                let own_res = self.maybe_instantiate_generic_impl_method_own_params(
+                  recv_r2.type_name,
+                  method_name,
+                  own_args
+                );
+                if own_res.is_some() {
+                  call_rtype = .Some(own_res.unwrap().rtype);
+                }
+              }
+              if call_rtype.is_none() {
+                let rt = self.lookup_impl_method_rtype(recv_r2.type_name, method_name);
+                if rt.is_some() {
+                  call_rtype = .Some(*rt.unwrap());
+                }
+              }
+              // A quirk-typed receiver dispatches dynamically, so no
+              // concrete impl owns the call; the return type comes
+              // from what the quirk itself declares instead.
+              if call_rtype.is_none() && self.quirk_names.contains(recv_r2.type_name) {
+                let qrt = self.lookup_quirk_method_rtype(recv_r2.type_name, method_name);
+                if qrt.is_some() {
+                  call_rtype = .Some(*qrt.unwrap());
+                }
+              }
+            }
+          }
+        }
+      }
+      _ -> {}
+    }
+    if call_rtype.is_none() {
+      ret .None;
+    }
+    ret .Some(self.resolve_type_subst(call_rtype.unwrap()));
+  }
+
   resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
@@ -7111,114 +7279,7 @@ impl Codegen {
         // `emit_expr`/`emit_call`, so it is captured by rendering into a
         // throwaway scratch buffer.
         if equals(inner_e.op, "()") && inner_e.has_left {
-          Option<DataType> call_rtype = .None;
-          fit inner_e.left.kind {
-            .Identifier(fn_name) -> {
-              let rt = self.lookup_function_rtype(fn_name);
-              if rt.is_some() {
-                call_rtype = .Some(*rt.unwrap());
-              } elif inner_e.has_right {
-                // A generic function template isn't in the plain
-                // registry `lookup_function_rtype` reads (same gap
-                // `infer_arg_type_name` already works around); its
-                // substituted return type comes from the same
-                // instantiation a real call site triggers.
-                Vec<Node*> gcall_args;
-                gcall_args.init(0);
-                self.flatten_call_args(inner_e.right, &gcall_args);
-                Vec<DataType*> no_explicit_gargs;
-                no_explicit_gargs.init(0);
-                let ginst = self.maybe_instantiate_generic_function(
-                  fn_name,
-                  gcall_args,
-                  no_explicit_gargs
-                );
-                if ginst.is_some() {
-                  call_rtype = .Some(ginst.unwrap().rtype);
-                }
-              }
-            }
-            .Expression(recv_e) -> {
-              if equals(recv_e.op, ".") && recv_e.has_left && recv_e.has_right {
-                str method_name = "";
-                fit recv_e.right.kind {
-                  .Identifier(n) -> { method_name = n; }
-                  _ -> {}
-                }
-                // `alias.func(args)`, a plain function call qualified by
-                // an import alias, shares the `.`-`()` AST shape of a
-                // method call. When `recv_e.left` is a known alias rather
-                // than a receiver, `method_name` is the callee's bare
-                // name and resolves via the plain-function lookup.
-                bin left_is_known_alias2 = false;
-                if !equals(method_name, "") {
-                  fit recv_e.left.kind {
-                    .Identifier(lname2) -> {
-                      if self.import_aliases.contains(lname2) &&
-                        self.lookup_local_type_name(lname2).is_none() {
-                        left_is_known_alias2 = true;
-                      }
-                    }
-                    _ -> {}
-                  }
-                }
-                if left_is_known_alias2 {
-                  let alias_rt = self.lookup_function_rtype(method_name);
-                  if alias_rt.is_some() {
-                    call_rtype = .Some(*alias_rt.unwrap());
-                  }
-                } elif !equals(method_name, "") {
-                  let recv_r_opt = self.resolve_field_chain(recv_e.left);
-                  if recv_r_opt.is_some() {
-                    let recv_r2 = recv_r_opt.unwrap();
-                    // A method declaring its own generic type param needs
-                    // the combined substitution
-                    // `maybe_instantiate_generic_impl_method_own_params`
-                    // builds; `lookup_impl_method_rtype` below only knows
-                    // the raw unsubstituted template return type.
-                    if inner_e.has_right &&
-                      self.impl_method_has_own_type_params(
-                      recv_r2.type_name,
-                      method_name
-                    ) {
-                      Vec<Node*> own_args;
-                      own_args.init(0);
-                      self.flatten_call_args(inner_e.right, &own_args);
-                      let own_res = self.maybe_instantiate_generic_impl_method_own_params(
-                        recv_r2.type_name,
-                        method_name,
-                        own_args
-                      );
-                      if own_res.is_some() {
-                        call_rtype = .Some(own_res.unwrap().rtype);
-                      }
-                    }
-                    if call_rtype.is_none() {
-                      let rt = self.lookup_impl_method_rtype(recv_r2.type_name, method_name);
-                      if rt.is_some() {
-                        call_rtype = .Some(*rt.unwrap());
-                      }
-                    }
-                    // A quirk-typed receiver dispatches dynamically, so
-                    // no concrete impl owns the call; the return type
-                    // comes from what the quirk itself declares instead.
-                    if call_rtype.is_none() &&
-                      self.quirk_names.contains(recv_r2.type_name) {
-                      let qrt = self.lookup_quirk_method_rtype(recv_r2.type_name, method_name);
-                      if qrt.is_some() {
-                        call_rtype = .Some(*qrt.unwrap());
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            _ -> {}
-          }
-          if call_rtype.is_none() {
-            ret .None;
-          }
-          let rdt = self.resolve_type_subst(call_rtype.unwrap());
+          let rdt = self._resolve_call_rtype(inner_e)?;
           let resolved_name = self.resolve_type_name(rdt)?;
 
           // `hoist_insert_pos`/`current_stmt_start_pos` are suspended for

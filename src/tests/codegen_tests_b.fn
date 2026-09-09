@@ -1657,3 +1657,73 @@ test "chaining a field access directly onto a Vec<T*>.get(...) call uses '->', n
   str out = run_source(src, "vec_ptr_get_field_chain", "chaining a field access directly onto a Vec<T*>.get(...) call");
   assert contains(out, "5"), "expected the field read through the pointer-typed Vec element to work directly";
 }
+
+test "a propagation nested inside another propagation's own call argument hoists correctly under MSVC" {
+  // Regression, two distinct bugs stacked on top of each other, both
+  // found reproducing a real Windows CI failure via
+  // emit_c_with_imports_forcing_msvc (no real MSVC access needed):
+  // 
+  // (1) emit_propagation resolved its own operand's type via the
+  // general resolve_field_chain, which (for a call operand) also
+  // renders the call's full text into a scratch buffer purely to
+  // capture `.text` - a field this call site never reads. Since that
+  // render walks into the call's own arguments, a propagation nested
+  // in one of them (get_field(lookup(...)?, "v")) got evaluated there,
+  // then evaluated *again* moments later by emit_propagation's own,
+  // correct single-evaluation render - the same nested propagation
+  // compiled to two separate __fun_try_N temps. Fixed by adding
+  // _resolve_call_rtype, the exact same type resolution with the
+  // unneeded text render skipped, and using it whenever the operand is
+  // directly a call.
+  // 
+  // (2) With the double-evaluation gone, the inner propagation's own
+  // hoisted temp-and-guard still spliced *outside* the enclosing
+  // function entirely. emit_propagation routes a nested propagation's
+  // splice through `root_hoist_pos` (via emit_hoisted's own
+  // hoist_scratch_depth>0 fallback) when current_stmt_start_pos is
+  // suspended - but `root_hoist_pos` tracks a *different* mechanism's
+  // splice point (the generic-method-drain queue's, correctly anchored
+  // before the whole enclosing function so a full definition never
+  // nests inside one), not a propagation's own temp, which belongs
+  // inside the function body at `root_stmt_start_pos`. The two
+  // mechanisms silently collided over the same field. Fixed by
+  // temporarily substituting root_stmt_start_pos in for root_hoist_pos
+  // for the duration of just this one splice.
+  str src = `imp std.c.io;
+  `imp std.option;
+  `imp std.string;
+  `fun lookup(str s) Option<str> {
+  `  if equals(s, "type_name") { ret .Some("Inner"); }
+  `  ret .None;
+  `}
+  `fun get_field(str type_name, str field_name) Option<str> {
+  `  ret .Some(field_name);
+  `}
+  `fun resolve() Option<str> {
+  `  ret .Some(
+  `    get_field(lookup("type_name")?, "v")?
+  `  );
+  `}
+  `fun main() num {
+  `  printf("%s\n", resolve().unwrap());
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "nested_propagation_call_arg_msvc",
+    "a propagation nested inside another propagation's own call argument hoists correctly under MSVC"
+  );
+  num fn_idx = index_of_str(out_c, "Option__str resolve(void) {");
+  assert fn_idx >= 0, "expected to find resolve's own function definition";
+  num first_try_idx = index_of_str(out_c, "__fun_try_");
+  assert first_try_idx >= 0, "expected a hoisted propagation temp";
+  assert first_try_idx > fn_idx, "expected the nested propagation's own temp to land inside resolve's body, not before its signature";
+  assert count(out_c, "lookup(\"type_name\")") == 1, "expected the inner propagation's own operand to be evaluated exactly once, not twice";
+
+  str out = run_source(
+    src,
+    "nested_propagation_call_arg",
+    "a propagation nested inside another propagation's own call argument"
+  );
+  assert contains(out, "v"), "expected the nested propagation to actually run correctly end to end";
+}
