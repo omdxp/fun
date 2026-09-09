@@ -1401,6 +1401,15 @@ test "postfix '!' propagates through a private (leading-underscore) method call 
   );
 }
 
+test "two adjacent string literals with no operator between them are rejected, not silently truncated" {
+  rejects(
+    `fun main() {
+    `  str s = "hello" "world";
+    `}`,
+    "expected adjacent string literals with no operator between them to be a parse error, not silently keep only the last one"
+  );
+}
+
 test "a duplicate compound name reports which kind and where, not a bare error" {
   str msg = check(
     `compound Shared { num x; }

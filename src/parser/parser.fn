@@ -2104,6 +2104,18 @@ impl Parser {
       self.state.err("expected expression");
       ret .Some(.InvalidExpression);
     }
+    // Two adjacent primaries with no operator between them (`"a" "b"`,
+    // `5 6`) each parse cleanly on their own, so `parse_expressionable`
+    // above reports no error, but it leaves more than one node behind -
+    // a real syntax error this root call is the right place to catch,
+    // rather than silently discarding every node but the last one to
+    // whatever `node_pop()` a caller happens to make next (which is how
+    // this went unnoticed: `str s = "a" "b";` compiled and ran with `s`
+    // silently bound to "b" alone, "a" never referenced again).
+    if self.state.nodes.len != before + 1 {
+      self.state.err("expected an operator or ';' between expressions");
+      ret .Some(.InvalidExpression);
+    }
     ret .None;
   }
 
@@ -7587,6 +7599,22 @@ test "parse_expressionable_root rejects a bare builtin type keyword outside of s
   ParseState st = _state_from("bin");
   Parser p = parser_new(&st);
   assert p.parse_expressionable_root().is_some(), "expected a bare 'bin' outside sizeof(...) to still be rejected";
+}
+
+test "parse_expressionable_root rejects two adjacent string literals with no operator between them" {
+  // Regression: each of "a"/"b" parses cleanly on its own with no
+  // operator connecting them, so nothing downstream ever reported an
+  // error - `str s = "a" "b";` compiled and ran with 's' silently bound
+  // to "b" alone, "a" discarded with no diagnostic at all.
+  ParseState st = _state_from(`"a" "b"`);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_some(), "expected two adjacent string literals to be rejected";
+}
+
+test "parse_expressionable_root rejects two adjacent number literals with no operator between them" {
+  ParseState st = _state_from("5 6");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_some(), "expected two adjacent number literals to be rejected";
 }
 
 test "parse_expressionable_root parses array indexing" {
