@@ -793,6 +793,29 @@ fun main() {
 
 - **Circular dependency detection**: the compiler detects and errors on
   circular imports.
+- **Imports are transitive.** `imp std.io;` alone also resolves every
+  name `std.io`'s own imports declare (`std.c.io`'s `putchar`,
+  `std.vec`'s `Vec<T>`, and so on), not just `std.io`'s direct public
+  API. This is intentional: the whole `imp`-connected graph is merged
+  into one flat program before typecheck and codegen ever run, the
+  same way a `#include`-based build sees everything a header
+  transitively pulls in. There is no per-file "only what I directly
+  imported" visibility boundary, and none is planned - it would mean
+  giving every file its own scoped symbol table, a structural change
+  disproportionate to the mild "completion offers a name I didn't
+  import directly" symptom this currently produces.
+- **A private (non-`pub`) top-level name must be unique across the
+  whole compiled program, not just within its own file.** Two files
+  each declaring their own private `_collect` conflict:
+  `'_collect' is already declared as a function in a.fn:1`. This is
+  intentional too, for the same reason: the merged program is one flat
+  namespace, and true per-module privacy would need every private
+  name's own C symbol mangled with its declaring file, which is a wide
+  change for real code that already works around this today the same
+  way most C code does - a project-specific prefix (`_mymod_collect`)
+  on a private helper whose bare name would otherwise collide. The
+  diagnostic names the exact conflict and where, so the fix (rename, or
+  make one `pub`) is immediate.
 
 ## C Interop
 
