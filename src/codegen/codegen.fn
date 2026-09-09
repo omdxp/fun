@@ -6380,8 +6380,7 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          let field_info = self.lookup_compound_field(recv_r.type_name, field_name)?;
-          ret .Some(field_info.type_name);
+          ret .Some(self.lookup_compound_field(recv_r.type_name, field_name)?.type_name);
         }
       }
       _ -> {}
@@ -11276,11 +11275,7 @@ impl Codegen {
           }
           // Not a qualified enum-variant constant: a plain field chain
           // such as `nbox.value` resolves via `resolve_field_chain`.
-          let chain = self.resolve_field_chain(arg);
-          if chain.is_some() {
-            ret .Some(chain.unwrap().type_name);
-          }
-          ret .None;
+          ret .Some(self.resolve_field_chain(arg)?.type_name);
         }
         if !equals(e.op, "()") || !e.has_left {
           // A comparison yields `bin`; other binary operators yield
@@ -11306,8 +11301,7 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(callee_name) -> {
-            let rt = self.lookup_function_rtype(callee_name)?;
-            ret .Some(rt.type_str);
+            ret .Some(self.lookup_function_rtype(callee_name)?.type_str);
           }
           _ -> {
             // Method call (`receiver.method(args)`): resolve via the chain

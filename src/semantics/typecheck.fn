@@ -387,8 +387,7 @@ impl TypeEnv {
 
   // The type bound to `name`, searching inner scopes first.
   pub lookup(str name) Option<CheckedType> {
-    let found = self.binding(name)?;
-    ret .Some(found.type);
+    ret .Some(self.binding(name)? .type);
   }
 
   pub free() {
@@ -1731,15 +1730,13 @@ impl Checker {
   // through alias canonicalization -- a caller that means the base type
   // itself canonicalizes before it gets here.
   method_signature(str type_name, str method) Option<FnSig> {
-    let table = self.methods.at(type_name)?;
-    ret table.methods.at(method);
+    ret self.methods.at(type_name)? .methods.at(method);
   }
 
   // The signature a call through a receiver resolves to, if the checker
   // can name both the receiver's type and the method.
   resolve_method_call(ExprNode callee, TypeEnv* env) Option<FnSig> {
-    let found = self.resolve_method_call_with_receiver(callee, env)?;
-    ret .Some(found.sig);
+    ret .Some(self.resolve_method_call_with_receiver(callee, env)? .sig);
   }
 
   // `resolve_method_call`, also carrying the receiver's own checked type
