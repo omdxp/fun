@@ -758,6 +758,24 @@ fun _needs_space_at(
     if _is_closing(p) {
       ret false;
     }
+    // A postfix '?'/'!' is itself a complete value (`half(x)?.field`,
+    // `to_result(x)!.field`), the same as a closing `)`/`]` just above -
+    // not an operator a following `.field` should be spaced away from.
+    // '!' is ambiguous with prefix logical-NOT, resolved the same way
+    // as the binary-operator-disambiguation case above: postfix only
+    // when its own preceding token itself ends a value.
+    if equals(p, "?") {
+      ret false;
+    }
+    if equals(p, "!") {
+      num prev_idx = _prev_significant(tokens, idx);
+      if prev_idx >= 0 {
+        num pprev_idx = _prev_significant(tokens, prev_idx);
+        if pprev_idx >= 0 && _is_postfix_operand_end(tokens.get(pprev_idx)) {
+          ret false;
+        }
+      }
+    }
     if prev.type == .Operator || prev.type == .Symbol {
       ret _operator_needs_spaces(p);
     }

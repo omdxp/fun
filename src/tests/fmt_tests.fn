@@ -485,3 +485,28 @@ test "a postfix '?'/'!' followed by another unary-capable operator ('*') stays a
   assert contains(got, "!*nil;"), "expected double-prefix '!*' to stay glued, unaffected by the fix";
   assert contains(got, "!!true;"), "expected double-prefix '!!' to stay glued, unaffected by the fix";
 }
+
+test "a postfix '?'/'!' followed by a chained field access stays glued, not spaced like an operator" {
+  // Regression: `_needs_space_at`'s own dot-run case already treated a
+  // closing ')'/']' before '.' as binding tight (no space), but had no
+  // matching case for a postfix '?'/'!' - `half(x)?.field` formatted as
+  // `half(x)? .field`, the propagation operator misread as needing the
+  // same spacing an ordinary binary operator gets before a value. '!'
+  // is resolved the same postfix-vs-prefix way the two regressions
+  // above already do, one token further back.
+  str src = `imp std.option;
+  `imp std.result;
+  `compound Point { num x; }
+  `fun half(num x) Option<Point> { ret .None; }
+  `fun to_result(num x) Result<Point, str> { ret .Err("e"); }
+  `fun main() num {
+  `  num a = half(1)?.x;
+  `  num b = to_result(1)!.x;
+  `  _ = a;
+  `  _ = b;
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "half(1)?.x;"), "expected postfix '?' before '.field' to stay glued, no space";
+  assert contains(got, "to_result(1)!.x;"), "expected postfix '!' before '.field' to stay glued, no space";
+}
