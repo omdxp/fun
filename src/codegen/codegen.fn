@@ -6435,17 +6435,7 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          // Deliberately not chained further (`?.type_name` straight
-          // into `lookup_compound_field(...)?`'s own argument
-          // position): the codegen fix that makes this exact nested-
-          // propagation-as-call-argument shape safe under MSVC lands
-          // in this same change, but only takes effect once a compiler
-          // *built from* it exists - the compiler that bootstraps this
-          // very commit doesn't have it yet. Safe to chain again once
-          // that fix has shipped in a release and become the bootstrap
-          // baseline.
-          let recv_type = self.resolve_field_chain(e.left)?.type_name;
-          ret .Some(self.lookup_compound_field(recv_type, field_name)?.type_name);
+          ret .Some(self.lookup_compound_field(self.resolve_field_chain(e.left)?.type_name, field_name)?.type_name);
         }
       }
       _ -> {}
@@ -11359,11 +11349,7 @@ impl Codegen {
           }
           // Not a qualified enum-variant constant: a plain field chain
           // such as `nbox.value` resolves via `resolve_field_chain`.
-          let chain = self.resolve_field_chain(arg);
-          if chain.is_some() {
-            ret .Some(chain.unwrap().type_name);
-          }
-          ret .None;
+          ret .Some(self.resolve_field_chain(arg)?.type_name);
         }
         if !equals(e.op, "()") || !e.has_left {
           // A comparison yields `bin`; other binary operators yield
@@ -11396,11 +11382,7 @@ impl Codegen {
             // Method call (`receiver.method(args)`): resolve via the chain
             // resolver, which handles the dot-then-call shape and returns
             // the method's declared return type.
-            let chain = self.resolve_field_chain(arg);
-            if chain.is_some() {
-              ret .Some(chain.unwrap().type_name);
-            }
-            ret .None;
+            ret .Some(self.resolve_field_chain(arg)?.type_name);
           }
         }
       }

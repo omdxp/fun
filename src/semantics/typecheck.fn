@@ -384,19 +384,8 @@ impl TypeEnv {
   }
 
   // The type bound to `name`, searching inner scopes first.
-  // 
-  // Deliberately not chained inline (`self.binding(name)?.type`): a
-  // propagation used as a receiver for a further field/method access
-  // has its own real MSVC hoist bug whenever that access is the
-  // *first* trigger for a generic method's own instantiation (found
-  // via emit_c_with_imports_forcing_msvc auditing every ?-chain
-  // tightening from this same change: a full method definition, body
-  // included, spliced *inside* the enclosing function's own braces).
-  // Reverted broadly rather than case by case under release-CI
-  // pressure; real fix is its own follow-up.
   pub lookup(str name) Option<CheckedType> {
-    let found = self.binding(name)?;
-    ret .Some(found.type);
+    ret .Some(self.binding(name)?.type);
   }
 
   pub free() {
@@ -1736,21 +1725,16 @@ impl Checker {
   // The signature of `method` on `type_name`, if the type declares one.
   // `type_name` may already be a generic-instantiation mangled string
   // (`Vec__num`, built by `mangled_name`), which must not be run back
-  // through alias canonicalization -- a caller that means the base type
+  // through alias canonicalization. A caller that means the base type
   // itself canonicalizes before it gets here.
-  // Not chained further (`?.methods.at(method)`): see `lookup`'s own
-  // note above, the same MSVC hoist bug for a propagation used as a
-  // receiver into a generic method call.
   method_signature(str type_name, str method) Option<FnSig> {
-    let table = self.methods.at(type_name)?;
-    ret table.methods.at(method);
+    ret self.methods.at(type_name)?.methods.at(method);
   }
 
   // The signature a call through a receiver resolves to, if the checker
   // can name both the receiver's type and the method.
   resolve_method_call(ExprNode callee, TypeEnv* env) Option<FnSig> {
-    let found = self.resolve_method_call_with_receiver(callee, env)?;
-    ret .Some(found.sig);
+    ret .Some(self.resolve_method_call_with_receiver(callee, env)?.sig);
   }
 
   // `resolve_method_call`, also carrying the receiver's own checked type
