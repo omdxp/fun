@@ -1740,3 +1740,48 @@ test "a propagation nested inside another propagation's own call argument hoists
   );
   assert contains(out, "v"), "expected the nested propagation to actually run correctly end to end";
 }
+
+test "a propagation used as a receiver does not corrupt hoist_insert_pos for a generic method instantiated right after it" {
+  // `expr?.field.method()`, where `method()` is the FIRST call anywhere
+  // in the program to trigger its own generic type's method
+  // instantiation (own type params, e.g. Map<K,V>.at()). Root cause: the
+  // `.Unary` propagation-as-receiver branch in `resolve_field_chain` set
+  // `root_hoist_pos = current_stmt_start_pos` instead of the standard
+  // `root_hoist_pos = hoist_insert_pos` used by every other scratch-swap
+  // site in this file. Once the branch unwound back to
+  // `hoist_scratch_depth == 0`, that stand-in value got written back
+  // into `hoist_insert_pos` itself, corrupting it for whatever ran
+  // next - here, `maybe_instantiate_generic_impl_method_own_params`
+  // splicing Map's own `.at()` method body via `emit_hoisted`, which
+  // landed the whole definition inside the enclosing function's own
+  // braces instead of at file scope. This reproduced even outside MSVC
+  // mode: a full C function definition is never valid nested inside
+  // another one, GNU statement-expression support notwithstanding.
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.map;
+  `imp std.c.io;
+  `compound Table {
+  `  Map<str, num> methods;
+  `}
+  `fun get_table(str s) Option<Table> {
+  `  Table t;
+  `  t.methods.init(4);
+  `  t.methods.put("foo", 1);
+  `  ret .Some(t);
+  `}
+  `fun method_signature(str type_name, str method) Option<num> {
+  `  ret get_table(type_name)?.methods.at(method);
+  `}
+  `fun main() num {
+  `  let r = method_signature("x", "foo");
+  `  printf("%lld\n", r.unwrap());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_receiver_generic_method_trigger",
+    "a propagation used as a receiver does not corrupt hoist_insert_pos for a generic method instantiated right after it"
+  );
+  assert contains(out, "1"), "expected the generic method call to actually run correctly end to end";
+}

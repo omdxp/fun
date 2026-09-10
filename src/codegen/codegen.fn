@@ -7524,15 +7524,19 @@ impl Codegen {
 
           if self.hoist_scratch_depth == 0 {
             self.root_state = self.state;
-            // `hoist_insert_pos` may have been advanced past file-scope
-            // forward prototypes emitted while resolving the operand's type
-            // in `resolve_field_chain(u.operand)` above - using it here
-            // would place the propagation temp at file scope instead of
-            // inside the function body. `current_stmt_start_pos` is
-            // correctly adjusted after any such splices and always stays
-            // inside the enclosing function body, so it's the right hoist
-            // target for the ?/! temp and guard that follow.
-            self.root_hoist_pos = self.current_stmt_start_pos;
+            // `root_hoist_pos` tracks the real prior `hoist_insert_pos`,
+            // same as every other scratch-swap site in this file - it's
+            // restored into `hoist_insert_pos` below once this branch
+            // fully unwinds, and downstream code (a generic method
+            // instantiated by this call's own receiver chain, e.g.
+            // `expr?.field.method()`) depends on seeing the real value,
+            // not a stale stand-in. `root_stmt_start_pos` is the actual
+            // splice target for the ?/! temp and guard that follow:
+            // `emit_propagation`'s own hoist-scratch-depth>0 fallback
+            // substitutes it in for `root_hoist_pos` for the duration of
+            // just its own splice, so `root_hoist_pos` never needs to
+            // double as a function-body-safe position here.
+            self.root_hoist_pos = self.hoist_insert_pos;
             self.root_stmt_start_pos = self.current_stmt_start_pos;
           }
           self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
