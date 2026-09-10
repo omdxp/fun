@@ -1829,3 +1829,207 @@ test "fit's own subject can be a propagation's field access, with no intermediat
   );
   assert contains(out, "1"), "expected the fit to actually run correctly end to end";
 }
+
+test "a ? chained straight onto another ?'s own receiver access (a?.b?) evaluates the outer call exactly once" {
+  // The stacked-propagation shape left reverted after the call-argument
+  // fix: `outer(s)?.field?`. Root cause was structurally identical to
+  // the call-argument case but living in two different places -
+  // `emit_propagation`'s own operand-type resolution, and
+  // `resolve_field_chain`'s `.Unary` branch's own operand-type
+  // resolution - both learned a propagated operand's type by calling
+  // `resolve_field_chain` on it, which for a further-nested propagation
+  // emits and splices it for real as a side effect, then the real
+  // render pass emits the same thing again. Fixed via
+  // `_resolve_propagation_field_rtype`, a type-only resolver
+  // (recursive, so any depth of stacking stays side-effect-free) mirroring
+  // `_resolve_call_rtype`'s existing precedent for a plain call operand.
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `compound Inner {
+  `  Option<num> maybe_val;
+  `}
+  `num call_count = 0;
+  `fun get_outer(str s) Option<Inner> {
+  `  call_count = call_count + 1;
+  `  Inner i;
+  `  i.maybe_val = .Some(55);
+  `  ret .Some(i);
+  `}
+  `fun use_it(str s) Option<num> {
+  `  ret .Some(get_outer(s)?.maybe_val?);
+  `}
+  `fun main() num {
+  `  printf("val=%lld calls=%lld\n", use_it("x").unwrap(), call_count);
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "stacked_propagation_field_strict",
+    "a ? chained onto another ?'s receiver access evaluates the outer call once (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "val=55 calls=1"), "expected get_outer to run exactly once under the strict MSVC-shaped compile";
+
+  str out = run_source(
+    src,
+    "stacked_propagation_field",
+    "a ? chained onto another ?'s receiver access evaluates the outer call once"
+  );
+  assert contains(out, "val=55 calls=1"), "expected get_outer to run exactly once";
+}
+
+test "a stacked propagation's own None still triggers the outer function's early return, with no wasted extra call" {
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `compound Inner {
+  `  Option<num> maybe_val;
+  `}
+  `num call_count = 0;
+  `fun get_outer(str s) Option<Inner> {
+  `  call_count = call_count + 1;
+  `  Inner i;
+  `  i.maybe_val = .None;
+  `  ret .Some(i);
+  `}
+  `fun use_it(str s) Option<num> {
+  `  ret .Some(get_outer(s)?.maybe_val?);
+  `}
+  `fun main() num {
+  `  fit use_it("x") {
+  `    .Some(v) -> { printf("some=%lld calls=%lld\n", v, call_count); }
+  `    .None -> { printf("none calls=%lld\n", call_count); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "stacked_propagation_none_strict",
+    "a stacked propagation's own None triggers early return, once (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "none calls=1"), "expected the field's own None to trigger use_it's early return, with get_outer called exactly once";
+
+  str out = run_source(
+    src,
+    "stacked_propagation_none",
+    "a stacked propagation's own None triggers early return, once"
+  );
+  assert contains(out, "none calls=1"), "expected the field's own None to trigger use_it's early return, with get_outer called exactly once";
+}
+
+test "three levels of stacked propagation still evaluate the outermost call exactly once" {
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `compound Innermost {
+  `  Option<num> v;
+  `}
+  `compound Inner {
+  `  Option<Innermost> next;
+  `}
+  `num call_count = 0;
+  `fun get_outer(str s) Option<Inner> {
+  `  call_count = call_count + 1;
+  `  Inner i;
+  `  Innermost im;
+  `  im.v = .Some(7);
+  `  i.next = .Some(im);
+  `  ret .Some(i);
+  `}
+  `fun use_it(str s) Option<num> {
+  `  ret .Some(get_outer(s)?.next?.v?);
+  `}
+  `fun main() num {
+  `  printf("val=%lld calls=%lld\n", use_it("x").unwrap(), call_count);
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "three_level_stacked_propagation_strict",
+    "three levels of stacked propagation evaluate the outermost call once (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "val=7 calls=1"), "expected three stacked propagations to still call get_outer exactly once, under the strict MSVC-shaped compile";
+
+  str out = run_source(
+    src,
+    "three_level_stacked_propagation",
+    "three levels of stacked propagation evaluate the outermost call once"
+  );
+  assert contains(out, "val=7 calls=1"), "expected three stacked propagations to still call get_outer exactly once";
+}
+
+test "Result propagation chained onto another !'s own receiver access evaluates the outer call exactly once" {
+  str src = `imp std.result;
+  `imp std.string;
+  `imp std.c.io;
+  `compound Inner {
+  `  Result<num, str> maybe_val;
+  `}
+  `num call_count = 0;
+  `fun get_outer(str s) Result<Inner, str> {
+  `  call_count = call_count + 1;
+  `  Inner i;
+  `  i.maybe_val = .Ok(99);
+  `  ret .Ok(i);
+  `}
+  `fun use_it(str s) Result<num, str> {
+  `  ret .Ok(get_outer(s)!.maybe_val!);
+  `}
+  `fun main() num {
+  `  fit use_it("x") {
+  `    .Ok(v) -> { printf("ok=%lld calls=%lld\n", v, call_count); }
+  `    .Err(e) -> { printf("err calls=%lld\n", call_count); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "stacked_result_propagation_strict",
+    "Result propagation chained onto another ! evaluates the outer call once (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "ok=99 calls=1"), "expected the Result propagation chain to run get_outer exactly once, under the strict MSVC-shaped compile";
+
+  str out = run_source(
+    src,
+    "stacked_result_propagation",
+    "Result propagation chained onto another ! evaluates the outer call once"
+  );
+  assert contains(out, "ok=99 calls=1"), "expected the Result propagation chain to run get_outer exactly once";
+}
+
+test "let v = a?.b? evaluates the outer call exactly once" {
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `compound Inner {
+  `  Option<num> maybe_val;
+  `}
+  `num call_count = 0;
+  `fun get_outer(str s) Option<Inner> {
+  `  call_count = call_count + 1;
+  `  Inner i;
+  `  i.maybe_val = .Some(55);
+  `  ret .Some(i);
+  `}
+  `fun use_it(str s) Option<num> {
+  `  let v = get_outer(s)?.maybe_val?;
+  `  ret .Some(v);
+  `}
+  `fun main() num {
+  `  printf("val=%lld calls=%lld\n", use_it("x").unwrap(), call_count);
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "let_stacked_propagation_strict",
+    "let v = a?.b? evaluates the outer call once (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "val=55 calls=1"), "expected let v = a?.b? to call get_outer exactly once, under the strict MSVC-shaped compile";
+
+  str out = run_source(
+    src,
+    "let_stacked_propagation",
+    "let v = a?.b? evaluates the outer call once"
+  );
+  assert contains(out, "val=55 calls=1"), "expected let v = a?.b? to call get_outer exactly once";
+}

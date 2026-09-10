@@ -4350,6 +4350,23 @@ impl Codegen {
               resolved_operand_type = true;
             }
           }
+        } elif equals(inner_e.op, ".") && inner_e.has_left {
+          fit inner_e.left.kind {
+            .Unary(u2) -> {
+              if u2.is_left_operanded_unary &&
+                (equals(u2.op, "?") || equals(u2.op, "!")) {
+                let field_rdt = self._resolve_propagation_field_rtype(inner_e);
+                if field_rdt.is_some() {
+                  let field_name = self.resolve_type_name(field_rdt.unwrap());
+                  if field_name.is_some() {
+                    operand_enum_name = field_name.unwrap();
+                    resolved_operand_type = true;
+                  }
+                }
+              }
+            }
+            _ -> {}
+          }
         }
       }
       _ -> {}
@@ -7252,6 +7269,86 @@ impl Codegen {
     ret .Some(self.resolve_type_subst(call_rtype.unwrap()));
   }
 
+  // `expr?.field`/`expr!.field`'s own resolved field type, type-only:
+  // like `_resolve_call_rtype`, no text is rendered and nothing is
+  // emitted or hoisted. `resolve_field_chain`'s own `.Unary` branch
+  // resolves this same shape, but does so by actually emitting the
+  // inner propagation for real (through `self.emit_expr`, to build its
+  // `.text`) - fine when the result is used as a real receiver, but
+  // `emit_propagation` only wants the type here, to know which enum
+  // (`Option`/`Result`) its own `.None`/`.Err` early return belongs to.
+  // Going through `resolve_field_chain` for that would both emit and
+  // splice the inner propagation for real as a side effect, then
+  // `emit_propagation` emits the same operand again for its own actual
+  // value, doubling every side effect (a call in it runs twice) and
+  // duplicating its hoisted temp. Recurses into itself for each further
+  // level of stacking (`a?.b?.c?...`), so no depth of stacking ever
+  // reaches `resolve_field_chain`'s side-effecting branch; only a base
+  // case that isn't itself a further propagation (a plain call, a bare
+  // local, an ordinary field chain) falls through to it, matching what
+  // a non-stacked propagation already relies on safely.
+  _resolve_propagation_field_rtype(ExprNode field_e) Option<DataType> {
+    if !equals(field_e.op, ".") || !field_e.has_left || !field_e.has_right {
+      ret .None;
+    }
+    str field_name = "";
+    fit field_e.right.kind {
+      .Identifier(n) -> { field_name = n; }
+      _ -> { ret .None; }
+    }
+    Option<DataType> operand_dt = .None;
+    fit field_e.left.kind {
+      .Unary(u2) -> {
+        if !u2.is_left_operanded_unary ||
+          !(equals(u2.op, "?") || equals(u2.op, "!")) {
+          ret .None;
+        }
+        bin resolved = false;
+        fit u2.operand.kind {
+          .Expression(inner_e2) -> {
+            if equals(inner_e2.op, "()") && inner_e2.has_left {
+              let call_rdt = self._resolve_call_rtype(inner_e2);
+              if call_rdt.is_some() {
+                operand_dt = call_rdt;
+                resolved = true;
+              }
+            } elif equals(inner_e2.op, ".") && inner_e2.has_left {
+              fit inner_e2.left.kind {
+                .Unary(u3) -> {
+                  if u3.is_left_operanded_unary &&
+                    (equals(u3.op, "?") || equals(u3.op, "!")) {
+                    let deeper_dt = self._resolve_propagation_field_rtype(inner_e2);
+                    if deeper_dt.is_some() {
+                      operand_dt = deeper_dt;
+                      resolved = true;
+                    }
+                  }
+                }
+                _ -> {}
+              }
+            }
+          }
+          _ -> {}
+        }
+        if !resolved {
+          let chain = self.resolve_field_chain(u2.operand)?;
+          operand_dt = chain.dtype;
+        }
+      }
+      _ -> { ret .None; }
+    }
+    if operand_dt.is_none() {
+      ret .None;
+    }
+    let odt = operand_dt.unwrap();
+    if odt.generic_args.len == 0 {
+      ret .None;
+    }
+    let t_dt = *odt.generic_args.get(0);
+    let t_name = self.resolve_type_name(t_dt)?;
+    ret .Some(self.lookup_compound_field(t_name, field_name)?.dtype?);
+  }
+
   resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
@@ -7494,18 +7591,44 @@ impl Codegen {
         // scratch buffer), resolved to its own unwrapped type the same
         // way `infer_let_expr_type`'s own `?`/`!` case does.
         if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          // Deliberately not chained further (`?.dtype?`, propagating
-          // twice off the same statement): distinct from the call-
-          // argument nesting fixed elsewhere in this file, a `?`
-          // chained straight onto another `?`'s own receiver access
-          // has its own separate MSVC hoist bug (verified via
-          // emit_c_with_imports_forcing_msvc: the receiver's own
-          // operand gets evaluated and hoisted 3-5 times instead of
-          // once, most of it outside the enclosing function). Left for
-          // its own follow-up fix; not chasing it further under
-          // release-CI pressure the same day as the call-argument one.
-          let operand_chain = self.resolve_field_chain(u.operand)?;
-          let operand_dt = operand_chain.dtype?;
+          // Type-only resolution of `u.operand`'s own type, same reason
+          // `emit_propagation` avoids a plain `resolve_field_chain` call
+          // here: `u.operand` may itself be another `?`/`!` chained onto
+          // a further propagation's own receiver access (`a?.b?.c`,
+          // resolving this `.Unary` branch for `a?.b?`'s own operand
+          // `a?.b`), and `resolve_field_chain` would both emit and
+          // splice that inner propagation for real as a side effect of
+          // learning its type, then this branch's own `self.emit_expr
+          // (*recv)` below emits the same thing again for real,
+          // duplicating every side effect a call in it has and its
+          // hoisted temp. `_resolve_call_rtype`/
+          // `_resolve_propagation_field_rtype` resolve the type alone,
+          // with nothing rendered or spliced; only a base case that
+          // isn't itself a further propagation (a bare local, an
+          // ordinary field chain) falls through to `resolve_field_chain`.
+          Option<DataType> operand_dt_opt = .None;
+          fit u.operand.kind {
+            .Expression(operand_e) -> {
+              if equals(operand_e.op, "()") && operand_e.has_left {
+                operand_dt_opt = self._resolve_call_rtype(operand_e);
+              } elif equals(operand_e.op, ".") && operand_e.has_left {
+                fit operand_e.left.kind {
+                  .Unary(ou) -> {
+                    if ou.is_left_operanded_unary &&
+                      (equals(ou.op, "?") || equals(ou.op, "!")) {
+                      operand_dt_opt = self._resolve_propagation_field_rtype(operand_e);
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            _ -> {}
+          }
+          if operand_dt_opt.is_none() {
+            operand_dt_opt = self.resolve_field_chain(u.operand)?.dtype;
+          }
+          let operand_dt = operand_dt_opt?;
           if operand_dt.generic_args.len == 0 {
             ret .None;
           }
@@ -11826,12 +11949,36 @@ impl Codegen {
         // later `fit v { .Variant -> ... }` on `v` can resolve its own
         // shorthand variants.
         if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          // Deliberately not chained further - see the identical note
-          // in resolve_field_chain's own `?`-as-receiver case above,
-          // same underlying MSVC hoist bug for a `?` chained straight
-          // onto another `?`'s own receiver access.
-          let prop_r = self.resolve_field_chain(u.operand)?;
-          let prop_dt = prop_r.dtype?;
+          // Type-only resolution, same reason and same technique as the
+          // identical note in resolve_field_chain's own `?`-as-receiver
+          // case above: `u.operand` may itself be a further propagation
+          // (`let v = a?.b?;`), and a plain `resolve_field_chain` call
+          // here would emit and splice it for real merely to learn its
+          // type, duplicating the real emission the `let` statement's
+          // own initializer triggers separately afterward.
+          Option<DataType> prop_dt_opt = .None;
+          fit u.operand.kind {
+            .Expression(prop_e) -> {
+              if equals(prop_e.op, "()") && prop_e.has_left {
+                prop_dt_opt = self._resolve_call_rtype(prop_e);
+              } elif equals(prop_e.op, ".") && prop_e.has_left {
+                fit prop_e.left.kind {
+                  .Unary(pu) -> {
+                    if pu.is_left_operanded_unary &&
+                      (equals(pu.op, "?") || equals(pu.op, "!")) {
+                      prop_dt_opt = self._resolve_propagation_field_rtype(prop_e);
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            _ -> {}
+          }
+          if prop_dt_opt.is_none() {
+            prop_dt_opt = self.resolve_field_chain(u.operand)?.dtype;
+          }
+          let prop_dt = prop_dt_opt?;
           if prop_dt.generic_args.len == 0 {
             ret .None;
           }
