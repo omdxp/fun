@@ -215,6 +215,93 @@ pub fun run_source(str src, str name, str label) str {
   ret run_source_result(src, name, label).stdout_text;
 }
 
+// `run_source`, with the MSVC codegen path forced on (see
+// `transpile_file_forcing_msvc`) and the local C compiler run in
+// strict, non-GNU mode (`-std=c11 -pedantic-errors`, no statement
+// expressions or other GNU-isms). A class of MSVC-only codegen bug -
+// most notably a hoisted temp-and-guard splicing outside the enclosing
+// function, or a nested propagation evaluated more than once - reads
+// as perfectly valid C once GNU statement expressions paper over it,
+// the same way the GNU (non-MSVC) codegen path itself would render it;
+// it only surfaces as a real "function definition is not allowed
+// here"/"undeclared identifier" compile error once nothing is left to
+// hide it. `-pedantic-errors` catches exactly that, on any platform,
+// without needing a real Windows host or MSVC itself - proven against
+// the actual Windows CI failure this was built to catch (see
+// `project_language_improvements_post_inception` memory / the codegen
+// commit fixing the nested-propagation hoist bug).
+pub fun run_source_forcing_msvc(str src, str name, str label) str {
+  ret run_source_result_forcing_msvc(src, name, label).stdout_text;
+}
+
+// `run_source_forcing_msvc`, handing back everything the run produced.
+pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResult {
+  StringBuilder sb = string_builder_init(64);
+  sb.append("src/tests/fixtures/");
+  sb.append(name);
+  str base = sb.build();
+
+  StringBuilder fb = string_builder_init(64);
+  fb.append(base);
+  fb.append(".fn");
+  str source_path = fb.build();
+
+  StringBuilder cb = string_builder_init(64);
+  cb.append(base);
+  cb.append(".c");
+  str c_path = cb.build();
+
+  assert write_string(source_path, src), format("{str}: could not stage {str}", label, source_path);
+  defer remove_file(source_path);
+
+  let emitted = transpile_file_forcing_msvc(source_path);
+  if emitted.is_err() {
+    allow assert_constant, "reports the stage that rejected the staged source";
+    assert false, format("{str}: {str}", label, emitted.unwrap_err());
+  }
+  assert write_string(c_path, emitted.unwrap()), format(
+    "{str}: could not write {str}",
+    label,
+    c_path
+  );
+  defer remove_file(c_path);
+
+  Vec<str> build;
+  build.init(8);
+  defer build.free();
+  str cc = env_or("FUN_CC", "");
+  if equals(cc, "") {
+    cc = "cc";
+  }
+  build.push(cc);
+  build.push("-std=c11");
+  build.push("-pedantic-errors");
+  build.push("-O0");
+  build.push("-pthread");
+  build.push("-lm");
+  build.push("-o");
+  build.push(base);
+  build.push(c_path);
+  let built = run(argv_from(&build));
+  assert built.is_ok(), format("{str}: could not run the C compiler", label);
+  assert built.unwrap().exit_code == 0, format(
+    "{str}: the strict, non-GNU C compile rejected the MSVC-shaped program: {str}",
+    label,
+    built.unwrap().stderr_text
+  );
+
+  str exe_path = base;
+  defer remove_file(exe_path);
+
+  Vec<str> invocation;
+  invocation.init(2);
+  defer invocation.free();
+  invocation.push(exe_path);
+  let ran = run(argv_from(&invocation));
+  assert ran.is_ok(), format("{str}: could not run the built program", label);
+  ret ran.unwrap();
+}
+
 // The same, handing back everything the run produced: what it wrote to
 // either stream and how it ended. Some expectations are about a program
 // being stopped rather than about what it printed.

@@ -6435,9 +6435,17 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          ret .Some(
-            self.lookup_compound_field(self.resolve_field_chain(e.left)?.type_name, field_name)?.type_name
-          );
+          // Deliberately not chained further (`?.type_name` straight
+          // into `lookup_compound_field(...)?`'s own argument
+          // position): the codegen fix that makes this exact nested-
+          // propagation-as-call-argument shape safe under MSVC lands
+          // in this same change, but only takes effect once a compiler
+          // *built from* it exists - the compiler that bootstraps this
+          // very commit doesn't have it yet. Safe to chain again once
+          // that fix has shipped in a release and become the bootstrap
+          // baseline.
+          let recv_type = self.resolve_field_chain(e.left)?.type_name;
+          ret .Some(self.lookup_compound_field(recv_type, field_name)?.type_name);
         }
       }
       _ -> {}
@@ -7496,7 +7504,18 @@ impl Codegen {
         // scratch buffer), resolved to its own unwrapped type the same
         // way `infer_let_expr_type`'s own `?`/`!` case does.
         if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          let operand_dt = self.resolve_field_chain(u.operand)?.dtype?;
+          // Deliberately not chained further (`?.dtype?`, propagating
+          // twice off the same statement): distinct from the call-
+          // argument nesting fixed elsewhere in this file, a `?`
+          // chained straight onto another `?`'s own receiver access
+          // has its own separate MSVC hoist bug (verified via
+          // emit_c_with_imports_forcing_msvc: the receiver's own
+          // operand gets evaluated and hoisted 3-5 times instead of
+          // once, most of it outside the enclosing function). Left for
+          // its own follow-up fix; not chasing it further under
+          // release-CI pressure the same day as the call-argument one.
+          let operand_chain = self.resolve_field_chain(u.operand)?;
+          let operand_dt = operand_chain.dtype?;
           if operand_dt.generic_args.len == 0 {
             ret .None;
           }
@@ -11336,7 +11355,11 @@ impl Codegen {
           }
           // Not a qualified enum-variant constant: a plain field chain
           // such as `nbox.value` resolves via `resolve_field_chain`.
-          ret .Some(self.resolve_field_chain(arg)?.type_name);
+          let chain = self.resolve_field_chain(arg);
+          if chain.is_some() {
+            ret .Some(chain.unwrap().type_name);
+          }
+          ret .None;
         }
         if !equals(e.op, "()") || !e.has_left {
           // A comparison yields `bin`; other binary operators yield
@@ -11362,7 +11385,8 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(callee_name) -> {
-            ret .Some(self.lookup_function_rtype(callee_name)?.type_str);
+            let rt = self.lookup_function_rtype(callee_name)?;
+            ret .Some(rt.type_str);
           }
           _ -> {
             // Method call (`receiver.method(args)`): resolve via the chain
@@ -11816,7 +11840,12 @@ impl Codegen {
         // later `fit v { .Variant -> ... }` on `v` can resolve its own
         // shorthand variants.
         if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
-          let prop_dt = self.resolve_field_chain(u.operand)?.dtype?;
+          // Deliberately not chained further - see the identical note
+          // in resolve_field_chain's own `?`-as-receiver case above,
+          // same underlying MSVC hoist bug for a `?` chained straight
+          // onto another `?`'s own receiver access.
+          let prop_r = self.resolve_field_chain(u.operand)?;
+          let prop_dt = prop_r.dtype?;
           if prop_dt.generic_args.len == 0 {
             ret .None;
           }

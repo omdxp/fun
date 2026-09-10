@@ -1720,6 +1720,19 @@ test "a propagation nested inside another propagation's own call argument hoists
   assert first_try_idx > fn_idx, "expected the nested propagation's own temp to land inside resolve's body, not before its signature";
   assert count(out_c, "lookup(\"type_name\")") == 1, "expected the inner propagation's own operand to be evaluated exactly once, not twice";
 
+  // The definitive check: a real, strict (non-GNU) compile of the
+  // MSVC-shaped C, which rejects a hoisted definition landing anywhere
+  // invalid the same way any standards-conforming compiler (MSVC
+  // included) would - see `run_source_forcing_msvc`'s own doc comment.
+  // This is what would have caught the original bug locally, with no
+  // real Windows host needed.
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "nested_propagation_call_arg_strict",
+    "a propagation nested inside another propagation's own call argument (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "v"), "expected the nested propagation to actually run correctly end to end under the strict MSVC-shaped compile";
+
   str out = run_source(
     src,
     "nested_propagation_call_arg",
