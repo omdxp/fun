@@ -153,6 +153,52 @@ pub fun transpile_file_forcing_msvc(str path) Result<str, str> {
   ret .Ok(st.out.build());
 }
 
+// `transpile_file_forcing_msvc`, with `-g` debug-info emission also
+// turned on. The MSVC path is the only one that ever hoists a
+// propagation's own temp-and-guard or a vararg's own hoisted decl into
+// hand-assembled text outside the ordinary statement path (the GNU path
+// renders both inline as a statement expression on the enclosing
+// statement's own already-`#line`-tagged line), so this is the only way
+// to prove those specific splices carry their own `#line` directive.
+pub fun transpile_file_forcing_msvc_with_debug_info(str path) Result<str, str> {
+  let parsed = parse_program_with_imports(path);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  let merged = parsed.unwrap();
+
+  CodegenState st = codegen_state_new();
+  Codegen cg = codegen_new(&st);
+  cg.msvc_mode = true;
+  cg.debug_info = true;
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+  if cg.transpile(merged.nodes).is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(st.out.build());
+}
+
+// `emit_c_with_imports_forcing_msvc`, with `-g` debug-info emission also
+// turned on.
+pub fun emit_c_with_imports_forcing_msvc_with_debug_info(str src, str name, str label) str {
+  StringBuilder pbd = string_builder_init(32);
+  pbd.append("src/tests/fixtures/");
+  pbd.append(name);
+  pbd.append(".fn");
+  str pathd = pbd.build();
+
+  assert write_string(pathd, src), format("{str}: could not stage {str}", label, pathd);
+  let rd = transpile_file_forcing_msvc_with_debug_info(pathd);
+  remove_file(pathd);
+  if rd.is_err() {
+    allow assert_constant, "reports the stage that rejected the staged source";
+    assert false, format("{str}: {str}", label, rd.unwrap_err());
+  }
+  ret rd.unwrap();
+}
+
 // `emit_c_with_imports`, with the MSVC codegen path forced on. `name`
 // must be unique across tests, since the file is staged and removed the
 // same way.

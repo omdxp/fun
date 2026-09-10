@@ -2033,3 +2033,152 @@ test "let v = a?.b? evaluates the outer call exactly once" {
   );
   assert contains(out, "val=55 calls=1"), "expected let v = a?.b? to call get_outer exactly once";
 }
+
+test "-g debug info survives a generic function's first monomorphized instantiation" {
+  // A generic function/method's first instantiation is rendered into a
+  // scratch `CodegenState` (so it can be spliced at the right position
+  // via `emit_hoisted`), not written directly into the real buffer like
+  // an ordinary function. `codegen_state_new()` defaults `debug_info =
+  // false`, and nothing copied the real flag into any of the ~21
+  // scratch buffers this file creates for exactly this reason (generic
+  // instantiation, a propagation's own operand, a receiver chain, and
+  // so on) - so every `#line` directive inside whatever got rendered
+  // into one of those scratch buffers was silently dropped
+  // (`set_pending_line_directive` is a no-op when `debug_info` is
+  // false). A native debugger stepping into a generic call landed on
+  // whichever Fun source line happened to be active before the splice,
+  // not the generic function's own body - this covers the most common
+  // real-world shape, since `Vec<T>`/`Option<T>`/`Map<K,V>` methods are
+  // all generic and their first instantiation hits this exact path.
+  // Fixed via `Codegen.new_scratch_state()`, a shared constructor every
+  // one of those ~21 sites now goes through instead of the raw
+  // `codegen_state_new()`.
+  str src = `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `fun main() num {
+  `  num v = identity(42);
+  `  ret v;
+  `}`;
+  let out = emit_c_with_debug_info(src, "generic_fn_debug_info");
+  num fn_idx = index_of_str(out, "int64_t identity__num(int64_t x) {");
+  assert fn_idx >= 0, "expected the monomorphized identity__num definition";
+  num line_idx = index_of_str(out, "#line 2 \"test.fn\"");
+  assert line_idx >= 0, "expected a #line directive for the generic function's own body";
+  assert line_idx > fn_idx, "expected the #line directive to land inside identity__num's own body, not before it";
+}
+
+test "-g debug info tags a hoisted call-result receiver's own temp assignment, not just the statement that follows it" {
+  // `call(...).method()`, no intermediate `let`: the call's own result
+  // is hoisted into a temp (`hoist_call_result_to_temp`) before the
+  // method call reads it, since some callers (quirk dispatch, a bare
+  // `.field` read) need to read the receiver's text more than once and
+  // evaluating the call itself twice would run it twice at runtime.
+  // That temp assignment is hand-assembled C text, outside the ordinary
+  // per-statement `set_pending_line_directive`/`write_indent` flush, so
+  // it never got its own `#line` directive - it silently inherited
+  // whatever was last active before it (a previous statement, or, once
+  // a generic method's own first-instantiation is triggered while
+  // resolving this exact receiver, a completely unrelated function's
+  // own last line). A debugger stepping into `call(...).method()`
+  // landed on the wrong location for the `call(...)` half, and only
+  // showed the right line once the following statement (the actual
+  // method call) took over. Fixed by tagging the temp assignment with
+  // `self.state.pending_line_directive`, the enclosing statement's own
+  // position - correctly scoped per `CodegenState`, so a nested generic
+  // instantiation (rendered into and restored from its own scratch
+  // state while resolving the receiver) can't contaminate it.
+  str src = `compound Box {
+  `  num v;
+  `}
+  `impl Box {
+  `  pub get() num {
+  `    ret self.v;
+  `  }
+  `}
+  `fun make(num n) Box {
+  `  Box b;
+  `  b.v = n;
+  `  ret b;
+  `}
+  `fun main() num {
+  `  num r = make(5).get();
+  `  ret r;
+  `}`;
+  let out = emit_c_with_debug_info(src, "hoisted_recv_temp_debug_info");
+  assert contains(out, "#line 15 \"test.fn\"\n    Box __fun_recv_tmp1 = make(5);"),
+  "expected the enclosing statement's own line (15, `num r = make(5).get();`) directly before the hoisted receiver temp, not a stale directive left over from whatever was emitted just before it";
+}
+
+test "-g debug info tags a propagation's own MSVC-hoisted temp-and-guard, not just the surrounding statement" {
+  // Under MSVC (no GNU statement expressions), `expr?`/`expr!` hoists
+  // its own temp-and-guard as separate C statements before the
+  // enclosing one (`emit_propagation`'s own `try_decl_sb`), rather than
+  // rendering inline as a `({...})` statement expression the way GNU
+  // mode does. That hoisted text is hand-assembled outside the ordinary
+  // per-statement `#line` flush, same class of gap as
+  // `hoist_call_result_to_temp`'s own receiver temp - GNU mode never
+  // exercises this at all (the propagation stays on the enclosing
+  // statement's own already-tagged line), so this needs the MSVC path
+  // specifically to catch.
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `fun get_val(num n) Option<num> {
+  `  if n > 0 {
+  `    ret .Some(n * 2);
+  `  }
+  `  ret .None;
+  `}
+  `fun use_it(num n) Option<num> {
+  `  num v = get_val(n)?;
+  `  ret .Some(v + 1);
+  `}`;
+  let out = emit_c_with_imports_forcing_msvc_with_debug_info(
+    src,
+    "msvc_propagation_debug_info",
+    "propagation's own MSVC-hoisted temp-and-guard carries the enclosing statement's line"
+  );
+  assert contains(out, "#line 11 \"src/tests/fixtures/msvc_propagation_debug_info.fn\"\n    Option__num __fun_try_1 = get_val(n);"),
+  "expected the enclosing statement's own line directly before the propagation's own hoisted temp, not a stale directive left over from whatever was emitted just before it";
+}
+
+test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
+  // Same reasoning as the propagation case above, for the other MSVC-
+  // only hoisted-text path: a `format`/`print_fmt`/`println_fmt` call's
+  // own vararg temps (and any Display-dispatch call riding along with
+  // one of them) are hand-assembled outside the ordinary statement
+  // path. GNU mode renders the whole thing inline as a statement
+  // expression on the enclosing statement's own line, so this needs the
+  // MSVC path specifically to catch.
+  str src = `imp std.option;
+  `imp std.io;
+  `imp std.quirks;
+  `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `impl Point as Display {
+  `  pub to_string() str {
+  `    ret format("({num}, {num})", self.x, self.y);
+  `  }
+  `}
+  `fun main() num {
+  `  Point p;
+  `  p.x = 1;
+  `  p.y = 2;
+  `  println_fmt("pt={}", p);
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports_forcing_msvc_with_debug_info(
+    src,
+    "msvc_vararg_debug_info",
+    "printf-style call's own MSVC-hoisted vararg temps carry the enclosing statement's line"
+  );
+  num line_idx = index_of_str(out, "#line 17 \"src/tests/fixtures/msvc_vararg_debug_info.fn\"");
+  assert line_idx >= 0, "expected the enclosing println_fmt statement's own line to be emitted";
+  num va_idx = index_of_str(out, "Point __fun_va_");
+  assert va_idx >= 0, "expected the Display-typed argument to be hoisted into a vararg temp";
+  assert line_idx < va_idx && va_idx - line_idx < 80,
+  "expected the #line directive to sit directly before the hoisted vararg temp, not only somewhere earlier in the file";
+}

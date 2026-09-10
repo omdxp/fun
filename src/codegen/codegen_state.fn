@@ -64,11 +64,7 @@ impl CodegenState {
   // (callers that already checked `debug_info` use this directly; most
   // should go through `write_indent`'s own flush instead).
   pub write_line_directive(Pos pos) {
-    self.out.append("#line ");
-    self.out.append_num(pos.line);
-    self.out.append(" \"");
-    self.out.append(_escaped_line_directive_path(pos.filename));
-    self.out.append("\"\n");
+    self.out.append(line_directive_text(pos));
   }
 
   // Writes `s` (which may itself span several C lines, each written in
@@ -102,6 +98,22 @@ impl CodegenState {
       self.out.append(substr(s, start, n - start));
     }
   }
+}
+
+// The exact `#line N "file"\n` text `write_line_directive` writes,
+// exposed so a caller building C text by hand outside the ordinary
+// statement-emission path (a hand-assembled temp-assignment line, for
+// instance) can prepend the same directive to its own text before
+// splicing it elsewhere, rather than writing straight to a
+// `CodegenState` that may not be the one the text ultimately lands in.
+pub fun line_directive_text(Pos pos) str {
+  StringBuilder b = string_builder_init(32);
+  b.append("#line ");
+  b.append_num(pos.line);
+  b.append(" \"");
+  b.append(_escaped_line_directive_path(pos.filename));
+  b.append("\"\n");
+  ret b.build();
 }
 
 // A `#line` directive's own filename argument is a C string literal, so

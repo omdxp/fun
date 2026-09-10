@@ -865,6 +865,30 @@ fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<Dat
 
 impl Codegen {
 
+  // A fresh scratch `CodegenState`, for wherever `self.state` is
+  // temporarily swapped to render something into its own buffer before
+  // splicing it elsewhere (a generic instantiation, a propagation's own
+  // operand, a receiver chain, an address-of temp, and so on).
+  // `codegen_state_new()` defaults `debug_info = false`, since it also
+  // serves callers with no `Codegen` in scope yet (the real root state,
+  // and this file's own inline unit tests); every one of THIS file's
+  // internal scratch swaps must inherit the real, already-resolved
+  // `self.debug_info` instead, or every `#line` directive inside
+  // whatever gets rendered into that scratch buffer is silently
+  // dropped (`set_pending_line_directive` is a no-op when `debug_info`
+  // is false) - the case that surfaced this: a generic function's or
+  // method's FIRST monomorphized instantiation (rendered into a scratch
+  // buffer, then spliced via `emit_hoisted`) carried no line info at
+  // all, so a debugger stepping into `Vec<T>.push()`, `Option<T>.
+  // unwrap()`, or any other first-use generic call landed on whatever
+  // Fun source line happened to be active before the splice, not the
+  // generic method's own body.
+  new_scratch_state() CodegenState {
+    CodegenState st = codegen_state_new();
+    st.debug_info = self.debug_info;
+    ret st;
+  }
+
   // Writes `type_name`'s bare C spelling, with no pointer stars.
   write_type_name(str type_name) {
     fit parse_dynamic_int_datatype(type_name) {
@@ -1355,7 +1379,7 @@ impl Codegen {
     // Pass 2: write the struct body verbatim from the resolved vectors
     // above, so no further resolution (and no recursive instantiation)
     // happens while `self.state` is swapped.
-    CodegenState typedef_scratch = codegen_state_new();
+    CodegenState typedef_scratch = self.new_scratch_state();
     CodegenState* saved_state = self.state;
     self.state = &typedef_scratch;
     self.state.write("typedef struct ");
@@ -1576,7 +1600,7 @@ impl Codegen {
       variant_names.push(vt.name);
     }
 
-    CodegenState enum_scratch = codegen_state_new();
+    CodegenState enum_scratch = self.new_scratch_state();
     CodegenState* saved_enum_state = self.state;
     self.state = &enum_scratch;
     if is_tagged_union {
@@ -1676,7 +1700,7 @@ impl Codegen {
     self.type_subst_arg_type_strs = q_arg_type_names;
     self.type_subst_arg_is_pointer = q_arg_is_pointer;
 
-    CodegenState qvt_scratch = codegen_state_new();
+    CodegenState qvt_scratch = self.new_scratch_state();
     CodegenState* saved_qvt_state = self.state;
     self.state = &qvt_scratch;
     self.state.write("typedef struct ");
@@ -2230,7 +2254,7 @@ impl Codegen {
           // path, landing in `qv_scratch`, exactly where this needs it,
           // and the ambient values are restored before the real
           // splice below, which needs them intact.
-          CodegenState qv_scratch = codegen_state_new();
+          CodegenState qv_scratch = self.new_scratch_state();
           CodegenState* saved_qv_state = self.state;
           let saved_qv_hoist_pos = self.hoist_insert_pos;
           let saved_qv_scratch_depth = self.hoist_scratch_depth;
@@ -2421,7 +2445,7 @@ impl Codegen {
             // Built into a scratch buffer, then spliced at the current
             // statement's start: writing at the live tail would land
             // mid-statement when the triggering call is a sub-expression.
-            CodegenState proto_scratch = codegen_state_new();
+            CodegenState proto_scratch = self.new_scratch_state();
             CodegenState* saved_proto_state = self.state;
             let saved_proto_hoist_pos = self.hoist_insert_pos;
             proto_scratch.indent_level = saved_proto_state.indent_level;
@@ -2467,7 +2491,7 @@ impl Codegen {
             fit m.kind {
               .Function(proto_async_fnv) -> {
                 if proto_async_fnv.is_async {
-                  CodegenState async_proto_scratch = codegen_state_new();
+                  CodegenState async_proto_scratch = self.new_scratch_state();
                   CodegenState* saved_async_state = self.state;
                   self.state = &async_proto_scratch;
                   self.emit_async_call_helper_prototype(*m, new_name);
@@ -2599,7 +2623,7 @@ impl Codegen {
       }
     }
 
-    CodegenState pm_scratch = codegen_state_new();
+    CodegenState pm_scratch = self.new_scratch_state();
     CodegenState* saved_pm_state = self.state;
     let saved_pm_hoist_pos = self.hoist_insert_pos;
     pm_scratch.indent_level = saved_pm_state.indent_level;
@@ -2758,7 +2782,7 @@ impl Codegen {
       }
     }
 
-    CodegenState pf_scratch = codegen_state_new();
+    CodegenState pf_scratch = self.new_scratch_state();
     CodegenState* saved_pf_state = self.state;
     let saved_pf_hoist_pos = self.hoist_insert_pos;
     pf_scratch.indent_level = saved_pf_state.indent_level;
@@ -3067,7 +3091,7 @@ impl Codegen {
             nb.append(bare_name);
             str new_name = nb.build();
 
-            CodegenState method_scratch = codegen_state_new();
+            CodegenState method_scratch = self.new_scratch_state();
             CodegenState* saved_method_state = self.state;
             let saved_hoist_pos = self.hoist_insert_pos;
             // `emit_function_named` recurses into `emit_statements`,
@@ -3379,7 +3403,7 @@ impl Codegen {
 
                 // Same scratch-buffer/state-swap discipline as
                 // `emit_one_generic_impl_method`.
-                CodegenState method_scratch = codegen_state_new();
+                CodegenState method_scratch = self.new_scratch_state();
                 CodegenState* saved_method_state = self.state;
                 let saved_hoist_pos = self.hoist_insert_pos;
                 let saved_stmt_start_pos = self.current_stmt_start_pos;
@@ -4389,7 +4413,7 @@ impl Codegen {
     // Render the operand's own C text once (never twice: it may have
     // side effects), into a scratch buffer so it can be spliced into
     // either the inline GNU form or a hoisted declaration.
-    CodegenState try_scratch = codegen_state_new();
+    CodegenState try_scratch = self.new_scratch_state();
     CodegenState* try_saved_state = self.state;
     let try_saved_hoist_pos = self.hoist_insert_pos;
     let try_saved_stmt_pos = self.current_stmt_start_pos;
@@ -4423,7 +4447,7 @@ impl Codegen {
     // through the same emission this codegen already uses for a real
     // `ret .None;`/`ret .Err(x);`, so a generic instantiation's mangled
     // enum name is handled automatically.
-    CodegenState early_ret_scratch = codegen_state_new();
+    CodegenState early_ret_scratch = self.new_scratch_state();
     CodegenState* early_ret_saved_state = self.state;
     self.state = &early_ret_scratch;
     str early_ret_text = "";
@@ -4497,6 +4521,17 @@ impl Codegen {
       ret .Some(.UnsupportedNode);
     }
     StringBuilder try_decl_sb = string_builder_init(64);
+    // MSVC-only text (the GNU path renders this whole thing inline as a
+    // statement expression on the enclosing statement's own line, so it
+    // needs no `#line` of its own): this temp-and-guard splice is hand-
+    // assembled outside the ordinary per-statement `#line` flush, same
+    // class of gap as `hoist_call_result_to_temp`'s own receiver temp -
+    // without this, a debugger stepping into `expr?`/`expr!` under
+    // MSVC showed the wrong location for the hoisted temp-and-guard,
+    // inheriting whatever directive was last active before it.
+    if self.debug_info {
+      try_decl_sb.append(line_directive_text(self.state.pending_line_directive));
+    }
     num try_indent_ii = 0;
     for try_indent_ii < self.state.indent_level {
       try_decl_sb.append("    ");
@@ -5505,7 +5540,7 @@ impl Codegen {
           }
           // Capture the expression text into a scratch buffer so we can
           // splice the declaration before the enclosing statement.
-          CodegenState va_scratch = codegen_state_new();
+          CodegenState va_scratch = self.new_scratch_state();
           CodegenState* va_saved_state = self.state;
           let va_saved_hoist_pos = self.hoist_insert_pos;
           let va_saved_stmt_pos = self.current_stmt_start_pos;
@@ -5550,6 +5585,16 @@ impl Codegen {
           }
           va_resolved_ctypes.push(va_c_type);
           StringBuilder va_decl_sb = string_builder_init(64);
+          // Same reasoning as `emit_propagation`'s own `try_decl_sb`:
+          // MSVC-only hand-assembled text, outside the ordinary
+          // per-statement `#line` flush, needing its own directive so a
+          // debugger stepping through a `printf`-style call with a
+          // hoisted vararg (MSVC's own dialect, no GNU statement
+          // expressions) lands on the right line instead of whatever
+          // was last active before it.
+          if self.debug_info {
+            va_decl_sb.append(line_directive_text(self.state.pending_line_directive));
+          }
           num va_indent_ii = 0;
           for va_indent_ii < self.state.indent_level {
             va_decl_sb.append("    ");
@@ -5632,7 +5677,7 @@ impl Codegen {
               .Character(_) -> { va_is_chr_literal = true; }
               _ -> {}
             }
-            CodegenState va_scratch_m = codegen_state_new();
+            CodegenState va_scratch_m = self.new_scratch_state();
             CodegenState* va_m_saved = self.state;
             let va_m_saved_hoist = self.hoist_insert_pos;
             let va_m_saved_stmt = self.current_stmt_start_pos;
@@ -6252,7 +6297,7 @@ impl Codegen {
       self.root_stmt_start_pos = self.current_stmt_start_pos;
     }
     self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-    CodegenState addr_scratch = codegen_state_new();
+    CodegenState addr_scratch = self.new_scratch_state();
     CodegenState* saved_addr_state = self.state;
     let saved_addr_hoist_pos = self.hoist_insert_pos;
     let saved_addr_stmt_start_pos = self.current_stmt_start_pos;
@@ -6300,6 +6345,27 @@ impl Codegen {
     str recv_tmp_name = recv_tmp_name_sb.build();
 
     StringBuilder recv_tmp_stmt_sb = string_builder_init(64);
+    // This temp assignment is hand-assembled text, outside the ordinary
+    // per-statement `set_pending_line_directive`/`write_indent` flush
+    // that tags everything else - without its own `#line` here, it
+    // silently inherited whatever directive was last active before it
+    // (a previous statement, or a previous function entirely), so a
+    // debugger stepping into `call(...).method()` showed the wrong
+    // location for the `call(...)` half, landing correctly only once
+    // the following statement's own directive took over for the
+    // `.method()` half. `self.state.pending_line_directive` (not a new
+    // `Codegen`-level field) is the right source: it is already
+    // correctly scoped per `CodegenState`, so resolving this call's own
+    // receiver - which can trigger an entirely separate generic
+    // instantiation, rendered into its OWN scratch state and restored
+    // before control returns here - never contaminates it, unlike a
+    // shared field would. It always holds a real value by this point:
+    // `emit_statement` sets it before dispatching into any statement's
+    // own expression emission, and nothing between there and here
+    // calls `set_pending_line_directive` again on `self.state` itself.
+    if self.debug_info {
+      recv_tmp_stmt_sb.append(line_directive_text(self.state.pending_line_directive));
+    }
     num recv_tmp_ii = 0;
     for recv_tmp_ii < self.state.indent_level {
       recv_tmp_stmt_sb.append("    ");
@@ -7390,7 +7456,7 @@ impl Codegen {
             self.root_stmt_start_pos = self.current_stmt_start_pos;
           }
           self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState call_scratch = codegen_state_new();
+          CodegenState call_scratch = self.new_scratch_state();
           CodegenState* saved_call_state = self.state;
           let saved_call_hoist_pos = self.hoist_insert_pos;
           let saved_call_stmt_start_pos = self.current_stmt_start_pos;
@@ -7511,7 +7577,7 @@ impl Codegen {
             self.root_stmt_start_pos = self.current_stmt_start_pos;
           }
           self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState idx_scratch = codegen_state_new();
+          CodegenState idx_scratch = self.new_scratch_state();
           CodegenState* saved_idx_state = self.state;
           let saved_idx_hoist_pos = self.hoist_insert_pos;
           let saved_idx_stmt_start_pos = self.current_stmt_start_pos;
@@ -7653,7 +7719,7 @@ impl Codegen {
             self.root_stmt_start_pos = self.current_stmt_start_pos;
           }
           self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState prop_scratch = codegen_state_new();
+          CodegenState prop_scratch = self.new_scratch_state();
           CodegenState* saved_prop_state = self.state;
           let saved_prop_hoist_pos = self.hoist_insert_pos;
           let saved_prop_stmt_start_pos = self.current_stmt_start_pos;
@@ -7774,7 +7840,7 @@ impl Codegen {
           // since lazy triggers fire only when `emit_expr` writes
           // somewhere real.
           if exp != nil {
-            CodegenState main_discard_scratch = codegen_state_new();
+            CodegenState main_discard_scratch = self.new_scratch_state();
             CodegenState* saved_discard_state = self.state;
             let saved_discard_hoist_pos = self.hoist_insert_pos;
             // Suspended alongside `hoist_insert_pos`, so a method call
@@ -10419,7 +10485,7 @@ impl Codegen {
         // `fun(T) R` value, not `R` alone), so it's suppressed the same
         // way `main`'s own forced `int` suppresses its real Fun rtype.
         bin suppress_direct_rtype_write = is_main || f.rtype.has_fn_sig;
-        CodegenState rtype_scratch = codegen_state_new();
+        CodegenState rtype_scratch = self.new_scratch_state();
         CodegenState* saved_rtype_state = self.state;
         let saved_rtype_hoist_pos = self.hoist_insert_pos;
         if suppress_direct_rtype_write {
@@ -12231,7 +12297,7 @@ impl Codegen {
               // outer position. This can run nested inside another
               // function's in-progress emission, so the local-name and
               // return-type state is saved and restored too.
-              CodegenState scratch = codegen_state_new();
+              CodegenState scratch = self.new_scratch_state();
               CodegenState* saved_state = self.state;
               let saved_hoist_pos = self.hoist_insert_pos;
               let saved_local_names = self.local_names;
