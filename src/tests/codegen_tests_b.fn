@@ -1785,3 +1785,47 @@ test "a propagation used as a receiver does not corrupt hoist_insert_pos for a g
   );
   assert contains(out, "1"), "expected the generic method call to actually run correctly end to end";
 }
+
+test "fit's own subject can be a propagation's field access, with no intermediate let" {
+  // `fit call(...)?.field { ... }`: the propagation's own hoisted temp
+  // and guard must land inside the enclosing function, and `fit`'s own
+  // subject-hoisting must read the already-resolved field off it, not
+  // re-evaluate or mis-hoist anything. Covers the same
+  // resolve_field_chain `.Unary` receiver branch as the generic-method
+  // trigger case above, with `fit` as the caller instead of a further
+  // method call.
+  str src = `imp std.option;
+  `imp std.string;
+  `imp std.c.io;
+  `enum Kind { A, B }
+  `compound Node { Kind kind; }
+  `fun get_node(str s) Option<Node> {
+  `  Node n;
+  `  n.kind = .A;
+  `  ret .Some(n);
+  `}
+  `fun use_it(str s) Option<num> {
+  `  fit get_node(s)?.kind {
+  `    .A -> { ret .Some(1); }
+  `    .B -> { ret .Some(2); }
+  `  }
+  `  ret .None;
+  `}
+  `fun main() num {
+  `  printf("%lld\n", use_it("x").unwrap());
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fit_subject_propagation_field_strict",
+    "fit's own subject can be a propagation's field access (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "1"), "expected the fit to actually run correctly end to end under the strict MSVC-shaped compile";
+
+  str out = run_source(
+    src,
+    "fit_subject_propagation_field",
+    "fit's own subject can be a propagation's field access"
+  );
+  assert contains(out, "1"), "expected the fit to actually run correctly end to end";
+}

@@ -4782,8 +4782,7 @@ fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataT
 // `file`, resolved against the enclosing `fit` statement's subject
 // type.
 pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
-  let found = covering_fit(program, file, line)?;
-  fit found.kind {
+  fit covering_fit(program, file, line)?.kind {
     .StatementFit(f) -> {
       str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
       if equals(enum_name, "") {
