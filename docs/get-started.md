@@ -193,6 +193,27 @@ wrong `path`, or a repo with no Fun code at all, fetches successfully
 and only surfaces as a normal "import not found" error at the `imp
 deps.<name>...` line that needed it, naming the missing file.
 
+### Transitive dependencies
+
+A fetched dependency that has its own `fun.toml` with its own `[deps]`
+gets those resolved too, automatically, flattened into your project's
+own `fun.lock` and the same flat `imp deps.<name>...` namespace - `imp
+deps.<name>` works for a transitive dependency exactly the way it works
+for one you declared yourself. A `git`/`path`/spec conflict two
+different sources have for the same name is caught for real: identical
+declared pins (or pins that happen to resolve to the exact same commit)
+dedupe silently, but two sources genuinely pinning different commits of
+the same name is a hard build error naming both. Your project's own
+`[deps]` always wins a same-name claim from somewhere deeper in the
+graph, silently, no error - the fix for any transitive conflict is
+adding your own `[deps]` entry for that name to pick a version yourself.
+
+`fun build` prints one line per dependency actually fetched or updated
+(nothing at all when everything's already cached, matching a warm
+`cargo build`/`go build`), including which dependency pulled in a
+transitive one, so a slow first build is never silent about what it's
+doing.
+
 ### `fun.lock`
 
 Resolving a `tag`/`branch` writes the exact commit it resolved to into

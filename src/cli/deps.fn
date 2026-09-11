@@ -8,6 +8,15 @@
 // a plain relative import already works. `fun.lock` pins the exact
 // resolved commit for every entry; a `tag`/`branch` only re-resolves on
 // an explicit `fun deps update`, never implicitly - see `resolve_all`.
+// 
+// `resolve_all` also walks transitively: a fetched dependency that has
+// its own `fun.toml` with its own `[deps]` gets those resolved too, all
+// flattened into the one project-level `fun.lock` and the one flat
+// `imp deps.<name>...` namespace. The project's own `[deps]` always
+// wins a same-name claim from somewhere deeper in the graph; two
+// different transitive sources claiming the same name at genuinely
+// different commits is a hard error naming both, since nothing else
+// here decides which one should win.
 
 imp manifest;
 imp ..parser.deps_lock;
@@ -19,7 +28,14 @@ imp std.error;
 imp std.process;
 imp std.fs;
 imp std.path;
-imp std.c.io;
+imp std.io;
+
+// A safety bound on the whole resolved dependency graph (direct plus
+// every transitive dependency reached through it), keyed by distinct
+// fetched trees - guards against a dependency cycle or a maliciously
+// (or accidentally) deep chain turning one `fun build` into unbounded
+// work. Generous: no real project should ever come close.
+const num max_deps_graph_size = 256;
 
 // Runs `git` with `args`, capturing output. `-C dir` (a plain argv
 // element, not a real chdir) is how every caller targets an existing
@@ -111,6 +127,47 @@ fun _git_clone_ref(str url, str ref, str dest) Result<bin, str> {
     ret .Err(format("git clone {str}@{str} failed: {str}", url, ref, res.stderr_text));
   }
   ret .Ok(true);
+}
+
+// A repo with no tags at all under an `.Auto` spec: clones the remote's
+// own default branch by simply omitting `--branch` (there is no real
+// branch literally named `HEAD` that `--branch` could target).
+fun _git_clone_default(str url, str dest) Result<bin, str> {
+  Vec<str> args;
+  args.init(6);
+  defer args.free();
+  args.push("git");
+  args.push("clone");
+  args.push("--depth");
+  args.push("1");
+  args.push(url);
+  args.push(dest);
+  let res = _git(args)!;
+  if !_git_ok(&res) {
+    ret .Err(format("git clone {str} failed: {str}", url, res.stderr_text));
+  }
+  ret .Ok(true);
+}
+
+// The real name of whatever branch a clone landed on - used to turn
+// `_git_clone_default`'s "whatever the remote's default is" into a
+// concrete branch name for `fun.lock`'s own `spec` field, rather than
+// leaving it unrecorded.
+fun _git_current_branch_name(str dir) Result<str, str> {
+  Vec<str> args;
+  args.init(5);
+  defer args.free();
+  args.push("git");
+  args.push("-C");
+  args.push(dir);
+  args.push("rev-parse");
+  args.push("--abbrev-ref");
+  args.push("HEAD");
+  let res = _git(args)!;
+  if !_git_ok(&res) {
+    ret .Err(format("could not determine the default branch in {str}: {str}", dir, res.stderr_text));
+  }
+  ret .Ok(trim(res.stdout_text));
 }
 
 // An exact commit, not a ref name git can `--branch` directly: shallow
@@ -207,8 +264,12 @@ fun remove_dir_best_effort(str dir) {
 
 // Resolves `d` to an exact commit and fetches it into the shared cache
 // if not already there, without consulting or updating the lockfile -
-// `resolve_all` is the caller that does both.
-pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
+// `resolve_all` is the caller that does both. `required_by` names the
+// dependency that transitively pulled `d` in (empty for one declared
+// directly in the project's own `[deps]`), folded into the printed
+// fetch line so provenance is visible without a separate announcement
+// that would print even when nothing is actually fetched.
+pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
   str ref_kind = "";
   str ref_value = "";
   fit d.spec {
@@ -230,13 +291,20 @@ pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
         ref_kind = "tag";
         ref_value = latest.unwrap();
       } else {
+        // No tags at all - resolved below against the remote's own
+        // default branch, whatever it's actually named.
         ref_kind = "branch";
-        ref_value = "HEAD";
+        ref_value = "";
       }
     }
   }
   if equals(ref_kind, "tag") && equals(ref_value, "latest") {
     ref_value = _git_latest_tag(d.git)!;
+  }
+
+  str provenance = "";
+  if !equals(required_by, "") {
+    provenance = format(" (required by {str})", required_by);
   }
 
   str resolved_rev = "";
@@ -246,6 +314,7 @@ pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
     // destination is already known before fetching.
     dest = dep_cache_dir(d.git, ref_value);
     if !is_dir(dest) {
+      println(format("  fetching {str} @ {str} ({str}){str}", d.name, ref_value, d.git, provenance));
       _ = _git_fetch_rev(d.git, ref_value, dest)!;
     }
     resolved_rev = ref_value;
@@ -255,10 +324,25 @@ pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
     // commit-keyed cache directory is only trusted once the resolved
     // commit is known - avoids leaving a half-named directory behind
     // if resolution races with another `fun build`.
-    str staging = format("{str}/.staging-{str}-{str}", deps_cache_root(), sanitize_url(d.git), ref_value);
+    bin default_branch = equals(ref_kind, "branch") && equals(ref_value, "");
+    if default_branch {
+      println(format("  fetching {str} @ default branch ({str}){str}", d.name, d.git, provenance));
+    } else {
+      println(format("  fetching {str} @ {str} {str} ({str}){str}", d.name, ref_kind, ref_value, d.git, provenance));
+    }
+    str staging_ref = ref_value;
+    if equals(staging_ref, "") {
+      staging_ref = "default";
+    }
+    str staging = format("{str}/.staging-{str}-{str}", deps_cache_root(), sanitize_url(d.git), staging_ref);
     remove_dir_best_effort(staging);
     make_dir_all(deps_cache_root());
-    _ = _git_clone_ref(d.git, ref_value, staging)!;
+    if default_branch {
+      _ = _git_clone_default(d.git, staging)!;
+      ref_value = _git_current_branch_name(staging)!;
+    } else {
+      _ = _git_clone_ref(d.git, ref_value, staging)!;
+    }
     resolved_rev = _git_rev_parse_head(staging)!;
     dest = dep_cache_dir(d.git, resolved_rev);
     if is_dir(dest) {
@@ -289,45 +373,177 @@ pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
   ret .Ok(out);
 }
 
+// Whether an already-resolved `spec_text` (e.g. "tag:v1.2.3" or
+// "branch:main") still matches what `d` itself declares - shared by the
+// lockfile-reuse check below and by `resolve_all`'s transitive dedupe,
+// since both are really the same question: does this dependency still
+// want what's already been resolved for it? `.Auto` matches either a
+// resolved tag or a resolved branch (a repo with no tags at all falls
+// back to its default branch, see `resolve_one`), since which of the
+// two currently applies is exactly what only `fun deps update` should
+// ever re-check.
+fun _spec_still_matches(str spec_text, Dependency* d) bin {
+  fit d.spec {
+    .Auto -> { ret starts_with(spec_text, "tag:") || starts_with(spec_text, "branch:"); }
+    _ -> {}
+  }
+  ret starts_with(spec_text, _dep_ref_text(d));
+}
+
+// Reuses `d`'s already-resolved entry from `locked` when the manifest's
+// own spec for its name hasn't changed (skipping the network entirely),
+// otherwise fetches fresh via `resolve_one`. Shared between a project's
+// own top-level `[deps]` and every dependency discovered transitively
+// through another dependency's own `fun.toml` - both need the exact
+// same reuse-or-fetch decision against the one flat lock.
+// `fetched_count` is incremented on every real fetch, so `resolve_all`
+// can decide at the end whether any network work happened at all.
+fun _resolve_one_reusing(Dependency* d, Vec<ResolvedDep>* locked, bin force_update, num* fetched_count, str required_by) Result<ResolvedDep, str> {
+  bin is_rev = false;
+  fit d.spec {
+    .Rev(_) -> { is_rev = true; }
+    _ -> {}
+  }
+  if !force_update || is_rev {
+    num j = 0;
+    for j < locked.len {
+      let lk = locked.get(j);
+      if equals(lk.name, d.name) && equals(lk.git, d.git) && equals(lk.path, d.path) &&
+        _spec_still_matches(lk.spec_text, d) && is_dir(lk.local_root) {
+        ret .Ok(lk);
+      }
+      j = j + 1;
+    }
+  }
+  *fetched_count = *fetched_count + 1;
+  ret resolve_one(d, required_by);
+}
+
+fun _index_of_name(Vec<ResolvedDep>* v, str name) num {
+  num i = 0;
+  for i < v.len {
+    if equals(v.get(i).name, name) {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
 // The one thing `fun build`/`test`/`fuzz` call: resolves every `[deps]`
-// entry in `m`, reusing the lockfile's own already-resolved commit
-// whenever the manifest's own spec for that name hasn't changed (so an
-// ordinary build never re-resolves `tag`/`branch` over the network),
-// fetching anything not already in the shared cache, and rewriting the
-// lock to match. `force_update` (from `fun deps update`) skips the
-// lockfile-reuse check for every `tag`/`branch` entry, re-resolving to
-// whatever is current; a `rev`-pinned entry is never re-resolved either
-// way, matching `cargo update`'s own respect for an explicit pin.
+// entry in `m`, then floods outward through every fetched dependency's
+// own `fun.toml` to resolve its transitive `[deps]` too, all flattened
+// into one `fun.lock` and one flat `imp deps.<name>...` namespace.
+// Reuses the lockfile's own already-resolved commit whenever a
+// manifest's spec for that name hasn't changed (so an ordinary build
+// never re-resolves `tag`/`branch` over the network), fetching anything
+// not already in the shared cache. `force_update` (from `fun deps
+// update`) skips the lockfile-reuse check for every `tag`/`branch`
+// entry at every level of the graph, re-resolving to whatever is
+// current; a `rev`-pinned entry is never re-resolved either way,
+// matching `cargo update`'s own respect for an explicit pin.
 pub fun resolve_all(Manifest* m, str root, bin force_update) Result<Vec<ResolvedDep>, str> {
   let locked = read_lock(root);
   defer locked.free();
 
   Vec<ResolvedDep> out;
   out.init(m.deps.len);
+  Vec<str> owners;
+  owners.init(m.deps.len);
+  defer owners.free();
+  Vec<str> top_level_names;
+  top_level_names.init(m.deps.len);
+  defer top_level_names.free();
+  num fetched = 0;
+
   num i = 0;
   for i < m.deps.len {
     let d = m.deps.get(i);
-    let manifest_spec = _dep_ref_text(&d);
-    bin reused = false;
-    if !force_update || equals(manifest_spec, "rev") {
-      num j = 0;
-      for j < locked.len {
-        let lk = locked.get(j);
-        if equals(lk.name, d.name) && equals(lk.git, d.git) && equals(lk.path, d.path) &&
-          starts_with(lk.spec_text, manifest_spec) && is_dir(lk.local_root) {
-          out.push(lk);
-          reused = true;
-        }
-        j = j + 1;
-      }
-    }
-    if !reused {
-      let resolved = resolve_one(&d)!;
-      out.push(resolved);
-    }
+    top_level_names.push(d.name);
+    let resolved = _resolve_one_reusing(&d, &locked, force_update, &fetched, "")!;
+    out.push(resolved);
+    owners.push("the project itself");
     i = i + 1;
   }
+
+  // `out` doubles as its own work queue below: resolving a transitive
+  // dependency's own `[deps]` appends onto the very list being walked,
+  // so a growing `out` naturally keeps the flood going until every
+  // reachable dependency, direct or transitive, has been visited once.
+  Vec<str> visited_nodes;
+  visited_nodes.init(0);
+  defer visited_nodes.free();
+
+  i = 0;
+  for i < out.len {
+    let parent = out.get(i);
+    str node_key = format("{str}|{str}|{str}", parent.git, parent.path, parent.resolved_rev);
+    i = i + 1;
+    if visited_nodes.contains(node_key) {
+      continue;
+    }
+    visited_nodes.push(node_key);
+    if visited_nodes.len > max_deps_graph_size {
+      ret .Err(format(
+        "[deps] the dependency graph reaches more than {num} distinct fetched repositories, likely a cycle; check for a dependency that transitively depends on itself",
+        max_deps_graph_size
+      ));
+    }
+
+    str child_toml_path = format("{str}/fun.toml", parent.local_root);
+    if !exists(child_toml_path) {
+      continue;
+    }
+    let child_text = read_to_string(child_toml_path);
+    let child_manifest_r = parse_manifest(child_text);
+    if child_manifest_r.is_err() {
+      ret .Err(format("[deps] `{str}`'s own fun.toml is invalid: {str}", parent.name, child_manifest_r.unwrap_err()));
+    }
+    Manifest child_m = child_manifest_r.unwrap();
+    defer child_m.free();
+
+    num j = 0;
+    for j < child_m.deps.len {
+      let cd = child_m.deps.get(j);
+      j = j + 1;
+      if top_level_names.contains(cd.name) {
+        // The project's own [deps] entry for this name always wins over
+        // anything a dependency transitively asks for.
+        continue;
+      }
+      num existing_idx = _index_of_name(&out, cd.name);
+      if existing_idx < 0 {
+        let resolved_child = _resolve_one_reusing(&cd, &locked, force_update, &fetched, parent.name)!;
+        out.push(resolved_child);
+        owners.push(parent.name);
+        continue;
+      }
+      let existing = out.get(existing_idx);
+      if equals(existing.git, cd.git) && equals(existing.path, cd.path) &&
+        _spec_still_matches(existing.spec_text, &cd) {
+        continue; // identical declared pin, already resolved - no extra fetch
+      }
+      // Specs differ syntactically (e.g. one side pins a tag, the other
+      // the branch that tag was cut from) - resolve for real before
+      // calling this an actual conflict, since they might still land on
+      // the exact same commit.
+      let resolved_child = _resolve_one_reusing(&cd, &locked, force_update, &fetched, parent.name)!;
+      if equals(resolved_child.resolved_rev, existing.resolved_rev) &&
+        equals(resolved_child.git, existing.git) &&
+        equals(resolved_child.path, existing.path) {
+        continue; // same content, different spelling - harmless
+      }
+      ret .Err(format(
+        "[deps] `{str}` is required by both `{str}` and `{str}` pinned to different commits ({str} vs {str}); add `{str}` to this project's own [deps] to pick one",
+        cd.name, owners.get(existing_idx), parent.name, existing.resolved_rev, resolved_child.resolved_rev, cd.name
+      ));
+    }
+  }
+
   write_lock(root, &out);
+  if fetched > 0 {
+    println(format("Resolved {num} dependencies ({num} fetched or updated).", out.len, fetched));
+  }
   ret .Ok(out);
 }
 
@@ -344,4 +560,48 @@ fun _dep_ref_text(Dependency* d) str {
     .Rev(r) -> { ret format("rev:{str}", r); }
   }
   ret "";
+}
+
+test "_index_of_name finds a resolved dependency by name, or reports -1" {
+  Vec<ResolvedDep> v;
+  v.init(2);
+  defer v.free();
+  ResolvedDep a;
+  a.name = "alpha";
+  v.push(a);
+  ResolvedDep b;
+  b.name = "beta";
+  v.push(b);
+  assert _index_of_name(&v, "beta") == 1, "expected the second entry's index";
+  assert _index_of_name(&v, "gamma") == -1, "expected -1 for a name that isn't present";
+}
+
+test "_spec_still_matches: an explicit tag only matches its own exact value" {
+  Dependency d;
+  d.spec = .Tag("v1.2.3");
+  assert _spec_still_matches("tag:v1.2.3", &d), "expected the same tag to match";
+  assert !_spec_still_matches("tag:v1.2.4", &d), "expected a different tag to not match";
+  assert !_spec_still_matches("branch:main", &d), "expected a branch entry to not match a tag spec";
+}
+
+test "_spec_still_matches: an explicit branch only matches its own exact value" {
+  Dependency d;
+  d.spec = .Branch("main");
+  assert _spec_still_matches("branch:main", &d), "expected the same branch to match";
+  assert !_spec_still_matches("branch:develop", &d), "expected a different branch to not match";
+}
+
+test "_spec_still_matches: a rev only matches its own exact commit" {
+  Dependency d;
+  d.spec = .Rev("abc123");
+  assert _spec_still_matches("rev:abc123", &d), "expected the same rev to match";
+  assert !_spec_still_matches("rev:def456", &d), "expected a different rev to not match";
+}
+
+test "_spec_still_matches: Auto matches either a resolved tag or a resolved branch" {
+  Dependency d;
+  d.spec = .Auto;
+  assert _spec_still_matches("tag:v1.0.0", &d), "expected Auto to accept a previously resolved tag";
+  assert _spec_still_matches("branch:main", &d), "expected Auto to accept a previously resolved branch, e.g. a repo with no tags at all";
+  assert !_spec_still_matches("rev:abc123", &d), "expected Auto to not accept a rev-pinned entry";
 }
