@@ -576,3 +576,123 @@ test "a lib with no path resolves to the conventional source file" {
   assert equals(m.lib.path, "src/lib.fn"), "expected the conventional library path";
   assert equals(m.lib.name, "mylib"), "expected the library to take the package name";
 }
+
+fun _dep_named(Vec<Dependency>* deps, str name) Dependency {
+  num i = 0;
+  for i < deps.len {
+    let d = deps.get(i);
+    if equals(d.name, name) {
+      ret d;
+    }
+    i = i + 1;
+  }
+  allow assert_constant, "reports the missing dependency's name";
+  assert false, format("no dependency named {str}", name);
+  ret deps.get(0);
+}
+
+test "parses a [deps] table with tag, branch, and rev entries" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "https://github.com/user/somejson", tag = "v1.2.3" }
+  `httpclient = { git = "https://github.com/other/repo", path = "libs/httpclient", branch = "main" }
+  `pinned = { git = "https://github.com/user/pinned", rev = "a1b2c3d" }`;
+  let m = parse_manifest(text).unwrap();
+  assert m.deps.len == 3, "expected three dependencies";
+
+  let somejson = _dep_named(&m.deps, "somejson");
+  assert equals(somejson.git, "https://github.com/user/somejson"), "expected the git url";
+  assert equals(somejson.path, ""), "expected no subfolder";
+  fit somejson.spec {
+    .Tag(t) -> { assert equals(t, "v1.2.3"), "expected the tag value"; }
+    _ -> { assert false, "expected a Tag spec"; }
+  }
+
+  let httpclient = _dep_named(&m.deps, "httpclient");
+  assert equals(httpclient.path, "libs/httpclient"), "expected the subfolder";
+  fit httpclient.spec {
+    .Branch(b) -> { assert equals(b, "main"), "expected the branch value"; }
+    _ -> { assert false, "expected a Branch spec"; }
+  }
+
+  let pinned = _dep_named(&m.deps, "pinned");
+  fit pinned.spec {
+    .Rev(r) -> { assert equals(r, "a1b2c3d"), "expected the rev value"; }
+    _ -> { assert false, "expected a Rev spec"; }
+  }
+}
+
+test "a [deps] entry with no tag/branch/rev defaults to Auto" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "https://github.com/user/somejson" }`;
+  let m = parse_manifest(text).unwrap();
+  fit m.deps.get(0).spec {
+    .Auto -> {}
+    _ -> { assert false, "expected an Auto spec"; }
+  }
+}
+
+test "a [deps] entry giving both tag and branch is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "https://github.com/user/somejson", tag = "v1.0.0", branch = "main" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected conflicting tag/branch to be rejected";
+}
+
+test "a [deps] entry missing git is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { tag = "v1.0.0" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a dependency with no git url to be rejected";
+}
+
+test "a [deps] entry with a disallowed git scheme is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "ext::sh -c evil" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a non-allow-listed git scheme to be rejected";
+}
+
+test "a [deps] entry with a flag-shaped tag is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "https://github.com/user/somejson", tag = "--upload-pack=evil" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected an argv-injection-shaped tag to be rejected";
+}
+
+test "a [deps] entry with a path-traversal path is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = { git = "https://github.com/user/somejson", path = "../../etc" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a path escaping the checkout to be rejected";
+}
+
+test "a non-inline-table [deps] entry is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `somejson = "not a table"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a scalar [deps] entry to be rejected";
+}

@@ -246,6 +246,9 @@ fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Started)
+fun add <name> --git <url> [--path <subfolder>] [--tag <ref> | --branch <ref> | --rev <sha>] [--token-env <VAR>]
+                         (adds or updates a [deps] entry in fun.toml, see Get Started)
+fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun.lock)
 ```
 
 - `-no-exec`/`-outf`/`-out` apply the same way under `-test`/`-fuzz`

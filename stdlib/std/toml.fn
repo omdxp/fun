@@ -627,3 +627,22 @@ test "a hash inside quotes is kept" {
   defer doc.free();
   assert equals(doc.get("tag").unwrap().as_str().unwrap_or(""), "a#b"), "expected the quoted hash to survive";
 }
+
+test "parses an inline table's fields" {
+  let doc = parse_document("[deps]\nsomejson = { git = \"https://example.com/repo\", tag = \"v1.0.0\" }\n");
+  defer doc.free();
+  let deps = doc.table("deps").unwrap();
+  let entry = deps.values.get("somejson");
+  assert entry.is_table(), "expected the dependency entry to parse as an inline table";
+  assert equals(entry.table_field("git"), "https://example.com/repo"), "expected the git field";
+  assert equals(entry.table_field("tag"), "v1.0.0"), "expected the tag field";
+  assert equals(entry.table_field("nosuchfield"), ""), "expected a missing field to report an empty string";
+}
+
+test "an inline table field value keeps its quotes stripped and a plain scalar reports not-a-table" {
+  let doc = parse_document("plain = 3\n");
+  defer doc.free();
+  let entry = doc.get("plain").unwrap();
+  assert !entry.is_table(), "expected a plain scalar to not be an inline table";
+  assert equals(entry.table_field("anything"), ""), "expected table_field on a non-table to report an empty string";
+}

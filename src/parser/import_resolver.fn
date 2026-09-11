@@ -6,6 +6,7 @@
 
 imp parse_state;
 imp parser;
+imp deps_lock;
 imp ..ast.ast;
 imp ..lexer.lexer;
 imp ..lexer.token;
@@ -154,15 +155,76 @@ pub fun stdlib_root(str input_file_path) str {
   ret "stdlib";
 }
 
+// Where the nearest `[deps]`-declaring project root is, walking upward
+// from `input_file_path` looking for a `fun.toml` - the same "ask
+// rather than assume, walk up looking for a marker" shape
+// `stdlib_root` already uses, just keyed on a different marker file.
+// A `deps.`-prefixed import resolves against whatever this finds; a
+// project with no `fun.toml` above it at all falls back to `.`, same
+// as `load_manifest`'s own working-directory assumption.
+pub fun deps_project_root(str input_file_path) str {
+  str dir = dirname(input_file_path);
+  if equals(dir, input_file_path) {
+    dir = ".";
+  }
+  num depth = 0;
+  for depth < max_stdlib_search_depth {
+    if exists(path_join(dir, "fun.toml")) {
+      ret dir;
+    }
+    let parent = dirname(dir);
+    if equals(parent, dir) || equals(parent, "") {
+      break;
+    }
+    dir = parent;
+    depth = depth + 1;
+  }
+  ret ".";
+}
+
+// `deps.<name>.<rest>` resolves against dependency `name`'s own
+// already-fetched root (`fun.lock`, read fresh - see
+// `deps_lock.resolve_deps_import_root`), the same dot-to-path
+// conversion `std.`/relative imports already share, just rooted
+// wherever that dependency's own `path` (or its repo root) sits. An
+// unresolved name (no matching `fun.lock` entry - a stale or missing
+// lock) resolves to a path that can never exist, so the failure comes
+// back through the ordinary "file not found" error naming the real
+// missing dependency, not a crash on a nil root.
+fun _resolve_deps_path(str input_file_path, str import_path) str {
+  str rest = substr(import_path, 5, len(import_path) - 5);
+  num dot_i = index_of_char(rest, '.');
+  str name = rest;
+  str remaining = "";
+  if dot_i >= 0 {
+    name = substr(rest, 0, dot_i);
+    remaining = substr(rest, dot_i + 1, len(rest) - (dot_i + 1));
+  }
+  str project_root = deps_project_root(input_file_path);
+  let root_opt = resolve_deps_import_root(name, project_root);
+  if root_opt.is_none() {
+    ret format("<unresolved-dep-{str}>/__missing__.fn", name);
+  }
+  if equals(remaining, "") {
+    ret root_opt.unwrap();
+  }
+  ret _convert_dotted_path(root_opt.unwrap(), remaining);
+}
+
 // Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
-// path. A `std.`-prefixed path resolves against the stdlib root, not
-// relative to the importing file, so it is the same regardless of who
-// imports it. Everything else resolves relative to `input_file_path`'s
-// own directory (see `_convert_dotted_path` for the dot-to-path
-// conversion shared by both).
+// path. A `std.`-prefixed path resolves against the stdlib root, a
+// `deps.`-prefixed path against that dependency's own fetched root
+// (see `_resolve_deps_path`), neither relative to the importing file so
+// each is the same regardless of who imports it. Everything else
+// resolves relative to `input_file_path`'s own directory (see
+// `_convert_dotted_path` for the dot-to-path conversion all three
+// share).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
     ret _convert_dotted_path(stdlib_root(input_file_path), import_path);
+  }
+  if starts_with(import_path, "deps.") {
+    ret _resolve_deps_path(input_file_path, import_path);
   }
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
@@ -1159,6 +1221,37 @@ test "resolve_import_path resolves a 'std.' import against the stdlib root, not 
 test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib root" {
   let resolved = resolve_import_path("src/lexer/lexer.fn", "std.c.io");
   assert ends_with(resolved, "std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
+}
+
+test "resolve_import_path resolves a 'deps.' import against the dependency's own root from fun.lock" {
+  str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
+  str cache = path_join(fixture_root, "depscache");
+  assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
+  defer clear_env("FUN_DEPS_CACHE");
+
+  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib.some");
+  assert equals(resolved, path_join(cache, "example_com_mylib/abc123/some.fn")), "expected the import resolved against the locked dependency's own cache directory";
+}
+
+test "resolve_import_path resolves a bare 'deps.<name>' import to the dependency's root directory" {
+  str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
+  str cache = path_join(fixture_root, "depscache");
+  assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
+  defer clear_env("FUN_DEPS_CACHE");
+
+  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib");
+  assert equals(resolved, path_join(cache, "example_com_mylib/abc123")), "expected a bare dependency name to resolve to its own root";
+}
+
+test "resolve_import_path resolves an unknown 'deps.' name to a never-existing path rather than crashing" {
+  str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
+  str cache = path_join(fixture_root, "depscache");
+  assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
+  defer clear_env("FUN_DEPS_CACHE");
+
+  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.nosuchlib.some");
+  assert contains(resolved, "nosuchlib"), "expected the failure to name the missing dependency rather than resolve to something unrelated";
+  assert !exists(resolved), "expected an unresolved dependency name to never coincide with a real file";
 }
 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {

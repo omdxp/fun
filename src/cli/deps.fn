@@ -1,0 +1,349 @@
+// Resolves, fetches, and locks `[deps]` entries from `fun.toml`.
+// 
+// Every fetch shells out to the system `git` (via `std.process.run`),
+// the only thing in this codebase with real, already-correct TLS/SSH
+// handling - there is no HTTP/TLS client anywhere in the stdlib. A
+// dependency is never executed as part of resolution: it is source
+// text, parsed and compiled the same as any other `imp`, the same way
+// a plain relative import already works. `fun.lock` pins the exact
+// resolved commit for every entry; a `tag`/`branch` only re-resolves on
+// an explicit `fun deps update`, never implicitly - see `resolve_all`.
+
+imp manifest;
+imp ..parser.deps_lock;
+imp std.vec;
+imp std.string;
+imp std.option;
+imp std.result;
+imp std.error;
+imp std.process;
+imp std.fs;
+imp std.path;
+
+// Runs `git` with `args`, capturing output. `-C dir` (a plain argv
+// element, not a real chdir) is how every caller targets an existing
+// checkout - `std.process.run` has no cwd parameter, and `-C` works
+// identically across every platform `git` itself supports.
+fun _git(Vec<str> args) Result<ProcessResult, str> {
+  str[] argv = argv_from(&args);
+  defer free_argv(argv);
+  let r = run(argv);
+  if r.is_err() {
+    ret .Err(format("git: {str}", r.unwrap_err().message));
+  }
+  ret .Ok(r.unwrap());
+}
+
+fun _git_ok(ProcessResult* r) bin {
+  ret r.exit_code == 0;
+}
+
+// `git ls-remote --tags --refs --sort=-v:refname <url>`: the highest
+// semver-sorted tag, using git's own version-sort so no semver parser
+// is needed here. A remote query, no clone - cheap, and lets `tag =
+// "latest"` resolve before deciding what to actually fetch.
+fun _git_latest_tag(str url) Result<str, str> {
+  Vec<str> args;
+  args.init(6);
+  defer args.free();
+  args.push("git");
+  args.push("ls-remote");
+  args.push("--tags");
+  args.push("--refs");
+  args.push("--sort=-v:refname");
+  args.push(url);
+  let res = _git(args)!;
+  if !_git_ok(&res) {
+    ret .Err(format("could not list tags for {str}: {str}", url, res.stderr_text));
+  }
+  let lines = split(res.stdout_text, '\n');
+  defer lines.free();
+  for line : lines {
+    if equals(trim(line), "") {
+      continue;
+    }
+    num tab_i = index_of_char(line, '\t');
+    if tab_i < 0 {
+      continue;
+    }
+    str ref = trim(substr(line, tab_i + 1, len(line) - (tab_i + 1)));
+    str prefix = "refs/tags/";
+    if starts_with(ref, prefix) {
+      ret .Ok(substr(ref, len(prefix), len(ref) - len(prefix)));
+    }
+  }
+  ret .Err(format("{str} has no tags", url));
+}
+
+fun _git_rev_parse_head(str dir) Result<str, str> {
+  Vec<str> args;
+  args.init(4);
+  defer args.free();
+  args.push("git");
+  args.push("-C");
+  args.push(dir);
+  args.push("rev-parse");
+  args.push("HEAD");
+  let res = _git(args)!;
+  if !_git_ok(&res) {
+    ret .Err(format("could not resolve HEAD in {str}: {str}", dir, res.stderr_text));
+  }
+  ret .Ok(trim(res.stdout_text));
+}
+
+// One shallow clone, exact ref (a tag or branch name git can resolve
+// directly): `git clone --depth 1 --branch <ref> <url> <dest>`.
+fun _git_clone_ref(str url, str ref, str dest) Result<bin, str> {
+  Vec<str> args;
+  args.init(8);
+  defer args.free();
+  args.push("git");
+  args.push("clone");
+  args.push("--depth");
+  args.push("1");
+  args.push("--branch");
+  args.push(ref);
+  args.push(url);
+  args.push(dest);
+  let res = _git(args)!;
+  if !_git_ok(&res) {
+    ret .Err(format("git clone {str}@{str} failed: {str}", url, ref, res.stderr_text));
+  }
+  ret .Ok(true);
+}
+
+// An exact commit, not a ref name git can `--branch` directly: shallow
+// clone with no checkout, fetch that one commit, then check it out.
+// Falls back to a full (non-shallow) clone + checkout when the shallow
+// fetch-by-sha is rejected (some self-hosted git servers disable
+// `uploadpack.allowReachableSHA1InWant`) - documented, not chased
+// further; a full clone always works.
+fun _git_fetch_rev(str url, str rev, str dest) Result<bin, str> {
+  Vec<str> clone_args;
+  clone_args.init(8);
+  defer clone_args.free();
+  clone_args.push("git");
+  clone_args.push("clone");
+  clone_args.push("--filter=blob:none");
+  clone_args.push("--no-checkout");
+  clone_args.push(url);
+  clone_args.push(dest);
+  let clone_res = _git(clone_args)!;
+  if !_git_ok(&clone_res) {
+    ret .Err(format("git clone {str} failed: {str}", url, clone_res.stderr_text));
+  }
+
+  Vec<str> fetch_args;
+  fetch_args.init(6);
+  defer fetch_args.free();
+  fetch_args.push("git");
+  fetch_args.push("-C");
+  fetch_args.push(dest);
+  fetch_args.push("fetch");
+  fetch_args.push("--depth");
+  fetch_args.push("1");
+  fetch_args.push("origin");
+  fetch_args.push(rev);
+  let fetch_res = _git(fetch_args)!;
+  bin shallow_fetch_ok = _git_ok(&fetch_res);
+
+  if !shallow_fetch_ok {
+    // Fall back to a full clone: remove the partial attempt and redo it
+    // without `--filter`/`--no-checkout`, then a plain checkout.
+    remove_dir_best_effort(dest);
+    Vec<str> full_args;
+    full_args.init(4);
+    defer full_args.free();
+    full_args.push("git");
+    full_args.push("clone");
+    full_args.push(url);
+    full_args.push(dest);
+    let full_res = _git(full_args)!;
+    if !_git_ok(&full_res) {
+      ret .Err(format("git clone {str} failed: {str}", url, full_res.stderr_text));
+    }
+  }
+
+  Vec<str> checkout_args;
+  checkout_args.init(5);
+  defer checkout_args.free();
+  checkout_args.push("git");
+  checkout_args.push("-C");
+  checkout_args.push(dest);
+  checkout_args.push("checkout");
+  str checkout_target = rev;
+  if shallow_fetch_ok {
+    checkout_target = "FETCH_HEAD";
+  }
+  checkout_args.push(checkout_target);
+  let checkout_res = _git(checkout_args)!;
+  if !_git_ok(&checkout_res) {
+    ret .Err(format("git checkout {str} in {str} failed: {str}", rev, dest, checkout_res.stderr_text));
+  }
+  ret .Ok(true);
+}
+
+// Best-effort recursive removal, used only to clear a partial/failed
+// clone attempt before retrying - never the primary cleanup path for
+// anything a user would notice missing.
+fun remove_dir_best_effort(str dir) {
+  Vec<str> args;
+  args.init(3);
+  defer args.free();
+  args.push("rm");
+  args.push("-rf");
+  args.push(dir);
+  str[] argv = argv_from(&args);
+  defer free_argv(argv);
+  run(argv);
+}
+
+// Resolves `d` to an exact commit and fetches it into the shared cache
+// if not already there, without consulting or updating the lockfile -
+// `resolve_all` is the caller that does both.
+pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
+  str ref_kind = "";
+  str ref_value = "";
+  fit d.spec {
+    .Tag(t) -> {
+      ref_kind = "tag";
+      ref_value = t;
+    }
+    .Branch(b) -> {
+      ref_kind = "branch";
+      ref_value = b;
+    }
+    .Rev(r) -> {
+      ref_kind = "rev";
+      ref_value = r;
+    }
+    .Auto -> {
+      let latest = _git_latest_tag(d.git);
+      if latest.is_ok() {
+        ref_kind = "tag";
+        ref_value = latest.unwrap();
+      } else {
+        ref_kind = "branch";
+        ref_value = "HEAD";
+      }
+    }
+  }
+  if equals(ref_kind, "tag") && equals(ref_value, "latest") {
+    ref_value = _git_latest_tag(d.git)!;
+  }
+
+  str resolved_rev = "";
+  str dest = "";
+  if equals(ref_kind, "rev") {
+    // The cache is keyed by the resolved commit itself, so the
+    // destination is already known before fetching.
+    dest = dep_cache_dir(d.git, ref_value);
+    if !is_dir(dest) {
+      _ = _git_fetch_rev(d.git, ref_value, dest)!;
+    }
+    resolved_rev = ref_value;
+  } else {
+    // A tag/branch name resolves to a commit only after cloning, so a
+    // temporary staging directory is used first, then the final,
+    // commit-keyed cache directory is only trusted once the resolved
+    // commit is known - avoids leaving a half-named directory behind
+    // if resolution races with another `fun build`.
+    str staging = format("{str}/.staging-{str}-{str}", deps_cache_root(), sanitize_url(d.git), ref_value);
+    remove_dir_best_effort(staging);
+    make_dir_all(deps_cache_root());
+    _ = _git_clone_ref(d.git, ref_value, staging)!;
+    resolved_rev = _git_rev_parse_head(staging)!;
+    dest = dep_cache_dir(d.git, resolved_rev);
+    if is_dir(dest) {
+      remove_dir_best_effort(staging);
+    } else {
+      // `mv`, unlike `git clone`, never creates a missing destination
+      // parent directory on its own - `dest`'s own parent (the
+      // sanitized-URL directory) doesn't exist yet the first time any
+      // ref of this repo is fetched.
+      make_dir_all(dirname(dest));
+      Vec<str> mv_args;
+      mv_args.init(3);
+      defer mv_args.free();
+      mv_args.push("mv");
+      mv_args.push(staging);
+      mv_args.push(dest);
+      str[] argv = argv_from(&mv_args);
+      defer free_argv(argv);
+      let mv_res = run(argv);
+      if mv_res.is_err() || mv_res.unwrap().exit_code != 0 {
+        ret .Err(format("could not move {str} into the dependency cache at {str}", staging, dest));
+      }
+    }
+  }
+
+  ResolvedDep out;
+  out.name = d.name;
+  out.git = d.git;
+  out.path = d.path;
+  out.spec_text = format("{str}:{str}", ref_kind, ref_value);
+  out.resolved_rev = resolved_rev;
+  if equals(d.path, "") {
+    out.local_root = dest;
+  } else {
+    out.local_root = format("{str}/{str}", dest, d.path);
+  }
+  ret .Ok(out);
+}
+
+// The one thing `fun build`/`test`/`fuzz` call: resolves every `[deps]`
+// entry in `m`, reusing the lockfile's own already-resolved commit
+// whenever the manifest's own spec for that name hasn't changed (so an
+// ordinary build never re-resolves `tag`/`branch` over the network),
+// fetching anything not already in the shared cache, and rewriting the
+// lock to match. `force_update` (from `fun deps update`) skips the
+// lockfile-reuse check for every `tag`/`branch` entry, re-resolving to
+// whatever is current; a `rev`-pinned entry is never re-resolved either
+// way, matching `cargo update`'s own respect for an explicit pin.
+pub fun resolve_all(Manifest* m, str root, bin force_update) Result<Vec<ResolvedDep>, str> {
+  let locked = read_lock(root);
+  defer locked.free();
+
+  Vec<ResolvedDep> out;
+  out.init(m.deps.len);
+  num i = 0;
+  for i < m.deps.len {
+    let d = m.deps.get(i);
+    let manifest_spec = _dep_ref_text(&d);
+    bin reused = false;
+    if !force_update || equals(manifest_spec, "rev") {
+      num j = 0;
+      for j < locked.len {
+        let lk = locked.get(j);
+        if equals(lk.name, d.name) && equals(lk.git, d.git) && equals(lk.path, d.path) &&
+          starts_with(lk.spec_text, manifest_spec) && is_dir(lk.local_root) {
+          out.push(lk);
+          reused = true;
+        }
+        j = j + 1;
+      }
+    }
+    if !reused {
+      let resolved = resolve_one(&d)!;
+      out.push(resolved);
+    }
+    i = i + 1;
+  }
+  write_lock(root, &out);
+  ret .Ok(out);
+}
+
+// The manifest spec's own kind, as the `spec_text` prefix
+// `resolve_all` compares a locked entry against (never the exact
+// value for `tag`/`branch`, since those are allowed to drift until an
+// explicit update; `rev` compares its own exact value, since a `rev`
+// pin changing at all means a genuinely different dependency).
+fun _dep_ref_text(Dependency* d) str {
+  fit d.spec {
+    .Auto -> { ret "tag"; }
+    .Tag(t) -> { ret format("tag:{str}", t); }
+    .Branch(b) -> { ret format("branch:{str}", b); }
+    .Rev(r) -> { ret format("rev:{str}", r); }
+  }
+  ret "";
+}
