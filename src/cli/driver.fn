@@ -780,17 +780,22 @@ pub fun compile_c_to_object(str c_path, str obj_path) num {
 // directory rather than searched for on `PATH`. Windows already looks in
 // the current directory, so only POSIX needs the prefix.
 pub fun executable_path(str path) str {
+  // Qualify a bare name so posix_spawnp never searches PATH for it.
+  if !contains(path, "/") && !contains(path, "\\") {
+    StringBuilder b = string_builder_init(16);
+    if runtime_backend_is_windows() {
+      b.append(".\\");
+    } else {
+      b.append("./");
+    }
+    b.append(path);
+    ret b.build();
+  }
   if runtime_backend_is_windows() {
     // posix_spawnp on MinGW fails with forward-slash relative paths; use backslashes.
     ret replace_char(path, '/', '\\');
   }
-  if contains(path, "/") || contains(path, "\\") {
-    ret path;
-  }
-  StringBuilder b = string_builder_init(16);
-  b.append("./");
-  b.append(path);
-  ret b.build();
+  ret path;
 }
 
 // Runs `exe_path` with `args`, inheriting this process's streams, and
@@ -1035,12 +1040,21 @@ test "with_extension ignores a dot in a parent directory" {
 }
 
 test "executable_path qualifies a bare name" {
-  assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+  if runtime_backend_is_windows() {
+    assert equals(executable_path("prog"), ".\\prog"), "expected a bare name to be qualified with backslash on Windows";
+  } else {
+    assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+  }
 }
 
 test "executable_path leaves a path alone" {
-  assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
-  assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+  if runtime_backend_is_windows() {
+    assert equals(executable_path(".\\prog"), ".\\prog"), "expected an explicit backslash path to be kept";
+    assert equals(executable_path("build/prog"), "build\\prog"), "expected forward slashes converted on Windows";
+  } else {
+    assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
+    assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+  }
 }
 
 test "with_extension handles a windows-style path" {
