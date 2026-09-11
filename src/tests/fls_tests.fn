@@ -2137,11 +2137,25 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
+  str current_file = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+  let lexed = tokenize("imp deps.mylib.some;\n", "main.fn");
+  assert lexed.is_ok(), "expected the source to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+
+  str target = import_target(&tokens, current_file, 0, 11);
+  bin target_is_dir = is_dir(target);
+  bin target_exists = exists(target);
+  assert target_is_dir, format(
+    "expected 'mylib' to resolve to a real directory - resolved target: {str} | is_dir: {bin} | exists: {bin}",
+    target, target_is_dir, target_exists
+  );
+
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///deps_project/src/main.fn";
-  doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+  doc.path = current_file;
   doc.text = "imp deps.mylib.some;\n";
   doc.version = 1;
 
