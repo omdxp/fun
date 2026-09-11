@@ -279,18 +279,15 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         ));
       }
       let entry_val = dt.values.get(dname);
-      let entry_opt = entry_val.as_table();
-      if entry_opt.is_none() {
-        ret .Err(format("[deps] `{str}` must be an inline table: {str} = {{ git = \"...\" }}", dname, dname));
+      if !entry_val.is_table() {
+        ret .Err(format("[deps] `{str}` must be an inline table: {str} = { git = \"...\" }", dname, dname));
       }
-      let entry = entry_opt.unwrap();
-
-      str dgit = entry.get_str("git");
-      str dpath = entry.get_str("path");
-      str dtag = entry.get_str("tag");
-      str dbranch = entry.get_str("branch");
-      str drev = entry.get_str("rev");
-      str dtoken_env = entry.get_str("token_env");
+      str dgit = entry_val.table_field("git");
+      str dpath = entry_val.table_field("path");
+      str dtag = entry_val.table_field("tag");
+      str dbranch = entry_val.table_field("branch");
+      str drev = entry_val.table_field("rev");
+      str dtoken_env = entry_val.table_field("token_env");
 
       if equals(dgit, "") {
         ret .Err(format("[deps] `{str}` is missing a `git` URL", dname));

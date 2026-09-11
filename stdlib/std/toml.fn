@@ -69,6 +69,33 @@ impl TomlValue {
     ret Option.None;
   }
 
+  // True when this is an inline table (`{ key = value, ... }`).
+  pub is_table() bin {
+    fit *self {
+      .Table(_) -> { ret true; }
+      _ -> { ret false; }
+    }
+    ret false;
+  }
+
+  // One field of this inline table, or "" when this isn't a Table, the
+  // field is absent, or the field isn't itself a string. A plain scalar
+  // return rather than handing back the inner `Map` or a `TomlTable`
+  // wrapper, since a bare `{ key = value }` value has no section name of
+  // its own for `TomlTable` to carry.
+  pub table_field(str key) str {
+    fit *self {
+      .Table(m) -> {
+        let v = m.at(key);
+        if v.is_none() {
+          ret "";
+        }
+        ret v.unwrap().as_str().unwrap_or("");
+      }
+      _ -> { ret ""; }
+    }
+    ret "";
+  }
 }
 
 impl TomlValue as Display {
@@ -127,25 +154,6 @@ impl TomlValue as Display {
       }
     }
     ret _tv_dup("");
-  }
-}
-
-impl TomlValue {
-  // The inline table, wrapped as a `TomlTable` (its own `name` left
-  // empty - an inline table has no section name of its own) so a caller
-  // gets the same `get`/`get_str` convenience a real `[section]` gives,
-  // or None when this is not a Table.
-  pub as_table() Option<TomlTable> {
-    fit *self {
-      .Table(m) -> {
-        TomlTable t;
-        t.name = "";
-        t.values = m;
-        ret Option.Some(t);
-      }
-      _ -> { ret Option.None; }
-    }
-    ret Option.None;
   }
 }
 
