@@ -6,8 +6,12 @@
 // 
 // Only the subset of TOML the manifest needs is parsed: top-level
 // tables, arrays of tables, and quoted string values. Fun resolves
-// imports by path, so a manifest declares build targets, never an
-// import graph.
+// local imports by path, never through the manifest - `[[deps]]` is the
+// one deliberate exception: a git-fetched dependency has no path to
+// resolve by until it has actually been fetched, so its own root gets
+// named here and reached through `imp deps.<name>...` (see
+// `src/cli/deps.fn` for resolution/fetching, `src/parser/
+// import_resolver.fn` for the `deps.`-prefixed `imp` branch).
 
 imp ..ast.ast;
 imp std.string;
@@ -23,6 +27,37 @@ imp std.c.mem;
 pub compound ExeTarget {
   str name;
   str path;
+}
+
+// Which git ref a dependency resolves against. `.Auto` (no `tag`/
+// `branch`/`rev` given) is resolved later, by `src/cli/deps.fn`, to the
+// highest semver-sorted tag if the repo has any, else the remote's
+// default branch - manifest parsing only records intent, it never talks
+// to the network.
+pub enum DepRef {
+  Auto,
+  Tag(str),
+  Branch(str),
+  Rev(str),
+}
+
+// One `[[deps]]` entry: a git-fetched dependency, importable as
+// `imp deps.<name>...` once resolved. `path` is the subfolder inside the
+// repo the dependency's own source root lives at ("" means the repo
+// root itself) - this is what lets a dependency live in an arbitrary
+// subfolder of someone else's repo with no cooperation needed from the
+// repo owner, unlike a Go module (needs its own go.mod) or a dub
+// subPackage (the owner's own dub.json must declare it).
+pub compound Dependency {
+  str name;
+  str git;
+  str path;
+  DepRef spec;
+  // Name of an environment variable whose value is used as a git
+  // credential for this remote only ("" means none). Never written into
+  // a checkout's own .git/config or interpolated into a URL - see
+  // `src/cli/deps.fn`.
+  str token_env;
 }
 
 // A source file compiled as a library: checked and compiled to an
@@ -50,6 +85,7 @@ pub compound Manifest {
   bin has_lib;
   LibTarget lib;
   Vec<ExeTarget> exes;
+  Vec<Dependency> deps;
 }
 
 impl Manifest {
@@ -69,7 +105,92 @@ impl Manifest {
 
   pub free() {
     self.exes.free();
+    self.deps.free();
   }
+}
+
+// A dependency `name`, safe to appear as an `imp deps.<name>...` path
+// segment: must look like an ordinary identifier, since it becomes part
+// of a dotted import path. Also reused to validate `token_env` (a real
+// environment-variable name has the same shape).
+fun _is_safe_dep_name(str s) bin {
+  if equals(s, "") {
+    ret false;
+  }
+  chr first = s[0];
+  if first >= '0' && first <= '9' {
+    ret false;
+  }
+  num n = len(s);
+  num i = 0;
+  for i < n {
+    chr c = s[i];
+    bin ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    (c >= '0' && c <= '9') || c == '_';
+    if !ok {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// A git ref (`tag`/`branch`/`rev`), safe to pass straight into a git
+// argv without being mistaken for a flag or escaping its intended
+// meaning. Refs may contain `/` (`feature/foo`) and `.`/`-`/`_`, but
+// never start with `-` (a value like `--upload-pack=...` is a known
+// real git-CLI argument-injection shape) and never contain `..` (not a
+// filesystem path, but defensive: git itself already rejects `..` in
+// real ref names, so this only ever rejects something that was never a
+// valid ref to begin with).
+fun _is_safe_git_ref(str s) bin {
+  if equals(s, "") {
+    ret false;
+  }
+  if s[0] == '-' {
+    ret false;
+  }
+  if contains(s, "..") {
+    ret false;
+  }
+  num n = len(s);
+  num i = 0;
+  for i < n {
+    chr c = s[i];
+    bin ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+    c == '/';
+    if !ok {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// A dependency's `git` URL: allow-listed to the transports this feature
+// actually supports - `https://`, `ssh://` and the `git@host:...` SCP-
+// like shorthand, and `file://` (needed for local test fixtures).
+// Rejects every other git transport helper (`ext::`, `fd::`, and
+// similar), some of which have a real history of being abused to run
+// arbitrary local commands via a crafted "URL".
+fun _is_safe_git_url(str s) bin {
+  ret starts_with(s, "https://") || starts_with(s, "ssh://") ||
+  starts_with(s, "git@") || starts_with(s, "file://");
+}
+
+// A dependency's own `path` subfolder inside its repo: rejects the
+// obviously-unsafe shapes at parse time (an absolute path, a `..`
+// segment, a backslash that could confuse a Windows-style separator).
+// The real enforcement - canonicalizing against the actual checkout
+// root and rejecting anything that normalizes outside it - happens in
+// `src/cli/deps.fn` once the repo is actually fetched; this is just a
+// fast, obvious first check.
+fun _is_safe_dep_path(str s) bin {
+  if equals(s, "") {
+    ret true;
+  }
+  ret !starts_with(s, "/") && !contains(s, "\\") && !contains(s, "..");
 }
 
 // Reads `text` as a manifest. Targets are taken exactly as declared;
@@ -85,6 +206,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.lib.name = "";
   m.lib.path = "";
   m.exes.init(0);
+  m.deps.init(0);
 
   let pkg = doc.table("package");
   if pkg.is_none() {
@@ -102,7 +224,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   num ti = 0;
   for ti < doc.tables.len {
     str tname = doc.tables.get(ti).name;
-    if !equals(tname, "package") && !equals(tname, "lib") {
+    if !equals(tname, "package") && !equals(tname, "lib") && !equals(tname, "deps") {
       ret .Err(format("unknown table `[{str}]`", tname));
     }
     ti = ti + 1;
@@ -140,6 +262,97 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     e.path = path;
     m.exes.push(e);
     i = i + 1;
+  }
+
+  let deps_table = doc.table("deps");
+  if deps_table.is_some() {
+    let dt = deps_table.unwrap();
+    let dep_names = dt.values.keys();
+    defer dep_names.free();
+    num di = 0;
+    for di < dep_names.len() {
+      str dname = dep_names.get(di);
+      if !_is_safe_dep_name(dname) {
+        ret .Err(format(
+          "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",
+          dname
+        ));
+      }
+      let entry_val = dt.values.get(dname);
+      let entry_opt = entry_val.as_table();
+      if entry_opt.is_none() {
+        ret .Err(format("[deps] `{str}` must be an inline table: {str} = {{ git = \"...\" }}", dname, dname));
+      }
+      let entry = entry_opt.unwrap();
+
+      str dgit = entry.get_str("git");
+      str dpath = entry.get_str("path");
+      str dtag = entry.get_str("tag");
+      str dbranch = entry.get_str("branch");
+      str drev = entry.get_str("rev");
+      str dtoken_env = entry.get_str("token_env");
+
+      if equals(dgit, "") {
+        ret .Err(format("[deps] `{str}` is missing a `git` URL", dname));
+      }
+      if !_is_safe_git_url(dgit) {
+        ret .Err(format(
+          "[deps] `{str}`: `git` must start with https://, ssh://, git@, or file://",
+          dname
+        ));
+      }
+      if !_is_safe_dep_path(dpath) {
+        ret .Err(format(
+          "[deps] `{str}`: `path` must be a relative path with no `..` segments",
+          dname
+        ));
+      }
+
+      num spec_count = 0;
+      if !equals(dtag, "") {
+        spec_count = spec_count + 1;
+      }
+      if !equals(dbranch, "") {
+        spec_count = spec_count + 1;
+      }
+      if !equals(drev, "") {
+        spec_count = spec_count + 1;
+      }
+      if spec_count > 1 {
+        ret .Err(format("[deps] `{str}`: only one of `tag`, `branch`, `rev` may be given", dname));
+      }
+
+      DepRef spec = .Auto;
+      if !equals(dtag, "") {
+        if !equals(dtag, "latest") && !_is_safe_git_ref(dtag) {
+          ret .Err(format("[deps] `{str}`: invalid `tag`", dname));
+        }
+        spec = .Tag(dtag);
+      } elif !equals(dbranch, "") {
+        if !_is_safe_git_ref(dbranch) {
+          ret .Err(format("[deps] `{str}`: invalid `branch`", dname));
+        }
+        spec = .Branch(dbranch);
+      } elif !equals(drev, "") {
+        if !_is_safe_git_ref(drev) {
+          ret .Err(format("[deps] `{str}`: invalid `rev`", dname));
+        }
+        spec = .Rev(drev);
+      }
+
+      if !equals(dtoken_env, "") && !_is_safe_dep_name(dtoken_env) {
+        ret .Err(format("[deps] `{str}`: invalid `token_env`", dname));
+      }
+
+      Dependency d;
+      d.name = dname;
+      d.git = dgit;
+      d.path = dpath;
+      d.spec = spec;
+      d.token_env = dtoken_env;
+      m.deps.push(d);
+      di = di + 1;
+    }
   }
 
   ret .Ok(m);

@@ -18,12 +18,18 @@ imp std.error;
 imp std.string;
 imp std.quirks;
 
-// A TOML scalar value.
+// A TOML value: a scalar, or one level of inline table (`{ key = value,
+// ... }`, the value-position construct a manifest's own `[dependencies]`
+// table uses to keep one dependency's several fields on one line).
+// Deliberately shallow: a value inside a `Table` may be a scalar, never
+// another nested inline table - this parser's own "narrow subset"
+// philosophy (see the module doc) extends here too.
 pub enum TomlValue {
   Str(str),
   Int(num),
   Float(dec),
   Bool(bin),
+  Table(Map<str, TomlValue>),
 }
 
 impl TomlValue {
@@ -62,6 +68,7 @@ impl TomlValue {
     }
     ret Option.None;
   }
+
 }
 
 impl TomlValue as Display {
@@ -97,8 +104,48 @@ impl TomlValue as Display {
         }
         ret _tv_dup("false");
       }
+      .Table(m) -> {
+        let b = string_builder_init(64);
+        b.append_char('{');
+        let keys = m.keys();
+        defer keys.free();
+        num i = 0;
+        for i < keys.len() {
+          if i > 0 {
+            b.append(", ");
+          }
+          let key = keys.get(i);
+          b.append(key);
+          b.append(" = ");
+          b.append(m.get(key).to_string());
+          i = i + 1;
+        }
+        b.append_char('}');
+        let out = b.build();
+        b.free();
+        ret out;
+      }
     }
     ret _tv_dup("");
+  }
+}
+
+impl TomlValue {
+  // The inline table, wrapped as a `TomlTable` (its own `name` left
+  // empty - an inline table has no section name of its own) so a caller
+  // gets the same `get`/`get_str` convenience a real `[section]` gives,
+  // or None when this is not a Table.
+  pub as_table() Option<TomlTable> {
+    fit *self {
+      .Table(m) -> {
+        TomlTable t;
+        t.name = "";
+        t.values = m;
+        ret Option.Some(t);
+      }
+      _ -> { ret Option.None; }
+    }
+    ret Option.None;
   }
 }
 
@@ -283,12 +330,67 @@ fun _strip_trailing_comment(str text) str {
   ret text;
 }
 
+// One `key = value` piece inside an inline table's braces, put into
+// `out` (a no-op for an empty or malformed piece, mirroring
+// `_parse_line_into`'s own tolerance for a line with no `=`).
+fun _inline_table_put(Map<str, TomlValue>* out, str piece) {
+  if len(piece) == 0 {
+    ret;
+  }
+  let eq_idx = index_of_char(piece, '=');
+  if eq_idx == -1 {
+    ret;
+  }
+  let key = trim(substr(piece, 0, eq_idx));
+  let value_text = trim(substr(piece, eq_idx + 1, len(piece) - (eq_idx + 1)));
+  if len(key) == 0 {
+    ret;
+  }
+  out.put(key, _classify(value_text));
+}
+
+// `{ key = value, key2 = value2 }`: strips the outer braces, then splits
+// on a top-level comma (one respecting quotes, so a comma inside a
+// quoted value doesn't split it) and classifies each `key = value`
+// piece the same way a top-level line would be.
+fun _classify_inline_table(str text) TomlValue {
+  Map<str, TomlValue> out;
+  out.init(4);
+  let inner = trim(substr(text, 1, len(text) - 2));
+  let n = len(inner);
+  if n == 0 {
+    ret .Table(out);
+  }
+  num i = 0;
+  num start = 0;
+  bin in_quotes = false;
+  for i < n {
+    let c = inner[i];
+    if c == '"' {
+      in_quotes = !in_quotes;
+    } elif c == ',' && !in_quotes {
+      _inline_table_put(&out, trim(substr(inner, start, i - start)));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < n {
+    _inline_table_put(&out, trim(substr(inner, start, n - start)));
+  }
+  ret .Table(out);
+}
+
 // Classify a raw (trimmed) TOML value string into a typed TomlValue.
 fun _classify(str raw_text) TomlValue {
   let text = _strip_trailing_comment(raw_text);
   let n = _tv_strlen(text);
   if n == 0 {
     ret .Str(text);
+  }
+
+  // Inline table: `{ key = value, ... }`, one level deep.
+  if text[0] == '{' && text[n - 1] == '}' {
+    ret _classify_inline_table(text);
   }
 
   // Quoted string: strip the surrounding quotes.
