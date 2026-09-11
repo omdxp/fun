@@ -113,7 +113,7 @@ impl Manifest {
 // segment: must look like an ordinary identifier, since it becomes part
 // of a dotted import path. Also reused to validate `token_env` (a real
 // environment-variable name has the same shape).
-fun _is_safe_dep_name(str s) bin {
+pub fun is_safe_dep_name(str s) bin {
   if equals(s, "") {
     ret false;
   }
@@ -143,7 +143,7 @@ fun _is_safe_dep_name(str s) bin {
 // filesystem path, but defensive: git itself already rejects `..` in
 // real ref names, so this only ever rejects something that was never a
 // valid ref to begin with).
-fun _is_safe_git_ref(str s) bin {
+pub fun is_safe_git_ref(str s) bin {
   if equals(s, "") {
     ret false;
   }
@@ -174,7 +174,7 @@ fun _is_safe_git_ref(str s) bin {
 // Rejects every other git transport helper (`ext::`, `fd::`, and
 // similar), some of which have a real history of being abused to run
 // arbitrary local commands via a crafted "URL".
-fun _is_safe_git_url(str s) bin {
+pub fun is_safe_git_url(str s) bin {
   ret starts_with(s, "https://") || starts_with(s, "ssh://") ||
   starts_with(s, "git@") || starts_with(s, "file://");
 }
@@ -186,7 +186,7 @@ fun _is_safe_git_url(str s) bin {
 // root and rejecting anything that normalizes outside it - happens in
 // `src/cli/deps.fn` once the repo is actually fetched; this is just a
 // fast, obvious first check.
-fun _is_safe_dep_path(str s) bin {
+pub fun is_safe_dep_path(str s) bin {
   if equals(s, "") {
     ret true;
   }
@@ -272,7 +272,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     num di = 0;
     for di < dep_names.len() {
       str dname = dep_names.get(di);
-      if !_is_safe_dep_name(dname) {
+      if !is_safe_dep_name(dname) {
         ret .Err(format(
           "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",
           dname
@@ -292,13 +292,13 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       if equals(dgit, "") {
         ret .Err(format("[deps] `{str}` is missing a `git` URL", dname));
       }
-      if !_is_safe_git_url(dgit) {
+      if !is_safe_git_url(dgit) {
         ret .Err(format(
           "[deps] `{str}`: `git` must start with https://, ssh://, git@, or file://",
           dname
         ));
       }
-      if !_is_safe_dep_path(dpath) {
+      if !is_safe_dep_path(dpath) {
         ret .Err(format(
           "[deps] `{str}`: `path` must be a relative path with no `..` segments",
           dname
@@ -321,23 +321,23 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
 
       DepRef spec = .Auto;
       if !equals(dtag, "") {
-        if !equals(dtag, "latest") && !_is_safe_git_ref(dtag) {
+        if !equals(dtag, "latest") && !is_safe_git_ref(dtag) {
           ret .Err(format("[deps] `{str}`: invalid `tag`", dname));
         }
         spec = .Tag(dtag);
       } elif !equals(dbranch, "") {
-        if !_is_safe_git_ref(dbranch) {
+        if !is_safe_git_ref(dbranch) {
           ret .Err(format("[deps] `{str}`: invalid `branch`", dname));
         }
         spec = .Branch(dbranch);
       } elif !equals(drev, "") {
-        if !_is_safe_git_ref(drev) {
+        if !is_safe_git_ref(drev) {
           ret .Err(format("[deps] `{str}`: invalid `rev`", dname));
         }
         spec = .Rev(drev);
       }
 
-      if !equals(dtoken_env, "") && !_is_safe_dep_name(dtoken_env) {
+      if !equals(dtoken_env, "") && !is_safe_dep_name(dtoken_env) {
         ret .Err(format("[deps] `{str}`: invalid `token_env`", dname));
       }
 

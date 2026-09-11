@@ -32,6 +32,7 @@ imp std.string;
 imp std.io;
 imp std.fs;
 imp std.path;
+imp std.sys;
 
 test "a string is written with what JSON reserves escaped" {
   assert equals(json_quote("plain"), `"plain"`), "expected a plain string to be quoted";
@@ -2116,6 +2117,74 @@ test "completion lists an import path's own directory, filtered by what's typed 
   assert contains(out_all, `"label":"subdir","kind":19`), "expected the sibling directory";
   assert contains(out_all, `"label":"sibling_a","kind":17`), "expected the sibling module, bare of its .fn extension";
   assert contains(out_all, `"label":"sibling_b","kind":17`), "expected the other sibling module";
+}
+
+test "completion offers the synthetic 'deps' entry point alongside 'std'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///here.fn";
+  doc.path = "here.fn";
+  doc.text = "imp ";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 4, false);
+  assert contains(out, `"label":"std","kind":19`), "expected the synthetic stdlib entry point";
+  assert contains(out, `"label":"deps","kind":19`), "expected the synthetic deps entry point";
+}
+
+test "hover and go-to-definition resolve a 'deps.<name>.<module>' import path against the locked dependency" {
+  assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
+  defer clear_env("FUN_DEPS_CACHE");
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///deps_project/src/main.fn";
+  doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+  doc.text = "imp deps.mylib.some;\n";
+  doc.version = 1;
+
+  // On `mylib`: the dependency's own resolved root (no README there, so
+  // a bare directory result rather than "null").
+  str name_hover = hover(&reads, doc, 0, 11);
+  assert !equals(name_hover, "null"), "expected 'mylib' to resolve to the locked dependency's own root";
+
+  // On `some`: the fetched module file itself.
+  str module_hover = hover(&reads, doc, 0, 17);
+  assert !equals(module_hover, "null"), "expected 'some' to resolve to the dependency's own fetched module";
+
+  str module_def = definition(&reads, doc, 0, 17);
+  assert contains(module_def, "some.fn"), "expected a jump straight to the dependency's fetched module file";
+}
+
+test "completion lists a project's own resolved dependency names for 'imp deps.'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///main.fn";
+  doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+  doc.text = "imp deps.";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 9, false);
+  assert contains(out, `"label":"mylib","kind":19`), "expected the locked dependency's own name offered";
+}
+
+test "completion lists a dependency's own modules for 'imp deps.<name>.'" {
+  assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
+  defer clear_env("FUN_DEPS_CACHE");
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///main.fn";
+  doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+  doc.text = "imp deps.mylib.";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 15, false);
+  assert contains(out, `"label":"some","kind":17`), "expected the dependency's own fetched module offered, bare of its .fn extension";
 }
 
 test "completion offers a warning id for the first argument of allow/expect, filtered by prefix" {

@@ -1247,6 +1247,38 @@ pub fun add_dependency(
     writeln_to(Sink.Stderr, "[Error]\nonly one of -tag, -branch, -rev may be given");
     ret 1;
   }
+  // The exact same checks `fun build` would apply once this entry is
+  // parsed back out of fun.toml, run here too, so a bad value is
+  // rejected before it's ever written rather than leaving the user to
+  // hand-edit the manifest after a confusing later failure.
+  if !is_safe_dep_name(name) {
+    writeln_to(Sink.Stderr, "[Error]\na dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)");
+    ret 1;
+  }
+  if !is_safe_git_url(git) {
+    writeln_to(Sink.Stderr, "[Error]\n-git must start with https://, ssh://, git@, or file://");
+    ret 1;
+  }
+  if !is_safe_dep_path(path) {
+    writeln_to(Sink.Stderr, "[Error]\n-path must be a relative path with no .. segments");
+    ret 1;
+  }
+  if !equals(tag, "") && !equals(tag, "latest") && !is_safe_git_ref(tag) {
+    writeln_to(Sink.Stderr, "[Error]\ninvalid -tag");
+    ret 1;
+  }
+  if !equals(branch, "") && !is_safe_git_ref(branch) {
+    writeln_to(Sink.Stderr, "[Error]\ninvalid -branch");
+    ret 1;
+  }
+  if !equals(rev, "") && !is_safe_git_ref(rev) {
+    writeln_to(Sink.Stderr, "[Error]\ninvalid -rev");
+    ret 1;
+  }
+  if !equals(token_env, "") && !is_safe_dep_name(token_env) {
+    writeln_to(Sink.Stderr, "[Error]\ninvalid -token-env");
+    ret 1;
+  }
 
   StringBuilder entry = string_builder_init(64);
   entry.append(name);
@@ -1282,6 +1314,14 @@ pub fun add_dependency(
   str text = read_to_string("fun.toml");
   Vec<str> lines = split(text, '\n');
   defer lines.free();
+  // A `\n`-terminated file's own split produces one trailing empty
+  // element representing "nothing after the last real line", not an
+  // actual blank line worth preserving - left in place, appending a
+  // new entry after it would grow a fresh blank line onto the file's
+  // own end every single time `fun add` runs.
+  if lines.len > 0 && equals(lines.get(lines.len - 1), "") {
+    lines.pop();
+  }
 
   bin in_deps = false;
   bin replaced = false;

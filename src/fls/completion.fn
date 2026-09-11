@@ -17,6 +17,7 @@ imp ..ast.ast;
 imp ..lexer.lexdefs;
 imp ..lexer.token;
 imp ..parser.import_resolver;
+imp ..parser.deps_lock;
 imp ..semantics.warnings;
 imp std.string;
 imp std.vec;
@@ -314,11 +315,32 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
     partial = substr(after_imp, last_dot + 1, len(after_imp) - last_dot - 1);
   }
 
+  if equals(parent_specifier, "deps") {
+    // "deps" itself is never a real directory - what it names is
+    // whichever dependencies this project's own fun.lock has actually
+    // resolved, the same list `imp deps.<name>...` can reach.
+    let locked = read_lock(deps_project_root(current_file));
+    defer locked.free();
+    num d = 0;
+    for d < locked.len {
+      str dep_name = locked.get(d).name;
+      d = d + 1;
+      if !equals(partial, "") && !starts_with(dep_name, partial) {
+        continue;
+      }
+      items.push(_item(dep_name, .Folder, "dependency"));
+    }
+    ret true;
+  }
+
   str base_dir = "";
   if equals(parent_specifier, "") {
     base_dir = dirname(current_file);
     if equals(partial, "") || starts_with("std", partial) {
       items.push(_item("std", .Folder, "stdlib"));
+    }
+    if equals(partial, "") || starts_with("deps", partial) {
+      items.push(_item("deps", .Folder, "dependencies"));
     }
   } else {
     base_dir = _import_dir(current_file, parent_specifier);
