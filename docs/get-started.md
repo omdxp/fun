@@ -114,8 +114,14 @@ path = "src/main.fn"
 - `version` is optional (defaults to `0.0.0`).
 - Multiple `[[exe]]` targets are supported (this repository's own
   `fun`/`fls` binaries are a real example).
-- A `[lib]` table (one `path`, no name) declares a library entry point
-  instead of a binary.
+- A `[lib]` table (one `path`, no name) declares a library entry point:
+  `fun build` compiles it to an object file under `fun-out/lib/` instead
+  of a linked executable, with no `main` required. This is unrelated to
+  sharing code with another project: nothing reads or links against a
+  `[lib]` entry automatically, and a repo doesn't need one at all for
+  `[deps]` below to pull source from it. `[lib]` is about what one
+  project's own `fun build` produces; `[deps]` is about pulling another
+  project's source in.
 - Only a narrow TOML subset is supported: no multi-line or escaped
   strings, and nested tables only in the one-level inline-table form
   `[deps]` entries use below (`key = { a = "x", b = "y" }`); nothing
