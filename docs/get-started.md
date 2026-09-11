@@ -185,6 +185,14 @@ under `$FUN_DEPS_CACHE` (default `$HOME/.local/share/fun/deps`), keyed
 by repo and resolved commit, shared across every project that pins the
 same commit.
 
+Fetching never checks whether the repo is actually a Fun project, or
+that `path` points at anything real: `imp` is already path-based with
+no manifest involved, so a `[deps]` entry just clones the ref and lets
+the ordinary `imp` machinery find (or fail to find) files under it. A
+wrong `path`, or a repo with no Fun code at all, fetches successfully
+and only surfaces as a normal "import not found" error at the `imp
+deps.<name>...` line that needed it, naming the missing file.
+
 ### `fun.lock`
 
 Resolving a `tag`/`branch` writes the exact commit it resolved to into
