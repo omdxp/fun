@@ -137,7 +137,7 @@ Fun shares libraries straight from git, no central package index to run
 or trust. Add a dependency and use it:
 
 ```sh
-fun add somejson --git https://github.com/user/somejson --tag v1.2.3
+fun add somejson -git https://github.com/user/somejson -tag v1.2.3
 ```
 
 ```fun
