@@ -19,6 +19,7 @@ imp std.error;
 imp std.process;
 imp std.fs;
 imp std.path;
+imp std.c.io;
 
 // Runs `git` with `args`, capturing output. `-C dir` (a plain argv
 // element, not a real chdir) is how every caller targets an existing
@@ -195,7 +196,13 @@ fun remove_dir_best_effort(str dir) {
   args.push(dir);
   str[] argv = argv_from(&args);
   defer free_argv(argv);
-  run(argv);
+  let r = run(argv);
+  // On Windows `rm` is not a standalone executable so the spawn fails;
+  // fall back to rename so the directory is at least moved out of the way.
+  if r.is_err() || r.unwrap().exit_code != 0 {
+    let orphan = format("{str}.removed", dir);
+    rename(dir, orphan);
+  }
 }
 
 // Resolves `d` to an exact commit and fetches it into the shared cache
@@ -257,21 +264,12 @@ pub fun resolve_one(Dependency* d) Result<ResolvedDep, str> {
     if is_dir(dest) {
       remove_dir_best_effort(staging);
     } else {
-      // `mv`, unlike `git clone`, never creates a missing destination
+      // `rename()`, unlike `git clone`, never creates a missing destination
       // parent directory on its own - `dest`'s own parent (the
       // sanitized-URL directory) doesn't exist yet the first time any
       // ref of this repo is fetched.
       make_dir_all(dirname(dest));
-      Vec<str> mv_args;
-      mv_args.init(3);
-      defer mv_args.free();
-      mv_args.push("mv");
-      mv_args.push(staging);
-      mv_args.push(dest);
-      str[] argv = argv_from(&mv_args);
-      defer free_argv(argv);
-      let mv_res = run(argv);
-      if mv_res.is_err() || mv_res.unwrap().exit_code != 0 {
+      if rename(staging, dest) != 0 {
         ret .Err(format("could not move {str} into the dependency cache at {str}", staging, dest));
       }
     }
