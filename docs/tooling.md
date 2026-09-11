@@ -246,6 +246,9 @@ fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Started)
+fun add <name> --git <url> [--path <subfolder>] [--tag <ref> | --branch <ref> | --rev <sha>] [--token-env <VAR>]
+                         (adds or updates a [deps] entry in fun.toml, see Get Started)
+fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun.lock)
 ```
 
 - `-no-exec`/`-outf`/`-out` apply the same way under `-test`/`-fuzz`
@@ -258,6 +261,23 @@ fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Star
   compile and debug itself.
 - `-warn-unused`/`-warn-unused-lenient` also apply under `-test`/`-fuzz`,
   both forms.
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FUN_STDLIB_DIR` | `<exe>/../share/fun`, then a nearby `stdlib/` search, then a system path | Where the compiler looks for the standard library. |
+| `FUN_DEPS_CACHE` | `$HOME/.local/share/fun/deps` | Where fetched `[deps]` checkouts are cached, keyed by repo and resolved commit; shared across every project on the machine. |
+| `FUN_CC` | `cc` (`cl` on Windows) | Overrides the host C compiler used to build the generated C. |
+| `FUN_CC_ARGS` | (none) | Extra space-separated flags appended to every C compiler invocation. |
+| `FUN_FUZZ_CC` | `clang` (searched on `PATH` and common package-manager install paths) | Overrides the compiler used for `-fsanitize=fuzzer` builds under `fun fuzz`. |
+| `FUN_FUZZ_DEFAULT_SECONDS` | `30` | Per-target wall-clock budget for `fun fuzz [dir]`'s directory-wide form. |
+| `FUN_FUZZ_NO_ASAN` | off | Drops AddressSanitizer from fuzz builds (keeps just `-fsanitize=fuzzer`), for sandboxes where ASan's startup hangs. |
+| `FUN_DEADLOCK_WATCHDOG_MS` | unarmed | Milliseconds a virtual thread may block before the concurrency runtime's watchdog warns about a likely deadlock. |
+| `FUN_DEADLOCK_ABORT` | warn only | When set to `1`, the deadlock watchdog aborts the process instead of just warning. |
+| `FUN_SCHED_MAX_WORKERS` | `4096` | Caps how many OS worker threads the virtual-thread scheduler may grow to under load. |
+| `FUN_RUNTIME_BACKEND` | auto-detected | Forces the concurrency runtime backend (`posix`/`windows`, or `1`/`2`), mainly for cross-backend testing. |
+| `FUN_RUNTIME_OS` | auto-detected | Forces the OS family (`posix`/`unix`/`windows`) the runtime backend detection resolves to. |
 
 ## Standard Library, at a Glance
 

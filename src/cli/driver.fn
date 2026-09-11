@@ -15,6 +15,7 @@ imp fmt;
 imp ..ast.ast;
 imp ..ast.ast_print;
 imp manifest;
+imp deps;
 imp ..codegen.codegen;
 imp ..codegen.codegen_state;
 imp std.string;
@@ -78,6 +79,20 @@ pub compound Options {
   Vec<str> program_args;
   // Constants injected into the program, from `-D name=value`.
   Vec<Define> defines;
+  // `fun deps <action> [name]`'s own action word ("update", so far the
+  // only one) - `input` carries the optional dependency `name` after
+  // it, the same "subcommand's own positionals" shape `fuzz`'s target
+  // name already uses.
+  str deps_action;
+  // `fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> |
+  // -rev <r>] [-token-env <VAR>]`'s own flags. Only meaningful when
+  // `subcommand` is `"add"`.
+  str dep_git;
+  str dep_path;
+  str dep_tag;
+  str dep_branch;
+  str dep_rev;
+  str dep_token_env;
   // Set when parsing failed, with `error_text` explaining why.
   bin has_error;
   str error_text;
@@ -106,6 +121,13 @@ fun _options_new() Options {
   o.fmt_check_all = false;
   o.program_args.init(0);
   o.defines.init(0);
+  o.deps_action = "";
+  o.dep_git = "";
+  o.dep_path = "";
+  o.dep_tag = "";
+  o.dep_branch = "";
+  o.dep_rev = "";
+  o.dep_token_env = "";
   o.has_error = false;
   o.error_text = "";
   ret o;
@@ -126,6 +148,12 @@ fun _value_flags() Vec<str> {
   out.push("out");
   out.push("D");
   out.push("fuzz-target");
+  out.push("git");
+  out.push("path");
+  out.push("tag");
+  out.push("branch");
+  out.push("rev");
+  out.push("token-env");
   ret out;
 }
 
@@ -150,10 +178,7 @@ pub fun parse_args(str[] argv) Options {
   if leading.is_some() {
     str head = leading.unwrap();
     if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
-      equals(
-      head,
-      "init"
-    ) {
+      equals(head, "init") || equals(head, "add") || equals(head, "deps") {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -181,6 +206,12 @@ pub fun parse_args(str[] argv) Options {
   o.fuzz_target = parsed.get_or("fuzz-target", "");
   o.input = parsed.get_or("in", "");
   o.output = parsed.get_or("out", "");
+  o.dep_git = parsed.get_or("git", "");
+  o.dep_path = parsed.get_or("path", "");
+  o.dep_tag = parsed.get_or("tag", "");
+  o.dep_branch = parsed.get_or("branch", "");
+  o.dep_rev = parsed.get_or("rev", "");
+  o.dep_token_env = parsed.get_or("token-env", "");
   if !equals(o.output, "") {
     if !ends_with(o.output, ".c") {
       o.has_error = true;
@@ -217,7 +248,9 @@ pub fun parse_args(str[] argv) Options {
   for i < parsed.positionals.len {
     str arg = parsed.positionals.get(i);
     bin looks_like_flag = len(arg) > 0 && arg[0] == '-';
-    if equals(o.input, "") {
+    if equals(o.subcommand, "deps") && equals(o.deps_action, "") {
+      o.deps_action = arg;
+    } elif equals(o.input, "") {
       o.input = arg;
     } elif equals(o.subcommand, "fuzz") && equals(o.fuzz_target, "") && !looks_like_flag {
       o.fuzz_target = arg;
@@ -747,17 +780,22 @@ pub fun compile_c_to_object(str c_path, str obj_path) num {
 // directory rather than searched for on `PATH`. Windows already looks in
 // the current directory, so only POSIX needs the prefix.
 pub fun executable_path(str path) str {
+  // Qualify a bare name so posix_spawnp never searches PATH for it.
+  if !contains(path, "/") && !contains(path, "\\") {
+    StringBuilder b = string_builder_init(16);
+    if runtime_backend_is_windows() {
+      b.append(".\\");
+    } else {
+      b.append("./");
+    }
+    b.append(path);
+    ret b.build();
+  }
   if runtime_backend_is_windows() {
     // posix_spawnp on MinGW fails with forward-slash relative paths; use backslashes.
     ret replace_char(path, '/', '\\');
   }
-  if contains(path, "/") || contains(path, "\\") {
-    ret path;
-  }
-  StringBuilder b = string_builder_init(16);
-  b.append("./");
-  b.append(path);
-  ret b.build();
+  ret path;
 }
 
 // Runs `exe_path` with `args`, inheriting this process's streams, and
@@ -1002,12 +1040,21 @@ test "with_extension ignores a dot in a parent directory" {
 }
 
 test "executable_path qualifies a bare name" {
-  assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+  if runtime_backend_is_windows() {
+    assert equals(executable_path("prog"), ".\\prog"), "expected a bare name to be qualified with backslash on Windows";
+  } else {
+    assert equals(executable_path("prog"), "./prog"), "expected a bare name to be qualified";
+  }
 }
 
 test "executable_path leaves a path alone" {
-  assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
-  assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+  if runtime_backend_is_windows() {
+    assert equals(executable_path(".\\prog"), ".\\prog"), "expected an explicit backslash path to be kept";
+    assert equals(executable_path("build/prog"), "build\\prog"), "expected forward slashes converted on Windows";
+  } else {
+    assert equals(executable_path("./prog"), "./prog"), "expected an explicit path to be kept";
+    assert equals(executable_path("build/prog"), "build/prog"), "expected a directory path to be kept";
+  }
 }
 
 test "with_extension handles a windows-style path" {
@@ -1052,6 +1099,38 @@ pub fun load_manifest() Result<Manifest, str> {
   ret .Ok(m);
 }
 
+// The shared "make sure `[deps]` is fetched before compiling anything"
+// step every entry point (`fun build`, `fun test`, `fun fuzz`) runs
+// first: a no-op when there is no `fun.toml` here at all (a bare `fun
+// -in file.fn` invocation, same as today) or the manifest declares no
+// dependencies, otherwise resolves and fetches every entry, rewriting
+// `fun.lock` to match. `None` on success; `Some(message)` is a real
+// resolution/fetch failure the caller should report and abort on -
+// distinct from "no fun.toml here", which is expected and silent.
+fun ensure_deps_resolved() Option<str> {
+  if !exists("fun.toml") {
+    ret .None;
+  }
+  let loaded = load_manifest();
+  if loaded.is_err() {
+    // A malformed fun.toml is reported properly by whatever actually
+    // needs it (compile_to_c_mode re-reads it for -D defines); this
+    // step only cares about depending on one that parses.
+    ret .None;
+  }
+  Manifest m = loaded.unwrap();
+  defer m.free();
+  if m.deps.len == 0 {
+    ret .None;
+  }
+  let resolved = resolve_all(&m, "", false);
+  if resolved.is_err() {
+    ret .Some(resolved.unwrap_err());
+  }
+  resolved.unwrap().free();
+  ret .None;
+}
+
 // Compiles every target the manifest declares, writing executables to
 // `fun-out/bin`. A library has no entry point, so it is compiled to an
 // object under `fun-out/lib` to prove it builds, never linked.
@@ -1070,6 +1149,15 @@ pub fun build_project(bin debug_info, Vec<Define>* extra_defines) num {
       format("[Error]\npackage `{str}` declares no [lib] or [[exe]] target", m.package_name)
     );
     ret 1;
+  }
+
+  if m.deps.len > 0 {
+    let resolved = resolve_all(&m, "", false);
+    if resolved.is_err() {
+      writeln_to(Sink.Stderr, format("[Error]\n{str}", resolved.unwrap_err()));
+      ret 1;
+    }
+    resolved.unwrap().free();
   }
 
   // Re-reads and re-parses fun.toml a second time (already loaded as
@@ -1111,6 +1199,178 @@ pub fun build_project(bin debug_info, Vec<Define>* extra_defines) num {
     }
     println(format("built {str} -> {str}", e.name, exe));
     i = i + 1;
+  }
+  ret 0;
+}
+
+// `fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> |
+// -rev <r>] [-token-env <VAR>]`: writes or updates one `[deps]` entry
+// in `fun.toml` in place. Line-based, matching this file's own
+// hand-built-text approach for `fun init` rather than a general TOML
+// writer (`std.toml`'s own `stringify` only round-trips flat top-level
+// scalars, not sections - see `manifest.fn`'s module doc).
+pub fun add_dependency(
+  str name,
+  str git,
+  str path,
+  str tag,
+  str branch,
+  str rev,
+  str token_env
+) num {
+  if !exists("fun.toml") {
+    writeln_to(Sink.Stderr, "[Error]\nno fun.toml in this directory");
+    ret 1;
+  }
+  if equals(name, "") {
+    writeln_to(Sink.Stderr, "[Error]\nfun add requires a dependency name");
+    ret 1;
+  }
+  if equals(git, "") {
+    writeln_to(Sink.Stderr, "[Error]\nfun add requires -git <url>");
+    ret 1;
+  }
+  num spec_count = 0;
+  if !equals(tag, "") {
+    spec_count = spec_count + 1;
+  }
+  if !equals(branch, "") {
+    spec_count = spec_count + 1;
+  }
+  if !equals(rev, "") {
+    spec_count = spec_count + 1;
+  }
+  if spec_count > 1 {
+    writeln_to(Sink.Stderr, "[Error]\nonly one of -tag, -branch, -rev may be given");
+    ret 1;
+  }
+
+  StringBuilder entry = string_builder_init(64);
+  entry.append(name);
+  entry.append(" = { git = \"");
+  entry.append(git);
+  entry.append("\"");
+  if !equals(path, "") {
+    entry.append(", path = \"");
+    entry.append(path);
+    entry.append("\"");
+  }
+  if !equals(tag, "") {
+    entry.append(", tag = \"");
+    entry.append(tag);
+    entry.append("\"");
+  } elif !equals(branch, "") {
+    entry.append(", branch = \"");
+    entry.append(branch);
+    entry.append("\"");
+  } elif !equals(rev, "") {
+    entry.append(", rev = \"");
+    entry.append(rev);
+    entry.append("\"");
+  }
+  if !equals(token_env, "") {
+    entry.append(", token_env = \"");
+    entry.append(token_env);
+    entry.append("\"");
+  }
+  entry.append(" }");
+  str entry_line = entry.build();
+
+  str text = read_to_string("fun.toml");
+  Vec<str> lines = split(text, '\n');
+  defer lines.free();
+
+  bin in_deps = false;
+  bin replaced = false;
+  bin has_deps_table = false;
+  StringBuilder out = string_builder_init(len(text) + len(entry_line) + 16);
+  str name_prefix = format("{str} = ", name);
+  for line : lines {
+    str trimmed = trim(line);
+    if starts_with(trimmed, "[") && !starts_with(trimmed, "[deps]") {
+      in_deps = false;
+    }
+    if equals(trimmed, "[deps]") {
+      in_deps = true;
+      has_deps_table = true;
+    }
+    if in_deps && starts_with(trimmed, name_prefix) {
+      out.append(entry_line);
+      out.append("\n");
+      replaced = true;
+      continue;
+    }
+    out.append(line);
+    out.append("\n");
+  }
+  if !replaced {
+    if !has_deps_table {
+      out.append("\n[deps]\n");
+    }
+    out.append(entry_line);
+    out.append("\n");
+  }
+  write_string("fun.toml", out.build());
+  println(format("added `{str}` to [deps]", name));
+  ret 0;
+}
+
+// `fun deps update [name]`: re-resolves every `tag`/`branch` entry (a
+// `rev` pin is never re-resolved, matching `cargo update`'s own
+// respect for an explicit pin), rewriting `fun.lock`. `name` narrows
+// this to one dependency; empty updates all of them.
+pub fun deps_update_command(str name) num {
+  let loaded = load_manifest();
+  if loaded.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
+    ret 1;
+  }
+  Manifest m = loaded.unwrap();
+  defer m.free();
+
+  if m.deps.len == 0 {
+    println("no [deps] entries to update");
+    ret 0;
+  }
+
+  Manifest target = m;
+  Vec<Dependency> filtered;
+  bin narrowed = false;
+  if !equals(name, "") {
+    filtered.init(0);
+    num i = 0;
+    bin found = false;
+    for i < m.deps.len {
+      let d = m.deps.get(i);
+      if equals(d.name, name) {
+        filtered.push(d);
+        found = true;
+      }
+      i = i + 1;
+    }
+    if !found {
+      writeln_to(Sink.Stderr, format("[Error]\nno [deps] entry named `{str}`", name));
+      filtered.free();
+      ret 1;
+    }
+    target.deps = filtered;
+    narrowed = true;
+  }
+
+  let resolved = resolve_all(&target, "", true);
+  if narrowed {
+    filtered.free();
+  }
+  if resolved.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", resolved.unwrap_err()));
+    ret 1;
+  }
+  let out = resolved.unwrap();
+  defer out.free();
+  if equals(name, "") {
+    println(format("updated {} dependencies", out.len));
+  } else {
+    println(format("updated `{str}`", name));
   }
   ret 0;
 }
@@ -1245,6 +1505,12 @@ pub fun run_tests(
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
 
+  let dep_check = ensure_deps_resolved();
+  if dep_check.is_some() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", dep_check.unwrap()));
+    ret 1;
+  }
+
   str c_path = out_override;
   if equals(c_path, "") {
     c_path = default_c_path(input, ".test.c");
@@ -1303,6 +1569,12 @@ pub fun run_fuzz(
 ) num {
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
+
+  let dep_check = ensure_deps_resolved();
+  if dep_check.is_some() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", dep_check.unwrap()));
+    ret 1;
+  }
 
   str c_path = out_override;
   if equals(c_path, "") {

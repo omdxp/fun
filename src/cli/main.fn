@@ -61,6 +61,23 @@ fun main(str[] args) num {
   if equals(opts.subcommand, "init") {
     ret init_project(opts.input);
   }
+  if equals(opts.subcommand, "add") {
+    ret add_dependency(
+      opts.input,
+      opts.dep_git,
+      opts.dep_path,
+      opts.dep_tag,
+      opts.dep_branch,
+      opts.dep_rev,
+      opts.dep_token_env
+    );
+  }
+  if equals(opts.subcommand, "deps") {
+    if !equals(opts.deps_action, "update") {
+      ret _fail(format("unknown `fun deps` action `{str}` (expected `update`)", opts.deps_action));
+    }
+    ret deps_update_command(opts.input);
+  }
   if equals(opts.subcommand, "test") {
     // No path, or a path that names a directory rather than a `.fn`
     // file, runs every `test` block found under that root instead of a

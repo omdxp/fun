@@ -50,10 +50,10 @@ jobs:
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test src/tests
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test .
           else
             export FUN_STDLIB_DIR="$PWD/stdlib"
-            ./fun-out/bin/fun test src/tests
+            ./fun-out/bin/fun test .
           fi
       - name: Validate examples/
         timeout-minutes: 20

@@ -399,6 +399,8 @@ impl JsonParser {
           b.append_char('"');
         } elif e == '\\' {
           b.append_char('\\');
+        } elif e == 'r' {
+          b.append_char('\r');
         } else {
           b.append_char(e);
         }

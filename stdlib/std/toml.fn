@@ -18,12 +18,18 @@ imp std.error;
 imp std.string;
 imp std.quirks;
 
-// A TOML scalar value.
+// A TOML value: a scalar, or one level of inline table (`{ key = value,
+// ... }`, the value-position construct a manifest's own `[dependencies]`
+// table uses to keep one dependency's several fields on one line).
+// Deliberately shallow: a value inside a `Table` may be a scalar, never
+// another nested inline table - this parser's own "narrow subset"
+// philosophy (see the module doc) extends here too.
 pub enum TomlValue {
   Str(str),
   Int(num),
   Float(dec),
   Bool(bin),
+  Table(Map<str, TomlValue>),
 }
 
 impl TomlValue {
@@ -62,6 +68,34 @@ impl TomlValue {
     }
     ret Option.None;
   }
+
+  // True when this is an inline table (`{ key = value, ... }`).
+  pub is_table() bin {
+    fit *self {
+      .Table(_) -> { ret true; }
+      _ -> { ret false; }
+    }
+    ret false;
+  }
+
+  // One field of this inline table, or "" when this isn't a Table, the
+  // field is absent, or the field isn't itself a string. A plain scalar
+  // return rather than handing back the inner `Map` or a `TomlTable`
+  // wrapper, since a bare `{ key = value }` value has no section name of
+  // its own for `TomlTable` to carry.
+  pub table_field(str key) str {
+    fit *self {
+      .Table(m) -> {
+        let v = m.at(key);
+        if v.is_none() {
+          ret "";
+        }
+        ret v.unwrap().as_str().unwrap_or("");
+      }
+      _ -> { ret ""; }
+    }
+    ret "";
+  }
 }
 
 impl TomlValue as Display {
@@ -96,6 +130,27 @@ impl TomlValue as Display {
           ret _tv_dup("true");
         }
         ret _tv_dup("false");
+      }
+      .Table(m) -> {
+        let b = string_builder_init(64);
+        b.append_char('{');
+        let keys = m.keys();
+        defer keys.free();
+        num i = 0;
+        for i < keys.len() {
+          if i > 0 {
+            b.append(", ");
+          }
+          let key = keys.get(i);
+          b.append(key);
+          b.append(" = ");
+          b.append(m.get(key).to_string());
+          i = i + 1;
+        }
+        b.append_char('}');
+        let out = b.build();
+        b.free();
+        ret out;
       }
     }
     ret _tv_dup("");
@@ -283,12 +338,67 @@ fun _strip_trailing_comment(str text) str {
   ret text;
 }
 
+// One `key = value` piece inside an inline table's braces, put into
+// `out` (a no-op for an empty or malformed piece, mirroring
+// `_parse_line_into`'s own tolerance for a line with no `=`).
+fun _inline_table_put(Map<str, TomlValue>* out, str piece) {
+  if len(piece) == 0 {
+    ret;
+  }
+  let eq_idx = index_of_char(piece, '=');
+  if eq_idx == -1 {
+    ret;
+  }
+  let key = trim(substr(piece, 0, eq_idx));
+  let value_text = trim(substr(piece, eq_idx + 1, len(piece) - (eq_idx + 1)));
+  if len(key) == 0 {
+    ret;
+  }
+  out.put(key, _classify(value_text));
+}
+
+// `{ key = value, key2 = value2 }`: strips the outer braces, then splits
+// on a top-level comma (one respecting quotes, so a comma inside a
+// quoted value doesn't split it) and classifies each `key = value`
+// piece the same way a top-level line would be.
+fun _classify_inline_table(str text) TomlValue {
+  Map<str, TomlValue> out;
+  out.init(4);
+  let inner = trim(substr(text, 1, len(text) - 2));
+  let n = len(inner);
+  if n == 0 {
+    ret .Table(out);
+  }
+  num i = 0;
+  num start = 0;
+  bin in_quotes = false;
+  for i < n {
+    let c = inner[i];
+    if c == '"' {
+      in_quotes = !in_quotes;
+    } elif c == ',' && !in_quotes {
+      _inline_table_put(&out, trim(substr(inner, start, i - start)));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < n {
+    _inline_table_put(&out, trim(substr(inner, start, n - start)));
+  }
+  ret .Table(out);
+}
+
 // Classify a raw (trimmed) TOML value string into a typed TomlValue.
 fun _classify(str raw_text) TomlValue {
   let text = _strip_trailing_comment(raw_text);
   let n = _tv_strlen(text);
   if n == 0 {
     ret .Str(text);
+  }
+
+  // Inline table: `{ key = value, ... }`, one level deep.
+  if text[0] == '{' && text[n - 1] == '}' {
+    ret _classify_inline_table(text);
   }
 
   // Quoted string: strip the surrounding quotes.
@@ -516,4 +626,23 @@ test "a hash inside quotes is kept" {
   let doc = parse_document("tag = \"a#b\"\n");
   defer doc.free();
   assert equals(doc.get("tag").unwrap().as_str().unwrap_or(""), "a#b"), "expected the quoted hash to survive";
+}
+
+test "parses an inline table's fields" {
+  let doc = parse_document("[deps]\nsomejson = { git = \"https://example.com/repo\", tag = \"v1.0.0\" }\n");
+  defer doc.free();
+  let deps = doc.table("deps").unwrap();
+  let entry = deps.values.get("somejson");
+  assert entry.is_table(), "expected the dependency entry to parse as an inline table";
+  assert equals(entry.table_field("git"), "https://example.com/repo"), "expected the git field";
+  assert equals(entry.table_field("tag"), "v1.0.0"), "expected the tag field";
+  assert equals(entry.table_field("nosuchfield"), ""), "expected a missing field to report an empty string";
+}
+
+test "an inline table field value keeps its quotes stripped and a plain scalar reports not-a-table" {
+  let doc = parse_document("plain = 3\n");
+  defer doc.free();
+  let entry = doc.get("plain").unwrap();
+  assert !entry.is_table(), "expected a plain scalar to not be an inline table";
+  assert equals(entry.table_field("anything"), ""), "expected table_field on a non-table to report an empty string";
 }

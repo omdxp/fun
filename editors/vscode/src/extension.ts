@@ -83,6 +83,22 @@ function isWindows(): boolean {
   return process?.platform === "win32";
 }
 
+// Builds the shell fragment that invokes `exe` in the integrated terminal.
+// On Windows (PowerShell), a quoted string is a value, not a command — `& `
+// is required to invoke it. On POSIX shells, quoting a command name is fine.
+function shellInvoke(exe: string): string {
+  return isWindows() ? `& "${exe}"` : `"${exe}"`;
+}
+
+// Escapes a string to be safely embedded inside double quotes in the terminal.
+// PowerShell uses backtick as the escape character; POSIX shells use backslash.
+function shellEscapeArg(s: string): string {
+  if (isWindows()) {
+    return s.replace(/["`$]/g, "`$&");
+  }
+  return s.replace(/(["\\$`])/g, "\\$1");
+}
+
 function splitPathList(p: string | undefined): string[] {
   if (!p) return [];
   return String(p)
@@ -951,7 +967,7 @@ export function activate(context: vscode.ExtensionContext) {
         runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
       }
       runTerminal.show(true);
-      runTerminal.sendText(`"${funExe}" -in "${fileUri.fsPath}"`);
+      runTerminal.sendText(`${shellInvoke(funExe)} -in "${fileUri.fsPath}"`);
     }),
   );
 
@@ -977,9 +993,9 @@ export function activate(context: vscode.ExtensionContext) {
           runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
         }
         runTerminal.show(true);
-        const escapedName = testName.replace(/(["\\$`])/g, "\\$1");
+        const escapedName = shellEscapeArg(testName);
         runTerminal.sendText(
-          `"${funExe}" -in "${fileUri.fsPath}" -test -- "${escapedName}"`,
+          `${shellInvoke(funExe)} -in "${fileUri.fsPath}" -test -- "${escapedName}"`,
         );
       },
     ),
@@ -1011,9 +1027,9 @@ export function activate(context: vscode.ExtensionContext) {
           runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
         }
         runTerminal.show(true);
-        const escapedName = fuzzName.replace(/(["\\$`])/g, "\\$1");
+        const escapedName = shellEscapeArg(fuzzName);
         runTerminal.sendText(
-          `"${funExe}" -in "${fileUri.fsPath}" -fuzz -fuzz-target "${escapedName}"`,
+          `${shellInvoke(funExe)} -in "${fileUri.fsPath}" -fuzz -fuzz-target "${escapedName}"`,
         );
       },
     ),

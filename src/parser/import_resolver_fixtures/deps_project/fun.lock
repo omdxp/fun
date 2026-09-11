@@ -1,0 +1,4 @@
+# fixture fun.lock
+
+[deps]
+mylib = { git = "https://example.com/mylib", resolved_rev = "abc123" }
