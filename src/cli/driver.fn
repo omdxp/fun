@@ -1720,7 +1720,16 @@ fun _run_tests_captured(
   ProcessResult r = result.unwrap();
   SuiteTestResult ok;
   ok.exit_code = r.exit_code;
-  ok.captured = r.stdout_text;
+  // A failed `assert`'s own "Assertion failed: ..." message goes to
+  // stderr (see StatementAssert's own codegen), so stdout alone never
+  // shows why a test actually failed - appended here rather than
+  // silently dropped, the same output a directly-run test binary would
+  // show in a real terminal, just not perfectly interleaved with it.
+  if !equals(r.stderr_text, "") {
+    ok.captured = format("{str}{str}", r.stdout_text, r.stderr_text);
+  } else {
+    ok.captured = r.stdout_text;
+  }
   ret ok;
 }
 
