@@ -2138,6 +2138,12 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   defer clear_env("FUN_DEPS_CACHE");
 
   str current_file = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
+
+  // Bypasses the tokenizer/cursor-position layer entirely: does
+  // resolve_import_path itself, on its own, find the locked
+  // dependency's root for a bare 'deps.mylib' specifier?
+  str direct_resolved = resolve_import_path(current_file, "deps.mylib");
+
   let lexed = tokenize("imp deps.mylib.some;\n", "main.fn");
   assert lexed.is_ok(), "expected the source to lex";
   Vec<Token> tokens = lexed.unwrap();
@@ -2147,8 +2153,8 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   bin target_is_dir = is_dir(target);
   bin target_exists = exists(target);
   assert target_is_dir, format(
-    "expected 'mylib' to resolve to a real directory - resolved target: {str} | is_dir: {bin} | exists: {bin}",
-    target, target_is_dir, target_exists
+    "expected 'mylib' to resolve to a real directory - resolve_import_path directly: {str} | import_target (tokenizer path): {str} | is_dir: {bin} | exists: {bin}",
+    direct_resolved, target, target_is_dir, target_exists
   );
 
   AnalysisCache reads = analysis_cache_new();
