@@ -826,6 +826,9 @@ pub fun help_text() str {
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
   `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
+  `  fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> | -rev <sha>] [-token-env <VAR>]
+  `                           adds or updates a [deps] entry in fun.toml
+  `  fun deps update [<name>]  re-resolves tag/branch [deps] entries and rewrites fun.lock
   `  fun -fmt-check-all [-in <file_or_dir>]
   `  fun -version
   `
