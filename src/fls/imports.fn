@@ -78,13 +78,23 @@ fun _resolve_specifier(str current_file, str specifier) str {
   if exists(resolved) {
     ret resolved;
   }
-  // The specifier may name a directory rather than a file.
-  // resolve_import_path always assumes a trailing ".fn" module, so
-  // strip that back off and check. A directory with no README of its
-  // own (an intermediate namespace segment like `std.c`, real but
-  // undocumented) still names something real, so its own path is
-  // returned rather than "": callers show a minimal fallback for a
-  // directory target instead of trying to read it.
+  // resolve_import_path may return a bare directory path (e.g. a `deps.<name>`
+  // specifier resolves to the dependency's own root, not a `.fn` file).
+  // On Windows, fopen fails on directories so exists() misses them; is_dir
+  // handles that independently. On POSIX, exists() already catches the
+  // directory case above (fopen succeeds), so this branch is unreachable there.
+  if is_dir(resolved) {
+    str readme = path_join(resolved, "README.md");
+    if exists(readme) {
+      ret readme;
+    }
+    ret resolved;
+  }
+  // The specifier may name an intermediate namespace directory (`std.c`)
+  // rather than a concrete file. resolve_import_path appends ".fn" when
+  // resolving a module name, so strip that suffix off and check whether the
+  // result is a real directory. A directory with no README (undocumented)
+  // still names something real; callers show a minimal fallback rather than "".
   if ends_with(resolved, ".fn") {
     str as_dir = substr(resolved, 0, len(resolved) - 3);
     if is_dir(as_dir) {
