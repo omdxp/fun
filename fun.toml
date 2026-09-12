@@ -1,6 +1,6 @@
 [package]
 name = "fun"
-version = "0.53.1"
+version = "0.53.2"
 
 [[exe]]
 name = "fun"
