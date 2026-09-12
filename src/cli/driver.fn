@@ -585,9 +585,8 @@ pub fun resolve_c_compiler() str {
 
 // Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
 // arguments inserted right after `cc` itself and before the source
-// file — this lets e.g. FUN_CC=zig FUN_CC_ARGS=cc work (a user
-// override is trusted to know what it's asking for, so this streams
-// the compiler's own output live rather than capturing it).
+// file (a user override is trusted to know what it's asking for,
+// so this streams the compiler's own output live rather than capturing it).
 fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
   Vec<str> argv_args;
   argv_args.init(0);

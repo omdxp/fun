@@ -422,9 +422,9 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
       build.push("-lws2_32");
     }
     build.push("-o");
-    // zig cc (and clang) on Windows do not auto-append .exe when the -o
-    // path has no extension, so supply it explicitly here so the exe_path
-    // lookup below finds the file.
+    // clang on Windows does not auto-append .exe when the -o path has no
+    // extension, so supply it explicitly here so the exe_path lookup below
+    // finds the file.
     if runtime_backend_is_windows() {
       build.push(format("{str}.exe", base));
     } else {
@@ -440,7 +440,7 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
     built.unwrap().stderr_text
   );
 
-  // On Windows, zig cc appends .exe; posix_spawnp also needs backslashes.
+  // On Windows, supply the .exe suffix explicitly; posix_spawnp also needs backslashes.
   str exe_path = base;
   if runtime_backend_is_windows() {
     exe_path = replace_char(format("{str}.exe", base), '/', '\\');
