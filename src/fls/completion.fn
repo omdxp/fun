@@ -125,6 +125,21 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       _c_builtin_completions(&items);
       _abbreviations(&items, snippets);
       _written_names(&tokens, _current_word(&tokens, line, character), &items);
+      // The file does not parse, so we have no merged program to walk.
+      // Parse each directly-imported module fresh (cached) and offer its
+      // top-level symbols, mirroring what _declared does via program.nodes
+      // in the parsed branch so that symbols like print (from std.io) are
+      // still reachable mid-edit.
+      Vec<str> import_paths = resolved_import_paths(&tokens, doc.path);
+      defer import_paths.free();
+      num ki = 0;
+      for ki < import_paths.len {
+        str ipath = import_paths.get(ki);
+        ki = ki + 1;
+        if !is_dir(ipath) {
+          _alias_module_completions_fresh(ipath, cache, &items, snippets);
+        }
+      }
     } else {
       // An import alias needs no tree of its own to resolve: it is
       // read straight off this document's tokens, and the module it
@@ -2144,6 +2159,22 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
         if !equals(call_snippet, "") {
           free(call_snippet);
         }
+      }
+      .Compound(c) -> {
+        items.push(
+          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, snippets))
+        );
+      }
+      .Enum(e) -> {
+        items.push(
+          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, snippets))
+        );
+      }
+      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .Variable(v) -> {
+        str decl_type_text = render_type(v.var_type);
+        items.push(_item(v.name, .Variable, decl_type_text));
+        free(decl_type_text);
       }
       _ -> {}
     }

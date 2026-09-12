@@ -152,7 +152,7 @@ pub fun basename(str path) str {
   num i = path_len;
   num last = -1;
   for i > 0 {
-    if path[i - 1] == '/' {
+    if path[i - 1] == '/' || path[i - 1] == '\\' {
       last = i - 1;
       break;
     }
@@ -174,7 +174,7 @@ pub fun dirname(str path) str {
   num i = path_len;
   num last = -1;
   for i > 0 {
-    if path[i - 1] == '/' {
+    if path[i - 1] == '/' || path[i - 1] == '\\' {
       last = i - 1;
       break;
     }
@@ -199,7 +199,7 @@ pub fun extname(str path) str {
     if last_dot == -1 && path[i - 1] == '.' {
       last_dot = i - 1;
     }
-    if path[i - 1] == '/' {
+    if path[i - 1] == '/' || path[i - 1] == '\\' {
       last_slash = i - 1;
       break;
     }

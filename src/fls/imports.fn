@@ -75,19 +75,20 @@ fun _resolve_specifier(str current_file, str specifier) str {
   // "C:\...\stdlib/std/c/math.fn" would not compare equal to
   // "C:/.../stdlib/std/c/math.fn" in _alias_module_completions.
   str resolved = _normalize_path(resolve_import_path(current_file, specifier));
-  if exists(resolved) {
-    ret resolved;
-  }
-  // resolve_import_path may return a bare directory path (e.g. a `deps.<name>`
-  // specifier resolves to the dependency's own root, not a `.fn` file).
-  // On Windows, fopen fails on directories so exists() misses them; is_dir
-  // handles that independently. On POSIX, exists() already catches the
-  // directory case above (fopen succeeds), so this branch is unreachable there.
+  // Check is_dir before exists: on POSIX fopen succeeds on directories so
+  // exists() would match them too, returning a raw directory path that
+  // goto-definition and document-links clients cannot open as a file.
+  // Checking is_dir first on all platforms routes directories here, where
+  // we try README.md first and fall back to the bare path (which hover
+  // still renders, but navigation callers must guard against themselves).
   if is_dir(resolved) {
     str readme = path_join(resolved, "README.md");
     if exists(readme) {
       ret readme;
     }
+    ret resolved;
+  }
+  if exists(resolved) {
     ret resolved;
   }
   // The specifier may name an intermediate namespace directory (`std.c`)
@@ -269,7 +270,7 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
       Token last = tokens.get(j - 1);
       str specifier = _specifier_through(tokens, last);
       str resolved = _resolve_specifier(current_file, specifier);
-      if !equals(resolved, "") {
+      if !equals(resolved, "") && !is_dir(resolved) {
         num start_line = first.pos.line - 1;
         num end_line = last.pos.line - 1;
         num start_char = byte_col_to_utf16_char(doc_text, start_line, first.pos.start_col - 1);

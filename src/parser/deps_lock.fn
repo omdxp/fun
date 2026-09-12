@@ -44,10 +44,16 @@ pub fun deps_cache_root() str {
     ret configured;
   }
   let home = env("HOME");
-  if home == nil || equals(home, "") {
-    ret ".fun-deps-cache";
+  if home != nil && !equals(home, "") {
+    ret format("{str}/.local/share/fun/deps", home);
   }
-  ret format("{str}/.local/share/fun/deps", home);
+  // On Windows, HOME is typically not set; LOCALAPPDATA points to the
+  // per-user application data directory (C:\Users\<user>\AppData\Local).
+  let local_app_data = env("LOCALAPPDATA");
+  if local_app_data != nil && !equals(local_app_data, "") {
+    ret format("{str}/fun/deps", local_app_data);
+  }
+  ret ".fun-deps-cache";
 }
 
 // A git URL turned into a filesystem-safe path component: strips the

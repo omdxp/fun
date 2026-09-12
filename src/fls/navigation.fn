@@ -301,7 +301,7 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
   }
 
   str target = import_target(&tokens, doc.path, line, character);
-  if !equals(target, "") {
+  if !equals(target, "") && !is_dir(target) {
     ret _file_start_location_result(target);
   }
 
