@@ -545,6 +545,85 @@ fun _default_cc_candidates() Vec<str> {
   ret out;
 }
 
+// On Windows, if INCLUDE is not set (vcvarsall.bat has not been sourced
+// into the current process), finds the Visual Studio installation via
+// vswhere.exe and applies the x64 MSVC environment to the current
+// process so that cl.exe can find its headers and libraries.  Called
+// before `compile_c_to_exe` so that `fun -in` and `fun build` work
+// from a plain PowerShell/CMD terminal without requiring the user to
+// run from a Developer Command Prompt.  A no-op on POSIX, when INCLUDE
+// is already set, or when no VS installation is found.
+fun _ensure_msvc_env() {
+  if !runtime_backend_is_windows() {
+    ret;
+  }
+  if !equals(env_or("INCLUDE", ""), "") {
+    ret;
+  }
+  str vswhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe";
+  if !exists(vswhere) {
+    ret;
+  }
+  Vec<str> probe_args;
+  probe_args.init(4);
+  probe_args.push(vswhere);
+  probe_args.push("-latest");
+  probe_args.push("-property");
+  probe_args.push("installationPath");
+  str[] probe_argv = argv_from(&probe_args);
+  let probe_result = run(probe_argv);
+  free_argv(probe_argv);
+  probe_args.free();
+  if probe_result.is_err() {
+    ret;
+  }
+  ProcessResult pr = probe_result.unwrap();
+  if pr.exit_code != 0 {
+    ret;
+  }
+  str install_path = trim(pr.stdout_text);
+  if equals(install_path, "") {
+    ret;
+  }
+  str vcvarsall = path_join(install_path, "VC\\Auxiliary\\Build\\vcvarsall.bat");
+  if !exists(vcvarsall) {
+    ret;
+  }
+  str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
+  str bat_path = path_join(temp_dir, "fun_msvc_env.bat");
+  write_string(bat_path, format("@echo off\ncall \"{str}\" x64 > NUL 2>&1\nset\n", vcvarsall));
+  Vec<str> bat_args;
+  bat_args.init(3);
+  bat_args.push("cmd.exe");
+  bat_args.push("/c");
+  bat_args.push(bat_path);
+  str[] bat_argv = argv_from(&bat_args);
+  let bat_result = run(bat_argv);
+  free_argv(bat_argv);
+  bat_args.free();
+  remove_file(bat_path);
+  if bat_result.is_err() {
+    ret;
+  }
+  ProcessResult bat_r = bat_result.unwrap();
+  if bat_r.exit_code != 0 {
+    ret;
+  }
+  Vec<str> lines = split(bat_r.stdout_text, '\n');
+  defer lines.free();
+  num i = 0;
+  for i < lines.len {
+    str line = trim(lines.get(i));
+    num eq = index_of_char(line, '=');
+    if eq > 0 {
+      str name = substr(line, 0, eq);
+      str value = substr(line, eq + 1, len(line) - eq - 1);
+      set_env(name, value);
+    }
+    i = i + 1;
+  }
+}
+
 // Which C compiler will actually receive the generated C, resolved the
 // same way `compile_c_to_exe` itself will pick one: `FUN_CC`'s exact
 // value if set, otherwise the first of `_default_cc_candidates()` found
@@ -562,6 +641,7 @@ pub fun resolve_c_compiler() str {
   if !equals(override_cc, "") {
     ret override_cc;
   }
+  _ensure_msvc_env();
   Vec<str> candidates = _default_cc_candidates();
   defer candidates.free();
   num i = 0;
@@ -622,6 +702,7 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
 // search there rather than trying the next one, since a real compile
 // error is never solved by switching compilers.
 pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+  _ensure_msvc_env();
   str override_cc = env_or("FUN_CC", "");
   if !equals(override_cc, "") {
     ret _compile_with_cc(override_cc, c_path, exe_path, debug_info);
@@ -649,7 +730,14 @@ pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
     }
     ProcessResult r = result.unwrap();
     if r.exit_code != 0 {
-      writeln_to(Sink.Stderr, r.stderr_text);
+      // cl.exe writes diagnostics to stdout; print both streams so the
+      // error is always visible regardless of which compiler ran.
+      if !equals(r.stderr_text, "") {
+        writeln_to(Sink.Stderr, r.stderr_text);
+      }
+      if !equals(r.stdout_text, "") {
+        writeln_to(Sink.Stderr, r.stdout_text);
+      }
     }
     ret r.exit_code;
   }

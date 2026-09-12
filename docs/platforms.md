@@ -27,16 +27,20 @@ separate `FUN_FUZZ_CC` override instead (see [Fuzzing](#tooling?anchor=tooling-f
 
 ### Windows notes
 
-When using `cl`, run Fun from Developer PowerShell for Visual Studio (or
-after `VsDevCmd.bat`) so MSVC environment variables are initialized:
+Fun automatically detects and sources the MSVC build environment on
+Windows. You can run `fun -in`, `fun build`, and `fun test` from any
+ordinary PowerShell or CMD terminal — no Developer Command Prompt, no
+manual `VsDevCmd.bat`, no `FUN_CC` override needed.
 
-```powershell
-$env:FUN_CC = "cl /nologo /Fe{out} {src}"
-$env:FUN_CC_ARGS = ""
-```
+Specifically: if the `INCLUDE` environment variable is not set, Fun
+locates your Visual Studio installation via `vswhere.exe` (at its
+standard path under `Program Files (x86)\Microsoft Visual Studio\Installer`)
+and applies the x64 MSVC environment to the current process before
+invoking `cl.exe`. This is a one-time cost on the first compile in a
+given terminal session; subsequent compiles in the same session skip it.
 
-`FUN_CC` may also be a full template when it includes `{src}` and
-`{out}`, as above, rather than just a bare compiler name.
+If you do need to override the compiler (e.g., to use Clang explicitly),
+`FUN_CC` still works as described above.
 
 ## Runtime Backend Selection
 
