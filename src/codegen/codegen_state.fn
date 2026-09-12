@@ -46,6 +46,16 @@ impl CodegenState {
     self.has_pending_line_directive = true;
   }
 
+  // Like `write_indent`, but re-pins the `#line` directive to `pos`
+  // before flushing, so synthesized C lines (not from real user
+  // statements) map back to a known Fun source location instead of
+  // inheriting or auto-incrementing from the previous directive.
+  // A no-op pin when debug info is disabled.
+  pub write_indent_pinned(Pos pos) {
+    self.set_pending_line_directive(pos);
+    self.write_indent();
+  }
+
   // Emits the current indentation, 4 spaces per level, flushing a
   // pending `#line` directive first when debug info is enabled.
   pub write_indent() {

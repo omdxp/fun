@@ -7203,6 +7203,15 @@ impl Codegen {
 
     let recv_info_opt = self.emit_receiver_and_resolve_type(e.left);
     if recv_info_opt.is_none() {
+      fit e.left.kind {
+        .Identifier(recv_name) -> {
+          if self.lookup_local_type_name(recv_name).is_none() &&
+            equals(self.error_note, "") {
+            self.error_note = format("unknown identifier '{str}'", recv_name);
+          }
+        }
+        _ -> {}
+      }
       ret .Some(.UnsupportedNode);
     }
     if recv_info_opt.unwrap().is_pointer {
@@ -10466,6 +10475,14 @@ impl Codegen {
         // defers must never bleed into this one.
         self.defer_stack.init(0);
         self.defer_scope_starts.init(0);
+        // Anchor the function declaration itself to its Fun source position.
+        // Without this, cl.exe /Zi attributes the signature to whatever line
+        // the C preprocessor auto-incremented to from the previous #line,
+        // so stack traces and "Go to Definition" in cppvsdbg land on the
+        // wrong (often blank or comment) line in the .fn source file.
+        if self.debug_info && node.has_pos {
+          self.state.write_line_directive(node.pos);
+        }
         if !f.has_rtype {
           ret .Some(.InvalidNode);
         }
@@ -10611,55 +10628,59 @@ impl Codegen {
         // matching its `__fun_tag` character rather than kept in its
         // native C type, since `vargs` is always a `Vec<str>`.
         if f.is_variadic {
-          self.state.write_indent();
+          // Each write_indent_pinned re-pins to node.pos so every line of
+          // this synthesized preamble maps to the function declaration in
+          // the .fn source. Without pinning, a debugger stepping into a
+          // variadic function lands on wrong (blank or comment) lines.
+          self.state.write_indent_pinned(node.pos);
           self.state.write("Vec__str vargs;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("vargs.len = 0; vargs.cap = 0; vargs.data = NULL;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("if (__fun_vtags) {\n");
           self.state.indent_level = self.state.indent_level + 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("vargs.len = (int64_t)__fun_vc; vargs.cap = (int64_t)__fun_vc;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("va_list __fun_ap; va_start(__fun_ap, __fun_vtags);\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("size_t __fun_vi = 0; while (__fun_vi < __fun_vc) {\n");
           self.state.indent_level = self.state.indent_level + 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("char __fun_tagc = __fun_vtags[__fun_vi];\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("switch (__fun_tagc) {\n");
           self.state.indent_level = self.state.indent_level + 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 's': vargs.data[__fun_vi] = va_arg(__fun_ap, char*); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 'b': vargs.data[__fun_vi] = fmt_bin((bool)va_arg(__fun_ap, int)); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
           self.state.indent_level = self.state.indent_level - 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("}\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("__fun_vi = __fun_vi + 1;\n");
           self.state.indent_level = self.state.indent_level - 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("}\n");
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("va_end(__fun_ap);\n");
           self.state.indent_level = self.state.indent_level - 1;
-          self.state.write_indent();
+          self.state.write_indent_pinned(node.pos);
           self.state.write("}\n");
           // Recorded as a known local so the body's reads of `vargs`
           // resolve like any other `Vec<str>`, with `resolve_type_name`
@@ -13244,7 +13265,7 @@ impl Codegen {
     `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
     `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
     `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
     `#else
     `#include <dirent.h>
@@ -18215,7 +18236,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
     `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
     `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
     `#else
     `#include <dirent.h>
@@ -18552,7 +18573,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
     `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
     `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
     `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
     `#else
     `#include <dirent.h>
@@ -19745,7 +19766,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
     `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
     `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
+    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
     `#else
     `#include <dirent.h>
