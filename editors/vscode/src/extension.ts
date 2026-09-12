@@ -216,12 +216,12 @@ function runProcess(
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(stdout);
-      else
+      else {
+        const parts = [stderr.trim(), stdout.trim()].filter(Boolean);
         reject(
-          new Error(
-            stderr.trim() || stdout.trim() || `exited with code ${code}`,
-          ),
+          new Error(parts.join("\n") || `exited with code ${code}`),
         );
+      }
     });
   });
 }
@@ -341,23 +341,19 @@ async function findMsvcEnv(root: string): Promise<Record<string, string>> {
       _cachedMsvcEnv = {};
       return _cachedMsvcEnv;
     }
-    // Run vcvarsall.bat x64 in a cmd.exe subshell and capture the resulting env.
-    const envText = await new Promise<string>((resolve, reject) => {
-      // Redirect vcvarsall's own output to NUL; only capture `set` output.
-      const child = spawn(
-        "cmd.exe",
-        ["/c", `"${vcvarsall}" x64 > NUL 2>&1 && set`],
-        { cwd: root, stdio: "pipe", windowsHide: true },
-      );
-      let out = "";
-      child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
-      child.on("error", reject);
-      child.on("close", (code) =>
-        code === 0
-          ? resolve(out)
-          : reject(new Error(`vcvarsall.bat exited with code ${code}`)),
-      );
-    });
+    // Write a temp batch file to invoke vcvarsall.bat and capture `set` output.
+    // A temp file avoids cmd.exe quoting issues when vcvarsall's path has spaces.
+    const batFile = path.join(os.tmpdir(), `fun_msvc_${Date.now()}.bat`);
+    fs.writeFileSync(
+      batFile,
+      `@echo off\r\ncall "${vcvarsall}" x64 > NUL 2>&1\r\nset\r\n`,
+    );
+    let envText: string;
+    try {
+      envText = await runProcess("cmd.exe", ["/c", batFile], root);
+    } finally {
+      fs.unlink(batFile, () => {});
+    }
     const env: Record<string, string> = {};
     for (const line of envText.split(/\r?\n/)) {
       const eq = line.indexOf("=");
@@ -375,8 +371,7 @@ async function findMsvcEnv(root: string): Promise<Record<string, string>> {
 
 /**
  * Compile a C file to a native binary for debugging.
- * On Windows tries clang-cl first (better DWARF/CodeLLDB support), then
- * cl.exe. On POSIX tries cc, clang, gcc.
+ * On Windows tries clang → clang-cl → cl. On POSIX tries cc → clang → gcc.
  * Returns null on success, or the last error string on failure.
  */
 async function compileCToNative(
@@ -384,34 +379,43 @@ async function compileCToNative(
   binFile: string,
   root: string,
   extraEnv?: Record<string, string>,
+  output?: vscode.OutputChannel,
 ): Promise<string | null> {
-  const compilers = isWindows() ? ["clang-cl", "cl"] : ["cc", "clang", "gcc"];
+  const linkArgs = isWindows() ? ["-lws2_32"] : ["-lm", "-pthread"];
+
+  function isMsvcCompiler(cc: string): boolean {
+    const base = path.basename(cc).toLowerCase();
+    return base === "cl" || base === "cl.exe";
+  }
+
+  async function tryCompile(cc: string, env: Record<string, string> | undefined): Promise<void> {
+    if (isMsvcCompiler(cc)) {
+      const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
+      await runProcess(
+        cc,
+        ["/nologo", "/std:c17", cFile, `/Fe:${binFile}`, `/Fd:${pdbFile}`, "/Zi", "/Od"],
+        root,
+        env,
+      );
+    } else if (isWindows() && path.basename(cc).toLowerCase() === "clang-cl") {
+      await runProcess(cc, ["-Z7", "-Od", cFile, `-Fe${binFile}`], root, env);
+    } else {
+      await runProcess(cc, ["-g", cFile, "-o", binFile, ...linkArgs], root, env);
+    }
+  }
+
+  const compilers = isWindows()
+    ? ["clang", "clang-cl", "cl"]
+    : ["cc", "clang", "gcc"];
   let lastErr = "";
   for (const cc of compilers) {
     try {
-      if (isWindows()) {
-        if (cc === "clang-cl") {
-          await runProcess(
-            cc,
-            ["-Z7", "-Od", cFile, `-Fe${binFile}`],
-            root,
-            extraEnv,
-          );
-        } else {
-          const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
-          await runProcess(
-            cc,
-            [cFile, `/Fe${binFile}`, `/Fd${pdbFile}`, "/Zi", "/Od", "/link"],
-            root,
-            extraEnv,
-          );
-        }
-      } else {
-        await runProcess(cc, ["-g", cFile, "-o", binFile], root);
-      }
-      return null; // success
+      await tryCompile(cc, extraEnv);
+      output?.appendLine(`[debug] compiled with ${cc}`);
+      return null;
     } catch (e: any) {
       lastErr = e?.message ?? String(e);
+      output?.appendLine(`[debug] ${cc} failed: ${lastErr}`);
     }
   }
   return lastErr;
@@ -424,9 +428,10 @@ function detectDebugType(): string {
     .get<string>("debugger.type", "");
   if (configured) return configured;
   if (vscode.extensions.getExtension("vadimcn.vscode-lldb")) return "lldb";
-  if (vscode.extensions.getExtension("ms-vscode.cpptools")) return "cppdbg";
-  // On Windows, cppdbg (MSVC engine) is more likely available than CodeLLDB.
-  return process?.platform === "win32" ? "cppdbg" : "lldb";
+  if (vscode.extensions.getExtension("ms-vscode.cpptools"))
+    return process?.platform === "win32" ? "cppvsdbg" : "cppdbg";
+  // On Windows, cppvsdbg (Visual Studio native engine) is most likely available.
+  return process?.platform === "win32" ? "cppvsdbg" : "lldb";
 }
 
 /** Build the VS Code debug configuration for a compiled Fun binary. */
@@ -455,21 +460,21 @@ function buildDebugConfig(
   }));
 
   const debugType = detectDebugType();
+  if (debugType === "cppvsdbg") {
+    // cpptools Windows-native engine (Visual Studio debugger). Reads PDB
+    // debug info produced by cl.exe /Zi — no MIMode, no GDB/LLDB required.
+    return {
+      type: "cppvsdbg",
+      request: "launch",
+      name: "Debug Fun Program",
+      program,
+      args,
+      cwd,
+      environment: envList,
+      stopAtEntry: false,
+    };
+  }
   if (debugType === "cppdbg") {
-    if (process?.platform === "win32") {
-      // cpptools on Windows uses the MSVC debug engine, not GDB/LLDB.
-      return {
-        type: "cppdbg",
-        request: "launch",
-        name: "Debug Fun Program",
-        program,
-        args,
-        cwd,
-        environment: envList,
-        stopAtEntry: false,
-        // No MIMode → cpptools auto-selects the MSVC engine on Windows.
-      };
-    }
     // cpptools on macOS/Linux uses LLDB as the MI backend.
     return {
       type: "cppdbg",
@@ -1242,17 +1247,31 @@ export function activate(context: vscode.ExtensionContext) {
             : `fun_dbg_${stem}_${uid}`,
         );
 
+        // Fetch MSVC env first so it can be passed to both fun.exe (so it finds
+        // cl.exe and emits MSVC-compatible C) and to compileCToNative (so
+        // cl.exe can find its headers/libs). Fetching is cached after the first call.
+        const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
+        if (isWindows()) {
+          const envCount = msvcEnv ? Object.keys(msvcEnv).length : 0;
+          output.appendLine(`[debug] MSVC env: ${envCount} vars found`);
+        }
+
         try {
           // Step 1: transpile with #line directives, write C file.
           // Passing the absolute path as -in ensures #line directives embed
           // absolute Fun source paths that the debugger can resolve directly.
-          // Pass derived FUN_STDLIB_DIR so stdlib imports resolve even when
-          // VS Code was launched from the Dock (no shell env inheritance).
+          // Merging MSVC env so fun.exe can probe cl.exe via resolve_c_compiler
+          // and emit MSVC-compatible C (msvc_mode=true in codegen) rather than
+          // GNU C (which cl.exe cannot compile).
+          const funEnv = {
+            ...buildFunEnv(workspaceRootPath()),
+            ...(msvcEnv ?? {}),
+          };
           await runProcess(
             funExe,
             ["-in", fileUri.fsPath, "-g", "-no-exec", "-outf", "-out", cFile],
             root,
-            buildFunEnv(workspaceRootPath()),
+            funEnv,
           );
         } catch (err: any) {
           void vscode.window.showErrorMessage(
@@ -1261,17 +1280,14 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        // Step 2: compile C → native binary with DWARF/CodeView debug info.
-        // On Windows, source the MSVC developer environment first so cl.exe
-        // (and clang-cl) can find their include/lib paths even when VS Code
-        // was launched from the Start Menu rather than a Developer Prompt.
+        // Step 2: compile C → native binary with CodeView debug info (cl.exe /Zi).
         {
-          const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
           const compileErr = await compileCToNative(
             cFile,
             binFile,
             root,
             msvcEnv && Object.keys(msvcEnv).length ? msvcEnv : undefined,
+            output,
           );
           if (compileErr !== null) {
             output.appendLine(`[debug] C compilation failed:\n${compileErr}`);
@@ -1358,7 +1374,17 @@ export function activate(context: vscode.ExtensionContext) {
             : `fun_dbg_test_${stem}_${uid}`,
         );
 
+        const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
+        if (isWindows()) {
+          const envCount = msvcEnv ? Object.keys(msvcEnv).length : 0;
+          output.appendLine(`[debug] MSVC env: ${envCount} vars found`);
+        }
+
         try {
+          const funEnv = {
+            ...buildFunEnv(workspaceRootPath()),
+            ...(msvcEnv ?? {}),
+          };
           await runProcess(
             funExe,
             [
@@ -1372,7 +1398,7 @@ export function activate(context: vscode.ExtensionContext) {
               "-test",
             ],
             root,
-            buildFunEnv(workspaceRootPath()),
+            funEnv,
           );
         } catch (err: any) {
           void vscode.window.showErrorMessage(
@@ -1382,12 +1408,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         {
-          const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
           const compileErr = await compileCToNative(
             cFile,
             binFile,
             root,
             msvcEnv && Object.keys(msvcEnv).length ? msvcEnv : undefined,
+            output,
           );
           if (compileErr !== null) {
             output.appendLine(`[debug] C compilation failed:\n${compileErr}`);
