@@ -545,24 +545,14 @@ fun _default_cc_candidates() Vec<str> {
   ret out;
 }
 
-// On Windows, if INCLUDE is not set (vcvarsall.bat has not been sourced
-// into the current process), finds the Visual Studio installation via
-// vswhere.exe and applies the x64 MSVC environment to the current
-// process so that cl.exe can find its headers and libraries.  Called
-// before `compile_c_to_exe` so that `fun -in` and `fun build` work
-// from a plain PowerShell/CMD terminal without requiring the user to
-// run from a Developer Command Prompt.  A no-op on POSIX, when INCLUDE
-// is already set, or when no VS installation is found.
-fun _ensure_msvc_env() {
-  if !runtime_backend_is_windows() {
-    ret;
-  }
-  if !equals(env_or("INCLUDE", ""), "") {
-    ret;
-  }
+// Returns the path to vcvarsall.bat for the latest VS installation on this
+// machine (located via vswhere.exe at its standard installer path), or ""
+// if VS is not installed or vswhere fails.  Windows-only helper used by
+// both `_ensure_msvc_env` and `_compile_with_msvc_bat`.
+fun _find_vcvarsall() str {
   str vswhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe";
   if !exists(vswhere) {
-    ret;
+    ret "";
   }
   Vec<str> probe_args;
   probe_args.init(4);
@@ -575,18 +565,39 @@ fun _ensure_msvc_env() {
   free_argv(probe_argv);
   probe_args.free();
   if probe_result.is_err() {
-    ret;
+    ret "";
   }
   ProcessResult pr = probe_result.unwrap();
   if pr.exit_code != 0 {
-    ret;
+    ret "";
   }
   str install_path = trim(pr.stdout_text);
   if equals(install_path, "") {
-    ret;
+    ret "";
   }
   str vcvarsall = path_join(install_path, "VC\\Auxiliary\\Build\\vcvarsall.bat");
   if !exists(vcvarsall) {
+    ret "";
+  }
+  ret vcvarsall;
+}
+
+// On Windows, if INCLUDE is not set (vcvarsall.bat has not been sourced
+// into the current process), finds the Visual Studio installation via
+// vswhere.exe and applies the x64 MSVC environment to the current process
+// via set_env().  Best-effort: on some Windows configurations the env
+// update does not propagate to child processes; `_compile_with_msvc_bat`
+// is the reliable fallback for that case.  A no-op on POSIX, when INCLUDE
+// is already set, or when no VS installation is found.
+fun _ensure_msvc_env() {
+  if !runtime_backend_is_windows() {
+    ret;
+  }
+  if !equals(env_or("INCLUDE", ""), "") {
+    ret;
+  }
+  str vcvarsall = _find_vcvarsall();
+  if equals(vcvarsall, "") {
     ret;
   }
   str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
@@ -622,6 +633,53 @@ fun _ensure_msvc_env() {
     }
     i = i + 1;
   }
+}
+
+// Compiles `c_path` to `exe_path` via cl.exe, routing through a temporary
+// batch file that sources vcvarsall.bat x64 first, so that cl.exe sees the
+// full MSVC build environment (INCLUDE, LIB, PATH) even when fun.exe itself
+// was started from a plain PowerShell or CMD terminal.  Used as the reliable
+// fallback when `_ensure_msvc_env` could not propagate INCLUDE to the current
+// process environment (which happens on some Windows configurations where
+// _putenv_s does not update the Windows environment block for child processes).
+fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, bin debug_info) num {
+  str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
+  str bat_path = path_join(temp_dir, "fun_cl.bat");
+  str debug_flag = "";
+  if debug_info {
+    debug_flag = " /Zi";
+  }
+  if !write_string(bat_path, format(
+    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\"\nexit /b %ERRORLEVEL%\n",
+    vcvarsall, c_path, debug_flag, exe_path
+  )) {
+    writeln_to(Sink.Stderr, "could not write MSVC build wrapper");
+    ret 1;
+  }
+  Vec<str> bat_args;
+  bat_args.init(3);
+  bat_args.push("cmd.exe");
+  bat_args.push("/c");
+  bat_args.push(bat_path);
+  str[] bat_argv = argv_from(&bat_args);
+  let result = run(bat_argv);
+  free_argv(bat_argv);
+  bat_args.free();
+  remove_file(bat_path);
+  if result.is_err() {
+    writeln_to(Sink.Stderr, "failed to spawn cmd.exe for MSVC build");
+    ret 1;
+  }
+  ProcessResult r = result.unwrap();
+  if r.exit_code != 0 {
+    if !equals(r.stderr_text, "") {
+      writeln_to(Sink.Stderr, r.stderr_text);
+    }
+    if !equals(r.stdout_text, "") {
+      writeln_to(Sink.Stderr, r.stdout_text);
+    }
+  }
+  ret r.exit_code;
 }
 
 // Which C compiler will actually receive the generated C, resolved the
@@ -714,6 +772,18 @@ pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
   for i < candidates.len {
     str cc = candidates.get(i);
     i = i + 1;
+
+    // When cl is selected and INCLUDE is still empty after _ensure_msvc_env
+    // (env-propagation via _putenv_s is unreliable on some Windows configs),
+    // use a bat-file wrapper that sources vcvarsall.bat directly so cl.exe
+    // inherits the full MSVC build environment without depending on our
+    // process environment reaching the child.
+    if compiler_is_msvc(cc) && equals(env_or("INCLUDE", ""), "") {
+      str vcvarsall = _find_vcvarsall();
+      if !equals(vcvarsall, "") {
+        ret _compile_with_msvc_bat(vcvarsall, c_path, exe_path, debug_info);
+      }
+    }
 
     Vec<str> argv_args;
     argv_args.init(0);
