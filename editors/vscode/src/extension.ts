@@ -290,6 +290,133 @@ function resolveFunCompilerExe(root: string | undefined): string {
   return resolved || "fun";
 }
 
+/**
+ * Cache for the MSVC developer environment sourced from vcvarsall.bat.
+ * null = not yet fetched; {} = fetched but not found; otherwise the full env map.
+ */
+let _cachedMsvcEnv: Record<string, string> | null = null;
+
+/**
+ * On Windows, locate the MSVC toolchain via vswhere.exe and source
+ * vcvarsall.bat x64 in a cmd subshell to obtain the full developer
+ * environment (INCLUDE, LIB, PATH with cl.exe, etc.).
+ * Returns an empty map when VS or vswhere is not found.
+ * The result is cached for the lifetime of the VS Code session.
+ */
+async function findMsvcEnv(root: string): Promise<Record<string, string>> {
+  if (_cachedMsvcEnv !== null) return _cachedMsvcEnv;
+  try {
+    const progFilesX86 =
+      (process?.env?.["ProgramFiles(x86)"] as string | undefined) ??
+      "C:\\Program Files (x86)";
+    const vswhere = path.join(
+      progFilesX86,
+      "Microsoft Visual Studio",
+      "Installer",
+      "vswhere.exe",
+    );
+    if (!fs.existsSync(vswhere)) {
+      _cachedMsvcEnv = {};
+      return _cachedMsvcEnv;
+    }
+    const installPath = (
+      await runProcess(
+        vswhere,
+        ["-latest", "-property", "installationPath"],
+        root,
+      )
+    ).trim();
+    if (!installPath) {
+      _cachedMsvcEnv = {};
+      return _cachedMsvcEnv;
+    }
+    const vcvarsall = path.join(
+      installPath,
+      "VC",
+      "Auxiliary",
+      "Build",
+      "vcvarsall.bat",
+    );
+    if (!fs.existsSync(vcvarsall)) {
+      _cachedMsvcEnv = {};
+      return _cachedMsvcEnv;
+    }
+    // Run vcvarsall.bat x64 in a cmd.exe subshell and capture the resulting env.
+    const envText = await new Promise<string>((resolve, reject) => {
+      // Redirect vcvarsall's own output to NUL; only capture `set` output.
+      const child = spawn(
+        "cmd.exe",
+        ["/c", `"${vcvarsall}" x64 > NUL 2>&1 && set`],
+        { cwd: root, stdio: "pipe", windowsHide: true },
+      );
+      let out = "";
+      child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+      child.on("error", reject);
+      child.on("close", (code) =>
+        code === 0
+          ? resolve(out)
+          : reject(new Error(`vcvarsall.bat exited with code ${code}`)),
+      );
+    });
+    const env: Record<string, string> = {};
+    for (const line of envText.split(/\r?\n/)) {
+      const eq = line.indexOf("=");
+      if (eq > 0) {
+        env[line.substring(0, eq)] = line.substring(eq + 1);
+      }
+    }
+    _cachedMsvcEnv = env;
+    return env;
+  } catch {
+    _cachedMsvcEnv = {};
+    return _cachedMsvcEnv;
+  }
+}
+
+/**
+ * Compile a C file to a native binary for debugging.
+ * On Windows tries clang-cl first (better DWARF/CodeLLDB support), then
+ * cl.exe. On POSIX tries cc, clang, gcc.
+ * Returns null on success, or the last error string on failure.
+ */
+async function compileCToNative(
+  cFile: string,
+  binFile: string,
+  root: string,
+  extraEnv?: Record<string, string>,
+): Promise<string | null> {
+  const compilers = isWindows() ? ["clang-cl", "cl"] : ["cc", "clang", "gcc"];
+  let lastErr = "";
+  for (const cc of compilers) {
+    try {
+      if (isWindows()) {
+        if (cc === "clang-cl") {
+          await runProcess(
+            cc,
+            ["-Z7", "-Od", cFile, `-Fe${binFile}`],
+            root,
+            extraEnv,
+          );
+        } else {
+          const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
+          await runProcess(
+            cc,
+            [cFile, `/Fe${binFile}`, `/Fd${pdbFile}`, "/Zi", "/Od", "/link"],
+            root,
+            extraEnv,
+          );
+        }
+      } else {
+        await runProcess(cc, ["-g", cFile, "-o", binFile], root);
+      }
+      return null; // success
+    } catch (e: any) {
+      lastErr = e?.message ?? String(e);
+    }
+  }
+  return lastErr;
+}
+
 /** Return which native debugger type to use (CodeLLDB or cpptools). */
 function detectDebugType(): string {
   const configured = vscode.workspace
@@ -1134,66 +1261,31 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        try {
-          // Step 2: compile C → native binary with DWARF debug info.
-          // Try cc first, then clang, then gcc.
-          // On Windows try clang-cl first (produces DWARF-compatible debug info
-          // for CodeLLDB), then cl.exe (MSVC, works with cpptools MSVC engine).
-          const compilers =
-            process?.platform === "win32"
-              ? ["clang-cl", "cl"]
-              : ["cc", "clang", "gcc"];
-          let compiled = false;
-          let lastErr = "";
-          for (const cc of compilers) {
-            try {
-              if (process?.platform === "win32") {
-                if (cc === "clang-cl") {
-                  // clang-cl: LLVM front-end with MSVC-compatible flags.
-                  // -Z7 embeds DWARF/CodeView in the .obj (no separate PDB).
-                  await runProcess(
-                    cc,
-                    ["-Z7", "-Od", cFile, `-Fe${binFile}`],
-                    root,
-                  );
-                } else {
-                  // cl.exe (MSVC): /Zi debug info, /Fd keeps PDB next to binary.
-                  const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
-                  await runProcess(
-                    cc,
-                    [
-                      cFile,
-                      `/Fe${binFile}`,
-                      `/Fd${pdbFile}`,
-                      "/Zi",
-                      "/Od",
-                      "/link",
-                    ],
-                    root,
-                  );
-                }
-              } else {
-                await runProcess(cc, ["-g", cFile, "-o", binFile], root);
-              }
-              compiled = true;
-              break;
-            } catch (e: any) {
-              lastErr = e?.message ?? String(e);
-            }
-          }
-          if (!compiled) {
-            void vscode.window.showErrorMessage(
-              `Fun: C compilation failed:\n${lastErr}`,
-            );
+        // Step 2: compile C → native binary with DWARF/CodeView debug info.
+        // On Windows, source the MSVC developer environment first so cl.exe
+        // (and clang-cl) can find their include/lib paths even when VS Code
+        // was launched from the Start Menu rather than a Developer Prompt.
+        {
+          const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
+          const compileErr = await compileCToNative(
+            cFile,
+            binFile,
+            root,
+            msvcEnv && Object.keys(msvcEnv).length ? msvcEnv : undefined,
+          );
+          if (compileErr !== null) {
+            output.appendLine(`[debug] C compilation failed:\n${compileErr}`);
+            void vscode.window
+              .showErrorMessage(
+                "Fun: C compilation failed — see 'Fun Language Server' output for details.",
+                "Show Output",
+              )
+              .then((choice) => {
+                if (choice === "Show Output") openOutput(output);
+              });
             fs.unlink(cFile, () => {});
             return;
           }
-        } catch (err: any) {
-          void vscode.window.showErrorMessage(
-            `Fun: C compilation failed:\n${err?.message ?? String(err)}`,
-          );
-          fs.unlink(cFile, () => {});
-          return;
         }
 
         // Step 3: launch the native debugger.
@@ -1289,59 +1381,27 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        try {
-          const compilers =
-            process?.platform === "win32"
-              ? ["clang-cl", "cl"]
-              : ["cc", "clang", "gcc"];
-          let compiled = false;
-          let lastErr = "";
-          for (const cc of compilers) {
-            try {
-              if (process?.platform === "win32") {
-                if (cc === "clang-cl") {
-                  await runProcess(
-                    cc,
-                    ["-Z7", "-Od", cFile, `-Fe${binFile}`],
-                    root,
-                  );
-                } else {
-                  const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
-                  await runProcess(
-                    cc,
-                    [
-                      cFile,
-                      `/Fe${binFile}`,
-                      `/Fd${pdbFile}`,
-                      "/Zi",
-                      "/Od",
-                      "/link",
-                    ],
-                    root,
-                  );
-                }
-              } else {
-                await runProcess(cc, ["-g", cFile, "-o", binFile], root);
-              }
-              compiled = true;
-              break;
-            } catch (e: any) {
-              lastErr = e?.message ?? String(e);
-            }
-          }
-          if (!compiled) {
-            void vscode.window.showErrorMessage(
-              `Fun: C compilation failed:\n${lastErr}`,
-            );
+        {
+          const msvcEnv = isWindows() ? await findMsvcEnv(root) : undefined;
+          const compileErr = await compileCToNative(
+            cFile,
+            binFile,
+            root,
+            msvcEnv && Object.keys(msvcEnv).length ? msvcEnv : undefined,
+          );
+          if (compileErr !== null) {
+            output.appendLine(`[debug] C compilation failed:\n${compileErr}`);
+            void vscode.window
+              .showErrorMessage(
+                "Fun: C compilation failed — see 'Fun Language Server' output for details.",
+                "Show Output",
+              )
+              .then((choice) => {
+                if (choice === "Show Output") openOutput(output);
+              });
             fs.unlink(cFile, () => {});
             return;
           }
-        } catch (err: any) {
-          void vscode.window.showErrorMessage(
-            `Fun: C compilation failed:\n${err?.message ?? String(err)}`,
-          );
-          fs.unlink(cFile, () => {});
-          return;
         }
 
         const debugType = detectDebugType();
