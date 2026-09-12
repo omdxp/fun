@@ -112,8 +112,8 @@ path = "src/main.fn"
 ```
 
 - `version` is optional (defaults to `0.0.0`).
-- Multiple `[[exe]]` targets are supported (this repository's own
-  `fun`/`fls` binaries are a real example).
+- Multiple `[[exe]]` targets are supported (the Fun compiler's own
+  `fun`/`fls` binaries are a real example, built from one manifest).
 - A `[lib]` table (one `path`, no name) declares a library entry point:
   `fun build` compiles it to an object file under `fun-out/lib/` instead
   of a linked executable, with no `main` required. This is unrelated to
@@ -130,6 +130,28 @@ path = "src/main.fn"
 `fun build` reads `./fun.toml`, compiles every `[[exe]]` target, and
 installs the resulting binaries under `fun-out/bin/`. Unlike `fun -in
 file.fn`, nothing is run afterward: `fun build` only ever compiles.
+
+### `PACKAGE_NAME` and `PACKAGE_VERSION`
+
+`fun build` (and `fun -in`/`fun test`/`fun fuzz` when a `fun.toml` is
+present) makes the manifest's own `[package]` `name` and `version`
+available inside the program itself, as two ordinary string constants:
+
+```fun
+imp std.io;
+
+fun main() {
+  println(format("{str} v{str}", PACKAGE_NAME, PACKAGE_VERSION));
+}
+```
+
+Neither is declared anywhere in source; the build injects them ahead
+of the program's own declarations before type-checking. This is how
+`fun`/`fls` themselves report a real version for `-version` without
+reading `fun.toml` at runtime. `fls` mirrors this for hover, completion,
+and go-to-definition too, so both names resolve and jump straight to
+the manifest's own `name`/`version` line like any other declared
+constant would.
 
 ## Dependencies (`[deps]`)
 

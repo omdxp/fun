@@ -439,6 +439,59 @@ test "PACKAGE_NAME and PACKAGE_VERSION resolve as ordinary declared constants, f
   assert contains(version_hover, `const str PACKAGE_VERSION = \"`), "expected PACKAGE_VERSION to resolve as a declared string constant";
 }
 
+test "go-to-definition on PACKAGE_NAME/PACKAGE_VERSION jumps to a real, openable fun.toml URI" {
+  // The synthetic node used to hardcode `pos.filename = "fun.toml"`, a
+  // bare relative literal - path_to_uri prepends a bare "/" to any
+  // path that isn't already absolute, so the client received
+  // "file:///fun.toml" (the filesystem root's own fun.toml, almost
+  // never real) instead of this project's actual, absolute one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///pkgconst.fn";
+  doc.path = "pkgconst.fn";
+  doc.text = `fun main() {
+  `  println(PACKAGE_NAME);
+  `}`;
+  doc.version = 1;
+
+  str name_def = definition(&reads, doc, 1, 12);
+  assert !contains(name_def, `"file:///fun.toml"`), "expected a real absolute path, not the filesystem root's own fun.toml";
+  assert contains(name_def, "fun.toml"), "expected the jump target to still be fun.toml, just a real one";
+}
+
+test "PACKAGE_NAME/PACKAGE_VERSION hover reflects an edited fun.toml immediately, not a stale first read" {
+  str fixture_dir = "src/tests/fixtures/pkgconst_stale_probe";
+  make_dir_all(fixture_dir);
+  str manifest_path = format("{str}/fun.toml", fixture_dir);
+  defer remove_file(manifest_path);
+  str doc_path = format("{str}/main.fn", fixture_dir);
+
+  assert write_string(manifest_path, `[package]
+  `name = "before"
+  `version = "0.0.1"`), "expected to stage the first fun.toml";
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///pkgconst_stale_probe/main.fn";
+  doc.path = doc_path;
+  doc.text = `fun main() {
+  `  println(PACKAGE_NAME);
+  `}`;
+  doc.version = 1;
+
+  str first_hover = hover(&reads, doc, 1, 12);
+  assert contains(first_hover, "before"), "expected the first read to see the original name";
+
+  assert write_string(manifest_path, `[package]
+  `name = "after"
+  `version = "0.0.2"`), "expected to overwrite fun.toml with a new name";
+  doc.version = 2;
+  str second_hover = hover(&reads, doc, 1, 12);
+  assert contains(second_hover, "after"), "expected the edit to show up immediately, not the first read's stale value";
+}
+
 test "hovering a stdlib import path segment resolves at every depth" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

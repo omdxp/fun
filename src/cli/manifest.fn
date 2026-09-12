@@ -425,6 +425,37 @@ pub fun manifest_defines(Manifest* m) Vec<Define> {
   ret out;
 }
 
+// The 1-based line of the first `<key> = ...` found inside `[section]`
+// in raw manifest `text`, or 0 (never a real line) when the section or
+// key isn't present. Used by fls to point PACKAGE_NAME/PACKAGE_VERSION's
+// synthetic go-to-definition at the actual `name`/`version` line in
+// `fun.toml`, rather than nowhere at all.
+pub fun manifest_key_line(str text, str section, str key) num {
+  let lines = split(text, '\n');
+  defer lines.free();
+  str header = format("[{str}]", section);
+  bin in_section = false;
+  num line_no = 0;
+  for line : lines {
+    line_no = line_no + 1;
+    str trimmed = trim(line);
+    if starts_with(trimmed, "[") {
+      in_section = equals(trimmed, header);
+      continue;
+    }
+    if !in_section {
+      continue;
+    }
+    if starts_with(trimmed, key) {
+      str rest = trim(substr(trimmed, len(key), len(trimmed) - len(key)));
+      if starts_with(rest, "=") {
+        ret line_no;
+      }
+    }
+  }
+  ret 0;
+}
+
 // Builds a `pub const str name = "value";` declaration, so a value known
 // only to the build is reachable from source as an ordinary constant.
 // Also used by fls (`analysis.fn`) to give a workspace's own

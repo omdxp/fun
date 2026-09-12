@@ -20,6 +20,7 @@ imp std.vec;
 imp std.option;
 imp std.result;
 imp std.fs;
+imp std.path;
 
 // One document as it was last read.
 pub compound Analyzed {
@@ -38,23 +39,12 @@ pub compound AnalysisCache {
   // What every file the open documents import last parsed as. An edit
   // changes one file, so the rest are reused rather than read again.
   ImportCache imports;
-  // The workspace's own PACKAGE_NAME/PACKAGE_VERSION, read from
-  // fun.toml the same way `fun build` itself does (manifest_defines),
-  // so hover/completion/go-to-definition see them as ordinary declared
-  // constants instead of an undeclared name a build-only define would
-  // otherwise leave invisible to source analysis entirely. Read once
-  // and reused (fun.toml itself changes far less often than fls
-  // answers questions per revision), not on every `.of()` call.
-  Vec<Define> workspace_defines;
-  bin workspace_defines_checked;
 }
 
 pub fun analysis_cache_new() AnalysisCache {
   AnalysisCache c;
   c.entries.init(8);
   c.imports = import_cache_new();
-  c.workspace_defines.init(0);
-  c.workspace_defines_checked = false;
   ret c;
 }
 
@@ -108,7 +98,7 @@ impl AnalysisCache {
     if merged.is_ok() {
       fresh.program = merged.unwrap();
       fresh.parsed = true;
-      self._inject_workspace_defines(&fresh.program.nodes);
+      self._inject_workspace_defines(&fresh.program.nodes, doc.path);
     }
 
     self.entries.put(doc.uri, fresh);
@@ -120,22 +110,35 @@ impl AnalysisCache {
   // `compile_to_c_mode` itself injects them ahead of the program's own
   // declarations before type-checking - into the merged program, not
   // this one file's own entry_nodes, since neither constant is
-  // actually declared by any file a client opened.
-  _inject_workspace_defines(Vec<Node>* nodes) {
-    if !self.workspace_defines_checked {
-      self.workspace_defines_checked = true;
-      if exists("fun.toml") {
-        let parsed = parse_manifest(read_to_string("fun.toml"));
-        if parsed.is_ok() {
-          Manifest m = parsed.unwrap();
-          self.workspace_defines = manifest_defines(&m);
-        }
-      }
+  // actually declared by any file a client opened. Read fresh every
+  // call rather than cached for the process's whole lifetime: fun.toml
+  // is tiny next to the full merged-program parse `.of()` already does
+  // per call, and a stale cache previously left hover/go-to-definition
+  // showing whatever fun.toml said when fls started, ignoring any
+  // edit made since. `current_file` locates the right fun.toml the
+  // same way a `deps.` import does (walking up from the file actually
+  // being edited), not the language server process's own cwd, which
+  // may not be the project root in every launch configuration.
+  _inject_workspace_defines(Vec<Node>* nodes, str current_file) {
+    str project_root = deps_project_root(current_file);
+    str manifest_path = path_join(project_root, "fun.toml");
+    if !exists(manifest_path) {
+      ret;
     }
-    num i = self.workspace_defines.len;
+    str manifest_text = read_to_string(manifest_path);
+    let parsed = parse_manifest(manifest_text);
+    if parsed.is_err() {
+      ret;
+    }
+    Manifest m = parsed.unwrap();
+    defer m.free();
+    Vec<Define> defines = manifest_defines(&m);
+    defer defines.free();
+
+    num i = defines.len;
     for i > 0 {
       i = i - 1;
-      Define* d = &self.workspace_defines.data[i];
+      Define* d = &defines.data[i];
       Node n = manifest_const_node(d.name, d.value);
       // `manifest_const_node` (built for a one-shot compile, where
       // nothing ever inspects a synthesized node's own position)
@@ -143,15 +146,25 @@ impl AnalysisCache {
       // fls feature that scans `program.nodes` assumes a real node
       // always has a real position, so an uninspected one here reads
       // as garbage memory the moment anything looks (go-to-definition,
-      // document links, workspace symbols, ...). Pointing it at
-      // fun.toml itself is honest: that's genuinely where the value
-      // comes from.
-      n.pos.filename = "fun.toml";
-      n.pos.line = 1;
+      // document links, workspace symbols, ...). Pointing it at the
+      // real, absolute manifest path (not the bare literal "fun.toml",
+      // which `path_to_uri` would turn into a bogus filesystem-root
+      // URI) and at the actual `name`/`version` line is honest: that's
+      // genuinely where the value comes from.
+      str toml_key = "name";
+      if equals(d.name, "PACKAGE_VERSION") {
+        toml_key = "version";
+      }
+      num line = manifest_key_line(manifest_text, "package", toml_key);
+      if line == 0 {
+        line = 1;
+      }
+      n.pos.filename = manifest_path;
+      n.pos.line = line;
       n.pos.col = 1;
       n.pos.start_col = 1;
       n.pos.end_col = 1;
-      n.pos.end_line = 1;
+      n.pos.end_line = line;
       n.has_pos = true;
       nodes.insert(0, n);
     }
@@ -179,6 +192,5 @@ impl AnalysisCache {
   pub free() {
     self.entries.free();
     self.imports.files.free();
-    self.workspace_defines.free();
   }
 }
