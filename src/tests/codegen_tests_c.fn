@@ -1194,6 +1194,91 @@ test "a self-recursive CONSTRAINED generic function calling itself with the abst
   assert contains(out, "sum_down__num((n - 1))"), "expected the recursive call to reuse it";
 }
 
+test "a quirk-bounded generic impl monomorphizes for a real implementor" {
+  str src = `use std.c.io;
+  `quirk Renderable { render() str; }
+  `compound Point { num x; }
+  `impl Point as Renderable {
+  `  render() str { ret "point"; }
+  `}
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: Renderable> {
+  `  describe() str { ret "wrapped"; }
+  `}
+  `fun main() num {
+  `  Wrapper<Point> w = Wrapper<Point>{value = Point{x = 1}};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  assert_emits(src, "Wrapper__Point__describe", "expected the quirk-implementor instantiation to monomorphize");
+}
+
+test "a quirk-bounded generic impl does not monomorphize for a non-implementor" {
+  str src = `use std.c.io;
+  `quirk Renderable { render() str; }
+  `compound Other { num v; }
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: Renderable> {
+  `  describe() str { ret "wrapped"; }
+  `}
+  `fun main() num {
+  `  Wrapper<Other> w = Wrapper<Other>{value = Other{v = 1}};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  // The call site itself is always emitted (`Wrapper__Other__describe(&w)`
+  // as a bare reference); a rejected instantiation only ever leaves the
+  // DEFINITION unemitted, matching the pre-existing behavior for a
+  // bare-name bound violation on a generic impl (this codebase's own
+  // baseline: an impl-level bound was never enforced with a clean Fun
+  // diagnostic, only by leaving the method undefined in C).
+  assert_not_emits(
+    src,
+    "Wrapper__Other__describe(Wrapper__Other* self) {",
+    "expected a non-implementor instantiation's method body to stay unemitted"
+  );
+}
+
+test "a generic-instantiation-bounded impl monomorphizes for a matching instantiation" {
+  str src = `use std.c.io;
+  `compound Box<T> { T value; }
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: num | Box<num>> {
+  `  describe() str { ret "wrapped"; }
+  `}
+  `fun main() num {
+  `  Wrapper<Box<num>> w = Wrapper<Box<num>>{value = Box<num>{value = 5}};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  assert_emits(
+    src,
+    "Wrapper__Box__num__describe",
+    "expected the matching generic-instantiation bound to monomorphize"
+  );
+}
+
+test "a generic-instantiation-bounded impl does not monomorphize for a mismatching instantiation" {
+  str src = `use std.c.io;
+  `compound Box<T> { T value; }
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: num | Box<num>> {
+  `  describe() str { ret "wrapped"; }
+  `}
+  `fun main() num {
+  `  Wrapper<str> w = Wrapper<str>{value = "hi"};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  // See the matching comment above: only the DEFINITION is checked, the
+  // call site's own bare reference is always emitted regardless.
+  assert_not_emits(
+    src,
+    "Wrapper__str__describe(Wrapper__str* self) {",
+    "expected a mismatching instantiation's method body to stay unemitted"
+  );
+}
+
 // A call violating a generic bound is rejected by the typechecker,
 // where the check and its tests live (typecheck_tests.fn).
 // test "a self-recursive CONSTRAINED generic function rejects a bound violation" {

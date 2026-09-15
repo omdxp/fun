@@ -813,7 +813,31 @@ fun dtype_is_array_as_pointer(DataType dt) flag {
 // dec>`-style forced-instantiation list. A builtin scalar matches by
 // kind; a named type matches by its bare name, or by the base name
 // before a mangled `__` separator.
-fun dtype_matches_constraint_name(DataType dt, str expected) flag {
+// True when some registered impl template supplies a real
+// `impl ... as quirk_name { ... }` for `dt` (its bare name, or its
+// mangled concrete form) - the codegen-side counterpart to typecheck's
+// `Checker.implements_quirk`, scanning the same raw impl-template AST
+// `maybe_instantiate_generic_impl_methods` already reads elsewhere in
+// this file, since codegen keeps no separate (type, quirk) registry of
+// its own (a different compilation phase/struct than typecheck's
+// `Checker`).
+fun dtype_implements_quirk(Vec<Node> all_nodes, DataType dt, str quirk_name) flag {
+  str base = render_datatype_bound(&dt);
+  for tmpl : all_nodes {
+    fit tmpl.kind {
+      .Impl(i) -> {
+        if i.has_quirk_name && equals(i.quirk_name, quirk_name) &&
+          (equals(i.type_name, base) || equals(i.type_name, dt.type_str)) {
+          ret true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret false;
+}
+
+fun dtype_matches_constraint_name(DataType dt, str expected, Vec<Node> all_nodes) flag {
   fit dt.kind {
     .Num -> { ret equals(expected, "num"); }
     .Dec -> { ret equals(expected, "dec"); }
@@ -823,14 +847,28 @@ fun dtype_matches_constraint_name(DataType dt, str expected) flag {
     .Raw -> { ret equals(expected, "raw"); }
     .Void -> { ret equals(expected, "void"); }
     .Unknown -> {
-      if equals(dt.type_str, expected) {
+      // A bound alternative's canonical rendered text (e.g. "Vec<num>"
+      // for a generic instantiation, or a bare name) - matches what the
+      // parser already stored via `render_datatype_bound`, so an exact
+      // compare here covers both a plain type name and a full
+      // generic-instantiation bound alike.
+      if equals(render_datatype_bound(&dt), expected) {
         ret true;
       }
+      // A monomorphizing impl's own mangled type name (`Type__num`) is
+      // a different shape from a bound string (never mangled this way),
+      // kept for the existing "impl on an already-concrete
+      // instantiation" case this branch already handled.
       num sep = index_of_str(dt.type_str, "__");
-      if sep < 0 {
-        ret false;
+      if sep >= 0 && equals(substr(dt.type_str, 0, sep), expected) {
+        ret true;
       }
-      ret equals(substr(dt.type_str, 0, sep), expected);
+      // A bound naming a quirk is checked by real membership - is there
+      // a registered `impl dt as expected { ... }`? Known v1 gap
+      // (matching typecheck's `Checker.implements_quirk`): a bound
+      // naming a concrete instantiation of a *generic* quirk is not
+      // covered here either.
+      ret dtype_implements_quirk(all_nodes, dt, expected);
     }
   }
 }
@@ -839,7 +877,12 @@ fun dtype_matches_constraint_name(DataType dt, str expected) flag {
 // is allowed by `forced_insts`, one of the concrete-type combinations
 // from an `impl Vec<T: num | dec>`-style constraint. An unconstrained
 // template always allows any instantiation.
-fun impl_allows_generic_args(flag has_forced, Vec<Vec<str>> forced_insts, Vec<DataType*> gargs) flag {
+fun impl_allows_generic_args(
+  flag has_forced,
+  Vec<Vec<str>> forced_insts,
+  Vec<DataType*> gargs,
+  Vec<Node> all_nodes
+) flag {
   if !has_forced {
     ret true;
   }
@@ -850,7 +893,7 @@ fun impl_allows_generic_args(flag has_forced, Vec<Vec<str>> forced_insts, Vec<Da
     flag all_match = true;
     num i = 0;
     for i < inst.len {
-      if !dtype_matches_constraint_name(*gargs.get(i), inst.get(i)) {
+      if !dtype_matches_constraint_name(*gargs.get(i), inst.get(i), all_nodes) {
         all_match = false;
         break;
       }
@@ -2042,7 +2085,8 @@ impl Codegen {
             impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
-            arg_dtypes
+            arg_dtypes,
+            self.all_nodes
           ) {
             self.instantiation_mangled_name.push(mangled_name);
             self.instantiation_base_name.push(base_name);
@@ -2218,7 +2262,8 @@ impl Codegen {
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
-            arg_dtypes
+            arg_dtypes,
+            self.all_nodes
           ) {
             continue;
           }
@@ -2364,7 +2409,8 @@ impl Codegen {
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
-            arg_dtypes
+            arg_dtypes,
+            self.all_nodes
           ) {
             continue;
           }
@@ -2895,7 +2941,8 @@ impl Codegen {
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
-            arg_dtypes
+            arg_dtypes,
+            self.all_nodes
           ) {
             continue;
           }
@@ -3049,7 +3096,8 @@ impl Codegen {
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
             i.type_param_forced_insts,
-            arg_dtypes
+            arg_dtypes,
+            self.all_nodes
           ) {
             continue;
           }

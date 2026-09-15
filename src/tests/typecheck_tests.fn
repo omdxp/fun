@@ -845,6 +845,79 @@ test "a method call inside the bound is accepted" {
   );
 }
 
+test "a quirk-bounded generic parameter accepts a real implementor" {
+  accepts(
+    `quirk Renderable { render() str; }
+    `compound Point { num x; }
+    `impl Point as Renderable {
+    `  render() str { ret "point"; }
+    `}
+    `fun show<T: Renderable>(T x) str { ret x.render(); }
+    `fun main() str {
+    `  Point p;
+    `  ret show(&p);
+    `}`,
+    "expected a real quirk implementor accepted"
+  );
+}
+
+test "a quirk-bounded generic parameter rejects a non-implementor" {
+  // Renderable has no `impl Other as Renderable`, unlike `assignable`'s
+  // coarser any-pointer-satisfies-any-quirk approximation used for
+  // ordinary quirk-typed parameters - a bound is held to real membership.
+  assert contains(
+    check(`quirk Renderable { render() str; }
+    `compound Other { num v; }
+    `fun show<T: Renderable>(T x) str { ret x.render(); }
+    `fun main() str {
+    `  Other o;
+    `  ret show(&o);
+    `}`),
+    "does not accept"
+  ), "expected a non-implementor rejected";
+}
+
+test "a generic-instantiation bound alternative accepts a matching instantiation" {
+  accepts(
+    `compound Box<T> { T value; }
+    `fun identity<T: num | Box<num>>(T x) T { ret x; }
+    `fun main() num {
+    `  Box<num> b = Box<num>{value = 5};
+    `  let out = identity(b);
+    `  ret out.value;
+    `}`,
+    "expected the matching generic instantiation accepted"
+  );
+}
+
+test "a generic-instantiation bound alternative rejects a mismatching instantiation" {
+  assert contains(
+    check(`compound Box<T> { T value; }
+    `fun identity<T: num | Box<num>>(T x) T { ret x; }
+    `fun main() str {
+    `  let out = identity("nope");
+    `  ret out;
+    `}`),
+    "does not accept"
+  ), "expected a type outside the bound list rejected";
+}
+
+test "a mixed bound list accepts both a concrete type and a quirk implementor" {
+  accepts(
+    `quirk Renderable { render() str; }
+    `compound Point { num x; }
+    `impl Point as Renderable {
+    `  render() str { ret "point"; }
+    `}
+    `fun describe<T: num | Renderable>(T x) num { ret 1; }
+    `fun main() num {
+    `  Point p;
+    `  ret describe(5) + describe(&p);
+    `}`,
+    "expected both the concrete type and the quirk implementor accepted"
+  );
+}
+
 test "await outside an async function is rejected" {
   // `await` suspends the caller, which only an async function can do.
   assert contains(

@@ -572,21 +572,21 @@ impl ParseState {
         self.token_next(); // consume ':'
         has_constraints = true;
         for true {
-          let ct = self.token_next();
-          if ct.is_none() {
-            self.err("expected type name in constraint after ':'");
-            ret .Some(.InvalidIdentifier);
+          // A bound alternative is a full type expression, not just a
+          // bare name: `Vec<num>` (a generic instantiation) and a quirk
+          // name are both legal here, alongside an ordinary type name.
+          // Which of those it is (concrete type vs. quirk) isn't known
+          // until typecheck resolves it against the program's own
+          // declarations - the parser just records its canonical text.
+          DataType* cdt = malloc(sizeof(DataType));
+          *cdt = dtype_new();
+          let cerr = self.parse_datatype(cdt);
+          if cerr.is_some() {
+            dtype_free(cdt);
+            ret cerr;
           }
-          let ctok = ct.unwrap();
-          if ctok.type != .Keyword && ctok.type != .Identifier {
-            self.err("expected type name in constraint");
-            ret .Some(.InvalidIdentifier);
-          }
-          str cname = "";
-          fit ctok.data {
-            .Sval(s) -> { cname = s; }
-            _ -> {}
-          }
+          str cname = render_datatype_bound(cdt);
+          dtype_free(cdt);
           constraints.push(cname);
           if self.next_token_is_operator("|") {
             self.token_next();
@@ -872,6 +872,62 @@ impl ParseState {
     ret .None;
   }
 
+  // Returns the `token_peek_n` offset just past a bound alternative's own
+  // `<...>` generic-argument list starting at `off` (or `off` unchanged
+  // if there's none there) - the same job as `skip_generic_args_tokens`,
+  // except for one case that helper gets wrong here: a lexed `>>` that
+  // closes this alternative's one open nesting level while its OTHER `>`
+  // is really the OUTER `<T: ...>` list's own closer (`Vec<num>>`).
+  // `skip_generic_args_tokens` always consumes a `>>` as belonging
+  // entirely to what it's skipping; this leaves the token unconsumed
+  // (returns the offset AT it, not past it) whenever only one of its two
+  // `>` characters is this alternative's, so the caller's own closer
+  // check still sees it - mirroring what `split_angle_closer_token_if_needed`
+  // does for real during actual parsing, without mutating the token
+  // stream (this must stay a pure lookahead).
+  _skip_bound_alternative_generic_args(num off) num {
+    let first_opt = self.token_peek_n(off);
+    if first_opt.is_none() || !token_is_operator(first_opt.unwrap(), "<") {
+      ret off;
+    }
+    num cur = off;
+    num depth = 0;
+    for true {
+      let tok_opt = self.token_peek_n(cur);
+      if tok_opt.is_none() {
+        ret cur;
+      }
+      let tok = tok_opt.unwrap();
+      if token_is_operator(tok, "<") {
+        depth = depth + 1;
+        cur = cur + 1;
+        continue;
+      }
+      if token_is_operator(tok, ">") {
+        depth = depth - 1;
+        cur = cur + 1;
+        if depth <= 0 {
+          ret cur;
+        }
+        continue;
+      }
+      if token_is_operator(tok, ">>") {
+        if depth <= 1 {
+          // Only one of these two `>` is this alternative's own closer;
+          // leave `cur` pointing AT this token rather than past it.
+          ret cur;
+        }
+        depth = depth - 2;
+        cur = cur + 1;
+        if depth <= 0 {
+          ret cur;
+        }
+        continue;
+      }
+      cur = cur + 1;
+    }
+  }
+
   // True if the `<...>` starting at the cursor looks like a type
   // parameter list (`<T>`, `<T: a | b>`) rather than concrete generic
   // arguments (`<num>`, `<Vec<str>>`). Pure lookahead, consumes nothing.
@@ -922,6 +978,17 @@ impl ParseState {
           } else {
             ret false;
           }
+          // A bound alternative may itself be a generic instantiation
+          // (`Vec<num>`) - skip its whole `<...>` argument list so the
+          // '|'/','/'>' check below doesn't misread its inner tokens as
+          // this outer list's own separators/closer. Not
+          // `skip_generic_args_tokens`: a lexed `>>` closing this bound's
+          // one nested level while also being this OUTER list's own
+          // closer (`Vec<num>>`) needs to stay unconsumed here so the
+          // check below still sees it, which that helper can't do (it
+          // always consumes a `>>` whole, assuming both levels are its
+          // own).
+          off = self._skip_bound_alternative_generic_args(off);
           let sep_opt = self.token_peek_n(off);
           if sep_opt.is_none() {
             ret false;
@@ -8944,6 +9011,42 @@ test "parse_function parses constrained generic type parameters into forced inst
       assert equals(combo1.get(0), "dec"), "expected the second combo to be 'dec'";
     }
     _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function parses a generic-instantiation bound alternative" {
+  ParseState st = _state_from("fun add<T: num | Vec<num>>(T a) T { ret a; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the generic-instantiation-bounded function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.type_param_forced_insts.len == 2, "expected 2 forced instantiations (num, Vec<num>)";
+      let combo0 = f.type_param_forced_insts.get(0);
+      let combo1 = f.type_param_forced_insts.get(1);
+      assert equals(combo0.get(0), "num"), "expected the first combo to be 'num'";
+      assert equals(combo1.get(0), "Vec<num>"), "expected the second combo to be the rendered 'Vec<num>'";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_impl recognizes a type-param list whose bound is itself a generic instantiation" {
+  // A lexed '>>' here closes both Vec<num>'s own bracket and the
+  // enclosing <T: ...> list's - impl_generic_args_are_params must not
+  // misread that as "not a type-param list" and fall through to parsing
+  // <T: num | Vec<num>> as concrete generic arguments instead.
+  ParseState st = _state_from("impl Box<T: num | Vec<num>> { get() T { ret self.value; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the constrained impl to parse as a type-param list";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      assert i.has_type_params, "expected type params, not a concrete monomorphizing impl";
+      assert i.type_params.len == 1, "expected 1 new type param";
+      assert equals(i.type_params.get(0), "T"), "expected the type param 'T'";
+    }
+    _ -> { panic("expected an Impl node"); }
   }
 }
 
