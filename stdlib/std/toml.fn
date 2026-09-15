@@ -11,12 +11,12 @@
 // print_num(v.as_int().unwrap_or(0));   // 1
 // ```
 
-imp std.map;
-imp std.option;
-imp std.result;
-imp std.error;
-imp std.string;
-imp std.quirks;
+use std.map;
+use std.option;
+use std.result;
+use std.error;
+use std.string;
+use std.quirks;
 
 // A TOML value: a scalar, or one level of inline table (`{ key = value,
 // ... }`, the value-position construct a manifest's own `[dependencies]`
@@ -28,7 +28,7 @@ pub enum TomlValue {
   Str(str),
   Int(num),
   Float(dec),
-  Bool(bin),
+  Bool(flag),
   Table(Map<str, TomlValue>),
 }
 
@@ -61,7 +61,7 @@ impl TomlValue {
   }
 
   // The boolean, or None when this is not a Bool.
-  pub as_bool() Option<bin> {
+  pub as_bool() Option<flag> {
     fit *self {
       .Bool(b) -> { ret Option.Some(b); }
       _ -> { ret Option.None; }
@@ -70,7 +70,7 @@ impl TomlValue {
   }
 
   // True when this is an inline table (`{ key = value, ... }`).
-  pub is_table() bin {
+  pub is_table() flag {
     fit *self {
       .Table(_) -> { ret true; }
       _ -> { ret false; }
@@ -317,7 +317,7 @@ impl TomlDoc {
 
 // --- Value classification ------------------------------------------------------------
 
-fun _toml_is_digit(chr c) bin {
+fun _toml_is_digit(chr c) flag {
   ret c >= '0' && c <= '9';
 }
 
@@ -325,7 +325,7 @@ fun _toml_is_digit(chr c) bin {
 // inside quotes is kept.
 fun _strip_trailing_comment(str text) str {
   num i = 0;
-  bin in_quotes = false;
+  flag in_quotes = false;
   let n = len(text);
   for i < n {
     if text[i] == '"' {
@@ -371,7 +371,7 @@ fun _classify_inline_table(str text) TomlValue {
   }
   num i = 0;
   num start = 0;
-  bin in_quotes = false;
+  flag in_quotes = false;
   for i < n {
     let c = inner[i];
     if c == '"' {
@@ -455,7 +455,7 @@ fun _parse_line_into(TomlDoc* out, str line) {
 }
 
 // True for a `[name]` header, including the `[[name]]` form.
-fun _is_header(str line) bin {
+fun _is_header(str line) flag {
   ret starts_with(line, "[") && ends_with(line, "]");
 }
 

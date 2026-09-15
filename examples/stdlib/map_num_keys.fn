@@ -1,7 +1,7 @@
 // Generic map with numeric keys.
 
-imp std.c.io;
-imp std.map;
+use std.c.io;
+use std.map;
 
 fun main() {
   Map<num, str> m;

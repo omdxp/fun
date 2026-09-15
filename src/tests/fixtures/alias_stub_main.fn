@@ -1,4 +1,4 @@
-imp alias_stub_helper as a;
+use alias_stub_helper as a;
 
 fun main() {
   a.say_hello();

@@ -1,7 +1,7 @@
-imp std.log as l;
-imp std.result;
-imp std.error;
-imp std.sys as sys;
+use std.log as l;
+use std.result;
+use std.error;
+use std.sys as sys;
 
 fun main() {
   let env = sys.try_env("PATH");

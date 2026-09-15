@@ -1,9 +1,9 @@
 // Structured logging: levels, typed key/value fields, Text vs JSON formats, and
 // routing to a std.io Sink (stdout / stderr / file / rotating file).
 
-imp std.c.io;
-imp std.log;
-imp std.io;
+use std.c.io;
+use std.log;
+use std.io;
 
 fun main() num {
   // A Text logger at Info level (timestamps off here for reproducible output).

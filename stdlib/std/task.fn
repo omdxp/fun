@@ -9,8 +9,8 @@
 // finish uses a `WaitGroup`: a completion barrier backed by a buffered
 // channel that tracks a known number of task completions.
 
-imp std.channel;
-imp std.sync;
+use std.channel;
+use std.sync;
 
 // A completion barrier for a known number of virtual tasks. Each task calls
 // `done()` when it finishes; `wait()` blocks until every expected task has.
@@ -76,7 +76,7 @@ impl WaitGroup {
   pub wait() {
     for true {
       self.mu.lock();
-      bin more = self.expected > 0;
+      flag more = self.expected > 0;
       self.mu.unlock();
       if !more {
         ret;

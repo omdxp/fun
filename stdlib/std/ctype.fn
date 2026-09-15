@@ -3,65 +3,65 @@
 // `isdigit(c) != 0`), with `c` passed as a plain `chr` instead of needing to
 // be widened to `num` first.
 
-imp std.c.ctype;
+use std.c.ctype;
 
 // Checks if the character is alphanumeric (a-z, A-Z, 0-9).
-pub fun is_alnum(chr c) bin {
+pub fun is_alnum(chr c) flag {
   ret isalnum(c) != 0;
 }
 
 // Checks if the character is alphabetic (a-z, A-Z).
-pub fun is_alpha(chr c) bin {
+pub fun is_alpha(chr c) flag {
   ret isalpha(c) != 0;
 }
 
 // Checks if the character is blank (space or tab).
-pub fun is_blank(chr c) bin {
+pub fun is_blank(chr c) flag {
   ret isblank(c) != 0;
 }
 
 // Checks if the character is a control character.
-pub fun is_cntrl(chr c) bin {
+pub fun is_cntrl(chr c) flag {
   ret iscntrl(c) != 0;
 }
 
 // Checks if the character is a decimal digit (0-9).
-pub fun is_digit(chr c) bin {
+pub fun is_digit(chr c) flag {
   ret isdigit(c) != 0;
 }
 
 // Checks if the character has a graphical representation (printable, not space).
-pub fun is_graph(chr c) bin {
+pub fun is_graph(chr c) flag {
   ret isgraph(c) != 0;
 }
 
 // Checks if the character is lowercase.
-pub fun is_lower(chr c) bin {
+pub fun is_lower(chr c) flag {
   ret islower(c) != 0;
 }
 
 // Checks if the character is printable (including space).
-pub fun is_print(chr c) bin {
+pub fun is_print(chr c) flag {
   ret isprint(c) != 0;
 }
 
 // Checks if the character is punctuation.
-pub fun is_punct(chr c) bin {
+pub fun is_punct(chr c) flag {
   ret ispunct(c) != 0;
 }
 
 // Checks if the character is whitespace (space, tab, newline, etc.).
-pub fun is_space(chr c) bin {
+pub fun is_space(chr c) flag {
   ret isspace(c) != 0;
 }
 
 // Checks if the character is uppercase.
-pub fun is_upper(chr c) bin {
+pub fun is_upper(chr c) flag {
   ret isupper(c) != 0;
 }
 
 // Checks if the character is a hexadecimal digit (0-9, a-f, A-F).
-pub fun is_xdigit(chr c) bin {
+pub fun is_xdigit(chr c) flag {
   ret isxdigit(c) != 0;
 }
 

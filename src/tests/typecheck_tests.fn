@@ -1,11 +1,11 @@
 // Type checking cases: a program, and whether the checker accepts it.
 
-imp ..lexer.lexer;
-imp ..parser.parse_state;
-imp ..parser.parser;
-imp ..semantics.typecheck;
-imp std.string;
-imp std.result;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..semantics.typecheck;
+use std.string;
+use std.result;
 
 // Parses `src` and checks it, reporting the message of the first type
 // error, or an empty string when the program checks out.

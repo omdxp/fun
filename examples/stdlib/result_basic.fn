@@ -3,9 +3,9 @@
 // Construct it with `ok(v)` / `err(code, message, default)`, then match it with
 // `fit` (to read the value or the error) or use a combinator like `unwrap_or`.
 
-imp std.c.io;
-imp std.result;
-imp std.error;
+use std.c.io;
+use std.result;
+use std.error;
 
 // A tiny fallible operation to produce Results.
 fun checked_double(num n) Result<num, Error> {
@@ -38,7 +38,7 @@ fun main() num {
   Result<dec, Error> d = .Ok(3.14);
   printf("d=%.2f\n", d.unwrap_or(0.0));
 
-  Result<bin, Error> b = .Ok(true);
+  Result<flag, Error> b = .Ok(true);
   printf("b=%d\n", b.unwrap_or(false));
 
   // `or` falls back to a second Result on Err.

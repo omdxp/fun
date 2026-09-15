@@ -1,11 +1,11 @@
 // CLI argument parsing.
 
-imp std.map;
-imp std.vec;
-imp std.string;
-imp std.quirks;
-imp std.option;
-imp std.c.mem;
+use std.map;
+use std.vec;
+use std.string;
+use std.quirks;
+use std.option;
+use std.c.mem;
 
 // Parsed command-line arguments.
 pub compound CliArgs {
@@ -15,7 +15,7 @@ pub compound CliArgs {
   Vec<str> positionals;
   // Set by cli_parse_flags when a value flag was the last argument, with
   // nothing following it to take as its value.
-  bin missing_value;
+  flag missing_value;
   str missing_value_flag;
 }
 
@@ -64,7 +64,7 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   out.missing_value_flag = "";
 
   num i = 1;
-  bin end_opts = false;
+  flag end_opts = false;
   for args[i] != 0 {
     let arg = args[i];
 
@@ -146,7 +146,7 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
   out.missing_value_flag = "";
 
   num i = 1;
-  bin rest_are_positional = false;
+  flag rest_are_positional = false;
   for args[i] != 0 {
     let arg = args[i];
 
@@ -203,14 +203,14 @@ impl CliArgs as Sized {
   }
 
   // Returns true when no positionals are present.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.positionals.len == 0;
   }
 }
 
 impl CliArgs {
   // Check if an option exists.
-  pub has(str key) bin {
+  pub has(str key) flag {
     ret self.opts.has(key);
   }
 
@@ -251,7 +251,7 @@ impl CliArgs {
 }
 
 // C-style wrapper for option existence.
-pub fun cli_has(CliArgs* args, str key) bin {
+pub fun cli_has(CliArgs* args, str key) flag {
   ret args.has(key);
 }
 

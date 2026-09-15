@@ -1,5 +1,5 @@
-imp std.c.io;
-imp agc_lib as g;
+use std.c.io;
+use agc_lib as g;
 
 fun main() num {
   printf("%lld\n", g.ident(123));

@@ -4,25 +4,25 @@
 // multi-file program's declarations all at once, in one pass, with no
 // changes to codegen itself.
 
-imp parse_state;
-imp parser;
-imp deps_lock;
-imp ..ast.ast;
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp std.string;
-imp std.path;
-imp std.fs;
-imp std.sys;
-imp std.vec;
-imp std.set;
-imp std.map;
-imp std.option;
-imp std.result;
-imp std.task;
-imp std.sync;
-imp std.channel;
-imp std.c.mem;
+use parse_state;
+use parser;
+use deps_lock;
+use ..ast.ast;
+use ..lexer.lexer;
+use ..lexer.token;
+use std.string;
+use std.path;
+use std.fs;
+use std.sys;
+use std.vec;
+use std.set;
+use std.map;
+use std.option;
+use std.result;
+use std.task;
+use std.sync;
+use std.channel;
+use std.c.mem;
 
 // Converts one `imp`-statement's dotted `path` into an actual `.fn` file
 // path under `root`: segments join with `/`, and a run of N consecutive
@@ -49,7 +49,7 @@ fun _convert_dotted_path(str root, str import_path) str {
     }
     num run_len = j - i;
     num parents = run_len / 2;
-    bin sep = run_len % 2 == 1;
+    flag sep = run_len % 2 == 1;
     num p = 0;
     for p < parents {
       sb.append("../");
@@ -75,7 +75,7 @@ pub fun _normalize_path(str path) str {
   str slashed = replace_char(path, '\\', '/');
   // An absolute path keeps its root: dropping the empty first segment
   // would turn it into a relative one.
-  bin absolute = len(slashed) > 0 && slashed[0] == '/';
+  flag absolute = len(slashed) > 0 && slashed[0] == '/';
   Vec<str> segs = split(slashed, '/');
   free(slashed);
   Vec<str> parts;
@@ -97,7 +97,7 @@ pub fun _normalize_path(str path) str {
   if absolute {
     sb.append("/");
   }
-  bin first = true;
+  flag first = true;
   for p : parts {
     if !first {
       sb.append("/");
@@ -313,7 +313,7 @@ pub compound ParsedFile {
 // one of these; a single compile makes one and drops it.
 pub compound ImportCache {
   Map<str, ParsedFile> files;
-  bin ready;
+  flag ready;
 }
 
 pub fun import_cache_new() ImportCache {
@@ -522,7 +522,7 @@ compound PreloadShared {
   Vec<Vec<Token>>* all_tokens;
   Channel<str> queue;
   num pending;
-  bin has_error;
+  flag has_error;
   str first_error;
 }
 
@@ -549,7 +549,7 @@ fun _preload_enqueue_locked(PreloadShared* shared, str path) {
 fun _preload_mark_done(PreloadShared* shared) {
   shared.mu.lock();
   shared.pending = shared.pending - 1;
-  bin finished = shared.pending == 0;
+  flag finished = shared.pending == 0;
   shared.mu.unlock();
   if finished {
     let _cc = shared.queue.close();
@@ -629,7 +629,7 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   // the default map `parse_state_new` constructs is ours alone.
   defer state.global_symbols.free();
 
-  for state.next_token_is_keyword("imp") {
+  for state.next_token_is_keyword("use") {
     let ierr = p.parse_import();
     if ierr.is_some() {
       ret .Some(format("parse error in {str}", path));
@@ -753,7 +753,7 @@ fun _preload_and_collect_source(
 fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, GlobalSymbolInfo>* out) {
   num i = start_idx;
   num depth = 0;
-  bin prev_was_pub = false;
+  flag prev_was_pub = false;
   for i < tokens.len {
     let t = tokens.get(i);
     if token_is_nl_or_comment_or_newline_separator(t) {
@@ -868,9 +868,9 @@ fun _parse_and_merge_source(
   // A file reached under an alias has its own function names rewritten
   // below, in place, so it is parsed fresh every time: handing out nodes
   // that are about to be renamed would poison what is kept.
-  bin cacheable = equals(current_alias, "");
+  flag cacheable = equals(current_alias, "");
   Vec<Node> parsed_nodes;
-  bin reused = false;
+  flag reused = false;
   if cacheable {
     let kept = cache.files.at(path);
     if kept.is_some() {
@@ -1032,7 +1032,7 @@ fun _rename_colliding_functions(
 
 // True when `merged` already contains a top-level plain function named
 // `name`, see `_rename_colliding_functions`.
-fun _merged_has_function_name(Vec<Node>* merged, str name) bin {
+fun _merged_has_function_name(Vec<Node>* merged, str name) flag {
   num mi = 0;
   for mi < merged.len {
     let n = merged.get(mi);
@@ -1258,8 +1258,8 @@ test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
   let result = parse_program_with_imports("src/parser/import_resolver_fixtures/two_file_main.fn");
   assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;
-  bin saw_main = false;
-  bin saw_helper = false;
+  flag saw_main = false;
+  flag saw_helper = false;
   for n : nodes {
     fit n.kind {
       .Function(fnv) -> {
@@ -1308,7 +1308,7 @@ test "parse_program_with_imports resolves a compound-literal expression whose ty
   let result = parse_program_with_imports("src/parser/import_resolver_fixtures/cross_file_compound_main.fn");
   assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;
-  bin saw_main = false;
+  flag saw_main = false;
   for n : nodes {
     fit n.kind {
       .Function(fnv) -> {

@@ -1,8 +1,8 @@
 // Array helpers example.
 
-imp std.c.io;
-imp std.c.mem;
-imp std.array;
+use std.c.io;
+use std.c.mem;
+use std.array;
 
 fun main() {
   num[] arr = [1, 2, 3, 4];

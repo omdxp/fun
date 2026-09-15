@@ -3,21 +3,21 @@
 // source string, so a test states its input as source text rather than
 // hand-built AST nodes.
 
-imp ..lexer.lexer;
-imp ..parser.parse_state;
-imp ..parser.parser;
-imp ..parser.import_resolver;
-imp ..codegen.codegen;
-imp ..codegen.codegen_state;
-imp std.string;
-imp std.result;
-imp std.error;
-imp std.io;
-imp std.fs;
-imp std.process;
-imp std.vec;
-imp std.option;
-imp std.runtime_backend;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..parser.import_resolver;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+use std.string;
+use std.result;
+use std.error;
+use std.io;
+use std.fs;
+use std.process;
+use std.vec;
+use std.option;
+use std.runtime_backend;
 
 // Transpiles `src` and returns the emitted C, or an error describing the
 // stage that rejected it. Imports are not resolved: `src` is compiled on
@@ -393,7 +393,7 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
       cc = "cc";
     }
   }
-  bin is_msvc = equals(cc, "cl") || equals(cc, "cl.exe");
+  flag is_msvc = equals(cc, "cl") || equals(cc, "cl.exe");
   build.push(cc);
   str cc_extra = env_or("FUN_CC_ARGS", "");
   if !equals(cc_extra, "") {

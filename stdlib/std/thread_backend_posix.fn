@@ -3,7 +3,7 @@
 // Defines the POSIX backend contract used by std.thread_runtime. Functions
 // are thin forwards to std.thread helpers.
 
-imp std.thread;
+use std.thread;
 
 // Creates a new POSIX backend thread handle.
 pub fun thread_backend_posix_new() Thread {

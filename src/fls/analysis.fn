@@ -9,25 +9,25 @@
 // The revision a client sends is what says whether what is kept is
 // still current. An edit raises it, and the next question re-reads.
 
-imp documents;
-imp ..ast.ast;
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp ..parser.import_resolver;
-imp ..cli.manifest;
-imp std.map;
-imp std.vec;
-imp std.option;
-imp std.result;
-imp std.fs;
-imp std.path;
+use documents;
+use ..ast.ast;
+use ..lexer.lexer;
+use ..lexer.token;
+use ..parser.import_resolver;
+use ..cli.manifest;
+use std.map;
+use std.vec;
+use std.option;
+use std.result;
+use std.fs;
+use std.path;
 
 // One document as it was last read.
 pub compound Analyzed {
   // False when the text could not be lexed or its imports could not be
   // resolved, which is ordinary while a reader is typing.
-  bin lexed;
-  bin parsed;
+  flag lexed;
+  flag parsed;
   num version;
   Vec<Token> tokens;
   ProgramMergeResult program;

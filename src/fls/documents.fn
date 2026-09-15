@@ -5,11 +5,11 @@
 // or as a range to replace, which means turning line and column
 // positions into offsets in the text held here.
 
-imp uri;
-imp std.string;
-imp std.map;
-imp std.option;
-imp std.fs;
+use uri;
+use std.string;
+use std.map;
+use std.option;
+use std.fs;
 
 // One document a client has open.
 pub compound Document {
@@ -228,7 +228,7 @@ impl Documents {
     for i < from_disk.len {
       str u = from_disk.get(i);
       i = i + 1;
-      bin dup = false;
+      flag dup = false;
       num j = 0;
       for j < open_count {
         if equals(out.get(j), u) {

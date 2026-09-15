@@ -1,12 +1,12 @@
 // AST predicate and semantics corpus, ported from the `ast` and
 // `semantics` suites. These build nodes and scopes directly.
 
-imp ..ast.ast;
-imp ..semantics.scope;
-imp ..semantics.symbol;
-imp std.string;
-imp std.vec;
-imp std.option;
+use ..ast.ast;
+use ..semantics.scope;
+use ..semantics.symbol;
+use std.string;
+use std.vec;
+use std.option;
 
 test "ast predicates classify nodes correctly" {
   Node num_node = node_new(.Number(.Num(1)));

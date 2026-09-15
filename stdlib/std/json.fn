@@ -15,20 +15,20 @@
 // }
 // ```
 
-imp std.map;
-imp std.vec;
-imp std.option;
-imp std.result;
-imp std.error;
-imp std.string;
-imp std.math;
-imp std.quirks;
-imp std.c.mem;
+use std.map;
+use std.vec;
+use std.option;
+use std.result;
+use std.error;
+use std.string;
+use std.math;
+use std.quirks;
+use std.c.mem;
 
 // Any JSON value. Arrays and objects nest recursively.
 pub enum JsonValue {
   Null,
-  Bool(bin),
+  Bool(flag),
   // JSON numbers are decimals; integer-looking values still round-trip as integers.
   Num(dec),
   Str(str),
@@ -38,7 +38,7 @@ pub enum JsonValue {
 
 impl JsonValue {
   // Return true when this value is JSON null.
-  pub is_null() bin {
+  pub is_null() flag {
     fit *self {
       .Null -> { ret true; }
       _ -> { ret false; }
@@ -47,7 +47,7 @@ impl JsonValue {
   }
 
   // Return true when this value is a JSON boolean.
-  pub is_bool() bin {
+  pub is_bool() flag {
     fit *self {
       .Bool(b) -> { ret true; }
       _ -> { ret false; }
@@ -56,7 +56,7 @@ impl JsonValue {
   }
 
   // Return true when this value is a JSON number.
-  pub is_num() bin {
+  pub is_num() flag {
     fit *self {
       .Num(n) -> { ret true; }
       _ -> { ret false; }
@@ -65,7 +65,7 @@ impl JsonValue {
   }
 
   // Return true when this value is a JSON string.
-  pub is_str() bin {
+  pub is_str() flag {
     fit *self {
       .Str(s) -> { ret true; }
       _ -> { ret false; }
@@ -74,7 +74,7 @@ impl JsonValue {
   }
 
   // Return true when this value is a JSON array.
-  pub is_array() bin {
+  pub is_array() flag {
     fit *self {
       .Array(a) -> { ret true; }
       _ -> { ret false; }
@@ -83,7 +83,7 @@ impl JsonValue {
   }
 
   // Return true when this value is a JSON object.
-  pub is_object() bin {
+  pub is_object() flag {
     fit *self {
       .Object(o) -> { ret true; }
       _ -> { ret false; }
@@ -92,7 +92,7 @@ impl JsonValue {
   }
 
   // Return the boolean contents, or None when this is not a Bool.
-  pub as_bool() Option<bin> {
+  pub as_bool() Option<flag> {
     fit *self {
       .Bool(b) -> { ret .Some(b); }
       _ -> { ret .None; }
@@ -214,7 +214,7 @@ pub fun json_str(str s) JsonValue {
 }
 
 // Create a JSON boolean.
-pub fun json_bool(bin b) JsonValue {
+pub fun json_bool(flag b) JsonValue {
   ret JsonValue.Bool(b);
 }
 
@@ -335,12 +335,12 @@ impl JsonValue {
 
 // --- Parsing (recursive descent) -----------------------------------------------------
 
-fun _json_is_digit(chr c) bin {
+fun _json_is_digit(chr c) flag {
   ret c >= '0' && c <= '9';
 }
 
 // A character that can appear inside a JSON number literal.
-fun _json_is_number_char(chr c) bin {
+fun _json_is_number_char(chr c) flag {
   if _json_is_digit(c) {
     ret true;
   }
@@ -424,7 +424,7 @@ impl JsonParser {
   }
 
   // Does the source at the cursor start with `word`?
-  starts_with(str word) bin {
+  starts_with(str word) flag {
     num i = 0;
     for word[i] != 0 {
       if self.src[self.pos + i] != word[i] {

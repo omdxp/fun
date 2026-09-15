@@ -2,10 +2,10 @@
 // and checks the emitted C. Ported from the `tests/` suite so the same
 // expectations run against this compiler.
 
-imp harness;
-imp std.sys;
-imp std.fs;
-imp std.string;
+use harness;
+use std.sys;
+use std.fs;
+use std.string;
 
 test "ra3: no crash on field access of a generic-impl method returning a compound" {
   str src = `imp std.c.io;

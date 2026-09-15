@@ -641,7 +641,7 @@ for (const file of stdFiles) {
 const samples = [
   {
     title: "Hello World",
-    code: `imp std.c.io;
+    code: `use std.c.io;
 
 fun main() {
   printf("hello from fun\\n");
@@ -651,9 +651,9 @@ fun main() {
   {
     title: "Alias Imports",
     code: `// file: main.fn
-imp std.io;
-imp mod1 as one;
-imp mod2 as two;
+use std.io;
+use mod1 as one;
+use mod2 as two;
 
 fun main() {
   num a = one.pick();
@@ -674,7 +674,7 @@ pub fun pick() num {
   },
   {
     title: "Compounds + Impl",
-    code: `imp std.io;
+    code: `use std.io;
 
 compound Point {
   num x;

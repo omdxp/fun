@@ -1,7 +1,7 @@
 // Helper utilities for fixed arrays.
 
-imp std.option;
-imp std.quirks;
+use std.option;
+use std.quirks;
 
 // View over a generic array.
 pub compound Array<T> {
@@ -88,7 +88,7 @@ impl Array<T> as Sized {
   }
 
   // True when the array holds no elements.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.len == 0;
   }
 }

@@ -1,11 +1,11 @@
 // Time helpers.
 
-imp std.c.time;
-imp std.c.mem;
-imp std.c.string;
-imp std.string;
-imp std.result;
-imp std.error;
+use std.c.time;
+use std.c.mem;
+use std.c.string;
+use std.string;
+use std.result;
+use std.error;
 
 // Timestamp wrapper (epoch seconds).
 pub compound Timestamp {

@@ -1,10 +1,10 @@
 // Path helpers.
 
-imp std.c.mem;
-imp std.string;
-imp std.vec;
-imp std.result;
-imp std.error;
+use std.c.mem;
+use std.string;
+use std.vec;
+use std.result;
+use std.error;
 
 // Path wrapper.
 pub compound Path {
@@ -41,7 +41,7 @@ impl Path {
   }
 
   // True when the path is absolute under POSIX rules.
-  pub is_abs() bin {
+  pub is_abs() flag {
     ret is_abs(self.value);
   }
 }
@@ -50,8 +50,8 @@ impl Path {
 pub fun path_join(str a, str b) str {
   let alen = len(a);
   let blen = len(b);
-  bin a_slash = false;
-  bin b_slash = false;
+  flag a_slash = false;
+  flag b_slash = false;
   if alen > 0 && a[alen - 1] == '/' {
     a_slash = true;
   }
@@ -136,7 +136,7 @@ pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
 }
 
 // True if path is absolute (POSIX rules).
-pub fun is_abs(str path) bin {
+pub fun is_abs(str path) flag {
   if len(path) == 0 {
     ret false;
   }

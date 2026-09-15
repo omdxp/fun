@@ -1,14 +1,14 @@
 // Parser corpus, ported from the `parser` suite. These run against the
 // parser directly and inspect the resulting AST rather than emitted C.
 
-imp ..ast.ast;
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp ..parser.parse_state;
-imp ..parser.parser;
-imp ..parser.incremental;
-imp std.string;
-imp std.vec;
+use ..ast.ast;
+use ..lexer.lexer;
+use ..lexer.token;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..parser.incremental;
+use std.string;
+use std.vec;
 
 // Lexes `src` into a parse state without parsing it.
 fun state_from(str src) ParseState {
@@ -30,7 +30,7 @@ fun parse_ok(str src) ParseState {
 }
 
 // True when `src` is rejected by the lexer or the parser.
-fun parse_fails(str src) bin {
+fun parse_fails(str src) flag {
   ParseState st = parse_state_new("test.fn", src);
   let tr = tokenize(src, "test.fn");
   if tr.is_err() {
@@ -334,7 +334,7 @@ fun ref_prev_n(Vec<Token> toks, num exclusive_end, num n) Option<Token> {
 
 // Two tokens are the same token when their kind and source position agree;
 // a position uniquely identifies a token within one lexed stream.
-fun same_token(Option<Token> a, Option<Token> b) bin {
+fun same_token(Option<Token> a, Option<Token> b) flag {
   if a.is_none() && b.is_none() {
     ret true;
   }

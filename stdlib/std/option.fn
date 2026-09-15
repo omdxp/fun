@@ -23,9 +23,9 @@
 // Option<num> b = Option.None; // or the shorthand `.None`
 // ```
 
-imp std.result;
-imp std.error;
-imp std.c.string;
+use std.result;
+use std.error;
+use std.c.string;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
@@ -35,7 +35,7 @@ pub enum Option<T> {
 
 impl Option<T> {
   // True when a value is present.
-  pub is_some() bin {
+  pub is_some() flag {
     fit *self {
       .Some(v) -> { ret true; }
       .None -> { ret false; }
@@ -44,7 +44,7 @@ impl Option<T> {
   }
 
   // True when no value is present.
-  pub is_none() bin {
+  pub is_none() flag {
     fit *self {
       .Some(v) -> { ret false; }
       .None -> { ret true; }
@@ -100,7 +100,7 @@ impl Option<T> {
   // Keep the value when `keep` is true; otherwise None. `keep` is a plain
   // boolean you compute at the call site (Fun has no first-class predicate
   // functions), e.g. `opt.filter(n > 0)`.
-  pub filter(bin keep) Option<T> {
+  pub filter(flag keep) Option<T> {
     fit *self {
       .Some(v) -> {
         if keep {

@@ -2,13 +2,13 @@
 // node storage, scope/symbol tracking, the cross-module duplicate-symbol
 // registry, and the current diagnostic position.
 
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..semantics.scope;
-imp ..semantics.symbol;
-imp std.vec;
-imp std.map;
-imp std.c.mem;
+use ..ast.ast;
+use ..lexer.token;
+use ..semantics.scope;
+use ..semantics.symbol;
+use std.vec;
+use std.map;
+use std.c.mem;
 
 // Tracks a public symbol's declaring file, to detect cross-module name
 // collisions. Only public symbols are recorded. `is_compound`
@@ -18,9 +18,9 @@ imp std.c.mem;
 pub compound GlobalSymbolInfo {
   str symbol_name;
   str file_path;
-  bin is_function;
-  bin is_public;
-  bin is_compound;
+  flag is_function;
+  flag is_public;
+  flag is_compound;
 }
 
 pub fun global_symbol_info_new(str symbol_name, str file_path) GlobalSymbolInfo {
@@ -44,7 +44,7 @@ pub compound ParseState {
   // The most recently peeked/advanced-to token, used by `err` to attach a
   // precise source span to a diagnostic.
   Token current_token;
-  bin has_current_token;
+  flag has_current_token;
 
   // Diagnostic position used when no `current_token` is available yet (e.g.
   // before the first token is read).
@@ -59,15 +59,15 @@ pub compound ParseState {
 
   // Scope tracking.
   Scope* scope_root;
-  bin has_scope_root;
+  flag has_scope_root;
   Scope* scope_current;
-  bin has_scope_current;
+  flag has_scope_current;
 
   // The symbol table currently receiving new declarations, plus every table
   // created so far during this parse (one per module/import, mirroring the
   // original).
   SymbolTable* active_table;
-  bin has_active_table;
+  flag has_active_table;
   Vec<SymbolTable*> tables;
 
   // Cross-module duplicate-symbol detection (see `register_symbol`).
@@ -77,18 +77,18 @@ pub compound ParseState {
   // a one-time scan of the whole token stream before parsing starts, so a
   // `Name{...}` initializer can forward-reference a type declared later
   // in the same file. See `prescan_forward_type_names`.
-  Map<str, bin> forward_type_names;
-  bin forward_type_names_scanned;
+  Map<str, flag> forward_type_names;
+  flag forward_type_names_scanned;
 
   // Gates `err()`'s stderr output; set false by tests that expect a clean
   // parse failure without polluting test output.
-  bin emit_stderr;
+  flag emit_stderr;
   // The last error reported, kept as data. A caller that is not a
   // terminal, such as a language server, reads it from here rather than
   // scraping what was printed.
   str error_message;
   Pos error_pos;
-  bin has_error;
+  flag has_error;
 }
 
 pub fun parse_state_new(str input_file_path, str input_source) ParseState {
@@ -137,7 +137,7 @@ pub fun free_parse_state_internal(ParseState* state) {
   if state.has_scope_current {
     Scope* cur = state.scope_current;
     for cur != nil {
-      bin has_next = cur.has_parent;
+      flag has_next = cur.has_parent;
       Scope* next = cur.parent;
       free_scope(cur);
       if !has_next {

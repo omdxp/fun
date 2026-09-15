@@ -5,10 +5,10 @@
 // and a token's end column is the column just past it. Everything that
 // has to turn one into the other goes through here.
 
-imp ..lexer.token;
-imp documents;
-imp std.vec;
-imp std.option;
+use ..lexer.token;
+use documents;
+use std.vec;
+use std.option;
 
 // A span in the terms a client understands: a line and the characters
 // it covers, all counted from zero.
@@ -116,7 +116,7 @@ pub fun index_of_token(Vec<Token>* tokens, Token t) num {
 // when the function already is async, nothing left to fix).
 compound FnAsyncScope {
   num body_depth;
-  bin has_insert;
+  flag has_insert;
   Pos insert_pos;
 }
 
@@ -131,9 +131,9 @@ pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line)
   Vec<FnAsyncScope> scopes;
   scopes.init(8);
   num depth = 0;
-  bin has_pending = false;
+  flag has_pending = false;
   Pos pending_pos;
-  bin pending_is_async = false;
+  flag pending_is_async = false;
 
   num i = 0;
   for i < tokens.len {
@@ -142,7 +142,7 @@ pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line)
       break;
     }
     if token_is_keyword(t, "fun") {
-      bin is_async = false;
+      flag is_async = false;
       let prev = token_before(tokens, i);
       if prev.is_some() && token_is_keyword(prev.unwrap(), "async") {
         is_async = true;
@@ -187,7 +187,7 @@ pub fun enclosing_function_async_insert_pos(Vec<Token>* tokens, num target_line)
 // and should never be treated as one - unlike an ordinary position with
 // no real token, which can legitimately mean "right after a trigger,
 // nothing typed yet."
-pub fun position_in_comment(Vec<Token>* tokens, num line, num character) bin {
+pub fun position_in_comment(Vec<Token>* tokens, num line, num character) flag {
   num source_line = line + 1;
   num source_col = character + 1;
   num i = 0;
@@ -205,7 +205,7 @@ pub fun position_in_comment(Vec<Token>* tokens, num line, num character) bin {
 }
 
 // True for a token that is only there for the reader.
-fun _is_trivia(Token t) bin {
+fun _is_trivia(Token t) flag {
   fit t.type {
     .Comment -> { ret true; }
     .NewLine -> { ret true; }

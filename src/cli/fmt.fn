@@ -4,43 +4,43 @@
 // comments and blank lines survive: the lexer keeps both, and the
 // emitter decides spacing, indentation, and where lines break.
 
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp ..parser.datatype_defs;
-imp std.string;
-imp std.vec;
-imp std.result;
+use ..lexer.lexer;
+use ..lexer.token;
+use ..parser.datatype_defs;
+use std.string;
+use std.vec;
+use std.result;
 
 // What the emitter carries between tokens.
 pub compound FmtState {
   StringBuilder out;
   num indent;
-  bin at_line_start;
+  flag at_line_start;
   // True when a separator ended the line and the break has not been
   // written yet, which is what lets a trailing comment stay put.
-  bin force_break;
+  flag force_break;
   // How many delimiters are still open, so a construct broken across
   // lines keeps its continuation lines indented under the line that
   // opened it.
   num open_delims;
   // True while a line continues a construct opened on an earlier one.
-  bin continuation;
+  flag continuation;
   // Width already written on the current line, which is what a
   // decision about breaking a construct is measured against.
   num col;
   // How many newlines have been seen since the last emitted token, so a
   // blank line in the source survives as a blank line.
   num pending_newlines;
-  bin has_prev;
+  flag has_prev;
   Token prev;
   // One entry per open brace, recording what it opened so its close
   // knows which context it ends.
   Vec<num> brace_kinds;
   // How many generic argument lists are open.
   num angle_depth;
-  bin in_fun_signature;
-  bin pending_decl_block;
-  bin pending_enum_block;
+  flag in_fun_signature;
+  flag pending_decl_block;
+  flag pending_enum_block;
   // Depths of the bodies that hold only declarations, and of function
   // bodies, which together say whether a value expression can appear
   // here at all.
@@ -49,7 +49,7 @@ pub compound FmtState {
   num function_body_depth;
   // How many `fit` statements' own arm lists are open.
   num fit_block_depth;
-  bin pending_fit_block;
+  flag pending_fit_block;
   // `function_body_depth`'s own value at the moment each still-open
   // fit's own body started, one entry per nesting level: a comma is
   // only one of an arm's own conditions, rather than one written
@@ -59,26 +59,26 @@ pub compound FmtState {
   // Whether the arm currently being written is long enough to need
   // each of its own conditions on its own line, decided once per arm
   // from a width measurement taken at its own first token.
-  bin fit_arm_wrap;
+  flag fit_arm_wrap;
   // True once an over-long `||`/`&&` chain has wrapped, so its own
   // continuation lines indent under the statement that opened it (it
   // has no enclosing brace of its own to indent under, unlike a fit
   // arm's conditions or an enum's variants). Reset at the next
   // statement boundary.
-  bin bool_chain_wrap;
+  flag bool_chain_wrap;
   // True when the token just written was a prefix operator.
-  bin prev_unary;
+  flag prev_unary;
   // A space owed to the previous token, written only if the line
   // continues rather than ending there.
-  bin pending_space;
+  flag pending_space;
   // The first word of the statement being written, which is what tells
   // a declaration's block from a compound literal.
   str stmt_first;
   // True before the statement's first token has been written.
-  bin at_stmt_start;
+  flag at_stmt_start;
   // True between the ``` markers of a fenced block in a doc comment,
   // where a comment body keeps the indentation it was written with.
-  bin in_doc_fence;
+  flag in_doc_fence;
 }
 
 pub fun fmt_state_new() FmtState {
@@ -146,7 +146,7 @@ fun _cval_of(Token t) chr {
 // The lexer keeps only a comment's body, so the marker is written back
 // with exactly one space after it. Inside a fenced block the body is
 // kept as written, since the indentation there is part of the code.
-fun _comment_line(str body, bin in_fence) str {
+fun _comment_line(str body, flag in_fence) str {
   StringBuilder b = string_builder_init(len(body) + 4);
   if in_fence {
     b.append("//");
@@ -163,7 +163,7 @@ fun _comment_text(Token t) str {
 }
 
 // True for the ``` line that opens or closes a fenced block.
-fun _is_fence_marker(str body) bin {
+fun _is_fence_marker(str body) flag {
   ret starts_with(trim(body), "```");
 }
 
@@ -195,7 +195,7 @@ fun _number_text(Token t) str {
 
 // True for a character literal, which is a number-kind token carrying a
 // char rather than a numeric value.
-pub fun is_char_literal(Token t) bin {
+pub fun is_char_literal(Token t) flag {
   if t.type != .Number {
     ret false;
   }
@@ -278,19 +278,19 @@ impl FmtState {
 }
 
 // Tokens that carry a word: a space always separates two of them.
-fun _is_word_like(Token t) bin {
+fun _is_word_like(Token t) flag {
   ret t.type == .Identifier || t.type == .Keyword ||
   t.type == .Number || t.type == .String || t.type == .Boolean;
 }
 
-fun _is_closing(str text) bin {
+fun _is_closing(str text) flag {
   ret equals(text, ")") || equals(text, "]");
 }
 
 // True when `text` is one of the postfix (left-operanded) unary
 // operators: `x++`/`x--`, or the propagation operators `x?`/`x!`.
 // Mirrors the parser's own `is_left_operanded_unary_operator`.
-fun _is_postfix_unary_op(str text) bin {
+fun _is_postfix_unary_op(str text) flag {
   ret equals(text, "++") || equals(text, "--") || equals(text, "?") || equals(text, "!");
 }
 
@@ -299,7 +299,7 @@ fun _is_postfix_unary_op(str text) bin {
 // a call, index, or parenthesized group. `++`/`--`/`?`/`!` also have a
 // prefix reading (`++x`, `!x`), told apart the same way the parser
 // tells them apart: whether a value already precedes the operator.
-fun _is_postfix_operand_end(Token prev) bin {
+fun _is_postfix_operand_end(Token prev) flag {
   if prev.type == .Identifier || prev.type == .Number || prev.type == .String ||
     prev.type == .Boolean {
     ret true;
@@ -309,7 +309,7 @@ fun _is_postfix_operand_end(Token prev) bin {
 
 // True for a token that reads as a type: a builtin type keyword, or a
 // name written in the leading-capital style types are written in.
-fun _is_type_token(Token t) bin {
+fun _is_type_token(Token t) flag {
   str text = token_text(t);
   if t.type == .Keyword {
     ret keyword_is_datatype(text);
@@ -335,14 +335,14 @@ fun _is_type_token(Token t) bin {
 
 // True when `text` is written with spaces around it. A run of dots
 // reads as an access operator and binds to what follows.
-fun _operator_needs_spaces(str text) bin {
+fun _operator_needs_spaces(str text) flag {
   if _is_dot_run(text) {
     ret false;
   }
   ret !equals(text, ",") && !equals(text, ":") && !equals(text, "(") && !equals(text, "[");
 }
 
-fun _is_dot_run(str text) bin {
+fun _is_dot_run(str text) flag {
   if len(text) == 0 {
     ret false;
   }
@@ -400,7 +400,7 @@ fun _next_significant(Vec<Token>* tokens, num idx) num {
 
 // True when the `:` at `idx` separates a for-in loop's binding from what
 // it walks, rather than constraining a generic parameter.
-fun _is_for_colon(Vec<Token>* tokens, num idx) bin {
+fun _is_for_colon(Vec<Token>* tokens, num idx) flag {
   num i = idx;
   for i > 0 {
     i = i - 1;
@@ -427,7 +427,7 @@ fun _is_for_colon(Vec<Token>* tokens, num idx) bin {
 // True when the `*` at `idx` spells a pointer type rather than a
 // multiplication. A pointer star follows a type and is followed by a
 // name, a closing generic argument, or the end of a declaration.
-fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, bin in_decl_only) bin {
+fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, flag in_decl_only) flag {
   Token base = prev;
   if equals(token_text(prev), "*") {
     num walk = _prev_significant(tokens, idx);
@@ -495,7 +495,7 @@ fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, bin in_decl_only) 
 // past the whole bracketed run for a balanced close immediately
 // followed by `(`, since a call's callee is never itself preceded by
 // one of that function's own delimiter tokens the way a type name is.
-fun _looks_like_call_generic_open(Vec<Token>* tokens, num idx) bin {
+fun _looks_like_call_generic_open(Vec<Token>* tokens, num idx) flag {
   Token t = tokens.get(idx);
   if !equals(token_text(t), "<") {
     ret false;
@@ -558,7 +558,7 @@ fun _looks_like_call_generic_open(Vec<Token>* tokens, num idx) bin {
 
 // True when the `<` at `idx` opens generic arguments rather than
 // comparing two values.
-fun _is_generic_open(Vec<Token>* tokens, num idx, bin in_decl_only) bin {
+fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
   Token t = tokens.get(idx);
   if !equals(token_text(t), "<") {
     ret false;
@@ -603,7 +603,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, bin in_decl_only) bin {
 
 // True for a word that opens a declaration or a control structure, whose
 // brace is a block rather than a compound literal.
-fun _is_block_keyword(str text) bin {
+fun _is_block_keyword(str text) flag {
   fit text {
     "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for",
     "fit", "defer", "asm" -> { ret true; }
@@ -626,7 +626,7 @@ fun _type_start_before(Vec<Token>* tokens, num idx) num {
     ret -1;
   }
   num depth = _is_close_run(token_text(tokens.get(i)));
-  bin had_generics = depth > 0;
+  flag had_generics = depth > 0;
   for depth > 0 {
     i = _prev_significant(tokens, i);
     if i < 0 {
@@ -653,7 +653,7 @@ fun _type_start_before(Vec<Token>* tokens, num idx) num {
 
 // True where no value expression can appear, which is what tells a
 // pointer star and generic arguments from arithmetic and comparisons.
-fun _in_decl_only(FmtState* s) bin {
+fun _in_decl_only(FmtState* s) flag {
   if s.in_fun_signature {
     ret true;
   }
@@ -672,10 +672,10 @@ fun _needs_space_at(
   num idx,
   Token prev,
   num angle_depth,
-  bin in_decl_only,
-  bin prev_unary,
-  bin block_brace
-) bin {
+  flag in_decl_only,
+  flag prev_unary,
+  flag block_brace
+) flag {
   Token cur = tokens.get(idx);
   str p = token_text(prev);
   str c = token_text(cur);
@@ -691,7 +691,7 @@ fun _needs_space_at(
   if _is_postfix_unary_op(c) && _is_postfix_operand_end(prev) {
     ret false;
   }
-  if equals(p, "imp") {
+  if equals(p, "use") {
     ret true;
   }
   // A leading dot opens an enum shorthand, which is a value, not a
@@ -802,7 +802,7 @@ fun _needs_space_at(
 
 // True when the operator at `idx` is written against its operand rather
 // than between two values.
-fun _is_unary_prefix(Vec<Token>* tokens, num idx, Token prev, bin has_prev) bin {
+fun _is_unary_prefix(Vec<Token>* tokens, num idx, Token prev, flag has_prev) flag {
   str c = token_text(tokens.get(idx));
   if !equals(c, "-") && !equals(c, "!") && !equals(c, "~") && !equals(c, "&") &&
     !equals(c, "*") && !equals(
@@ -994,7 +994,7 @@ fun _fit_condition_end(Vec<Token>* tokens, num from) num {
 // True for the two boolean-combinator operators, a long chain of which
 // may need to wrap - filling each line up to the width budget the same
 // way an over-long fit arm's own conditions do.
-fun _is_bool_chain_op(str text) bin {
+fun _is_bool_chain_op(str text) flag {
   ret equals(text, "||") || equals(text, "&&");
 }
 
@@ -1035,7 +1035,7 @@ fun _bool_chain_operand_end(Vec<Token>* tokens, num from) num {
 // starting at `start_col`, would run past `MAX_LINE_WIDTH`. False for
 // a shape `_fit_arm_end` doesn't recognize, the same "don't guess"
 // stance every other width check here takes.
-fun _measure_fit_arm_wrap(Vec<Token>* tokens, num from, num start_col) bin {
+fun _measure_fit_arm_wrap(Vec<Token>* tokens, num from, num start_col) flag {
   num arm_end = _fit_arm_end(tokens, from);
   if arm_end < 0 {
     ret false;
@@ -1091,9 +1091,9 @@ fun _written_text(str src, Vec<num>* starts, Token t) str {
 // when the line has none. A `//` inside a string, a character literal,
 // or a raw string is part of the value, not a comment.
 fun _trailing_comment_start(str line) num {
-  bin in_str = false;
-  bin in_chr = false;
-  bin in_raw = false;
+  flag in_str = false;
+  flag in_chr = false;
+  flag in_raw = false;
   num first_code = -1;
   num i = 0;
   let n = len(line);
@@ -1294,7 +1294,7 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    bin ends = false;
+    flag ends = false;
     if t.type == .Symbol {
       let c = _cval_of(t);
       if c == '{' {
@@ -1321,7 +1321,7 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
       chunk.end = last;
       chunk.kind = .Rest;
       let word = _chunk_keyword(tokens, start, last);
-      if equals(word, "imp") {
+      if equals(word, "use") {
         chunk.kind = .Import;
       } elif keyword_is_datatype(word) || equals(word, "let") {
         // A global written with a builtin type, unlike a declaration
@@ -1381,7 +1381,7 @@ fun _group_top_level(Vec<Token>* tokens) Vec<Token> {
   num pass = 0;
   for pass < 3 {
     num k = 0;
-    bin any = false;
+    flag any = false;
     for k < chunks.len {
       Chunk chunk = chunks.get(k);
       num want = 2;
@@ -1454,7 +1454,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // Every top-level declaration stands apart from the one before it.
     // A declaration with a body stands apart from the one before it,
     // while consecutive prototypes stay together.
-    bin after_block = s.has_prev && equals(token_text(s.prev), "}");
+    flag after_block = s.has_prev && equals(token_text(s.prev), "}");
     if s.brace_kinds.len == 0 && s.open_delims == 0 && s.at_stmt_start && after_block &&
       _is_block_keyword(text) {
       if s.pending_newlines < 2 {
@@ -1477,7 +1477,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         i = i + 1;
         continue;
       }
-      bin stays = equals(text, ",") || equals(text, ";") || equals(text, ")") ||
+      flag stays = equals(text, ",") || equals(text, ";") || equals(text, ")") ||
         equals(text, "]");
       if stays && s.pending_newlines == 0 {
         s.write(text);
@@ -1489,7 +1489,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         }
         continue;
       }
-      bin trailing = t.type == .Comment && s.pending_newlines == 0;
+      flag trailing = t.type == .Comment && s.pending_newlines == 0;
       if trailing {
         s.space();
         s.write(text);
@@ -1537,11 +1537,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A literal follows the name of its type, or the generic arguments
     // of that name, as in `Box<T>{value = x}`. The statement it sits in
     // is what separates it from a declaration's block.
-    bin literal_lead = s.prev.type == .Identifier || _is_dot_run(prev_text) ||
+    flag literal_lead = s.prev.type == .Identifier || _is_dot_run(prev_text) ||
       _is_close_run(prev_text) > 0;
     // A return type written after a parameter list also introduces a
     // body, as a method inside an impl block does.
-    bin type_after_params = false;
+    flag type_after_params = false;
     if s.has_prev {
       num type_idx = _type_start_before(&tokens, i);
       if type_idx > 0 {
@@ -1551,9 +1551,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
         }
       }
     }
-    bin block_context = _is_block_keyword(s.stmt_first) || equals(prev_text, ")") ||
+    flag block_context = _is_block_keyword(s.stmt_first) || equals(prev_text, ")") ||
       type_after_params;
-    bin is_literal_brace = equals(text, "{") && s.has_prev && literal_lead && !block_context;
+    flag is_literal_brace = equals(text, "{") && s.has_prev && literal_lead && !block_context;
 
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
@@ -1568,7 +1568,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         if width <= MAX_LINE_WIDTH {
           s.flush_newlines();
           num j = i;
-          bin arm_unary = false;
+          flag arm_unary = false;
           for j <= close {
             Token it = tokens.get(j);
             if it.type == .NewLine {
@@ -1577,9 +1577,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
             }
             str itext = _written_text(src, &starts, it);
             str last = token_text(s.prev);
-            bin empty = equals(last, "{") && equals(itext, "}");
-            bin pad = !empty && (equals(last, "{") || equals(itext, "}"));
-            bin separated = equals(last, ",") || equals(last, ":");
+            flag empty = equals(last, "{") && equals(itext, "}");
+            flag pad = !empty && (equals(last, "{") || equals(itext, "}"));
+            flag separated = equals(last, ",") || equals(last, ":");
             if !s.at_line_start && s.has_prev &&
               (pad || separated || _needs_space_at(
               &tokens,
@@ -1655,7 +1655,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // A closing brace dedents before it is written, and always starts
     // its own line.
     if equals(text, "}") {
-      bin closed_arm_body = false;
+      flag closed_arm_body = false;
       if s.brace_kinds.len > 0 {
         let kind = s.brace_kinds.pop();
         if kind == 2 && s.function_body_depth > 0 {
@@ -1737,13 +1737,13 @@ pub fun format_source(str src, str filename) Result<str, str> {
     // over-long fit arm's own conditions, which fill each line up to
     // the width budget instead of one condition per line, the same
     // way a long function call's own wrapped arguments do.
-    bin fit_condition_comma = s.fit_block_depth > 0 && s.open_delims == 0 &&
+    flag fit_condition_comma = s.fit_block_depth > 0 && s.open_delims == 0 &&
       !equals(prev_text, "}") && s.fit_body_depth_at_start.len > 0 &&
       s.function_body_depth == s.fit_body_depth_at_start.get(
       s.fit_body_depth_at_start.len - 1
     );
     if equals(text, ",") {
-      bin fit_fill_break = false;
+      flag fit_fill_break = false;
       if fit_condition_comma && s.fit_arm_wrap {
         num next_end = _fit_condition_end(&tokens, i + 1);
         num next_width = _inline_width(&tokens, i + 1, next_end - 1);
@@ -1770,7 +1770,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
       // one nested inside a call's or index's own parens defers to
       // whatever wrapping that construct already does for its
       // contents.
-      bin chain_fill_break = false;
+      flag chain_fill_break = false;
       if s.open_delims == 0 {
         num next_end = _bool_chain_operand_end(&tokens, i + 1);
         num next_width = _inline_width(&tokens, i + 1, next_end - 1);
@@ -1868,7 +1868,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
     // A pointer star belongs to the type before it, so what follows is
     // a name and takes its own space.
-    bin pointer_star = equals(text, "*") &&
+    flag pointer_star = equals(text, "*") &&
       _is_pointer_star(&tokens, i, s.prev, _in_decl_only(&s));
     s.prev_unary = !pointer_star && _is_unary_prefix(&tokens, i, s.prev, s.has_prev);
     // A statement's first word decides how its braces read, so it is

@@ -1,6 +1,6 @@
 // Log helpers example.
 
-imp std.log;
+use std.log;
 
 fun main() {
   Logger l = logger_init(.Debug);

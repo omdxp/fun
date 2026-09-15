@@ -2,8 +2,8 @@
 // - Using a C typedef type (`size_t`) in Fun code
 // - Doing arithmetic and printing with `%zu`
 
-imp std.c.io;
-imp std.c.def;
+use std.c.io;
+use std.c.def;
 
 fun main() {
   size_t n = 0;

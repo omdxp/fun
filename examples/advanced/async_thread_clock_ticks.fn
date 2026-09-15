@@ -3,9 +3,9 @@
 // The worker thread uses recv_timeout as a pacing mechanism:
 // if no stop signal arrives within interval_ms, it emits the next tick.
 
-imp std.c.io;
-imp std.thread;
-imp std.channel;
+use std.c.io;
+use std.thread;
+use std.channel;
 
 compound ClockWorker {
   Channel<num>* ticks;
@@ -68,7 +68,7 @@ async fun main() {
 
   num observed = 0;
   num last_tick = 0;
-  bin stop_sent = false;
+  flag stop_sent = false;
 
   for {
     num tick = 0;

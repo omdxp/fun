@@ -19,7 +19,7 @@
 // Each `MockClock` is an ordinary local value a test owns, so concurrently
 // running tests never share or race over fake time.
 
-imp std.time;
+use std.time;
 
 // Uniform "what time is it" access, implemented by both `SystemClock` (the
 // real clock) and `MockClock` (a fully controllable fake one for tests).

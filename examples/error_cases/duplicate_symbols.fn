@@ -1,5 +1,5 @@
-imp duplicate_symbols.mod1;
-imp duplicate_symbols.mod2;
+use duplicate_symbols.mod1;
+use duplicate_symbols.mod2;
 
 fun main() {
 }

@@ -1,7 +1,7 @@
 // Minimal HTTP server example (POSIX sockets).
 
-imp std.c.io;
-imp std.net;
+use std.c.io;
+use std.net;
 
 fun main() {
   num port = 8080;

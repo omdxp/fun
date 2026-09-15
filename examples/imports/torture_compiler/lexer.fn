@@ -1,8 +1,8 @@
 // Lexer module: turns source text into a Vec<Token>.
 
-imp std.string;
-imp std.vec;
-imp token;
+use std.string;
+use std.vec;
+use token;
 
 pub compound Lexer {
   str src;
@@ -16,11 +16,11 @@ pub fun lexer_new(str src) Lexer {
   ret l;
 }
 
-fun _is_digit(chr c) bin {
+fun _is_digit(chr c) flag {
   ret c >= '0' && c <= '9';
 }
 
-fun _is_alpha(chr c) bin {
+fun _is_alpha(chr c) flag {
   ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 

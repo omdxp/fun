@@ -1,8 +1,8 @@
 // State for codegen (C emission): the growing output buffer and current
 // indentation depth.
 
-imp std.string;
-imp ..lexer.token;
+use std.string;
+use ..lexer.token;
 
 pub compound CodegenState {
   StringBuilder out;
@@ -16,8 +16,8 @@ pub compound CodegenState {
   // (each statement writes its own trailing newline before the next
   // one's `write_indent` call), which is exactly where a `#line`
   // directive is valid C - it must start its own line.
-  bin debug_info;
-  bin has_pending_line_directive;
+  flag debug_info;
+  flag has_pending_line_directive;
   Pos pending_line_directive;
 }
 

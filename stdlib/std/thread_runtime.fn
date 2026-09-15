@@ -4,10 +4,10 @@
 // selection is sourced from std.runtime_backend; return codes come from the
 // selected backend implementation.
 
-imp std.runtime_backend;
-imp std.thread;
-imp std.thread_backend_posix;
-imp std.thread_backend_windows;
+use std.runtime_backend;
+use std.thread;
+use std.thread_backend_posix;
+use std.thread_backend_windows;
 
 // Return the active thread runtime backend id.
 // 
@@ -24,12 +24,12 @@ pub fun thread_runtime_backend_name() str {
 }
 
 // True when the active thread runtime backend is POSIX.
-pub fun thread_runtime_backend_is_posix() bin {
+pub fun thread_runtime_backend_is_posix() flag {
   ret runtime_backend_is_posix();
 }
 
 // True when the active thread runtime backend is Windows.
-pub fun thread_runtime_backend_is_windows() bin {
+pub fun thread_runtime_backend_is_windows() flag {
   ret runtime_backend_is_windows();
 }
 
@@ -105,7 +105,7 @@ pub compound RuntimeAsyncTask {
   // Start result from runtime_thread_start.
   num start_rc;
   // True while the thread is considered active.
-  bin active;
+  flag active;
 }
 
 // Create an inactive runtime async task handle.
@@ -129,7 +129,7 @@ pub fun runtime_async_spawn(raw* entry, raw* arg) RuntimeAsyncTask {
 
 impl RuntimeAsyncTask {
   // True while the task has an active thread.
-  pub is_active() bin {
+  pub is_active() flag {
     ret self.active;
   }
 

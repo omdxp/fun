@@ -8,9 +8,9 @@
 // type must match `E` exactly). Both work anywhere an expression is
 // legal, not just statement-final.
 
-imp std.c.io;
-imp std.option;
-imp std.result;
+use std.c.io;
+use std.option;
+use std.result;
 
 fun half(num x) Option<num> {
   if x % 2 == 1 {

@@ -1,10 +1,10 @@
 // Fallible path operations return a Result; read the value with `unwrap_or` or
 // match with `fit`.
 
-imp std.c.io;
-imp std.path;
-imp std.result;
-imp std.error;
+use std.c.io;
+use std.path;
+use std.result;
+use std.error;
 
 fun main() num {
   Result<str, Error> j = try_path_join("/tmp", "file.txt");

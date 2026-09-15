@@ -6,24 +6,24 @@
 // one with `expect`, and an expectation that never fires is an error
 // rather than a silent no-op.
 
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..parser.import_resolver;
-imp ..parser.datatype_defs;
-imp std.string;
-imp std.vec;
-imp std.set;
-imp std.map;
-imp std.option;
-imp std.result;
-imp std.io;
+use ..ast.ast;
+use ..lexer.token;
+use ..parser.import_resolver;
+use ..parser.datatype_defs;
+use std.string;
+use std.vec;
+use std.set;
+use std.map;
+use std.option;
+use std.result;
+use std.io;
 
 // One finding: what was noticed, and where.
 pub compound Warning {
   WarningId id;
   str message;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
 }
 
 // The name a warning is written as in `allow` and `expect`.
@@ -52,7 +52,7 @@ compound Analysis {
   Vec<Warning> found;
   // Set when a declaration nothing reads is worth reporting, which is
   // asked for rather than assumed.
-  bin report_unused;
+  flag report_unused;
   // What each enum declares, so a `fit` over one can be told whether it
   // covers every variant.
   Map<str, Vec<str>> enum_variants;
@@ -69,7 +69,7 @@ compound Analysis {
   Map<str, str> channel_element_types;
   // True while walking a function that creates a wait group with no
   // room of its own.
-  bin waits_on_unsized_group;
+  flag waits_on_unsized_group;
   // The file being compiled. A program is merged with everything it
   // imports, and what those files declare and read is their own
   // business, so only this one is judged.
@@ -151,7 +151,7 @@ impl Analysis {
 
 // True when a statement always leaves the scope it is written in, so
 // anything after it is never reached.
-fun _always_exits(Node* stmt) bin {
+fun _always_exits(Node* stmt) flag {
   if stmt == nil {
     ret false;
   }
@@ -167,7 +167,7 @@ fun _always_exits(Node* stmt) bin {
 
 // True when `node` reads the address of something declared in the body
 // being walked, which stops existing when that body returns.
-fun _takes_address_of_local(Node* node, Set<str>* locals) bin {
+fun _takes_address_of_local(Node* node, Set<str>* locals) flag {
   if node == nil {
     ret false;
   }
@@ -193,7 +193,7 @@ fun _takes_address_of_local(Node* node, Set<str>* locals) bin {
 
 // The value an expression is known to hold at compile time, when it is
 // written as a literal truth value.
-fun _constant_truth(Node* node) Option<bin> {
+fun _constant_truth(Node* node) Option<flag> {
   if node == nil {
     ret .None;
   }
@@ -274,7 +274,7 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
 }
 
 // True when a statement hands a value back on every path through it.
-fun _always_returns(Node* stmt) bin {
+fun _always_returns(Node* stmt) flag {
   if stmt == nil {
     ret false;
   }
@@ -342,7 +342,7 @@ fun _always_returns(Node* stmt) bin {
 
 // True when the branches written after an `if` hand a value back on
 // every path, which is what an `else` chain amounts to.
-fun _rest_always_returns(Vec<Node*>* statements, num from) bin {
+fun _rest_always_returns(Vec<Node*>* statements, num from) flag {
   num i = from;
   for i < statements.len {
     Node* s = statements.get(i);
@@ -570,7 +570,7 @@ fun _plain_name(Node* node) str {
 
 // True when a body creates a wait group with no room, which only works
 // if something grows it before the tasks arrive.
-fun _creates_empty_wait_group(Node* body) bin {
+fun _creates_empty_wait_group(Node* body) flag {
   if body == nil {
     ret false;
   }
@@ -645,7 +645,7 @@ fun _flatten_arguments(Node* node, Vec<Node*>* out) {
 
 // True when `body` writes through `param`, either into a field it
 // points at or into the value itself.
-fun _writes_through(Node* body, str param) bin {
+fun _writes_through(Node* body, str param) flag {
   if body == nil {
     ret false;
   }
@@ -693,7 +693,7 @@ fun _writes_through(Node* body, str param) bin {
 
 // True when an expression reaches into what `param` points at, as the
 // left side of an assignment does.
-fun _reads_through(Node* node, str param) bin {
+fun _reads_through(Node* node, str param) flag {
   if node == nil {
     ret false;
   }
@@ -712,7 +712,7 @@ fun _reads_through(Node* node, str param) bin {
   ret false;
 }
 
-fun _is_assignment_op(str op) bin {
+fun _is_assignment_op(str op) flag {
   if equals(op, "=") {
     ret true;
   }
@@ -752,7 +752,7 @@ fun _address_of_name(Node* node) str {
 
 // True when a call names `method` on any receiver, which is how a
 // wait group is grown or a value is guarded.
-fun _calls_method(Node* node, str method) bin {
+fun _calls_method(Node* node, str method) flag {
   if node == nil {
     ret false;
   }
@@ -794,7 +794,7 @@ fun _calls_method(Node* node, str method) bin {
 }
 
 // True when a body forks a task.
-fun _contains_fork(Node* node) bin {
+fun _contains_fork(Node* node) flag {
   if node == nil {
     ret false;
   }
@@ -832,7 +832,7 @@ impl Analysis {
             _ -> {}
           }
         }
-        bin exited = false;
+        flag exited = false;
         for s : body.statements {
           if exited {
             self.report(
@@ -1001,7 +1001,7 @@ impl Analysis {
 
   // True when the type of `name` carries something that guards access to
   // it, which is what makes sharing it safe.
-  guards_itself(str name) bin {
+  guards_itself(str name) flag {
     let declared = self.local_types.at(name);
     if declared.is_none() {
       ret false;
@@ -1266,7 +1266,7 @@ impl Analysis {
   // method-call operand isn't tracked with enough to unwrap and
   // resolves to "" instead of guessing.
   _resolve_propagation_type(Node* operand) str {
-    bin is_call = false;
+    flag is_call = false;
     str callee_name = "";
     fit operand.kind {
       .Expression(ce) -> {
@@ -1524,7 +1524,7 @@ impl Analysis {
   // Reports a top-level declaration nothing reads. A public one is part
   // of what the file offers, so its use is not visible here.
   // True when a node was written in the file being compiled.
-  belongs_here(Node* node) bin {
+  belongs_here(Node* node) flag {
     if equals(self.file, "") {
       ret true;
     }
@@ -1597,7 +1597,7 @@ impl Analysis {
           if module.has_alias {
             used_as = module.alias;
           }
-          bin earned = _import_is_read(used_as, &read) ||
+          flag earned = _import_is_read(used_as, &read) ||
             _module_is_read(
             module.path,
             self.file,
@@ -1731,7 +1731,7 @@ pub fun c_builtin_owner(str name) str {
 
 // True when any name the file reads is a C builtin the imported module
 // documents.
-fun _module_owns_a_read_builtin(str path, Set<str>* read) bin {
+fun _module_owns_a_read_builtin(str path, Set<str>* read) flag {
   Vec<str> names = read.keys();
   defer names.free();
   num i = 0;
@@ -1746,7 +1746,7 @@ fun _module_owns_a_read_builtin(str path, Set<str>* read) bin {
 
 // True for a module whose purpose is to document the C names the
 // language accepts without a declaration.
-fun _module_documents_builtins(str path) bin {
+fun _module_documents_builtins(str path) flag {
   fit path {
     "std.c.def", "std.c.io", "std.c.mem", "std.c.limits", "std.c.time", "std.c.thread",
     "std.c.process" -> { ret true; }
@@ -1756,7 +1756,7 @@ fun _module_documents_builtins(str path) bin {
 
 // True when a module declares nothing of its own and exists to forward
 // what it imports, which is reason enough to import it.
-fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
+fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) flag {
   // A module that documents C builtins declares nothing either, but it
   // exists to name those, not to forward another module.
   if _module_documents_builtins(path) {
@@ -1766,7 +1766,7 @@ fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
   if equals(resolved, "") {
     ret false;
   }
-  bin declares_something = false;
+  flag declares_something = false;
   num i = 0;
   for i < program.len {
     Node* node = &program.data[i];
@@ -1789,7 +1789,7 @@ fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) bin {
 // True when the file compiled reads any name the imported module
 // declares. An import earns its place by what it brings in, which is
 // not always named after the module itself (`NULL` from `std.c.def`).
-fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) bin {
+fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) flag {
   str resolved = _normalize_path(resolve_import_path(importer, path));
   if equals(resolved, "") {
     ret false;
@@ -1876,7 +1876,7 @@ fun _unmangled_method_name(str mangled, str type_name) str {
 // True when anything a module offers is read. An import is written as a
 // dotted path, while what it brings in is read by the last name in that
 // path or by whatever the file calls it.
-fun _import_is_read(str path, Set<str>* read) bin {
+fun _import_is_read(str path, Set<str>* read) flag {
   if read.has(path) {
     ret true;
   }
@@ -1900,12 +1900,12 @@ fun _import_is_read(str path, Set<str>* read) bin {
 pub compound UnmetExpectation {
   str message;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
 }
 
 // Reads a program and reports what it notices, or the `expect` that
 // never fired.
-pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, bin report_unused, str file) Result<Vec<Warning>, UnmetExpectation> {
+pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str file) Result<Vec<Warning>, UnmetExpectation> {
   Analysis state = _analysis_new();
   state.report_unused = report_unused;
   state.file = file;

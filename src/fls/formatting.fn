@@ -6,12 +6,12 @@
 // says so honestly, rather than a diff that claims more precision than
 // was computed.
 
-imp documents;
-imp protocol;
-imp ..cli.fmt;
-imp std.string;
-imp std.result;
-imp std.c.mem;
+use documents;
+use protocol;
+use ..cli.fmt;
+use std.string;
+use std.result;
+use std.c.mem;
 
 // The edits that format `doc`, as the result a client is sent. Text that
 // cannot be read is left alone: refusing to format is better than

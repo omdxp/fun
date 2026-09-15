@@ -12,13 +12,13 @@
 // hot per-keystroke paths (hover, completion, document symbols) never
 // touch this table at all.
 
-imp documents;
-imp analysis;
-imp symbols;
-imp std.map;
-imp std.vec;
-imp std.string;
-imp std.option;
+use documents;
+use analysis;
+use symbols;
+use std.map;
+use std.vec;
+use std.string;
+use std.option;
 
 // One declaration as the table indexes it: the Declaration itself, plus
 // the document URI that declares it. Declaration.pos.filename is a

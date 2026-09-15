@@ -7,13 +7,13 @@
 // never `std.process` (the fetching engine's own git-shelling stays in
 // `deps.fn`, which imports this file, not the other way around).
 
-imp std.toml;
-imp std.map;
-imp std.vec;
-imp std.string;
-imp std.option;
-imp std.fs;
-imp std.sys;
+use std.toml;
+use std.map;
+use std.vec;
+use std.string;
+use std.option;
+use std.fs;
+use std.sys;
 
 // One dependency, fully resolved: an exact commit pinned, and fetched
 // into the shared cache. `local_root` is `path` joined onto the

@@ -1,4 +1,4 @@
-imp std.io as io1;
+use std.io as io1;
 
 pub fun greet(str name) {
   io1.print_fmt("Hello, {str}!", name);

@@ -3,10 +3,10 @@
 // Run:
 // fun -in .\examples\advanced\warning_allow.fn
 
-imp std.c.io;
+use std.c.io;
 
 fun main() {
-  bin x = true;
+  flag x = true;
 
   // This suppresses the next fit_non_exhaustive warning.
   allow fit_non_exhaustive, "temporary partial branch set during migration";

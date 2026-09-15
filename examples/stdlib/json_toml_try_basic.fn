@@ -1,11 +1,11 @@
 // Parsing is fallible, so `parse` / `try_parse_document` return a Result. Match it
 // with `fit`, or recover a fallback with `unwrap_or` after mapping.
 
-imp std.c.io;
-imp std.json;
-imp std.toml;
-imp std.result;
-imp std.error;
+use std.c.io;
+use std.json;
+use std.toml;
+use std.result;
+use std.error;
 
 fun main() num {
   // JSON parse returns Result<JsonValue, Error>.

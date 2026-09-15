@@ -1,10 +1,10 @@
 // Formatter cases: an unformatted input, and the layout it is given.
 
-imp ..cli.fmt;
-imp std.string;
-imp std.result;
-imp std.io;
-imp std.vec;
+use ..cli.fmt;
+use std.string;
+use std.result;
+use std.io;
+use std.vec;
 
 test "formats file in-place" {
   str src = `fun  add(num a,num b) num{ret a+b;}
@@ -109,8 +109,8 @@ test "groups imports and globals at top" {
   `num x=1;
   `imp foo.bar;
   `num y=2;`;
-  str want = `imp std.c.io;
-  `imp foo.bar;
+  str want = `use std.c.io;
+  `use foo.bar;
   `
   `num x = 1;
   `num y = 2;
@@ -129,7 +129,7 @@ test "keeps unused warning controls attached to grouped imports and globals" {
   `num value=1;
   `fun main(){}`;
   str want = `allow unused_import, "keep attached";
-  `imp std.option;
+  `use std.option;
   `
   `allow unused_variable, "keep attached";
   `num value = 1;
@@ -146,10 +146,10 @@ test "formats parent traversal imports" {
   `imp ..  defs.greeter;
   `imp .... defs.greeter;
   `fun main() void{ }`;
-  str want = `imp std.c.io;
-  `imp ..defs.user;
-  `imp ..defs.greeter;
-  `imp ....defs.greeter;
+  str want = `use std.c.io;
+  `use ..defs.user;
+  `use ..defs.greeter;
+  `use ....defs.greeter;
   `
   `fun main() void {
   `}`;
@@ -286,7 +286,7 @@ test "keeps space after ret before unary reference" {
 
 test "keeps space before unary minus after comparisons" {
   str src = `fun f(num x) bin{if x<=-1000000000{ret true;}ret false;}`;
-  str want = `fun f(num x) bin {
+  str want = `fun f(num x) flag {
   `  if x <= -1000000000 {
   `    ret true;
   `  }
@@ -375,7 +375,7 @@ test "wraps an over-long boolean chain, filling each line rather than one operan
     `(a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c')`
   ), "expected the whole chain not to still be on one line";
   num i = 0;
-  bin over_width = false;
+  flag over_width = false;
   Vec<str> lines = split(got, '\n');
   defer lines.free();
   for i < lines.len {
@@ -511,19 +511,19 @@ test "a postfix '?'/'!' followed by a chained field access stays glued, not spac
   assert contains(got, "to_result(1)!.x;"), "expected postfix '!' before '.field' to stay glued, no space";
 }
 
-test "'use'/'flag' format back to the current canonical spelling 'imp'/'bin'" {
-  str src = `use std.c.io;
+test "'imp'/'bin' format forward to the current canonical spelling 'use'/'flag'" {
+  str src = `imp std.c.io;
   `
   `fun main() num {
-  `  flag ok = true;
+  `  bin ok = true;
   `  if ok {
   `    printf("ok\n");
   `  }
   `  ret 0;
   `}`;
   str got = format_source(src, "t.fn").unwrap();
-  assert contains(got, "imp std.c.io;"), "expected 'use' to format back to the canonical 'imp'";
-  assert !contains(got, "use std.c.io;"), "expected no trace of the alternate spelling after formatting";
-  assert contains(got, "bin ok = true;"), "expected 'flag' to format back to the canonical 'bin'";
-  assert !contains(got, "flag ok"), "expected no trace of the alternate spelling after formatting";
+  assert contains(got, "use std.c.io;"), "expected 'imp' to format forward to the canonical 'use'";
+  assert !contains(got, "imp std.c.io;"), "expected no trace of the alternate spelling after formatting";
+  assert contains(got, "flag ok = true;"), "expected 'bin' to format forward to the canonical 'flag'";
+  assert !contains(got, "bin ok"), "expected no trace of the alternate spelling after formatting";
 }

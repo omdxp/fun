@@ -1,8 +1,8 @@
 // System utilities (process, environment, and randomness).
 
-imp std.c.mem;
-imp std.result;
-imp std.error;
+use std.c.mem;
+use std.result;
+use std.error;
 
 // Reads an environment variable, returning null if missing.
 pub fun env(str name) str {
@@ -24,12 +24,12 @@ pub fun env_or(str name, str fallback) str {
 // Sets an environment variable for this process, and so for every
 // process it starts afterward, since a child inherits what its parent
 // holds. Replaces a value already there.
-pub fun set_env(str name, str value) bin {
+pub fun set_env(str name, str value) flag {
   ret setenv(name, value, 1) == 0;
 }
 
 // Removes an environment variable, so a later read finds nothing.
-pub fun clear_env(str name) bin {
+pub fun clear_env(str name) flag {
   ret unsetenv(name) == 0;
 }
 

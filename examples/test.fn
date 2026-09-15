@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 // this calculates the factorial of a number
 fun factorial(num n) num {

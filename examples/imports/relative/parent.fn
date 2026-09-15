@@ -1,4 +1,4 @@
-imp child;
+use child;
 
 pub fun parent() {
   child();

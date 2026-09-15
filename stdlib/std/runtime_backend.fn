@@ -2,8 +2,8 @@
 // override, then FUN_RUNTIME_OS override, then host environment hints
 // (OS / OSTYPE), then fallback to POSIX.
 
-imp std.sys;
-imp std.c.string;
+use std.sys;
+use std.c.string;
 
 // Runtime backend id for POSIX platforms.
 pub const num RUNTIME_BACKEND_POSIX_ID = 1;
@@ -52,7 +52,7 @@ fun runtime_backend_id_from_os_name(str os_name) num {
   ret 0;
 }
 
-fun runtime_backend_detect_windows_hint() bin {
+fun runtime_backend_detect_windows_hint() flag {
   let os_env = env("OS");
   if os_env != nil && strcmp(os_env, "Windows_NT") == 0 {
     ret true;
@@ -106,11 +106,11 @@ pub fun runtime_backend_name() str {
 }
 
 // True when the selected backend is POSIX.
-pub fun runtime_backend_is_posix() bin {
+pub fun runtime_backend_is_posix() flag {
   ret runtime_backend_id() == RUNTIME_BACKEND_POSIX_ID;
 }
 
 // True when the selected backend is Windows.
-pub fun runtime_backend_is_windows() bin {
+pub fun runtime_backend_is_windows() flag {
   ret runtime_backend_id() == RUNTIME_BACKEND_WINDOWS_ID;
 }

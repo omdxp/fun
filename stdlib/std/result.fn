@@ -24,8 +24,8 @@
 // shorthand (`ret .Err(ParseErrorKind.UnexpectedToken);`) instead, since a
 // generic helper over an unconstrained `E` has nothing to infer it from.
 
-imp std.error;
-imp std.c.string;
+use std.error;
+use std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
 pub enum Result<T, E> {
@@ -35,7 +35,7 @@ pub enum Result<T, E> {
 
 impl Result<T, E> {
   // Return true when the result is Ok.
-  pub is_ok() bin {
+  pub is_ok() flag {
     fit *self {
       .Ok(v) -> { ret true; }
       .Err(e) -> { ret false; }
@@ -44,7 +44,7 @@ impl Result<T, E> {
   }
 
   // Return true when the result is Err.
-  pub is_err() bin {
+  pub is_err() flag {
     fit *self {
       .Ok(v) -> { ret false; }
       .Err(e) -> { ret true; }

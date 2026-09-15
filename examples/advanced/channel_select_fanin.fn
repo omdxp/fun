@@ -13,8 +13,8 @@
 // which channel fired (0 = self, 1 = other), and returns a status code (0 = ok,
 // 1 = both closed). A negative `timeout_ms` means wait forever.
 
-imp std.c.io;
-imp std.channel;
+use std.c.io;
+use std.channel;
 
 // Push `count` multiples of `step` onto `out`, then stop.
 async fun produce(Channel<num>* out, num step, num count) {

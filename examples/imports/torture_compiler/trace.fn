@@ -3,9 +3,9 @@
 // (sizeof(Trace<T>) inside a constrained generic function, monomorphized
 // Display) alongside the plain-enum AST machinery in ast.fn/eval.fn.
 
-imp std.c.mem;
-imp std.io;
-imp std.quirks;
+use std.c.mem;
+use std.io;
+use std.quirks;
 
 pub compound Trace<T: num | dec> {
   T value;

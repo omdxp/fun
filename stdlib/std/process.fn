@@ -1,12 +1,12 @@
 // Spawn child processes and capture (or inherit) their output.
 
-imp std.c.process;
-imp std.c.mem;
-imp std.string;
-imp std.result;
-imp std.error;
-imp std.channel;
-imp std.vec;
+use std.c.process;
+use std.c.mem;
+use std.string;
+use std.result;
+use std.error;
+use std.channel;
+use std.vec;
 
 // The outcome of a captured child process run: its exit status and the full
 // text it wrote to stdout/stderr.
@@ -78,7 +78,7 @@ fun _decode_wait_status(i32 status) num {
   num term_sig = status & 127;
   // Binding the comparison to a name avoids a parser edge case with a
   // leading parenthesized sub-expression followed by more operators.
-  bin exited_normally = term_sig == 0;
+  flag exited_normally = term_sig == 0;
   if exited_normally {
     ret (status >> 8) & 255;
   }
@@ -131,7 +131,7 @@ async fun _drain_pipe(num fd, Channel<str>* out) {
 // real allocations) inheriting one just because its parent happened
 // to be run under it can balloon memory catastrophically for no
 // benefit to anyone debugging the parent.
-fun _is_memory_debug_env_name(str name) bin {
+fun _is_memory_debug_env_name(str name) flag {
   if starts_with(name, "Malloc") || starts_with(name, "MALLOC_") {
     ret true;
   }

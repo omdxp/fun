@@ -8,9 +8,9 @@
 // Each worker squares its input, sends the result over a channel, then signals the
 // WaitGroup. Main waits for all workers, then drains the results.
 
-imp std.c.io;
-imp std.channel;
-imp std.task;
+use std.c.io;
+use std.channel;
+use std.task;
 
 // A virtual-thread body: square `v`, hand the result back, and signal completion.
 async fun square_into(Channel<num>* out, WaitGroup* wg, num v) {

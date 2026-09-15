@@ -1,5 +1,5 @@
-imp std.c.io;
-imp mod as m;
+use std.c.io;
+use mod as m;
 
 async fun main() {
   m.Counter c;

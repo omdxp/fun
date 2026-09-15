@@ -2,10 +2,10 @@
 // synchronization operations. Backend selection comes from
 // std.runtime_backend; return codes come from the selected backend.
 
-imp std.runtime_backend;
-imp std.sync;
-imp std.sync_backend_posix;
-imp std.sync_backend_windows;
+use std.runtime_backend;
+use std.sync;
+use std.sync_backend_posix;
+use std.sync_backend_windows;
 
 // Active sync runtime backend id (1: POSIX, 2: Windows).
 pub fun sync_runtime_backend_id() num {
@@ -18,12 +18,12 @@ pub fun sync_runtime_backend_name() str {
 }
 
 // True when the active sync runtime backend is POSIX.
-pub fun sync_runtime_backend_is_posix() bin {
+pub fun sync_runtime_backend_is_posix() flag {
   ret runtime_backend_is_posix();
 }
 
 // True when the active sync runtime backend is Windows.
-pub fun sync_runtime_backend_is_windows() bin {
+pub fun sync_runtime_backend_is_windows() flag {
   ret runtime_backend_is_windows();
 }
 

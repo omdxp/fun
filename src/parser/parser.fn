@@ -4,20 +4,20 @@
 // `asm`/inline-assembly is not parsed; the lexer defers raw asm-body
 // lexing to match.
 
-imp parse_state;
-imp datatype_defs;
-imp expressionable_defs;
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..lexer.lexer;
-imp ..semantics.scope;
-imp ..semantics.symbol;
-imp std.vec;
-imp std.string;
-imp std.option;
-imp std.io;
-imp std.c.io;
-imp std.c.mem;
+use parse_state;
+use datatype_defs;
+use expressionable_defs;
+use ..ast.ast;
+use ..lexer.token;
+use ..lexer.lexer;
+use ..semantics.scope;
+use ..semantics.symbol;
+use std.vec;
+use std.string;
+use std.option;
+use std.io;
+use std.c.io;
+use std.c.mem;
 
 // Maximum recursive-descent depth for the expression parser. Set well
 // above any plausible hand-written expression, but low enough that the
@@ -204,7 +204,7 @@ impl ParseState {
 
   // True if the next significant token is an `Operator` with text `op`,
   // without consuming it.
-  pub next_token_is_operator(str op) bin {
+  pub next_token_is_operator(str op) flag {
     fit self.token_peek_next() {
       .Some(t) -> { ret token_is_operator(t, op); }
       .None -> { ret false; }
@@ -213,7 +213,7 @@ impl ParseState {
 
   // True if the next significant token is the `Keyword` `keyword`, without
   // consuming it.
-  pub next_token_is_keyword(str keyword) bin {
+  pub next_token_is_keyword(str keyword) flag {
     fit self.token_peek_next() {
       .Some(t) -> { ret token_is_keyword(t, keyword); }
       .None -> { ret false; }
@@ -222,7 +222,7 @@ impl ParseState {
 
   // True if the next significant token is the `Symbol` `c`, without
   // consuming it.
-  pub next_token_is_symbol(chr c) bin {
+  pub next_token_is_symbol(chr c) flag {
     fit self.token_peek_next() {
       .Some(t) -> { ret token_is_symbol(t, c); }
       .None -> { ret false; }
@@ -232,7 +232,7 @@ impl ParseState {
   // True if the next significant token opens a generic-argument list: a
   // `<` (as an `Operator`, the common case, or a lexed `Symbol` in the rare
   // context where it wasn't combined into a longer operator).
-  pub next_token_is_angle_open() bin {
+  pub next_token_is_angle_open() flag {
     fit self.token_peek_next() {
       .Some(t) -> {
         fit t.type {
@@ -265,7 +265,7 @@ impl ParseState {
         if t.type != .Operator {
           ret;
         }
-        bin is_shr = false;
+        flag is_shr = false;
         fit t.data {
           .Sval(s) -> { is_shr = equals(s, ">>"); }
           _ -> {}
@@ -295,7 +295,7 @@ impl ParseState {
         if t.type != .Operator {
           ret;
         }
-        bin is_shl = false;
+        flag is_shl = false;
         fit t.data {
           .Sval(s) -> { is_shl = equals(s, "<<"); }
           _ -> {}
@@ -371,7 +371,7 @@ impl ParseState {
   // Expects the next significant token to be the symbol `c`. Reports and
   // returns an error if it is anything else.
   pub expect_sym(chr c) Option<ParseErrorKind> {
-    bin matched = false;
+    flag matched = false;
     fit self.token_next() {
       .Some(t) -> {
         if t.type == .Symbol {
@@ -395,7 +395,7 @@ impl ParseState {
   // Expects the next significant token to be the operator `op`. Reports and
   // returns an error if it is anything else.
   pub expect_op(str op) Option<ParseErrorKind> {
-    bin matched = false;
+    flag matched = false;
     fit self.token_next() {
       .Some(t) -> { matched = token_is_operator(t, op); }
       .None -> {}
@@ -412,7 +412,7 @@ impl ParseState {
   // Expects the next significant token to be the keyword `keyword`. Reports
   // and returns an error if it is anything else.
   pub expect_keyword(str keyword) Option<ParseErrorKind> {
-    bin matched = false;
+    flag matched = false;
     fit self.token_next() {
       .Some(t) -> { matched = token_is_keyword(t, keyword); }
       .None -> {}
@@ -551,7 +551,7 @@ impl ParseState {
     }
     self.token_next(); // consume '<'
 
-    bin has_constraints = false;
+    flag has_constraints = false;
 
     for true {
       let tok = self.token_next();
@@ -736,7 +736,7 @@ impl ParseState {
 
     DataType* rtype = malloc(sizeof(DataType));
     *rtype = dtype_new();
-    bin has_rtype_tok = false;
+    flag has_rtype_tok = false;
     fit self.token_peek_next() {
       .Some(t) -> {
         if t.type == .Identifier {
@@ -879,7 +879,7 @@ impl ParseState {
   // param) from `impl Vec<num> { ... }` (a concrete monomorphizing impl).
   // Every segment must be a bare identifier, optionally with `:
   // constraint | constraint` bounds, all the way to the closing `>`/`>>`.
-  pub impl_generic_args_are_params() bin {
+  pub impl_generic_args_are_params() flag {
     num off = 0;
     let first_opt = self.token_peek_n(off);
     if first_opt.is_none() {
@@ -891,7 +891,7 @@ impl ParseState {
     }
     off = off + 1;
 
-    bin saw_any = false;
+    flag saw_any = false;
     for true {
       let tok_opt = self.token_peek_n(off);
       if tok_opt.is_none() {
@@ -1008,7 +1008,7 @@ impl ParseState {
   // followed by `{`, once any generic-argument list (`<...>`) between them
   // is skipped over: the shape of a compound-literal initializer
   // (`Point{...}`, `Box<num>{...}`).
-  pub looks_like_compound_init() bin {
+  pub looks_like_compound_init() flag {
     num off = self.skip_generic_args_tokens(1);
     let next_opt = self.token_peek_n(off);
     if next_opt.is_none() {
@@ -1020,7 +1020,7 @@ impl ParseState {
   // Same lookahead as `looks_like_compound_init`, but for a bare type
   // reference used as `sizeof(...)`'s sole argument (`sizeof(Trace<dec>)`).
   // The closing token is `)`, not `{`, since there's no literal body here.
-  pub looks_like_sizeof_generic_type() bin {
+  pub looks_like_sizeof_generic_type() flag {
     num off = self.skip_generic_args_tokens(1);
     if off == 1 {
       ret false;
@@ -1113,7 +1113,7 @@ impl ParseState {
 
   // True when `name` is a top-level `compound`/`enum`/`quirk` declared
   // anywhere in the file, per `prescan_forward_type_names`.
-  pub is_forward_declared_type(str name) bin {
+  pub is_forward_declared_type(str name) flag {
     ret self.forward_type_names.has(name);
   }
 
@@ -1124,7 +1124,7 @@ impl ParseState {
   // a type declared later in the same file needs the separate
   // `is_forward_declared_type` check, kept apart since it recognizes
   // enum/quirk names too, which this deliberately doesn't.
-  pub is_known_compound_symbol(str name) bin {
+  pub is_known_compound_symbol(str name) flag {
     let maybe_sym = self.get_symbol(name);
     if maybe_sym.is_some() {
       let maybe_node = get_node_symbol(maybe_sym.unwrap());
@@ -1145,7 +1145,7 @@ impl ParseState {
   // `Function` declaration -- one of the conditions gating whether
   // `name<T1,T2>(...)` parses as an explicit generic call rather than a
   // chained comparison. Mirrors `is_known_compound_symbol`.
-  pub is_known_function(str name) bin {
+  pub is_known_function(str name) flag {
     let maybe_sym = self.get_symbol(name);
     if maybe_sym.is_some() {
       let maybe_node = get_node_symbol(maybe_sym.unwrap());
@@ -1203,14 +1203,14 @@ pub compound Parser {
 
   // The most recently consumed significant token.
   Token last_token;
-  bin has_last_token;
+  flag has_last_token;
 
   // The body/function node currently being parsed, used to stamp newly
   // created nodes' `binded` context (see `create_node`).
   Node* current_body;
-  bin has_current_body;
+  flag has_current_body;
   Node* current_function;
-  bin has_current_function;
+  flag has_current_function;
 
   // Current native-recursion depth of the recursive-descent expression
   // parser. Guards against stack-overflow crashes on pathological input.
@@ -1218,19 +1218,19 @@ pub compound Parser {
 
   // True while parsing a `fit` arm condition, where pattern bindings like
   // `Enum.Variant(x, y)` introduce new identifiers not yet in scope.
-  bin in_fit_condition;
+  flag in_fit_condition;
 
   // True for the entire duration of parsing a `fit` statement. Stops the
   // general expression loop from swallowing a following `->` as a binary
   // operator (it's only ever the fit-arm delimiter). Without this,
   // `fit x { 1 -> { a; } ...` over-consumes past `1` into the arm body.
-  bin in_fit_statement;
+  flag in_fit_statement;
 
   // True while parsing a bounded operand (`await expr`, `fork call`, a
   // channel receive `<-ch`) that must stop at the first binary operator:
   // `await f(x) + 1` is `(await f(x)) + 1`, not `await (f(x) + 1)`.
   // Postfix continuations (`(`, `[`, `.`) still continue the primary.
-  bin stop_at_binary_op;
+  flag stop_at_binary_op;
 
   // True while parsing a value expression that must stop at a top-level
   // comma rather than treating it as the comma operator, e.g. a
@@ -1238,7 +1238,7 @@ pub compound Parser {
   // this, `x`'s value would greedily consume `1, y = 2`. Unlike
   // `stop_at_binary_op`, this stops unconditionally; a comma nested
   // inside `(...)`/`[...]` is unaffected (`f(a, b)` still parses fully).
-  bin stop_at_comma;
+  flag stop_at_comma;
 
   // Explicit type arguments parsed right before a call's `(`
   // (`ok<num, Error>(42)`), waiting to be attached to the call's own
@@ -1246,7 +1246,7 @@ pub compound Parser {
   // `name<T1,T2>` and reaching its `(`, so this is always for the call
   // being built right after it is set.
   Vec<DataType*> pending_call_generic_args;
-  bin has_pending_call_generic_args;
+  flag has_pending_call_generic_args;
 }
 
 // Creates a new `Parser` over the given shared parse state.
@@ -1274,7 +1274,7 @@ impl Parser {
   // function is currently being parsed.
   pub create_node(Node* n) {
     BindedNode* binded = nil;
-    bin is_bound = false;
+    flag is_bound = false;
 
     if self.has_current_body {
       Node* owner = malloc(sizeof(Node));
@@ -1364,7 +1364,7 @@ impl Parser {
           _ -> {}
         }
         let prev = self.state.token_peek_prev();
-        bin is_member_access = false;
+        flag is_member_access = false;
         fit prev {
           .Some(p) -> { is_member_access = token_is_operator(p, "."); }
           .None -> {}
@@ -1373,7 +1373,7 @@ impl Parser {
         // Allow type operands inside `sizeof(Type)` even when the
         // identifier isn't declared as a value symbol yet (supports
         // forward-declared custom types).
-        bin is_sizeof_type_operand = false;
+        flag is_sizeof_type_operand = false;
         fit prev {
           .Some(p) -> {
             if token_is_operator(p, "(") {
@@ -1405,7 +1405,7 @@ impl Parser {
               if self.state.get_symbol(name).is_none() &&
                 !self.state.global_symbols.has(name) {
                 if !_is_c_macro_ident(name) {
-                  bin is_possible_enum_member_access = self.state.next_token_is_operator(".");
+                  flag is_possible_enum_member_access = self.state.next_token_is_operator(".");
                   if !self.state.next_token_is_operator("(") && !is_possible_enum_member_access &&
                     !self.in_fit_condition {
                     let msg = format("unknown identifier '{str}'", name);
@@ -1491,7 +1491,7 @@ impl Parser {
   // argument becomes a `Blank`), `ch <- v` -> `ch.send(v)` (`has_arg =
   // true`). Builds `(recv.method)(arg)`, a `.` dot-expression wrapped in a
   // `()` call, the same AST shape a method call already has.
-  _push_channel_method_call(Node* recv, str method_name, Node* arg, bin has_arg, Pos op_pos) {
+  _push_channel_method_call(Node* recv, str method_name, Node* arg, flag has_arg, Pos op_pos) {
     Node method_ident = node_new(.Identifier(method_name));
     method_ident.pos = op_pos;
     method_ident.has_pos = true;
@@ -1519,7 +1519,7 @@ impl Parser {
   // already parsed by the caller), or `.{...}` when not (`dt` unused).
   // `pos`/`has_pos` is the node's own position, chosen by the caller,
   // falling back to the `{` token's position when it has none.
-  pub parse_compound_init(DataType* dt, bin has_dt, Pos pos, bin has_pos) Option<ParseErrorKind> {
+  pub parse_compound_init(DataType* dt, flag has_dt, Pos pos, flag has_pos) Option<ParseErrorKind> {
     let lbrace_tok = self.state.token_peek_next();
     let lberr = self.state.expect_sym('{');
     if lberr.is_some() {
@@ -1703,7 +1703,7 @@ impl Parser {
   // (`foo(x?)`, `arr[x?]`), already correctly shaped, not this bug.
   // Returns whether a hoist happened, so the caller knows `node` is no
   // longer an `Expression`.
-  pub parse_node_hoist_postfix_unary_right(Node* node) bin {
+  pub parse_node_hoist_postfix_unary_right(Node* node) flag {
     fit node.kind {
       .Expression(exp) -> {
         if !exp.has_left || !exp.has_right || !equals(exp.op, ".") {
@@ -1766,8 +1766,8 @@ impl Parser {
           ret;
         }
 
-        bin left_is_expr = _is_expression_kind(exp.left);
-        bin right_is_expr = _is_expression_kind(exp.right);
+        flag left_is_expr = _is_expression_kind(exp.left);
+        flag right_is_expr = _is_expression_kind(exp.right);
         if !left_is_expr && !right_is_expr {
           ret;
         }
@@ -1793,14 +1793,14 @@ impl Parser {
         // Re-read node.kind: the rotation above (if it ran) mutated it.
         fit node.kind {
           .Expression(exp2) -> {
-            bin left_is_array = node_is_array(*exp2.left);
-            bin right_is_assign = node_is_assignment(*exp2.right);
-            bin left_is_call_or_index = node_is_expression(*exp2.left, "()") ||
+            flag left_is_array = node_is_array(*exp2.left);
+            flag right_is_assign = node_is_assignment(*exp2.right);
+            flag left_is_call_or_index = node_is_expression(*exp2.left, "()") ||
               node_is_expression(
               *exp2.left,
               "[]"
             );
-            bin right_is_comma = node_is_expression(*exp2.right, ",");
+            flag right_is_comma = node_is_expression(*exp2.right, ",");
             if (left_is_array && right_is_assign) || (left_is_call_or_index && right_is_comma) {
               self.parse_node_move_right_left_to_left(node);
             }
@@ -1868,13 +1868,13 @@ impl Parser {
             .Sval(s) -> { name = s; }
             _ -> {}
           }
-          bin after_member_access = false;
+          flag after_member_access = false;
           fit self.state.token_peek_prev_stream_n(0) {
             .Some(p) -> { after_member_access = token_is_operator(p, "."); }
             .None -> {}
           }
-          bin is_value_in_scope = self.state.get_scope_entity(name) != nil;
-          bin is_known_or_forward_type = self.state.is_known_compound_symbol(name) ||
+          flag is_value_in_scope = self.state.get_scope_entity(name) != nil;
+          flag is_known_or_forward_type = self.state.is_known_compound_symbol(name) ||
             self.state.is_forward_declared_type(name);
           if !after_member_access && !is_value_in_scope && is_known_or_forward_type &&
             self.state.looks_like_compound_init() {
@@ -1892,7 +1892,7 @@ impl Parser {
           // read `Trace < dec >` as a comparison chain instead. The type
           // reference rides in a `.CompoundInit` node with zero fields,
           // which `emit_call`'s `sizeof` case reads back structurally.
-          bin in_sizeof_ctx = false;
+          flag in_sizeof_ctx = false;
           fit self.state.token_peek_prev_stream_n(0) {
             .Some(p) -> {
               if token_is_operator(p, "(") {
@@ -1940,9 +1940,9 @@ impl Parser {
           // that can run the length of the file when there's no closing
           // `>` nearby, so it must not run for every ordinary identifier,
           // only the rare ones that are already known functions.
-          bin could_be_generic_call = !after_member_access && !is_value_in_scope &&
+          flag could_be_generic_call = !after_member_access && !is_value_in_scope &&
             self.state.is_known_function(name);
-          bin looks_like_generic_call = false;
+          flag looks_like_generic_call = false;
           if could_be_generic_call {
             num after_generic = self.state.skip_generic_args_tokens(1);
             if after_generic != 1 {
@@ -2031,7 +2031,7 @@ impl Parser {
           // Gated like `is_sizeof_type_operand`, on being preceded by a
           // `(` whose own preceding token is the identifier `sizeof`.
           if keyword_is_datatype(kw) {
-            bin in_sizeof = false;
+            flag in_sizeof = false;
             // `t` hasn't been consumed yet, so `token_peek_prev_stream_n`
             // (relative to the next token still to be consumed) is the
             // correct lookup here, not `token_peek_prev`/`token_peek_prev_n`
@@ -2146,7 +2146,7 @@ impl Parser {
     }
 
     Node left_node = node_new(.Blank);
-    bin has_left_node = false;
+    flag has_left_node = false;
     fit self.state.node_peek_last() {
       .Some(n) -> {
         if node_is_value_type(n) {
@@ -2233,7 +2233,7 @@ impl Parser {
   // bare `Bracket` node, e.g. `[1, 2, 3]`).
   pub parse_for_bracket() Option<ParseErrorKind> {
     Node left_node = node_new(.Blank);
-    bin has_left_node = false;
+    flag has_left_node = false;
     fit self.node_peek_expressionable() {
       .Some(n) -> {
         left_node = n;
@@ -2458,8 +2458,8 @@ impl Parser {
   pub parse_expression() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
-        bin is_lparen = false;
-        bin is_lbracket = false;
+        flag is_lparen = false;
+        flag is_lbracket = false;
         fit t.data {
           .Sval(s) -> {
             is_lparen = equals(s, "(");
@@ -2506,7 +2506,7 @@ impl Parser {
       // Type-inferred compound-literal shorthand: `.{ field = value, ... }`
       // (the type comes from context, e.g. the declared type of a
       // `let`/assignment/return position, and isn't resolved here).
-      bin next_is_lbrace = false;
+      flag next_is_lbrace = false;
       fit self.state.token_peek_n(1) {
         .Some(nt) -> { next_is_lbrace = token_is_symbol(nt, '{'); }
         .None -> {}
@@ -2614,9 +2614,9 @@ impl Parser {
     }
     let t2 = tok2.unwrap();
     if t2.type == .Operator {
-      bin is_lparen = false;
-      bin is_lbracket = false;
-      bin is_dot_recv_or_unary = false;
+      flag is_lparen = false;
+      flag is_lbracket = false;
+      flag is_dot_recv_or_unary = false;
       fit t2.data {
         .Sval(s2) -> {
           is_lparen = equals(s2, "(");
@@ -2862,7 +2862,7 @@ impl Parser {
   // already visible in the current scope chain. The `T[] name;` form, with
   // the brackets right after the base type, goes through
   // `parse_array_brackets`.
-  pub parse_variable(DataType* dt, bin is_public, bin require_initializer, bin is_const) Option<ParseErrorKind> {
+  pub parse_variable(DataType* dt, flag is_public, flag require_initializer, flag is_const) Option<ParseErrorKind> {
     if self.state.next_token_is_operator("[") {
       let aberr = self.parse_array_brackets(dt);
       if aberr.is_some() {
@@ -2892,7 +2892,7 @@ impl Parser {
       ret .Some(.InvalidStatement);
     }
 
-    bin has_value = self.state.next_token_is_operator("=");
+    flag has_value = self.state.next_token_is_operator("=");
     if !has_value && require_initializer {
       self.state.err("'let' declarations require an initializer");
       ret .Some(.InvalidStatement);
@@ -2949,7 +2949,7 @@ impl Parser {
   // Parses `let <name> = value;`: the declared type is the `__let_infer__`
   // sentinel, since real type inference happens at typecheck time, and an
   // initializer is mandatory.
-  pub parse_let_declaration(bin is_public) Option<ParseErrorKind> {
+  pub parse_let_declaration(flag is_public) Option<ParseErrorKind> {
     let kw_err = self.state.expect_keyword("let");
     if kw_err.is_some() {
       ret kw_err;
@@ -2972,7 +2972,7 @@ impl Parser {
   // Always requires an initializer, since a `const` with no value has
   // nothing to ever be assigned. Valid at both top-level and function-body
   // scope.
-  pub parse_const_declaration(bin is_public) Option<ParseErrorKind> {
+  pub parse_const_declaration(flag is_public) Option<ParseErrorKind> {
     let kw_err = self.state.expect_keyword("const");
     if kw_err.is_some() {
       ret kw_err;
@@ -3083,7 +3083,7 @@ impl Parser {
     }
     Node exp_val = maybe_exp.unwrap();
 
-    bin is_comma_expr = false;
+    flag is_comma_expr = false;
     fit exp_val.kind {
       .Expression(e) -> {
         if equals(e.op, ",") {
@@ -3095,7 +3095,7 @@ impl Parser {
 
     Node* cond_ptr = nil;
     Node* msg_ptr = nil;
-    bin has_msg = false;
+    flag has_msg = false;
 
     if is_comma_expr {
       fit exp_val.kind {
@@ -3153,7 +3153,7 @@ impl Parser {
   // grouping survives into codegen; codegen never auto-parenthesizes, so
   // `(a || b) && c` would otherwise emit as `a || b && c`.
   _parse_if_or_elif_condition() Option<ParseErrorKind> {
-    bin had_leading_paren = false;
+    flag had_leading_paren = false;
     Node cond = node_new(.Blank);
 
     if self.state.next_token_is_operator("(") {
@@ -3216,7 +3216,7 @@ impl Parser {
       .None -> {}
     }
 
-    bin is_assignment = false;
+    flag is_assignment = false;
     fit cond.kind {
       .Expression(e) -> {
         if equals(e.op, "=") {
@@ -3404,7 +3404,7 @@ impl Parser {
   // `...` (either as the whole list, `f(...)`, or after named args,
   // `f(str fmt, ...)`) sets `*out_is_variadic` and stops; it never becomes
   // an argument node itself.
-  _parse_function_args(Vec<Node*>* out_args, bin* out_is_variadic) Option<ParseErrorKind> {
+  _parse_function_args(Vec<Node*>* out_args, flag* out_is_variadic) Option<ParseErrorKind> {
     for !self.state.next_token_is_symbol(')') {
       if self.state.next_token_is_operator("...") {
         self.state.token_next();
@@ -3439,7 +3439,7 @@ impl Parser {
   // `binded.function` correctly. Reached from
   // `parse_top_level_declaration`, not `parse_statement`, since a function
   // declaration is only valid at the top level.
-  pub parse_function(bin is_public, bin is_async) Option<ParseErrorKind> {
+  pub parse_function(flag is_public, flag is_async) Option<ParseErrorKind> {
     self.state.new_scope();
 
     self.state.token_next(); // skip 'fun'
@@ -3518,7 +3518,7 @@ impl Parser {
     }
     Vec<Node*> args;
     args.init(0);
-    bin is_variadic = false;
+    flag is_variadic = false;
     let aerr = self._parse_function_args(&args, &is_variadic);
     if aerr.is_some() {
       ret aerr;
@@ -3566,10 +3566,10 @@ impl Parser {
     }
 
     DataType* rtype = malloc(sizeof(DataType));
-    bin has_explicit_rtype = false;
+    flag has_explicit_rtype = false;
     fit self.state.token_peek_next() {
       .Some(rt) -> {
-        bin looks_like_type = false;
+        flag looks_like_type = false;
         if rt.type == .Identifier {
           looks_like_type = true;
         }
@@ -3660,13 +3660,13 @@ impl Parser {
       ret .Some(.InvalidIdentifier);
     }
     str index_name = "";
-    bin has_index_name = false;
+    flag has_index_name = false;
     str item_name = "";
     fit first.unwrap().data {
       .Sval(s) -> { item_name = s; }
       _ -> {}
     }
-    bin used_double_colon = false;
+    flag used_double_colon = false;
 
     if self.state.next_token_is_operator(",") {
       index_name = item_name;
@@ -3704,7 +3704,7 @@ impl Parser {
     }
     Node iterable_node = maybe_iterable.unwrap();
 
-    bin is_range = false;
+    flag is_range = false;
     fit iterable_node.kind {
       .Expression(e) -> {
         if equals(e.op, "..") {
@@ -3833,7 +3833,7 @@ impl Parser {
       ret .None;
     }
 
-    bin is_legacy = false;
+    flag is_legacy = false;
     fit self.state.token_peek_next() {
       .Some(nt) -> {
         if nt.type == .Identifier {
@@ -3901,7 +3901,7 @@ impl Parser {
   // nothing and leaves `*out_matched` false. Detection requires the
   // trailing `(`, so a payload-less `Enum.Variant`/`.Variant` arm still
   // goes through the ordinary path.
-  _try_parse_fit_destructure(bin* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
+  _try_parse_fit_destructure(flag* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
     *out_matched = false;
     let p0_opt = self.state.token_peek_n(0);
     let p1_opt = self.state.token_peek_n(1);
@@ -3911,8 +3911,8 @@ impl Parser {
     let p0 = p0_opt.unwrap();
     let p1 = p1_opt.unwrap();
 
-    bin is_shorthand = token_is_operator(p0, ".") && p1.type == .Identifier;
-    bin is_qualified = false;
+    flag is_shorthand = token_is_operator(p0, ".") && p1.type == .Identifier;
+    flag is_qualified = false;
     if !is_shorthand {
       is_qualified = p0.type == .Identifier && token_is_operator(p1, ".");
     }
@@ -3921,7 +3921,7 @@ impl Parser {
     }
 
     Token variant_tok;
-    bin found_lparen = false;
+    flag found_lparen = false;
     if is_shorthand {
       let p2_opt = self.state.token_peek_n(2);
       if p2_opt.is_some() && token_is_operator(p2_opt.unwrap(), "(") {
@@ -4029,12 +4029,12 @@ impl Parser {
   // a payload-less `.Variant` shorthand, which the general parser doesn't
   // recognize as a complete expression on its own; and an ordinary
   // expression pattern via `parse_expressionable_root`.
-  _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
+  _parse_fit_arm(Vec<FitBranch>* out_branches, flag* out_has_default) Option<ParseErrorKind> {
     Node arm_condition = node_new(.Blank);
     Vec<str> bindings;
     bindings.init(0);
 
-    bin destructure_matched = false;
+    flag destructure_matched = false;
     Node destructure_condition = node_new(.Blank);
     Vec<str> destructure_bindings;
     destructure_bindings.init(0);
@@ -4051,7 +4051,7 @@ impl Parser {
       arm_condition = destructure_condition;
       bindings = destructure_bindings;
     } else {
-      bin is_dot_shorthand = false;
+      flag is_dot_shorthand = false;
       Pos op_pos;
       fit self.state.token_peek_next() {
         .Some(t) -> {
@@ -4112,7 +4112,7 @@ impl Parser {
       }
     }
 
-    bin is_assignment = false;
+    flag is_assignment = false;
     fit arm_condition.kind {
       .Expression(e) -> {
         if equals(e.op, "=") {
@@ -4126,7 +4126,7 @@ impl Parser {
       ret .Some(.InvalidExpression);
     }
 
-    bin is_wildcard = false;
+    flag is_wildcard = false;
     fit arm_condition.kind {
       .Identifier(s) -> {
         if equals(s, "_") {
@@ -4143,7 +4143,7 @@ impl Parser {
       branch.condition = cond_ptr;
       branch.has_condition = true;
     }
-    bin has_bindings = bindings.len > 0;
+    flag has_bindings = bindings.len > 0;
     if has_bindings {
       branch.bindings = bindings;
       branch.has_bindings = true;
@@ -4208,7 +4208,7 @@ impl Parser {
   // Parses a fit statement's body: `{ arm , arm , ... }`. Stops parsing
   // further arms once a wildcard `_` default arm has been parsed, since
   // `_` is always the last arm, then requires the closing `}`.
-  pub parse_fit_body(Node* condition, Pos fit_pos, bin has_fit_pos) Option<ParseErrorKind> {
+  pub parse_fit_body(Node* condition, Pos fit_pos, flag has_fit_pos) Option<ParseErrorKind> {
     let lbrace_err = self.state.expect_sym('{');
     if lbrace_err.is_some() {
       ret lbrace_err;
@@ -4216,7 +4216,7 @@ impl Parser {
 
     Vec<FitBranch> branches;
     branches.init(0);
-    bin has_default_branch = false;
+    flag has_default_branch = false;
 
     for !self.state.next_token_is_symbol('}') {
       let aerr = self._parse_fit_arm(&branches, &has_default_branch);
@@ -4274,7 +4274,7 @@ impl Parser {
     Node* condition = malloc(sizeof(Node));
     *condition = maybe_cond.unwrap();
 
-    bin has_pos = false;
+    flag has_pos = false;
     // Zeroed rather than left uninitialized: `parse_fit_body` never
     // reads `pos` when `has_pos` is false, but passing an
     // uninitialized struct by value is undefined behavior in the
@@ -4560,7 +4560,7 @@ impl Parser {
       }
 
       let colon_tok = self.state.token_next();
-      bin colon_ok = false;
+      flag colon_ok = false;
       if colon_tok.is_some() {
         let ct = colon_tok.unwrap();
         colon_ok = token_is_symbol(ct, ':') || token_is_operator(ct, ":");
@@ -4760,7 +4760,7 @@ impl Parser {
     }
     self.state.token_next(); // consume 'asm'
 
-    bin is_volatile = false;
+    flag is_volatile = false;
     let vol_tok = self.state.token_peek_next();
     if vol_tok.is_some() && token_is_keyword(vol_tok.unwrap(), "volatile") {
       self.state.token_next();
@@ -4768,7 +4768,7 @@ impl Parser {
     }
 
     str arch_name = "";
-    bin has_arch = false;
+    flag has_arch = false;
     let arch_kw_tok = self.state.token_peek_next();
     if arch_kw_tok.is_some() && token_is_keyword(arch_kw_tok.unwrap(), "arch") {
       self.state.token_next();
@@ -4847,7 +4847,7 @@ impl Parser {
     }
 
     str template = "";
-    bin is_string_literal = false;
+    flag is_string_literal = false;
     self.state.skip_nl_or_comment();
 
     let body_tok = self.state.token_peek_next();
@@ -5015,7 +5015,7 @@ impl Parser {
 
     Vec<Node*> args;
     args.init(0);
-    bin is_variadic = false;
+    flag is_variadic = false;
     let aerr = self._parse_function_args(&args, &is_variadic);
     if aerr.is_some() {
       self.state.finish_scope();
@@ -5088,7 +5088,7 @@ impl Parser {
 
   // True for the warning ids that may be controlled at module scope (no
   // enclosing function); everything else needs a function to check inside.
-  _warning_control_is_valid_in_module_scope(WarningId id) bin {
+  _warning_control_is_valid_in_module_scope(WarningId id) flag {
     fit id {
       .UnusedVariable -> { ret true; }
       .UnusedImport -> { ret true; }
@@ -5303,7 +5303,8 @@ impl Parser {
       }
       if equals(name, "fork") {
         let after = self.state.token_peek_n(1);
-        bin calls_fork_itself = after.is_some() && token_is_operator(after.unwrap(), "(");
+        flag calls_fork_itself = after.is_some() &&
+          token_is_operator(after.unwrap(), "(");
         if !calls_fork_itself {
           ret self.parse_fork_statement();
         }
@@ -5327,7 +5328,7 @@ impl Parser {
           if dot_tok.is_none() {
             break;
           }
-          bin is_dot = token_is_operator(dot_tok.unwrap(), ".") ||
+          flag is_dot = token_is_operator(dot_tok.unwrap(), ".") ||
             token_is_symbol(
             dot_tok.unwrap(),
             '.'
@@ -5363,7 +5364,7 @@ impl Parser {
             break;
           }
           off = off + 1; // skip '['
-          bin closed = false;
+          flag closed = false;
           for true {
             let inn = self.state.token_peek_n(off);
             if inn.is_none() {
@@ -5456,7 +5457,7 @@ impl Parser {
     }
 
     for true {
-      bin is_dot_run = false;
+      flag is_dot_run = false;
       fit self.state.token_peek_next() {
         .Some(t) -> { is_dot_run = _is_dot_run_operator(t); }
         .None -> {}
@@ -5484,7 +5485,7 @@ impl Parser {
     }
 
     str alias = "";
-    bin has_alias = false;
+    flag has_alias = false;
     if self.state.next_token_is_keyword("as") {
       self.state.token_next(); // consume 'as'
       let alias_tok = self.state.token_next();
@@ -5528,7 +5529,7 @@ impl Parser {
   // size-expression AST per extra name isn't supported. Registers the
   // compound's name as a symbol so it can be used as a datatype identifier
   // elsewhere.
-  pub parse_compound(bin is_public) Option<ParseErrorKind> {
+  pub parse_compound(flag is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("compound");
     if kwerr.is_some() {
       ret kwerr;
@@ -5661,7 +5662,7 @@ impl Parser {
   // enum's name as a symbol, and reuses
   // `parse_type_params_with_constraints` so `T: a | b` constraint syntax
   // parses here too, though constraints carry no meaning for an enum.
-  pub parse_enum(bin is_public) Option<ParseErrorKind> {
+  pub parse_enum(flag is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("enum");
     if kwerr.is_some() {
       ret kwerr;
@@ -5758,7 +5759,7 @@ impl Parser {
       // Optional explicit integer value: `A = 3`, `A = -1`.
       if self.state.next_token_is_operator("=") {
         self.state.token_next(); // consume '='
-        bin negate = false;
+        flag negate = false;
         if self.state.next_token_is_operator("-") {
           self.state.token_next();
           negate = true;
@@ -5769,7 +5770,7 @@ impl Parser {
           ret .Some(.InvalidToken);
         }
         num v = 0;
-        bin got_num = false;
+        flag got_num = false;
         fit ntok.unwrap().data {
           .Num(n) -> {
             v = n;
@@ -5830,7 +5831,7 @@ impl Parser {
   // quirk's name as a symbol, and reuses
   // `parse_type_params_with_constraints` so `T: a | b` constraint syntax
   // parses here too.
-  pub parse_quirk(bin is_public) Option<ParseErrorKind> {
+  pub parse_quirk(flag is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("quirk");
     if kwerr.is_some() {
       ret kwerr;
@@ -5861,7 +5862,7 @@ impl Parser {
     if tperr.is_some() {
       ret tperr;
     }
-    bin is_generic = type_params.len > 0;
+    flag is_generic = type_params.len > 0;
 
     let lberr = self.state.expect_sym('{');
     if lberr.is_some() {
@@ -5872,7 +5873,7 @@ impl Parser {
     methods.init(0);
 
     for !self.state.next_token_is_symbol('}') {
-      bin method_is_async = false;
+      flag method_is_async = false;
       if self.state.next_token_is_keyword("async") {
         self.state.token_next();
         method_is_async = true;
@@ -5938,10 +5939,10 @@ impl Parser {
 
       DataType* rtype = malloc(sizeof(DataType));
       *rtype = dtype_new();
-      bin has_explicit_rtype = false;
+      flag has_explicit_rtype = false;
       fit self.state.token_peek_next() {
         .Some(rt) -> {
-          bin looks_like_type = false;
+          flag looks_like_type = false;
           if rt.type == .Identifier {
             looks_like_type = true;
           }
@@ -6022,7 +6023,7 @@ impl Parser {
   // `<Type>* self` first argument, parsed through the same
   // scope/`current_function` machinery as `parse_function`, and may carry
   // its own generic params plus a trailing `...` variadic marker.
-  pub parse_impl(bin is_public) Option<ParseErrorKind> {
+  pub parse_impl(flag is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("impl");
     if kwerr.is_some() {
       ret kwerr;
@@ -6046,7 +6047,7 @@ impl Parser {
     type_param_constraints.init(0);
     str type_name = base_type_name;
     DataType* impl_concrete_dt = nil;
-    bin has_impl_concrete_dt = false;
+    flag has_impl_concrete_dt = false;
 
     if self.state.next_token_is_angle_open() {
       if self.state.impl_generic_args_are_params() {
@@ -6080,16 +6081,16 @@ impl Parser {
         ret tperr;
       }
     }
-    bin has_type_params = type_params.len > 0;
-    bin has_type_param_forced_insts = type_param_forced_insts.len > 0;
-    bin has_type_param_constraints = type_param_constraints.len > 0;
+    flag has_type_params = type_params.len > 0;
+    flag has_type_param_forced_insts = type_param_forced_insts.len > 0;
+    flag has_type_param_constraints = type_param_constraints.len > 0;
 
     let peek_after_type = self.state.token_peek_next();
 
     str quirk_name = "";
-    bin has_quirk_name = false;
+    flag has_quirk_name = false;
     str quirk_concrete_instantiation = "";
-    bin has_quirk_concrete_instantiation = false;
+    flag has_quirk_concrete_instantiation = false;
 
     if peek_after_type.is_some() && token_is_keyword(peek_after_type.unwrap(), "as") {
       self.state.token_next(); // consume 'as'
@@ -6118,7 +6119,7 @@ impl Parser {
         if qgaerr.is_some() {
           ret qgaerr;
         }
-        bin is_symbolic = _dtype_references_any_param(quirk_dt, type_params);
+        flag is_symbolic = _dtype_references_any_param(quirk_dt, type_params);
         if !is_symbolic {
           quirk_concrete_instantiation = _mangled_dtype_name(quirk_dt);
           has_quirk_concrete_instantiation = true;
@@ -6190,15 +6191,15 @@ impl Parser {
   // node to `out_methods`. See `parse_impl`'s doc comment for the
   // generated-name and implicit-`self` scheme this implements.
   _parse_impl_method(
-    bin impl_is_public,
+    flag impl_is_public,
     str type_name,
     Vec<str> type_params,
     str quirk_name,
-    bin has_quirk_name,
+    flag has_quirk_name,
     Vec<Node*>* out_methods
   ) Option<ParseErrorKind> {
-    bin method_is_public = impl_is_public;
-    bin method_is_async = false;
+    flag method_is_public = impl_is_public;
+    flag method_is_async = false;
 
     for true {
       let peek = self.state.token_peek_next();
@@ -6330,7 +6331,7 @@ impl Parser {
     margs.init(0);
     margs.push(self_node_ptr);
 
-    bin method_is_variadic = false;
+    flag method_is_variadic = false;
     let aerr = self._parse_function_args(&margs, &method_is_variadic);
     if aerr.is_some() {
       ret aerr;
@@ -6350,10 +6351,10 @@ impl Parser {
     }
 
     DataType* rtype = malloc(sizeof(DataType));
-    bin has_explicit_rtype = false;
+    flag has_explicit_rtype = false;
     fit self.state.token_peek_next() {
       .Some(rt) -> {
-        bin looks_like_type = false;
+        flag looks_like_type = false;
         if rt.type == .Identifier {
           looks_like_type = true;
         }
@@ -6451,7 +6452,7 @@ impl Parser {
         _ -> {}
       }
 
-      if equals(kw, "imp") {
+      if equals(kw, "use") {
         ret self.parse_import();
       }
 
@@ -6488,7 +6489,7 @@ impl Parser {
         }
         let nt = next_tok.unwrap();
         str nkw = "";
-        bin nt_is_keyword = nt.type == .Keyword;
+        flag nt_is_keyword = nt.type == .Keyword;
         if nt_is_keyword {
           fit nt.data {
             .Sval(s) -> { nkw = s; }
@@ -6564,7 +6565,7 @@ impl Parser {
   // with no leading `let`. Shared by `parse_statement` (inside a function
   // body, always private) and `parse_top_level_declaration` (`pub`/bare
   // at file scope).
-  _parse_bare_type_variable_declaration(bin is_public) Option<ParseErrorKind> {
+  _parse_bare_type_variable_declaration(flag is_public) Option<ParseErrorKind> {
     DataType* dt = malloc(sizeof(DataType));
     *dt = dtype_new();
     let derr = self.state.parse_datatype(dt);
@@ -7579,7 +7580,7 @@ test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword
         .ExpressionParenthesis(inner) -> {
           fit inner.kind {
             .Identifier(s2) -> {
-              assert equals(s2, "bin"), "expected the operand 'bin' folded into a plain Identifier node";
+              assert equals(s2, "flag"), "expected the operand 'bin' folded into a plain Identifier node, canonicalized to 'flag'";
             }
             _ -> { panic("expected Identifier 'bin'"); }
           }
@@ -8236,7 +8237,7 @@ test "parse_statement dispatches a bare-datatype-keyword declaration" {
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Variable(v) -> {
-      assert equals(v.var_type.type_str, "bin"), "expected an explicit 'bin' type";
+      assert equals(v.var_type.type_str, "flag"), "expected an explicit 'bin'/'flag' type, canonicalized";
     }
     _ -> { panic("expected a Variable statement"); }
   }
@@ -9920,7 +9921,7 @@ test "parse_quirk parses method signatures with args and return types" {
       assert m0.args.len == 0, "expected 'len' to take no args";
       let m1 = q.methods.get(1);
       assert equals(m1.name, "is_empty"), "expected second method 'is_empty'";
-      assert equals(m1.rtype.type_str, "bin"), "expected 'is_empty' to return 'bin'";
+      assert equals(m1.rtype.type_str, "flag"), "expected 'is_empty' to return 'bin', canonicalized to 'flag'";
     }
     _ -> { panic("expected a Quirk node"); }
   }
@@ -10329,12 +10330,16 @@ test "parse_fit_statement names the reserved word when a destructuring binding c
   Vec<str> names;
   names.init(0);
   names.push("x");
+  // 'imp' is still valid input (an accepted alternate spelling of 'use'),
+  // so the diagnostic below names the canonicalized token text - what the
+  // token actually carries by this point, same as every other keyword
+  // use - not the literal characters typed.
   ParseState st = _state_with_declared("fit x { .Circle(imp) -> { } }", names);
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_fit_statement();
   assert err.is_some(), "expected an error for a reserved-word binding name";
-  assert contains(st.error_message, "'imp' is a reserved word"), "expected the diagnostic to name the reserved word, not a bare 'expected identifier'";
+  assert contains(st.error_message, "'use' is a reserved word"), "expected the diagnostic to name the reserved word, not a bare 'expected identifier'";
 }
 
 test "parse_function names the reserved word when a parameter collides with a keyword" {
@@ -10390,7 +10395,7 @@ fun _scope_entity_name(Node* node) str {
 // which is `.`, `..`, or `...`. Used by `parse_import` to tell
 // path-segment separators and leading `..` parent-directory markers from
 // any other operator.
-fun _is_dot_run_operator(Token t) bin {
+fun _is_dot_run_operator(Token t) flag {
   if t.type != .Operator {
     ret false;
   }
@@ -10430,7 +10435,7 @@ fun _mangled_dtype_name_depth(DataType* dt, num depth) str {
 // (`impl VecIter<T> as Iterator<T>`, whose arg is the enclosing impl's own
 // type param) from a concrete one (`impl Point as To<num>`), which is a
 // distinct quirk identity needing its own mangled name to dispatch.
-fun _dtype_references_any_param(DataType* dt, Vec<str> params) bin {
+fun _dtype_references_any_param(DataType* dt, Vec<str> params) flag {
   if dt.kind == .Unknown && len(dt.type_str) > 0 {
     for p : params {
       if equals(p, dt.type_str) {
@@ -10454,7 +10459,7 @@ fun _dtype_references_any_param(DataType* dt, Vec<str> params) bin {
 // program using `std.c.*` bindings routinely references real macro
 // constants (`INT_MAX`, `O_RDONLY`, ...) that this compiler never sees a
 // declaration for.
-fun _is_c_macro_ident(str name) bin {
+fun _is_c_macro_ident(str name) flag {
   if len(name) == 0 {
     ret false;
   }
@@ -10465,8 +10470,8 @@ fun _is_c_macro_ident(str name) bin {
   num i = 0;
   for i < len(name) {
     chr c = name[i];
-    bin is_upper = c >= 'A' && c <= 'Z';
-    bin is_digit_c = c >= '0' && c <= '9';
+    flag is_upper = c >= 'A' && c <= 'Z';
+    flag is_digit_c = c >= '0' && c <= '9';
     if !(is_upper || is_digit_c || c == '_') {
       ret false;
     }
@@ -10478,7 +10483,7 @@ fun _is_c_macro_ident(str name) bin {
 // True if `n`'s kind is `Expression` (a binary op node). The
 // precedence-reordering functions use it to tell a child that may still
 // need rotation from an already-primary operand.
-fun _is_expression_kind(Node* n) bin {
+fun _is_expression_kind(Node* n) flag {
   fit n.kind {
     .Expression(e) -> { ret true; }
     _ -> { ret false; }

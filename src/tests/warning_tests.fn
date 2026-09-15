@@ -1,17 +1,17 @@
 // Warning cases: a program, and what the analysis is expected to notice
 // about it.
 
-imp ..lexer.lexer;
-imp ..parser.parse_state;
-imp ..parser.parser;
-imp ..semantics.warnings;
-imp std.string;
-imp std.vec;
-imp std.result;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..semantics.warnings;
+use std.string;
+use std.vec;
+use std.result;
 
 // Parses `src` and reports what the analysis notices, joined into one
 // string, or the message of the expectation that went unmet.
-fun notice(str src, bin report_unused) str {
+fun notice(str src, flag report_unused) str {
   let tokens = tokenize(src, "t.fn");
   if tokens.is_err() {
     ret "lex error";
@@ -651,7 +651,7 @@ test "a missing_return warning reports the function's own declaration line, not 
   assert found.is_ok(), "expected analysis to succeed";
   Vec<Warning> warnings = found.unwrap();
   defer warnings.free();
-  bin saw_it = false;
+  flag saw_it = false;
   num i = 0;
   for i < warnings.len {
     Warning w = warnings.get(i);

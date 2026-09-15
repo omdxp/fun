@@ -5,41 +5,41 @@
 // request it does not recognize is answered with an error rather than
 // silence, which is what keeps a client from waiting forever.
 
-imp protocol;
-imp documents;
-imp analysis;
-imp symbol_table;
-imp diagnostics;
-imp navigation;
-imp signature_help;
-imp inlay_hints;
-imp code_action;
-imp semantic_tokens;
-imp outline;
-imp references;
-imp completion;
-imp formatting;
-imp folding_range;
-imp imports;
-imp code_lens;
-imp selection_range;
-imp call_hierarchy;
-imp uri;
-imp std.string;
-imp std.option;
-imp std.result;
-imp std.json;
-imp std.math;
-imp std.io;
-imp std.fs;
-imp std.c.mem;
+use protocol;
+use documents;
+use analysis;
+use symbol_table;
+use diagnostics;
+use navigation;
+use signature_help;
+use inlay_hints;
+use code_action;
+use semantic_tokens;
+use outline;
+use references;
+use completion;
+use formatting;
+use folding_range;
+use imports;
+use code_lens;
+use selection_range;
+use call_hierarchy;
+use uri;
+use std.string;
+use std.option;
+use std.result;
+use std.json;
+use std.math;
+use std.io;
+use std.fs;
+use std.c.mem;
 
 // What the server carries between messages.
 pub compound Server {
   // Set once the client asks the server to shut down, so the next
   // `exit` leaves quietly rather than as a failure.
-  bin shutting_down;
-  bin running;
+  flag shutting_down;
+  flag running;
   // What the client has open, which is the text to work from: an editor
   // holds edits the compiler would not read from disk.
   Documents docs;
@@ -53,22 +53,22 @@ pub compound Server {
   // Whether the client said it understands a completion written as a
   // skeleton. One that does not would insert the marks as text, so it
   // is told only plain words.
-  bin snippets;
+  flag snippets;
   // Whether the client said it can dynamically register interest in
   // `workspace/didChangeWatchedFiles`. Registration is requested only
   // when this is true; a client that never says so never gets asked,
   // and never sends the notification either.
-  bin watch_registration_supported;
+  flag watch_registration_supported;
   // The workspace root `initialize` was told, as a filesystem path
   // ready to walk. Absent for a single-file client with no folder
   // open, in which case a whole-workspace feature only ever sees
   // whatever the client has open.
   str workspace_root;
-  bin has_workspace_root;
+  flag has_workspace_root;
   // Set once the workspace has been walked and every `.fn` file under
   // it recorded in `docs`, so the (possibly large) scan only ever
   // runs once per server lifetime, not once per request.
-  bin workspace_indexed;
+  flag workspace_indexed;
   // The persistent workspace symbol table `workspace_symbols`/
   // `definition_workspace_wide` query, kept current by version
   // rather than re-walked from scratch on every request.
@@ -128,7 +128,7 @@ impl Server {
     }
     str id = _raw_field(message, "id");
     defer free(id);
-    bin is_request = !equals(id, "");
+    flag is_request = !equals(id, "");
 
     if equals(method, "initialize") {
       self.snippets = _snippets_supported(message);
@@ -896,7 +896,7 @@ fun _workspace_root(JsonValue message) str {
   ret substr(root_path, 0, len(root_path));
 }
 
-fun _snippets_supported(JsonValue message) bin {
+fun _snippets_supported(JsonValue message) flag {
   JsonValue params = _field(message, "params");
   JsonValue capabilities = _field(params, "capabilities");
   JsonValue document = _field(capabilities, "textDocument");
@@ -913,7 +913,7 @@ fun _snippets_supported(JsonValue message) bin {
 // Whether the client's own `initialize` said it can dynamically
 // register `workspace/didChangeWatchedFiles`. A client that can't is
 // never asked, and never sends the notification either.
-fun _watch_registration_supported(JsonValue message) bin {
+fun _watch_registration_supported(JsonValue message) flag {
   JsonValue params = _field(message, "params");
   JsonValue capabilities = _field(params, "capabilities");
   JsonValue workspace = _field(capabilities, "workspace");

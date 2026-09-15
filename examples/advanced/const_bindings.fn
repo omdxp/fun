@@ -2,7 +2,7 @@
 // (`const num x = 5;`), both top-level and local. A `const` binding rejects
 // any later reassignment (a compile-time diagnostic, not a runtime check).
 
-imp std.c.io;
+use std.c.io;
 
 const GREETING_REPEAT = 3;
 pub const str GREETING = "hi";

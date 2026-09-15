@@ -1,15 +1,15 @@
 // Generic set built on Map<T, bin>.
 
-imp std.map;
-imp std.vec;
-imp std.string;
-imp std.quirks;
-imp std.option;
+use std.map;
+use std.vec;
+use std.string;
+use std.quirks;
+use std.option;
 
 // Generic set backed by Map<T, bin>.
 pub compound Set<T> {
   // Backing map.
-  Map<T, bin> map;
+  Map<T, flag> map;
 }
 
 // Creates a set with initial capacity `cap`. `sample` is used only for type
@@ -28,7 +28,7 @@ impl Set<T> as Sized {
   }
 
   // True when the set holds no elements.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.map.len == 0;
   }
 }
@@ -40,7 +40,7 @@ impl Set<T> {
   }
 
   // True when `key` is present in the set.
-  pub has(T key) bin {
+  pub has(T key) flag {
     ret self.map.has(key);
   }
 
@@ -50,7 +50,7 @@ impl Set<T> {
   }
 
   // Removes a key from the set. Returns true when it was present.
-  pub remove(T key) bin {
+  pub remove(T key) flag {
     ret self.map.remove(key);
   }
 
@@ -123,7 +123,7 @@ impl Set<T> {
   }
 
   // True when every element of this set is also in `other`.
-  pub is_subset(Set<T>* other) bin {
+  pub is_subset(Set<T>* other) flag {
     let it = self.map.iter_keys();
     for true {
       fit it.next() {
@@ -149,7 +149,7 @@ impl Set<T> {
 // Forward iterator over a Set's elements, produced by `Set.iter()`.
 pub compound SetIter<T> {
   // Backing map key iterator.
-  MapIter<T, bin> inner;
+  MapIter<T, flag> inner;
 }
 
 impl SetIter<T> as Iterator<T> {

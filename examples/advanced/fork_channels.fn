@@ -12,8 +12,8 @@
 // The fork target is an `async fun`. Here three workers each square their input
 // and send it back; main sums the results in arrival order.
 
-imp std.c.io;
-imp std.channel;
+use std.c.io;
+use std.channel;
 
 // A virtual-thread body: square `v` and hand the result back over the channel.
 async fun square_into(Channel<num>* out, num v) {

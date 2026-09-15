@@ -1,5 +1,5 @@
-imp std.io;
-imp alias_module_scope_error as e;
+use std.io;
+use alias_module_scope_error as e;
 
 fun main() {
   let some_err = e.ErrorCode.FailedToStartServer;

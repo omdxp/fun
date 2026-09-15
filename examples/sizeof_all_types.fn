@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 // sizeof(Type) returns a `num` (C: int) with the size in bytes.
 // 
@@ -40,7 +40,7 @@ fun main() {
   printf("sizeof(num)     = %d\n", sizeof(num));
   printf("sizeof(dec)     = %d\n", sizeof(dec));
   printf("sizeof(str)     = %d\n", sizeof(str));
-  printf("sizeof(bin)     = %d\n", sizeof(bin));
+  printf("sizeof(bin)     = %d\n", sizeof(flag));
   printf("sizeof(chr)     = %d\n", sizeof(chr));
 
   // Custom types.

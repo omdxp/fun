@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 compound Point {
   num x;
@@ -30,7 +30,7 @@ fun add(num a, num b) num {
   ret a + b;
 }
 
-fun is_positive(num n) bin {
+fun is_positive(num n) flag {
   ret n > 0;
 }
 

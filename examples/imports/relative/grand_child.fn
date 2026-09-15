@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 pub fun grand_child() {
   printf("grand_child\n");

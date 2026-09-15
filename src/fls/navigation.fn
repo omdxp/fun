@@ -4,25 +4,25 @@
 // cursor refer to? Hover then spells that declaration back to the
 // reader, and go to definition says where it was written.
 
-imp protocol;
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp symbol_table;
-imp uri;
-imp imports;
-imp ..lexer.token;
-imp ..parser.datatype_defs;
-imp ..parser.import_resolver;
-imp ..semantics.warnings;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.io;
-imp std.fs;
-imp std.ctype;
-imp std.c.mem;
+use protocol;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use symbol_table;
+use uri;
+use imports;
+use ..lexer.token;
+use ..parser.datatype_defs;
+use ..parser.import_resolver;
+use ..semantics.warnings;
+use std.string;
+use std.vec;
+use std.option;
+use std.io;
+use std.fs;
+use std.ctype;
+use std.c.mem;
 
 // What a client is told when there is nothing to say.
 const str NO_HOVER = "null";
@@ -34,7 +34,7 @@ const str NO_LOCATION = "[]";
 // `)`/`]`), the same left-operand-presence test the parser itself uses
 // to tell a postfix operator (`x!`) from a prefix one (`!x`) at this
 // exact token.
-fun _is_postfix_position(Vec<Token>* tokens, Token t) bin {
+fun _is_postfix_position(Vec<Token>* tokens, Token t) flag {
   let prev = token_before(tokens, index_of_token(tokens, t));
   if prev.is_none() {
     ret false;
@@ -396,7 +396,7 @@ pub fun definition_workspace_wide(
     // Restrict to true top-level declarations only (what
     // lookup_top_level itself would have matched), not a field,
     // variant, or method the table also indexes.
-    bin is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) &&
+    flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) &&
       equals(
       d.container,
       ""
@@ -537,7 +537,7 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
   // program happens to declare (or nothing at all).
   str literal_type_name = "";
   Vec<str> literal_args;
-  bin in_literal = compound_literal_field_context(
+  flag in_literal = compound_literal_field_context(
     tokens,
     t,
     &program.nodes,
@@ -578,7 +578,7 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
       // collide (a method sharing its name with an unrelated field on
       // the same compound), and a field always wins by being checked
       // first below unless this looks ahead first.
-      bin is_call = false;
+      flag is_call = false;
       let after_name = token_after(tokens, index_of_token(tokens, t) + 1);
       if after_name.is_some() && token_is_operator(after_name.unwrap(), "(") {
         is_call = true;
@@ -698,7 +698,7 @@ fun _receiver_of(Vec<Token>* tokens, Token t) str {
 // its name, but nothing meaningful before that dot, and must fall
 // through to `_is_dot_shorthand`'s own branch instead, not be
 // swallowed here into a receiver search that finds nothing.
-fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
+fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
   num index = index_of_token(tokens, t);
   if index <= 0 {
     ret false;
@@ -725,7 +725,7 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) bin {
 // preceded by a `.` that is not itself preceded by an identifier (an
 // ordinary field or method access, which `_receiver_of` resolves
 // instead).
-fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
+fun _is_dot_shorthand(Vec<Token>* tokens, Token t) flag {
   num index = index_of_token(tokens, t);
   if index <= 0 {
     ret false;
@@ -755,7 +755,7 @@ fun _is_dot_shorthand(Vec<Token>* tokens, Token t) bin {
 // True when the nearest preceding token that could start a new
 // statement, walked back from `t`, is the `ret` keyword: `t` is (or
 // begins) a `ret`'s own value expression.
-pub fun is_return_value(Vec<Token>* tokens, Token t) bin {
+pub fun is_return_value(Vec<Token>* tokens, Token t) flag {
   num index = index_of_token(tokens, t);
   num i = index - 1;
   // Bounded by the nearest enclosing '(' too, not just ';'/'{'/'}':
@@ -1120,7 +1120,7 @@ fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
       i = i - 1;
       continue;
     }
-    if token_is_keyword(tok, "imp") {
+    if token_is_keyword(tok, "use") {
       ret import_doc;
     }
     ret impl_doc;
@@ -1143,7 +1143,7 @@ fun _doc(str code, str prose) str {
 // tend to take): `4294967295` reads a lot faster as "2^32 - 1" than as
 // a wall of nines.
 fun _int_literal_doc(num n) str {
-  bin negative = n < 0;
+  flag negative = n < 0;
   num magnitude = n;
   if negative {
     magnitude = 0 - magnitude;
@@ -1374,11 +1374,11 @@ pub fun keyword_doc(str word) str {
       `ends.`
     );
   }
-  if equals(word, "imp") {
+  if equals(word, "use") {
     ret _doc(
-      `imp module.path;
-      `imp ..sibling.module;
-      `imp module.path as alias;`,
+      `use module.path;
+      `use ..sibling.module;
+      `use module.path as alias;`,
       `Imports another module. A leading run of dots steps up out of the
       `importing file's own directory. as gives it a shorter name to
       `qualify its own symbols with.`
@@ -1508,8 +1508,8 @@ pub fun keyword_doc(str word) str {
   if equals(word, "str") {
     ret _doc(`str s;`, `A NUL-terminated byte string.`);
   }
-  if equals(word, "bin") {
-    ret _doc(`bin ok;`, `A boolean: true or false.`);
+  if equals(word, "flag") {
+    ret _doc(`flag ok;`, `A boolean: true or false.`);
   }
   if equals(word, "chr") {
     ret _doc(`chr c;`, `A single byte, written as a character literal ('a').`);
@@ -1531,10 +1531,10 @@ pub fun keyword_doc(str word) str {
     );
   }
   if equals(word, "true") {
-    ret _doc(`bin ok = true;`, `The boolean literal for a true value.`);
+    ret _doc(`flag ok = true;`, `The boolean literal for a true value.`);
   }
   if equals(word, "false") {
-    ret _doc(`bin ok = false;`, `The boolean literal for a false value.`);
+    ret _doc(`flag ok = false;`, `The boolean literal for a false value.`);
   }
   if equals(word, "for") {
     ret _doc(

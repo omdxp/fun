@@ -11,21 +11,21 @@
 // own reference counts: a method name collides across too many
 // unrelated types for a naive name match to mean anything there.
 
-imp documents;
-imp analysis;
-imp positions;
-imp references;
-imp navigation;
-imp symbols;
-imp protocol;
-imp uri;
-imp ..ast.ast;
-imp ..lexer.token;
-imp std.vec;
-imp std.string;
-imp std.fs;
-imp std.option;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use references;
+use navigation;
+use symbols;
+use protocol;
+use uri;
+use ..ast.ast;
+use ..lexer.token;
+use std.vec;
+use std.string;
+use std.fs;
+use std.option;
+use std.c.mem;
 
 // The top-level function at `line`/`character`, as the result a
 // client is sent: prepareCallHierarchy's own CallHierarchyItem[],
@@ -163,7 +163,7 @@ pub fun outgoing_calls(AnalysisCache* cache, Document doc, str name) str {
   num i = 0;
   Node target_node = node_new(.Blank);
   FunctionNode f = function_node_new();
-  bin found_target = false;
+  flag found_target = false;
   for i < read.program.entry_nodes.len {
     Node n = read.program.entry_nodes.get(i);
     i = i + 1;

@@ -1,9 +1,9 @@
 // Iterate the elements of a parsed JSON array, reading each typed value.
 
-imp std.c.io;
-imp std.json;
-imp std.result;
-imp std.vec;
+use std.c.io;
+use std.json;
+use std.result;
+use std.vec;
 
 fun main() num {
   fit parse("[10, 20, 30]") {

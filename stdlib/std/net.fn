@@ -1,13 +1,13 @@
 // Basic URL parsing and HTTP request building.
 
-imp std.string;
-imp std.vec;
-imp std.c.mem;
-imp std.c.net;
-imp std.channel;
-imp std.thread_runtime;
-imp std.result;
-imp std.error;
+use std.string;
+use std.vec;
+use std.c.mem;
+use std.c.net;
+use std.channel;
+use std.thread_runtime;
+use std.result;
+use std.error;
 
 // Parsed URL components.
 pub compound Url {

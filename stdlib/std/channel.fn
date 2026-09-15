@@ -2,12 +2,12 @@
 // std.sync_runtime backends. Async wrappers are await-friendly APIs over
 // the same blocking semantics.
 
-imp std.sync;
-imp std.sync_runtime;
-imp std.c.mem;
-imp std.c.string;
-imp std.c.time;
-imp std.c.wd;
+use std.sync;
+use std.sync_runtime;
+use std.c.mem;
+use std.c.string;
+use std.c.time;
+use std.c.wd;
 
 // Time-unit conversion factors used by the absolute-deadline math below.
 const num MS_PER_SEC = 1_000;
@@ -26,7 +26,7 @@ pub compound Channel<T> {
   // Ring buffer storage.
   T[] data;
   // True when ring storage is allocated.
-  bin has_buffer;
+  flag has_buffer;
   // Buffer capacity.
   num cap;
   // Read cursor.
@@ -37,7 +37,7 @@ pub compound Channel<T> {
   num count;
 
   // True once close() is called.
-  bin closed;
+  flag closed;
 
   // Per-channel select wait slice in milliseconds.
   num select_wait_slice_ms;
@@ -173,7 +173,7 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
 }
 
 // Returns true when the absolute timeout is reached.
-fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
+fun channel_deadline_reached(ChannelAbsTime* abs_time) flag {
   if abs_time == nil {
     ret true;
   }
@@ -298,7 +298,7 @@ fun channel_compute_wait_slice_ms(
 
 // Returns true when an optional cancellation flag is set (nil disables
 // cancellation; nonzero means cancelled).
-fun channel_is_cancelled(num* cancel_flag) bin {
+fun channel_is_cancelled(num* cancel_flag) flag {
   if cancel_flag == nil {
     ret false;
   }
@@ -344,7 +344,7 @@ pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
 }
 
 // Read cancellation state.
-pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) bin {
+pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) flag {
   if token == nil {
     ret false;
   }
@@ -1827,7 +1827,7 @@ impl Channel<T> {
 
   // Reads closed state as an unsynchronized snapshot; guard with the
   // channel mutex for coordinated checks.
-  pub is_closed() bin {
+  pub is_closed() flag {
     ret self.closed;
   }
 
@@ -1839,7 +1839,7 @@ impl Channel<T> {
 
   // True when no values are currently queued (unsynchronized snapshot;
   // guard with the channel mutex for coordinated checks).
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.count == 0;
   }
 

@@ -1,9 +1,9 @@
 // Demonstrates std.io format helpers and user-defined Display.
 
-imp std.io;
-imp std.c.mem;
-imp std.string;
-imp std.quirks;
+use std.io;
+use std.c.mem;
+use std.string;
+use std.quirks;
 
 compound Point {
   num x;
@@ -33,7 +33,7 @@ impl Point as Display {
 fun main() {
   num n = 42;
   dec d = 3.14159;
-  bin b = true;
+  flag b = true;
   chr c = 'Z';
   str s = "hello";
   raw* p = NULL;

@@ -1,6 +1,6 @@
-imp std.c.io;
-imp left;
-imp right;
+use std.c.io;
+use left;
+use right;
 
 fun main() {
   left();

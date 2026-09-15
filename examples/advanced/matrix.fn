@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 fun main() {
   // 2D matrix with explicit type annotation

@@ -1,13 +1,13 @@
 // Collection quirks and helpers.
 
-imp std.quirks;
+use std.quirks;
 
 // Collection quirk for basic size introspection.
 pub quirk Collection {
   // Returns the number of elements.
   len() num;
   // Returns true when the collection is empty.
-  is_empty() bin;
+  is_empty() flag;
 }
 
 // Returns the element count of a Sized value.
@@ -16,7 +16,7 @@ pub fun len_of(Sized s) num {
 }
 
 // Checks whether a Sized value is empty.
-pub fun is_empty_of(Sized s) bin {
+pub fun is_empty_of(Sized s) flag {
   ret s.is_empty();
 }
 

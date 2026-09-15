@@ -5,11 +5,11 @@
 // one means reading headers up to a blank line, then exactly that many
 // bytes of body.
 
-imp std.string;
-imp std.option;
-imp std.io;
-imp std.c.mem;
-imp std.runtime_backend;
+use std.string;
+use std.option;
+use std.io;
+use std.c.mem;
+use std.runtime_backend;
 
 // The largest header line worth reading. A header far longer than this
 // is a client fault rather than something to grow a buffer for.
@@ -58,7 +58,7 @@ pub fun read_message(Sink* input) Option<Message> {
 
 // True when `s` begins with `prefix`, whatever case each is written in.
 // A header name is not case sensitive.
-pub fun starts_with_ignore_case(str s, str prefix) bin {
+pub fun starts_with_ignore_case(str s, str prefix) flag {
   if len(s) < len(prefix) {
     ret false;
   }

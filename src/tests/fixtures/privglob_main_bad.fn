@@ -1,4 +1,4 @@
-imp privglob_lib as g;
+use privglob_lib as g;
 
 fun main() num {
   num x = g.secret_g;

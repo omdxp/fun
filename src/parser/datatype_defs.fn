@@ -2,15 +2,15 @@
 // reading a type annotation. Pure, self-contained lookup tables kept in
 // their own module rather than inside parser.fn.
 
-imp ..ast.ast;
-imp std.string;
-imp std.ctype;
-imp std.option;
+use ..ast.ast;
+use std.string;
+use std.ctype;
+use std.option;
 
 // A sized integer type name (`i8`..`i64`, `u8`..`u64`, arbitrary bit
 // widths are accepted syntactically): its signedness and bit width.
 pub compound DynamicIntType {
-  bin is_signed;
+  flag is_signed;
   num bits;
 }
 
@@ -21,7 +21,7 @@ pub fun parse_dynamic_int_datatype(str s) Option<DynamicIntType> {
   if len(s) < 2 {
     ret .None;
   }
-  bin is_signed = false;
+  flag is_signed = false;
   if s[0] == 'i' {
     is_signed = true;
   } elif s[0] == 'u' {
@@ -44,15 +44,15 @@ pub fun parse_dynamic_int_datatype(str s) Option<DynamicIntType> {
 }
 
 // True if `s` is a `iN`/`uN` sized-integer type name.
-pub fun is_dynamic_int_datatype(str s) bin {
+pub fun is_dynamic_int_datatype(str s) flag {
   ret parse_dynamic_int_datatype(s).is_some();
 }
 
 // True if `s` is a reserved builtin datatype keyword (as opposed to a
 // user-defined/identifier-based type name like a compound or C typedef).
-pub fun keyword_is_datatype(str s) bin {
+pub fun keyword_is_datatype(str s) flag {
   fit s {
-    "void", "raw", "num", "dec", "str", "bin", "chr", "f32", "f64" -> { ret true; }
+    "void", "raw", "num", "dec", "str", "flag", "chr", "f32", "f64" -> { ret true; }
     _ -> { ret is_dynamic_int_datatype(s); }
   }
 }
@@ -68,7 +68,7 @@ pub fun get_datatype_type(str s) DataTypeType {
     "str" -> { ret .Str; }
     "dec", "f32", "f64" -> { ret .Dec; }
     "num" -> { ret .Num; }
-    "bin" -> { ret .Bin; }
+    "flag" -> { ret .Bin; }
     _ -> {
       if is_dynamic_int_datatype(s) {
         ret .Num;

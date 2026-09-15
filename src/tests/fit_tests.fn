@@ -2,8 +2,8 @@
 // checks lowering; the warnings for the same fixtures are checked where
 // the warning analysis itself is tested (warning_tests.fn).
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 // The exhaustiveness warning for this fixture is checked in
 // warning_tests.fn ("a fit over num or a pointer with no catch-all is

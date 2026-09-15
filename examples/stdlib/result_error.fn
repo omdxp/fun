@@ -2,9 +2,9 @@
 // Build one with the `error_*` constructors, attach context, then match the
 // Result with `fit` to read it.
 
-imp std.c.io;
-imp std.result;
-imp std.error;
+use std.c.io;
+use std.result;
+use std.error;
 
 fun main() num {
   Error e = error_new_kind(.Invalid, 7, "bad input");

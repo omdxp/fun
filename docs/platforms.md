@@ -117,7 +117,7 @@ If a program genuinely needs an integer wider than 128 bits, use
 
 ## C Interop
 
-- Import C headers via `imp std.c.*;`.
+- Import C headers via `use std.c.*;`.
 - C constants (`NULL`, `INT_MAX`, etc.) are allowed once the right header
   is imported.
 - `num` maps to `int64_t`; for `printf`, use `PRId64` (from

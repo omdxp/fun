@@ -1,4 +1,4 @@
-imp ....defs.greeter;
+use ....defs.greeter;
 
 fun main() void {
   greet();

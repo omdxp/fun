@@ -1,7 +1,7 @@
 // Constrained generic impl example: impl Vec<T: num | dec>.
 
-imp std.c.io;
-imp std.vec;
+use std.c.io;
+use std.vec;
 
 fun main() {
   Vec<num> nums;

@@ -8,13 +8,13 @@
 // kinds and read off at a specific position rather than emitted for
 // every pair in the document.
 
-imp documents;
-imp analysis;
-imp positions;
-imp ..lexer.token;
-imp std.vec;
-imp std.string;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use ..lexer.token;
+use std.vec;
+use std.string;
+use std.c.mem;
 
 // A range that may cross lines, unlike `Span` (which assumes its own
 // start and end share one line - true of a single token, never true
@@ -108,9 +108,9 @@ fun _chain_at(Vec<Token>* tokens, num line, num character, str text) str {
       continue;
     }
     num close_char = byte_col_to_utf16_char(text, tok_line, t.pos.end_col - 1);
-    bin at_or_after_open = line > opened.line ||
+    flag at_or_after_open = line > opened.line ||
       (line == opened.line && character >= opened.col);
-    bin at_or_before_close = line < tok_line || (line == tok_line && character <= close_char);
+    flag at_or_before_close = line < tok_line || (line == tok_line && character <= close_char);
     if at_or_after_open && at_or_before_close {
       _Range r;
       r.start_line = opened.line;
@@ -146,11 +146,11 @@ fun _bracket_kind_of(Token t) chr {
   ret 0;
 }
 
-fun _is_open_bracket(chr c) bin {
+fun _is_open_bracket(chr c) flag {
   ret c == '(' || c == '[' || c == '{';
 }
 
-fun _matches(chr open, chr close) bin {
+fun _matches(chr open, chr close) flag {
   if open == '(' {
     ret close == ')';
   }

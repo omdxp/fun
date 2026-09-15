@@ -6,8 +6,8 @@
 // imports, so a case whose expectation depends on an imported module's body
 // (a stdlib generic type, an extern prototype) is noted rather than ported.
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 test "defer inside false if branch does not run" {
   str src = `imp std.c.io;

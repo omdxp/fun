@@ -1,7 +1,7 @@
 // Rand helpers example.
 
-imp std.c.io;
-imp std.rand;
+use std.c.io;
+use std.rand;
 
 fun main() {
   Rand r = rand_init(12345);

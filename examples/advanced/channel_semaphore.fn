@@ -12,8 +12,8 @@
 // admits at most three into the critical section at any moment. Each worker
 // reports its result on `done`; main sums them to prove all eight ran.
 
-imp std.c.io;
-imp std.channel;
+use std.c.io;
+use std.channel;
 
 // Acquire a permit, do the work, release the permit, report the result.
 async fun worker(Channel<num>* sem, Channel<num>* done, num id) {

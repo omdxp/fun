@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 fun main() {
   // 3D tensor with explicit type: 2 layers, 3 rows, 4 columns

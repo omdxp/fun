@@ -18,17 +18,17 @@
 // different commits is a hard error naming both, since nothing else
 // here decides which one should win.
 
-imp manifest;
-imp ..parser.deps_lock;
-imp std.vec;
-imp std.string;
-imp std.option;
-imp std.result;
-imp std.error;
-imp std.process;
-imp std.fs;
-imp std.path;
-imp std.io;
+use manifest;
+use ..parser.deps_lock;
+use std.vec;
+use std.string;
+use std.option;
+use std.result;
+use std.error;
+use std.process;
+use std.fs;
+use std.path;
+use std.io;
 
 // A safety bound on the whole resolved dependency graph (direct plus
 // every transitive dependency reached through it), keyed by distinct
@@ -51,7 +51,7 @@ fun _git(Vec<str> args) Result<ProcessResult, str> {
   ret .Ok(r.unwrap());
 }
 
-fun _git_ok(ProcessResult* r) bin {
+fun _git_ok(ProcessResult* r) flag {
   ret r.exit_code == 0;
 }
 
@@ -110,7 +110,7 @@ fun _git_rev_parse_head(str dir) Result<str, str> {
 
 // One shallow clone, exact ref (a tag or branch name git can resolve
 // directly): `git clone --depth 1 --branch <ref> <url> <dest>`.
-fun _git_clone_ref(str url, str ref, str dest) Result<bin, str> {
+fun _git_clone_ref(str url, str ref, str dest) Result<flag, str> {
   Vec<str> args;
   args.init(8);
   defer args.free();
@@ -132,7 +132,7 @@ fun _git_clone_ref(str url, str ref, str dest) Result<bin, str> {
 // A repo with no tags at all under an `.Auto` spec: clones the remote's
 // own default branch by simply omitting `--branch` (there is no real
 // branch literally named `HEAD` that `--branch` could target).
-fun _git_clone_default(str url, str dest) Result<bin, str> {
+fun _git_clone_default(str url, str dest) Result<flag, str> {
   Vec<str> args;
   args.init(6);
   defer args.free();
@@ -176,7 +176,7 @@ fun _git_current_branch_name(str dir) Result<str, str> {
 // fetch-by-sha is rejected (some self-hosted git servers disable
 // `uploadpack.allowReachableSHA1InWant`) - documented, not chased
 // further; a full clone always works.
-fun _git_fetch_rev(str url, str rev, str dest) Result<bin, str> {
+fun _git_fetch_rev(str url, str rev, str dest) Result<flag, str> {
   Vec<str> clone_args;
   clone_args.init(8);
   defer clone_args.free();
@@ -203,7 +203,7 @@ fun _git_fetch_rev(str url, str rev, str dest) Result<bin, str> {
   fetch_args.push("origin");
   fetch_args.push(rev);
   let fetch_res = _git(fetch_args)!;
-  bin shallow_fetch_ok = _git_ok(&fetch_res);
+  flag shallow_fetch_ok = _git_ok(&fetch_res);
 
   if !shallow_fetch_ok {
     // Fall back to a full clone: remove the partial attempt and redo it
@@ -324,7 +324,7 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
     // commit-keyed cache directory is only trusted once the resolved
     // commit is known - avoids leaving a half-named directory behind
     // if resolution races with another `fun build`.
-    bin default_branch = equals(ref_kind, "branch") && equals(ref_value, "");
+    flag default_branch = equals(ref_kind, "branch") && equals(ref_value, "");
     if default_branch {
       println(format("  fetching {str} @ default branch ({str}){str}", d.name, d.git, provenance));
     } else {
@@ -382,7 +382,7 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
 // back to its default branch, see `resolve_one`), since which of the
 // two currently applies is exactly what only `fun deps update` should
 // ever re-check.
-fun _spec_still_matches(str spec_text, Dependency* d) bin {
+fun _spec_still_matches(str spec_text, Dependency* d) flag {
   fit d.spec {
     .Auto -> { ret starts_with(spec_text, "tag:") || starts_with(spec_text, "branch:"); }
     _ -> {}
@@ -398,8 +398,8 @@ fun _spec_still_matches(str spec_text, Dependency* d) bin {
 // same reuse-or-fetch decision against the one flat lock.
 // `fetched_count` is incremented on every real fetch, so `resolve_all`
 // can decide at the end whether any network work happened at all.
-fun _resolve_one_reusing(Dependency* d, Vec<ResolvedDep>* locked, bin force_update, num* fetched_count, str required_by) Result<ResolvedDep, str> {
-  bin is_rev = false;
+fun _resolve_one_reusing(Dependency* d, Vec<ResolvedDep>* locked, flag force_update, num* fetched_count, str required_by) Result<ResolvedDep, str> {
+  flag is_rev = false;
   fit d.spec {
     .Rev(_) -> { is_rev = true; }
     _ -> {}
@@ -442,7 +442,7 @@ fun _index_of_name(Vec<ResolvedDep>* v, str name) num {
 // entry at every level of the graph, re-resolving to whatever is
 // current; a `rev`-pinned entry is never re-resolved either way,
 // matching `cargo update`'s own respect for an explicit pin.
-pub fun resolve_all(Manifest* m, str root, bin force_update) Result<Vec<ResolvedDep>, str> {
+pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<ResolvedDep>, str> {
   let locked = read_lock(root);
   defer locked.free();
 

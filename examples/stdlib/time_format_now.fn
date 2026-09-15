@@ -1,8 +1,8 @@
 // Real-world-ish: print the current time (epoch seconds).
 
-imp std.c.io;
-imp std.c.mem;
-imp std.time;
+use std.c.io;
+use std.c.mem;
+use std.time;
 
 fun main() {
   Timestamp t = now();

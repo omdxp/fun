@@ -5,10 +5,10 @@
 // driven by a `for` loop. The compiler desugars it to the iterator's `next()`/`Option`
 // protocol, so Vec, Set, and Map (over its keys) all just work.
 
-imp std.c.io;
-imp std.vec;
-imp std.set;
-imp std.map;
+use std.c.io;
+use std.vec;
+use std.set;
+use std.map;
 
 fun main() num {
   // --- Vec: for-each + Option accessors + Display ---

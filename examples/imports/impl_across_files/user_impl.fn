@@ -1,5 +1,5 @@
-imp std.c.io;
-imp user;
+use std.c.io;
+use user;
 
 pub impl User {
   greet() {

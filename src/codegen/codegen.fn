@@ -6,15 +6,15 @@
 // type-checker: declared types are taken at face value, and an untyped
 // `let` binding relies on the C compiler's own `__auto_type` inference.
 
-imp codegen_state;
-imp typedefs;
-imp host_arch;
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..parser.datatype_defs;
-imp std.string;
-imp std.option;
-imp std.io;
+use codegen_state;
+use typedefs;
+use host_arch;
+use ..ast.ast;
+use ..lexer.token;
+use ..parser.datatype_defs;
+use std.string;
+use std.option;
+use std.io;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -41,7 +41,7 @@ compound ArrayLiteralElemInfo {
 // generic args intact, when the recording call site had one on hand.
 compound FieldTypeInfo {
   str type_name;
-  bin is_pointer;
+  flag is_pointer;
   Option<DataType> dtype;
 }
 
@@ -51,12 +51,12 @@ compound FieldTypeInfo {
 compound ChainResolution {
   str text;
   str type_name;
-  bin is_pointer;
+  flag is_pointer;
   Option<DataType> dtype;
   // Set when `text` is a call's own rendered result (an rvalue) rather
   // than an addressable lvalue. A caller that needs `&text` must hoist
   // it into a temp first.
-  bin is_call_result;
+  flag is_call_result;
 }
 
 // Which mangled `to_string` function to call for a `Display` argument in
@@ -64,7 +64,7 @@ compound ChainResolution {
 // first.
 compound DisplayResolution {
   str fn_name;
-  bin pass_by_ref;
+  flag pass_by_ref;
 }
 
 // A monomorphized generic function call: its mangled name, plus each
@@ -91,9 +91,9 @@ compound OwnParamCallResolution {
 // substitution.
 compound GenericEnumVariantTemplate {
   str name;
-  bin has_payload;
+  flag has_payload;
   Vec<str> payload_type_strs;
-  Vec<bin> payload_is_pointer;
+  Vec<flag> payload_is_pointer;
 }
 
 // Where `fn_proto_splice_pos` chose to splice a lazily-triggered
@@ -106,7 +106,7 @@ compound GenericEnumVariantTemplate {
 // every later use that relied on it anyway.
 compound ProtoSplice {
   Option<num> pos;
-  bin broad;
+  flag broad;
 }
 
 pub compound Codegen {
@@ -116,7 +116,7 @@ pub compound Codegen {
   // decide `.`/`->` for a field access and build a method call's mangled
   // name without a real type-inference engine.
   Vec<str> local_names;
-  Vec<bin> local_is_pointer;
+  Vec<flag> local_is_pointer;
   Vec<str> local_type_name;
   // A local's full structured type, when known (`record_local_typed`);
   // `.None` for a local recorded without one (`record_local`). Lets a
@@ -131,7 +131,7 @@ pub compound Codegen {
   // `emit_global_variable`, before any function or impl body is
   // transpiled - see its own comment on `pub transpile`'s pass order.
   Vec<str> global_names;
-  Vec<bin> global_is_pointer;
+  Vec<flag> global_is_pointer;
   Vec<str> global_type_name;
   Vec<Option<DataType>> global_dtype;
   // Sparse record of a multi-dimensional array's iteration variable,
@@ -155,14 +155,14 @@ pub compound Codegen {
   // real type-inference engine.
   Vec<str> enum_names;
   Vec<Vec<str>> enum_variant_names;
-  Vec<bin> enum_is_tagged_union;
+  Vec<flag> enum_is_tagged_union;
   // A tagged-union enum's per-variant payload field types, so a `fit`
   // destructuring binding is registered as a known local and further
   // access on it (a field, another `fit`, a method call) resolves.
   Vec<str> enum_variant_payload_owner;
   Vec<str> enum_variant_payload_variant;
   Vec<Vec<str>> enum_variant_payload_type_names;
-  Vec<Vec<bin>> enum_variant_payload_is_pointer;
+  Vec<Vec<flag>> enum_variant_payload_is_pointer;
   Vec<Vec<Option<DataType>>> enum_variant_payload_dtype;
   // The current function's declared return type name, refreshed at the
   // start of every `emit_function`; feeds `expected_enum_type` for a
@@ -185,7 +185,7 @@ pub compound Codegen {
   // correct form for an array literal: an array variable's initializer, a
   // nested row, or a compound-init field value. When false, a bare array
   // literal is rejected outright rather than emitting invalid C.
-  bin in_array_initializer;
+  flag in_array_initializer;
   // Names of every quirk with at least one concrete (non-generic) impl
   // emitted so far, used to recognize a receiver/declared type as a
   // quirk (dispatched through a vtable) rather than a concrete compound.
@@ -233,7 +233,7 @@ pub compound Codegen {
   Vec<str> compound_names;
   Vec<Vec<str>> compound_field_names;
   Vec<Vec<str>> compound_field_type_names;
-  Vec<Vec<bin>> compound_field_is_pointer;
+  Vec<Vec<flag>> compound_field_is_pointer;
   // Each field's full, un-mangled declared type, when known.
   Vec<Vec<Option<DataType>>> compound_field_dtype;
   // Every top-level `const`'s name and declared type, so a reference to
@@ -272,7 +272,7 @@ pub compound Codegen {
   Vec<Vec<Node*>> function_default_values;
   // Whether each registered plain function is variadic, parallel to
   // `function_names`.
-  Vec<bin> function_is_variadic;
+  Vec<flag> function_is_variadic;
   // Each function's declared return type, parallel to `function_names`.
   Vec<DataType*> function_rtypes;
   // Every generic top-level function, recorded whole rather than
@@ -286,7 +286,7 @@ pub compound Codegen {
   Vec<Vec<str>> generic_compound_type_params;
   Vec<Vec<str>> generic_compound_field_names;
   Vec<Vec<str>> generic_compound_field_type_names;
-  Vec<Vec<bin>> generic_compound_field_is_pointer;
+  Vec<Vec<flag>> generic_compound_field_is_pointer;
   // Each field's full pre-substitution type, generic arguments included,
   // so a field whose own type is itself a nested generic instantiation
   // can be substituted correctly.
@@ -331,7 +331,7 @@ pub compound Codegen {
   Vec<str> instantiation_mangled_name;
   Vec<str> instantiation_base_name;
   Vec<Vec<str>> instantiation_arg_type_names;
-  Vec<Vec<bin>> instantiation_arg_is_pointer;
+  Vec<Vec<flag>> instantiation_arg_is_pointer;
   Vec<Vec<DataType*>> instantiation_arg_dtypes;
   // Every generic impl method emitted (or enqueued, see
   // `pending_generic_impl_method_owner`) so far, keyed
@@ -371,27 +371,27 @@ pub compound Codegen {
   // already written at discovery time. False only for an entry
   // discovered while draining was suppressed, whose prototype the drain
   // loop still needs to write itself before the body.
-  Vec<bin> pending_generic_impl_method_proto_written;
+  Vec<flag> pending_generic_impl_method_proto_written;
   // How many entries at the front of the queue have already been
   // processed, so a later, unrelated drain resumes instead of
   // re-processing everything from the start.
   num pending_generic_impl_method_cursor;
   // True for the duration of the outermost drain loop. A call arriving
   // while this is already true just enqueues and returns.
-  bin draining_generic_impl_methods;
+  flag draining_generic_impl_methods;
   // True while `self.state` points at a throwaway text-capture probe,
   // such as `resolve_field_chain`'s call-as-receiver case. A generic impl
   // method first reached inside such a probe can't be spliced there, so
   // draining is suppressed in favor of enqueuing; the probe drains the
   // queue itself once it restores the real buffer.
-  bin suppress_generic_impl_method_draining;
+  flag suppress_generic_impl_method_draining;
   // The active type-param substitution for the generic impl method being
   // monomorphized: parallel arrays mapping each of the impl's type-param
   // names to this instantiation's concrete argument. Empty means no
   // substitution is active.
   Vec<str> type_subst_param_names;
   Vec<str> type_subst_arg_type_strs;
-  Vec<bin> type_subst_arg_is_pointer;
+  Vec<flag> type_subst_arg_is_pointer;
   // Each argument's full structural type, parallel to the two arrays
   // above, kept separately so a further-generic argument substitutes
   // with its own generic arguments intact rather than collapsing to an
@@ -421,7 +421,7 @@ pub compound Codegen {
   // binary op `emit_expr` handles, whichever that is, and reset
   // immediately, so it never reaches into `left`/`right`'s own nested
   // emission.
-  bin suppress_next_expr_parens;
+  flag suppress_next_expr_parens;
   // Root-buffer-relative position right before the current top-level
   // function's own signature, only ever trustworthy while `self.state
   // == self.root_state` (several other scratch buffers, a struct or
@@ -459,7 +459,7 @@ pub compound Codegen {
   num fit_subj_temp_counter;
   // Whether any `fork` statement appears in the program, computed once
   // before the prelude is written.
-  bin uses_fork;
+  flag uses_fork;
   // Names of program-defined functions that collide with a C binding
   // symbol declared in `std/c/*`. Emitted under a `__fun_shadow__`
   // prefix so they never clash with the real libc declaration.
@@ -475,11 +475,11 @@ pub compound Codegen {
   // expression still reports a position.
   str last_where;
   // Emit test blocks and a runner in place of the program's own `main`.
-  bin test_mode;
+  flag test_mode;
   // Emit MSVC-compatible C: hoist vararg temps before the enclosing
   // statement instead of using GNU `({...})`, replace `__auto_type` with
   // explicit C types wherever they can be inferred at transpile time.
-  bin msvc_mode;
+  flag msvc_mode;
   // Incremented for each variadic call that uses the hoist path so each
   // call's temporaries get a unique prefix in the surrounding scope.
   num va_call_counter;
@@ -488,17 +488,17 @@ pub compound Codegen {
   num try_call_counter;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
-  bin fuzz_mode;
+  flag fuzz_mode;
   // The `fuzz` target's name to build when a file declares more than one.
   // Empty means "not given", which is only valid when the file declares
   // exactly one target.
   str fuzz_target;
-  bin in_main;
+  flag in_main;
   // Emit `#line` directives (`-g`) so a native debugger shows and steps
   // through the original `.fn` source, not the generated C. Applies
   // equally in ordinary, test, and fuzz mode - all three lower to the
   // same statement-emission path this flag gates.
-  bin debug_info;
+  flag debug_info;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -629,7 +629,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
 // True if `node`'s subtree contains a `fork <call>;` statement anywhere.
 // A `fork` is always a statement, never nested inside an expression, so
 // only statement and body shapes need walking.
-fun node_contains_fork(Node* node) bin {
+fun node_contains_fork(Node* node) flag {
   fit node.kind {
     .StatementFork(_) -> { ret true; }
     .Body(bn) -> {
@@ -684,7 +684,7 @@ fun node_contains_fork(Node* node) bin {
 // True when the program pulled in the bindings declared by `std/c/<file>`.
 // Imports are flattened before codegen, so the binding declarations
 // themselves are what identifies which C headers the program needs.
-fun program_uses_std_c_header(Vec<Node> nodes, str file) bin {
+fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
   for n : nodes {
     if !n.has_pos {
       continue;
@@ -699,7 +699,7 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) bin {
   ret false;
 }
 
-fun uses_fork_in(Vec<Node> nodes) bin {
+fun uses_fork_in(Vec<Node> nodes) flag {
   for n : nodes {
     if node_contains_fork(&n) {
       ret true;
@@ -709,7 +709,7 @@ fun uses_fork_in(Vec<Node> nodes) bin {
 }
 
 // True when `node` was declared in a `std/c/*.fn` binding file.
-fun node_is_std_c_binding(Node n) bin {
+fun node_is_std_c_binding(Node n) flag {
   if !n.has_pos {
     ret false;
   }
@@ -775,7 +775,7 @@ fun adjust_pos_after_splice(Option<num> pos, num splice_at, num splice_len) Opti
 // declaration boundary if some other position it was derived from
 // went stale, and landing mid-signature there would silently split an
 // identifier in two.
-fun is_safe_splice_boundary(StringBuilder* out, num pos) bin {
+fun is_safe_splice_boundary(StringBuilder* out, num pos) flag {
   if pos <= 0 || pos >= out.len() {
     ret true;
   }
@@ -783,13 +783,13 @@ fun is_safe_splice_boundary(StringBuilder* out, num pos) bin {
 }
 
 // True for a character C reads as part of a `\x` escape's digits.
-fun _is_hex_digit(chr c) bin {
+fun _is_hex_digit(chr c) flag {
   ret (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
 // True when `dt` is a pointer of any depth, matching `write_type`'s
 // `ptr_depth`/`flags.is_pointer` check.
-fun dtype_is_pointer(DataType dt) bin {
+fun dtype_is_pointer(DataType dt) flag {
   if dt.pointer_depth > 0 {
     ret true;
   }
@@ -799,7 +799,7 @@ fun dtype_is_pointer(DataType dt) bin {
 // True for an unsized array type (`T[]`, no bracket dimension), which
 // decays to a plain C pointer. A sized array (`T[3]`) is excluded; it
 // stays a fixed-size inline array.
-fun dtype_is_array_as_pointer(DataType dt) bin {
+fun dtype_is_array_as_pointer(DataType dt) flag {
   if !dt.is_array {
     ret false;
   }
@@ -813,13 +813,13 @@ fun dtype_is_array_as_pointer(DataType dt) bin {
 // dec>`-style forced-instantiation list. A builtin scalar matches by
 // kind; a named type matches by its bare name, or by the base name
 // before a mangled `__` separator.
-fun dtype_matches_constraint_name(DataType dt, str expected) bin {
+fun dtype_matches_constraint_name(DataType dt, str expected) flag {
   fit dt.kind {
     .Num -> { ret equals(expected, "num"); }
     .Dec -> { ret equals(expected, "dec"); }
     .Str -> { ret equals(expected, "str"); }
     .Chr -> { ret equals(expected, "chr"); }
-    .Bin -> { ret equals(expected, "bin"); }
+    .Bin -> { ret equals(expected, "flag"); }
     .Raw -> { ret equals(expected, "raw"); }
     .Void -> { ret equals(expected, "void"); }
     .Unknown -> {
@@ -839,7 +839,7 @@ fun dtype_matches_constraint_name(DataType dt, str expected) bin {
 // is allowed by `forced_insts`, one of the concrete-type combinations
 // from an `impl Vec<T: num | dec>`-style constraint. An unconstrained
 // template always allows any instantiation.
-fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<DataType*> gargs) bin {
+fun impl_allows_generic_args(flag has_forced, Vec<Vec<str>> forced_insts, Vec<DataType*> gargs) flag {
   if !has_forced {
     ret true;
   }
@@ -847,7 +847,7 @@ fun impl_allows_generic_args(bin has_forced, Vec<Vec<str>> forced_insts, Vec<Dat
     if inst.len != gargs.len {
       continue;
     }
-    bin all_match = true;
+    flag all_match = true;
     num i = 0;
     for i < inst.len {
       if !dtype_matches_constraint_name(*gargs.get(i), inst.get(i)) {
@@ -937,7 +937,7 @@ impl Codegen {
     Vec<DataType*> new_args;
     new_args.init(0);
     for a : dt.generic_args {
-      bin substituted = false;
+      flag substituted = false;
       if a.generic_args.len == 0 {
         for i : 0..self.type_subst_param_names.len {
           if equals(self.type_subst_param_names.get(i), a.type_str) {
@@ -1113,7 +1113,7 @@ impl Codegen {
   // template, or a type param can't be inferred from any field.
   infer_generic_compound_init_args(str base_name, Vec<CompoundInitField> init_fields) Option<Vec<DataType*>> {
     num template_idx = 0;
-    bin found_tmpl = false;
+    flag found_tmpl = false;
     for template_idx < self.generic_compound_names.len {
       if equals(self.generic_compound_names.get(template_idx), base_name) {
         found_tmpl = true;
@@ -1131,9 +1131,9 @@ impl Codegen {
     Vec<DataType*> resolved_args;
     resolved_args.init(0);
     for tp : type_params {
-      bin tp_found = false;
+      flag tp_found = false;
       str tp_name = "";
-      bin tp_is_pointer = false;
+      flag tp_is_pointer = false;
       num fi = 0;
       for fi < tmpl_field_names.len {
         if tp_found {
@@ -1181,7 +1181,7 @@ impl Codegen {
   // a nested argument can't be resolved.
   ensure_compound_instantiated(DataType dt) Option<str> {
     num template_idx = 0;
-    bin found = false;
+    flag found = false;
     for template_idx < self.generic_compound_names.len {
       if equals(self.generic_compound_names.get(template_idx), dt.type_str) {
         found = true;
@@ -1202,7 +1202,7 @@ impl Codegen {
     name_sb.append(dt.type_str);
     Vec<str> arg_type_names;
     arg_type_names.init(0);
-    Vec<bin> arg_is_pointer;
+    Vec<flag> arg_is_pointer;
     arg_is_pointer.init(0);
     Vec<DataType*> arg_dtypes;
     arg_dtypes.init(0);
@@ -1217,7 +1217,7 @@ impl Codegen {
       }
       name_sb.append("__");
       name_sb.append(arg_name);
-      bin arg_ptr = dtype_is_pointer(*arg);
+      flag arg_ptr = dtype_is_pointer(*arg);
       if arg_ptr {
         name_sb.append("_ptr");
         name_sb.append(format_num(arg.pointer_depth));
@@ -1249,7 +1249,7 @@ impl Codegen {
     // A directly self-referential template is forward-declared first, so
     // a field like `Box<T>* next;` inside `compound Box<T>` has a type
     // name to reference before the body is written.
-    bin is_self_referential = false;
+    flag is_self_referential = false;
     for fdt : field_dtypes {
       if equals(fdt.type_str, dt.type_str) {
         is_self_referential = true;
@@ -1269,7 +1269,7 @@ impl Codegen {
     resolved_field_names.init(0);
     Vec<str> resolved_field_type_names;
     resolved_field_type_names.init(0);
-    Vec<bin> resolved_field_is_pointer;
+    Vec<flag> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
     // Each field's substituted, structural `DataType` (generic_args
     // included), passed to `record_compound_typed` below instead of
@@ -1307,10 +1307,10 @@ impl Codegen {
     num fi = 0;
     for fi < field_names.len {
       str ftype = field_type_names.get(fi);
-      bin fptr = field_is_pointer.get(fi);
+      flag fptr = field_is_pointer.get(fi);
       str resolved_type = ftype;
-      bin resolved_ptr = fptr;
-      bin matched_bare_param = false;
+      flag resolved_ptr = fptr;
+      flag matched_bare_param = false;
       num ptr_depth = 0;
       if fptr {
         ptr_depth = 1;
@@ -1469,7 +1469,7 @@ impl Codegen {
   // emits.
   ensure_enum_instantiated(DataType dt) Option<str> {
     num template_idx = 0;
-    bin found = false;
+    flag found = false;
     for template_idx < self.generic_enum_names.len {
       if equals(self.generic_enum_names.get(template_idx), dt.type_str) {
         found = true;
@@ -1490,7 +1490,7 @@ impl Codegen {
     name_sb.append(dt.type_str);
     Vec<str> arg_type_names;
     arg_type_names.init(0);
-    Vec<bin> arg_is_pointer;
+    Vec<flag> arg_is_pointer;
     arg_is_pointer.init(0);
     Vec<DataType*> arg_dtypes;
     arg_dtypes.init(0);
@@ -1509,7 +1509,7 @@ impl Codegen {
       }
       name_sb.append("__");
       name_sb.append(arg_name);
-      bin arg_ptr = dtype_is_pointer(*arg);
+      flag arg_ptr = dtype_is_pointer(*arg);
       if arg_ptr {
         name_sb.append("_ptr");
         name_sb.append(format_num(arg.pointer_depth));
@@ -1534,7 +1534,7 @@ impl Codegen {
     // self-referential; see `ensure_compound_instantiated`.
     self.emitted_generic_instantiations.push(mangled_name);
     let variant_templates = self.generic_enum_variants.get(template_idx);
-    bin enum_is_self_referential = false;
+    flag enum_is_self_referential = false;
     for vt : variant_templates {
       for pt : vt.payload_type_strs {
         if equals(pt, dt.type_str) {
@@ -1552,7 +1552,7 @@ impl Codegen {
       self.emit_hoisted(efwd_sb.build());
     }
 
-    bin is_tagged_union = false;
+    flag is_tagged_union = false;
     for vt : variant_templates {
       if vt.has_payload {
         is_tagged_union = true;
@@ -1576,7 +1576,7 @@ impl Codegen {
         num pti = 0;
         for pti < vt2.payload_type_strs.len {
           str ptype2 = vt2.payload_type_strs.get(pti);
-          bin pptr2 = vt2.payload_is_pointer.get(pti);
+          flag pptr2 = vt2.payload_is_pointer.get(pti);
           pti = pti + 1;
           if pptr2 || equals(ptype2, dt.type_str) {
             continue;
@@ -1657,7 +1657,7 @@ impl Codegen {
   // the argument count doesn't match.
   ensure_quirk_instantiated(DataType dt) Option<str> {
     num qdi = 0;
-    bin qfound = false;
+    flag qfound = false;
     for qdi < self.quirk_decl_names.len {
       if equals(self.quirk_decl_names.get(qdi), dt.type_str) {
         qfound = true;
@@ -1677,7 +1677,7 @@ impl Codegen {
     qname_sb.append(dt.type_str);
     Vec<str> q_arg_type_names;
     q_arg_type_names.init(0);
-    Vec<bin> q_arg_is_pointer;
+    Vec<flag> q_arg_is_pointer;
     q_arg_is_pointer.init(0);
     for qarg : dt.generic_args {
       qname_sb.append("__");
@@ -1711,7 +1711,7 @@ impl Codegen {
     self.state.write("struct ");
     self.state.write(q_mangled);
     self.state.write("_vtable {\n");
-    bin q_write_err = false;
+    flag q_write_err = false;
     for qm : q_methods {
       self.state.write("  ");
       if qm.rtype != nil {
@@ -1783,7 +1783,7 @@ impl Codegen {
             ret perr;
           }
           self.state.write("))(");
-          bin rfirst = true;
+          flag rfirst = true;
           for rp : rsig.params {
             if !rfirst {
               self.state.write(", ");
@@ -1831,7 +1831,7 @@ impl Codegen {
       self.state.write("void");
       ret .None;
     }
-    bin first = true;
+    flag first = true;
     for arg : f.args {
       if !first {
         self.state.write(", ");
@@ -1848,7 +1848,7 @@ impl Codegen {
             self.state.write(" (*");
             self.state.write(v.name);
             self.state.write(")(");
-            bin pfirst = true;
+            flag pfirst = true;
             for p : sig.params {
               if !pfirst {
                 self.state.write(", ");
@@ -1864,7 +1864,7 @@ impl Codegen {
             // An unsized array parameter's decay star must be added
             // here too, or the prototype and the definition disagree;
             // see `emit_function_param`.
-            bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+            flag arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
             let wt = self.write_type(*v.var_type);
             if wt.is_none() {
               ret .Some(.UnsupportedNode);
@@ -1901,7 +1901,7 @@ impl Codegen {
         self.state.write(new_name);
         self.state.write("(");
         if f.has_args && f.args.len > 0 {
-          bin first = true;
+          flag first = true;
           for arg : f.args {
             fit arg.kind {
               .Variable(v) -> {
@@ -1935,7 +1935,7 @@ impl Codegen {
   // either kind. Unlike a compound, whose bare name is already
   // forward-declared, C can't name an enum without its full definition,
   // and offers no name-only forward-declare for a generic instantiation.
-  prototype_type_is_unsafe_early(DataType dt) bin {
+  prototype_type_is_unsafe_early(DataType dt) flag {
     if dt.generic_args.len > 0 {
       ret true;
     }
@@ -1984,7 +1984,7 @@ impl Codegen {
   // for the early forward-declare pass; see
   // `prototype_type_is_unsafe_early`. A function-pointer-typed parameter
   // is treated as always safe without inspecting its nested types.
-  function_prototype_is_safe_early(Node n) bin {
+  function_prototype_is_safe_early(Node n) flag {
     fit n.kind {
       .Function(f) -> {
         if f.has_rtype && self.prototype_type_is_unsafe_early(*f.rtype) {
@@ -2032,7 +2032,7 @@ impl Codegen {
     str base_name,
     str mangled_name,
     Vec<str> arg_type_names,
-    Vec<bin> arg_is_pointer,
+    Vec<flag> arg_is_pointer,
     Vec<DataType*> arg_dtypes
   ) {
     for tmpl : self.generic_impl_templates {
@@ -2085,7 +2085,7 @@ impl Codegen {
                     tmpl_rtype = fnv.rtype;
                   }
                   if fnv.has_args {
-                    bin skipped_tmpl_self = false;
+                    flag skipped_tmpl_self = false;
                     for arg : fnv.args {
                       if !skipped_tmpl_self {
                         skipped_tmpl_self = true;
@@ -2175,7 +2175,7 @@ impl Codegen {
     str mangled_name,
     Vec<str> type_params,
     Vec<str> arg_type_names,
-    Vec<bin> arg_is_pointer,
+    Vec<flag> arg_is_pointer,
     Vec<DataType*> arg_dtypes
   ) {
     for tmpl : self.generic_impl_templates {
@@ -2195,7 +2195,7 @@ impl Codegen {
           // vtable keyed by the resolved `K`, which this machinery
           // doesn't build, so it's skipped rather than misfiring with a
           // stale, unsubstituted vtable shape.
-          bin quirk_itself_generic = false;
+          flag quirk_itself_generic = false;
           num qdi = 0;
           for qdi < self.quirk_decl_names.len {
             if equals(self.quirk_decl_names.get(qdi), i.quirk_name) {
@@ -2295,7 +2295,7 @@ impl Codegen {
           qm_pfx_sb.append(i.quirk_name);
           qm_pfx_sb.append("__");
           str qm_prefix = qm_pfx_sb.build();
-          bin prev_suppress_qv = self.suppress_generic_impl_method_draining;
+          flag prev_suppress_qv = self.suppress_generic_impl_method_draining;
           self.suppress_generic_impl_method_draining = true;
           for m : i.methods {
             fit m.kind {
@@ -2335,7 +2335,7 @@ impl Codegen {
   // own impl, same as `emit_one_generic_impl_method`.
   emit_generic_impl_method_prototype_now(str owner_type, str bare_name, str quirk_name) {
     num ii = 0;
-    bin found_inst = false;
+    flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
       if equals(self.instantiation_mangled_name.get(ii), owner_type) {
         found_inst = true;
@@ -2539,7 +2539,7 @@ impl Codegen {
     }
 
     num pmi = 0;
-    bin found_pm = false;
+    flag found_pm = false;
     for pmi < self.impl_method_owner_type.len {
       if equals(self.impl_method_owner_type.get(pmi), owner_type) &&
         equals(
@@ -2570,7 +2570,7 @@ impl Codegen {
     // the implicit `self`. Narrower than
     // `prototype_type_is_unsafe_early`: just the plain-enum and quirk
     // name check, since a mangled generic instantiation has its own path.
-    bin pm_owner_unsafe = false;
+    flag pm_owner_unsafe = false;
     for pm_owner_n : self.all_nodes {
       fit pm_owner_n.kind {
         .Enum(pm_oe) -> {
@@ -2586,7 +2586,7 @@ impl Codegen {
         _ -> {}
       }
     }
-    bin pm_unsafe = pm_owner_unsafe;
+    flag pm_unsafe = pm_owner_unsafe;
     if !pm_unsafe {
       pm_unsafe = self.prototype_type_is_unsafe_early(*pm_rtype);
     }
@@ -2701,7 +2701,7 @@ impl Codegen {
 
   // The C name to emit for a call's callee: alias-qualified calls name a
   // C binding directly and keep their raw name.
-  emit_callee_name(str name, bin alias_qualified) str {
+  emit_callee_name(str name, flag alias_qualified) str {
     if alias_qualified {
       ret name;
     }
@@ -2732,7 +2732,7 @@ impl Codegen {
     }
 
     num fi = 0;
-    bin found_pf = false;
+    flag found_pf = false;
     for fi < self.function_names.len {
       if equals(self.function_names.get(fi), fn_name) {
         found_pf = true;
@@ -2754,7 +2754,7 @@ impl Codegen {
       }
     }
 
-    bin pf_unsafe = self.prototype_type_is_unsafe_early(*pf_rtype);
+    flag pf_unsafe = self.prototype_type_is_unsafe_early(*pf_rtype);
     if !pf_unsafe {
       for pf_pt2 : pf_param_types {
         if self.prototype_type_is_unsafe_early(*pf_pt2) {
@@ -2801,7 +2801,7 @@ impl Codegen {
       self.state.write(" ");
       self.state.write(self.effective_function_name(fn_name));
       self.state.write("(");
-      bin pf_first = true;
+      flag pf_first = true;
       for pf_pt4 : pf_param_types {
         if !pf_first {
           self.state.write(", ");
@@ -2872,7 +2872,7 @@ impl Codegen {
       ret requested_quirk;
     }
     num ii = 0;
-    bin found_inst = false;
+    flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
       if equals(self.instantiation_mangled_name.get(ii), owner_type) {
         found_inst = true;
@@ -2962,7 +2962,7 @@ impl Codegen {
     // Pushed before this entry is processed, so a self-recursive call
     // sees "already handled" rather than recursing forever.
     self.emitted_generic_impl_methods.push(key);
-    bin proto_written = !self.suppress_generic_impl_method_draining;
+    flag proto_written = !self.suppress_generic_impl_method_draining;
     if proto_written {
       self.emit_generic_impl_method_prototype_now(owner_type, bare_name, resolved_quirk);
     }
@@ -3015,7 +3015,7 @@ impl Codegen {
   // `Clearable` quirk's `clear()`) can't shadow each other.
   emit_one_generic_impl_method(str owner_type, str bare_name, str quirk_name) Option<CodegenErrorKind> {
     num ii = 0;
-    bin found_inst = false;
+    flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
       if equals(self.instantiation_mangled_name.get(ii), owner_type) {
         found_inst = true;
@@ -3160,7 +3160,7 @@ impl Codegen {
   // True when `bare_name`, resolved against `owner_type`'s impl template,
   // declares its own generic type params on top of the impl's
   // (`impl Box<T> { pub wrap<U>(U x) Box<U> { ... } }`).
-  impl_method_has_own_type_params(str owner_type, str bare_name) bin {
+  impl_method_has_own_type_params(str owner_type, str bare_name) flag {
     // A plain impl's own methods can declare type params too, and are
     // monomorphized through the same path with an empty impl-level
     // substitution.
@@ -3227,7 +3227,7 @@ impl Codegen {
   // one reduces to the method's own params.
   maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
     num ii = 0;
-    bin found_inst = false;
+    flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
       if equals(self.instantiation_mangled_name.get(ii), owner_type) {
         found_inst = true;
@@ -3239,7 +3239,7 @@ impl Codegen {
     str base_name = owner_type;
     Vec<str> impl_arg_type_names;
     impl_arg_type_names.init(0);
-    Vec<bin> impl_arg_is_pointer;
+    Vec<flag> impl_arg_is_pointer;
     impl_arg_is_pointer.init(0);
     Vec<DataType*> impl_arg_dtypes;
     impl_arg_dtypes.init(0);
@@ -3288,10 +3288,10 @@ impl Codegen {
 
                 Vec<str> own_arg_type_names;
                 own_arg_type_names.init(0);
-                Vec<bin> own_arg_is_pointer;
+                Vec<flag> own_arg_is_pointer;
                 own_arg_is_pointer.init(0);
                 for tp : fnv.type_params {
-                  bin found = false;
+                  flag found = false;
                   str found_name = "";
                   num ai = 0;
                   num arg_i = 0;
@@ -3340,7 +3340,7 @@ impl Codegen {
                 combined_params.init(0);
                 Vec<str> combined_arg_names;
                 combined_arg_names.init(0);
-                Vec<bin> combined_arg_ptrs;
+                Vec<flag> combined_arg_ptrs;
                 combined_arg_ptrs.init(0);
                 for tpn : i.type_params {
                   combined_params.push(tpn);
@@ -3382,7 +3382,7 @@ impl Codegen {
                 }
 
                 num ei = 0;
-                bin already_emitted = false;
+                flag already_emitted = false;
                 for ei < self.emitted_method_own_param_insts.len {
                   if equals(self.emitted_method_own_param_insts.get(ei), new_name) {
                     already_emitted = true;
@@ -3478,7 +3478,7 @@ impl Codegen {
     Vec<GenericEnumVariantTemplate> variant_templates,
     Vec<str> type_params,
     Vec<str> arg_type_names,
-    Vec<bin> arg_is_pointer
+    Vec<flag> arg_is_pointer
   ) {
     self.state.write("typedef enum ");
     self.state.write(mangled_name);
@@ -3505,13 +3505,13 @@ impl Codegen {
         num i = 0;
         Vec<str> resolved_payload_names;
         resolved_payload_names.init(0);
-        Vec<bin> resolved_payload_ptrs;
+        Vec<flag> resolved_payload_ptrs;
         resolved_payload_ptrs.init(0);
         for i < vt.payload_type_strs.len {
           str ptype = vt.payload_type_strs.get(i);
-          bin pptr = vt.payload_is_pointer.get(i);
+          flag pptr = vt.payload_is_pointer.get(i);
           str resolved_type = ptype;
-          bin resolved_ptr = pptr;
+          flag resolved_ptr = pptr;
           // A payload written as the enum's own name (`List<T>*` inside
           // `List`'s own variant) refers to this instantiation itself,
           // not to a type parameter: nothing in `type_params` would ever
@@ -3558,7 +3558,7 @@ impl Codegen {
   // Records that local `name` is (or isn't) a pointer, and its declared
   // type name, for later field-access/method-call decisions. No full
   // `DataType` on hand here; see `record_local_typed` for that case.
-  record_local(str name, str type_name, bin is_pointer) {
+  record_local(str name, str type_name, flag is_pointer) {
     self.local_names.push(name);
     self.local_is_pointer.push(is_pointer);
     self.local_type_name.push(type_name);
@@ -3567,7 +3567,7 @@ impl Codegen {
 
   // Like `record_local`, but for a call site that has the local's real,
   // already-substituted `DataType` on hand.
-  record_local_typed(str name, str type_name, bin is_pointer, DataType dtype) {
+  record_local_typed(str name, str type_name, flag is_pointer, DataType dtype) {
     self.local_names.push(name);
     self.local_is_pointer.push(is_pointer);
     self.local_type_name.push(type_name);
@@ -3577,7 +3577,7 @@ impl Codegen {
   // Like `record_local_typed`, but for a top-level `Variable` - see the
   // separate `global_names` etc. fields for why these can't share the
   // per-function `local_names` vecs.
-  record_global_typed(str name, str type_name, bin is_pointer, DataType dtype) {
+  record_global_typed(str name, str type_name, flag is_pointer, DataType dtype) {
     self.global_names.push(name);
     self.global_is_pointer.push(is_pointer);
     self.global_type_name.push(type_name);
@@ -3604,7 +3604,7 @@ impl Codegen {
   // wins; there is no block-scope popping, so both entries live in the
   // same flat list. Falls back to a global variable of the same name
   // when no local shadows it.
-  lookup_local_is_pointer(str name) Option<bin> {
+  lookup_local_is_pointer(str name) Option<flag> {
     num i = self.local_names.len - 1;
     for i >= 0 {
       if equals(self.local_names.get(i), name) {
@@ -3716,7 +3716,7 @@ impl Codegen {
 
   // Records `name` as a known enum with the given variant names and
   // tagged-union-ness, for later `EnumName.Variant` access recognition.
-  record_enum(str name, Vec<str> variant_names, bin is_tagged_union) {
+  record_enum(str name, Vec<str> variant_names, flag is_tagged_union) {
     self.enum_names.push(name);
     self.enum_variant_names.push(variant_names);
     self.enum_is_tagged_union.push(is_tagged_union);
@@ -3728,7 +3728,7 @@ impl Codegen {
     str enum_name,
     str variant_name,
     Vec<str> type_names,
-    Vec<bin> is_pointer
+    Vec<flag> is_pointer
   ) {
     Vec<Option<DataType>> dtypes;
     dtypes.init(0);
@@ -3750,7 +3750,7 @@ impl Codegen {
     str enum_name,
     str variant_name,
     Vec<str> type_names,
-    Vec<bin> is_pointer,
+    Vec<flag> is_pointer,
     Vec<DataType> dtypes_raw
   ) {
     Vec<Option<DataType>> dtypes;
@@ -3821,7 +3821,7 @@ impl Codegen {
 
   // True if `enum_name` is a known enum with a variant named
   // `variant_name`.
-  enum_has_variant(str enum_name, str variant_name) bin {
+  enum_has_variant(str enum_name, str variant_name) flag {
     num i = 0;
     for i < self.enum_names.len {
       if equals(self.enum_names.get(i), enum_name) {
@@ -3841,7 +3841,7 @@ impl Codegen {
   }
 
   // True if `enum_name` is a known tagged-union enum.
-  enum_is_tagged_union_named(str enum_name) bin {
+  enum_is_tagged_union_named(str enum_name) flag {
     num i = 0;
     for i < self.enum_names.len {
       if equals(self.enum_names.get(i), enum_name) {
@@ -3859,7 +3859,7 @@ impl Codegen {
     str name,
     Vec<str> field_names,
     Vec<str> field_type_names,
-    Vec<bin> field_is_pointer
+    Vec<flag> field_is_pointer
   ) {
     Vec<Option<DataType>> field_dtypes;
     field_dtypes.init(0);
@@ -3881,7 +3881,7 @@ impl Codegen {
     str name,
     Vec<str> field_names,
     Vec<str> field_type_names,
-    Vec<bin> field_is_pointer,
+    Vec<flag> field_is_pointer,
     Vec<DataType> field_dtypes_raw
   ) {
     Vec<Option<DataType>> field_dtypes;
@@ -4206,12 +4206,12 @@ impl Codegen {
   // `map_type_to_c` (a scalar like `num`/`str`, or a raw C keyword
   // spelling it already maps to) never gets a typedef of its own, so
   // it's excluded rather than always failing the check.
-  fn_types_declared_before(Vec<str> type_names, num pos) bin {
+  fn_types_declared_before(Vec<str> type_names, num pos) flag {
     if pos <= 0 {
       ret false;
     }
     str head = "";
-    bin head_built = false;
+    flag head_built = false;
     for name : type_names {
       if equals(name, "") || equals(name, "void") || !equals(map_type_to_c(name), name) {
         continue;
@@ -4233,7 +4233,7 @@ impl Codegen {
       enum_needle_sb.append(name);
       str struct_needle = struct_needle_sb.build();
       str enum_needle = enum_needle_sb.build();
-      bin found = contains(head, struct_needle) || contains(head, enum_needle);
+      flag found = contains(head, struct_needle) || contains(head, enum_needle);
       free(struct_needle);
       free(enum_needle);
       if !found {
@@ -4301,7 +4301,7 @@ impl Codegen {
   }
 
   emit_condition(Node cond) Option<CodegenErrorKind> {
-    bin is_plain_binary = false;
+    flag is_plain_binary = false;
     fit cond.kind {
       .Expression(ce) -> {
         // `=` isn't excluded because it's exempt from the double-paren
@@ -4337,7 +4337,7 @@ impl Codegen {
   // `ret .None;` to build the early-return value, rather than
   // hand-writing new compound-literal text.
   emit_propagation(UnaryNode u) Option<CodegenErrorKind> {
-    bin is_option = equals(u.op, "?");
+    flag is_option = equals(u.op, "?");
     str none_or_err = "Err";
     str some_or_ok = "Ok";
     if is_option {
@@ -4362,7 +4362,7 @@ impl Codegen {
     // of them a second time. `_resolve_call_rtype` is the exact same
     // type resolution with that unneeded, unsafe render skipped.
     str operand_enum_name = "";
-    bin resolved_operand_type = false;
+    flag resolved_operand_type = false;
     fit u.operand.kind {
       .Expression(inner_e) -> {
         if equals(inner_e.op, "()") && inner_e.has_left {
@@ -4486,7 +4486,7 @@ impl Codegen {
     // `root_hoist_pos`/`root_state` whenever `hoist_scratch_depth > 0`,
     // this only widens the gate that used to bail out before ever
     // reaching it.
-    bin use_hoist = self.msvc_mode &&
+    flag use_hoist = self.msvc_mode &&
       (self.current_stmt_start_pos.is_some() ||
       (self.hoist_scratch_depth > 0 && self.root_stmt_start_pos.is_some()));
     if !self.msvc_mode {
@@ -4575,7 +4575,7 @@ impl Codegen {
     // tracks correctly. Temporarily substituting it in for the
     // duration of this one splice keeps the two mechanisms from
     // colliding over the same field.
-    bin routed_via_root_stmt = false;
+    flag routed_via_root_stmt = false;
     let saved_root_hoist_for_prop = self.root_hoist_pos;
     if try_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
       self.root_stmt_start_pos.is_some() {
@@ -4678,7 +4678,7 @@ impl Codegen {
         // ... }`, or `(Type){0}` for an empty initializer.
         str type_name = "";
         if ci.has_dtype {
-          bin have_type_name = false;
+          flag have_type_name = false;
           // A bare `Type{...}` inside a generic impl method's body,
           // naming that method's return type's bare template, resolves
           // against `current_fn_rtype_name`. Checked before the
@@ -4726,7 +4726,7 @@ impl Codegen {
         if ci.fields.len == 0 {
           self.state.write("0");
         } else {
-          bin first = true;
+          flag first = true;
           for f : ci.fields {
             if !first {
               self.state.write(", ");
@@ -4782,7 +4782,7 @@ impl Codegen {
         elems.init(0);
         self.flatten_call_args(inner, &elems);
         self.state.write("{");
-        bin first = true;
+        flag first = true;
         for elem : elems {
           if !first {
             self.state.write(", ");
@@ -4892,7 +4892,7 @@ impl Codegen {
         }
         // Consumed here, one shot: only this outermost pair is skipped,
         // never `e.left`/`e.right`'s own recursive `emit_expr` calls.
-        bin wrote_own_parens = !self.suppress_next_expr_parens;
+        flag wrote_own_parens = !self.suppress_next_expr_parens;
         self.suppress_next_expr_parens = false;
         if wrote_own_parens {
           self.state.write("(");
@@ -4908,7 +4908,7 @@ impl Codegen {
         // An assignment or equality comparison's right-hand side may be a
         // bare enum-variant shorthand, so the left side's declared type
         // becomes the expected type for the right expression only.
-        bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") ||
+        flag resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") ||
           equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
         str prev_expected_compound = self.expected_compound_type;
@@ -4917,7 +4917,7 @@ impl Codegen {
         // declared `HasV h` hits the identical mismatch a fresh `HasV h
         // = &a;` would, since plain assignment never went through that
         // path at all.
-        bin did_assign_coerce = false;
+        flag did_assign_coerce = false;
         if equals(e.op, "=") {
           let lhs_resolved2 = self.resolve_field_chain(e.left);
           if lhs_resolved2.is_some() {
@@ -5057,7 +5057,7 @@ impl Codegen {
   // and `__fun_key_hash` intrinsics use to pick string-contents over
   // raw-byte semantics. Only a bare `.Identifier` argument is resolvable;
   // anything else conservatively answers false.
-  _key_arg_is_str(Node* arg) bin {
+  _key_arg_is_str(Node* arg) flag {
     fit arg.kind {
       .Identifier(name) -> {
         let dt_opt = self.lookup_local_dtype(name);
@@ -5085,15 +5085,15 @@ impl Codegen {
     // matches `eligible` below.
     fit expr.kind {
       .Unary(u) -> {
-        bin want_ptr = equals(u.op, "*");
-        bin want_addr = equals(u.op, "&");
+        flag want_ptr = equals(u.op, "*");
+        flag want_addr = equals(u.op, "&");
         if want_ptr || want_addr {
           fit u.operand.kind {
             .Identifier(name) -> {
               let is_ptr = self.lookup_local_is_pointer(name);
               let type_name = self.lookup_local_type_name(name);
               if is_ptr.is_some() && type_name.is_some() {
-                bin shape_ok = false;
+                flag shape_ok = false;
                 if want_ptr && is_ptr.unwrap() {
                   shape_ok = true;
                 }
@@ -5130,7 +5130,7 @@ impl Codegen {
       }
       _ -> {}
     }
-    bin eligible = false;
+    flag eligible = false;
     fit expr.kind {
       .Identifier(_) -> { eligible = true; }
       .Expression(e) -> {
@@ -5189,7 +5189,7 @@ impl Codegen {
           word_key.append_char(fmt[i + 1]);
           word_key.append_char(fmt[i + 2]);
           word_key.append_char(fmt[i + 3]);
-          bin matched = false;
+          flag matched = false;
           fit word_key.build() {
             "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { matched = true; }
             _ -> {}
@@ -5238,7 +5238,7 @@ impl Codegen {
           word_key2.append_char(fmt[i + 2]);
           word_key2.append_char(fmt[i + 3]);
           str word = word_key2.build();
-          bin known_word = false;
+          flag known_word = false;
           fit word {
             "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { known_word = true; }
             _ -> {}
@@ -5266,7 +5266,7 @@ impl Codegen {
     str callee_name = "";
     // An alias-qualified callee (`cmath.log(x)`) names the C binding
     // directly, so it keeps its raw name; see `effective_function_name`.
-    bin callee_is_alias_qualified = false;
+    flag callee_is_alias_qualified = false;
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
       .Expression(recv_e) -> {
@@ -5275,7 +5275,7 @@ impl Codegen {
           // import alias. Checked before falling through to
           // `emit_method_call`, and gated on not already being a known
           // local so a same-named local shadows the alias.
-          bin left_is_known_alias = false;
+          flag left_is_known_alias = false;
           str known_alias_name = "";
           if recv_e.has_left {
             fit recv_e.left.kind {
@@ -5315,7 +5315,7 @@ impl Codegen {
             // known enum name carrying that variant.
             if recv_e.has_left && recv_e.has_right {
               str enum_name = "";
-              bin have_enum_name = false;
+              flag have_enum_name = false;
               fit recv_e.left.kind {
                 .Identifier(name) -> {
                   enum_name = name;
@@ -5470,24 +5470,24 @@ impl Codegen {
 
       // Resolved once per position and reused across the three loops
       // below: binding, tag string, and pass-through argument.
-      Vec<bin> va_is_display;
+      Vec<flag> va_is_display;
       va_is_display.init(var_len);
       defer va_is_display.free();
       Vec<str> va_disp_fn;
       va_disp_fn.init(var_len);
       defer va_disp_fn.free();
-      Vec<bin> va_disp_by_ref;
+      Vec<flag> va_disp_by_ref;
       va_disp_by_ref.init(var_len);
       defer va_disp_by_ref.free();
       // Tracks `{ptr}`/`{raw}` positions so MSVC can emit the correct `'p'`
       // tag character and `void*` declaration type for those slots (GNU mode
       // uses `__fun_tag`'s `_Generic` which handles pointers automatically).
-      Vec<bin> va_is_force_raw;
+      Vec<flag> va_is_force_raw;
       va_is_force_raw.init(var_len);
       defer va_is_force_raw.free();
       num vd_i = 0;
       for vd_i < var_len {
-        bin force_raw = false;
+        flag force_raw = false;
         if vd_i < va_placeholder_types.len {
           str ph_word = va_placeholder_types.get(vd_i);
           force_raw = equals(ph_word, "ptr") || equals(ph_word, "raw");
@@ -5513,7 +5513,7 @@ impl Codegen {
       // callee call directly. Falls back to the GNU form otherwise (e.g.
       // when emitting top-level initializers where no statement context
       // exists).
-      bin va_use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
+      flag va_use_hoist = self.msvc_mode && self.current_stmt_start_pos.is_some();
       // Arg texts captured for the msvc inline fallback (no-hoist + msvc):
       // avoids GNU statement expressions when there is no stmt position to
       // hoist into (e.g. nested variadic call evaluated in a scratch buffer).
@@ -5533,7 +5533,7 @@ impl Codegen {
         num va_i = 0;
         for va_i < var_len {
           Node* va_arg = args.get(fixed_len + va_i);
-          bin va_is_chr_literal = false;
+          flag va_is_chr_literal = false;
           fit va_arg.kind {
             .Character(_) -> { va_is_chr_literal = true; }
             _ -> {}
@@ -5672,7 +5672,7 @@ impl Codegen {
           num va_i = 0;
           for va_i < var_len {
             Node* va_arg = args.get(fixed_len + va_i);
-            bin va_is_chr_literal = false;
+            flag va_is_chr_literal = false;
             fit va_arg.kind {
               .Character(_) -> { va_is_chr_literal = true; }
               _ -> {}
@@ -5746,7 +5746,7 @@ impl Codegen {
             // the `int` case, and the callee's shim would stringify the ASCII
             // code instead of the character. An explicit `(char)` cast forces
             // the right inference; a `chr`-typed variable is already `char`.
-            bin va_is_chr_literal = false;
+            flag va_is_chr_literal = false;
             fit va_arg.kind {
               .Character(_) -> { va_is_chr_literal = true; }
               _ -> {}
@@ -6005,7 +6005,7 @@ impl Codegen {
         _ -> {}
       }
       str sizeof_operand = "";
-      bin have_sizeof_operand = false;
+      flag have_sizeof_operand = false;
       fit args.get(0).kind {
         .Identifier(name) -> {
           sizeof_operand = name;
@@ -6063,7 +6063,7 @@ impl Codegen {
     self.state.write(self.emit_callee_name(callee_name, callee_is_alias_qualified));
     self.state.write("(");
 
-    bin first = true;
+    flag first = true;
     num arg_idx = 0;
     for arg : args {
       if !first {
@@ -6090,7 +6090,7 @@ impl Codegen {
         }
       }
       str prev_expected = self.expected_enum_type;
-      bin arg_did_quirk_coerce = false;
+      flag arg_did_quirk_coerce = false;
       if ptype.is_some() {
         let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
@@ -6167,9 +6167,9 @@ impl Codegen {
     Vec<Node*> defaults,
     Option<Vec<DataType*>> param_types,
     num provided_count,
-    bin anything_written
+    flag anything_written
   ) Option<CodegenErrorKind> {
-    bin needs_separator = anything_written;
+    flag needs_separator = anything_written;
     num i = provided_count;
     for i < defaults.len {
       Node* d = defaults.get(i);
@@ -6337,7 +6337,7 @@ impl Codegen {
   // collapses a plain enum's own constant to its C-level `int` type
   // even under GNU/Clang, breaking `&tmp` against an `EnumName*`
   // parameter the same way MSVC would fail outright.
-  hoist_call_result_to_temp(str call_text, str recv_type_name, bin recv_is_pointer) str {
+  hoist_call_result_to_temp(str call_text, str recv_type_name, flag recv_is_pointer) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -6611,7 +6611,7 @@ impl Codegen {
     // impl's `T` plus this call's `U` inferred from `args`, that neither
     // `ensure_generic_impl_method_emitted` nor the static dispatch below
     // builds, so it is checked first.
-    bin used_own_param_inst = false;
+    flag used_own_param_inst = false;
     if self.impl_method_has_own_type_params(recv_r.type_name, method_name) {
       let own_inst = self.maybe_instantiate_generic_impl_method_own_params(
         recv_r.type_name,
@@ -6779,7 +6779,7 @@ impl Codegen {
   // Writes one `[name] "constraint"(expr)` operand of an asm statement's
   // out/in list.
   emit_asm_operand_list(Vec<AsmOperand> list) Option<CodegenErrorKind> {
-    bin first = true;
+    flag first = true;
     for op : list {
       if !first {
         self.state.write(", ");
@@ -6806,7 +6806,7 @@ impl Codegen {
   // compiler binary, matching the reference compiler's own check.
   emit_asm_stmt(AsmStmtNode a) Option<CodegenErrorKind> {
     if a.has_arch {
-      bin arch_ok = false;
+      flag arch_ok = false;
       str want = a.arch_name;
       str host = host_arch_name();
       if equals(want, "x86_64") || equals(want, "amd64") {
@@ -6832,9 +6832,9 @@ impl Codegen {
     self.write_asm_escaped(a.template);
     self.state.write("\"");
 
-    bin has_outputs = a.outputs.len > 0;
-    bin has_inputs = a.inputs.len > 0;
-    bin has_clobbers = a.clobbers.len > 0;
+    flag has_outputs = a.outputs.len > 0;
+    flag has_inputs = a.inputs.len > 0;
+    flag has_clobbers = a.clobbers.len > 0;
 
     if has_outputs || has_inputs || has_clobbers {
       self.state.write(" : ");
@@ -6854,7 +6854,7 @@ impl Codegen {
         }
         if has_clobbers {
           self.state.write(" : ");
-          bin first_cl = true;
+          flag first_cl = true;
           for cl : a.clobbers {
             if !first_cl {
               self.state.write(", ");
@@ -6909,7 +6909,7 @@ impl Codegen {
             self.state.write(prefix);
             self.state.write(callee_name);
             self.state.write("(");
-            bin first = true;
+            flag first = true;
             for arg : args {
               if !first {
                 self.state.write(", ");
@@ -7079,8 +7079,8 @@ impl Codegen {
     }
 
     str enum_recv_name = "";
-    bin is_bare_shorthand = false;
-    bin left_is_single_level = false;
+    flag is_bare_shorthand = false;
+    flag left_is_single_level = false;
 
     // `alias.EnumName.Variant` used as a value rather than a call, which
     // `emit_call` handles. `e.left` is `alias.EnumName`, an Expression
@@ -7091,7 +7091,7 @@ impl Codegen {
         if equals(inner_e.op, ".") && inner_e.has_left && inner_e.has_right {
           // Gated on not already being a known local, since a local
           // always shadows a same-named global alias.
-          bin inner_left_is_alias = false;
+          flag inner_left_is_alias = false;
           fit inner_e.left.kind {
             .Identifier(aname) -> {
               if self.import_aliases.contains(aname) &&
@@ -7277,7 +7277,7 @@ impl Codegen {
           // call. When `recv_e.left` is a known alias rather than a
           // receiver, `method_name` is the callee's bare name and
           // resolves via the plain-function lookup.
-          bin left_is_known_alias2 = false;
+          flag left_is_known_alias2 = false;
           if !equals(method_name, "") {
             fit recv_e.left.kind {
               .Identifier(lname2) -> {
@@ -7378,7 +7378,7 @@ impl Codegen {
           !(equals(u2.op, "?") || equals(u2.op, "!")) {
           ret .None;
         }
-        bin resolved = false;
+        flag resolved = false;
         fit u2.operand.kind {
           .Expression(inner_e2) -> {
             if equals(inner_e2.op, "()") && inner_e2.has_left {
@@ -7523,9 +7523,9 @@ impl Codegen {
         // resolves to instead of only a bare local's own declaration.
         if equals(inner_e.op, "[]") && inner_e.has_left {
           str elem_type_name = "";
-          bin elem_is_pointer = false;
+          flag elem_is_pointer = false;
           Option<DataType> elem_dtype = .None;
-          bin have_elem = false;
+          flag have_elem = false;
           fit inner_e.left.kind {
             .Identifier(arr_name) -> {
               let t = self.lookup_local_type_name(arr_name);
@@ -7829,7 +7829,7 @@ impl Codegen {
         // else must discard it and report success, since returning a
         // struct from an `int`-returning C function is an error. Pending
         // defers still run either way; only the value is skipped.
-        bin main_discards_return = false;
+        flag main_discards_return = false;
         if self.in_main {
           main_discards_return = true;
           if self.current_fn_rtype_dt.is_some() {
@@ -7884,7 +7884,7 @@ impl Codegen {
         // variable the expression already read. A `ret` value coerced to
         // a quirk-typed return gets the same coercion wrap a `Variable`
         // initializer does.
-        bin ret_did_quirk_coerce = false;
+        flag ret_did_quirk_coerce = false;
         str ret_quirk_concrete = "";
         if exp != nil && self.quirk_names.contains(self.current_fn_rtype_name) {
           let ret_concrete = self.resolve_quirk_coerce_concrete_type(exp);
@@ -8000,17 +8000,17 @@ impl Codegen {
         // is still the fallback whenever inference can't determine a
         // type at all, so unusual expression shapes this can't type
         // still resolve exactly as before.
-        bin is_let = equals(v.var_type.type_str, "__let_infer__");
-        bin have_resolved = false;
+        flag is_let = equals(v.var_type.type_str, "__let_infer__");
+        flag have_resolved = false;
         str resolved_name = "";
-        bin resolved_ptr = false;
+        flag resolved_ptr = false;
         Option<DataType> resolved_dtype = .None;
         // A function-typed local (`fun(T1, T2) R name = ...;`) writes
         // its own name inside the declarator (`R (*name)(T1, T2)`), the
         // same shape a function-typed field or parameter already does,
         // so the plain "type, then space, then name" writing below
         // doesn't apply to it at all.
-        bin fn_sig_local = v.var_type.has_fn_sig;
+        flag fn_sig_local = v.var_type.has_fn_sig;
         if fn_sig_local {
           let wnt = self.write_named_type(*v.var_type, v.name);
           if wnt.is_some() {
@@ -8023,7 +8023,7 @@ impl Codegen {
         // initialized with a bracket array literal, which stays a stack
         // array. Decided here, since `write_type` can't see the
         // initializer.
-        bin arr_as_ptr = false;
+        flag arr_as_ptr = false;
         if !is_let {
           arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
           if arr_as_ptr && v.has_val {
@@ -8047,7 +8047,7 @@ impl Codegen {
         // char*`, incompatible with the plain `char*` every ordinary
         // `str` value uses, which is what every str-returning function
         // and str-taking parameter expects.
-        bin const_is_ptr_binding = !is_let &&
+        flag const_is_ptr_binding = !is_let &&
           (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
           v.var_type.type_str,
           "str"
@@ -8065,7 +8065,7 @@ impl Codegen {
         // this applies to a function-typed local, whose type and name
         // are already fully written above.
         if !fn_sig_local {
-          bin let_is_bracket_literal = false;
+          flag let_is_bracket_literal = false;
           str let_lit_elem_c_type = "int64_t";
           num let_lit_depth = 1;
           if is_let && v.has_val {
@@ -8090,7 +8090,7 @@ impl Codegen {
           if let_is_bracket_literal {
             self.state.write(let_lit_elem_c_type);
           } elif is_let {
-            bin let_resolved_via_infer = false;
+            flag let_resolved_via_infer = false;
             if v.has_val {
               let let_idt_opt = self.infer_let_expr_type(v.val);
               if let_idt_opt.is_some() {
@@ -8193,7 +8193,7 @@ impl Codegen {
               // the initializer's shape. Falls back to `[]` per dimension
               // when there's no bracket literal to derive sizes from.
               self.state.write("[]");
-              bin wrote_inner_dims = false;
+              flag wrote_inner_dims = false;
               if v.has_val {
                 fit v.val.kind {
                   .Bracket(_) -> {
@@ -8266,7 +8266,7 @@ impl Codegen {
           self.in_array_initializer = true;
           // A quirk-typed declaration's initializer needs a coercion call
           // wrapped around the RHS.
-          bin did_quirk_coerce = false;
+          flag did_quirk_coerce = false;
           // A concrete quirk instantiation is registered under its
           // mangled identity (`To__num`), not `v.var_type.type_str`.
           str var_quirk_type = v.var_type.type_str;
@@ -8514,7 +8514,7 @@ impl Codegen {
     str arr_text = "";
     Option<DataType> arr_dtype = .None;
     Option<str> arr_type_name = .None;
-    bin iterable_is_identifier = false;
+    flag iterable_is_identifier = false;
     fit fi.iterable.kind {
       .Identifier(name) -> {
         arr_text = name;
@@ -8549,7 +8549,7 @@ impl Codegen {
     // is recognized as a Vec, but only the structural one resolves the
     // element type.
     Option<DataType> elem_dt = .None;
-    bin is_vec = false;
+    flag is_vec = false;
     if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       if equals(arr_dt.type_str, "Vec") && arr_dt.generic_args.len == 1 {
@@ -8568,7 +8568,7 @@ impl Codegen {
     // A sized array local (`num[] arr`, not decayed to a pointer) has no
     // `.len`/`.data` in C, so its length comes from
     // `sizeof(arr)/sizeof(arr[0])` instead.
-    bin is_raw_array = false;
+    flag is_raw_array = false;
     str elem_c_type = "int64_t";
     // Defaults to 1 (an ordinary single-dimension array) when
     // `arr_dt.array_depth` wasn't populated at all.
@@ -8594,8 +8594,8 @@ impl Codegen {
     // call `.iter()` on it.
     if !is_vec && !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
       let coll_dt = arr_dtype.unwrap();
-      bin is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
-      bin is_map = equals(coll_dt.type_str, "Map") && coll_dt.generic_args.len == 2;
+      flag is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
+      flag is_map = equals(coll_dt.type_str, "Map") && coll_dt.generic_args.len == 2;
       if is_set || is_map {
         DataType elem_key_dt = *coll_dt.generic_args.get(0);
         DataType* elem_key_ptr = malloc(sizeof(DataType));
@@ -8783,7 +8783,7 @@ impl Codegen {
       // `.iter()` indirection: unlike Set/Map, the value already IS its
       // own iterator state.
       str user_iter_elem_type = "";
-      bin has_user_iter = false;
+      flag has_user_iter = false;
       for n2 : self.all_nodes {
         fit n2.kind {
           .Impl(i2) -> {
@@ -8905,7 +8905,7 @@ impl Codegen {
     // re-allocating a Vec per iteration, so it is materialized into a
     // temp up front. Raw arrays never reach here as a non-identifier,
     // since the earlier `is_array` check requires a real local.
-    bin needs_vec_src_temp = is_vec && !iterable_is_identifier;
+    flag needs_vec_src_temp = is_vec && !iterable_is_identifier;
     str vec_src_text = arr_text;
     if needs_vec_src_temp {
       self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
@@ -8994,7 +8994,7 @@ impl Codegen {
     // MSVC mode: use explicit element type when available.
     // When dims are known the full declaration is written here and the
     // generic suffix below is skipped.
-    bin msvc_multidim_wrote_all = false;
+    flag msvc_multidim_wrote_all = false;
     if is_vec || element_depth >= 2 {
       if self.msvc_mode && !is_vec && element_depth >= 2 {
         // Try stored dimension sizes for a proper pointer-to-array type:
@@ -9111,11 +9111,11 @@ impl Codegen {
   // known local when its payload field type is on record.
   emit_fit_enum_branch(
     str subj_name,
-    bin subj_is_pointer,
+    flag subj_is_pointer,
     str enum_name,
     str variant_name,
     FitBranch br,
-    bin wrote_branch
+    flag wrote_branch
   ) Option<CodegenErrorKind> {
     if wrote_branch {
       self.state.write(" else if (");
@@ -9198,11 +9198,11 @@ impl Codegen {
   // tagged-union struct. No destructuring, there being no payload.
   emit_fit_plain_enum_branch(
     str subj_name,
-    bin subj_is_pointer,
+    flag subj_is_pointer,
     str enum_name,
     str variant_name,
     FitBranch br,
-    bin wrote_branch
+    flag wrote_branch
   ) Option<CodegenErrorKind> {
     if wrote_branch {
       self.state.write(" else if (");
@@ -9254,7 +9254,7 @@ impl Codegen {
   // type comes from the callee's declared return type.
   emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
     str subj_name = "";
-    bin subj_is_pointer = false;
+    flag subj_is_pointer = false;
     Option<str> subj_type = .None;
     fit f.exp.kind {
       .Identifier(name) -> {
@@ -9397,7 +9397,7 @@ impl Codegen {
           // infers `T` from this call's own arguments and substitutes it
           // into the declared return type, since `lookup_function_rtype`
           // only knows the template's unsubstituted `RR<T>`.
-          bin is_plain_fn_call = false;
+          flag is_plain_fn_call = false;
           str plain_fn_name = "";
           fit dot_e.left.kind {
             .Identifier(fn_name) -> {
@@ -9540,9 +9540,9 @@ impl Codegen {
       _ -> { ret .Some(.UnsupportedNode); }
     }
 
-    bin wrote_branch = false;
+    flag wrote_branch = false;
     Node* default_body = nil;
-    bin has_default = false;
+    flag has_default = false;
 
     for br : f.branches {
       if !br.has_condition {
@@ -9554,12 +9554,12 @@ impl Codegen {
         continue;
       }
 
-      bin handled_as_enum = false;
+      flag handled_as_enum = false;
       fit br.condition.kind {
         .Expression(dot_e) -> {
           if equals(dot_e.op, ".") && dot_e.has_left && dot_e.has_right {
             str enum_name = "";
-            bin have_enum_name = false;
+            flag have_enum_name = false;
             fit dot_e.left.kind {
               .Identifier(en) -> {
                 enum_name = en;
@@ -9585,7 +9585,7 @@ impl Codegen {
             // `enum_name`, the condition matches `subj_type`'s variant
             // instead. Bare shorthand skips this, already falling back to
             // `subj_type`.
-            bin has_variant = self.enum_has_variant(enum_name, variant_name);
+            flag has_variant = self.enum_has_variant(enum_name, variant_name);
             str effective_enum_name = enum_name;
             if !has_variant && have_enum_name && subj_type.is_some() {
               let subj = subj_type.unwrap();
@@ -9656,13 +9656,13 @@ impl Codegen {
       defer labels.free();
       self.flatten_call_args(br.condition, &labels);
 
-      bin first_label = true;
+      flag first_label = true;
       for lbl : labels {
         if !first_label {
           self.state.write(" || ");
         }
         first_label = false;
-        bin is_str_label = false;
+        flag is_str_label = false;
         fit lbl.kind {
           .String(_) -> { is_str_label = true; }
           _ -> {}
@@ -9757,7 +9757,7 @@ impl Codegen {
     num i = start_i + 1;
     for i < stmts.len {
       Node* next = stmts.get(i);
-      bin chained = false;
+      flag chained = false;
       fit next.kind {
         .StatementElseIf(ein) -> {
           self.state.write(" else ");
@@ -9798,7 +9798,7 @@ impl Codegen {
   // here even when every branch returns, since proving that needs
   // branch-coverage analysis, so such a block emits dead but valid
   // cleanup.
-  node_is_scope_terminator(Node stmt) bin {
+  node_is_scope_terminator(Node stmt) flag {
     fit stmt.kind {
       .StatementReturn(_) -> { ret true; }
       .StatementBreak -> { ret true; }
@@ -9866,7 +9866,7 @@ impl Codegen {
   emit_statements(Vec<Node*> stmts) Option<CodegenErrorKind> {
     self.push_defer_scope();
     num i = 0;
-    bin last_is_terminator = false;
+    flag last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
       // Armed fresh per statement, relative to whatever buffer
@@ -9876,7 +9876,7 @@ impl Codegen {
       // triggered it. The swap restores the outer value afterward, as it
       // does for `hoist_insert_pos`.
       self.current_stmt_start_pos = .Some(self.state.out.len());
-      bin is_if = false;
+      flag is_if = false;
       fit stmt.kind {
         .StatementIf(ifn) -> { is_if = true; }
         _ -> {}
@@ -9955,7 +9955,7 @@ impl Codegen {
     self.state.write(" (*");
     self.state.write(name);
     self.state.write(")(");
-    bin first = true;
+    flag first = true;
     for p : sig.params {
       if !first {
         self.state.write(", ");
@@ -9982,7 +9982,7 @@ impl Codegen {
           self.state.write(" (*");
           self.state.write(v.name);
           self.state.write(")(");
-          bin first = true;
+          flag first = true;
           for p : sig.params {
             if !first {
               self.state.write(", ");
@@ -10004,7 +10004,7 @@ impl Codegen {
         // would drop the array's level whenever the element is itself a
         // pointer: `Vec<Node*>`'s `push_many(Node* src, ...)` needs
         // `Node** src`, one level for the array and one for the element.
-        bin arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+        flag arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
         let wt = self.write_type(*v.var_type);
         if wt.is_none() {
           ret .Some(.UnsupportedNode);
@@ -10046,7 +10046,7 @@ impl Codegen {
   // exists so call sites and field accesses can typecheck against it; the
   // system header remains the sole source of truth, so codegen must never
   // emit competing C text for one of these nodes.
-  is_std_c_signature_node(Node node) bin {
+  is_std_c_signature_node(Node node) flag {
     if !node.has_pos {
       ret false;
     }
@@ -10074,7 +10074,7 @@ impl Codegen {
         if !f.has_rtype {
           ret .Some(.InvalidNode);
         }
-        bin is_void = equals(f.rtype.type_str, "void");
+        flag is_void = equals(f.rtype.type_str, "void");
 
         Vec<str> arg_names;
         arg_names.init(0);
@@ -10438,7 +10438,7 @@ impl Codegen {
         // this: a nested one reached through some scratch buffer
         // (`self.state != self.root_state`) leaves it alone, since its
         // own position would be relative to the wrong buffer entirely.
-        bin owns_fn_body_start_pos = self.state == self.root_state &&
+        flag owns_fn_body_start_pos = self.state == self.root_state &&
           self.current_fn_body_start_pos.is_none();
         if owns_fn_body_start_pos {
           self.current_fn_body_start_pos = .Some(self.state.out.len());
@@ -10493,7 +10493,7 @@ impl Codegen {
         // and discarded once `rt` is in hand. `hoist_insert_pos` is
         // suspended for the swap, so a nested hoisted emission splices
         // into the real buffer.
-        bin is_main = equals(emit_name, "main");
+        flag is_main = equals(emit_name, "main");
         // A function returning a function pointer (`fun name() fun(T)
         // R`) writes a nested C declarator, `R (*name(args))(T)`, built
         // separately below from `f.rtype.fn_sig` - this initial write is
@@ -10501,7 +10501,7 @@ impl Codegen {
         // bookkeeping of what the function *really* returns (the whole
         // `fun(T) R` value, not `R` alone), so it's suppressed the same
         // way `main`'s own forced `int` suppresses its real Fun rtype.
-        bin suppress_direct_rtype_write = is_main || f.rtype.has_fn_sig;
+        flag suppress_direct_rtype_write = is_main || f.rtype.has_fn_sig;
         CodegenState rtype_scratch = self.new_scratch_state();
         CodegenState* saved_rtype_state = self.state;
         let saved_rtype_hoist_pos = self.hoist_insert_pos;
@@ -10535,7 +10535,7 @@ impl Codegen {
         // standard `argc`/`argv` pair; a single `str[] name` param keeps
         // that name but still takes OS argv; anything else emits the
         // declared params verbatim.
-        bin main_is_single_str_array = false;
+        flag main_is_single_str_array = false;
         if is_main && f.has_args && f.args.len == 1 {
           let main_arg0 = f.args.get(0);
           fit main_arg0.kind {
@@ -10570,7 +10570,7 @@ impl Codegen {
             ret margerr;
           }
         } elif f.has_args && f.args.len > 0 {
-          bin first = true;
+          flag first = true;
           for arg : f.args {
             if !first {
               self.state.write(", ");
@@ -10599,7 +10599,7 @@ impl Codegen {
         // itself takes, completing `R (*name(args))(P1, P2)`.
         if f.rtype.has_fn_sig {
           self.state.write("))(");
-          bin rpfirst = true;
+          flag rpfirst = true;
           for rp : f.rtype.fn_sig.params {
             if !rpfirst {
               self.state.write(", ");
@@ -10776,7 +10776,7 @@ impl Codegen {
         // extra statement onto the ordinary one. Stays deliberately
         // loud (a crash) rather than `__builtin_unreachable()` (silent
         // undefined behavior), in case that guarantee is ever wrong.
-        bin fn_body_ends_in_return = false;
+        flag fn_body_ends_in_return = false;
         fit (*f.body).kind {
           .Body(fn_bn) -> {
             if fn_bn.statements.len > 0 {
@@ -10845,7 +10845,7 @@ impl Codegen {
   // self-referential JSON-tree-style enum, say) is not an unbounded-size
   // cycle and must not be reported as one; only the direct case is
   // checked against `plain_type_in_progress`.
-  ensure_plain_type_emitted(str type_name, bin via_direct_embed = true) Option<CodegenErrorKind> {
+  ensure_plain_type_emitted(str type_name, flag via_direct_embed = true) Option<CodegenErrorKind> {
     num ei = 0;
     for ei < self.emitted_plain_types.len {
       if equals(self.emitted_plain_types.get(ei), type_name) {
@@ -10917,7 +10917,7 @@ impl Codegen {
             self.emitted_plain_types.push(type_name);
             self.plain_type_in_progress.push(type_name);
             defer self.plain_type_in_progress.pop();
-            bin is_tagged_union = false;
+            flag is_tagged_union = false;
             for v : e.variants {
               if v.has_payload && v.payload.len > 0 {
                 is_tagged_union = true;
@@ -10973,7 +10973,7 @@ impl Codegen {
             vt.has_payload = v.has_payload && v.payload.len > 0;
             Vec<str> payload_type_strs;
             payload_type_strs.init(0);
-            Vec<bin> payload_is_pointer;
+            Vec<flag> payload_is_pointer;
             payload_is_pointer.init(0);
             for pt : v.payload {
               payload_type_strs.push(pt.type_str);
@@ -10988,7 +10988,7 @@ impl Codegen {
           self.generic_enum_variants.push(variant_templates);
           ret .None;
         }
-        bin is_tagged_union = false;
+        flag is_tagged_union = false;
         for v : e.variants {
           if v.has_payload && v.payload.len > 0 {
             is_tagged_union = true;
@@ -11067,7 +11067,7 @@ impl Codegen {
         num i = 0;
         Vec<str> payload_type_names;
         payload_type_names.init(0);
-        Vec<bin> payload_is_pointer;
+        Vec<flag> payload_is_pointer;
         payload_is_pointer.init(0);
         Vec<DataType> payload_dtypes;
         payload_dtypes.init(0);
@@ -11120,7 +11120,7 @@ impl Codegen {
         field_names.init(0);
         Vec<str> field_type_names;
         field_type_names.init(0);
-        Vec<bin> field_is_pointer;
+        Vec<flag> field_is_pointer;
         field_is_pointer.init(0);
 
         if c.has_type_params {
@@ -11164,8 +11164,8 @@ impl Codegen {
           if wt.is_none() {
             ret .Some(.UnsupportedNode);
           }
-          bin fld_ptr = dtype_is_pointer(*f.dtype);
-          bin fld_arr_ptr = dtype_is_array_as_pointer(*f.dtype);
+          flag fld_ptr = dtype_is_pointer(*f.dtype);
+          flag fld_arr_ptr = dtype_is_array_as_pointer(*f.dtype);
           if fld_arr_ptr && !fld_ptr {
             self.state.write("*");
           }
@@ -11234,7 +11234,7 @@ impl Codegen {
     }
     fit node.kind {
       .Variable(v) -> {
-        bin is_let = equals(v.var_type.type_str, "__let_infer__");
+        flag is_let = equals(v.var_type.type_str, "__let_infer__");
         // `pub transpile` emits every global before any plain type's full
         // body, which breaks for a global whose declared type is itself a
         // plain compound or enum. This emits that body first; memoization
@@ -11246,7 +11246,7 @@ impl Codegen {
         // An unsized array global (`T[] buf = malloc(...);`) decays to a
         // pointer, as a local does, unless it's initialized with a
         // bracket array literal, which stays a fixed-size global array.
-        bin arr_as_ptr = false;
+        flag arr_as_ptr = false;
         if !is_let {
           arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
           if arr_as_ptr && v.has_val {
@@ -11259,7 +11259,7 @@ impl Codegen {
         // See the matching fix on the local-variable declaration site:
         // `str` needs the same "pointer for const-placement purposes"
         // treatment `dtype_is_pointer` alone doesn't give it.
-        bin const_is_ptr_binding = !is_let &&
+        flag const_is_ptr_binding = !is_let &&
           (dtype_is_pointer(*v.var_type) || arr_as_ptr || equals(
           v.var_type.type_str,
           "str"
@@ -11334,7 +11334,7 @@ impl Codegen {
             }
           } elif v.var_type.array_depth > 1 {
             self.state.write("[]");
-            bin wrote_inner_dims = false;
+            flag wrote_inner_dims = false;
             if v.has_val {
               fit v.val.kind {
                 .Bracket(_) -> {
@@ -11538,7 +11538,7 @@ impl Codegen {
       }
       .String(_) -> { ret .Some("str"); }
       .Character(_) -> { ret .Some("chr"); }
-      .Boolean(_) -> { ret .Some("bin"); }
+      .Boolean(_) -> { ret .Some("flag"); }
       .Expression(e) -> {
         // A qualified enum-variant constant (`Job.Quit`) infers `T` as the
         // enum's name. Checked before the `()` call case below, since a
@@ -11570,7 +11570,7 @@ impl Codegen {
             e.op,
             ">"
           ) || equals(e.op, ">=") || equals(e.op, "&&") || equals(e.op, "||") {
-            ret .Some("bin");
+            ret .Some("flag");
           }
           if e.has_left {
             let left_type = self.infer_arg_type_name(e.left);
@@ -11614,7 +11614,7 @@ impl Codegen {
   // Companion to `infer_arg_type_name`, resolving a known local's
   // recorded pointer-ness so type-param inference knows whether the
   // generated param should be `T` or `T*`. `false` for every other shape.
-  infer_arg_is_pointer(Node* arg) bin {
+  infer_arg_is_pointer(Node* arg) flag {
     fit arg.kind {
       .Identifier(name) -> {
         let p = self.lookup_local_is_pointer(name);
@@ -11716,7 +11716,7 @@ impl Codegen {
       }
       .Boolean(_) -> {
         DataType dt = dtype_new();
-        dt.type_str = "bin";
+        dt.type_str = "flag";
         ret .Some(dt);
       }
       .Expression(e) -> {
@@ -11847,7 +11847,7 @@ impl Codegen {
       }
       .Boolean(_) -> {
         DataType dt = dtype_new();
-        dt.type_str = "bin";
+        dt.type_str = "flag";
         ret .Some(dt);
       }
       .Expression(e) -> {
@@ -12145,7 +12145,7 @@ impl Codegen {
           if equals(f.name, fn_name) {
             Vec<str> arg_type_names;
             arg_type_names.init(0);
-            Vec<bin> arg_is_pointer;
+            Vec<flag> arg_is_pointer;
             arg_is_pointer.init(0);
             // Parallel to `arg_type_names`, the full structural type
             // behind each inferred binding, so a nested call inside this
@@ -12160,9 +12160,9 @@ impl Codegen {
             arg_dtypes.init(0);
             num tp_idx = 0;
             for tp : f.type_params {
-              bin found = false;
+              flag found = false;
               str found_name = "";
-              bin found_is_pointer = false;
+              flag found_is_pointer = false;
               Option<DataType> found_dtype = .None;
               num ai = 0;
               for parg : f.args {
@@ -12300,7 +12300,7 @@ impl Codegen {
             }
 
             num ei = 0;
-            bin already_emitted = false;
+            flag already_emitted = false;
             for ei < self.emitted_generic_instantiations.len {
               if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
                 already_emitted = true;
@@ -12470,7 +12470,7 @@ impl Codegen {
           }
           Vec<Node*> defaults;
           defaults.init(f.args.len);
-          bin any = false;
+          flag any = false;
           for arg : f.args {
             fit arg.kind {
               .Variable(v) -> {
@@ -12561,7 +12561,7 @@ impl Codegen {
                 rtype = fnv.rtype;
               }
               if fnv.has_args {
-                bin skipped_self = false;
+                flag skipped_self = false;
                 for arg : fnv.args {
                   if !skipped_self {
                     skipped_self = true;
@@ -12620,7 +12620,7 @@ impl Codegen {
           // site by `maybe_instantiate_generic_impl_method_own_params`;
           // emitting the template here too would leave its unsubstituted
           // param names in the output as literal C type names.
-          bin own_params = false;
+          flag own_params = false;
           fit m.kind {
             .Function(mf) -> { own_params = mf.has_type_params; }
             _ -> {}
@@ -12729,7 +12729,7 @@ impl Codegen {
           self.state.write("struct ");
           self.state.write(quirk_type_identity);
           self.state.write("_vtable {\n");
-          bin vtable_has_methods = false;
+          flag vtable_has_methods = false;
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
@@ -12748,7 +12748,7 @@ impl Codegen {
                 self.state.write(base);
                 self.state.write(")(void* self");
                 if fnv.has_args {
-                  bin skipped_self = false;
+                  flag skipped_self = false;
                   for arg : fnv.args {
                     if !skipped_self {
                       skipped_self = true;
@@ -12838,7 +12838,7 @@ impl Codegen {
               self.state.write(real_fn_name);
               self.state.write("(");
               if fnv.has_args {
-                bin proto_first = true;
+                flag proto_first = true;
                 for parg : fnv.args {
                   fit parg.kind {
                     .Variable(pv) -> {
@@ -12872,7 +12872,7 @@ impl Codegen {
               Vec<str> arg_names;
               arg_names.init(0);
               if fnv.has_args {
-                bin skipped_self2 = false;
+                flag skipped_self2 = false;
                 num arg_i = 0;
                 for arg : fnv.args {
                   if !skipped_self2 {
@@ -13693,7 +13693,7 @@ impl Codegen {
         }
         .Enum(e) -> {
           if !e.has_type_params {
-            bin en_is_tagged_union = false;
+            flag en_is_tagged_union = false;
             for v : e.variants {
               if v.has_payload && v.payload.len > 0 {
                 en_is_tagged_union = true;
@@ -13772,7 +13772,7 @@ impl Codegen {
               }
               // Emitted per call site once its own type params are
               // known; see `emit_impl`.
-              bin m_own_params = false;
+              flag m_own_params = false;
               fit m.kind {
                 .Function(mfn) -> { m_own_params = mfn.has_type_params; }
                 _ -> {}
@@ -13888,7 +13888,7 @@ impl Codegen {
           // own `main` is left out rather than competing with it. The
           // fuzzing engine's own driver supplies `main` too, so a
           // user-defined one would collide with it at link time.
-          bin skip_main = equals(f.name, "main") && (self.test_mode || self.fuzz_mode);
+          flag skip_main = equals(f.name, "main") && (self.test_mode || self.fuzz_mode);
           if !f.has_type_params && !skip_main {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function(n);
@@ -13961,7 +13961,7 @@ impl Codegen {
           // A test body compiles straight through `emit_body`, never
           // through `emit_function_named`, so it needs its own copy of
           // that function's function-start ownership capture.
-          bin owns_test_fn_body_start_pos = self.state == self.root_state &&
+          flag owns_test_fn_body_start_pos = self.state == self.root_state &&
             self.current_fn_body_start_pos.is_none();
           if owns_test_fn_body_start_pos {
             self.current_fn_body_start_pos = .Some(self.state.out.len());
@@ -14070,7 +14070,7 @@ impl Codegen {
     }
 
     Node chosen;
-    bin have_chosen = false;
+    flag have_chosen = false;
     if !equals(self.fuzz_target, "") {
       for n : targets {
         fit n.kind {
@@ -14557,7 +14557,7 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
   Vec<str> ps_field_types;
   ps_field_types.init(0);
   ps_field_types.push("Token");
-  Vec<bin> ps_field_ptrs;
+  Vec<flag> ps_field_ptrs;
   ps_field_ptrs.init(0);
   ps_field_ptrs.push(false);
   g.record_compound("ParseState", ps_fields, ps_field_types, ps_field_ptrs);
@@ -14568,7 +14568,7 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
   Vec<str> tok_field_types;
   tok_field_types.init(0);
   tok_field_types.push("Pos");
-  Vec<bin> tok_field_ptrs;
+  Vec<flag> tok_field_ptrs;
   tok_field_ptrs.init(0);
   tok_field_ptrs.push(false);
   g.record_compound("Token", tok_fields, tok_field_types, tok_field_ptrs);
@@ -14817,7 +14817,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   checkfn.has_name = true;
   DataType* check_rt = malloc(sizeof(DataType));
   *check_rt = dtype_new();
-  check_rt.type_str = "bin";
+  check_rt.type_str = "flag";
   checkfn.rtype = check_rt;
   checkfn.has_rtype = true;
   checkfn.args = check_params;
@@ -14844,7 +14844,7 @@ test "emit_statement emits an uninitialized variable declaration" {
   Codegen g = codegen_new(&st);
   DataType* dt = malloc(sizeof(DataType));
   *dt = dtype_new();
-  dt.type_str = "bin";
+  dt.type_str = "flag";
   VariableNode v;
   v.var_type = dt;
   v.name = "done";
@@ -16173,7 +16173,7 @@ test "emit_statement emits a fit over a method-call subject with a CHAINED field
   Vec<str> parser_field_types;
   parser_field_types.init(0);
   parser_field_types.push("ParseState");
-  Vec<bin> parser_field_ptrs;
+  Vec<flag> parser_field_ptrs;
   parser_field_ptrs.init(0);
   parser_field_ptrs.push(true);
   g.record_compound("Parser", parser_fields, parser_field_types, parser_field_ptrs);
@@ -16389,7 +16389,7 @@ test "emit_statement emits a fit over a chained field-access subject" {
   Vec<str> wrapper_field_types;
   wrapper_field_types.init(0);
   wrapper_field_types.push("Opt");
-  Vec<bin> wrapper_field_ptrs;
+  Vec<flag> wrapper_field_ptrs;
   wrapper_field_ptrs.init(0);
   wrapper_field_ptrs.push(false);
   g.record_compound("Wrapper", wrapper_fields, wrapper_field_types, wrapper_field_ptrs);
@@ -16622,7 +16622,7 @@ test "emit_expr emits a chained field access through two value-typed links" {
   Vec<str> rect_field_types;
   rect_field_types.init(0);
   rect_field_types.push("Point");
-  Vec<bin> rect_field_ptrs;
+  Vec<flag> rect_field_ptrs;
   rect_field_ptrs.init(0);
   rect_field_ptrs.push(false);
   g.record_compound("Rect", rect_fields, rect_field_types, rect_field_ptrs);
@@ -16633,7 +16633,7 @@ test "emit_expr emits a chained field access through two value-typed links" {
   Vec<str> point_field_types;
   point_field_types.init(0);
   point_field_types.push("num");
-  Vec<bin> point_field_ptrs;
+  Vec<flag> point_field_ptrs;
   point_field_ptrs.init(0);
   point_field_ptrs.push(false);
   g.record_compound("Point", point_fields, point_field_types, point_field_ptrs);
@@ -16676,7 +16676,7 @@ test "emit_expr emits a chained field access mixing pointer and value links" {
   Vec<str> rect_field_types;
   rect_field_types.init(0);
   rect_field_types.push("Point");
-  Vec<bin> rect_field_ptrs;
+  Vec<flag> rect_field_ptrs;
   rect_field_ptrs.init(0);
   rect_field_ptrs.push(false);
   g.record_compound("Rect", rect_fields, rect_field_types, rect_field_ptrs);
@@ -16687,7 +16687,7 @@ test "emit_expr emits a chained field access mixing pointer and value links" {
   Vec<str> point_field_types;
   point_field_types.init(0);
   point_field_types.push("num");
-  Vec<bin> point_field_ptrs;
+  Vec<flag> point_field_ptrs;
   point_field_ptrs.init(0);
   point_field_ptrs.push(false);
   g.record_compound("Point", point_fields, point_field_types, point_field_ptrs);
@@ -16981,7 +16981,7 @@ test "emit_expr resolves a bare-shorthand construction NESTED inside another var
   Vec<str> wrap_payload_types;
   wrap_payload_types.init(0);
   wrap_payload_types.push("Inner");
-  Vec<bin> wrap_payload_ptrs;
+  Vec<flag> wrap_payload_ptrs;
   wrap_payload_ptrs.init(0);
   wrap_payload_ptrs.push(false);
   g.record_enum_variant_payload("Outer", "Wrap", wrap_payload_types, wrap_payload_ptrs);
@@ -17270,7 +17270,7 @@ test "emit_expr emits a method call through a CHAINED field-access receiver (sel
   Vec<str> sb_field_types;
   sb_field_types.init(0);
   sb_field_types.push("Vec__str");
-  Vec<bin> sb_field_ptrs;
+  Vec<flag> sb_field_ptrs;
   sb_field_ptrs.init(0);
   sb_field_ptrs.push(false);
   g.record_compound("StringBuilder", sb_fields, sb_field_types, sb_field_ptrs);
@@ -17795,7 +17795,7 @@ test "emit_expr resolves a chained field access through a CALL receiver, with no
   Vec<str> tok_field_types;
   tok_field_types.init(0);
   tok_field_types.push("TokKind");
-  Vec<bin> tok_field_ptrs;
+  Vec<flag> tok_field_ptrs;
   tok_field_ptrs.init(0);
   tok_field_ptrs.push(false);
   g.record_compound("Token", tok_fields, tok_field_types, tok_field_ptrs);
@@ -19230,7 +19230,7 @@ test "emit_statement resolves a bare '.{...}' compound-literal assignment right-
   Vec<str> field_types;
   field_types.init(0);
   field_types.push("DataTypeFlags");
-  Vec<bin> field_ptrs;
+  Vec<flag> field_ptrs;
   field_ptrs.init(0);
   field_ptrs.push(false);
   g.record_compound("DataType", field_names, field_types, field_ptrs);
@@ -19282,7 +19282,7 @@ test "emit_expr emits a chained field access followed by indexing (self.data[i])
   Vec<str> vec_field_types;
   vec_field_types.init(0);
   vec_field_types.push("str");
-  Vec<bin> vec_field_ptrs;
+  Vec<flag> vec_field_ptrs;
   vec_field_ptrs.init(0);
   vec_field_ptrs.push(true);
   g.record_compound("Vec", vec_fields, vec_field_types, vec_field_ptrs);
@@ -19360,7 +19360,7 @@ test "emit_statement resolves a bare-shorthand assignment right-hand side agains
   Vec<str> token_field_types;
   token_field_types.init(0);
   token_field_types.push("TokenData");
-  Vec<bin> token_field_ptrs;
+  Vec<flag> token_field_ptrs;
   token_field_ptrs.init(0);
   token_field_ptrs.push(false);
   g.record_compound("Token", token_fields, token_field_types, token_field_ptrs);
@@ -19440,7 +19440,7 @@ test "emit_expr resolves a bare-shorthand equality comparison's right-hand side 
   Vec<str> error_field_types;
   error_field_types.init(0);
   error_field_types.push("ErrorKind");
-  Vec<bin> error_field_ptrs;
+  Vec<flag> error_field_ptrs;
   error_field_ptrs.init(0);
   error_field_ptrs.push(false);
   g.record_compound("Error", error_fields, error_field_types, error_field_ptrs);

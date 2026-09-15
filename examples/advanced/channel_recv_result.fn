@@ -7,9 +7,9 @@
 // (value / closed / timeout / cancelled / error) is its own variant. This is purely
 // additive: the num-rc methods still exist for low-level / await-friendly use.
 
-imp std.c.io;
-imp std.channel;
-imp std.task;
+use std.c.io;
+use std.channel;
+use std.task;
 
 // A virtual-thread body: hand a value back, then signal completion.
 // `defer wg.done()` guarantees the WaitGroup is signalled however this task exits.

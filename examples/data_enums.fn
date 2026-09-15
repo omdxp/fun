@@ -5,7 +5,7 @@
 // variants (`Empty`) still participate. Construct with `Enum.Variant(args)` and
 // match with `fit`, binding each matched variant's payload into locals.
 
-imp std.c.io;
+use std.c.io;
 
 enum Geometry {
   Circle(num),

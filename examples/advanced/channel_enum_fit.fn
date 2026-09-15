@@ -13,8 +13,8 @@
 // A `Channel<Job>` / `Channel<Reply>` works exactly like any other generic
 // channel — the element type just happens to be a sum type.
 
-imp std.c.io;
-imp std.channel;
+use std.c.io;
+use std.channel;
 
 // A unit of work sent to a worker.
 enum Job {

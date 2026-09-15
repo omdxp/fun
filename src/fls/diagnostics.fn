@@ -6,22 +6,22 @@
 // what the editor holds rather than from disk, so an unsaved edit is
 // judged as it stands.
 
-imp protocol;
-imp documents;
-imp analysis;
-imp ..ast.ast;
-imp ..parser.parse_state;
-imp ..parser.parser;
-imp ..parser.import_resolver;
-imp ..semantics.typecheck;
-imp ..semantics.warnings;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.result;
-imp std.io;
-imp std.map;
-imp std.c.mem;
+use protocol;
+use documents;
+use analysis;
+use ..ast.ast;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use ..semantics.warnings;
+use std.string;
+use std.vec;
+use std.option;
+use std.result;
+use std.io;
+use std.map;
+use std.c.mem;
 
 // How seriously a client should take one finding.
 pub const num DIAG_SEVERITY_ERROR = 1;
@@ -197,7 +197,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // parsed nodes, independent of whatever typechecking got through, so
   // it still runs below even when checking failed. The type error
   // itself is recorded here and re-added once warnings are collected.
-  bin has_type_error = false;
+  flag has_type_error = false;
   Diagnostic type_error_diag = _at_start(DIAG_SEVERITY_ERROR, "");
   let checked = typecheck_program(&program.nodes);
   if checked.is_err() {

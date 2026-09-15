@@ -1,4 +1,4 @@
-imp diamond_shared;
+use diamond_shared;
 
 pub fun helper_b() num {
   ret shared_fn();

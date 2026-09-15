@@ -1,9 +1,9 @@
 // Typed JSON: parse text into a JsonValue, read fields with typed accessors, and
 // render back with stringify.
 
-imp std.c.io;
-imp std.json;
-imp std.result;
+use std.c.io;
+use std.json;
+use std.result;
 
 fun main() num {
   let src = "{\"name\": \"fun\", \"version\": 1, \"stable\": true}";

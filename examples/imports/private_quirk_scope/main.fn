@@ -1,5 +1,5 @@
-imp std.io;
-imp private_quirk_model as m;
+use std.io;
+use private_quirk_model as m;
 
 fun main() {
   m.local_checks();
