@@ -6,8 +6,8 @@
 // the tightest; 13 = comma, the loosest). Each group's index is what
 // `left_has_priority` compares.
 
-imp std.string;
-imp ..lexer.token;
+use std.string;
+use ..lexer.token;
 
 // Which direction a chain of same-precedence operators groups: `a op b op
 // c` reads as `(a op b) op c` for LeftToRight, `a op (b op c)` for
@@ -24,7 +24,7 @@ pub enum Associativity {
 pub compound OpPrecedence {
   num rank;
   Associativity assoc;
-  bin found;
+  flag found;
 }
 
 // Resolves `op`'s precedence rank and associativity.
@@ -120,7 +120,7 @@ pub fun op_precedence_for(str op) OpPrecedence {
 // otherwise a right-associative left operator never yields, and
 // same-or-tighter binding (numerically <=, since lower rank binds
 // tighter) on the left wins.
-pub fun left_has_priority(str op_left, str op_right) bin {
+pub fun left_has_priority(str op_left, str op_right) flag {
   let left = op_precedence_for(op_left);
   let right = op_precedence_for(op_right);
   if equals(op_left, op_right) {
@@ -135,7 +135,7 @@ pub fun left_has_priority(str op_left, str op_right) bin {
 // True if `op` is one of the supported prefix unary operators: negation,
 // unary plus, logical/bitwise not, pointer indirection, address-of, or
 // pre-increment/decrement.
-pub fun is_unary_operator(str op) bin {
+pub fun is_unary_operator(str op) flag {
   fit op {
     "-", "+", "!", "~", "*", "&", "++", "--" -> { ret true; }
     _ -> { ret false; }
@@ -146,13 +146,13 @@ pub fun is_unary_operator(str op) bin {
 // check than `is_unary_operator`: indirection needs its own parsing
 // path since a following run of `*`s is a pointer-depth count, not a
 // chain of separate unary operators.
-pub fun is_indirection_operator(str op) bin {
+pub fun is_indirection_operator(str op) flag {
   ret equals(op, "*");
 }
 
 // True if `op` is a left-operanded (postfix) unary operator: `x++`/`x--`,
 // or the propagation operators `x?` (Option) / `x!` (Result).
-pub fun is_left_operanded_unary_operator(str op) bin {
+pub fun is_left_operanded_unary_operator(str op) flag {
   ret equals(op, "++") || equals(op, "--") || equals(op, "?") || equals(op, "!");
 }
 
@@ -163,7 +163,7 @@ pub fun is_left_operanded_unary_operator(str op) bin {
 // primary instead). Used to decide whether a just-parsed condition
 // (`if`/`elif`) needs to keep parsing a following binary operator, e.g.
 // the `&&` in `if (a || b) && c`.
-pub fun is_binary_only_operator(Token t) bin {
+pub fun is_binary_only_operator(Token t) flag {
   if t.type != .Operator {
     ret false;
   }

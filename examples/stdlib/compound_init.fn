@@ -1,11 +1,11 @@
 // Demonstrates compound initialization (longhand and shorthand).
 
-imp std.io;
+use std.io;
 
 compound User {
   str name;
   num age;
-  bin active;
+  flag active;
 }
 
 fun main() {

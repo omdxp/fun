@@ -6,28 +6,28 @@
 // Anything it cannot resolve infers as unknown, which stands for any
 // type, so a gap in the checker never rejects a correct program.
 
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..parser.datatype_defs;
-imp std.string;
-imp std.io;
-imp std.vec;
-imp std.map;
-imp std.set;
-imp std.option;
-imp std.result;
+use ..ast.ast;
+use ..lexer.token;
+use ..parser.datatype_defs;
+use std.string;
+use std.io;
+use std.vec;
+use std.map;
+use std.set;
+use std.option;
+use std.result;
 
 // What a value is, as far as the checker can tell.
 pub compound CheckedType {
   DataTypeType base;
-  bin is_array;
+  flag is_array;
   num array_depth;
   num pointer_depth;
   // `nil`, which stands for a pointer or a string of any type.
-  bin is_null_literal;
+  flag is_null_literal;
   // `panic(...)`, which never produces a value and so stands for any
   // type expected of it.
-  bin is_panic_literal;
+  flag is_panic_literal;
   // The written name of a user-defined type, empty for a builtin.
   str name;
   // The arguments a generic instantiation supplied, in the order the
@@ -37,7 +37,7 @@ pub compound CheckedType {
   // carried through so a value bound to it (a name referencing a known
   // top-level function, or another function-typed local) can be checked
   // against it, rather than degrading to unknown.
-  bin has_fn_sig;
+  flag has_fn_sig;
   FnTypeSig* fn_sig;
 }
 
@@ -119,7 +119,7 @@ pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) Chec
 
 // A name the checker cannot resolve stands for any type, so it never
 // rejects what it does not understand.
-pub fun is_unknown(CheckedType t) bin {
+pub fun is_unknown(CheckedType t) flag {
   if t.base != .Unknown {
     ret false;
   }
@@ -140,7 +140,7 @@ pub fun type_name(CheckedType t) str {
     .Str -> { base = "str"; }
     .Dec -> { base = "dec"; }
     .Num -> { base = "num"; }
-    .Bin -> { base = "bin"; }
+    .Bin -> { base = "flag"; }
     .Unknown -> {
       if !equals(t.name, "") {
         base = t.name;
@@ -196,7 +196,7 @@ pub fun mangled_name(CheckedType t) str {
 }
 
 // True when a value of type `from` can stand where `to` is expected.
-pub fun can_assign(CheckedType to, CheckedType from) bin {
+pub fun can_assign(CheckedType to, CheckedType from) flag {
   if is_unknown(to) || is_unknown(from) {
     ret true;
   }
@@ -255,7 +255,7 @@ pub fun can_assign(CheckedType to, CheckedType from) bin {
   ret true;
 }
 
-fun _is_numeric(CheckedType t) bin {
+fun _is_numeric(CheckedType t) flag {
   if t.pointer_depth > 0 || t.is_array {
     ret false;
   }
@@ -271,18 +271,18 @@ pub compound FnSig {
   // The number of leading parameters a caller must pass; the rest carry
   // defaults.
   num min_args;
-  bin is_variadic;
-  bin is_async;
+  flag is_variadic;
+  flag is_async;
   // A generic function's checks are left to the instantiation, since a
   // type parameter stands for whatever the call site supplies.
-  bin is_generic;
+  flag is_generic;
   // Set when the name belongs to more than one declaration, where a
   // call cannot be matched to one of them by name alone.
-  bin ambiguous;
+  flag ambiguous;
   // Where the function was declared, and whether it is offered to other
   // files.
   str file;
-  bin is_public;
+  flag is_public;
   // The type parameters the declaration names, the types each one is
   // allowed to stand for (empty where unconstrained), and, per
   // parameter, the type parameter it is written as (empty otherwise).
@@ -303,14 +303,14 @@ pub compound MethodResolution {
 // What a top-level variable offers, and where it was declared.
 compound GlobalInfo {
   str file;
-  bin is_public;
+  flag is_public;
 }
 
 // Where checking failed, and why.
 pub compound TypeError {
   str message;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
 }
 
 fun _error(str message, Node* node) TypeError {
@@ -327,7 +327,7 @@ fun _error(str message, Node* node) TypeError {
 // A name in scope: what it holds, and whether it may be assigned again.
 pub compound Binding {
   CheckedType type;
-  bin is_const;
+  flag is_const;
 }
 
 // The names in scope, innermost last.
@@ -360,7 +360,7 @@ impl TypeEnv {
     self.bind(name, type, false);
   }
 
-  pub bind(str name, CheckedType type, bin is_const) {
+  pub bind(str name, CheckedType type, flag is_const) {
     if self.scopes.len == 0 {
       self.push();
     }
@@ -402,7 +402,7 @@ compound CompoundInfo {
   // Where the compound was declared, and whether it is offered to other
   // files.
   str file;
-  bin is_public;
+  flag is_public;
   // The parameters the fields are written in terms of, which an
   // instantiation supplies arguments for, and the combinations of
   // concrete types those parameters are allowed to stand for.
@@ -410,7 +410,7 @@ compound CompoundInfo {
   Vec<Vec<str>> bounds;
   // A generic compound's fields mention its type parameters, which
   // stand for whatever an instantiation supplies.
-  bin is_generic;
+  flag is_generic;
 }
 
 // The methods declared on a type, keyed by method name. A quirk's
@@ -491,7 +491,7 @@ fun _bare_enum_shorthand_variant(Node* val) Option<str> {
         ret _bare_enum_shorthand_variant(e.left);
       }
       if equals(e.op, ".") && e.has_left && e.has_right {
-        bin left_is_blank = false;
+        flag left_is_blank = false;
         fit e.left.kind {
           .Blank -> { left_is_blank = true; }
           _ -> {}
@@ -543,7 +543,7 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
   if f.args.len == 0 {
     ret sig;
   }
-  bin leads_with_self = false;
+  flag leads_with_self = false;
   Node* first = f.args.get(0);
   fit first.kind {
     .Variable(v) -> { leads_with_self = equals(v.name, "self"); }
@@ -692,12 +692,12 @@ compound Checker {
   // The return type of the function being walked, and whether it may
   // await.
   CheckedType rtype;
-  bin in_async;
+  flag in_async;
   // The type parameters the declaration being walked names. They stand
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
   Vec<str> active_type_params;
-  bin failed;
+  flag failed;
   TypeError error;
 }
 
@@ -763,7 +763,7 @@ impl Checker {
 
   // True when a value of type `from` can stand where `to` is expected,
   // including where `to` is a quirk a pointer satisfies.
-  assignable(CheckedType to, CheckedType from) bin {
+  assignable(CheckedType to, CheckedType from) flag {
     if can_assign(to, from) {
       // Two instantiations of one generic type are the same type only
       // when they were instantiated with the same arguments: a
@@ -790,7 +790,7 @@ impl Checker {
   // than a value: what follows the dot is a variable in the file that
   // alias stands for. True when it was one, whether or not anything was
   // reported.
-  check_alias_qualified_read(ExprNode e, str name, TypeEnv* env) bin {
+  check_alias_qualified_read(ExprNode e, str name, TypeEnv* env) flag {
     if !e.has_left || e.left == nil {
       ret false;
     }
@@ -907,7 +907,7 @@ impl Checker {
   // they hold. An argument the checker never resolved stands for
   // anything, and a side carrying no arguments at all says nothing about
   // what it holds, so only two resolved lists are compared.
-  generic_args_agree(CheckedType to, CheckedType from) bin {
+  generic_args_agree(CheckedType to, CheckedType from) flag {
     if to.generic_args.len == 0 || from.generic_args.len == 0 {
       ret true;
     }
@@ -934,7 +934,7 @@ impl Checker {
 
   // True when a type names something the program declares, as opposed to
   // a parameter standing in for whatever an instantiation supplies.
-  names_a_declared_type(CheckedType t) bin {
+  names_a_declared_type(CheckedType t) flag {
     if t.base != .Unknown {
       ret true;
     }
@@ -951,7 +951,7 @@ impl Checker {
 
   // True for a value that stands in a numeric position: a number, or an
   // enum whose variants carry no payload.
-  reads_as_number(CheckedType t) bin {
+  reads_as_number(CheckedType t) flag {
     if t.pointer_depth > 0 || t.is_array {
       ret false;
     }
@@ -972,7 +972,7 @@ impl Checker {
 }
 
 // Calls the language supplies rather than a program declaring them.
-fun _is_builtin_call(str name) bin {
+fun _is_builtin_call(str name) flag {
   fit name {
     "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
     "va_arg_chr", "va_arg_str", "va_arg_raw" -> { ret true; }
@@ -982,7 +982,7 @@ fun _is_builtin_call(str name) bin {
 
 // True for a name that reads as a type rather than a value, which is
 // what `sizeof` measures.
-fun _names_a_type(Node* node) bin {
+fun _names_a_type(Node* node) flag {
   if node == nil {
     ret false;
   }
@@ -1023,7 +1023,7 @@ fun _names_a_type(Node* node) bin {
 // The signature a function declaration promises.
 // True when `name` is one of the function's own type parameters, which
 // stands for whatever a call site supplies rather than a fixed type.
-fun _is_type_param(FunctionNode f, str name) bin {
+fun _is_type_param(FunctionNode f, str name) flag {
   if !f.has_type_params {
     ret false;
   }
@@ -1102,7 +1102,7 @@ fun _signature_of(FunctionNode f) FnSig {
     }
   }
   sig.min_args = 0;
-  bin counting = true;
+  flag counting = true;
   for a : f.args {
     fit a.kind {
       .Variable(v) -> {
@@ -1196,7 +1196,7 @@ fun _format_fmt_arg_index(str name) num {
   ret -1;
 }
 
-fun _is_c_style_format(str name) bin {
+fun _is_c_style_format(str name) flag {
   ret equals(name, "printf") || equals(name, "fprintf") || equals(name, "sprintf") ||
     equals(name, "snprintf");
   }
@@ -1511,7 +1511,7 @@ impl Checker {
   // validates and infers the resulting type.
   infer_propagation(Node* node, UnaryNode u, TypeEnv* env) CheckedType {
     CheckedType operand = self.infer(u.operand, env);
-    bin is_option = equals(u.op, "?");
+    flag is_option = equals(u.op, "?");
     str want_name = "Option";
     if !is_option {
       want_name = "Result";
@@ -1684,7 +1684,7 @@ impl Checker {
     ret substr(name, sep + 2, len(name) - sep - 2);
   }
 
-  has_method(str type_name, str method) bin {
+  has_method(str type_name, str method) flag {
     let table = self.methods.at(self.canonical_type_name(type_name));
     if table.is_none() {
       ret false;
@@ -1709,7 +1709,7 @@ impl Checker {
 
   // True when the checker has seen what methods a type has, which is
   // what lets it say a call names none of them.
-  knows_methods_of(CheckedType receiver) bin {
+  knows_methods_of(CheckedType receiver) flag {
     if equals(receiver.name, "") {
       ret false;
     }
@@ -1762,7 +1762,7 @@ impl Checker {
 
   // True when a call through a receiver reaches an async method, or one
   // the checker cannot resolve, which it does not second-guess.
-  awaits_async_method(ExprNode e, TypeEnv* env) bin {
+  awaits_async_method(ExprNode e, TypeEnv* env) flag {
     if !e.has_left {
       ret true;
     }
@@ -1784,7 +1784,7 @@ impl Checker {
 
   // Checks a call written through a receiver, which resolves to a
   // method the receiver's type declares.
-  check_method_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env, bin awaited) CheckedType {
+  check_method_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env, flag awaited) CheckedType {
     if !e.has_left {
       ret checked_unknown();
     }
@@ -1856,7 +1856,7 @@ impl Checker {
         continue;
       }
       str supplied_name = type_name(supplied);
-      bin listed = false;
+      flag listed = false;
       num b = 0;
       for b < holder.bounds.len {
         Vec<str> combination = holder.bounds.get(b);
@@ -1917,7 +1917,7 @@ impl Checker {
           break;
         }
         str supplied_name = type_name(supplied);
-        bin listed = false;
+        flag listed = false;
         num a = 0;
         for a < allowed.len {
           if equals(allowed.get(a), supplied_name) {
@@ -1944,7 +1944,7 @@ impl Checker {
   // Only a name that resolves to nothing else is read this way, so a
   // receiver whose type the checker does not model is left to the method
   // path rather than being mistaken for an alias.
-  check_alias_qualified_call(Node* node, ExprNode e, str method, TypeEnv* env) bin {
+  check_alias_qualified_call(Node* node, ExprNode e, str method, TypeEnv* env) flag {
     if equals(method, "") || !e.has_left {
       ret false;
     }
@@ -2027,7 +2027,7 @@ impl Checker {
   // (`Vec<T>.sort_by`'s `T`) with the receiver's real one (`Vec<num>`'s
   // `num`) before either side is compared, since `want` is written
   // against the unsubstituted template.
-  _fn_sig_matches(FnTypeSig* want, FnSig got, Vec<str>* type_params, Vec<CheckedType>* generic_args) bin {
+  _fn_sig_matches(FnTypeSig* want, FnSig got, Vec<str>* type_params, Vec<CheckedType>* generic_args) flag {
     if got.is_variadic || want.params.len != got.args.len {
       ret false;
     }
@@ -2054,7 +2054,7 @@ impl Checker {
     Vec<Node*>* args,
     Vec<str>* type_params,
     Vec<CheckedType>* generic_args
-  ) bin {
+  ) flag {
     num i = 0;
     for i < args.len && i < sig.args.len {
       CheckedType want = sig.args.get(i);
@@ -2152,10 +2152,10 @@ impl Checker {
   // usual convention every real printf-checker follows, since a
   // format built at runtime can't be reasoned about here - or when
   // the C-style parser meets a spec it doesn't confidently recognize.
-  check_format_args(Node* node, str name, Vec<Node*>* args, num fmt_index, bin c_style, TypeEnv* env) {
+  check_format_args(Node* node, str name, Vec<Node*>* args, num fmt_index, flag c_style, TypeEnv* env) {
     Node* fmt_node = args.get(fmt_index);
     str fmt_text = "";
-    bin is_literal = false;
+    flag is_literal = false;
     fit fmt_node.kind {
       .String(s) -> {
         fmt_text = s;
@@ -2275,7 +2275,7 @@ impl Checker {
 
   // True when `node` calls something the checker knows to be async, or
   // something it cannot resolve, which it does not second-guess.
-  awaits_async_call(Node* node, TypeEnv* env) bin {
+  awaits_async_call(Node* node, TypeEnv* env) flag {
     if node == nil {
       ret false;
     }
@@ -2309,7 +2309,7 @@ impl Checker {
 
   // Checks a call against the callee's signature and reports its return
   // type.
-  check_call(Node* node, ExprNode e, TypeEnv* env, bin awaited) CheckedType {
+  check_call(Node* node, ExprNode e, TypeEnv* env, flag awaited) CheckedType {
     Vec<Node*> args;
     args.init(4);
     defer args.free();
@@ -2405,7 +2405,7 @@ impl Checker {
 }
 
 // True for `=` and the operators that read and write in one step.
-fun _is_assignment(str op) bin {
+fun _is_assignment(str op) flag {
   if equals(op, "=") {
     ret true;
   }
@@ -2467,7 +2467,7 @@ fun _constant_value(Node* node) Option<num> {
 }
 
 // True when `node` is written as a zero, however it is spelled.
-fun _is_constant_zero(Node* node) bin {
+fun _is_constant_zero(Node* node) flag {
   let value = _constant_value(node);
   ret value.is_some() && value.unwrap() == 0;
 }
@@ -2497,7 +2497,7 @@ fun _branch_enum_name(Node* condition) str {
   ret "";
 }
 
-fun _is_comparison(str op) bin {
+fun _is_comparison(str op) flag {
   ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") ||
     equals(
     op,
@@ -2505,7 +2505,7 @@ fun _is_comparison(str op) bin {
   ) || equals(op, ">=");
 }
 
-fun _is_logical(str op) bin {
+fun _is_logical(str op) flag {
   ret equals(op, "&&") || equals(op, "||");
 }
 
@@ -2629,7 +2629,7 @@ impl Checker {
 
   // Rejects a name another file declares only for itself. A file offers
   // what it marks public; the rest is its own business.
-  check_visibility(str name, str declared_in, bin is_public, str what, Node* at) {
+  check_visibility(str name, str declared_in, flag is_public, str what, Node* at) {
     if is_public || equals(declared_in, "") || equals(self.current_file, "") {
       ret;
     }
@@ -2894,7 +2894,7 @@ impl Checker {
     // Once a parameter carries a default, every parameter after it must
     // too, or a call omitting only the later ones would leave no way to
     // tell which trailing argument binds to which parameter.
-    bin seen_default_param = false;
+    flag seen_default_param = false;
     for pa : f.args {
       fit pa.kind {
         .Variable(pv) -> {
@@ -2949,7 +2949,7 @@ impl Checker {
     self.active_type_params = params;
 
     CheckedType previous = self.rtype;
-    bin previous_async = self.in_async;
+    flag previous_async = self.in_async;
     self.in_async = f.is_async;
     self.rtype = checked_unknown();
     if f.has_rtype {
@@ -2972,7 +2972,7 @@ impl Checker {
 // their own top-level C symbol or typedef, so any two of them sharing a
 // name collide regardless of whether they are the same kind. True when
 // this failed (the caller should stop and return the error).
-fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node) bin {
+fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node) flag {
   let existing = checker.declared_at.at(name);
   if existing.is_some() {
     TopLevelSite site = existing.unwrap();
@@ -3001,7 +3001,7 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
 }
 
 // Checks a whole program, reporting the first type error it finds.
-pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
+pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   Checker checker = _checker_new();
   defer _free_fn_sig_map(&checker.fns);
   defer checker.declared_at.free();
@@ -3074,7 +3074,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<bin, TypeError> {
           checker.fail(format("enum '{str}' must declare at least one variant", e.name), node);
           ret .Err(checker.error);
         }
-        bin carries_data = false;
+        flag carries_data = false;
         for v : e.variants {
           if v.has_payload && v.payload.len > 0 {
             carries_data = true;

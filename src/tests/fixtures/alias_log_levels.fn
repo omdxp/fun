@@ -1,4 +1,4 @@
-imp std.log as mylog;
+use std.log as mylog;
 
 fun main() {
   mylog.Logger logger = mylog.logger_init(mylog.LogLevel.Debug);

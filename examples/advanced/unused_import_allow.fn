@@ -8,7 +8,7 @@
 // - Program still runs normally.
 
 allow unused_import, "placeholder import while sketching the option-based API";
-imp std.option;
+use std.option;
 
 fun main() {
 }

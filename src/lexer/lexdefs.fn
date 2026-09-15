@@ -7,13 +7,13 @@
 // `keyword_is_datatype` table, used by the parser for type-position
 // disambiguation, is where those get recognized.
 
-imp std.vec;
-imp std.string;
+use std.vec;
+use std.string;
 
 // True if `s` is a reserved word. `use`/`flag` are accepted alongside
 // `imp`/`bin` as alternate spellings during the transition tracked in
 // canonical_keyword_text below; both parse identically.
-pub fun is_keyword(str s) bin {
+pub fun is_keyword(str s) flag {
   fit s {
     "imp", "use", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const",
     "defer",
@@ -77,23 +77,24 @@ pub fun keywords() Vec<str> {
 }
 
 // True if `s` is `true` or `false`.
-pub fun is_boolean_keyword(str s) bin {
+pub fun is_boolean_keyword(str s) flag {
   fit s {
     "true", "false" -> { ret true; }
     _ -> { ret false; }
   }
 }
 
-// The keyword text every consumer past the lexer actually sees: `use`
-// canonicalizes to `imp`, `flag` to `bin`, everything else passes through
-// unchanged. `use`/`flag` are accepted spellings a reader may type, but
-// the parser, formatter, and fls all key off one spelling per keyword, so
-// canonicalizing once here - the single place a keyword's matched text
-// turns into a token - means nothing downstream needs to know a second
-// spelling exists at all. This direction (old spelling canonical) is the
-// transition state: once this repo's own source has migrated to the new
-// spelling, this flips so `-fmt` rewrites the old spelling forward
-// instead, until `imp`/`bin` are dropped from is_keyword entirely.
+// The keyword text every consumer past the lexer actually sees: `imp`
+// canonicalizes to `use`, `bin` to `flag`, everything else passes through
+// unchanged. `imp`/`bin` are still accepted spellings a reader may type
+// (nothing about parsing changes), but the parser, formatter, and fls all
+// key off one spelling per keyword, so canonicalizing once here - the
+// single place a keyword's matched text turns into a token - means
+// nothing downstream needs to know a second spelling exists at all.
+// `use`/`flag` are canonical as of this flip: this repo's own source has
+// migrated (see the language-feedback keyword-rename plan), so `-fmt` now
+// rewrites the old spelling forward instead of back. `imp`/`bin` stay
+// accepted until Phase 3 drops them from is_keyword entirely.
 pub fun canonical_keyword_text(str s) str {
   // The token this feeds is later freed as an owned allocation (see
   // free_token_contents), same as the heap-allocated text the lexer
@@ -102,8 +103,8 @@ pub fun canonical_keyword_text(str s) str {
   // ("pointer being freed was not allocated"). substr forces a fresh
   // heap copy, matching how every other token's own text is owned.
   fit s {
-    "use" -> { ret substr("imp", 0, 3); }
-    "flag" -> { ret substr("bin", 0, 3); }
+    "imp" -> { ret substr("use", 0, 3); }
+    "bin" -> { ret substr("flag", 0, 4); }
     _ -> { ret s; }
   }
 }
@@ -111,7 +112,7 @@ pub fun canonical_keyword_text(str s) str {
 // An operator character that is always treated as a single-character unit
 // even when a longer run of operator characters might otherwise follow it
 // (e.g. `(` never combines with a following char into a multi-char op).
-pub fun op_treated_as_one(chr op) bin {
+pub fun op_treated_as_one(chr op) flag {
   fit op {
     '(', '[', ',', '*', '?' -> { ret true; }
     _ -> { ret false; }
@@ -119,7 +120,7 @@ pub fun op_treated_as_one(chr op) bin {
 }
 
 // A character that may participate in a multi-character operator.
-pub fun is_single_operator(chr op) bin {
+pub fun is_single_operator(chr op) flag {
   fit op {
     '+', '-', '/', '*', '=', '>', '<', '|', '&', '^', '%', '~', '!', '(', '[', ',', '.', ':', '#', '$', '?' -> {
       ret true;
@@ -130,7 +131,7 @@ pub fun is_single_operator(chr op) bin {
 
 // Every valid operator text (as opposed to `is_single_operator`, which
 // checks a single character that may be part of one).
-pub fun op_valid(str op) bin {
+pub fun op_valid(str op) flag {
   fit op {
     "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=",
     "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(",

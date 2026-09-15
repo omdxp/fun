@@ -1,7 +1,7 @@
 // Math operations showcase.
 
-imp std.c.io;
-imp std.math;
+use std.c.io;
+use std.math;
 
 fun main() {
   dec angle = deg_to_rad(45);

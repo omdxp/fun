@@ -3,8 +3,8 @@
 // Option is a sum type — construct it with `some(v)` or the `None` variant, then
 // either match it with `fit` or reach for a combinator like `unwrap_or`.
 
-imp std.c.io;
-imp std.option;
+use std.c.io;
+use std.option;
 
 fun main() num {
   Option<num> a = some(7);

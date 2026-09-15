@@ -6,10 +6,10 @@
 // key/value fields, either via direct calls (`l.info(...)`) or a chainable
 // builder (`l.info_r(...).str_field(...).emit()`).
 
-imp std.io;
-imp std.string;
-imp std.vec;
-imp std.time;
+use std.io;
+use std.string;
+use std.vec;
+use std.time;
 
 // Log severity levels with explicit ordered values, so filtering is a stable
 // integer comparison and there's room to insert levels between the existing ones.
@@ -43,7 +43,7 @@ pub enum FieldVal {
   Str(str),
   Num(num),
   Dec(dec),
-  Bin(bin)
+  Bin(flag)
 }
 
 // An ordered key/value pair attached to a log record.
@@ -79,7 +79,7 @@ pub fun fdec(str k, dec v) Field {
 }
 
 // Builds a boolean-valued field.
-pub fun fbin(str k, bin v) Field {
+pub fun fbin(str k, flag v) Field {
   Field f;
   f.key = k;
   f.val = FieldVal.Bin(v);
@@ -95,11 +95,11 @@ pub compound Logger {
   // Destination.
   Sink sink;
   // Prefix each record with a timestamp.
-  bin with_timestamp;
+  flag with_timestamp;
   // Optional logger name (empty = none).
   str name;
   // When true, Warn/Error/Fatal go to stderr even if `sink` is stdout.
-  bin route_err;
+  flag route_err;
 }
 
 // Creates a Text logger writing to stdout with timestamps on, filtering below `level`.
@@ -107,9 +107,9 @@ pub fun logger_init(
   LogLevel level,
   LogFormat format = .Text,
   Sink sink = .Stdout,
-  bin with_timestamp = true,
+  flag with_timestamp = true,
   str name = "",
-  bin route_err = false
+  flag route_err = false
 ) Logger {
   Logger l;
   l.level = level;
@@ -207,12 +207,12 @@ pub compound LogRecord {
   LogLevel min;
   LogFormat format;
   Sink sink;
-  bin with_timestamp;
+  flag with_timestamp;
   str name;
-  bin route_err;
+  flag route_err;
   // False when this record is below the logger's threshold; every builder
   // method and `emit()` become no-ops so filtered-out logging stays cheap.
-  bin live;
+  flag live;
 }
 
 impl LogRecord {
@@ -251,7 +251,7 @@ impl LogRecord {
   }
 
   // Attaches a boolean-valued field; chainable.
-  pub bin_field(str k, bin v) LogRecord {
+  pub bin_field(str k, flag v) LogRecord {
     ret self.field(k, FieldVal.Bin(v));
   }
 
@@ -351,7 +351,7 @@ impl Logger {
   }
 
   // Returns true when `level` would be emitted by this logger.
-  pub enabled(LogLevel level) bin {
+  pub enabled(LogLevel level) flag {
     ret level >= self.level;
   }
 
@@ -376,13 +376,13 @@ impl Logger {
   }
 
   // Toggles routing Warn+ records to stderr regardless of `sink`; chainable.
-  pub route_errors(bin on) Logger {
+  pub route_errors(flag on) Logger {
     self.route_err = on;
     ret *self;
   }
 
   // Toggles whether records are prefixed with a timestamp; chainable.
-  pub with_timestamps(bin on) Logger {
+  pub with_timestamps(flag on) Logger {
     self.with_timestamp = on;
     ret *self;
   }
@@ -485,7 +485,7 @@ impl Logger {
   }
 
   // Logs a single boolean field under `label`, with no message.
-  pub log_bin(LogLevel level, str label, bin value) {
+  pub log_bin(LogLevel level, str label, flag value) {
     if level >= self.level {
       let r = self.record(level, "");
       r.bin_field(label, value).emit();

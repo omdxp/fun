@@ -7,16 +7,16 @@
 // that happens to share the name; resolving each occurrence would need
 // an index of the whole workspace rather than the open files.
 
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp protocol;
-imp ..lexer.token;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use protocol;
+use ..lexer.token;
+use std.string;
+use std.vec;
+use std.option;
+use std.c.mem;
 
 // One place a name is written.
 pub compound Occurrence {
@@ -99,7 +99,7 @@ pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line
 // per file, so renaming into a name already taken elsewhere in that
 // same program doesn't just shadow it, it breaks the build the moment
 // both declarations sit in one merged program together.
-fun _collides_with_existing(AnalysisCache* cache, Documents* docs, Vec<Occurrence>* found, str new_name) bin {
+fun _collides_with_existing(AnalysisCache* cache, Documents* docs, Vec<Occurrence>* found, str new_name) flag {
   Vec<str> checked;
   checked.init(4);
   defer checked.free();
@@ -230,13 +230,13 @@ pub fun name_at(AnalysisCache* cache, Document doc, num line, num character) str
 
 // True for text a reader could have written as a name: a letter or an
 // underscore, then letters, digits, or underscores.
-pub fun is_identifier(str s) bin {
+pub fun is_identifier(str s) flag {
   num n = len(s);
   if n == 0 {
     ret false;
   }
   let first = s[0];
-  bin starts = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_';
+  flag starts = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_';
   if !starts {
     ret false;
   }
@@ -244,7 +244,7 @@ pub fun is_identifier(str s) bin {
   for i < n {
     let c = s[i];
     i = i + 1;
-    bin ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    flag ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
     if !ok {
       ret false;
     }

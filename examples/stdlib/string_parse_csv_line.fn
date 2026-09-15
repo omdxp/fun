@@ -1,7 +1,7 @@
 // Real-world-ish: simple request parsing via substring checks.
 
-imp std.c.io;
-imp std.string;
+use std.c.io;
+use std.string;
 
 fun main() {
   str req = "GET /health HTTP/1.1";

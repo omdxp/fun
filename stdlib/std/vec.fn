@@ -1,9 +1,9 @@
 // Dynamic vectors for common types.
 
-imp std.c.mem;
-imp std.c.string;
-imp std.quirks;
-imp std.option;
+use std.c.mem;
+use std.c.string;
+use std.quirks;
+use std.option;
 
 // Dynamic vector.
 pub compound Vec<T> {
@@ -30,7 +30,7 @@ impl Vec<T> as Sized {
   }
 
   // Returns true when the vector holds no elements.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.len == 0;
   }
 
@@ -466,7 +466,7 @@ impl Vec<T: num | dec> {
   }
 
   // Returns true when the value is present.
-  pub contains(T value) bin {
+  pub contains(T value) flag {
     num i = 0;
     for i < self.len {
       if self.data[i] == value {
@@ -687,7 +687,7 @@ impl Vec<str> {
   }
 
   // Returns true when the string is present.
-  pub contains(str value) bin {
+  pub contains(str value) flag {
     num i = 0;
     for i < self.len {
       if _str_cmp(self.data[i], value) == 0 {

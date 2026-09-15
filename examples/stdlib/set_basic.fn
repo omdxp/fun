@@ -1,7 +1,7 @@
 // Set helpers example.
 
-imp std.c.io;
-imp std.set;
+use std.c.io;
+use std.set;
 
 fun main() {
   Set<str> s = set_init("", 8);

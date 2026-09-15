@@ -1,6 +1,6 @@
-imp std.c.io;
-imp user;
-imp user_impl;
+use std.c.io;
+use user;
+use user_impl;
 
 fun main() void {
   User user;

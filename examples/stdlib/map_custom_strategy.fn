@@ -1,7 +1,7 @@
 // Hashed map with custom compound keys via MapKeyStrategy.
 
-imp std.c.io;
-imp std.map;
+use std.c.io;
+use std.map;
 
 compound UserKey {
   num id;

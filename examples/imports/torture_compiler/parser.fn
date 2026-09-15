@@ -2,13 +2,13 @@
 // and building an Expr* tree (from ast.fn) — the two most
 // "compiler-shaped" cross-file dependencies in this program.
 
-imp std.c.mem;
-imp std.vec;
-imp std.result;
-imp std.error;
-imp token;
-imp ast;
-imp lexer;
+use std.c.mem;
+use std.vec;
+use std.result;
+use std.error;
+use token;
+use ast;
+use lexer;
 
 pub compound Parser {
   Vec<Token> toks;
@@ -52,14 +52,14 @@ fun parser_mk_call(str name, Vec<Expr*> args) Expr* {
   ret e;
 }
 
-fun token_is_rparen(Token t) bin {
+fun token_is_rparen(Token t) flag {
   fit t {
     Token.RParen -> { ret true; }
     _ -> { ret false; }
   }
 }
 
-fun token_is_comma(Token t) bin {
+fun token_is_comma(Token t) flag {
   fit t {
     Token.Comma -> { ret true; }
     _ -> { ret false; }

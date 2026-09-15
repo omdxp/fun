@@ -1,8 +1,8 @@
 // Math helpers beyond C bindings.
 
-imp std.c.math as cmath;
-imp std.result;
-imp std.error;
+use std.c.math as cmath;
+use std.result;
+use std.error;
 
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
 // `sign()`. Match it with `fit`:

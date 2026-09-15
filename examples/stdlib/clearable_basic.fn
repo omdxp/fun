@@ -1,7 +1,7 @@
-imp std.c.io;
-imp std.quirks;
-imp std.vec;
-imp std.map;
+use std.c.io;
+use std.quirks;
+use std.vec;
+use std.map;
 
 compound Scratch {
   num value;

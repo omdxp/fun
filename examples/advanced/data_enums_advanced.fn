@@ -5,7 +5,7 @@
 // compound by value, or a monomorphized generic instance. Pattern matching binds
 // each matched variant's payload into locals; payload-free variants coexist.
 
-imp std.c.io;
+use std.c.io;
 
 // A generic container, used below as an enum payload.
 compound Box<T> {

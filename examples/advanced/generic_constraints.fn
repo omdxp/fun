@@ -6,7 +6,7 @@
 // is one of the listed bounds — a violation is a compile-time error, not a
 // mysterious C link failure.
 
-imp std.io;
+use std.io;
 
 // A constrained generic FREE function: T must be num or str.
 fun identity<T: num | str>(T x) T {

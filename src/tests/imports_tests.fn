@@ -2,12 +2,12 @@
 // compiles a real entry file from disk through import resolution and
 // checks the emitted C, so paths here are relative to the repository root.
 
-imp ..codegen.codegen;
-imp ..codegen.codegen_state;
-imp ..parser.import_resolver;
-imp ..semantics.typecheck;
-imp std.string;
-imp std.result;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use std.string;
+use std.result;
 
 // Resolves `path`'s import graph and transpiles the merged program.
 fun transpile_file(str path) Result<str, str> {

@@ -1,5 +1,5 @@
-imp std.c.io;
-imp std.thread_pool;
+use std.c.io;
+use std.thread_pool;
 
 fun main() {
   ThreadPool pool = thread_pool_new(0);

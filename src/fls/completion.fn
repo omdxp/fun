@@ -5,29 +5,29 @@
 // the reserved words, what the program declares, and what is in scope
 // where the cursor sits.
 
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp imports;
-imp navigation;
-imp inlay_hints;
-imp protocol;
-imp ..ast.ast;
-imp ..lexer.lexdefs;
-imp ..lexer.token;
-imp ..parser.import_resolver;
-imp ..parser.deps_lock;
-imp ..semantics.warnings;
-imp std.string;
-imp std.vec;
-imp std.io;
-imp std.path;
-imp std.fs;
-imp std.ctype;
-imp std.result;
-imp std.map;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use imports;
+use navigation;
+use inlay_hints;
+use protocol;
+use ..ast.ast;
+use ..lexer.lexdefs;
+use ..lexer.token;
+use ..parser.import_resolver;
+use ..parser.deps_lock;
+use ..semantics.warnings;
+use std.string;
+use std.vec;
+use std.io;
+use std.path;
+use std.fs;
+use std.ctype;
+use std.result;
+use std.map;
+use std.c.mem;
 
 // What a client is told an item is. The values are the protocol's own
 // numbering; only the kinds this file offers are listed.
@@ -63,7 +63,7 @@ compound Item {
 
 // Everything worth offering at `line`/`character` in `doc`, as the
 // result a client is sent.
-pub fun completion(AnalysisCache* cache, Document doc, num line, num character, bin snippets) str {
+pub fun completion(AnalysisCache* cache, Document doc, num line, num character, flag snippets) str {
   Vec<Item> items;
   items.init(64);
   defer items.free();
@@ -291,7 +291,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
 // sits in one at all (even with zero matches), worked out purely
 // from the current line's own text, independent of tokens or a
 // parsed program, so it still answers while the path is unfinished.
-fun _try_import_completions(Vec<Item>* items, str current_file, str text, num line, num character) bin {
+fun _try_import_completions(Vec<Item>* items, str current_file, str text, num line, num character) flag {
   Vec<str> lines = split_lines(text);
   if line < 0 || line >= lines.len {
     ret false;
@@ -305,7 +305,10 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
     ret false;
   }
   str stripped = trim_left(substr(raw_line, 0, cut));
-  if !starts_with(stripped, "imp") {
+  // 'imp' is still accepted as an alternate spelling of the now-canonical
+  // 'use' (see canonical_keyword_text) - both are exactly 3 characters,
+  // so the fixed offsets below work unchanged for either.
+  if !starts_with(stripped, "use") && !starts_with(stripped, "imp") {
     ret false;
   }
   num rest_len = len(stripped) - 3;
@@ -367,8 +370,8 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
   }
   Vec<str> names = listed.unwrap();
   defer names.free();
-  bin saw_c_dir = false;
-  bin saw_any_fn = false;
+  flag saw_c_dir = false;
+  flag saw_any_fn = false;
   num i = 0;
   for i < names.len {
     str name = names.get(i);
@@ -477,7 +480,7 @@ fun _all_warning_ids() Vec<str> {
 // `expect <id>, "reason";`, filled in from what's typed so far.
 // Line-based like `_try_import_completions`, and for the same reason:
 // this needs to answer before the rest of the line even parses.
-fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num character) bin {
+fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num character) flag {
   Vec<str> lines = split_lines(text);
   if line < 0 || line >= lines.len {
     ret false;
@@ -544,7 +547,7 @@ fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num charac
 // True when `stripped` is exactly `keyword_len` characters long (the
 // bare keyword, nothing following yet) or the character right after
 // it is whitespace, so `allow` matches but `allowed` does not.
-fun _kw_boundary(str stripped, num keyword_len) bin {
+fun _kw_boundary(str stripped, num keyword_len) flag {
   if len(stripped) == keyword_len {
     ret true;
   }
@@ -556,7 +559,7 @@ fun _kw_boundary(str stripped, num keyword_len) bin {
 // method elsewhere. A trigger is only offered to a client that
 // understands a skeleton, since the point of it is the text it expands
 // to rather than the letters typed.
-fun _abbreviations(Vec<Item>* items, bin snippets) {
+fun _abbreviations(Vec<Item>* items, flag snippets) {
   if !snippets {
     ret;
   }
@@ -987,9 +990,9 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
       continue;
     }
     str kw = token_word(t);
-    bin is_compound = equals(kw, "compound");
-    bin is_enum = equals(kw, "enum");
-    bin is_methods = equals(kw, "quirk") || equals(kw, "impl");
+    flag is_compound = equals(kw, "compound");
+    flag is_enum = equals(kw, "enum");
+    flag is_methods = equals(kw, "quirk") || equals(kw, "impl");
     if !is_compound && !is_enum && !is_methods {
       continue;
     }
@@ -1319,7 +1322,7 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
 
     num current_index = 0;
     num last_name_idx = -1;
-    bin past_default = false;
+    flag past_default = false;
     num pdepth = 0;
     for j < tokens.len {
       Token pt = tokens.get(j);
@@ -1817,7 +1820,7 @@ fun _propagation_receiver_type_before(
     ret "";
   }
   Token op_tail = operand_opt.unwrap();
-  bin op_is_call = false;
+  flag op_is_call = false;
   if token_is_symbol(op_tail, ')') {
     // Matches the closing paren backward to find the callee - inline
     // rather than reusing `symbols.fn`'s own private `_matching_lparen`,
@@ -1868,7 +1871,7 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
   num source_line = line + 1;
   num source_col = character + 1;
   str receiver = "";
-  bin last_was_dot = false;
+  flag last_was_dot = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -1941,7 +1944,7 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
   num source_line = line + 1;
   num source_col = character + 1;
   Option<Token> receiver = .None;
-  bin last_was_dot = false;
+  flag last_was_dot = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -2139,7 +2142,7 @@ fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
 // file rather than by type name the way `_members_of` does. Every
 // declaration reached through the alias's own import is already
 // merged into `program`, cross-alias name collisions aside.
-fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* items, bin snippets) {
+fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* items, flag snippets) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2187,7 +2190,7 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
 // file, almost always still valid on its own, so it is read and
 // parsed fresh rather than giving up on alias completion entirely
 // just because the document being typed into is momentarily broken.
-fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<Item>* items, bin snippets) {
+fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<Item>* items, flag snippets) {
   str text = read_to_string(module_path);
   if text == nil {
     ret;
@@ -2250,7 +2253,7 @@ fun _enum_variant_completions(Vec<Node>* program, str type_name, Vec<Item>* item
   }
 }
 
-fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, bin snippets) {
+fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2319,7 +2322,7 @@ fun _declared(
   str file,
   num line,
   Vec<Item>* items,
-  bin snippets
+  flag snippets
 ) {
   num i = 0;
   for i < program.len {
@@ -2513,7 +2516,7 @@ fun _collect_locals(
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";
-          bin is_map = fi.has_index_name &&
+          flag is_map = fi.has_index_name &&
             _for_iter_map_kv(tokens, fi.iterable, program, file, line, &map_key, &map_value);
           if fi.has_index_name {
             str index_type = "num";
@@ -2541,7 +2544,7 @@ fun _collect_locals(
   }
 }
 
-fun _reserved(Vec<Item>* items, bin snippets) {
+fun _reserved(Vec<Item>* items, flag snippets) {
   Vec<str> words = keywords();
   defer words.free();
   num i = 0;
@@ -2677,7 +2680,7 @@ fun _item(str label, ItemKind kind, str detail) Item {
 // ${2:E}>$0`, one tab stop per declared type parameter. "" (plain
 // label insertion) for a non-generic type, or when the client
 // wouldn't understand a snippet.
-fun _generic_type_snippet(str name, Vec<str>* type_params, bin snippets) str {
+fun _generic_type_snippet(str name, Vec<str>* type_params, flag snippets) str {
   if !snippets || type_params.len == 0 {
     ret "";
   }
@@ -2710,7 +2713,7 @@ fun _generic_type_snippet(str name, Vec<str>* type_params, bin snippets) str {
 // `render_function_named` still renders a method's implicit `self`
 // as a literal first parameter, which a reader never types and a
 // snippet must not ask for.
-fun _call_snippet(str label, str signature, bin is_method, bin snippets) str {
+fun _call_snippet(str label, str signature, flag is_method, flag snippets) str {
   if !snippets || index_of_char(signature, '(') < 0 {
     ret "";
   }

@@ -3,16 +3,16 @@
 // What a call's own signature looks like, and which parameter the
 // cursor sits on, while a reader is still typing inside its parens.
 
-imp protocol;
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp ..lexer.token;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.c.mem;
+use protocol;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use ..lexer.token;
+use std.string;
+use std.vec;
+use std.option;
+use std.c.mem;
 
 // What a client is told when the cursor isn't inside a resolvable call.
 const str NO_SIGNATURE = "null";

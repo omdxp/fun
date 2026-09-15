@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 pub fun shared_value() num {
   ret 42;

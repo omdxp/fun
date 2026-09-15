@@ -2,8 +2,8 @@
 // Run:
 // fun -in examples/stdlib/cli_parse.fn -- --name=fun --debug file1 file2
 
-imp std.c.io;
-imp std.cli;
+use std.c.io;
+use std.cli;
 
 fun main(str[] args) {
   CliArgs parsed = cli_parse(args);

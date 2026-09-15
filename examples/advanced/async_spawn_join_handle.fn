@@ -1,7 +1,7 @@
 // Runtime async spawn + join handle example.
 
-imp std.c.io;
-imp std.thread_runtime;
+use std.c.io;
+use std.thread_runtime;
 
 fun worker(raw* arg) raw* {
   ret arg;

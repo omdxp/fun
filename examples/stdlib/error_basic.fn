@@ -1,7 +1,7 @@
 // Error helpers example.
 
-imp std.c.io;
-imp std.error;
+use std.c.io;
+use std.error;
 
 fun main() {
   Error e = error_new(1, "bad");

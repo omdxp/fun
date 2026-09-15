@@ -6,17 +6,17 @@
 // function it reads as), worked out from its own neighbors rather
 // than guessed from a pattern.
 
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp ..lexer.token;
-imp ..ast.ast;
-imp ..parser.datatype_defs;
-imp ..semantics.warnings;
-imp std.string;
-imp std.vec;
-imp std.map;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use ..lexer.token;
+use ..ast.ast;
+use ..parser.datatype_defs;
+use ..semantics.warnings;
+use std.string;
+use std.vec;
+use std.map;
 
 // The protocol's own token-type/modifier legend, in the exact order
 // each index below refers to. `initialize`'s own capabilities must
@@ -60,7 +60,7 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   // from a type's by shape alone (`NAME`/`Widget` are both a bare
   // capitalized identifier), and the same set membership check covers
   // both the declaration site and every later reference to it.
-  Map<str, bin> const_names;
+  Map<str, flag> const_names;
   const_names.init(16);
   defer const_names.free();
   if read.parsed {
@@ -72,14 +72,14 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
   // its parens, and not the enum's own name - so it reads as an enum
   // member rather than a called function despite the same `Name(`
   // shape a variant with a payload has.
-  Vec<bin> variant_decl = _enum_variant_name_flags(&tokens);
+  Vec<flag> variant_decl = _enum_variant_name_flags(&tokens);
   defer variant_decl.free();
 
   Vec<num> data;
   data.init(tokens.len * 5);
   num last_line = 0;
   num last_start = 0;
-  bin have_last = false;
+  flag have_last = false;
 
   num i = 0;
   for i < tokens.len {
@@ -146,7 +146,7 @@ pub fun semantic_tokens(AnalysisCache* cache, Document doc) str {
 // inside a function body isn't reached here (`nodes` is the top-level
 // program only) - a narrower, separately-scoped gap, same tradeoff
 // `outline.fn`'s own top-level walks already accept.
-fun _collect_const_names(Vec<Node>* nodes, Map<str, bin>* out) {
+fun _collect_const_names(Vec<Node>* nodes, Map<str, flag>* out) {
   num i = 0;
   for i < nodes.len {
     Node n = nodes.get(i);
@@ -167,8 +167,8 @@ fun _collect_const_names(Vec<Node>* nodes, Map<str, bin>* out) {
 // Circle(num), Square, }`) - the first identifier right after the
 // enum's own `{` or after a `,` at the variant list's own top level,
 // never a payload type sitting inside a variant's own parens.
-fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<bin> {
-  Vec<bin> flags;
+fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<flag> {
+  Vec<flag> flags;
   flags.init(tokens.len);
   num fi = 0;
   for fi < tokens.len {
@@ -192,7 +192,7 @@ fun _enum_variant_name_flags(Vec<Token>* tokens) Vec<bin> {
     }
     num depth = 1;
     num paren_depth = 0;
-    bin expect_name = true;
+    flag expect_name = true;
     num k = j + 1;
     for k < tokens.len && depth > 0 {
       Token tk = tokens.get(k);
@@ -233,8 +233,8 @@ fun _token_type_of(
   Vec<Token>* tokens,
   num idx,
   Token t,
-  Map<str, bin>* const_names,
-  Vec<bin>* variant_decl
+  Map<str, flag>* const_names,
+  Vec<flag>* variant_decl
 ) num {
   fit t.type {
     .Comment -> { ret TokenKind.Comment; }
@@ -291,8 +291,8 @@ fun _identifier_token_type(
   Vec<Token>* tokens,
   num idx,
   Token t,
-  Map<str, bin>* const_names,
-  Vec<bin>* variant_decl
+  Map<str, flag>* const_names,
+  Vec<flag>* variant_decl
 ) num {
   let prev = token_before(tokens, idx);
   if prev.is_some() && token_is_keyword(prev.unwrap(), "fun") {
@@ -308,7 +308,7 @@ fun _identifier_token_type(
   }
 
   let next = token_after(tokens, idx + 1);
-  bin next_is_paren = next.is_some() && token_is_operator(next.unwrap(), "(");
+  flag next_is_paren = next.is_some() && token_is_operator(next.unwrap(), "(");
   // `fork` is a contextual keyword, lexed as a plain identifier like
   // any other: `fork some_call(...)` is the statement, `fork(...)` is
   // an ordinary call to a function literally named "fork" - the same

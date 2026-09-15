@@ -1,8 +1,8 @@
 // Windows synchronization backend implementation, used by std.sync_runtime.
 // Talks directly to pthread-shaped primitives from std.c.thread_windows.
 
-imp std.c.thread_windows;
-imp std.sync;
+use std.c.thread_windows;
+use std.sync;
 
 // Legacy compatibility function kept for API stability.
 pub fun sync_backend_windows_unavailable() num {

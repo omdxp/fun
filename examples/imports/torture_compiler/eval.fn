@@ -1,9 +1,9 @@
 // Evaluator module: walks the Expr tree (ast.fn) using a Map<str, dec>
 // (std.map, a two-type-param generic) as the symbol table.
 
-imp std.map;
-imp std.vec;
-imp ast;
+use std.map;
+use std.vec;
+use ast;
 
 // max/min reduce over a variable-arity Vec<Expr*> -- any argument count.
 fun eval_call(str name, Vec<Expr*> args, Map<str, dec>* env) dec {

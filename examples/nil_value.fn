@@ -4,7 +4,7 @@
 // and compares against them with `==` / `!=`. Use it to initialize optional links,
 // signal "no value" for a pointer field, or check whether a pointer is unset.
 
-imp std.c.io;
+use std.c.io;
 
 // A singly-linked list node whose `next` is nil at the tail.
 compound Node {

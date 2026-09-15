@@ -1,9 +1,9 @@
 // Language server entry point: serve one client over standard input and
 // output until it asks to stop.
 
-imp server;
-imp std.io;
-imp std.string;
+use server;
+use std.io;
+use std.string;
 
 fun main(str[] args) num {
   // Normally launched by an editor with no args, over stdio. `--version`

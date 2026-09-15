@@ -1,4 +1,4 @@
-imp private_lib;
+use private_lib;
 
 fun main() {
   Secret s;

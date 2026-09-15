@@ -10,9 +10,9 @@
 // is over tokens rather than text, so a brace inside a string or a
 // comment cannot be mistaken for the end of a declaration.
 
-imp ..lexer.token;
-imp std.vec;
-imp std.string;
+use ..lexer.token;
+use std.vec;
+use std.string;
 
 // Where one top-level declaration sits: the tokens it spans, and the
 // lines it covers. The lines matter because a declaration kept from an
@@ -38,7 +38,7 @@ pub fun top_level_ranges(Vec<Token>* tokens) Vec<DeclRange> {
 
   num depth = 0;
   num started = -1;
-  bin inside = false;
+  flag inside = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -165,7 +165,7 @@ fun _push_range(Vec<DeclRange>* out, Vec<Token>* tokens, num first, num last) {
 // True when what was read from `started` up to `at` carries no brace of
 // its own, which is what tells a bodyless declaration from one whose
 // body is still being read.
-fun _ends_without_brace(Vec<Token>* tokens, num started, num at) bin {
+fun _ends_without_brace(Vec<Token>* tokens, num started, num at) flag {
   num i = started;
   for i < at {
     if _is_brace(tokens.get(i)) {
@@ -177,7 +177,7 @@ fun _ends_without_brace(Vec<Token>* tokens, num started, num at) bin {
 }
 
 // A word that can only begin a top-level declaration.
-fun _starts_declaration(Token t) bin {
+fun _starts_declaration(Token t) flag {
   fit t.type {
     .Keyword -> {}
     _ -> { ret false; }
@@ -195,19 +195,19 @@ fun _starts_declaration(Token t) bin {
   ret false;
 }
 
-fun _is_brace(Token t) bin {
+fun _is_brace(Token t) flag {
   ret token_is_symbol(t, '{') || token_is_symbol(t, '}');
 }
 
-fun _opens(Token t) bin {
+fun _opens(Token t) flag {
   ret token_is_symbol(t, '{') || token_is_symbol(t, '(') || token_is_symbol(t, '[');
 }
 
-fun _closes(Token t) bin {
+fun _closes(Token t) flag {
   ret token_is_symbol(t, '}') || token_is_symbol(t, ')') || token_is_symbol(t, ']');
 }
 
-fun _is_trivia(Token t) bin {
+fun _is_trivia(Token t) flag {
   fit t.type {
     .Comment -> { ret true; }
     .NewLine -> { ret true; }

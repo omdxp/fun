@@ -1,5 +1,5 @@
-imp privfield_lib as a;
-imp std.c.io;
+use privfield_lib as a;
+use std.c.io;
 
 fun main() num {
   Account acc = a.new_account(1, 100);

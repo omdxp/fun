@@ -1,8 +1,8 @@
 // Time helpers example.
 
-imp std.c.io;
-imp std.c.mem;
-imp std.time;
+use std.c.io;
+use std.c.mem;
+use std.time;
 
 fun main() {
   str buf = malloc(64);

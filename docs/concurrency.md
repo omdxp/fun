@@ -48,7 +48,7 @@ nothing; results flow back through channels.
   10 seconds of nothing to do.
 
 ```fun
-imp std.channel;
+use std.channel;
 
 async fun square_into(Channel<num>* out, num v) {
   out <- v * v;
@@ -87,8 +87,8 @@ ergonomic layer returns a value you can `fit` on:
   `try_send_result`, async).
 
 ```fun
-imp std.io;
-imp std.channel;
+use std.io;
+use std.channel;
 
 fun main() {
   Channel<num> ch = channel_new_cap(0, 1);

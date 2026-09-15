@@ -3,7 +3,7 @@
 // Box<U> { ... } }` mints a DIFFERENT Box<U> instantiation than the
 // receiver's own Box<T>, with `U` inferred from the call's own argument.
 
-imp std.c.io;
+use std.c.io;
 
 compound Box<T> {
   T value;

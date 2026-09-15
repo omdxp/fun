@@ -5,16 +5,16 @@
 // these return 0 on success (including as a no-op when already in the
 // target state) and a nonzero backend error code on failure.
 
-imp std.c.thread;
-imp std.result;
-imp std.error;
+use std.c.thread;
+use std.result;
+use std.error;
 
 // Managed thread handle.
 pub compound Thread {
   // Underlying pthread handle.
   pthread_t handle;
   // True once started and not yet joined/detached.
-  bin started;
+  flag started;
 }
 
 // Creates a thread handle in stopped state.
@@ -84,7 +84,7 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 
 // Start a thread with Result. `Ok(true)` on success, `Err` with the backend code
 // otherwise (where `thread_start` returns a raw nonzero/-1 code that's easy to ignore).
-pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin, Error> {
+pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<flag, Error> {
   let rc = thread_start(thread, entry, arg);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_start failed", false);
@@ -105,7 +105,7 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 }
 
 // Join a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin, Error> {
+pub fun try_thread_join(Thread* thread, raw* out_ret) Result<flag, Error> {
   let rc = thread_join(thread, out_ret);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_join failed", false);
@@ -126,7 +126,7 @@ pub fun thread_detach(Thread* thread) num {
 }
 
 // Detach a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_detach(Thread* thread) Result<bin, Error> {
+pub fun try_thread_detach(Thread* thread) Result<flag, Error> {
   let rc = thread_detach(thread);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_detach failed", false);
@@ -140,6 +140,6 @@ pub fun current_thread() pthread_t {
 }
 
 // Returns true when two thread ids refer to the same thread.
-pub fun thread_equal(pthread_t a, pthread_t b) bin {
+pub fun thread_equal(pthread_t a, pthread_t b) flag {
   ret pthread_equal(a, b) != 0;
 }

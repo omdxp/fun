@@ -2,8 +2,8 @@
 // - Using C macro constants (INT_MAX, NULL, SEEK_SET)
 // - Using C stdlib functions via Fun std imports
 
-imp std.c.io;
-imp std.c.limits;
+use std.c.io;
+use std.c.limits;
 
 fun main() {
   printf("INT_MAX=%d\n", INT_MAX);

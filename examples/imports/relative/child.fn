@@ -1,5 +1,5 @@
-imp grand_child;
-imp std.c.io;
+use grand_child;
+use std.c.io;
 
 num x = 5;
 

@@ -1,7 +1,7 @@
 // Map helpers example.
 
-imp std.c.io;
-imp std.map;
+use std.c.io;
+use std.map;
 
 fun main() {
   Map<str, str> m;

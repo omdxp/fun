@@ -9,16 +9,16 @@
 // off to VS Code's own built-in show-references command, which
 // validates its own arguments by type and rejects a plain object.
 
-imp documents;
-imp analysis;
-imp positions;
-imp references;
-imp protocol;
-imp uri;
-imp ..ast.ast;
-imp std.vec;
-imp std.string;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use references;
+use protocol;
+use uri;
+use ..ast.ast;
+use std.vec;
+use std.string;
+use std.c.mem;
 
 // Every top-level function/compound/enum/quirk's own code lens in
 // `doc`, as the result a client is sent: "N references" for a
@@ -42,13 +42,13 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
 
   StringBuilder b = string_builder_init(256);
   b.append("[");
-  bin any = false;
+  flag any = false;
   num i = 0;
   for i < read.program.entry_nodes.len {
     Node n = read.program.entry_nodes.get(i);
     i = i + 1;
     str name = "";
-    bin is_quirk = false;
+    flag is_quirk = false;
     fit n.kind {
       .Function(f) -> {
         if !equals(f.name, "main") {

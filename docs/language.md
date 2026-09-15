@@ -18,13 +18,13 @@ compound fields, and quirk members. Keep them short and
 declaration-specific.
 
 ```fun
-imp std.io;
+use std.io;
 
 // Optional value container. Named Maybe here (not Option) only to avoid
 // colliding with std.option's own Option<T> for this standalone example.
 pub compound Maybe<T> {
   // True when a value is present.
-  bin has;
+  flag has;
   // Stored value.
   T value;
 }
@@ -40,7 +40,7 @@ fun main() {
   Maybe<num> opt;
   opt.has = true;
   opt.value = 42;
-  println_fmt("has={bin} value={num}", opt.has, opt.value);
+  println_fmt("has={flag} value={num}", opt.has, opt.value);
 }
 ```
 
@@ -57,7 +57,7 @@ fun main() {
 | `f32` | `float` | Fixed-width 32-bit float. |
 | `f64` | `double` | Fixed-width 64-bit float. |
 | `iN` / `uN` (arbitrary width) | Nearest standard container up to 128 bits, `_BitInt(N)`/`unsigned _BitInt(N)` past that | See Platforms & Compilers, compiler support past 128 bits varies. |
-| `bin` | `bool` | Boolean. |
+| `flag` | `bool` | Boolean. |
 | `chr` | `char` | Character. |
 | `str` | `char*` | Null-terminated string. |
 | `raw` | `void` (`raw*` for `void*`) | Opaque type. |
@@ -67,7 +67,7 @@ fun main() {
 The null pointer/string sentinel (a keyword; lowers to C `NULL`). It
 coerces to any pointer type and to `str`, and compares with `==`/`!=`:
 `num* p = nil;`, `if p == nil { ... }`, `Node{next = nil}`. No import is
-needed, unlike the C macro `NULL`, which requires `imp std.c.def;`.
+needed, unlike the C macro `NULL`, which requires `use std.c.def;`.
 
 ### Raw strings
 
@@ -75,7 +75,7 @@ A backtick-delimited literal (`` `...` ``) needs no escaping at all: a
 backslash or an embedded double-quote is just a literal byte.
 
 ```fun
-imp std.io;
+use std.io;
 
 fun main() {
   let path = `C:\Users\name\file.txt`;
@@ -95,7 +95,7 @@ you close it on the same line:
   with a real newline byte, ending at the first line that doesn't:
 
 ```fun
-imp std.io;
+use std.io;
 
 fun main() {
   let sql =
@@ -116,7 +116,7 @@ own is the empty raw string, and content that is itself made of backticks
 (a markdown fence, for one) is written by doubling each:
 
 ```fun
-imp std.io;
+use std.io;
 
 fun main() {
   let quoted = `a``b`;          // a`b
@@ -161,7 +161,7 @@ type from the expression:
 
 - Numeric literals infer `num` or `dec` depending on literal form:
   `1` -> `num`, `1.5` -> `dec`.
-- `"text"` infers `str`, `'a'` infers `chr`, `true`/`false` infer `bin`.
+- `"text"` infers `str`, `'a'` infers `chr`, `true`/`false` infer `flag`.
 - Array literals infer element type and become `T[]`: `[1, 2, 3]` ->
   `num[]`, `[Point{x = 1, y = 2}]` -> `Point[]`.
 - Function calls infer the function's return type: `let p =
@@ -184,7 +184,7 @@ fun main() {
   let d = 3.5;               // dec
   let s = "hello";           // str
   let c = 'Z';               // chr
-  let b = true;              // bin
+  let b = true;              // flag
   let nums = [1, 2, 3];      // num[]
   let p = make_point(1, 2);  // Point
   let x = p.x;               // num
@@ -286,8 +286,8 @@ Sugar over `std.option`/`std.result`, replacing the repeated
 check-then-unwrap shape with a single postfix operator:
 
 ```fun
-imp std.option;
-imp std.result;
+use std.option;
+use std.result;
 
 fun half(num x) Option<num> {
   if x % 2 == 1 { ret .None; }
@@ -363,7 +363,7 @@ the compound's declaration (including its own `impl` methods via
 `self._field`). Another module must go through public accessor methods.
 
 ```fun
-imp std.io;
+use std.io;
 
 compound Account {
   num id;          // public
@@ -415,7 +415,7 @@ fun main() {
 ### Implementations
 
 ```fun
-imp std.io;
+use std.io;
 
 quirk Shape {
   area() num;
@@ -468,7 +468,7 @@ Type parameters can be constrained with `:` and `|`, on impls, compounds,
 and free functions alike:
 
 ```fun
-imp std.io;
+use std.io;
 
 // Named Accum here (not Vec) only to avoid colliding with std.vec's own
 // Vec<T> for this standalone example; a real project would just use that.
@@ -532,7 +532,7 @@ instantiation.
 ## Functions
 
 ```fun
-imp std.io;
+use std.io;
 
 fun add(num a, num b) num {
   ret a + b;
@@ -554,7 +554,7 @@ A parameter may declare a default with `= expr`; a call that omits it
 uses the default.
 
 ```fun
-imp std.io;
+use std.io;
 
 fun greet(str name, num times = 1, str sep = ", ") {
   println_fmt("name={str} times={num} sep={str}", name, times, sep);
@@ -585,7 +585,7 @@ parameter, a local variable, a function's own return type, and a
 compound field:
 
 ```fun
-imp std.io;
+use std.io;
 
 fun add(num a, num b) num { ret a + b; }
 fun apply(num a, num b, fun(num, num) num cb) num { ret cb(a, b); }
@@ -713,7 +713,7 @@ combinations to cover.
 ## Inline Assembly
 
 ```fun
-imp std.io;
+use std.io;
 
 fun main() {
   num x = 21 + 21;
@@ -763,10 +763,10 @@ fun main() {
 
 ## Imports & Modularity
 
-- **Standard library**: `imp std.c.io;` maps to C standard headers;
-  `imp std.string;` imports Fun-native stdlib modules.
-- **Relative imports**: `imp ..foo.bar;` for user modules.
-- **Import alias**: `imp mod1 as one;`, then call symbols as
+- **Standard library**: `use std.c.io;` maps to C standard headers;
+  `use std.string;` imports Fun-native stdlib modules.
+- **Relative imports**: `use ..foo.bar;` for user modules.
+- **Import alias**: `use mod1 as one;`, then call symbols as
   `one.some_fn()`.
 - **Duplicate export collisions**: import modules that export the same
   public symbol by aliasing each module and calling through the alias
@@ -780,9 +780,9 @@ pub fun pick() num { ret 1; }
 pub fun pick() num { ret 2; }
 
 // file: main.fn
-imp std.io;
-imp mod1 as one;
-imp mod2 as two;
+use std.io;
+use mod1 as one;
+use mod2 as two;
 
 fun main() {
   num a = one.pick();
@@ -793,10 +793,10 @@ fun main() {
 
 - **Circular dependency detection**: the compiler detects and errors on
   circular imports.
-- **Imports are transitive.** `imp std.io;` alone also resolves every
+- **Imports are transitive.** `use std.io;` alone also resolves every
   name `std.io`'s own imports declare (`std.c.io`'s `putchar`,
   `std.vec`'s `Vec<T>`, and so on), not just `std.io`'s direct public
-  API. This is intentional: the whole `imp`-connected graph is merged
+  API. This is intentional: the whole `use`-connected graph is merged
   into one flat program before typecheck and codegen ever run, the
   same way a `#include`-based build sees everything a header
   transitively pulls in. There is no per-file "only what I directly
@@ -821,7 +821,7 @@ fun main() {
 
 - **C macros**: ALL_CAPS identifiers (`NULL`, `INT_MAX`) are allowed if
   the right header is imported.
-- **Direct mapping**: `imp std.c.*;` maps to C headers (`stdio.h`,
+- **Direct mapping**: `use std.c.*;` maps to C headers (`stdio.h`,
   `limits.h`, etc.). Fun stdlib modules under `std.c.*` only declare
   signatures; C provides the implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from
@@ -898,7 +898,7 @@ fun bad() num* {
   ret &x;
 }
 
-fun partial(bin x) {
+fun partial(flag x) {
   allow fit_non_exhaustive, "legacy branch set, cleanup pending";
   fit x {
     true -> { }
@@ -937,7 +937,7 @@ See also:
 ## Example
 
 ```fun
-imp std.io;
+use std.io;
 
 compound Point { num x; num y; }
 

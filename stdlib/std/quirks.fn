@@ -9,7 +9,7 @@ pub quirk Sized {
   // Returns the number of elements or items.
   len() num;
   // Returns true when there are no elements or items.
-  is_empty() bin;
+  is_empty() flag;
 }
 
 // Types that can render themselves as a string. Implemented by the collections,

@@ -4,9 +4,9 @@
 // E>` is exactly that case -- `E` never appears in the parameter list, so
 // nothing about the call `ok(42)` alone tells the compiler what `E` is.
 
-imp std.c.io;
-imp std.result;
-imp std.error;
+use std.c.io;
+use std.result;
+use std.error;
 
 fun main() {
   Result<num, Error> r = ok<num, Error>(42);

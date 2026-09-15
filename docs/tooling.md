@@ -3,7 +3,7 @@
 ## Testing
 
 ```fun
-imp std.io;
+use std.io;
 
 fun add(num a, num b) num { ret a + b; }
 
@@ -47,18 +47,18 @@ fun main() {
   still executes. `panic`, by contrast, still aborts the whole process
   outright (no per-test recovery for it yet), prefer `assert` over
   `panic` inside a test body for this reason.
-- **Time-mocked tests**: `imp std.mock_time;` provides a `Clock` quirk
+- **Time-mocked tests**: `use std.mock_time;` provides a `Clock` quirk
   implemented by `SystemClock` (the real clock) and `MockClock` (a fully
   controllable fake one, for tests). A function that needs "the current
   time" to be testable should accept a `Clock` parameter instead of
   calling `std.time`'s `now()` directly:
 
 ```fun
-imp std.io;
-imp std.mock_time;
-imp std.time;
+use std.io;
+use std.mock_time;
+use std.time;
 
-fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {
+fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) flag {
   ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;
 }
 
@@ -216,7 +216,7 @@ LSP.
 - Breakpoints, call stack, and step-through work on `.fn` files without
   any manual configuration.
 - Variable types are remapped from C (`int64_t`, `char*`, `bool`, ...) to
-  Fun (`num`, `str`, `bin`, ...) via a DAP message tracker.
+  Fun (`num`, `str`, `flag`, ...) via a DAP message tracker.
 - Internal C boilerplate frames (`__fun_async_entry_*`, etc.) are marked
   secondary and collapsed in the call stack.
 - Temp `.c` and compiled binary files are created in the OS temp

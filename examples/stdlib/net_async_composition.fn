@@ -1,9 +1,9 @@
 // Async net APIs: request building channel + socket roundtrip primitive.
 
-imp std.c.io;
-imp std.c.mem;
-imp std.net;
-imp std.channel;
+use std.c.io;
+use std.c.mem;
+use std.net;
+use std.channel;
 
 async fun main() {
   Channel<str> reqs = channel_new_cap("", 1);

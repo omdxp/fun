@@ -3,7 +3,7 @@
 // expression is evaluated at the call site (so it can't reference `self` or an earlier
 // parameter — use constants, globals, `nil`, or enum variants).
 
-imp std.c.io;
+use std.c.io;
 
 // Free function with two defaulted params.
 fun greet(str name, num times = 2, str sep = "-") str {

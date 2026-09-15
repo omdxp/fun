@@ -6,7 +6,7 @@
 // methods (`self._field`) and anywhere else in the same file, the field is fully
 // accessible; another module must go through public accessors.
 
-imp std.c.io;
+use std.c.io;
 
 compound BankAccount {
   // the account id is part of the type's external surface.
@@ -20,7 +20,7 @@ impl BankAccount {
     self._balance = self._balance + amount;
   }
 
-  pub withdraw(num amount) bin {
+  pub withdraw(num amount) flag {
     if amount > self._balance {
       ret false;
     }
@@ -39,8 +39,8 @@ fun main() num {
   BankAccount acc = BankAccount{id = 1, _balance = 100};
 
   acc.deposit(50);
-  bin ok = acc.withdraw(30);
-  bin denied = acc.withdraw(1000);
+  flag ok = acc.withdraw(30);
+  flag denied = acc.withdraw(1000);
 
   printf("id=%lld balance=%lld ok=%d denied=%d\n", acc.id, acc.balance(), ok, denied);
   ret 0;

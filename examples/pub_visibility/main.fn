@@ -1,5 +1,5 @@
-imp std.c.io;
-imp lib;
+use std.c.io;
+use lib;
 
 fun main() void {
   User u = makeUser("Ada", .Red);

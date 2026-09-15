@@ -5,10 +5,10 @@
 // unreserved set, and a Windows path arrives with its drive letter after
 // the leading separator.
 
-imp std.string;
-imp std.option;
-imp std.runtime_backend;
-imp std.c.mem;
+use std.string;
+use std.option;
+use std.runtime_backend;
+use std.c.mem;
 
 // The path a `file://` URI names, or nothing when the URI names
 // something else.
@@ -82,16 +82,16 @@ pub fun path_to_uri(str path) str {
 
 // True for a path that begins with a drive letter, as `C:/src/a.fn`
 // does.
-fun _has_drive_letter(str path) bin {
+fun _has_drive_letter(str path) flag {
   if len(path) < 3 {
     ret false;
   }
-  bin letter = (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z');
+  flag letter = (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z');
   ret letter && path[1] == ':' && (path[2] == '/' || path[2] == '\\');
 }
 
 // The characters a URI carries as themselves.
-fun _is_unreserved(chr c) bin {
+fun _is_unreserved(chr c) flag {
   if c >= 'a' && c <= 'z' {
     ret true;
   }

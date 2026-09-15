@@ -1,11 +1,11 @@
 // Generic map with typed keys and values.
 
-imp std.c.mem;
-imp std.c.string;
-imp std.string;
-imp std.vec;
-imp std.quirks;
-imp std.option;
+use std.c.mem;
+use std.c.string;
+use std.string;
+use std.vec;
+use std.quirks;
+use std.option;
 
 // Generic open-addressing hash map.
 pub compound Map<K, V> {
@@ -14,9 +14,9 @@ pub compound Map<K, V> {
   // Value storage array.
   V* value_slots;
   // Occupied-slot flags.
-  bin* used;
+  flag* used;
   // Tombstone flags for deleted slots.
-  bin* tomb;
+  flag* tomb;
   // Number of live entries.
   num len;
   // Allocated slot capacity.
@@ -30,7 +30,7 @@ impl Map<K, V> as Sized {
   }
 
   // Returns true when the map holds no entries.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.len == 0;
   }
 
@@ -73,8 +73,8 @@ impl Map<K, V> {
   alloc(num cap) {
     self.key_slots = malloc(cap * sizeof(K));
     self.value_slots = malloc(cap * sizeof(V));
-    self.used = malloc(cap * sizeof(bin));
-    self.tomb = malloc(cap * sizeof(bin));
+    self.used = malloc(cap * sizeof(flag));
+    self.tomb = malloc(cap * sizeof(flag));
 
     if self.key_slots == nil {
       ret;
@@ -91,8 +91,8 @@ impl Map<K, V> {
 
     memset(self.key_slots, 0, cap * sizeof(K));
     memset(self.value_slots, 0, cap * sizeof(V));
-    memset(self.used, 0, cap * sizeof(bin));
-    memset(self.tomb, 0, cap * sizeof(bin));
+    memset(self.used, 0, cap * sizeof(flag));
+    memset(self.tomb, 0, cap * sizeof(flag));
     self.cap = cap;
   }
 
@@ -102,7 +102,7 @@ impl Map<K, V> {
     ret __fun_key_hash(key);
   }
 
-  keys_equal(K a, K b) bin {
+  keys_equal(K a, K b) flag {
     // String keys compare by value (strcmp); value-typed keys by raw bytes.
     ret __fun_key_eq(a, b);
   }
@@ -200,8 +200,8 @@ impl Map<K, V> {
   rehash(num new_cap) {
     K* old_keys = self.key_slots;
     V* old_values = self.value_slots;
-    bin* old_used = self.used;
-    bin* old_tomb = self.tomb;
+    flag* old_used = self.used;
+    flag* old_tomb = self.tomb;
     let old_cap = self.cap;
 
     self.key_slots = nil;
@@ -263,7 +263,7 @@ impl Map<K, V> {
   }
 
   // Returns true when the key exists in the map.
-  pub has(K key) bin {
+  pub has(K key) flag {
     ret self.find_live_index(key) != -1;
   }
 
@@ -287,7 +287,7 @@ impl Map<K, V> {
 
   // Writes the value for a key into `out` and returns true, or returns false
   // and leaves `out` untouched when the key is missing.
-  pub try_get(K key, V* out) bin {
+  pub try_get(K key, V* out) flag {
     let idx = self.find_live_index(key);
     if idx == -1 {
       ret false;
@@ -339,7 +339,7 @@ impl Map<K, V> {
 
   // Inserts a value only when the key is absent, returning true when it did.
   // An existing value is left untouched.
-  pub put_if_absent(K key, V value) bin {
+  pub put_if_absent(K key, V value) flag {
     if self.find_live_index(key) != -1 {
       ret false;
     }
@@ -348,7 +348,7 @@ impl Map<K, V> {
   }
 
   // Removes a key, returning true when an entry was removed.
-  pub remove(K key) bin {
+  pub remove(K key) flag {
     let idx = self.find_live_index(key);
     if idx == -1 {
       ret false;
@@ -365,8 +365,8 @@ impl Map<K, V> {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
       memset(self.value_slots, 0, self.cap * sizeof(V));
-      memset(self.used, 0, self.cap * sizeof(bin));
-      memset(self.tomb, 0, self.cap * sizeof(bin));
+      memset(self.used, 0, self.cap * sizeof(flag));
+      memset(self.tomb, 0, self.cap * sizeof(flag));
     }
     self.len = 0;
   }
@@ -450,8 +450,8 @@ impl Map<K, V> as Clearable {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
       memset(self.value_slots, 0, self.cap * sizeof(V));
-      memset(self.used, 0, self.cap * sizeof(bin));
-      memset(self.tomb, 0, self.cap * sizeof(bin));
+      memset(self.used, 0, self.cap * sizeof(flag));
+      memset(self.tomb, 0, self.cap * sizeof(flag));
     }
     self.len = 0;
   }

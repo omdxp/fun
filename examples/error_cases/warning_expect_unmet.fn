@@ -1,9 +1,9 @@
 // Expect: compiler error because expect warning is not emitted.
 
-imp std.c.io;
+use std.c.io;
 
 fun main() {
-  bin x = true;
+  flag x = true;
 
   // This should fail: the fit below is exhaustive, so no warning is emitted.
   expect fit_non_exhaustive, "should fail when fit is exhaustive";

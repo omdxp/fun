@@ -1,11 +1,11 @@
 // String helpers.
 
-imp std.c.mem;
-imp std.c.io;
-imp std.vec;
-imp std.quirks;
-imp std.result;
-imp std.error;
+use std.c.mem;
+use std.c.io;
+use std.vec;
+use std.quirks;
+use std.result;
+use std.error;
 
 // String builder for efficient concatenation. One growable byte
 // buffer, copied into directly on each append rather than holding a
@@ -36,7 +36,7 @@ impl StringBuilder as Sized {
   }
 
   // True when no content has been appended.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.total_len == 0;
   }
 }
@@ -184,7 +184,7 @@ fun _string_len(str s) num {
   ret i;
 }
 
-fun _is_space(chr c) bin {
+fun _is_space(chr c) flag {
   // A carriage return counts: text that arrives with Windows line
   // endings would otherwise keep one after being trimmed.
   if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\0' {
@@ -199,12 +199,12 @@ pub fun len(str s) num {
 }
 
 // True when string is empty.
-pub fun is_empty(str s) bin {
+pub fun is_empty(str s) flag {
   ret _string_len(s) == 0;
 }
 
 // Compares two strings for equality.
-pub fun equals(str a, str b) bin {
+pub fun equals(str a, str b) flag {
   num i = 0;
   for true {
     let ca = a[i];
@@ -220,7 +220,7 @@ pub fun equals(str a, str b) bin {
 }
 
 // True when s starts with prefix.
-pub fun starts_with(str s, str prefix) bin {
+pub fun starts_with(str s, str prefix) flag {
   let sl = _string_len(s);
   let pl = _string_len(prefix);
   if pl > sl {
@@ -237,7 +237,7 @@ pub fun starts_with(str s, str prefix) bin {
 }
 
 // True when s ends with suffix.
-pub fun ends_with(str s, str suffix) bin {
+pub fun ends_with(str s, str suffix) flag {
   let sl = _string_len(s);
   let su = _string_len(suffix);
   if su > sl {
@@ -255,7 +255,7 @@ pub fun ends_with(str s, str suffix) bin {
 }
 
 // True when needle appears in s.
-pub fun contains(str s, str needle) bin {
+pub fun contains(str s, str needle) flag {
   ret index_of_str(s, needle) != -1;
 }
 
@@ -455,7 +455,7 @@ pub fun index_of_str(str s, str needle) num {
   num i = 0;
   for i <= sl - nl {
     num j = 0;
-    bin ok = true;
+    flag ok = true;
     for j < nl {
       if s[i + j] != needle[j] {
         ok = false;
@@ -482,7 +482,7 @@ pub fun count(str s, str needle) num {
   num total = 0;
   for i <= sl - nl {
     num j = 0;
-    bin ok = true;
+    flag ok = true;
     for j < nl {
       if s[i + j] != needle[j] {
         ok = false;
@@ -549,7 +549,7 @@ pub fun to_lower(str s) str {
   for i < n {
     let c = s[i];
     num j = 0;
-    bin changed = false;
+    flag changed = false;
     for j < 26 {
       if c == upper[j] {
         out[i] = lower[j];
@@ -580,7 +580,7 @@ pub fun to_upper(str s) str {
   for i < n {
     let c = s[i];
     num j = 0;
-    bin changed = false;
+    flag changed = false;
     for j < 26 {
       if c == lower[j] {
         out[i] = upper[j];
@@ -653,7 +653,7 @@ pub fun replace_str(str s, str needle, str repl) str {
   let sl = _string_len(s);
   num i = 0;
   for i < sl {
-    bin match = true;
+    flag match = true;
     if i + nl > sl {
       match = false;
     } else {
@@ -803,7 +803,7 @@ pub fun format_dec(dec d, num places) str {
 }
 
 // Formats a bin as "true" or "false" (static string, do not free).
-pub fun format_bin(bin b) str {
+pub fun format_bin(flag b) str {
   if b {
     ret "true";
   }
@@ -853,7 +853,7 @@ pub fun parse_dec(str s) dec {
     ret value;
   }
   i = i + 1;
-  bin negative_exponent = false;
+  flag negative_exponent = false;
   if s[i] == '+' {
     i = i + 1;
   } elif s[i] == '-' {
@@ -861,7 +861,7 @@ pub fun parse_dec(str s) dec {
     i = i + 1;
   }
   num exponent = 0;
-  bin any = false;
+  flag any = false;
   for s[i] != 0 {
     if s[i] < '0' || s[i] > '9' {
       break;

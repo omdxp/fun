@@ -1,22 +1,22 @@
 // Lexical scope tracking.
 
-imp ..ast.ast;
-imp std.vec;
-imp std.string;
-imp std.c.mem;
+use ..ast.ast;
+use std.vec;
+use std.string;
+use std.c.mem;
 
 // A single declared name (variable, parameter, loop binding, ...) visible
 // within a Scope.
 pub compound ScopeEntity {
-  bin on_stack;
+  flag on_stack;
   Node* node;
-  bin has_node;
+  flag has_node;
   str name;
   // For multi-dimensional array elements: the root array name used to
   // compute sizeof chain bounds for nested for-iter loops. Empty for
   // non-multidim entities.
   str multidim_root;
-  bin has_multidim_root;
+  flag has_multidim_root;
   // How many dimensions deep this element is from multidim_root (0 = root
   // itself).
   num multidim_depth;
@@ -39,7 +39,7 @@ pub fun scope_entity_new(str name) ScopeEntity {
 pub compound Scope {
   Vec<ScopeEntity*> entities;
   Scope* parent;
-  bin has_parent;
+  flag has_parent;
 }
 
 pub fun scope_new() Scope {

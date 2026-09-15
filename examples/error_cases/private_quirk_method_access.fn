@@ -1,5 +1,5 @@
-imp std.io;
-imp ..imports.private_quirk_scope.private_quirk_model as m;
+use std.io;
+use ..imports.private_quirk_scope.private_quirk_model as m;
 
 fun main() {
   m.Boxed b = m.make_boxed(22);

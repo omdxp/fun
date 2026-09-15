@@ -1,6 +1,6 @@
-imp std.c.io;
-imp mod1 as one;
-imp mod2 as two;
+use std.c.io;
+use mod1 as one;
+use mod2 as two;
 
 fun main() {
   num a = one.pick();

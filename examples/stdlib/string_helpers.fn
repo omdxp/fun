@@ -1,8 +1,8 @@
 // String helpers example.
 
-imp std.c.io;
-imp std.string;
-imp std.vec;
+use std.c.io;
+use std.string;
+use std.vec;
 
 fun main() {
   str input = "  hello,world  ";

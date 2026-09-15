@@ -3,10 +3,10 @@
 // parser.fn and eval.fn, to stress cross-file resolution of a recursive
 // pointer-based tagged-union type (and its Display quirk impl).
 
-imp std.io;
-imp std.string;
-imp std.vec;
-imp std.quirks;
+use std.io;
+use std.string;
+use std.vec;
+use std.quirks;
 
 // `Call`'s args are a real `Vec<Expr*>` (variable arity) -- this used to hit
 // a genuine compiler bug: a generic container instantiated with a POINTER

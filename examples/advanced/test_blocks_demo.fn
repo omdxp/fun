@@ -4,7 +4,7 @@
 // (or `fun test test_blocks_demo.fn`), which reports each test's pass/fail
 // and exits non-zero on any failure.
 
-imp std.c.io;
+use std.c.io;
 
 fun add(num a, num b) num {
   ret a + b;

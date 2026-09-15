@@ -46,12 +46,12 @@ impl Error {
   }
 
   // Returns true when no error is present (`kind` is `None`).
-  pub is_ok() bin {
+  pub is_ok() flag {
     ret self.kind == .None;
   }
 
   // Returns true when an error is present (`kind` is not `None`).
-  pub is_err() bin {
+  pub is_err() flag {
     ret self.kind != .None;
   }
 }
@@ -100,11 +100,11 @@ pub fun error_with_cause(Error* e, str cause) {
 }
 
 // Returns true when `e` has no error present (`kind` is `None`).
-pub fun error_is_ok(Error* e) bin {
+pub fun error_is_ok(Error* e) flag {
   ret e.kind == .None;
 }
 
 // Returns true when `e` has an error present (`kind` is not `None`).
-pub fun error_is_err(Error* e) bin {
+pub fun error_is_err(Error* e) flag {
   ret e.kind != .None;
 }

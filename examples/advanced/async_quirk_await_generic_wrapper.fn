@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 compound Counter {
   num base;

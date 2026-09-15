@@ -17,17 +17,17 @@
 // has no such nested variant in the protocol at all, so `workspace_symbols`
 // below stays flat.
 
-imp documents;
-imp analysis;
-imp symbols;
-imp symbol_table;
-imp positions;
-imp protocol;
-imp ..ast.ast;
-imp ..parser.import_resolver;
-imp std.string;
-imp std.vec;
-imp std.c.mem;
+use documents;
+use analysis;
+use symbols;
+use symbol_table;
+use positions;
+use protocol;
+use ..ast.ast;
+use ..parser.import_resolver;
+use std.string;
+use std.vec;
+use std.c.mem;
 
 // What a client is told a symbol is. The values are the protocol's own
 // numbering, which is why they are written out rather than counted from
@@ -196,7 +196,7 @@ pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbol
 
   StringBuilder b = string_builder_init(256);
   b.append("[");
-  bin any = false;
+  flag any = false;
   num mi = 0;
   for mi < matched.len {
     str name = matched.get(mi);
@@ -269,7 +269,7 @@ fun _symbol_match_score(str lower_name, str lower_query) num {
   ret 0;
 }
 
-fun _is_subsequence(str needle, str haystack) bin {
+fun _is_subsequence(str needle, str haystack) flag {
   num ni = 0;
   num hi = 0;
   num nlen = len(needle);

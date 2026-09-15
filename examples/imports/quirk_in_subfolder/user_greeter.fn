@@ -1,6 +1,6 @@
-imp std.c.io;
-imp user;
-imp defs.greeter;
+use std.c.io;
+use user;
+use defs.greeter;
 
 pub impl User as Greeter {
   greet(str prefix) void {

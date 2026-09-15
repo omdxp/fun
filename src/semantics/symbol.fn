@@ -4,9 +4,9 @@
 // data-carrying enum, so there's no separate tag field that could disagree
 // with the payload.
 
-imp ..ast.ast;
-imp std.vec;
-imp std.option;
+use ..ast.ast;
+use std.vec;
+use std.option;
 
 // What a Symbol refers to: a real AST declaration, an opaque native
 // (std.c.*-bound) function, or an as-yet-unresolved placeholder.
@@ -21,7 +21,7 @@ pub compound Symbol {
   SymbolKind kind;
   str name;
   SymbolTable* symbol_table;
-  bin has_symbol_table;
+  flag has_symbol_table;
 }
 
 pub fun symbol_new(str name) Symbol {

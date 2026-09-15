@@ -1,6 +1,6 @@
-imp std.io;
-imp geom as g;
-imp colors as c;
+use std.io;
+use geom as g;
+use colors as c;
 
 fun main() {
   g.Vec2 v = g.make(1, 2);

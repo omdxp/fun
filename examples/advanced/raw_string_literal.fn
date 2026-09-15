@@ -6,7 +6,7 @@
 // own leading backtick, joined with real newlines, closed either implicitly
 // by a line with no leading backtick or explicitly by a trailing backtick).
 
-imp std.c.io;
+use std.c.io;
 
 fun main() {
   str inline_raw = `C:\no\escaping\needed`;

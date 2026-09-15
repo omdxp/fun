@@ -5,15 +5,15 @@
 // keywords/statements; the raw-body-capture special case for inline
 // assembly is not implemented.
 
-imp std.string;
-imp std.vec;
-imp std.ctype;
-imp std.result;
-imp std.error;
-imp std.c.mem;
-imp std.c.string;
-imp token;
-imp lexdefs;
+use std.string;
+use std.vec;
+use std.ctype;
+use std.result;
+use std.error;
+use std.c.mem;
+use std.c.string;
+use token;
+use lexdefs;
 
 // Lexing state for one source file: a cursor into `src` plus the running
 // line/col position and every token emitted so far.
@@ -45,12 +45,12 @@ pub fun lexer_new(str src, str filename) Lexer {
 }
 
 // True if `c` can start an identifier (a letter or underscore).
-fun _is_ident_start(chr c) bin {
+fun _is_ident_start(chr c) flag {
   ret is_alpha(c) || c == '_';
 }
 
 // True if `c` can continue an identifier after its first character.
-fun _is_ident_char(chr c) bin {
+fun _is_ident_char(chr c) flag {
   ret is_alnum(c) || c == '_';
 }
 
@@ -100,7 +100,7 @@ fun token_zero() Token {
 
 // True for any character except a newline/carriage-return/NUL, used to
 // read a line comment up to (not including) its terminator.
-fun _not_newline(chr c) bin {
+fun _not_newline(chr c) flag {
   ret c != '\n' && c != '\r' && c != 0;
 }
 
@@ -192,7 +192,7 @@ impl Lexer {
 
   // Reads characters while `pred` holds, appending them to a fresh string.
   // Does not consume the character that fails `pred`.
-  _read_while(fun(chr) bin pred) str {
+  _read_while(fun(chr) flag pred) str {
     let b = string_builder_init(16);
     for pred(self._peek()) && self.pos < self.len {
       b.append_char(self._advance());
@@ -317,7 +317,7 @@ impl Lexer {
     let save_col = self.col;
     self._advance();
 
-    bin has_sign = false;
+    flag has_sign = false;
     let sign = self._peek();
     if sign == '+' || sign == '-' {
       self._advance();
@@ -679,7 +679,7 @@ impl Lexer {
     // Whitespace consumed while looking ahead still counts as following
     // the token, so an ordinary `=` is not mistaken for one written
     // against what comes next.
-    bin skipped_space = false;
+    flag skipped_space = false;
     if op0 == '=' {
       // Always treat `==` as one token, even with whitespace in between.
       num peeked_spaces = 0;
@@ -765,7 +765,7 @@ impl Lexer {
   // True if the most recently emitted token was a bare integer literal `0`,
   // the only context in which a following `b`/`x` starts a special
   // binary/hex number rather than an ordinary identifier.
-  _prev_token_is_bare_zero() bin {
+  _prev_token_is_bare_zero() flag {
     let last = self.tokens.last();
     fit last {
       .Some(t) -> {

@@ -65,7 +65,7 @@ Runnable `fun` code blocks can define multiple files using markers:
 
 ```fun
 // file: main.fn
-imp mod1 as one;
+use mod1 as one;
 
 fun main() {
   num v = one.pick();

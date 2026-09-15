@@ -1,7 +1,7 @@
 // Path helpers example.
 
-imp std.c.io;
-imp std.path;
+use std.c.io;
+use std.path;
 
 fun main() {
   str p = path_join("a/b", "c.txt");

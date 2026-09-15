@@ -1,5 +1,5 @@
-imp diamond_shared;
-imp diamond_b;
+use diamond_shared;
+use diamond_b;
 
 fun main() num {
   ret shared_fn() + helper_b();

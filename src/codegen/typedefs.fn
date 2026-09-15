@@ -1,9 +1,9 @@
 // Fun-to-C builtin type name mapping and other pure, stateless codegen
 // lookup tables.
 
-imp std.string;
-imp std.io;
-imp ..parser.datatype_defs;
+use std.string;
+use std.io;
+use ..parser.datatype_defs;
 
 // Maps a builtin Fun scalar type name to its C spelling. Sized/dynamic
 // ints (`iN`/`uN`) are handled separately by the caller via
@@ -25,7 +25,7 @@ pub fun map_type_to_c(str type_str) str {
     "u32" -> { ret "uint32_t"; }
     "u64" -> { ret "uint64_t"; }
     "str" -> { ret "char*"; }
-    "bin" -> { ret "bool"; }
+    "flag" -> { ret "bool"; }
     "chr" -> { ret "char"; }
     "raw" -> { ret "void"; }
     _ -> { ret type_str; }
@@ -89,7 +89,7 @@ test "map_type_to_c maps builtin scalars to their C spellings" {
   assert equals(map_type_to_c("num"), "int64_t"), "expected 'num' -> 'int64_t'";
   assert equals(map_type_to_c("dec"), "double"), "expected 'dec' -> 'double'";
   assert equals(map_type_to_c("str"), "char*"), "expected 'str' -> 'char*'";
-  assert equals(map_type_to_c("bin"), "bool"), "expected 'bin' -> 'bool'";
+  assert equals(map_type_to_c("flag"), "bool"), "expected 'bin'/'flag' -> 'bool'";
   assert equals(map_type_to_c("chr"), "char"), "expected 'chr' -> 'char'";
   assert equals(map_type_to_c("raw"), "void"), "expected 'raw' -> 'void'";
 }

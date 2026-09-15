@@ -5,9 +5,9 @@
 // - async main awaits channel A, transforms values, forwards to channel B
 // - consumer thread receives from channel B and aggregates
 
-imp std.c.io;
-imp std.thread;
-imp std.channel;
+use std.c.io;
+use std.thread;
+use std.channel;
 
 fun producer_main(raw* arg) raw* {
   Channel<num>* out = arg;

@@ -2,8 +2,8 @@
 // emitted C. Ported from the `tests/` suite so the same expectations run
 // against this compiler.
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 test "if/elif/else transpiles" {
   str src = `imp std.c.io;

@@ -9,13 +9,13 @@
 // per-thread jump back to the runner) rather than aborting the whole
 // process. Ordinary Fun source never calls this directly.
 
-imp std.channel;
-imp std.io;
+use std.channel;
+use std.io;
 
 // One test's outcome, sent back over a channel by its own forked task.
 compound TestOutcome {
   num index;
-  bin passed;
+  flag passed;
 }
 
 fun default_outcome() TestOutcome {
@@ -27,7 +27,7 @@ fun default_outcome() TestOutcome {
 
 // Runs test `i` and reports its outcome over `out`. A forked virtual task's
 // body, one per discovered test. See `run_discovered_tests`.
-async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
+async fun run_one(num i, fun(num) flag run_at, Channel<TestOutcome>* out) {
   TestOutcome o;
   o.index = i;
   o.passed = run_at(i);
@@ -41,7 +41,7 @@ async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
 // `run_at` runs test `i`, returning true on pass or false on a failed
 // assertion recovered without aborting the process. Returns 0 when every
 // test passed, 1 otherwise.
-pub fun run_discovered_tests(num count, fun(num) str name_of, fun(num) bin run_at) num {
+pub fun run_discovered_tests(num count, fun(num) str name_of, fun(num) flag run_at) num {
   if count == 0 {
     println("no tests found");
     ret 0;

@@ -1,7 +1,7 @@
 // Companion to error_cases/let_infer_quirk_invalid.fn
 // Shows the correct pattern: explicit quirk annotation.
 
-imp std.c.io;
+use std.c.io;
 
 compound Point {
   num x;

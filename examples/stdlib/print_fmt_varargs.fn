@@ -1,8 +1,8 @@
 // Demonstrates variadic print_fmt/println_fmt usage.
 
-imp std.io;
-imp std.c.def;
-imp std.quirks;
+use std.io;
+use std.c.def;
+use std.quirks;
 
 compound Point {
   num x;

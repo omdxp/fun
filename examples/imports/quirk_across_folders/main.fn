@@ -1,5 +1,5 @@
-imp defs.user;
-imp impls.user_greeter;
+use defs.user;
+use impls.user_greeter;
 
 fun main() void {
   User user;

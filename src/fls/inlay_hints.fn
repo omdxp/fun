@@ -12,18 +12,17 @@
 // the shapes a `let`'s own initializer most commonly takes: a
 // literal, a plain function call, or a method call.
 
-imp documents;
-imp analysis;
-imp positions;
-imp symbols;
-imp signature_help;
-imp protocol;
-imp ..lexer.token;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.ctype;
-imp std.c.mem;
+use documents;
+use analysis;
+use positions;
+use symbols;
+use protocol;
+use ..lexer.token;
+use std.string;
+use std.vec;
+use std.option;
+use std.ctype;
+use std.c.mem;
 
 // Every `let name = value;` local within lines `start_line` through
 // `end_line` (both 0-indexed, inclusive) of `doc`, each as a type
@@ -38,7 +37,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
 
   StringBuilder b = string_builder_init(256);
   b.append("[");
-  bin any = false;
+  flag any = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -110,7 +109,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
 
     str callee_name = token_word(t);
     let prev = token_before(&tokens, name_idx);
-    bin is_method = prev.is_some() && token_is_operator(prev.unwrap(), ".");
+    flag is_method = prev.is_some() && token_is_operator(prev.unwrap(), ".");
     Option<Declaration> found = .None;
     if is_method {
       str type_name = chain_receiver_type(&tokens, t, &program.nodes, doc.path, src_line);
@@ -145,13 +144,13 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
 
     num depth = 0;
     num arg_index = 0;
-    bin expecting_arg = true;
+    flag expecting_arg = true;
     num k = lparen_idx;
     for k < tokens.len {
       Token at = tokens.get(k);
       k = k + 1;
-      bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-      bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+      flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+      flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
       if is_open {
         depth = depth + 1;
         if depth == 1 {
@@ -184,7 +183,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
         free(pname);
         continue;
       }
-      bin redundant = at.type == .Identifier && equals(token_word(at), pname);
+      flag redundant = at.type == .Identifier && equals(token_word(at), pname);
       if redundant {
         free(pname);
         continue;
@@ -216,7 +215,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
 // boundary with only type-shaped tokens between the matching `)` and
 // a following `{`. Anything else, `;`/`.`/`=`/a bare expression
 // context, means this is a call.
-fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx) bin {
+fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx) flag {
   let prev = token_before(tokens, name_idx);
   if prev.is_some() {
     Token p = prev.unwrap();
@@ -228,7 +227,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
       ret true;
     }
   }
-  bin at_stmt_boundary = prev.is_none();
+  flag at_stmt_boundary = prev.is_none();
   if prev.is_some() {
     Token p = prev.unwrap();
     at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') ||
@@ -256,7 +255,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
     if token_is_symbol(k, '{') {
       ret true;
     }
-    bin typeish = k.type == .Identifier || k.type == .Keyword ||
+    flag typeish = k.type == .Identifier || k.type == .Keyword ||
     token_is_operator(
       k,
       "*"
@@ -286,7 +285,7 @@ fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx)
 pub fun param_name_from_piece(str piece) str {
   str name_part = piece;
   num eq = index_of_str(piece, " = ");
-  bin name_part_owned = false;
+  flag name_part_owned = false;
   if eq >= 0 {
     name_part = substr(piece, 0, eq);
     name_part_owned = true;

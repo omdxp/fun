@@ -1,7 +1,7 @@
 // Assert with message (advanced example).
 // Note: calling fail_demo() will abort.
 
-imp std.c.io;
+use std.c.io;
 
 fun fail_demo() {
   assert false, "this should never happen";

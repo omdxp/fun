@@ -6,8 +6,8 @@
 // std.map, std.net helpers, std.mock_time) have no counterpart here. The
 // tests that only need an import to select C headers are ported as-is.
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 test "generic function specialization emits concrete names" {
   str src = `fun id<T>(T x) T { ret x; }

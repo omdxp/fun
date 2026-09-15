@@ -1,5 +1,5 @@
-imp std.io;
-imp std.quirks;
+use std.io;
+use std.quirks;
 
 pub compound Boxed {
   num v;

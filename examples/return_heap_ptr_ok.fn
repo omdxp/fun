@@ -2,8 +2,8 @@
 // This should NOT trigger the "returning address of local variable" warning,
 // because we return the heap pointer itself (not `&local`).
 
-imp std.c.mem;
-imp std.c.io;
+use std.c.mem;
+use std.c.io;
 
 fun make_buf(num n) raw* {
   raw* p = malloc(n);

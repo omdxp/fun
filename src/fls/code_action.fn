@@ -6,17 +6,17 @@
 // function `async`, or silencing any warning with the same `allow` a
 // reader could write by hand.
 
-imp protocol;
-imp documents;
-imp analysis;
-imp diagnostics;
-imp symbols;
-imp positions;
-imp ..lexer.token;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.c.mem;
+use protocol;
+use documents;
+use analysis;
+use diagnostics;
+use symbols;
+use positions;
+use ..lexer.token;
+use std.string;
+use std.vec;
+use std.option;
+use std.c.mem;
 
 // The quick fixes available for `diags`, as the result a client is
 // sent.
@@ -24,7 +24,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
   Vec<str> lines = split(doc.text, '\n');
   StringBuilder b = string_builder_init(256);
   b.append("[");
-  bin any = false;
+  flag any = false;
   num i = 0;
   for i < diags.len {
     Diagnostic d = diags.get(i);
@@ -487,7 +487,7 @@ fun _quirk_conformance_from_message(str message) Option<QuirkConformanceRef> {
 // exactly where each diagnostic's own position points.
 fun _find_block_close(Vec<Token>* tokens, num diag_line) Option<Pos> {
   num source_line = diag_line + 1;
-  bin found_open = false;
+  flag found_open = false;
   num depth = 0;
   num i = 0;
   for i < tokens.len {

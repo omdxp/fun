@@ -1,9 +1,9 @@
 // Async-friendly io flow: sync file APIs + async channel handoff.
 
-imp std.c.io;
-imp std.c.mem;
-imp std.io;
-imp std.channel;
+use std.c.io;
+use std.c.mem;
+use std.io;
+use std.channel;
 
 async fun main() {
   str path = "_tmp_io_async_pipeline.txt";

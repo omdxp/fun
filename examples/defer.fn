@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 fun logLine(str msg) {
   printf("%s\n", msg);

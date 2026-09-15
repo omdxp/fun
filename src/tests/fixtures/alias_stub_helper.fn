@@ -1,4 +1,4 @@
-imp std.c.io;
+use std.c.io;
 
 pub fun say_hello() {
   printf("hello\n");

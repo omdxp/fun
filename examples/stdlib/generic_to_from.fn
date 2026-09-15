@@ -10,15 +10,15 @@
 // `to_json_value`/`to_json_string` take a `To<JsonValue>` parameter, so any
 // implementer coerces at the call site: `to_json_value(&c)`).
 
-imp std.c.io;
-imp std.json;
-imp std.quirks;
-imp std.result;
+use std.c.io;
+use std.json;
+use std.quirks;
+use std.result;
 
 pub compound Config {
   str name;
   dec version;
-  bin stable;
+  flag stable;
 }
 
 impl Config as To<JsonValue> {

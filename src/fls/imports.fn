@@ -7,21 +7,21 @@
 // directory shows its README.md when it has one, the same as the
 // reference fls did.
 
-imp positions;
-imp symbols;
-imp protocol;
-imp documents;
-imp analysis;
-imp uri;
-imp ..ast.ast;
-imp ..lexer.token;
-imp ..parser.import_resolver;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.fs;
-imp std.path;
-imp std.c.mem;
+use positions;
+use symbols;
+use protocol;
+use documents;
+use analysis;
+use uri;
+use ..ast.ast;
+use ..lexer.token;
+use ..parser.import_resolver;
+use std.string;
+use std.vec;
+use std.option;
+use std.fs;
+use std.path;
+use std.c.mem;
 
 // Where an `imp`-path segment at `line`/`character` (in a document
 // whose own path is `current_file`) leads: a resolved file path (a
@@ -142,7 +142,7 @@ pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, st
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != .Keyword || !equals(token_word(t), "imp") {
+    if t.type != .Keyword || !equals(token_word(t), "use") {
       i = i + 1;
       continue;
     }
@@ -153,7 +153,7 @@ pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, st
         j = j + 1;
         continue;
       }
-      bin extends = false;
+      flag extends = false;
       fit tok.type {
         .Identifier -> { extends = true; }
         _ -> { extends = _is_dot_run_token(tok); }
@@ -189,7 +189,7 @@ pub fun resolved_import_paths(Vec<Token>* tokens, str current_file) Vec<str> {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != .Keyword || !equals(token_word(t), "imp") {
+    if t.type != .Keyword || !equals(token_word(t), "use") {
       i = i + 1;
       continue;
     }
@@ -200,7 +200,7 @@ pub fun resolved_import_paths(Vec<Token>* tokens, str current_file) Vec<str> {
         j = j + 1;
         continue;
       }
-      bin extends = false;
+      flag extends = false;
       fit tok.type {
         .Identifier -> { extends = true; }
         _ -> { extends = _is_dot_run_token(tok); }
@@ -240,11 +240,11 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
   str doc_text = doc.text;
   StringBuilder b = string_builder_init(128);
   b.append("[");
-  bin any = false;
+  flag any = false;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != .Keyword || !equals(token_word(t), "imp") {
+    if t.type != .Keyword || !equals(token_word(t), "use") {
       i = i + 1;
       continue;
     }
@@ -255,7 +255,7 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
         j = j + 1;
         continue;
       }
-      bin extends = false;
+      flag extends = false;
       fit tok.type {
         .Identifier -> { extends = true; }
         _ -> { extends = _is_dot_run_token(tok); }
@@ -305,7 +305,7 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
 // path, judged by walking back from it past dots and identifiers only
 // until the nearest keyword: `imp` means yes, anything else (or
 // running off the front of the file) means no.
-fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
+fun _is_import_segment(Vec<Token>* tokens, Token t) flag {
   num i = index_of_token(tokens, t);
   if i < 0 {
     ret false;
@@ -318,7 +318,7 @@ fun _is_import_segment(Vec<Token>* tokens, Token t) bin {
     }
     fit tok.type {
       .Identifier -> {}
-      .Keyword -> { ret equals(token_word(tok), "imp"); }
+      .Keyword -> { ret equals(token_word(tok), "use"); }
       _ -> {
         if !_is_dot_run_token(tok) {
           ret false;
@@ -345,7 +345,7 @@ fun _specifier_through(Vec<Token>* tokens, Token t) str {
       start = start - 1;
       continue;
     }
-    bin extends = false;
+    flag extends = false;
     fit prev.type {
       .Identifier -> { extends = true; }
       _ -> { extends = _is_dot_run_token(prev); }
@@ -380,7 +380,7 @@ fun _specifier_through(Vec<Token>* tokens, Token t) str {
 // token, not several, so a parent-traversal segment (`imp
 // ..lexer.lexer;`) needs its own check, not `token_is_operator(t,
 // ".")` alone, which only ever matches a single dot.
-fun _is_dot_run_token(Token t) bin {
+fun _is_dot_run_token(Token t) flag {
   if t.type != .Operator {
     ret false;
   }
@@ -407,7 +407,7 @@ pub fun leading_doc_comment(str text) str {
   Vec<str> src_lines = split_lines(text);
   StringBuilder b = string_builder_init(64);
   num i = 0;
-  bin any = false;
+  flag any = false;
   for i < src_lines.len {
     str t = trim(src_lines.get(i));
     if !starts_with(t, "//") {

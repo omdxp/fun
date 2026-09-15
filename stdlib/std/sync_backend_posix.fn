@@ -1,7 +1,7 @@
 // POSIX synchronization backend implementation, used by std.sync_runtime.
 // Functions are thin forwards to std.sync helpers.
 
-imp std.sync;
+use std.sync;
 
 // Creates a new POSIX backend mutex.
 pub fun sync_backend_posix_mutex_new() Mutex {

@@ -1,10 +1,10 @@
 // Lexer corpus, ported from the `lexer` suite. These run against the
 // tokenizer directly rather than through the emitted C.
 
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp std.string;
-imp std.vec;
+use ..lexer.lexer;
+use ..lexer.token;
+use std.string;
+use std.vec;
 
 // Tokenizes `src`, aborting the test if the lexer itself rejects it.
 fun lex_ok(str src) Vec<Token> {
@@ -191,28 +191,28 @@ test "a bare '=' followed by whitespace reports its own true end column" {
   assert eq.pos.end_col - eq.pos.start_col == 1, "expected '='s own span to be exactly one column wide";
 }
 
-test "'use' lexes as a Keyword token canonicalized to 'imp'" {
+test "'use' lexes as a Keyword token, already the canonical spelling" {
   let tokens = lex_ok("use std.io;");
   defer tokens.free();
   Token first = tokens.get(0);
   assert first.type == .Keyword, "expected a Keyword token";
-  assert equals(tok_text(first), "imp"), "expected 'use' to canonicalize to 'imp'";
+  assert equals(tok_text(first), "use"), "expected 'use' to lex as itself, the canonical spelling";
 }
 
-test "'flag' lexes as a Keyword token canonicalized to 'bin'" {
+test "'flag' lexes as a Keyword token, already the canonical spelling" {
   let tokens = lex_ok("flag ok = true;");
   defer tokens.free();
   Token first = tokens.get(0);
   assert first.type == .Keyword, "expected a Keyword token";
-  assert equals(tok_text(first), "bin"), "expected 'flag' to canonicalize to 'bin'";
+  assert equals(tok_text(first), "flag"), "expected 'flag' to lex as itself, the canonical spelling";
 }
 
-test "'imp'/'bin' still lex unchanged, canonicalization is not one-directional damage" {
+test "'imp'/'bin' still accepted as input, now canonicalized to 'use'/'flag'" {
   let imp_tokens = lex_ok("imp std.io;");
   defer imp_tokens.free();
-  assert equals(tok_text(imp_tokens.get(0)), "imp"), "expected 'imp' to still lex as itself";
+  assert equals(tok_text(imp_tokens.get(0)), "use"), "expected 'imp' to canonicalize to 'use'";
 
   let bin_tokens = lex_ok("bin ok = true;");
   defer bin_tokens.free();
-  assert equals(tok_text(bin_tokens.get(0)), "bin"), "expected 'bin' to still lex as itself";
+  assert equals(tok_text(bin_tokens.get(0)), "flag"), "expected 'bin' to canonicalize to 'flag'";
 }

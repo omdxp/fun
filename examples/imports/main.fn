@@ -1,5 +1,5 @@
-imp std.c.io;
-imp relative.parent;
+use std.c.io;
+use relative.parent;
 
 fun main() {
   parent();

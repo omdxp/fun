@@ -5,8 +5,8 @@
 // noted otherwise, these return 0 on success (including as a no-op when
 // already in the target state) and a nonzero backend error code on failure.
 
-imp std.c.thread_windows;
-imp std.thread;
+use std.c.thread_windows;
+use std.thread;
 
 // Always returns 0; kept for API stability across backend implementations.
 pub fun thread_backend_windows_unavailable() num {

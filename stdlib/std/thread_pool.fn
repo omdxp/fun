@@ -3,12 +3,12 @@
 // Manages groups of worker thread handles. Worker entrypoints use
 // pthread-style function pointers (`raw*`).
 
-imp std.thread;
-imp std.thread_runtime;
-imp std.c.mem;
-imp std.result;
-imp std.error;
-imp std.quirks;
+use std.thread;
+use std.thread_runtime;
+use std.c.mem;
+use std.result;
+use std.error;
+use std.quirks;
 
 // Managed pool of worker threads.
 pub compound ThreadPool {
@@ -17,7 +17,7 @@ pub compound ThreadPool {
   // Number of worker slots.
   num size;
   // True when worker storage is usable.
-  bin has_storage;
+  flag has_storage;
 }
 
 // Creates a thread pool with `size` worker handles (negative values become
@@ -60,14 +60,14 @@ impl ThreadPool as Sized {
   }
 
   // True when the pool has no worker handles.
-  pub is_empty() bin {
+  pub is_empty() flag {
     ret self.size == 0;
   }
 }
 
 impl ThreadPool {
   // Returns true when worker storage is usable.
-  pub is_ready() bin {
+  pub is_ready() flag {
     ret self.has_storage;
   }
 

@@ -1,8 +1,8 @@
 // Simple PRNG.
 
-imp std.vec;
-imp std.result;
-imp std.error;
+use std.vec;
+use std.result;
+use std.error;
 
 // Pseudo-random number generator.
 pub compound Rand {
@@ -66,7 +66,7 @@ impl Rand {
   }
 
   // Returns true with probability `p` (clamped to `[0, 1]`).
-  pub chance(dec p) bin {
+  pub chance(dec p) flag {
     if p <= 0 {
       ret false;
     }
@@ -98,7 +98,7 @@ pub fun rand_range_dec(Rand* r, dec min, dec max) dec {
 }
 
 // C-style wrapper for chance().
-pub fun rand_chance(Rand* r, dec p) bin {
+pub fun rand_chance(Rand* r, dec p) flag {
   ret r.chance(p);
 }
 

@@ -10,20 +10,20 @@
 // garbage length; always build node payloads through the `_new()`
 // constructors below, never a bare declaration.
 
-imp ..lexer.token;
-imp std.vec;
-imp std.string;
-imp std.option;
-imp std.quirks;
-imp std.c.mem;
+use ..lexer.token;
+use std.vec;
+use std.string;
+use std.option;
+use std.quirks;
+use std.c.mem;
 
 // ===== Data types =====
 
 // Boolean characteristics of a DataType.
 pub compound DataTypeFlags {
-  bin is_pointer;
-  bin is_literal;
-  bin is_array;
+  flag is_pointer;
+  flag is_literal;
+  flag is_array;
 }
 
 // The builtin scalar kind of a DataType (a named/user-defined type has
@@ -62,13 +62,13 @@ pub compound DataType {
   // Array-size expressions (`num[COMPUTED_SIZE]`); empty when not an
   // array or when brackets have no inner expression (`num[]`).
   Vec<Node*> array_brackets;
-  bin is_array;
+  flag is_array;
   num array_depth;
   // Generic instantiation arguments (`Vec<num>` -> [num]); empty for a
   // non-generic type.
   Vec<DataType*> generic_args;
   FnTypeSig* fn_sig;
-  bin has_fn_sig;
+  flag has_fn_sig;
 }
 
 // Every DataType construction site must go through this constructor (see
@@ -92,15 +92,15 @@ pub fun dtype_new() DataType {
 
 // Boolean characteristics of a Node, tracked during parsing/typecheck.
 pub compound NodeFlags {
-  bin inside_expression;
-  bin has_variable_combined;
-  bin is_public;
-  bin is_used;
+  flag inside_expression;
+  flag has_variable_combined;
+  flag is_public;
+  flag is_used;
   // True for a `.String`-kind node built from a backtick raw string
   // literal; see `Token.is_raw_string`'s doc comment. Set by the parser
   // when constructing this node from its token; codegen and the
   // formatter both key off it for `.String` nodes specifically.
-  bin is_raw_string;
+  flag is_raw_string;
 }
 
 pub fun node_flags_new() NodeFlags {
@@ -118,9 +118,9 @@ pub fun node_flags_new() NodeFlags {
 // visibility checks, "which function is this return statement inside").
 pub compound BindedNode {
   Node* owner;
-  bin has_owner;
+  flag has_owner;
   Node* function;
-  bin has_function;
+  flag has_function;
 }
 
 // ===== Warning diagnostics =====
@@ -224,15 +224,15 @@ impl WarningId as To<str> {
 // `"()"` for a call, with `right` holding the flattened comma-joined args).
 pub compound ExprNode {
   Node* left;
-  bin has_left;
+  flag has_left;
   Node* right;
-  bin has_right;
+  flag has_right;
   str op;
   // Explicit type arguments at a call site (`ok<num, Error>(42)`), for a
   // type param nothing in the argument list can infer (one that only
   // appears in the return type). Only meaningful when `op` is `"()"`.
   Vec<DataType*> generic_args;
-  bin has_generic_args;
+  flag has_generic_args;
 }
 
 // Every `ExprNode` construction site must go through this constructor
@@ -252,10 +252,10 @@ pub fun expr_node_new() ExprNode {
 
 // A prefix (`-x`, `!x`, `*p`, `&x`) or postfix (`x++`) unary operator.
 pub compound UnaryNode {
-  bin is_left_operanded_unary;
+  flag is_left_operanded_unary;
   str op;
   Node* operand;
-  bin has_indirection;
+  flag has_indirection;
   num indirection_depth;
 }
 
@@ -277,7 +277,7 @@ pub compound CompoundInitField {
 // (dtype inferred from context).
 pub compound CompoundInitNode {
   DataType* init_dtype;
-  bin has_dtype;
+  flag has_dtype;
   Vec<CompoundInitField> fields;
 }
 
@@ -296,11 +296,11 @@ pub compound VariableNode {
   DataType* var_type;
   str name;
   Node* val;
-  bin has_val;
+  flag has_val;
   // True for `const name = value;` (always requires an initializer).
   // False for every other variable-shaped construction: a plain
   // `let`/typed local, a function parameter, or a method's `self`.
-  bin is_const;
+  flag is_const;
 }
 
 // A `{ ... }` block: an ordered list of statements.
@@ -318,28 +318,28 @@ pub fun body_node_new() BodyNode {
 // `has_body = false`, is a binding/prototype; see `std.c.*`).
 pub compound FunctionNode {
   DataType* rtype;
-  bin has_rtype;
+  flag has_rtype;
   str name;
-  bin has_name;
+  flag has_name;
   // Generic type parameter names (`fun f<T>` -> ["T"]).
   Vec<str> type_params;
-  bin has_type_params;
+  flag has_type_params;
   // Forced concrete type combinations from constrained type params
   // (`fun f<T: num | str>` -> [["num"], ["str"]]), parallel to type_params.
   Vec<Vec<str>> type_param_forced_insts;
-  bin has_type_param_forced_insts;
+  flag has_type_param_forced_insts;
   // Each type param's own declared constraint, index-aligned with
   // type_params (`fun f<T: num | str>` -> [["num", "str"]]); empty per
   // param when unconstrained. For display (hover, signatures), unlike
   // type_param_forced_insts' combined Cartesian product.
   Vec<Vec<str>> type_param_constraints;
-  bin has_type_param_constraints;
+  flag has_type_param_constraints;
   Vec<Node*> args;
-  bin has_args;
-  bin is_async;
-  bin is_variadic;
+  flag has_args;
+  flag is_async;
+  flag is_variadic;
   Node* body;
-  bin has_body;
+  flag has_body;
 }
 
 pub fun function_node_new() FunctionNode {
@@ -372,7 +372,7 @@ pub compound IfStmtNode {
 pub compound ForCondNode {
   // `for { ... }` (infinite) when absent; `for cond { ... }` otherwise.
   Node* condition;
-  bin has_condition;
+  flag has_condition;
   Node* body;
 }
 
@@ -387,7 +387,7 @@ pub compound ForRangeNode {
 // array/Vec/Iterator-implementing value, optionally tracking an index.
 pub compound ForIterNode {
   str index_name;
-  bin has_index_name;
+  flag has_index_name;
   str item_name;
   Node* iterable;
   Node* body;
@@ -404,7 +404,7 @@ pub enum ForKind {
 pub compound AssertNode {
   Node* condition;
   Node* message;
-  bin has_message;
+  flag has_message;
 }
 
 // `allow warning_id;` or `expect warning_id;` (see WarningControlAction).
@@ -417,12 +417,12 @@ pub compound WarningCtrlNode {
 // One `pattern -> { body }` arm of a `fit` statement.
 pub compound FitBranch {
   Node* condition;
-  bin has_condition;
+  flag has_condition;
   Node* body;
   // Positional binding names for a data-carrying-enum destructuring arm
   // (`Shape.Circle(r)` binds ["r"]). Empty for a non-destructuring arm.
   Vec<str> bindings;
-  bin has_bindings;
+  flag has_bindings;
 }
 
 pub fun fit_branch_new() FitBranch {
@@ -439,7 +439,7 @@ pub fun fit_branch_new() FitBranch {
 pub compound FitStmtNode {
   Node* exp;
   Vec<FitBranch> branches;
-  bin has_default_branch;
+  flag has_default_branch;
 }
 
 pub fun fit_stmt_node_new() FitStmtNode {
@@ -454,7 +454,7 @@ pub fun fit_stmt_node_new() FitStmtNode {
 pub compound ImportNode {
   str path;
   str alias;
-  bin has_alias;
+  flag has_alias;
 }
 
 // One `name` : `dtype` field of a compound type declaration.
@@ -462,7 +462,7 @@ pub compound CompoundField {
   str name;
   DataType* dtype;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
 }
 
 // A `compound Name { fields }` declaration (a struct-like user-defined
@@ -471,13 +471,13 @@ pub compound CompoundNode {
   str name;
   Vec<CompoundField> fields;
   Vec<str> type_params;
-  bin has_type_params;
+  flag has_type_params;
   Vec<Vec<str>> type_param_forced_insts;
-  bin has_type_param_forced_insts;
+  flag has_type_param_forced_insts;
   // Each type param's own declared constraint, index-aligned with
   // type_params; see FunctionNode's own field of the same name.
   Vec<Vec<str>> type_param_constraints;
-  bin has_type_param_constraints;
+  flag has_type_param_constraints;
 }
 
 pub fun compound_node_new() CompoundNode {
@@ -506,7 +506,7 @@ pub compound QuirkMethodSig {
   str name;
   DataType* rtype;
   Vec<QuirkArg> args;
-  bin is_async;
+  flag is_async;
   Pos pos;
 }
 
@@ -527,9 +527,9 @@ pub compound QuirkNode {
   // only, no monomorphic vtable/quirk-object struct (an unbound type param
   // can't be represented in a single emitted signature) unless a concrete
   // instantiation is used as a type annotation.
-  bin is_generic;
+  flag is_generic;
   Vec<str> type_params;
-  bin has_type_params;
+  flag has_type_params;
 }
 
 pub fun quirk_node_new() QuirkNode {
@@ -549,14 +549,14 @@ pub compound EnumVariant {
   // Explicit integer value (`Variant = 3;`); auto-increments from 0
   // when absent.
   num value;
-  bin has_value;
+  flag has_value;
   // Positional payload types for a data-carrying variant (`Circle(num)` ->
   // [num]); absent for a plain enumerator. An enum is a tagged union if
   // any of its variants has a payload.
   Vec<DataType*> payload;
-  bin has_payload;
+  flag has_payload;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
 }
 
 pub fun enum_variant_new() EnumVariant {
@@ -578,7 +578,7 @@ pub compound EnumDeclNode {
   // "E"]); variant payloads may reference these, monomorphized per concrete
   // instantiation like generic compounds.
   Vec<str> type_params;
-  bin has_type_params;
+  flag has_type_params;
 }
 
 pub fun enum_decl_node_new() EnumDeclNode {
@@ -595,24 +595,24 @@ pub fun enum_decl_node_new() EnumDeclNode {
 pub compound ImplNode {
   str type_name;
   Vec<str> type_params;
-  bin has_type_params;
+  flag has_type_params;
   Vec<Vec<str>> type_param_forced_insts;
-  bin has_type_param_forced_insts;
+  flag has_type_param_forced_insts;
   // Each type param's own declared constraint, index-aligned with
   // type_params; see FunctionNode's own field of the same name.
   Vec<Vec<str>> type_param_constraints;
-  bin has_type_param_constraints;
+  flag has_type_param_constraints;
   // Bare quirk name (`Iterator`, `To`, ...), even when the `as` clause names
   // a concrete instantiation (`as Iterator<num>`). Absent for a plain impl
   // block (`impl Type { ... }`).
   str quirk_name;
-  bin has_quirk_name;
+  flag has_quirk_name;
   // Set when the `as` clause names a concrete instantiation of a generic
   // quirk whose argument is not the enclosing impl's own type param (`as
   // To<num>`), the mangled name (`To__num`) of that distinct quirk
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
-  bin has_quirk_concrete_instantiation;
+  flag has_quirk_concrete_instantiation;
   // Set when this impl targets a concrete instantiation of an
   // already-generic type (`impl Vec<num> { ... }`, `type_name` mangled
   // to `Vec__num`): the full, un-mangled DataType, so codegen can force
@@ -620,7 +620,7 @@ pub compound ImplNode {
   // Absent for a plain impl or a generic template impl (`has_type_params`
   // true instead).
   DataType* concrete_dtype;
-  bin has_concrete_dtype;
+  flag has_concrete_dtype;
   Vec<Node*> methods;
 }
 
@@ -676,13 +676,13 @@ pub compound AsmOperand {
 // and comments) for the block form.
 pub compound AsmStmtNode {
   str template;
-  bin is_volatile;
+  flag is_volatile;
   str arch_name;
-  bin has_arch;
+  flag has_arch;
   Vec<AsmOperand> outputs;
   Vec<AsmOperand> inputs;
   Vec<str> clobbers;
-  bin is_string_literal;
+  flag is_string_literal;
 }
 
 pub fun asm_stmt_node_new() AsmStmtNode {
@@ -708,7 +708,7 @@ pub enum NodeKind {
   Identifier(str),
   String(str),
   Character(chr),
-  Boolean(bin),
+  Boolean(flag),
   // The `nil` literal (a null pointer/string sentinel).
   Nil,
   // A `panic(msg)` expression: unifies with whatever type is expected at
@@ -762,10 +762,10 @@ pub enum NodeKind {
 pub compound Node {
   NodeKind kind;
   Pos pos;
-  bin has_pos;
+  flag has_pos;
   NodeFlags flags;
   BindedNode* binded;
-  bin has_binded;
+  flag has_binded;
 }
 
 // Names `kind` for a diagnostic, so a rejected node can say what it was.
@@ -808,7 +808,7 @@ pub fun node_new(NodeKind kind) Node {
 
 // ===== Predicates =====
 
-pub fun node_is_expression_or_parenthesis(Node n) bin {
+pub fun node_is_expression_or_parenthesis(Node n) flag {
   fit n.kind {
     .Expression(e) -> { ret true; }
     .ExpressionParenthesis(inner) -> { ret true; }
@@ -816,7 +816,7 @@ pub fun node_is_expression_or_parenthesis(Node n) bin {
   }
 }
 
-pub fun node_is_value_type(Node n) bin {
+pub fun node_is_value_type(Node n) flag {
   if node_is_expression_or_parenthesis(n) {
     ret true;
   }
@@ -832,7 +832,7 @@ pub fun node_is_value_type(Node n) bin {
   }
 }
 
-pub fun node_is_expressionable(Node n) bin {
+pub fun node_is_expressionable(Node n) flag {
   fit n.kind {
     .Expression(e) -> { ret true; }
     .ExpressionParenthesis(inner) -> { ret true; }
@@ -854,14 +854,14 @@ pub fun node_is_expressionable(Node n) bin {
   }
 }
 
-pub fun node_is_array(Node n) bin {
+pub fun node_is_array(Node n) flag {
   fit n.kind {
     .Expression(e) -> { ret is_array_operator(e.op); }
     _ -> { ret false; }
   }
 }
 
-pub fun node_is_assignment(Node n) bin {
+pub fun node_is_assignment(Node n) flag {
   fit n.kind {
     .Expression(e) -> {
       ret equals(e.op, "=") || equals(e.op, "+=") || equals(e.op, "-=") ||
@@ -878,7 +878,7 @@ pub fun node_is_assignment(Node n) bin {
   }
 }
 
-pub fun node_is_expression(Node n, str op) bin {
+pub fun node_is_expression(Node n, str op) flag {
   fit n.kind {
     .Expression(e) -> { ret equals(e.op, op); }
     _ -> { ret false; }
@@ -887,7 +887,7 @@ pub fun node_is_expression(Node n, str op) bin {
 
 // True for the `[]` index-expression operator, the only shape relevant to
 // AST-level array-ness here.
-fun is_array_operator(str op) bin {
+fun is_array_operator(str op) flag {
   ret equals(op, "[]");
 }
 

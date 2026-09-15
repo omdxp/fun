@@ -1,5 +1,5 @@
-imp std.c.io;
-imp std.channel;
+use std.c.io;
+use std.channel;
 
 async fun main() {
   Channel<num> src = channel_new_cap(0, 1);

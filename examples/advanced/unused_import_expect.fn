@@ -8,7 +8,7 @@
 // - Compilation fails if the warning stops being emitted.
 
 expect unused_import, "tracked unused import until the call site lands";
-imp std.option;
+use std.option;
 
 fun main() {
 }

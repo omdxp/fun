@@ -3,16 +3,16 @@
 // with cross-file recursive types, generics, and quirks, the way a real
 // self-hosted compiler's own source tree would be laid out.
 
-imp std.c.io;
-imp std.c.mem;
-imp std.io;
-imp std.map;
-imp std.result;
-imp std.error;
-imp ast;
-imp parser;
-imp eval;
-imp trace;
+use std.c.io;
+use std.c.mem;
+use std.io;
+use std.map;
+use std.result;
+use std.error;
+use ast;
+use parser;
+use eval;
+use trace;
 
 fun mk_num(dec n) Expr* {
   Expr* e = malloc(sizeof(Expr));

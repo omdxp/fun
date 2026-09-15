@@ -1,5 +1,5 @@
-imp std.io;
-imp std.math as m;
+use std.io;
+use std.math as m;
 
 fun main() {
   m.Vec2 a;

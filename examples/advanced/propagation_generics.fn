@@ -2,10 +2,10 @@
 // str: a compound, a generic compound, a stdlib container, or a custom
 // error type all work the same way.
 
-imp std.c.io;
-imp std.option;
-imp std.result;
-imp std.vec;
+use std.c.io;
+use std.option;
+use std.result;
+use std.vec;
 
 compound Point {
   num x;

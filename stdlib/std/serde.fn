@@ -13,7 +13,7 @@
 // `std.quirks`'s `To<JsonValue>`/`From<JsonValue>`. Fun has no reflection or
 // derive macros, so each type hand-implements the conversion.
 
-imp std.quirks;
+use std.quirks;
 
 // Convert any `To<str>` implementer to text.
 pub fun to_string(To<str> value) str {

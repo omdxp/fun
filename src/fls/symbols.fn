@@ -7,15 +7,15 @@
 // Answering in that order is what keeps a local named `len` from
 // resolving to the standard library's function of the same name.
 
-imp ..ast.ast;
-imp ..lexer.token;
-imp positions;
-imp std.string;
-imp std.io;
-imp std.vec;
-imp std.c.mem;
-imp std.option;
-imp std.ctype;
+use ..ast.ast;
+use ..lexer.token;
+use positions;
+use std.string;
+use std.io;
+use std.vec;
+use std.c.mem;
+use std.option;
+use std.ctype;
 
 // What a name turned out to be.
 pub enum DeclarationKind {
@@ -52,14 +52,14 @@ pub compound Declaration {
   // for everything else (a field, a local, a parameter, a variant),
   // which this language has no independent `pub`/private concept for
   // at all.
-  bin is_public;
+  flag is_public;
 }
 
 // Whether `d` is visible from `current_file`: always, from the same
 // file it's declared in (`pos.filename` empty means no position info
 // at all, trusted the same way), otherwise only when it was written
 // `pub`. Matches `check_visibility`'s own rule in typecheck.fn exactly.
-pub fun declaration_visible_from(Declaration d, str current_file) bin {
+pub fun declaration_visible_from(Declaration d, str current_file) flag {
   if d.is_public || equals(d.pos.filename, "") || equals(current_file, "") {
     ret true;
   }
@@ -126,7 +126,7 @@ pub fun render_type(DataType* dt) str {
     // dimension recorded one (the overwhelmingly common case: a
     // single `[N]`, or every dimension of a multi-dimensional array
     // sized the same way).
-    bin show_sizes = dt.array_brackets.len == depth;
+    flag show_sizes = dt.array_brackets.len == depth;
     num a = 0;
     for a < depth {
       b.append("[");
@@ -158,7 +158,7 @@ fun _base_type_name(DataType* dt) str {
     .Str -> { ret substr("str", 0, 3); }
     .Dec -> { ret substr("dec", 0, 3); }
     .Num -> { ret substr("num", 0, 3); }
-    .Bin -> { ret substr("bin", 0, 3); }
+    .Bin -> { ret substr("flag", 0, 4); }
     _ -> {}
   }
   ret _demangled_alias_type_name(dt.type_str);
@@ -179,7 +179,7 @@ fun _demangled_alias_type_name(str type_str) str {
   if sep <= 0 {
     ret substr(type_str, 0, len(type_str));
   }
-  bin looks_like_alias = is_lower(type_str[0]);
+  flag looks_like_alias = is_lower(type_str[0]);
   num i = 1;
   for looks_like_alias && i < sep {
     if !(is_alnum(type_str[i]) || type_str[i] == '_') {
@@ -222,7 +222,7 @@ pub fun render_function(FunctionNode f) str {
 // given index renders that param bare, as before.
 fun _append_type_params(
   StringBuilder* b,
-  bin has_type_params,
+  flag has_type_params,
   Vec<str>* type_params,
   Vec<Vec<str>>* type_param_constraints
 ) {
@@ -255,7 +255,7 @@ fun _append_type_params(
   b.append(">");
 }
 
-pub fun render_function_named(FunctionNode f, str name, bin include_fun) str {
+pub fun render_function_named(FunctionNode f, str name, flag include_fun) str {
   StringBuilder b = string_builder_init(64);
   if f.is_async {
     b.append("async ");
@@ -371,7 +371,7 @@ fun _quote_escaped(str s) str {
   StringBuilder b = string_builder_init(len(s) + 4);
   num n = len(s);
   num i = 0;
-  bin prev_is_escaping_backslash = false;
+  flag prev_is_escaping_backslash = false;
   for i < n {
     chr c = s[i];
     if c == '"' && !prev_is_escaping_backslash {
@@ -514,13 +514,13 @@ pub fun doc_comment_above(str text, num decl_line) str {
   // structure; outside, it's trimmed further so a stray extra space
   // in prose doesn't render as accidental sub-indentation.
   StringBuilder b = string_builder_init(64);
-  bin in_fence = false;
+  flag in_fence = false;
   num i = collected.len;
   for i > 0 {
     i = i - 1;
     str content = collected.get(i);
     str trimmed_content = trim(content);
-    bin is_fence = starts_with(trimmed_content, "```");
+    flag is_fence = starts_with(trimmed_content, "```");
     if in_fence {
       b.append(content);
     } else {
@@ -588,7 +588,7 @@ fun _infer_global_const_type(Node* val) str {
       }
     }
     .String(_) -> { ret "str"; }
-    .Boolean(_) -> { ret "bin"; }
+    .Boolean(_) -> { ret "flag"; }
     .Character(_) -> { ret "chr"; }
     _ -> { ret ""; }
   }
@@ -747,7 +747,7 @@ pub fun compound_literal_field_context(
   num line,
   str* out_name,
   Vec<str>* out_args
-) bin {
+) flag {
   *out_name = "";
   out_args.init(2);
   num idx = index_of_token(tokens, field_tok);
@@ -834,7 +834,7 @@ pub fun compound_literal_field_context(
       ret false;
     }
     Token prev = tokens.get(ci);
-    bin is_assign_like = token_is_operator(prev, "=") || token_is_operator(prev, "==") ||
+    flag is_assign_like = token_is_operator(prev, "=") || token_is_operator(prev, "==") ||
       token_is_operator(prev, "!=");
     if !is_assign_like {
       ret false;
@@ -1121,7 +1121,7 @@ pub fun free_params_vec(Vec<str>* params) {
 fun _param_type_from_piece(str piece) str {
   str name_part = piece;
   num eq = index_of_str(piece, " = ");
-  bin owned = false;
+  flag owned = false;
   if eq >= 0 {
     name_part = substr(piece, 0, eq);
     owned = true;
@@ -1185,7 +1185,7 @@ fun _replace_word(str s, str word, str replacement) str {
   StringBuilder b = string_builder_init(n + 8);
   num i = 0;
   for i < n {
-    bin matches = i + wlen <= n;
+    flag matches = i + wlen <= n;
     if matches {
       num k = 0;
       for k < wlen {
@@ -1196,8 +1196,8 @@ fun _replace_word(str s, str word, str replacement) str {
       }
     }
     if matches {
-      bin before_ok = i == 0 || !_is_type_param_ident_char(s[i - 1]);
-      bin after_ok = i + wlen >= n || !_is_type_param_ident_char(s[i + wlen]);
+      flag before_ok = i == 0 || !_is_type_param_ident_char(s[i - 1]);
+      flag after_ok = i + wlen >= n || !_is_type_param_ident_char(s[i + wlen]);
       if before_ok && after_ok {
         b.append(replacement);
         i = i + wlen;
@@ -1211,7 +1211,7 @@ fun _replace_word(str s, str word, str replacement) str {
 }
 
 // True for a character that can appear in an identifier.
-fun _is_type_param_ident_char(chr c) bin {
+fun _is_type_param_ident_char(chr c) flag {
   ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
@@ -1255,7 +1255,7 @@ pub fun bare_method_name(str mangled) str {
 pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option<Declaration> {
   num best_line = -1;
   Declaration best;
-  bin found = false;
+  flag found = false;
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1411,7 +1411,7 @@ pub fun lookup_field_at(Vec<Node>* program, str file, num line, str name) Option
 // uppercase letter right after its own leading underscore though, so
 // this stays false for those. Shared by every classifier that tells a
 // type reference apart from an ordinary name by capitalization alone.
-pub fun looks_like_type_name(str name) bin {
+pub fun looks_like_type_name(str name) flag {
   num i = 0;
   num n = len(name);
   for i < n && name[i] == '_' {
@@ -1455,7 +1455,7 @@ pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str
 // `bare_type_from_detail` for that shape).
 pub fun bare_type_expr(str type_expr) str {
   str written = type_expr;
-  bin owned = false;
+  flag owned = false;
   num cut = index_of_char(written, '<');
   if cut > 0 {
     written = substr(written, 0, cut);
@@ -1512,7 +1512,7 @@ fun full_return_type_from_detail(str signature) str {
 // declared return type rather than a field lookup.
 compound ChainSeg {
   str name;
-  bin is_call;
+  flag is_call;
   // The segment's own name token, needed only when `is_call` and it's
   // the chain's first segment (`chain_receiver`'s `first.is_call`
   // branch), to locate its own argument list in `tokens` for generic
@@ -1529,8 +1529,8 @@ compound ChainSeg {
   // parenthesized group's own closing `)` ends the leftward walk -
   // whatever precedes its matching `(` (a keyword like `await`,
   // another operator, or nothing) is not part of this chain.
-  bin is_paren_group;
-  bin paren_is_call;
+  flag is_paren_group;
+  flag paren_is_call;
   // Set for a `?`/`!`-propagated operand used directly as a receiver
   // (`get()?.field`, `x?.field`), with no intermediate `let`. Same
   // "always the chain's own first segment" contract as `is_paren_
@@ -1539,8 +1539,8 @@ compound ChainSeg {
   // whether that's a call, both needed to resolve the operand's own
   // type through `chain_ending_receiver` before unwrapping one level
   // (`Option<T>`/`Result<T, E>` to `T`) for the rest of the chain.
-  bin is_propagation;
-  bin propagation_is_call;
+  flag is_propagation;
+  flag propagation_is_call;
 }
 
 // The index of the `(` matching the `)` at `rparen_idx`, scanning
@@ -1654,7 +1654,8 @@ fun _walk_forward_chain(
     str member_name = token_word(member_opt.unwrap());
     num member_idx = index_of_token(tokens, member_opt.unwrap());
     let after_member = token_after(tokens, member_idx + 1);
-    bin is_call = after_member.is_some() && token_is_operator(after_member.unwrap(), "(");
+    flag is_call = after_member.is_some() &&
+      token_is_operator(after_member.unwrap(), "(");
     if is_call {
       let m = lookup_method(program, current_type, member_name, current_args);
       if m.is_none() {
@@ -1728,7 +1729,7 @@ fun _call_return_type(
   str file,
   num line,
   num depth,
-  bin* out_substituted,
+  flag* out_substituted,
   Vec<str>* out_resolved_args
 ) str {
   *out_substituted = false;
@@ -1748,7 +1749,7 @@ fun _call_return_type(
     ret rtype;
   }
 
-  bin rtype_is_bare_param = false;
+  flag rtype_is_bare_param = false;
   num pi = 0;
   for pi < type_params.len {
     if equals(rtype, type_params.get(pi)) {
@@ -1794,13 +1795,13 @@ fun _call_return_type(
 
   num depth_p = 0;
   num arg_idx = 0;
-  bin expecting = true;
+  flag expecting = true;
   num k = lparen_idx;
   for k < tokens.len {
     Token at = tokens.get(k);
     k = k + 1;
-    bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-    bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
     if is_open {
       depth_p = depth_p + 1;
       if depth_p == 1 {
@@ -1883,7 +1884,7 @@ fun _call_return_type(
     free(ptype);
   }
 
-  bin any_resolved = false;
+  flag any_resolved = false;
   num ri = 0;
   for ri < resolved.len {
     if !equals(resolved.get(ri), "") {
@@ -1927,7 +1928,7 @@ fun _call_return_type(
   for gi < rtype_generic_args.len {
     str garg = rtype_generic_args.get(gi);
     num match_i = 0;
-    bin found = false;
+    flag found = false;
     for match_i < type_params.len {
       if equals(garg, type_params.get(match_i)) {
         found = true;
@@ -2008,13 +2009,13 @@ pub fun specialized_call_signature(
 
   num depth_p = 0;
   num arg_idx = 0;
-  bin expecting = true;
+  flag expecting = true;
   num k = lparen_idx;
   for k < tokens.len {
     Token at = tokens.get(k);
     k = k + 1;
-    bin is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-    bin is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
     if is_open {
       depth_p = depth_p + 1;
       if depth_p == 1 {
@@ -2059,7 +2060,7 @@ pub fun specialized_call_signature(
     free(ptype);
   }
 
-  bin all_resolved = true;
+  flag all_resolved = true;
   num check_i = 0;
   for check_i < concrete.len {
     if equals(concrete.get(check_i), "") {
@@ -2153,7 +2154,7 @@ pub fun chain_receiver(
       break;
     }
     Token seg_tok = before_dot.unwrap();
-    bin is_call = false;
+    flag is_call = false;
     if token_is_operator(seg_tok, "?") || token_is_operator(seg_tok, "!") {
       // `get()?.field`/`x?.field`: the propagated operand used directly
       // as this segment's own receiver, with no intermediate `let`.
@@ -2168,7 +2169,7 @@ pub fun chain_receiver(
         break;
       }
       Token prop_tail = prop_operand.unwrap();
-      bin prop_is_call = false;
+      flag prop_is_call = false;
       if token_is_symbol(prop_tail, ')') {
         let prop_lparen = _matching_lparen(tokens, index_of_token(tokens, prop_tail));
         if prop_lparen.is_some() {
@@ -2206,7 +2207,7 @@ pub fun chain_receiver(
         break;
       }
       let callee = token_before(tokens, lparen.unwrap());
-      bin callee_is_ident = false;
+      flag callee_is_ident = false;
       if callee.is_some() {
         fit callee.unwrap().type {
           .Identifier -> { callee_is_ident = true; }
@@ -2230,7 +2231,7 @@ pub fun chain_receiver(
           break;
         }
         Token inner_tok = inner_last_raw.unwrap();
-        bin inner_is_call = false;
+        flag inner_is_call = false;
         // The group's own tail can itself be a call's closing paren
         // (`(*ptr(&b))`'s inner content is `*ptr(&b)`, ending in
         // `ptr(&b)`'s own `)`, not a nameable identifier) - a leading
@@ -2243,7 +2244,7 @@ pub fun chain_receiver(
             break;
           }
           let inner_callee = token_before(tokens, inner_lparen.unwrap());
-          bin inner_callee_is_ident = false;
+          flag inner_callee_is_ident = false;
           if inner_callee.is_some() {
             fit inner_callee.unwrap().type {
               .Identifier -> { inner_callee_is_ident = true; }
@@ -2309,7 +2310,7 @@ pub fun chain_receiver(
   if first.is_call {
     let f = lookup_top_level(program, first.name);
     if f.is_some() {
-      bin substituted = false;
+      flag substituted = false;
       current_type = _call_return_type(
         tokens,
         f.unwrap(),
@@ -2414,7 +2415,7 @@ pub fun chain_receiver(
 pub fun chain_ending_type(
   Vec<Token>* tokens,
   Token last_tok,
-  bin last_is_call,
+  flag last_is_call,
   Vec<Node>* program,
   str file,
   num line
@@ -2430,7 +2431,7 @@ pub fun chain_ending_type(
 pub fun chain_ending_receiver(
   Vec<Token>* tokens,
   Token last_tok,
-  bin last_is_call,
+  flag last_is_call,
   Vec<Node>* program,
   str file,
   num line,
@@ -2451,7 +2452,7 @@ pub fun chain_ending_receiver(
       if f.is_none() {
         ret empty;
       }
-      bin substituted = false;
+      flag substituted = false;
       empty.type_name = _call_return_type(
         tokens,
         f.unwrap(),
@@ -2756,7 +2757,7 @@ fun _infer_type(
     op_tok = after_prop.unwrap();
     base_type = unwrapped;
   }
-  bin is_arith = token_is_operator(op_tok, "+") || token_is_operator(op_tok, "-") ||
+  flag is_arith = token_is_operator(op_tok, "+") || token_is_operator(op_tok, "-") ||
     token_is_operator(
     op_tok,
     "*"
@@ -2827,7 +2828,7 @@ fun _infer_type_primary(
     }
     .Boolean -> {
       *out_end_idx = index_of_token(tokens, val_tok);
-      ret substr("bin", 0, 3);
+      ret substr("flag", 0, 4);
     }
     .Keyword -> {
       // `await <expr>`: Fun's async model makes an `async fun foo()
@@ -3086,7 +3087,7 @@ fun _infer_type_primary(
       // own field/method, a plain top-level call, or (no chain at
       // all) the bare read handled below.
       Token last_tok = val_tok;
-      bin last_is_call = false;
+      flag last_is_call = false;
       num cursor_idx = idx;
       let after0 = token_after(tokens, cursor_idx + 1);
       if after0.is_some() && token_is_operator(after0.unwrap(), "(") {
@@ -3194,9 +3195,9 @@ fun _infer_type_primary(
         // bare generic literal (`Box{value = 7}` for `compound
         // Box<T>`) still can't say what `T` is without the field
         // values' own types, which isn't resolved here.
-        bin explicit_args = brace_check_idx != cursor_idx;
+        flag explicit_args = brace_check_idx != cursor_idx;
         let type_decl = lookup_top_level(program, name);
-        bin is_generic_compound = false;
+        flag is_generic_compound = false;
         if type_decl.is_some() {
           Declaration td = type_decl.unwrap();
           if td.kind == .Compound && index_of_char(td.detail, '<') >= 0 {
@@ -3233,7 +3234,7 @@ fun _infer_type_primary(
             czi = czi + 1;
           }
           num cursor2 = index_of_token(tokens, brace_opt.unwrap());
-          bin field_expecting = true;
+          flag field_expecting = true;
           for cursor2 < close_opt.unwrap() {
             let f_opt = token_after(tokens, cursor2 + 1);
             if f_opt.is_none() {
@@ -3289,7 +3290,7 @@ fun _infer_type_primary(
               free(field_type);
             }
           }
-          bin cany_resolved = false;
+          flag cany_resolved = false;
           num cri = 0;
           for cri < cresolved.len {
             if !equals(cresolved.get(cri), "") {
@@ -3622,7 +3623,7 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
 // the file being asked about. Shared with `completion.fn`, which
 // needs the exact same coverage test to scope what it offers to the
 // function the cursor actually sits in.
-pub fun covers(Node n, FunctionNode f, str file, num line) bin {
+pub fun covers(Node n, FunctionNode f, str file, num line) flag {
   if !f.has_body {
     ret false;
   }
@@ -3632,7 +3633,7 @@ pub fun covers(Node n, FunctionNode f, str file, num line) bin {
 // The same test as `covers`, for a declaration whose body isn't
 // wrapped in a `FunctionNode` (a `test`/`fuzz` block, which has no
 // return type or generic params of its own to carry one).
-pub fun covers_body(Node n, Node* body, str file, num line) bin {
+pub fun covers_body(Node n, Node* body, str file, num line) flag {
   if !n.has_pos || !equals(n.pos.filename, file) {
     ret false;
   }
@@ -3857,7 +3858,7 @@ fun _lookup_in_body(
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";
-          bin is_map = fi.has_index_name &&
+          flag is_map = fi.has_index_name &&
             _for_iter_map_kv(
             tokens,
             fi.iterable,
@@ -3995,7 +3996,7 @@ pub fun _for_iter_map_kv(
   num line,
   str* out_key_type,
   str* out_value_type
-) bin {
+) flag {
   *out_key_type = "";
   *out_value_type = "";
   str detail = _for_iter_declared_detail(tokens, program, iterable, file, line);
@@ -4003,7 +4004,7 @@ pub fun _for_iter_map_kv(
     ret false;
   }
   str declared = bare_type_from_detail(detail);
-  bin is_map = equals(declared, "Map");
+  flag is_map = equals(declared, "Map");
   free(declared);
   if !is_map {
     ret false;
@@ -4910,7 +4911,7 @@ fun _lookup_fit_binding(
           start = br.body.pos.line;
         }
         num last = _last_line(br.body);
-        bin covers = line >= start && line <= last;
+        flag covers = line >= start && line <= last;
         if covers && br.has_bindings {
           num idx = -1;
           num k = 0;
@@ -4988,7 +4989,7 @@ pub fun _declaration(str name, DeclarationKind kind, str detail, Pos pos) Declar
 // call site keeps going through the plain `_declaration` wrapper,
 // which is always visible from anywhere within the merged program the
 // same way it always has been.
-fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, bin is_public) Declaration {
+fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, flag is_public) Declaration {
   Declaration d;
   d.name = name;
   d.kind = kind;

@@ -1,11 +1,11 @@
 // `-ast`'s dump: a plain-text tree of what the parser produced, for
 // looking at the shape of a program without reading generated C.
 
-imp ast;
-imp ..lexer.token;
-imp std.string;
-imp std.io;
-imp std.vec;
+use ast;
+use ..lexer.token;
+use std.string;
+use std.io;
+use std.vec;
 
 fun _indent(num depth) str {
   StringBuilder b = string_builder_init(depth * 2);

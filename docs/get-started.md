@@ -57,7 +57,7 @@ first; see `CONTRIBUTING.md` in the repository.
 Create `hello.fn`:
 
 ```fun
-imp std.c.io;
+use std.c.io;
 
 fun main(str[] args) {
   printf("Hello, World!\n");
@@ -97,7 +97,7 @@ directory, so it never overwrites an existing project.
 
 ## The build manifest (`fun.toml`)
 
-A manifest declares build targets, not an import graph: `imp` already
+A manifest declares build targets, not an import graph: `use` already
 does path-based module resolution, so `fun.toml` only needs to name which
 entry file produces which binary.
 
@@ -138,7 +138,7 @@ present) makes the manifest's own `[package]` `name` and `version`
 available inside the program itself, as two ordinary string constants:
 
 ```fun
-imp std.io;
+use std.io;
 
 fun main() {
   println(format("{str} v{str}", PACKAGE_NAME, PACKAGE_VERSION));
@@ -163,11 +163,11 @@ fun add somejson -git https://github.com/user/somejson -tag v1.2.3
 ```
 
 ```fun
-imp deps.somejson.parser;
+use deps.somejson.parser;
 ```
 
 That writes a `[deps]` table in `fun.toml`, one inline table per
-dependency, keyed by the name used in `imp deps.<name>...`:
+dependency, keyed by the name used in `use deps.<name>...`:
 
 ```toml
 [deps]
@@ -208,18 +208,18 @@ by repo and resolved commit, shared across every project that pins the
 same commit.
 
 Fetching never checks whether the repo is actually a Fun project, or
-that `path` points at anything real: `imp` is already path-based with
+that `path` points at anything real: `use` is already path-based with
 no manifest involved, so a `[deps]` entry just clones the ref and lets
-the ordinary `imp` machinery find (or fail to find) files under it. A
+the ordinary `use` machinery find (or fail to find) files under it. A
 wrong `path`, or a repo with no Fun code at all, fetches successfully
-and only surfaces as a normal "import not found" error at the `imp
+and only surfaces as a normal "import not found" error at the `use
 deps.<name>...` line that needed it, naming the missing file.
 
 ### Transitive dependencies
 
 A fetched dependency that has its own `fun.toml` with its own `[deps]`
 gets those resolved too, automatically, flattened into your project's
-own `fun.lock` and the same flat `imp deps.<name>...` namespace - `imp
+own `fun.lock` and the same flat `use deps.<name>...` namespace - `use
 deps.<name>` works for a transitive dependency exactly the way it works
 for one you declared yourself. A `git`/`path`/spec conflict two
 different sources have for the same name is caught for real: identical
@@ -276,7 +276,7 @@ Commit `fun.lock` for a binary project, the same way you'd commit
   helpers with a history of local command execution via a crafted "URL")
   is rejected.
 - A fetched dependency is source text, parsed and compiled the same as
-  any other `imp`. There is no build-script/install-hook concept at
+  any other `use`. There is no build-script/install-hook concept at
   all, so a dependency never runs arbitrary code as a side effect of
   being fetched, unlike npm lifecycle scripts or Cargo's `build.rs`.
 - A git-based system has no central review or yank mechanism the way a

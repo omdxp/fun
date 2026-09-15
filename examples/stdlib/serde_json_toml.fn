@@ -3,17 +3,17 @@
 // derive), plus the same To<str>/From<str> quirks (via std.serde) for the text
 // layer shared by JsonValue and TomlDoc.
 
-imp std.c.io;
-imp std.json;
-imp std.toml;
-imp std.serde;
-imp std.result;
-imp std.quirks;
+use std.c.io;
+use std.json;
+use std.toml;
+use std.serde;
+use std.result;
+use std.quirks;
 
 pub compound Config {
   str name;
   dec version;
-  bin stable;
+  flag stable;
 }
 
 impl Config as To<JsonValue> {

@@ -3,8 +3,8 @@
 // A `Number` token distinguishes integer vs decimal by which `TokenData`
 // variant it carries (`Num` vs `Dec`).
 
-imp std.string;
-imp std.c.mem;
+use std.string;
+use std.c.mem;
 
 // The kind of lexical token.
 pub enum TokKind {
@@ -28,7 +28,7 @@ pub enum TokenData {
   Sval(str),
   Num(num),
   Dec(dec),
-  Bval(bin),
+  Bval(flag),
 }
 
 // The span of a token in its source file.
@@ -51,7 +51,7 @@ pub compound Token {
   // True when whitespace (space/tab) follows the token, as opposed to the
   // next token being immediately adjacent. This is what tells `Vec<T>`
   // and `Type*` apart from a comparison or a multiplication.
-  bin whitespace;
+  flag whitespace;
   // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
   // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences
   // verbatim, ready for direct re-embedding in C), a raw string's data
@@ -59,7 +59,7 @@ pub compound Token {
   // must escape this content when emitting the C string literal, and the
   // formatter must reproduce the backtick spelling verbatim rather than
   // requoting the buffer.
-  bin is_raw_string;
+  flag is_raw_string;
 }
 
 // Frees `t`'s own heap-allocated content: `Sval`'s string, the only
@@ -88,7 +88,7 @@ pub fun free_token_vec(Vec<Token>* tokens) {
 }
 
 // Returns true if `t` is an `Operator` token whose text equals `val`.
-pub fun token_is_operator(Token t, str val) bin {
+pub fun token_is_operator(Token t, str val) flag {
   fit t.data {
     .Sval(s) -> { ret t.type == .Operator && equals(s, val); }
     _ -> { ret false; }
@@ -96,7 +96,7 @@ pub fun token_is_operator(Token t, str val) bin {
 }
 
 // Returns true if `t` is a `Keyword` token whose text equals `val`.
-pub fun token_is_keyword(Token t, str val) bin {
+pub fun token_is_keyword(Token t, str val) flag {
   fit t.data {
     .Sval(s) -> { ret t.type == .Keyword && equals(s, val); }
     _ -> { ret false; }
@@ -104,7 +104,7 @@ pub fun token_is_keyword(Token t, str val) bin {
 }
 
 // Returns true if `t` is a `Symbol` token whose character equals `val`.
-pub fun token_is_symbol(Token t, chr val) bin {
+pub fun token_is_symbol(Token t, chr val) flag {
   fit t.data {
     .Cval(c) -> { ret t.type == .Symbol && c == val; }
     _ -> { ret false; }
@@ -113,7 +113,7 @@ pub fun token_is_symbol(Token t, chr val) bin {
 
 // Returns true if `t` is a newline, a comment, or the `\` newline-separator
 // symbol (used to continue a logical line across a physical one).
-pub fun token_is_nl_or_comment_or_newline_separator(Token t) bin {
+pub fun token_is_nl_or_comment_or_newline_separator(Token t) flag {
   if t.type == .NewLine || t.type == .Comment {
     ret true;
   }

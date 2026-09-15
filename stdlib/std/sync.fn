@@ -17,14 +17,14 @@
 // construction path and should be preferred whenever the result will be
 // shared across threads.
 
-imp std.c.thread;
+use std.c.thread;
 
 // Managed mutex.
 pub compound Mutex {
   // Underlying pthread mutex.
   pthread_mutex_t inner;
   // True once initialized and not yet destroyed.
-  bin initialized;
+  flag initialized;
 }
 
 // Managed condition variable.
@@ -32,7 +32,7 @@ pub compound CondVar {
   // Underlying pthread condvar.
   pthread_cond_t inner;
   // True once initialized and not yet destroyed.
-  bin initialized;
+  flag initialized;
 }
 
 // Creates a mutex wrapper, initialized immediately (see this module's
@@ -67,7 +67,7 @@ impl Mutex {
   }
 
   // True once initialized and not yet destroyed.
-  pub is_initialized() bin {
+  pub is_initialized() flag {
     ret self.initialized;
   }
 
@@ -129,7 +129,7 @@ impl CondVar {
   }
 
   // True once initialized and not yet destroyed.
-  pub is_initialized() bin {
+  pub is_initialized() flag {
     ret self.initialized;
   }
 

@@ -8,10 +8,10 @@
 // "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values"
 // - Program still runs normally.
 
-imp std.c.io;
+use std.c.io;
 
 fun main() {
-  bin x = true;
+  flag x = true;
 
   fit x {
     true -> { printf("x was true\n"); },

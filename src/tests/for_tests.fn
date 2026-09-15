@@ -1,8 +1,8 @@
 // Loop-lowering corpus, ported from the `for` suite. Each test states its
 // input as source text and checks the emitted C.
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 test "for range transpiles" {
   str src = `imp std.c.io;

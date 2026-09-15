@@ -6,34 +6,34 @@
 // chosen by `FUN_CC` or by platform default, and runs the executable it
 // produces.
 
-imp ..parser.import_resolver;
-imp ..semantics.typecheck;
-imp ..semantics.warnings;
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp fmt;
-imp ..ast.ast;
-imp ..ast.ast_print;
-imp manifest;
-imp deps;
-imp ..codegen.codegen;
-imp ..codegen.codegen_state;
-imp std.string;
-imp std.vec;
-imp std.option;
-imp std.result;
-imp std.io;
-imp std.fs;
-imp std.sys;
-imp std.cli;
-imp std.process;
-imp std.path;
-imp std.set;
-imp std.runtime_backend;
-imp std.c.mem;
-imp std.task;
-imp std.sync;
-imp std.time;
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use ..semantics.warnings;
+use ..lexer.lexer;
+use ..lexer.token;
+use fmt;
+use ..ast.ast;
+use ..ast.ast_print;
+use manifest;
+use deps;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+use std.string;
+use std.vec;
+use std.option;
+use std.result;
+use std.io;
+use std.fs;
+use std.sys;
+use std.cli;
+use std.process;
+use std.path;
+use std.set;
+use std.runtime_backend;
+use std.c.mem;
+use std.task;
+use std.sync;
+use std.time;
 
 // What the arguments asked for.
 pub compound Options {
@@ -41,8 +41,8 @@ pub compound Options {
   str subcommand;
   // `-test`/`-fuzz` given directly (alongside `-in`) rather than via a
   // `test`/`fuzz` subcommand. Only meaningful when `subcommand` is "".
-  bin test_flag;
-  bin fuzz_flag;
+  flag test_flag;
+  flag fuzz_flag;
   str input;
   str output;
   // The `fuzz` target's name, from `fun fuzz <input> <target>`'s optional
@@ -50,31 +50,31 @@ pub compound Options {
   // declares exactly one target).
   str fuzz_target;
   // Compile only, leaving the executable unrun.
-  bin no_exec;
+  flag no_exec;
   // Keep the generated C instead of removing it after the build.
-  bin keep_c;
+  flag keep_c;
   // Build with debug information.
-  bin debug_info;
-  bin show_help;
-  bin show_version;
+  flag debug_info;
+  flag show_help;
+  flag show_version;
   // Report declarations nothing reads.
-  bin warn_unused;
+  flag warn_unused;
   // Like `warn_unused`, but keeps reporting them even when the file has
   // an unrelated type error elsewhere. fls's own diagnose() implements
   // the identical idea separately, for the editor rather than the CLI.
-  bin warn_unused_lenient;
+  flag warn_unused_lenient;
   // Print the parsed AST before compiling.
-  bin show_ast;
+  flag show_ast;
   // Rewrite the input in place, and with `fmt_all` its local imports too.
-  bin fmt;
-  bin fmt_all;
+  flag fmt;
+  flag fmt_all;
   // Rewrite the input in place, then still run diagnostics against it
   // (what fls shells out to, to combine formatting and diagnostics).
-  bin fmt_diag;
+  flag fmt_diag;
   // Report whether the input, or everything under it, is formatted,
   // without rewriting anything.
-  bin fmt_check;
-  bin fmt_check_all;
+  flag fmt_check;
+  flag fmt_check_all;
   // Arguments after `--`, passed to the compiled program.
   Vec<str> program_args;
   // Constants injected into the program, from `-D name=value`.
@@ -94,7 +94,7 @@ pub compound Options {
   str dep_rev;
   str dep_token_env;
   // Set when parsing failed, with `error_text` explaining why.
-  bin has_error;
+  flag has_error;
   str error_text;
 }
 
@@ -247,7 +247,7 @@ pub fun parse_args(str[] argv) Options {
   num i = first_positional;
   for i < parsed.positionals.len {
     str arg = parsed.positionals.get(i);
-    bin looks_like_flag = len(arg) > 0 && arg[0] == '-';
+    flag looks_like_flag = len(arg) > 0 && arg[0] == '-';
     if equals(o.subcommand, "deps") && equals(o.deps_action, "") {
       o.deps_action = arg;
     } elif equals(o.input, "") {
@@ -316,7 +316,7 @@ pub fun c_compiler() str {
 }
 
 // True when `cc` takes MSVC-style arguments rather than gcc-style ones.
-pub fun compiler_is_msvc(str cc) bin {
+pub fun compiler_is_msvc(str cc) flag {
   let name = basename(cc);
   ret equals(name, "cl") || equals(name, "cl.exe");
 }
@@ -324,12 +324,12 @@ pub fun compiler_is_msvc(str cc) bin {
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
 // program.
-pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
   ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false);
 }
 
 // Lowers `input` to C, reporting declarations nothing reads.
-pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, bin debug_info) Result<bin, str> {
+pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
   ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false);
 }
 
@@ -357,13 +357,13 @@ pub fun compile_to_c_mode(
   str input,
   str out_path,
   Vec<Define>* defines,
-  bin test_mode,
-  bin warn_unused,
-  bin fuzz_mode,
+  flag test_mode,
+  flag warn_unused,
+  flag fuzz_mode,
   str fuzz_target,
-  bin debug_info,
-  bin warn_unused_lenient
-) Result<bin, str> {
+  flag debug_info,
+  flag warn_unused_lenient
+) Result<flag, str> {
   let merged = parse_program_with_imports(input)!;
 
   // Injected ahead of the program's own declarations, so anything in it
@@ -498,7 +498,7 @@ pub fun compile_to_c_mode(
 // after `cc`'s own name is already in `argv_args`. MSVC spells its
 // arguments differently and links the C runtime itself, so the thread
 // and math flags apply only to gcc-style compilers.
-fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, bin debug_info) {
+fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, flag debug_info) {
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
     argv_args.push("/std:c17");
@@ -642,7 +642,7 @@ fun _ensure_msvc_env() {
 // fallback when `_ensure_msvc_env` could not propagate INCLUDE to the current
 // process environment (which happens on some Windows configurations where
 // _putenv_s does not update the Windows environment block for child processes).
-fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, bin debug_info) num {
+fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_info) num {
   str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
   str bat_path = path_join(temp_dir, "fun_cl.bat");
   str debug_flag = "";
@@ -725,7 +725,7 @@ pub fun resolve_c_compiler() str {
 // arguments inserted right after `cc` itself and before the source
 // file (a user override is trusted to know what it's asking for,
 // so this streams the compiler's own output live rather than capturing it).
-fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
+fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
@@ -759,7 +759,7 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, bin debug_info) num {
 // on `PATH`; a candidate that's found but fails to compile stops the
 // search there rather than trying the next one, since a real compile
 // error is never solved by switching compilers.
-pub fun compile_c_to_exe(str c_path, str exe_path, bin debug_info) num {
+pub fun compile_c_to_exe(str c_path, str exe_path, flag debug_info) num {
   _ensure_msvc_env();
   str override_cc = env_or("FUN_CC", "");
   if !equals(override_cc, "") {
@@ -855,9 +855,9 @@ fun _fuzz_cc_candidates() Vec<str> {
 // sandboxed environments even when the compiler and fuzzing engine both
 // work fine otherwise. Returns the exit code of the last candidate tried
 // (0 on success), or -1 if no candidate compiler could be found at all.
-pub fun compile_c_to_fuzz_exe(str c_path, str exe_path, bin debug_info) num {
+pub fun compile_c_to_fuzz_exe(str c_path, str exe_path, flag debug_info) num {
   str no_asan_setting = env_or("FUN_FUZZ_NO_ASAN", "");
-  bin no_asan = !equals(no_asan_setting, "") && !equals(no_asan_setting, "0");
+  flag no_asan = !equals(no_asan_setting, "") && !equals(no_asan_setting, "0");
   str sanitize_flag = "-fsanitize=fuzzer,address";
   if no_asan {
     sanitize_flag = "-fsanitize=fuzzer";
@@ -1294,7 +1294,7 @@ fun ensure_deps_resolved() Option<str> {
 // Compiles every target the manifest declares, writing executables to
 // `fun-out/bin`. A library has no entry point, so it is compiled to an
 // object under `fun-out/lib` to prove it builds, never linked.
-pub fun build_project(bin debug_info, Vec<Define>* extra_defines) num {
+pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
   let loaded = load_manifest();
   if loaded.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
@@ -1480,9 +1480,9 @@ pub fun add_dependency(
     lines.pop();
   }
 
-  bin in_deps = false;
-  bin replaced = false;
-  bin has_deps_table = false;
+  flag in_deps = false;
+  flag replaced = false;
+  flag has_deps_table = false;
   StringBuilder out = string_builder_init(len(text) + len(entry_line) + 16);
   str name_prefix = format("{str} = ", name);
   for line : lines {
@@ -1535,11 +1535,11 @@ pub fun deps_update_command(str name) num {
 
   Manifest target = m;
   Vec<Dependency> filtered;
-  bin narrowed = false;
+  flag narrowed = false;
   if !equals(name, "") {
     filtered.init(0);
     num i = 0;
-    bin found = false;
+    flag found = false;
     for i < m.deps.len {
       let d = m.deps.get(i);
       if equals(d.name, name) {
@@ -1604,8 +1604,8 @@ pub fun init_project(str kind) num {
   if equals(resolved_kind, "") {
     resolved_kind = "exe";
   }
-  bin wants_lib = equals(resolved_kind, "lib") || equals(resolved_kind, "mix");
-  bin wants_exe = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
+  flag wants_lib = equals(resolved_kind, "lib") || equals(resolved_kind, "mix");
+  flag wants_exe = equals(resolved_kind, "exe") || equals(resolved_kind, "mix");
   if !wants_lib && !wants_exe {
     writeln_to(
       Sink.Stderr,
@@ -1694,12 +1694,12 @@ pub fun resolved_defines(Vec<Define>* extra) Vec<Define> {
 pub fun run_tests(
   str input,
   Vec<str>* args,
-  bin debug_info,
-  bin no_exec,
+  flag debug_info,
+  flag no_exec,
   str out_override,
-  bin warn_unused,
-  bin warn_unused_lenient,
-  bin keep_c,
+  flag warn_unused,
+  flag warn_unused_lenient,
+  flag keep_c,
   Vec<Define>* extra_defines
 ) num {
   Vec<Define> defines = resolved_defines(extra_defines);
@@ -1759,12 +1759,12 @@ pub fun run_fuzz(
   str input,
   str target,
   Vec<str>* args,
-  bin debug_info,
-  bin no_exec,
+  flag debug_info,
+  flag no_exec,
   str out_override,
-  bin warn_unused,
-  bin warn_unused_lenient,
-  bin keep_c,
+  flag warn_unused,
+  flag warn_unused_lenient,
+  flag keep_c,
   Vec<Define>* extra_defines
 ) num {
   Vec<Define> defines = resolved_defines(extra_defines);
@@ -1824,9 +1824,9 @@ compound SuiteTestResult {
 // to stderr when a compiler is explicitly set via FUN_CC.
 fun _run_tests_captured(
   str input,
-  bin debug_info,
-  bin warn_unused,
-  bin warn_unused_lenient,
+  flag debug_info,
+  flag warn_unused,
+  flag warn_unused_lenient,
   Vec<Define>* extra_defines
 ) SuiteTestResult {
   SuiteTestResult bad;
@@ -1899,9 +1899,9 @@ fun _run_tests_captured(
 // crash can't take the rest of the run down with it.
 pub fun run_test_suite(
   str root,
-  bin debug_info,
-  bin warn_unused,
-  bin warn_unused_lenient,
+  flag debug_info,
+  flag warn_unused,
+  flag warn_unused_lenient,
   Vec<Define>* extra_defines
 ) num {
   str dir = root;
@@ -1988,8 +1988,8 @@ compound FuzzWatch {
   num pid;
   num budget_seconds;
   Mutex mu;
-  bin done;
-  bin killed;
+  flag done;
+  flag killed;
 }
 
 // Sleeps up to `budget_seconds`, checking once a second whether the
@@ -2003,7 +2003,7 @@ async fun _fuzz_watchdog(FuzzWatch* w, WaitGroup* wg) {
   num slept = 0;
   for slept < w.budget_seconds {
     w.mu.lock();
-    bin d = w.done;
+    flag d = w.done;
     w.mu.unlock();
     if d {
       break;
@@ -2012,7 +2012,7 @@ async fun _fuzz_watchdog(FuzzWatch* w, WaitGroup* wg) {
     slept = slept + 1;
   }
   w.mu.lock();
-  bin already_done = w.done;
+  flag already_done = w.done;
   if !already_done {
     w.killed = true;
   }
@@ -2030,7 +2030,7 @@ async fun _fuzz_watchdog(FuzzWatch* w, WaitGroup* wg) {
 // disappears.
 compound FuzzRunResult {
   num exit_code;
-  bin killed_by_budget;
+  flag killed_by_budget;
 }
 
 fun _run_fuzz_bounded(str[] argv, num budget_seconds) FuzzRunResult {
@@ -2114,9 +2114,9 @@ fun _collect_fuzz_targets(str path) Vec<str> {
 // short, bounded budget rather than running indefinitely.
 pub fun run_fuzz_suite(
   str root,
-  bin debug_info,
-  bin warn_unused,
-  bin warn_unused_lenient,
+  flag debug_info,
+  flag warn_unused,
+  flag warn_unused_lenient,
   Vec<Define>* extra_defines
 ) num {
   str dir = root;
@@ -2216,7 +2216,7 @@ pub fun run_fuzz_suite(
 // True when `path` declares at least one top level `keyword "name" {`/`(`
 // block (`keyword` is `"test"` or `"fuzz"`). Shared scan behind
 // `run_test_suite` and `run_fuzz_suite`'s own filters.
-fun _declares_top_level_block(str path, str keyword) bin {
+fun _declares_top_level_block(str path, str keyword) flag {
   if !exists(path) {
     ret false;
   }
@@ -2259,7 +2259,7 @@ pub fun print_ast_for(str input) {
 // Formats `path` in place, reporting whether the file changed. A file
 // that is already formatted is left untouched, so its timestamp only
 // moves when its contents do.
-pub fun format_file(str path) Result<bin, str> {
+pub fun format_file(str path) Result<flag, str> {
   if !exists(path) {
     ret .Err(format("no such file: {str}", path));
   }
@@ -2275,7 +2275,7 @@ pub fun format_file(str path) Result<bin, str> {
 }
 
 // True when `path` is already formatted.
-pub fun format_file_is_clean(str path) bin {
+pub fun format_file_is_clean(str path) flag {
   if !exists(path) {
     ret false;
   }
@@ -2304,7 +2304,7 @@ fun _imported_paths(str src, str filename) Vec<str> {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type != .Keyword || !equals(token_text(t), "imp") {
+    if t.type != .Keyword || !equals(token_text(t), "use") {
       i = i + 1;
       continue;
     }
@@ -2382,7 +2382,7 @@ pub fun format_file_and_imports(str path) Result<num, str> {
 
 // Directories that hold generated or vendored files, which are not the
 // project's own source.
-fun _skip_scan_dir(str name) bin {
+fun _skip_scan_dir(str name) flag {
   fit name {
     ".git", ".funsand", "fun-out", "build", "node_modules" -> { ret true; }
     _ -> { ret false; }

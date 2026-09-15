@@ -1,7 +1,7 @@
 // Typed TOML: parse `key = value` lines into typed values and read them back.
 
-imp std.c.io;
-imp std.toml;
+use std.c.io;
+use std.toml;
 
 fun main() num {
   let doc = parse_document("name = \"fun\"\nversion = 2\nratio = 1.5\nstable = true\n");

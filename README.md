@@ -77,7 +77,7 @@ This reads [fun.toml](fun.toml) and produces `fun`/`fls` under `fun-out/bin/`. B
 Create `hello.fn`:
 
 ```fun
-imp std.c.io;
+use std.c.io;
 
 fun main(str[] args) {
   printf("Hello, World!\n");

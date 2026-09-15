@@ -1,6 +1,6 @@
 // Assert statement example.
 
-imp std.c.io;
+use std.c.io;
 
 fun main() {
   num x = 5;

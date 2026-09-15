@@ -1,5 +1,5 @@
-imp user;
-imp user_greeter;
+use user;
+use user_greeter;
 
 fun main() void {
   User user;

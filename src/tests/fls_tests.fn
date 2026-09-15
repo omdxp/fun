@@ -1,38 +1,38 @@
 // Language server cases: what a message on the wire is turned into.
 
-imp ..fls.protocol;
-imp ..fls.positions;
-imp ..fls.symbols;
-imp ..fls.symbol_table;
-imp ..fls.navigation;
-imp ..fls.signature_help;
-imp ..fls.inlay_hints;
-imp ..fls.code_action;
-imp ..fls.diagnostics;
-imp ..fls.outline;
-imp ..fls.references;
-imp ..fls.completion;
-imp ..fls.formatting;
-imp ..fls.folding_range;
-imp ..fls.code_lens;
-imp ..fls.selection_range;
-imp ..fls.call_hierarchy;
-imp ..fls.imports;
-imp ..fls.semantic_tokens;
-imp ..fls.analysis;
-imp ..fls.documents;
-imp ..fls.uri;
-imp ..lexer.lexer;
-imp ..lexer.token;
-imp ..parser.import_resolver;
-imp std.vec;
-imp std.option;
-imp std.result;
-imp std.string;
-imp std.io;
-imp std.fs;
-imp std.path;
-imp std.sys;
+use ..fls.protocol;
+use ..fls.positions;
+use ..fls.symbols;
+use ..fls.symbol_table;
+use ..fls.navigation;
+use ..fls.signature_help;
+use ..fls.inlay_hints;
+use ..fls.code_action;
+use ..fls.diagnostics;
+use ..fls.outline;
+use ..fls.references;
+use ..fls.completion;
+use ..fls.formatting;
+use ..fls.folding_range;
+use ..fls.code_lens;
+use ..fls.selection_range;
+use ..fls.call_hierarchy;
+use ..fls.imports;
+use ..fls.semantic_tokens;
+use ..fls.analysis;
+use ..fls.documents;
+use ..fls.uri;
+use ..lexer.lexer;
+use ..lexer.token;
+use ..parser.import_resolver;
+use std.vec;
+use std.option;
+use std.result;
+use std.string;
+use std.io;
+use std.fs;
+use std.path;
+use std.sys;
 
 test "a string is written with what JSON reserves escaped" {
   assert equals(json_quote("plain"), `"plain"`), "expected a plain string to be quoted";
@@ -586,7 +586,7 @@ test "a function completion item carries structured labelDetails" {
 
   // Params dimmed, return type right-aligned.
   str out = completion(&reads, doc, 4, 8, true);
-  assert contains(out, `"labelDetails":{"detail":"(str name, num count)","description":"bin"}`), "expected structured labelDetails for the function";
+  assert contains(out, `"labelDetails":{"detail":"(str name, num count)","description":"flag"}`), "expected structured labelDetails for the function";
 
   // Reserved words carry no labelDetails at all.
   assert !contains(out, `"label":"ret","kind":14,"detail":"declaration","labelDetails"`), "expected no labelDetails on a keyword";
@@ -612,7 +612,7 @@ test "a method completion item's own labelDetails excludes the implicit self" {
 
   // Right after `b.re`.
   str out = completion(&reads, doc, 7, 10, true);
-  assert contains(out, `"labelDetails":{"detail":"(num n)","description":"bin"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
+  assert contains(out, `"labelDetails":{"detail":"(num n)","description":"flag"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
 }
 
 test "completion offers a call snippet with one tab stop per parameter" {
@@ -817,7 +817,7 @@ test "a function is spelled back as its signature" {
 
   let found = lookup_top_level(&program.nodes, "probe");
   assert found.is_some(), "expected the function to resolve";
-  assert equals(found.unwrap().detail, "fun probe(str name, num count) bin"), "expected the whole signature";
+  assert equals(found.unwrap().detail, "fun probe(str name, num count) flag"), "expected the whole signature";
 }
 
 test "hover appends a 'See also' footer linking a user-defined type in the signature" {
@@ -2203,8 +2203,8 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   defer tokens.free();
 
   str target = import_target(&tokens, current_file, 0, 11);
-  bin target_is_dir = is_dir(target);
-  bin target_exists = exists(target);
+  flag target_is_dir = is_dir(target);
+  flag target_exists = exists(target);
   assert target_is_dir, format(
     "expected 'mylib' to resolve to a real directory - resolve_import_path directly: {str} | import_target (tokenizer path): {str} | is_dir: {bin} | exists: {bin}",
     direct_resolved, target, target_is_dir, target_exists
@@ -2695,7 +2695,7 @@ test "hovering a constant shows its own literal value, not just its type" {
   assert contains(hovered_str, `const str GREETING = \"hi\"`), "expected the constant's own string literal value shown, quoted";
 
   str hovered_bin = hover(&reads, doc, 7, 10);
-  assert contains(hovered_bin, "const bin ENABLED = true"), "expected the constant's own boolean literal value shown";
+  assert contains(hovered_bin, "const flag ENABLED = true"), "expected the constant's own boolean literal value shown";
 
   str hovered_neg = hover(&reads, doc, 8, 10);
   assert contains(hovered_neg, "const num NEGATIVE = -1"), "expected a negative numeric literal (a unary minus over the literal) shown with its sign";
@@ -4480,7 +4480,7 @@ test "code actions implement a quirk's missing method with its exact declared si
 
   str out = code_actions(&reads, doc, doc.uri, &diags);
   assert contains(out, `"title":"Implement missing 'Q.b'"`), "expected the quirk-method quick fix";
-  assert contains(out, `"newText":"  pub b(num n) bin {\n    // TODO: implement\n  }\n"`), "expected a stub with the quirk's own declared signature, no 'self'";
+  assert contains(out, `"newText":"  pub b(num n) flag {\n    // TODO: implement\n  }\n"`), "expected a stub with the quirk's own declared signature, no 'self'";
   // Inserted right before the impl block's own closing brace (line 9).
   assert contains(out, `"start":{"line":9,"character":0}`), "expected the insertion right before the impl's closing brace";
 }

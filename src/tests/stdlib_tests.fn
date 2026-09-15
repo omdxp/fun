@@ -2,8 +2,8 @@
 // resolve imports from disk, so they cover the paths a source-only
 // harness cannot reach.
 
-imp harness;
-imp std.string;
+use harness;
+use std.string;
 
 test "std.vec: push and get monomorphize on the element type" {
   str src = `imp std.vec;

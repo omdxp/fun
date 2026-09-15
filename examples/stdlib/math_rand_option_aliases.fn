@@ -1,7 +1,7 @@
-imp std.io;
-imp std.math as m;
-imp std.rand as r;
-imp std.option;
+use std.io;
+use std.math as m;
+use std.rand as r;
+use std.option;
 
 compound Person<T> {
   T name;
