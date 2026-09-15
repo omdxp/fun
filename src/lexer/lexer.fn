@@ -260,7 +260,7 @@ impl Lexer {
       t.data = .Bval(equals(text, "true"));
     } elif is_keyword(text) {
       t.type = .Keyword;
-      t.data = .Sval(text);
+      t.data = .Sval(canonical_keyword_text(text));
     } else {
       t.type = .Identifier;
       t.data = .Sval(text);

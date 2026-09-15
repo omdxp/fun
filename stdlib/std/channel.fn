@@ -308,20 +308,20 @@ fun channel_is_cancelled(num* cancel_flag) bin {
 // Dedicated cancellation token for channel APIs.
 pub compound ChannelCancelToken {
   // Cancellation flag (0 = active, nonzero = cancelled).
-  num flag;
+  num cancelled;
 }
 
 // Create a non-cancelled channel token.
 pub fun channel_cancel_token_new() ChannelCancelToken {
   ChannelCancelToken token;
-  token.flag = 0;
+  token.cancelled = 0;
   ret token;
 }
 
 // Create an already-cancelled channel token.
 pub fun channel_cancel_token_cancelled() ChannelCancelToken {
   ChannelCancelToken token;
-  token.flag = 1;
+  token.cancelled = 1;
   ret token;
 }
 
@@ -330,7 +330,7 @@ pub fun channel_cancel_token_cancel(ChannelCancelToken* token) num {
   if token == nil {
     ret CHANNEL_RC_NULL_ARG;
   }
-  token.flag = 1;
+  token.cancelled = 1;
   ret CHANNEL_RC_OK;
 }
 
@@ -339,7 +339,7 @@ pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
   if token == nil {
     ret CHANNEL_RC_NULL_ARG;
   }
-  token.flag = 0;
+  token.cancelled = 0;
   ret CHANNEL_RC_OK;
 }
 
@@ -348,7 +348,7 @@ pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) bin {
   if token == nil {
     ret false;
   }
-  ret token.flag != 0;
+  ret token.cancelled != 0;
 }
 
 // Convert optional token pointer into optional raw cancellation flag pointer.
@@ -356,7 +356,7 @@ fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
   if token == nil {
     ret nil;
   }
-  ret &token.flag;
+  ret &token.cancelled;
 }
 
 // Shared channel return codes. Some APIs intentionally alias meanings to

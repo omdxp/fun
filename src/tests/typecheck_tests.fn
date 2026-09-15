@@ -1149,8 +1149,8 @@ test "printf's own %-specifiers are checked against the arguments passed, bin wi
   accepts(
     `pub fun printf(str fmt, ...) num;
     `fun main() num {
-    `  bin flag = true;
-    `  printf("%d\n", flag);
+    `  bin ok = true;
+    `  printf("%d\n", ok);
     `  ret 0;
     `}`,
     "expected a bin argument accepted against %d, idiomatic C usage"
