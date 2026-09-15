@@ -519,6 +519,39 @@ pub fun quirk_method_sig_new() QuirkMethodSig {
   ret m;
 }
 
+// An `als Name<T1, T2> = <type>;` declaration: a reusable name for a type
+// expression, expanded wherever referenced before typecheck ever runs (see
+// the alias-expansion pass) - typecheck and codegen never see an alias
+// reference, only its already-expanded body.
+// 
+// Two distinct body shapes, told apart by `is_bound_list`: an ordinary
+// alias (`als Meters = num;`, `als Callback<A, R> = fun(A) R;`) names one
+// type expression in `body`; a bound-list alias (`als Numeric = num |
+// dec;`) names a set of alternatives in `bound_alternatives`, each already
+// rendered to canonical text the same way a generic bound alternative is
+// (see `render_datatype_bound`), spliced into a `T: Numeric` bound list
+// wherever referenced rather than standing for a single type. A bound-list
+// alias is never generic - a bound list has no single instantiation site.
+pub compound TypeAliasNode {
+  str name;
+  Vec<str> type_params;
+  flag has_type_params;
+  DataType* body;
+  Vec<str> bound_alternatives;
+  flag is_bound_list;
+}
+
+pub fun type_alias_node_new() TypeAliasNode {
+  TypeAliasNode a;
+  a.name = "";
+  a.type_params.init(0);
+  a.has_type_params = false;
+  a.body = nil;
+  a.bound_alternatives.init(0);
+  a.is_bound_list = false;
+  ret a;
+}
+
 // A `quirk Name { methods }` declaration (a structural interface).
 pub compound QuirkNode {
   str name;
@@ -747,6 +780,7 @@ pub enum NodeKind {
   Quirk(QuirkNode),
   Enum(EnumDeclNode),
   Impl(ImplNode),
+  TypeAlias(TypeAliasNode),
   // `test "name" { ... }` (top-level only). Skipped entirely by an
   // ordinary compile; only emitted/run in `fun test` mode.
   Test(TestDeclNode),
@@ -787,6 +821,7 @@ pub fun node_kind_name(NodeKind kind) str {
     .Enum(_) -> { ret "enum declaration"; }
     .Quirk(_) -> { ret "quirk declaration"; }
     .Impl(_) -> { ret "impl block"; }
+    .TypeAlias(_) -> { ret "type alias"; }
     .Import(_) -> { ret "import"; }
     .Test(_) -> { ret "test block"; }
     .StatementWarningControl(_) -> { ret "warning control"; }
@@ -1145,6 +1180,14 @@ fun _free_node_contents(Node* n) {
         dtype_free(im.concrete_dtype);
       }
       _free_node_vec(&im.methods);
+    }
+    .TypeAlias(a) -> {
+      a.type_params.free();
+      if a.is_bound_list {
+        a.bound_alternatives.free();
+      } else {
+        dtype_free(a.body);
+      }
     }
     .Test(t) -> { node_free(t.body); }
     .Fuzz(fz) -> {
@@ -1535,6 +1578,16 @@ pub fun node_clone(Node n) Node {
       }
       ci.methods = _clone_node_vec(&im.methods);
       c.kind = .Impl(ci);
+    }
+    .TypeAlias(a) -> {
+      TypeAliasNode ca = a;
+      ca.type_params = _clone_str_vec(&a.type_params);
+      if a.is_bound_list {
+        ca.bound_alternatives = _clone_str_vec(&a.bound_alternatives);
+      } else {
+        ca.body = dtype_clone(a.body);
+      }
+      c.kind = .TypeAlias(ca);
     }
     .Test(t) -> {
       TestDeclNode ct = t;

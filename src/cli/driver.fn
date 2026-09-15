@@ -9,6 +9,7 @@
 use ..parser.import_resolver;
 use ..semantics.typecheck;
 use ..semantics.warnings;
+use ..semantics.alias_expand;
 use ..lexer.lexer;
 use ..lexer.token;
 use fmt;
@@ -373,6 +374,14 @@ pub fun compile_to_c_mode(
     di = di - 1;
     Define* d = &defines.data[di];
     merged.nodes.insert(0, manifest_const_node(d.name, d.value));
+  }
+
+  // Every `als` reference is expanded transparently, in place, before
+  // typecheck ever sees the program - typecheck and codegen never learn
+  // aliases exist at all.
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
   }
 
   // Type checking runs over the merged program, so a call into an

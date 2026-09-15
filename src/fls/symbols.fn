@@ -28,6 +28,7 @@ pub enum DeclarationKind {
   Parameter,
   Global,
   Variant,
+  TypeAlias,
 }
 
 // A name's declaration: what it is, how to spell it back to a reader,
@@ -84,6 +85,38 @@ pub fun render_type(DataType* dt) str {
     ret "";
   }
   StringBuilder b = string_builder_init(32);
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    // A function-typed value (`fun(A, B) R`): `_base_type_name` would
+    // otherwise just show the parser's own fixed placeholder text
+    // (`"fun(...)"`, never rewritten to reflect the real params/return -
+    // codegen reads `fn_sig` directly instead of ever needing to), so
+    // this renders the real signature the same way a reader wrote it.
+    b.append("fun(");
+    num p = 0;
+    for p < dt.fn_sig.params.len {
+      if p > 0 {
+        b.append(", ");
+      }
+      str param_text = render_type(dt.fn_sig.params.get(p));
+      b.append(param_text);
+      free(param_text);
+      p = p + 1;
+    }
+    b.append(") ");
+    str rtype_text = render_type(dt.fn_sig.rtype);
+    b.append(rtype_text);
+    free(rtype_text);
+    num fstars = dt.pointer_depth;
+    if dt.flags.is_pointer && fstars == 0 {
+      fstars = 1;
+    }
+    num fs = 0;
+    for fs < fstars {
+      b.append("*");
+      fs = fs + 1;
+    }
+    ret b.build();
+  }
   str base_name = _base_type_name(dt);
   b.append(base_name);
   free(base_name);
@@ -669,6 +702,30 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
             free(literal);
           }
           ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
+        }
+      }
+      .TypeAlias(a) -> {
+        if equals(a.name, name) {
+          StringBuilder b = string_builder_init(32);
+          b.append("als ");
+          b.append(a.name);
+          _append_type_params(&b, a.has_type_params, &a.type_params, nil);
+          b.append(" = ");
+          if a.is_bound_list {
+            num bi = 0;
+            for bi < a.bound_alternatives.len {
+              if bi > 0 {
+                b.append(" | ");
+              }
+              b.append(a.bound_alternatives.get(bi));
+              bi = bi + 1;
+            }
+          } else {
+            str body_text = render_type(a.body);
+            b.append(body_text);
+            free(body_text);
+          }
+          ret .Some(_declaration_vis(name, .TypeAlias, b.build(), n.pos, n.flags.is_public));
         }
       }
       _ -> {}
@@ -5093,6 +5150,28 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         qb.append(q.name);
         _append_type_params(&qb, q.has_type_params, &q.type_params, nil);
         out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
+      }
+      .TypeAlias(a) -> {
+        StringBuilder ab = string_builder_init(32);
+        ab.append("als ");
+        ab.append(a.name);
+        _append_type_params(&ab, a.has_type_params, &a.type_params, nil);
+        ab.append(" = ");
+        if a.is_bound_list {
+          num bi = 0;
+          for bi < a.bound_alternatives.len {
+            if bi > 0 {
+              ab.append(" | ");
+            }
+            ab.append(a.bound_alternatives.get(bi));
+            bi = bi + 1;
+          }
+        } else {
+          str ab_body_text = render_type(a.body);
+          ab.append(ab_body_text);
+          free(ab_body_text);
+        }
+        out.push(_declaration_vis(a.name, .TypeAlias, ab.build(), n.pos, n.flags.is_public));
       }
       .Impl(im) -> {
         num m = 0;

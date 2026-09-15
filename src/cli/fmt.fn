@@ -592,7 +592,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
       equals(bt, "pub") || equals(
       bt,
       "enum"
-    ) || equals(bt, "quirk") || equals(bt, "as") || equals(bt, "ret");
+    ) || equals(bt, "quirk") || equals(bt, "as") || equals(bt, "ret") || equals(bt, "als");
   }
   ret equals(bt, "{") || equals(bt, "}") || equals(bt, ";") || equals(bt, ",") ||
     equals(bt, "(") || equals(
@@ -1413,6 +1413,41 @@ fun _group_top_level(Vec<Token>* tokens) Vec<Token> {
 }
 
 // Formats `src`, or reports the stage that rejected it.
+// Splits a lexed `>=` token in place into a `>` then a `=` token,
+// wherever it appears between an `als` keyword and its own terminating
+// `;` - the lexer can't tell a real `>=` comparison apart from "close
+// this alias's generic-param list, then assign" without parse context
+// (the same maximal-munch ambiguity the parser resolves via
+// `split_angle_closer_equals_token_if_needed`), and unlike a real
+// parser this formatter has no cursor-relative lookahead to resolve it
+// with - but an alias body is always a bare type expression, which
+// never itself contains a real `>=` comparison, so any `>=` found in
+// this narrow window is unambiguous.
+fun _split_als_generic_closer_equals(Vec<Token>* tokens) {
+  flag in_als = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == .Keyword && equals(token_text(t), "als") {
+      in_als = true;
+    } elif t.type == .Symbol && equals(token_text(t), ";") {
+      in_als = false;
+    } elif in_als && t.type == .Operator && equals(token_text(t), ">=") {
+      // `substr` forces a genuine heap copy, not a bare C string
+      // literal: `free_token_vec` frees every token's own text as owned
+      // heap memory, which crashes on a literal.
+      Token first = t;
+      first.data = .Sval(substr(">", 0, 1));
+      tokens.set(i, first);
+      Token second = t;
+      second.data = .Sval(substr("=", 0, 1));
+      tokens.insert(i + 1, second);
+      in_als = false;
+    }
+    i = i + 1;
+  }
+}
+
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
   if lexed.is_err() {
@@ -1423,6 +1458,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
   // of these same structs, sharing every string, so it stays a
   // shallow free.
   defer free_token_vec(&raw_tokens);
+  _split_als_generic_closer_equals(&raw_tokens);
   Vec<Token> tokens = _group_top_level(&raw_tokens);
   defer tokens.free();
 

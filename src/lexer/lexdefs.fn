@@ -15,7 +15,7 @@ use std.string;
 // canonical_keyword_text below; both parse identically.
 pub fun is_keyword(str s) flag {
   fit s {
-    "imp", "use", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const",
+    "imp", "use", "pub", "fun", "as", "als", "enum", "compound", "quirk", "impl", "let", "const",
     "defer",
     "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "flag", "chr", "if",
     "elif",
@@ -30,12 +30,13 @@ pub fun is_keyword(str s) flag {
 // changed together.
 pub fun keywords() Vec<str> {
   Vec<str> out;
-  out.init(42);
+  out.init(43);
   out.push("imp");
   out.push("use");
   out.push("pub");
   out.push("fun");
   out.push("as");
+  out.push("als");
   out.push("enum");
   out.push("compound");
   out.push("quirk");

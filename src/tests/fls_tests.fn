@@ -1091,6 +1091,68 @@ test "go-to-definition on a compound field or enum variant lands on its own decl
   assert contains(variant_def, `"line":6`), "expected the variant's own declaration line, not the enum's";
 }
 
+test "hover on a type alias declaration shows its own resolved body" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alsdecl.fn";
+  doc.path = "alsdecl.fn";
+  doc.text = `als Callback<A, R> = fun(A) R;
+  `fun main() {}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 10);
+  assert contains(hovered, "als Callback<A, R> = fun(A) R"), "expected the alias's own declared form";
+}
+
+test "hover on a bound-list type alias shows its own alternatives" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alsbound.fn";
+  doc.path = "alsbound.fn";
+  doc.text = `als Numeric = num | dec;
+  `fun main() {}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 6);
+  assert contains(hovered, "als Numeric = num | dec"), "expected the alias's own bound-list body";
+}
+
+test "go-to-definition on a type alias reference jumps to its own declaration" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alsdef.fn";
+  doc.path = "alsdef.fn";
+  doc.text = `als Meters = num;
+  `fun main() {
+  `  Meters m = 5;
+  `  _ = m;
+  `}`;
+  doc.version = 1;
+
+  // 'Meters' is used as a type on line 2 (0-indexed), declared on line 0.
+  str jumped = definition(&reads, doc, 2, 4);
+  assert contains(jumped, `"line":0`), "expected the alias's own declaration line";
+}
+
+test "completion offers a declared type alias name alongside compound/enum/quirk" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alscompletion.fn";
+  doc.path = "alscompletion.fn";
+  doc.text = `als Meters = num;
+  `fun main() {
+  `  M
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 2, 3, false);
+  assert contains(out, `"label":"Meters"`), "expected the alias offered among general completions";
+}
+
 test "go-to-definition on a quirk-typed receiver's method lands on the method's own line, not the quirk's" {
   // User-reported. QuirkMethodSig carried no position of its own -
   // quirk_method_declaration fell back to the whole quirk node's

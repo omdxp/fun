@@ -2042,6 +2042,11 @@ fun _bare_type_name(Vec<Node>* program, str name) str {
           ret name;
         }
       }
+      .TypeAlias(a) -> {
+        if equals(a.name, name) {
+          ret name;
+        }
+      }
       _ -> {}
     }
   }
@@ -2151,6 +2156,7 @@ fun _type_and_quirk_bound_completions(Vec<Node>* program, Vec<Item>* items) {
       .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
       .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       _ -> {}
     }
   }
@@ -2284,6 +2290,7 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
         );
       }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);
         items.push(_item(v.name, .Variable, decl_type_text));
@@ -2515,6 +2522,7 @@ fun _declared(
         );
       }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);
         items.push(_item(v.name, .Variable, decl_type_text));

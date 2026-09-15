@@ -1,0 +1,438 @@
+// Type-alias expansion.
+// 
+// An `als Name<T1, T2> = <type>;` (or `als Name = a | b;`) declaration
+// names a reusable type expression, transparently expanded wherever
+// referenced before typecheck ever runs - neither typecheck nor codegen
+// needs to know aliases exist, matching the same "single point of
+// expansion, everything downstream free" approach this compiler already
+// uses for keyword canonicalization.
+// 
+// This mutates the program's own DataType nodes in place, so a caller
+// that must keep an alias reference visible for display (fls hover,
+// completion, go-to-definition) needs to run this against a disposable
+// clone of the program, never its own cached copy - see
+// `src/fls/diagnostics.fn`'s own call site for exactly that.
+
+use ..ast.ast;
+use ..parser.datatype_defs;
+use std.string;
+use std.io;
+use std.vec;
+use std.map;
+use std.option;
+
+// One alias's own body, resolved against every other alias in the same
+// program up to the round it was last processed. `is_resolved` is false
+// until a round finds no remaining unresolved alias reference inside its
+// own body/alternatives - only then is it safe for another alias (or the
+// program at large) to substitute it in.
+compound _ResolvedAlias {
+  flag is_resolved;
+  Vec<str> type_params;
+  flag is_bound_list;
+  DataType* body;
+  Vec<str> bound_alternatives;
+}
+
+fun _unresolved_marker() _ResolvedAlias {
+  Vec<str> empty_params;
+  empty_params.init(0);
+  Vec<str> empty_alts;
+  empty_alts.init(0);
+  ret _ResolvedAlias{
+  is_resolved = false,
+  type_params = empty_params,
+  is_bound_list = false,
+  body = nil,
+  bound_alternatives = empty_alts}
+  ;
+}
+
+// Frees a Vec<DataType*> this module itself built (each entry its own
+// fresh allocation) - the same job as ast.fn's own private
+// `_free_dtype_vec`, kept local since that one isn't exported.
+fun _free_dtype_ptr_vec(Vec<DataType*>* v) {
+  num i = 0;
+  for i < v.len {
+    dtype_free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
+// Overwrites `*dt` with `replacement`'s own field values, freeing
+// whatever `dt` used to own first (its old generic_args and fn_sig -
+// nothing else in the program can still be pointing at either, since the
+// walk below visits each DataType exactly once). `dt`'s own pointer
+// identity stays stable; only its contents change, mirroring
+// `dtype_clone`'s own shallow-copy-then-take-ownership idiom.
+fun _replace_dtype(DataType* dt, DataType replacement) {
+  Vec<DataType*> old_generic_args = dt.generic_args;
+  flag old_has_fn_sig = dt.has_fn_sig;
+  FnTypeSig* old_fn_sig = dt.fn_sig;
+  *dt = replacement;
+  _free_dtype_ptr_vec(&old_generic_args);
+  if old_has_fn_sig && old_fn_sig != nil {
+    _free_dtype_ptr_vec(&old_fn_sig.params);
+    dtype_free(old_fn_sig.rtype);
+    free(old_fn_sig);
+  }
+}
+
+// Substitutes every bare occurrence of one of `params` (an alias's own
+// declared type params) inside `dt` for the matching concrete argument
+// in `args`, recursively through `dt`'s own generic_args and fn_sig.
+fun _substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* args) {
+  if dt == nil {
+    ret;
+  }
+  num i = 0;
+  for i < dt.generic_args.len {
+    _substitute_params(dt.generic_args.get(i), params, args);
+    i = i + 1;
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    num p = 0;
+    for p < dt.fn_sig.params.len {
+      _substitute_params(dt.fn_sig.params.get(p), params, args);
+      p = p + 1;
+    }
+    _substitute_params(dt.fn_sig.rtype, params, args);
+  }
+  num j = 0;
+  for j < params.len && j < args.len {
+    if equals(params.get(j), dt.type_str) {
+      DataType* arg = args.get(j);
+      DataType sub = *dtype_clone(arg);
+      sub.pointer_depth = sub.pointer_depth + dt.pointer_depth;
+      _replace_dtype(dt, sub);
+      ret;
+    }
+    j = j + 1;
+  }
+}
+
+// Expands any alias reference reachable through `dt` - its own base
+// name, and recursively through generic_args/fn_sig regardless of
+// whether the outer name is itself an alias (an alias can sit nested
+// inside another type's own generic argument, e.g.
+// `Vec<Callback<num, num>>`). Sets `*saw_unresolved` when `dt`'s own base
+// name names a registered alias not yet resolved this round - used
+// during the alias table's own self-resolution rounds to know when
+// another round is still needed.
+fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_unresolved) {
+  if dt == nil {
+    ret;
+  }
+  num i = 0;
+  for i < dt.generic_args.len {
+    _expand_dtype(dt.generic_args.get(i), resolved, saw_unresolved);
+    i = i + 1;
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    num p = 0;
+    for p < dt.fn_sig.params.len {
+      _expand_dtype(dt.fn_sig.params.get(p), resolved, saw_unresolved);
+      p = p + 1;
+    }
+    _expand_dtype(dt.fn_sig.rtype, resolved, saw_unresolved);
+  }
+
+  let found = resolved.at(dt.type_str);
+  if found.is_none() {
+    ret;
+  }
+  _ResolvedAlias ra = found.unwrap();
+  if !ra.is_resolved {
+    *saw_unresolved = true;
+    ret;
+  }
+  if ra.is_bound_list {
+    // A bound-list alias referenced as an ordinary type is a real user
+    // error (only valid inside a bound-list position) - left for
+    // typecheck's own downstream "unknown type" diagnostic rather than
+    // expanding to nonsense here.
+    ret;
+  }
+
+  DataType expanded = *dtype_clone(ra.body);
+  if ra.type_params.len > 0 {
+    _substitute_params(&expanded, &ra.type_params, &dt.generic_args);
+  }
+  // A pointer applied at the reference site stacks onto whatever the
+  // alias's own body already carries (`als P = num*; P* x;` -> num**).
+  expanded.pointer_depth = expanded.pointer_depth + dt.pointer_depth;
+  _replace_dtype(dt, expanded);
+}
+
+// Splices a resolved bound-list alias's own alternatives into
+// `alternatives` in place of a reference to it by name, or substitutes
+// an ordinary alias reference with its own rendered, fully-expanded
+// text; leaves anything not naming a registered alias (a concrete type,
+// a quirk name) untouched. Sets `*saw_unresolved` when an alternative
+// names a registered alias not yet resolved this round.
+fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>* resolved, flag* saw_unresolved) {
+  Vec<str> out;
+  out.init(alternatives.len);
+  num i = 0;
+  for i < alternatives.len {
+    str alt = alternatives.get(i);
+    i = i + 1;
+    let found = resolved.at(alt);
+    if found.is_none() {
+      out.push(alt);
+      continue;
+    }
+    _ResolvedAlias ra = found.unwrap();
+    if !ra.is_resolved {
+      *saw_unresolved = true;
+      out.push(alt);
+      continue;
+    }
+    if ra.is_bound_list {
+      num j = 0;
+      for j < ra.bound_alternatives.len {
+        out.push(ra.bound_alternatives.get(j));
+        j = j + 1;
+      }
+    } else {
+      out.push(render_datatype_bound(ra.body));
+    }
+  }
+  alternatives.free();
+  *alternatives = out;
+}
+
+// Walks every top-level declaration's own DataType-bearing positions and
+// expands each in place: a function/method's own params and return type,
+// a compound's own fields, a plain variable declaration's own type, a
+// quirk method's own signature, and every generic bound-list's own
+// alternatives (function, compound, and impl - a method's own bound list
+// is covered via the function-shaped branch inside `.Impl`'s methods).
+fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
+  flag unused = false;
+  num i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    fit node.kind {
+      .Function(f) -> { _expand_function_shaped(f, resolved, &unused); }
+      .Variable(v) -> { _expand_dtype(v.var_type, resolved, &unused); }
+      .Compound(c) -> {
+        num fi = 0;
+        for fi < c.fields.len {
+          CompoundField cf = c.fields.get(fi);
+          fi = fi + 1;
+          _expand_dtype(cf.dtype, resolved, &unused);
+        }
+        if c.has_type_param_forced_insts {
+          _expand_forced_insts(&c.type_param_forced_insts, resolved, &unused);
+        }
+      }
+      .Quirk(q) -> {
+        num mi = 0;
+        for mi < q.methods.len {
+          QuirkMethodSig m = q.methods.get(mi);
+          mi = mi + 1;
+          _expand_dtype(m.rtype, resolved, &unused);
+          num ai = 0;
+          for ai < m.args.len {
+            QuirkArg qa = m.args.get(ai);
+            ai = ai + 1;
+            _expand_dtype(qa.dtype, resolved, &unused);
+          }
+        }
+      }
+      .Impl(im) -> {
+        if im.has_type_param_forced_insts {
+          _expand_forced_insts(&im.type_param_forced_insts, resolved, &unused);
+        }
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(f) -> { _expand_function_shaped(f, resolved, &unused); }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+fun _expand_function_shaped(FunctionNode f, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+  if f.has_rtype {
+    _expand_dtype(f.rtype, resolved, unused);
+  }
+  if f.has_args {
+    num a = 0;
+    for a < f.args.len {
+      Node* arg = f.args.get(a);
+      a = a + 1;
+      if arg == nil {
+        continue;
+      }
+      fit arg.kind {
+        .Variable(v) -> { _expand_dtype(v.var_type, resolved, unused); }
+        _ -> {}
+      }
+    }
+  }
+  if f.has_type_param_forced_insts {
+    _expand_forced_insts(&f.type_param_forced_insts, resolved, unused);
+  }
+  if f.has_body {
+    _expand_body(f.body, resolved, unused);
+  }
+}
+
+// Walks a function/method body recursively for a local `Variable`
+// declaration's own type - the only DataType-bearing position inside a
+// body, alongside every statement kind that can nest a body of its own.
+fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+  if stmt == nil {
+    ret;
+  }
+  fit stmt.kind {
+    .Body(b) -> {
+      num i = 0;
+      for i < b.statements.len {
+        _expand_body(b.statements.get(i), resolved, unused);
+        i = i + 1;
+      }
+    }
+    .Variable(v) -> {
+      _expand_dtype(v.var_type, resolved, unused);
+      if v.has_val {
+        _expand_body(v.val, resolved, unused);
+      }
+    }
+    .StatementIf(ifn) -> { _expand_body(ifn.body, resolved, unused); }
+    .StatementElseIf(ein) -> { _expand_body(ein.body, resolved, unused); }
+    .StatementElse(b) -> { _expand_body(b, resolved, unused); }
+    .StatementDefer(inner) -> { _expand_body(inner, resolved, unused); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> { _expand_body(c.body, resolved, unused); }
+        .Range(r) -> { _expand_body(r.body, resolved, unused); }
+        .Iter(it) -> { _expand_body(it.body, resolved, unused); }
+      }
+    }
+    .StatementFit(f) -> {
+      num i = 0;
+      for i < f.branches.len {
+        FitBranch b = f.branches.get(i);
+        i = i + 1;
+        _expand_body(b.body, resolved, unused);
+      }
+    }
+    .StatementFork(inner) -> { _expand_body(inner, resolved, unused); }
+    _ -> {}
+  }
+}
+
+fun _expand_forced_insts(Vec<Vec<str>>* insts, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+  num c = 0;
+  for c < insts.len {
+    Vec<str> combo = insts.get(c);
+    _expand_bound_alternatives(&combo, resolved, unused);
+    insts.set(c, combo);
+    c = c + 1;
+  }
+}
+
+// Expands every `als` reference anywhere in `nodes` before typecheck
+// ever runs - see the file-level note above. A no-op (fast path) when
+// the program declares no aliases at all. Returns an error message for
+// a duplicate alias name or a real reference cycle among aliases
+// themselves; both are real compile errors, not something to silently
+// paper over.
+pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
+  Map<str, TypeAliasNode> raw_aliases;
+  raw_aliases.init(8);
+  num i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    fit node.kind {
+      .TypeAlias(a) -> {
+        if raw_aliases.has(a.name) {
+          raw_aliases.free();
+          ret .Some(format("type alias '{str}' is declared more than once", a.name));
+        }
+        raw_aliases.put(a.name, a);
+      }
+      _ -> {}
+    }
+  }
+  if raw_aliases.len() == 0 {
+    raw_aliases.free();
+    ret .None;
+  }
+
+  // Resolve the alias table against itself: an alias's own body may
+  // reference another alias, so this repeats until a full round leaves
+  // nothing unresolved. Bounded by names.len + 1 rounds - a genuine
+  // chain among N aliases resolves in at most N rounds, so anything
+  // still unresolved after one more is a real cycle, not a slow chain.
+  Vec<str> names = raw_aliases.keys();
+  Map<str, _ResolvedAlias> resolved;
+  resolved.init(names.len);
+  num ni = 0;
+  for ni < names.len {
+    resolved.put(names.get(ni), _unresolved_marker());
+    ni = ni + 1;
+  }
+
+  num round = 0;
+  flag any_left = true;
+  for round < names.len + 1 && any_left {
+    any_left = false;
+    num r = 0;
+    for r < names.len {
+      str name = names.get(r);
+      r = r + 1;
+      TypeAliasNode a = raw_aliases.at(name).unwrap();
+      flag saw_unresolved = false;
+      if a.is_bound_list {
+        _expand_bound_alternatives(&a.bound_alternatives, &resolved, &saw_unresolved);
+      } else {
+        _expand_dtype(a.body, &resolved, &saw_unresolved);
+      }
+      raw_aliases.put(name, a);
+      resolved.put(
+        name,
+        _ResolvedAlias{
+        is_resolved = !saw_unresolved,
+        type_params = a.type_params,
+        is_bound_list = a.is_bound_list,
+        body = a.body,
+        bound_alternatives = a.bound_alternatives}
+
+      );
+      if saw_unresolved {
+        any_left = true;
+      }
+    }
+    round = round + 1;
+  }
+
+  if any_left {
+    names.free();
+    raw_aliases.free();
+    resolved.free();
+    ret .Some("type aliases form a reference cycle");
+  }
+
+  _expand_program(nodes, &resolved);
+
+  names.free();
+  raw_aliases.free();
+  resolved.free();
+  ret .None;
+}

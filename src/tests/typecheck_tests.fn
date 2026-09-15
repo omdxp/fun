@@ -4,11 +4,15 @@ use ..lexer.lexer;
 use ..parser.parse_state;
 use ..parser.parser;
 use ..semantics.typecheck;
+use ..semantics.alias_expand;
 use std.string;
 use std.result;
 
 // Parses `src` and checks it, reporting the message of the first type
-// error, or an empty string when the program checks out.
+// error, or an empty string when the program checks out. Expands any
+// `als` reference first, the same way the real compile pipeline does
+// (see `expand_type_aliases`'s own callers) - a no-op for the vast
+// majority of tests here that declare no aliases at all.
 fun check(str src) str {
   let tokens = tokenize(src, "t.fn");
   if tokens.is_err() {
@@ -21,6 +25,10 @@ fun check(str src) str {
   let perr = p.parse();
   if perr.is_some() {
     ret "parse error";
+  }
+  let alias_err = expand_type_aliases(&state.nodes);
+  if alias_err.is_some() {
+    ret alias_err.unwrap();
   }
   let checked = typecheck_program(&state.nodes);
   if checked.is_err() {
@@ -916,6 +924,90 @@ test "a mixed bound list accepts both a concrete type and a quirk implementor" {
     `}`,
     "expected both the concrete type and the quirk implementor accepted"
   );
+}
+
+test "a non-generic type alias typechecks through, transparently" {
+  accepts(
+    `als Meters = num;
+    `fun main() num {
+    `  Meters m = 5;
+    `  ret m + 1;
+    `}`,
+    "expected the alias to resolve to num, both directions"
+  );
+}
+
+test "a non-generic type alias still rejects a real type mismatch" {
+  assert contains(
+    check(`als Meters = num;
+    `fun main() num {
+    `  Meters m = "hi";
+    `  ret 0;
+    `}`),
+    "cannot initialize"
+  ), "expected the alias's own underlying type still enforced";
+}
+
+test "a generic function-type alias typechecks a real callback parameter" {
+  accepts(
+    `als Callback<A, R> = fun(A) R;
+    `fun square(num x) num { ret x * x; }
+    `fun apply(Callback<num, num> cb, num x) num { ret cb(x); }
+    `fun main() num {
+    `  ret apply(square, 4);
+    `}`,
+    "expected the generic alias to expand to a real callback type"
+  );
+}
+
+test "a bound-list type alias is usable as a generic constraint" {
+  accepts(
+    `als Numeric = num | dec;
+    `fun identity<T: Numeric>(T x) T { ret x; }
+    `fun main() num {
+    `  ret identity(5);
+    `}`,
+    "expected the bound-list alias spliced into the constraint"
+  );
+  assert contains(
+    check(`als Numeric = num | dec;
+    `fun identity<T: Numeric>(T x) T { ret x; }
+    `fun main() str {
+    `  ret identity("nope");
+    `}`),
+    "does not accept"
+  ), "expected a type outside the bound-list alias rejected";
+}
+
+test "a chain of type aliases resolves through every link" {
+  accepts(
+    `als Base = num;
+    `als Middle = Base;
+    `als Top = Middle;
+    `fun main() num {
+    `  Top t = 42;
+    `  ret t;
+    `}`,
+    "expected the whole alias chain to resolve to num"
+  );
+}
+
+test "a duplicate type alias name is rejected" {
+  assert contains(
+    check(`als Foo = num;
+    `als Foo = str;
+    `fun main() {}`),
+    "declared more than once"
+  ), "expected the duplicate alias name rejected";
+}
+
+test "a type alias reference cycle is rejected" {
+  assert contains(
+    check(`als A = B;
+    `als B = A;
+    `fun main() {}`),
+    "reference cycle"
+  ), "expected the alias cycle rejected";
 }
 
 test "await outside an async function is rejected" {
