@@ -5941,3 +5941,67 @@ test "hover on a let-bound '?' propagation resolves a generic compound instantia
   assert contains(comp, `"label":"v"`), "expected Box<num>'s own field 'v' to be offered";
   assert !contains(comp, `"label":"get_box"`), "expected filtering to Box<num>'s own members, not every name in scope";
 }
+
+test "hover on 'use'/'flag' matches hover on 'imp'/'bin' exactly, real fls parity for the alternate spellings" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document imp_doc;
+  imp_doc.uri = "file:///imp_spelling.fn";
+  imp_doc.path = "imp_spelling.fn";
+  imp_doc.text = "imp std.io;\n";
+  imp_doc.version = 1;
+  str imp_hover = hover(&reads, imp_doc, 0, 1);
+
+  Document use_doc;
+  use_doc.uri = "file:///use_spelling.fn";
+  use_doc.path = "use_spelling.fn";
+  use_doc.text = "use std.io;\n";
+  use_doc.version = 1;
+  str use_hover = hover(&reads, use_doc, 0, 1);
+
+  // 'imp' and 'use' are the same length, so their hover JSON (which
+  // embeds the token's own source span alongside its doc text) is
+  // truly byte-identical, not just similar.
+  assert equals(imp_hover, use_hover), "expected 'use' to hover identically to 'imp', same canonicalized keyword";
+
+  Document bin_doc;
+  bin_doc.uri = "file:///bin_spelling.fn";
+  bin_doc.path = "bin_spelling.fn";
+  bin_doc.text = "fun main() {\n  bin ok = true;\n}\n";
+  bin_doc.version = 1;
+  str bin_hover = hover(&reads, bin_doc, 1, 3);
+
+  Document flag_doc;
+  flag_doc.uri = "file:///flag_spelling.fn";
+  flag_doc.path = "flag_spelling.fn";
+  flag_doc.text = "fun main() {\n  flag ok = true;\n}\n";
+  flag_doc.version = 1;
+  str flag_hover = hover(&reads, flag_doc, 1, 3);
+
+  // 'bin' and 'flag' differ in length, so the embedded source span
+  // legitimately differs even though the doc content is identical
+  // (both resolve through the same canonicalized keyword text) -
+  // compare the markdown content itself, not the whole span-bearing
+  // JSON payload.
+  num bin_value_end = index_of_str(bin_hover, `},"range"`);
+  num flag_value_end = index_of_str(flag_hover, `},"range"`);
+  assert bin_value_end > 0 && flag_value_end > 0, "expected both hovers to carry a range";
+  assert equals(substr(bin_hover, 0, bin_value_end), substr(flag_hover, 0, flag_value_end)), "expected 'flag' hover content to match 'bin', same canonicalized keyword";
+}
+
+test "completion offers both 'imp'/'use' and 'bin'/'flag' as keyword suggestions" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///kwcomp.fn";
+  doc.path = "kwcomp.fn";
+  doc.text = "";
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 0, 0, false);
+  assert contains(comp, `"label":"imp"`), "expected 'imp' still offered";
+  assert contains(comp, `"label":"use"`), "expected 'use' offered alongside 'imp'";
+  assert contains(comp, `"label":"bin"`), "expected 'bin' still offered";
+  assert contains(comp, `"label":"flag"`), "expected 'flag' offered alongside 'bin'";
+}

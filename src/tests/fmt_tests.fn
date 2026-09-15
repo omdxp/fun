@@ -220,8 +220,8 @@ test "keeps space after await before parenthesized receiver" {
 }
 
 test "keeps pointer-to-pointer spacing and assignment spacing" {
-  str src = `fun use(raw **args) num{raw** local=args;ret 0;}`;
-  str want = `fun use(raw** args) num {
+  str src = `fun run(raw **args) num{raw** local=args;ret 0;}`;
+  str want = `fun run(raw** args) num {
   `  raw** local = args;
   `  ret 0;
   `}`;
@@ -509,4 +509,21 @@ test "a postfix '?'/'!' followed by a chained field access stays glued, not spac
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "half(1)?.x;"), "expected postfix '?' before '.field' to stay glued, no space";
   assert contains(got, "to_result(1)!.x;"), "expected postfix '!' before '.field' to stay glued, no space";
+}
+
+test "'use'/'flag' format back to the current canonical spelling 'imp'/'bin'" {
+  str src = `use std.c.io;
+  `
+  `fun main() num {
+  `  flag ok = true;
+  `  if ok {
+  `    printf("ok\n");
+  `  }
+  `  ret 0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "imp std.c.io;"), "expected 'use' to format back to the canonical 'imp'";
+  assert !contains(got, "use std.c.io;"), "expected no trace of the alternate spelling after formatting";
+  assert contains(got, "bin ok = true;"), "expected 'flag' to format back to the canonical 'bin'";
+  assert !contains(got, "flag ok"), "expected no trace of the alternate spelling after formatting";
 }

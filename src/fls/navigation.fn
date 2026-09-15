@@ -1509,7 +1509,7 @@ pub fun keyword_doc(str word) str {
     ret _doc(`str s;`, `A NUL-terminated byte string.`);
   }
   if equals(word, "bin") {
-    ret _doc(`bin flag;`, `A boolean: true or false.`);
+    ret _doc(`bin ok;`, `A boolean: true or false.`);
   }
   if equals(word, "chr") {
     ret _doc(`chr c;`, `A single byte, written as a character literal ('a').`);
@@ -1531,10 +1531,10 @@ pub fun keyword_doc(str word) str {
     );
   }
   if equals(word, "true") {
-    ret _doc(`bin flag = true;`, `The boolean literal for a true value.`);
+    ret _doc(`bin ok = true;`, `The boolean literal for a true value.`);
   }
   if equals(word, "false") {
-    ret _doc(`bin flag = false;`, `The boolean literal for a false value.`);
+    ret _doc(`bin ok = false;`, `The boolean literal for a false value.`);
   }
   if equals(word, "for") {
     ret _doc(

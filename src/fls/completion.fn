@@ -2633,6 +2633,9 @@ fun _skeleton(str word) str {
   if equals(word, "imp") {
     ret "imp ${1:std.io};";
   }
+  if equals(word, "use") {
+    ret "use ${1:std.io};";
+  }
   if equals(word, "let") {
     ret "let ${1:name} = ${0:value};";
   }

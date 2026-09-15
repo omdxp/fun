@@ -333,3 +333,17 @@ test "debug info pins every line of an async function's synthesized trampoline b
   assert !contains(entry_body, `#line 3`), "expected no line inside the trampoline to drift past worker's own declaration line";
   assert contains(out, `#line 2 "test.fn"`), "expected the trampoline's own lines pinned to worker's declaration";
 }
+
+test "'use'/'flag' compile and run end to end, as real alternate spellings of 'imp'/'bin'" {
+  str src = `use std.c.io;
+  `
+  `fun main() num {
+  `  flag ok = true;
+  `  if ok {
+  `    printf("ok\n");
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "use_flag_alt_spellings", "'use'/'flag' end to end");
+  assert equals(out, "ok\n"), "expected 'use'/'flag' to compile and run identically to 'imp'/'bin'";
+}

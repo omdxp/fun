@@ -8,12 +8,17 @@
 // disambiguation, is where those get recognized.
 
 imp std.vec;
+imp std.string;
 
-// True if `s` is a reserved word.
+// True if `s` is a reserved word. `use`/`flag` are accepted alongside
+// `imp`/`bin` as alternate spellings during the transition tracked in
+// canonical_keyword_text below; both parse identically.
 pub fun is_keyword(str s) bin {
   fit s {
-    "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const", "defer",
-    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif",
+    "imp", "use", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "const",
+    "defer",
+    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "flag", "chr", "if",
+    "elif",
     "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue",
     "allow", "expect", "assert", "panic", "test", "fuzz" -> { ret true; }
     _ -> { ret false; }
@@ -25,8 +30,9 @@ pub fun is_keyword(str s) bin {
 // changed together.
 pub fun keywords() Vec<str> {
   Vec<str> out;
-  out.init(40);
+  out.init(42);
   out.push("imp");
+  out.push("use");
   out.push("pub");
   out.push("fun");
   out.push("as");
@@ -46,6 +52,7 @@ pub fun keywords() Vec<str> {
   out.push("dec");
   out.push("str");
   out.push("bin");
+  out.push("flag");
   out.push("chr");
   out.push("if");
   out.push("elif");
@@ -74,6 +81,30 @@ pub fun is_boolean_keyword(str s) bin {
   fit s {
     "true", "false" -> { ret true; }
     _ -> { ret false; }
+  }
+}
+
+// The keyword text every consumer past the lexer actually sees: `use`
+// canonicalizes to `imp`, `flag` to `bin`, everything else passes through
+// unchanged. `use`/`flag` are accepted spellings a reader may type, but
+// the parser, formatter, and fls all key off one spelling per keyword, so
+// canonicalizing once here - the single place a keyword's matched text
+// turns into a token - means nothing downstream needs to know a second
+// spelling exists at all. This direction (old spelling canonical) is the
+// transition state: once this repo's own source has migrated to the new
+// spelling, this flips so `-fmt` rewrites the old spelling forward
+// instead, until `imp`/`bin` are dropped from is_keyword entirely.
+pub fun canonical_keyword_text(str s) str {
+  // The token this feeds is later freed as an owned allocation (see
+  // free_token_contents), same as the heap-allocated text the lexer
+  // read for every other token - a bare string literal here would get
+  // freed as if it were heap memory too, a real crash
+  // ("pointer being freed was not allocated"). substr forces a fresh
+  // heap copy, matching how every other token's own text is owned.
+  fit s {
+    "use" -> { ret substr("imp", 0, 3); }
+    "flag" -> { ret substr("bin", 0, 3); }
+    _ -> { ret s; }
   }
 }
 
