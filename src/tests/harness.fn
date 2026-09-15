@@ -9,6 +9,7 @@ use ..parser.parser;
 use ..parser.import_resolver;
 use ..codegen.codegen;
 use ..codegen.codegen_state;
+use ..semantics.alias_expand;
 use std.string;
 use std.result;
 use std.error;
@@ -35,6 +36,10 @@ pub fun transpile_source(str src) Result<str, str> {
   let perr = p.parse();
   if perr.is_some() {
     ret .Err("parse error");
+  }
+  let alias_err = expand_type_aliases(&state.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
   }
 
   CodegenState cst = codegen_state_new();
@@ -64,6 +69,10 @@ pub fun transpile_source_with_debug_info(str src) Result<str, str> {
   let perr = p.parse();
   if perr.is_some() {
     ret .Err("parse error");
+  }
+  let alias_err = expand_type_aliases(&state.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
   }
 
   CodegenState cst = codegen_state_new();

@@ -15,6 +15,7 @@ use ..parser.parser;
 use ..parser.import_resolver;
 use ..semantics.typecheck;
 use ..semantics.warnings;
+use ..semantics.alias_expand;
 use std.string;
 use std.vec;
 use std.option;
@@ -199,8 +200,20 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   // itself is recorded here and re-added once warnings are collected.
   flag has_type_error = false;
   Diagnostic type_error_diag = _at_start(DIAG_SEVERITY_ERROR, "");
-  let checked = typecheck_program(&program.nodes);
-  if checked.is_err() {
+  // Typechecking through an `als` reference needs it expanded first, but
+  // expansion mutates the tree in place - and `program.nodes` here is
+  // the SAME merged program hover/completion/go-to-definition read from
+  // this same `AnalysisCache` entry. Expanding a disposable clone keeps
+  // an alias reference visible as written for the rest of fls.
+  Vec<Node> alias_checked_nodes = clone_node_tree(&program.nodes);
+  let alias_err = expand_type_aliases(&alias_checked_nodes);
+  if alias_err.is_some() {
+    has_type_error = true;
+    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, alias_err.unwrap());
+  }
+  let checked = typecheck_program(&alias_checked_nodes);
+  free_node_tree(&alias_checked_nodes);
+  if !has_type_error && checked.is_err() {
     TypeError e = checked.unwrap_err();
     has_type_error = true;
     type_error_diag = _at_start(DIAG_SEVERITY_ERROR, e.message);

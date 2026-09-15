@@ -284,6 +284,42 @@ impl ParseState {
     }
   }
 
+  // Splits a lexed `>=` token in place into a `>` then a `=` token, if the
+  // next significant token is one. Needed so a generic-parameter list
+  // immediately followed by `=` with no space (`als Name<T>=body;`)
+  // parses correctly, since the lexer can't tell a real `>=` comparison
+  // apart from "close this generic list, then assign" without parse
+  // context - the same problem `split_angle_closer_token_if_needed`
+  // already solves for `>>`, for the one other operator that can start
+  // with the closing bracket's own character.
+  pub split_angle_closer_equals_token_if_needed() {
+    fit self.tokens_peek_no_increment() {
+      .Some(t) -> {
+        if t.type != .Operator {
+          ret;
+        }
+        flag is_ge = false;
+        fit t.data {
+          .Sval(s) -> { is_ge = equals(s, ">="); }
+          _ -> {}
+        }
+        if !is_ge {
+          ret;
+        }
+        // `substr` forces a genuine heap copy, not a bare C string
+        // literal: token cleanup frees every token's own text as owned
+        // heap memory, which crashes on a literal.
+        Token first = t;
+        first.data = .Sval(substr(">", 0, 1));
+        self.tokens.set(self.pindex, first);
+        Token second = t;
+        second.data = .Sval(substr("=", 0, 1));
+        self.tokens.insert(self.pindex + 1, second);
+      }
+      .None -> {}
+    }
+  }
+
   // Splits a lexed `<<` token in place into two adjacent `<` tokens, if the
   // next significant token is one. The opening-bracket counterpart to
   // `split_angle_closer_token_if_needed`: a `<<` can appear immediately
@@ -540,6 +576,35 @@ impl ParseState {
   // constraint set (e.g. `<T: num | dec, U: a | b>` produces all four
   // `[T, U]` pairings). Constraint names are captured as plain strings,
   // not interpreted here.
+  // Parses one `|`-separated bound-alternative list into `out`: the text
+  // after `:` in `<T: a | b>`, or a bound-list type alias's own body
+  // (`als Numeric = a | b;`). Each alternative is a full type expression
+  // via `parse_datatype` (a generic instantiation like `Vec<num>` and a
+  // quirk name are both legal here, alongside an ordinary type name -
+  // which of those it is isn't known until typecheck resolves it),
+  // flattened to canonical text via `render_datatype_bound`. Does not
+  // consume a leading `:` or `=` - the caller decides what precedes this.
+  pub parse_bound_alternatives(Vec<str>* out) Option<ParseErrorKind> {
+    for true {
+      DataType* cdt = malloc(sizeof(DataType));
+      *cdt = dtype_new();
+      let cerr = self.parse_datatype(cdt);
+      if cerr.is_some() {
+        dtype_free(cdt);
+        ret cerr;
+      }
+      str cname = render_datatype_bound(cdt);
+      dtype_free(cdt);
+      out.push(cname);
+      if self.next_token_is_operator("|") {
+        self.token_next();
+        continue;
+      }
+      break;
+    }
+    ret .None;
+  }
+
   pub parse_type_params_with_constraints(
     Vec<str>* out_params,
     Vec<Vec<str>>* out_forced_insts,
@@ -571,28 +636,9 @@ impl ParseState {
       if self.next_token_is_operator(":") {
         self.token_next(); // consume ':'
         has_constraints = true;
-        for true {
-          // A bound alternative is a full type expression, not just a
-          // bare name: `Vec<num>` (a generic instantiation) and a quirk
-          // name are both legal here, alongside an ordinary type name.
-          // Which of those it is (concrete type vs. quirk) isn't known
-          // until typecheck resolves it against the program's own
-          // declarations - the parser just records its canonical text.
-          DataType* cdt = malloc(sizeof(DataType));
-          *cdt = dtype_new();
-          let cerr = self.parse_datatype(cdt);
-          if cerr.is_some() {
-            dtype_free(cdt);
-            ret cerr;
-          }
-          str cname = render_datatype_bound(cdt);
-          dtype_free(cdt);
-          constraints.push(cname);
-          if self.next_token_is_operator("|") {
-            self.token_next();
-            continue;
-          }
-          break;
+        let baerr = self.parse_bound_alternatives(&constraints);
+        if baerr.is_some() {
+          ret baerr;
         }
       }
       out_param_constraints.push(constraints);
@@ -605,6 +651,7 @@ impl ParseState {
     }
 
     self.split_angle_closer_token_if_needed();
+    self.split_angle_closer_equals_token_if_needed();
     if self.next_token_is_operator(">") {
       let err = self.expect_op(">");
       if err.is_some() {
@@ -5892,6 +5939,106 @@ impl Parser {
     ret .None;
   }
 
+  // Parses `als Name<T1, T2> = <type>;` (an ordinary type alias) or `als
+  // Name = a | b;` (a bound-list alias, referenced only from inside a
+  // generic bound list, e.g. `T: Numeric`) - told apart by whether a `|`
+  // follows the first alternative. A bound-list alias is never generic (a
+  // bound list has no single instantiation site of its own), rejected
+  // here rather than left to misbehave downstream.
+  pub parse_type_alias(flag is_public) Option<ParseErrorKind> {
+    let kwerr = self.state.expect_keyword("als");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
+      self.state.err("expected identifier after 'als'");
+      ret .Some(.InvalidIdentifier);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> unused_forced_insts;
+    unused_forced_insts.init(0);
+    Vec<Vec<str>> unused_param_constraints;
+    unused_param_constraints.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(
+      &type_params,
+      &unused_forced_insts,
+      &unused_param_constraints
+    );
+    if tperr.is_some() {
+      ret tperr;
+    }
+
+    let eqerr = self.state.expect_op("=");
+    if eqerr.is_some() {
+      ret eqerr;
+    }
+
+    // Parsed first as a real DataType (not flattened text) so an ordinary
+    // alias's body keeps its full structure - generic_args, fn_sig,
+    // pointer depth - which a bound-list alternative's canonical text
+    // alone can't carry.
+    DataType* first = malloc(sizeof(DataType));
+    *first = dtype_new();
+    let fderr = self.state.parse_datatype(first);
+    if fderr.is_some() {
+      dtype_free(first);
+      ret fderr;
+    }
+
+    TypeAliasNode a = type_alias_node_new();
+    a.name = name;
+    a.type_params = type_params;
+    a.has_type_params = type_params.len > 0;
+
+    if self.state.next_token_is_operator("|") {
+      if a.has_type_params {
+        dtype_free(first);
+        self.state.err("a bound-list alias ('a | b') cannot be generic");
+        ret .Some(.InvalidDataType);
+      }
+      self.state.token_next(); // consume '|'
+      a.is_bound_list = true;
+      Vec<str> alternatives;
+      alternatives.init(2);
+      alternatives.push(render_datatype_bound(first));
+      dtype_free(first);
+      let baerr = self.state.parse_bound_alternatives(&alternatives);
+      if baerr.is_some() {
+        ret baerr;
+      }
+      a.bound_alternatives = alternatives;
+    } else {
+      a.is_bound_list = false;
+      a.body = first;
+    }
+
+    let scerr = self.state.expect_sym(';');
+    if scerr.is_some() {
+      ret scerr;
+    }
+
+    Node node = node_new(.TypeAlias(a));
+    node.pos = name_tok.unwrap().pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    Symbol sym = symbol_new(name);
+    sym.kind = .NodeSym(node);
+    self.state.push_symbol(sym);
+
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
   // Parses `quirk Name { method sigs }` (optionally generic, `quirk
   // Name<T> { ... }`): a structural interface of method signatures with no
   // bodies, which `impl Type as Name { ... }` supplies. Registers the
@@ -6547,6 +6694,10 @@ impl Parser {
         ret self.parse_impl(false);
       }
 
+      if equals(kw, "als") {
+        ret self.parse_type_alias(false);
+      }
+
       if equals(kw, "pub") {
         self.state.token_next(); // consume 'pub'
         let next_tok = self.state.token_peek_next();
@@ -6582,6 +6733,9 @@ impl Parser {
           }
           if equals(nkw, "impl") {
             ret self.parse_impl(true);
+          }
+          if equals(nkw, "als") {
+            ret self.parse_type_alias(true);
           }
           if equals(nkw, "async") {
             self.state.token_next(); // consume 'async'
@@ -9047,6 +9201,103 @@ test "parse_impl recognizes a type-param list whose bound is itself a generic in
       assert equals(i.type_params.get(0), "T"), "expected the type param 'T'";
     }
     _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_type_alias parses a non-generic alias" {
+  ParseState st = _state_from("als Meters = num;");
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_none(), "expected the alias to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .TypeAlias(a) -> {
+      assert equals(a.name, "Meters"), "expected the alias name 'Meters'";
+      assert !a.has_type_params, "expected no type params";
+      assert !a.is_bound_list, "expected an ordinary alias, not a bound-list one";
+      assert a.body != nil, "expected a body DataType";
+      assert equals(a.body.type_str, "num"), "expected the body 'num'";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+}
+
+test "parse_type_alias parses a generic function-type alias" {
+  ParseState st = _state_from("als Callback<A, R> = fun(A) R;");
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_none(), "expected the generic alias to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .TypeAlias(a) -> {
+      assert equals(a.name, "Callback"), "expected the alias name 'Callback'";
+      assert a.has_type_params, "expected type params";
+      assert a.type_params.len == 2, "expected 2 type params";
+      assert equals(a.type_params.get(0), "A"), "expected the first type param 'A'";
+      assert equals(a.type_params.get(1), "R"), "expected the second type param 'R'";
+      assert !a.is_bound_list, "expected an ordinary alias, not a bound-list one";
+      assert a.body != nil, "expected a body DataType";
+      assert a.body.has_fn_sig, "expected the body to carry a function-type signature";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+}
+
+test "parse_type_alias parses a bound-list alias" {
+  ParseState st = _state_from("als Numeric = num | dec;");
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_none(), "expected the bound-list alias to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .TypeAlias(a) -> {
+      assert equals(a.name, "Numeric"), "expected the alias name 'Numeric'";
+      assert !a.has_type_params, "expected no type params";
+      assert a.is_bound_list, "expected a bound-list alias";
+      assert a.bound_alternatives.len == 2, "expected 2 bound alternatives";
+      assert equals(a.bound_alternatives.get(0), "num"), "expected the first alternative 'num'";
+      assert equals(a.bound_alternatives.get(1), "dec"), "expected the second alternative 'dec'";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+}
+
+test "parse_type_alias rejects a generic bound-list alias" {
+  ParseState st = _state_from("als Numeric<T> = num | dec;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_some(), "expected a generic bound-list alias to be rejected";
+}
+
+test "parse_type_alias parses a no-space generic closer immediately before '='" {
+  // A lexed '>=' here closes the generic-param list and starts the
+  // assignment - the same maximal-munch ambiguity `Vec<Vec<num>>`'s `>>`
+  // already needs splitting for, just with a different second character.
+  ParseState st = _state_from("als Callback<A,R>=fun(A)R;");
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_none(), "expected the no-space alias to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .TypeAlias(a) -> {
+      assert equals(a.name, "Callback"), "expected the alias name 'Callback'";
+      assert a.type_params.len == 2, "expected 2 type params";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+}
+
+test "parse_top_level_declaration dispatches 'als' and 'pub als'" {
+  ParseState st = _state_from("als A = num;\npub als B = str;");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected 'als A' to parse";
+  assert p.parse_top_level_declaration().is_none(), "expected 'pub als B' to parse";
+  assert st.nodes.len == 2, "expected 2 top-level nodes";
+  fit st.nodes.get(0).kind {
+    .TypeAlias(a) -> {
+      assert !st.nodes.get(0).flags.is_public, "expected 'A' not public";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .TypeAlias(a) -> { assert st.nodes.get(1).flags.is_public, "expected 'B' public"; }
+    _ -> { panic("expected a TypeAlias node"); }
   }
 }
 

@@ -362,6 +362,11 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
         }
         out.push(_entry(v.name, kind, n.pos));
       }
+      .TypeAlias(a) -> {
+        // LSP's SymbolKind has no dedicated "type alias" value; Struct
+        // is the closest existing fit, matching how Compound is shown.
+        out.push(_entry(a.name, .Struct, n.pos));
+      }
       _ -> {}
     }
   }

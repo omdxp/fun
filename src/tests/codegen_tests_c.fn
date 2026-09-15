@@ -1194,6 +1194,34 @@ test "a self-recursive CONSTRAINED generic function calling itself with the abst
   assert contains(out, "sum_down__num((n - 1))"), "expected the recursive call to reuse it";
 }
 
+test "a generic function-type alias emits the real callback signature, not the alias name" {
+  str src = `use std.c.io;
+  `als Callback<A, R> = fun(A) R;
+  `fun square(num x) num { ret x * x; }
+  `fun apply(Callback<num, num> cb, num x) num { ret cb(x); }
+  `fun main() num {
+  `  printf("%lld\n", apply(square, 4));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a generic function-type alias emits the real callback signature, not the alias name");
+  assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
+}
+
+test "a bound-list type alias's own expansion agrees with a hand-written bound list" {
+  str src = `use std.c.io;
+  `als Numeric = num | dec;
+  `fun identity<T: Numeric>(T n) T { ret n; }
+  `fun main() num {
+  `  printf("%lld\n", identity(5));
+  `  ret 0;
+  `}`;
+  assert_emits(
+    src,
+    "identity__num",
+    "a bound-list type alias's own expansion agrees with a hand-written bound list"
+  );
+}
+
 test "a quirk-bounded generic impl monomorphizes for a real implementor" {
   str src = `use std.c.io;
   `quirk Renderable { render() str; }

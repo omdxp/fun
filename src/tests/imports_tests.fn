@@ -6,6 +6,7 @@ use ..codegen.codegen;
 use ..codegen.codegen_state;
 use ..parser.import_resolver;
 use ..semantics.typecheck;
+use ..semantics.alias_expand;
 use std.string;
 use std.result;
 
@@ -133,6 +134,10 @@ fun check_file(str path) str {
     ret parsed.unwrap_err();
   }
   let merged = parsed.unwrap();
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret alias_err.unwrap();
+  }
   let checked = typecheck_program(&merged.nodes);
   if checked.is_err() {
     ret checked.unwrap_err().message;

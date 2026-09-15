@@ -396,8 +396,9 @@ pub fun definition_workspace_wide(
     // Restrict to true top-level declarations only (what
     // lookup_top_level itself would have matched), not a field,
     // variant, or method the table also indexes.
-    flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk || d.kind == .Global) &&
-      equals(
+    flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk ||
+      d.kind == .Global || d.kind == .TypeAlias) &&
+    equals(
       d.container,
       ""
     );
@@ -488,6 +489,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
     .Compound -> { ret _location_result(doc, d); }
     .Enum -> { ret _location_result(doc, d); }
     .Quirk -> { ret _location_result(doc, d); }
+    .TypeAlias -> { ret _location_result(doc, d); }
     _ -> {}
   }
 
