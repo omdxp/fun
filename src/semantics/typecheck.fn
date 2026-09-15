@@ -476,6 +476,20 @@ fun _free_variant_owners_map(Map<str, Vec<str>>* owners) {
   owners.free();
 }
 
+// Frees a whole `Map<str, Set<str>>` where every value's own strings are
+// borrowed from the AST (never a fresh allocation): unlike
+// `_free_variant_owners_map`'s buckets, only each `Set<str>` and the map
+// itself need freeing, not the strings inside.
+fun _free_quirk_implementors_map(Map<str, Set<str>>* implementors) {
+  Vec<str> names = implementors.keys();
+  defer names.free();
+  for name : names {
+    Set<str> bucket = implementors.at(name).unwrap();
+    bucket.free();
+  }
+  implementors.free();
+}
+
 // The variant name a bare enum-variant shorthand initializer names,
 // whether payload-less (`.Same`) or carrying one (`.Same(5)`, parsed as
 // a call whose callee is the same dot-shorthand shape). `.None` for
@@ -668,6 +682,18 @@ compound Checker {
   // The quirks a program declares. A pointer to a compound that
   // implements one stands where the quirk is expected.
   Set<str> quirks;
+  // Quirk name -> the type_name of every impl block that implements it
+  // (both a generic impl's own bare template name, e.g. `impl Vec<T> as
+  // Renderable` -> "Vec", and a monomorphizing impl's mangled concrete
+  // name, e.g. `impl Vec<num> as Renderable` -> "Vec__num" - see
+  // `implements_quirk`, which tries both forms the same way
+  // `receiver_method` does for method lookup). Used to check a real
+  // `impl X as Quirk` relationship for a generic bound naming a quirk
+  // (`T: Renderable`), as opposed to `assignable`'s coarser
+  // any-pointer-satisfies-any-quirk approximation used for ordinary
+  // quirk-typed-parameter coercion - the two are deliberately different
+  // strictness levels, not a shared notion of "satisfies this quirk".
+  Map<str, Set<str>> quirk_implementors;
   // Enums whose variants carry no payload, which stand for the numbers
   // they are written as.
   Set<str> plain_enums;
@@ -707,6 +733,7 @@ fun _checker_new() Checker {
   c.fns.init(32);
   c.declared_at.init(32);
   c.quirks = set_init("", 16);
+  c.quirk_implementors.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
   c.enum_names = set_init("", 16);
@@ -759,6 +786,43 @@ impl Checker {
       }
     }
     self.methods.put(block.type_name, table);
+  }
+
+  // Records that `type_name` (a bare template name or a mangled concrete
+  // instantiation, exactly as `ImplNode.type_name` carries it) has a real
+  // `impl ... as quirk_name { ... }` block, for `implements_quirk` below.
+  record_quirk_impl(str type_name, str quirk_name) {
+    let existing = self.quirk_implementors.at(quirk_name);
+    if existing.is_some() {
+      Set<str> bucket = existing.unwrap();
+      bucket.add(type_name);
+      self.quirk_implementors.put(quirk_name, bucket);
+    } else {
+      Set<str> bucket = set_init("", 4);
+      bucket.add(type_name);
+      self.quirk_implementors.put(quirk_name, bucket);
+    }
+  }
+
+  // True when `t` is a real, registered implementor of `quirk` - a
+  // genuine `impl X as quirk { ... }` block was seen for it, not just
+  // "any pointer satisfies any quirk" (`assignable`'s coarser check,
+  // left as-is for ordinary quirk-typed-parameter coercion). Tries both
+  // the mangled concrete-instantiation name and the bare type name, the
+  // same lookup order `receiver_method` already uses for method lookup.
+  implements_quirk(CheckedType t, str quirk_name) flag {
+    let bucket_opt = self.quirk_implementors.at(quirk_name);
+    if bucket_opt.is_none() {
+      ret false;
+    }
+    Set<str> implementors = bucket_opt.unwrap();
+    CheckedType named = t;
+    named.name = self.canonical_type_name(t.name);
+    str mangled = mangled_name(named);
+    if !equals(mangled, named.name) && implementors.has(mangled) {
+      ret true;
+    }
+    ret implementors.has(named.name);
   }
 
   // True when a value of type `from` can stand where `to` is expected,
@@ -1861,8 +1925,20 @@ impl Checker {
       for b < holder.bounds.len {
         Vec<str> combination = holder.bounds.get(b);
         b = b + 1;
-        if at_param < combination.len &&
-          equals(combination.get(at_param), supplied_name) {
+        if at_param >= combination.len {
+          continue;
+        }
+        str bound = combination.get(at_param);
+        // A bound alternative naming a quirk is checked by real
+        // membership (a genuine `impl X as quirk` block was seen), not
+        // name equality - `bound` itself is never resolved against a
+        // declared type/quirk table until now, so this is the first
+        // point either check is even possible. Known v1 gap: a bound
+        // naming a concrete instantiation of a *generic* quirk (`T:
+        // To<num>`) never matches here, since `self.quirks`/
+        // `quirk_implementors` only ever key on a quirk's bare name.
+        if equals(bound, supplied_name) ||
+          self.implements_quirk(supplied, self.canonical_type_name(bound)) {
           listed = true;
         }
       }
@@ -1920,7 +1996,11 @@ impl Checker {
         flag listed = false;
         num a = 0;
         for a < allowed.len {
-          if equals(allowed.get(a), supplied_name) {
+          str bound = allowed.get(a);
+          // See the matching comment in `check_instantiation`: a quirk
+          // bound is checked by real membership, not name equality.
+          if equals(bound, supplied_name) ||
+            self.implements_quirk(supplied, self.canonical_type_name(bound)) {
             listed = true;
           }
           a = a + 1;
@@ -3006,6 +3086,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer _free_fn_sig_map(&checker.fns);
   defer checker.declared_at.free();
   defer checker.quirks.free();
+  defer _free_quirk_implementors_map(&checker.quirk_implementors);
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
@@ -3128,7 +3209,12 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         }
         checker.compounds.put(c.name, info);
       }
-      .Impl(block) -> { checker.register_impl(block); }
+      .Impl(block) -> {
+        checker.register_impl(block);
+        if block.has_quirk_name {
+          checker.record_quirk_impl(block.type_name, block.quirk_name);
+        }
+      }
       _ -> {}
     }
   }

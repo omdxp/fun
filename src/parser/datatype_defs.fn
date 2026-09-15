@@ -78,6 +78,60 @@ pub fun get_datatype_type(str s) DataTypeType {
   }
 }
 
+// The canonical text a resolved type expression renders as: base name,
+// `<A, B>` generic args (recursive, comma-space separated), then trailing
+// `*` pointer-depth markers. Matches `type_name(CheckedType)` in
+// src/semantics/typecheck.fn byte-for-byte, so a bound alternative stored
+// as this text can be compared against an inferred argument's own
+// rendered name with a bare `equals()`. No array-suffix handling: a bound
+// alternative is a bare type reference, never an array type.
+pub fun render_datatype_bound(DataType* dt) str {
+  if dt == nil {
+    ret "";
+  }
+  str base = "unknown";
+  fit dt.kind {
+    .Void -> { base = "void"; }
+    .Raw -> { base = "raw"; }
+    .Chr -> { base = "chr"; }
+    .Str -> { base = "str"; }
+    .Dec -> { base = "dec"; }
+    .Num -> { base = "num"; }
+    .Bin -> { base = "flag"; }
+    .Unknown -> {
+      if !equals(dt.type_str, "") {
+        base = dt.type_str;
+      }
+    }
+  }
+  StringBuilder b = string_builder_init(len(base) + 4);
+  b.append(base);
+  if dt.generic_args.len > 0 {
+    b.append("<");
+    num g = 0;
+    for g < dt.generic_args.len {
+      if g > 0 {
+        b.append(", ");
+      }
+      str arg = render_datatype_bound(dt.generic_args.get(g));
+      b.append(arg);
+      free(arg);
+      g = g + 1;
+    }
+    b.append(">");
+  }
+  num stars = dt.pointer_depth;
+  if dt.flags.is_pointer && stars == 0 {
+    stars = 1;
+  }
+  num i = 0;
+  for i < stars {
+    b.append("*");
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 // Best-effort semantic typing for common C typedef names.
 // 
 // These identifiers are emitted verbatim in C (`type_str`), but are tagged
@@ -105,6 +159,40 @@ pub fun get_c_typedef_alias_datatype_type(str s) Option<DataTypeType> {
     }
     _ -> { ret .None; }
   }
+}
+
+test "render_datatype_bound renders a builtin scalar" {
+  DataType dt = dtype_new();
+  dt.kind = .Num;
+  assert equals(render_datatype_bound(&dt), "num"), "expected 'num'";
+}
+
+test "render_datatype_bound renders an identifier type name" {
+  DataType dt = dtype_new();
+  dt.kind = .Unknown;
+  dt.type_str = "User";
+  assert equals(render_datatype_bound(&dt), "User"), "expected 'User'";
+}
+
+test "render_datatype_bound renders a generic instantiation recursively" {
+  DataType* arg = malloc(sizeof(DataType));
+  *arg = dtype_new();
+  arg.kind = .Num;
+
+  DataType dt = dtype_new();
+  dt.kind = .Unknown;
+  dt.type_str = "Vec";
+  dt.generic_args.push(arg);
+
+  assert equals(render_datatype_bound(&dt), "Vec<num>"), "expected 'Vec<num>'";
+}
+
+test "render_datatype_bound renders trailing pointer stars" {
+  DataType dt = dtype_new();
+  dt.kind = .Unknown;
+  dt.type_str = "User";
+  dt.pointer_depth = 2;
+  assert equals(render_datatype_bound(&dt), "User**"), "expected 'User**'";
 }
 
 test "parse_dynamic_int_datatype accepts iN/uN, rejects everything else" {

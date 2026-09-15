@@ -5625,6 +5625,87 @@ test "hover on a generic compound shows each type param's own constraint" {
   assert contains(hovered, "Node<T: dec | num>"), "expected the constraint to render alongside the type param, not just 'T'";
 }
 
+test "hover on a generic function shows a quirk bound alongside its type param" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///quirkbound.fn";
+  doc.path = "quirkbound.fn";
+  doc.text = `quirk Renderable {
+  `  render() str;
+  `}
+  `fun show<T: Renderable>(T x) str {
+  `  ret x.render();
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 3, 6);
+  assert contains(hovered, "T: Renderable"), "expected the quirk bound to render alongside the type param";
+}
+
+test "hover on a generic compound shows a generic-instantiation bound alongside its type param" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///geninstbound.fn";
+  doc.path = "geninstbound.fn";
+  doc.text = `compound Slot<T> {
+  `  T value;
+  `}
+  `compound Nested<T: num | Slot<num>> {
+  `  T value;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 3, 12);
+  assert contains(hovered, "T: num | Slot<num>"), "expected the generic-instantiation bound to render in full, not just its base name";
+}
+
+test "completion inside a type-param bound offers a quirk and a builtin type, never a function" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///boundcompletion.fn";
+  doc.path = "boundcompletion.fn";
+  doc.text = `quirk Renderable {
+  `  render() str;
+  `}
+  `fun helper() num {
+  `  ret 1;
+  `}
+  `fun show<T: R>(T x) T {
+  `  ret x;
+  `}`;
+  doc.version = 1;
+
+  // A trailing single letter already typed ("R"), not an empty position:
+  // a genuinely empty bound alternative can never itself parse (a bound
+  // is always a real `parse_datatype` call, which needs at least one
+  // token), so completion there always falls to the unparsed branch
+  // tested separately below. One partial identifier is what a real
+  // editor's completion trigger looks like once typing has started.
+  str out = completion(&reads, doc, 6, 13, false);
+  assert contains(out, `"label":"Renderable"`), "expected the quirk offered inside the bound position";
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside the bound position";
+  assert !contains(out, `"label":"helper"`), "expected a function name never offered inside a bound position";
+}
+
+test "completion inside a type-param bound still offers builtin types while the document does not parse" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///boundcompletionunparsed.fn";
+  doc.path = "boundcompletionunparsed.fn";
+  doc.text = `fun show<T: >(T x) T {
+  `  ret x;
+  `}
+  `fun broken( {`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 12, false);
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside the bound position even while the document fails to parse";
+}
+
 test "hover on a 'let'-inferred top-level const shows its character-literal type" {
   // `_infer_global_const_type` had arms for .Number/.String/.Boolean but
   // not .Character, the node kind a bare 'c' literal actually parses to

@@ -18,6 +18,7 @@ use ..lexer.lexdefs;
 use ..lexer.token;
 use ..parser.import_resolver;
 use ..parser.deps_lock;
+use ..parser.datatype_defs;
 use ..semantics.warnings;
 use std.string;
 use std.vec;
@@ -121,6 +122,12 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       }
     }
     if equals(receiver, "") {
+      Vec<Node> no_program;
+      no_program.init(0);
+      if _in_type_param_bound_position(&tokens, line, character) {
+        _type_and_quirk_bound_completions(&no_program, &items);
+        ret _reply(&items);
+      }
       _reserved(&items, snippets);
       _c_builtin_completions(&items);
       _abbreviations(&items, snippets);
@@ -223,6 +230,10 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   }
 
   if equals(receiver, "") {
+    if _in_type_param_bound_position(&tokens, line, character) {
+      _type_and_quirk_bound_completions(&program.nodes, &items);
+      ret _reply(&items);
+    }
     str init_type = _compound_init_type_at(&tokens, &program.nodes, line, character);
     if !equals(init_type, "") {
       _init_fields_of(&program.nodes, init_type, &items);
@@ -2046,6 +2057,105 @@ fun _bare_type_name(Vec<Node>* program, str name) str {
 // the innermost still-open frame both looks like a type name *and* is
 // one an actual `.Compound` declares, which rules out a bare
 // capitalized condition (`if IsReady { ... }`) being mistaken for one.
+// True when the cursor sits right after a `:` or `|` inside an unclosed
+// `<...>` type-parameter list (`fun f<T: |>`, `fun f<T: num | |>`) - a
+// bound-alternative position, where only a type or quirk name is legal.
+// Depth resets at each `;`/`{`/`}`, so an ordinary comparison operator
+// (`a < b`) elsewhere in the file is never mistaken for an open bracket
+// carried across statements. Token-only, like the other lookaheads in
+// this file: a bound list is often typed before the rest of the
+// declaration exists, so this works whether or not the document parses.
+fun _in_type_param_bound_position(Vec<Token>* tokens, num line, num character) flag {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num depth = 0;
+  // True from the moment a ':' or '|' is seen (at any open depth) until
+  // the next ','/'<'/'>' resets it: an identifier/keyword token being
+  // typed for the current alternative (`T: Ren`, cursor after "Ren")
+  // never itself resets it, since a genuinely EMPTY alternative can
+  // never parse - the only way this position is ever reached with a
+  // parsed document at all is with at least one character already typed
+  // for it.
+  flag after_boundary = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line > source_line ||
+      (t.pos.line == source_line && t.pos.start_col >= source_col) {
+      break;
+    }
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if token_is_symbol(t, ';') || token_is_symbol(t, '{') || token_is_symbol(t, '}') {
+      depth = 0;
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, "<") {
+      depth = depth + 1;
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ">") {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ">>") {
+      depth = depth - 2;
+      if depth < 0 {
+        depth = 0;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ",") {
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ":") || token_is_operator(t, "|") {
+      after_boundary = true;
+      continue;
+    }
+    // Any other token (an identifier/keyword mid-typed for the current
+    // alternative) leaves `after_boundary` exactly as it was.
+  }
+  ret depth > 0 && after_boundary;
+}
+
+// Completions legal inside a bound-list constraint alternative: every
+// builtin scalar type keyword, plus every declared compound/enum/quirk
+// name - never a function, variable, or local, none of which are valid
+// there. `program` may be empty (the unparsed-document caller has no
+// tree), in which case only the builtin keywords are offered.
+fun _type_and_quirk_bound_completions(Vec<Node>* program, Vec<Item>* items) {
+  Vec<str> words = keywords();
+  defer words.free();
+  num i = 0;
+  for i < words.len {
+    str word = words.get(i);
+    i = i + 1;
+    if keyword_is_datatype(word) {
+      items.push(_item(word, .Keyword, "type"));
+    }
+  }
+  num p = 0;
+  for p < program.len {
+    Node n = program.get(p);
+    p = p + 1;
+    fit n.kind {
+      .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
+      .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
+      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      _ -> {}
+    }
+  }
+}
+
 fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num character) str {
   num source_line = line + 1;
   num source_col = character + 1;

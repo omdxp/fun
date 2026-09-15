@@ -3,8 +3,12 @@
 // A type parameter can be bounded to a union of allowed types with `<T: a | b>`.
 // The compiler monomorphizes each concrete instantiation (zero runtime cost) AND
 // type-checks, at every call/instantiation site, that the concrete type argument
-// is one of the listed bounds — a violation is a compile-time error, not a
-// mysterious C link failure.
+// is one of the listed bounds: a violation is a compile-time error, not a
+// mysterious C link failure. A bound alternative can also be a quirk name,
+// checked by real "does this type implement it" membership rather than an exact
+// name match, or a full type expression like a generic instantiation
+// (`Vec<num>`), not just a bare identifier. The bound list is a union of type
+// expressions and quirk names, mixed freely.
 
 use std.io;
 
@@ -33,6 +37,36 @@ compound Boxed<T: num | str> {
   T value;
 }
 
+// A bound naming a quirk instead of a fixed list of concrete types: any type
+// with a real `impl X as Renderable { ... }` satisfies it, not just Circle.
+quirk Renderable {
+  render() str;
+}
+
+compound Circle {
+  num radius;
+}
+
+impl Circle as Renderable {
+  render() str {
+    ret "circle";
+  }
+}
+
+fun label<T: Renderable>(T shape) T {
+  ret shape;
+}
+
+// A bound alternative that is itself a generic instantiation, not a bare
+// name: Slot<num> below is a full type expression, checked structurally.
+compound Slot<T> {
+  T value;
+}
+
+compound Nested<T: num | Slot<num>> {
+  T value;
+}
+
 fun main() {
   // Both instantiations satisfy `num | str`.
   let a = identity(42);
@@ -47,6 +81,18 @@ fun main() {
   Boxed<str> bs = Boxed<str>{value = "seven"};
   println_fmt("boxed: {} {}", bn.value, bs.value);
 
-  // Calling `identity(3.5)` (a dec) or declaring `Boxed<bin>` would now be a
-  // compile-time error: the type argument is not in the declared bound.
+  Circle c = Circle{radius = 3};
+  Circle* cp = &c;
+  let labeled = label(cp);
+  _ = labeled;
+  println_fmt("labeled: {}", c.render());
+
+  Nested<num> nn = Nested<num>{value = 9};
+  Nested<Slot<num>> ns = Nested<Slot<num>>{value = Slot<num>{value = 4}};
+  println_fmt("nested: {} {}", nn.value, ns.value.value);
+
+  // Calling `identity(3.5)` (a dec), declaring `Boxed<flag>`, passing a type
+  // with no `impl X as Renderable` to `label`, or declaring `Nested<str>`
+  // would now all be compile-time errors: the type argument is not in the
+  // declared bound.
 }
