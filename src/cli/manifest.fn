@@ -14,6 +14,7 @@
 // import_resolver.fn` for the `deps.`-prefixed `imp` branch).
 
 imp ..ast.ast;
+imp ..lexer.lexdefs;
 imp std.string;
 imp std.toml;
 imp std.vec;
@@ -131,6 +132,14 @@ pub fun is_safe_dep_name(str s) bin {
       ret false;
     }
     i = i + 1;
+  }
+  // A dependency named e.g. "fun" or "flag" would otherwise compile
+  // fine as an identifier here, but break the moment anything writes
+  // `imp deps.<name>...`: the lexer tokenizes that segment as the
+  // reserved word, not a plain identifier, and the import fails to
+  // parse. Reject it before it ever gets written into fun.toml.
+  if is_keyword(s) {
+    ret false;
   }
   ret true;
 }
@@ -706,6 +715,16 @@ test "a [deps] entry with a flag-shaped tag is rejected" {
   `somejson = { git = "https://github.com/user/somejson", tag = "--upload-pack=evil" }`;
   let r = parse_manifest(text);
   assert r.is_err(), "expected an argv-injection-shaped tag to be rejected";
+}
+
+test "a [deps] entry named after a reserved keyword is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `
+  `[deps]
+  `async = { git = "https://github.com/user/somejson" }`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a dependency literally named after a keyword to be rejected, imp deps.async... would never parse";
 }
 
 test "a [deps] entry with a path-traversal path is rejected" {
