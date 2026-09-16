@@ -5041,13 +5041,29 @@ impl Codegen {
         self.state.write("){");
         flag tl_first = true;
         num tl_idx = 0;
+        flag prev_has_expected_tuple7 = self.has_expected_tuple_type;
+        DataType prev_expected_tuple7 = self.expected_tuple_type;
         for el : tl.elements {
           if !tl_first {
             self.state.write(", ");
           }
           tl_first = false;
           self.state.write(format("._{num} = ", tl_idx));
+          // Each element's own expected type is its own tuple position,
+          // not the whole outer tuple `dt` just resolved above - without
+          // rescoping here, a nested tuple element (`((1, 2), "pair")`)
+          // would see the OUTER shape while building itself, mismatching
+          // its own mangled struct against what it actually holds.
+          DataType* elem_dt = dt.tuple_members.get(tl_idx);
+          if elem_dt.is_tuple {
+            self.has_expected_tuple_type = true;
+            self.expected_tuple_type = *elem_dt;
+          } else {
+            self.has_expected_tuple_type = false;
+          }
           let eerr = self.emit_expr(*el);
+          self.has_expected_tuple_type = prev_has_expected_tuple7;
+          self.expected_tuple_type = prev_expected_tuple7;
           if eerr.is_some() {
             ret eerr;
           }

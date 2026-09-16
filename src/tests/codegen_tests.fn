@@ -470,7 +470,24 @@ test "let destructuring compiles under MSVC's strict, non-GNU C, with no '__auto
     "tuple_destructure_msvc_strict",
     "let destructuring compiles and runs under a real strict (non-GNU) compile"
   );
-  assert equals(out_msvc, "3 9\n"), "expected the destructured values to actually run correctly under the strict MSVC-shaped compile";
+  num tmp_at = index_of_str(out_c, "__fun_destructure_tmp1");
+  str tmp_snippet = "(not found)";
+  if tmp_at >= 0 {
+    num snippet_start = tmp_at - 60;
+    if snippet_start < 0 {
+      snippet_start = 0;
+    }
+    num snippet_len = 260;
+    if snippet_start + snippet_len > len(out_c) {
+      snippet_len = len(out_c) - snippet_start;
+    }
+    tmp_snippet = substr(out_c, snippet_start, snippet_len);
+  }
+  assert equals(out_msvc, "3 9\n"), format(
+    "expected the destructured values to actually run correctly under the strict MSVC-shaped compile, got {str}; emitted around the temp: {str}",
+    out_msvc,
+    tmp_snippet
+  );
 }
 
 test "let destructuring from a tuple-returning function compiles under MSVC's strict, non-GNU C" {
@@ -488,5 +505,8 @@ test "let destructuring from a tuple-returning function compiles under MSVC's st
     "tuple_fn_return_destructure_msvc_strict",
     "destructuring a tuple-returning function's call result under a real strict (non-GNU) compile"
   );
-  assert equals(out_msvc, "7 seven\n"), "expected the call-returned tuple to destructure and run correctly under the strict MSVC-shaped compile";
+  assert equals(out_msvc, "7 seven\n"), format(
+    "expected the call-returned tuple to destructure and run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
 }
