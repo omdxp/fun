@@ -534,6 +534,59 @@ instantiation.
   resolves through the enclosing type's own generic instantiation
   instead of naming one concrete type.
 
+### Type Aliases
+
+`als Name<T1, T2> = <type>;` names a reusable type expression, expanded
+wherever it's referenced before typechecking ever runs - the compiler
+never sees the alias name itself, only its fully-resolved body, so it's
+never a textual macro: the underlying type is still fully enforced.
+
+```fun
+use std.io;
+
+// A non-generic alias: just a shorter, more meaningful name.
+als Meters = num;
+
+// A generic alias whose body is a function type.
+als Callback<A, R> = fun(A) R;
+
+fun square(num x) num {
+  ret x * x;
+}
+
+fun apply(Callback<num, num> cb, num x) num {
+  ret cb(x);
+}
+
+// A bound-list alias: stands for a union of types, spliced into a
+// generic constraint wherever it's referenced.
+als Numeric = num | dec;
+
+fun double<T: Numeric>(T x) T {
+  ret x + x;
+}
+
+fun main() {
+  Meters distance = 5;
+  println_fmt("distance={num} applied={num} doubled={num}", distance, apply(square, 4), double(3));
+}
+```
+
+- An alias can be `pub`, same as any other top-level declaration.
+- An alias's own body can reference another alias (`als Top = Middle;`);
+  a reference cycle among aliases is a compile-time error, not infinite
+  recursion.
+- **An alias's own body can never be a pointer type**
+  (`als NodePtr = Node*;` is rejected, and so is a pointer-typed
+  alternative in a bound-list alias's own body): the point of writing
+  `Node* x;` is that the pointer is visible right there at the use site,
+  not hidden behind a name that reads like an ordinary value. Applying a
+  pointer at a *reference* to a non-pointer alias (`Meters* m;`) is
+  unaffected - the pointer is still written explicitly there, exactly
+  like any other type.
+- A bound-list alias (the `a | b` form) can't itself be generic - it has
+  no single instantiation site of its own the way an ordinary alias does.
+
 ## Functions
 
 ```fun

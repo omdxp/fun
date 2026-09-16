@@ -5993,6 +5993,18 @@ impl Parser {
       dtype_free(first);
       ret fderr;
     }
+    // A pointer type is never itself an alias's own body: the point of
+    // `T* x;` is that the pointer is visible right there at the use
+    // site, not hidden behind a name that reads like an ordinary value
+    // (`NodePtr p = nil;` gives no hint `p` is actually a pointer). An
+    // explicit pointer suffix on a REFERENCE to a non-pointer alias
+    // (`Meters* m;`) is unaffected - the pointer is still written
+    // explicitly there.
+    if first.pointer_depth > 0 || first.flags.is_pointer {
+      dtype_free(first);
+      self.state.err("a type alias's own body cannot be a pointer type; write the pointer explicitly at each use site instead");
+      ret .Some(.InvalidDataType);
+    }
 
     TypeAliasNode a = type_alias_node_new();
     a.name = name;
@@ -6014,6 +6026,14 @@ impl Parser {
       let baerr = self.state.parse_bound_alternatives(&alternatives);
       if baerr.is_some() {
         ret baerr;
+      }
+      num bi = 0;
+      for bi < alternatives.len {
+        if ends_with(alternatives.get(bi), "*") {
+          self.state.err("a type alias's own bound alternative cannot be a pointer type; write the pointer explicitly at each use site instead");
+          ret .Some(.InvalidDataType);
+        }
+        bi = bi + 1;
       }
       a.bound_alternatives = alternatives;
     } else {
@@ -9264,6 +9284,33 @@ test "parse_type_alias rejects a generic bound-list alias" {
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   assert p.parse_type_alias(false).is_some(), "expected a generic bound-list alias to be rejected";
+}
+
+test "parse_type_alias rejects a pointer-typed ordinary alias body" {
+  // A pointer must stay visible at each use site (`Node* x;`), never
+  // hidden behind an alias name that reads like an ordinary value.
+  ParseState st = _state_from("als NodePtr = num*;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_some(), "expected a pointer-typed alias body to be rejected";
+}
+
+test "parse_type_alias rejects a pointer-typed bound-list alternative" {
+  ParseState st = _state_from("als Ptrs = num | dec*;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_some(), "expected a pointer-typed bound alternative to be rejected";
+}
+
+test "parse_type_alias accepts an explicit pointer at a non-pointer alias's own reference site" {
+  // The alias's own body ('Meters' = num) stays a plain value; the
+  // pointer is written explicitly right where the alias is referenced,
+  // exactly like any other type - only the ALIAS'S OWN body is
+  // restricted, not a use of it.
+  ParseState st = _state_from("als Meters = num;\nfun main() { Meters* mp; }");
+  Parser p = parser_new(&st);
+  assert p.parse_type_alias(false).is_none(), "expected the alias declaration itself to parse";
+  assert p.parse_function(true, false).is_none(), "expected 'Meters*' at a reference site to parse fine";
 }
 
 test "parse_type_alias parses a no-space generic closer immediately before '='" {
