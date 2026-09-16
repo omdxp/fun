@@ -9567,8 +9567,18 @@ impl Codegen {
       }
       self.state.write(" ");
     }
+    // A destructuring loop variable (`for (a, b) : pairs`) has no single
+    // name to declare the raw element under - it goes into a hidden temp
+    // instead, immediately destructured into the real names right after.
+    // Safe under a fixed name even across nested/sibling destructuring
+    // loops: each one's own temp lives inside its own for-loop block
+    // scope, either shadowed (nested) or already out of scope (sibling).
+    str item_write_name = fi.item_name;
+    if fi.item_is_destructure {
+      item_write_name = "__fun_for_item";
+    }
     if !msvc_multidim_wrote_all {
-      self.state.write(fi.item_name);
+      self.state.write(item_write_name);
       self.state.write(" = ");
       self.state.write(vec_src_text);
       if is_vec {
@@ -9587,7 +9597,49 @@ impl Codegen {
       let edt = elem_dt.unwrap();
       let elem_name = self.resolve_type_name(edt);
       if elem_name.is_some() {
-        self.record_local_typed(fi.item_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
+        self.record_local_typed(item_write_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
+      }
+    }
+    if fi.item_is_destructure {
+      if elem_dt.is_some() && elem_dt.unwrap().is_tuple {
+        let edt2 = elem_dt.unwrap();
+        num fdi = 0;
+        for name : fi.item_destructure_names {
+          self.state.write_indent();
+          flag wrote_fd_type = false;
+          if fdi < edt2.tuple_members.len {
+            if self.msvc_mode {
+              let fdwt = self.write_type(*edt2.tuple_members.get(fdi));
+              wrote_fd_type = fdwt.is_some();
+            }
+          }
+          if !wrote_fd_type {
+            self.state.write("__auto_type");
+          }
+          self.state.write(" ");
+          self.state.write(name);
+          self.state.write(" = ");
+          self.state.write(item_write_name);
+          self.state.write(format("._{num};\n", fdi));
+          if fdi < edt2.tuple_members.len {
+            let fd_elem = *edt2.tuple_members.get(fdi);
+            let fd_resolved = self.resolve_type_name(fd_elem);
+            if fd_resolved.is_some() {
+              let fd_subst = self.resolve_type_subst(fd_elem);
+              self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+            }
+          }
+          fdi = fdi + 1;
+        }
+      } else {
+        // The Vec's own real element type didn't resolve structurally
+        // here (the same pre-existing gap `elem_dt.is_some()` above
+        // already documents for an ordinary, non-destructuring item) -
+        // typecheck already requires a real tuple-shaped element for a
+        // destructuring for-loop to pass at all, so reaching here means
+        // codegen's own narrower structural resolution missed what
+        // typecheck already confirmed, not that the program is invalid.
+        ret .Some(.UnsupportedNode);
       }
     }
     // A raw array's item is recorded at the decremented depth, so a
@@ -16238,6 +16290,8 @@ test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" 
   fi.index_name = "";
   fi.has_index_name = false;
   fi.item_name = "item";
+  fi.item_is_destructure = false;
+  fi.item_destructure_names.init(0);
   fi.iterable = iterable;
   fi.body = body;
   Node n = node_new(.StatementFor(.Iter(fi)));
@@ -16269,6 +16323,8 @@ test "emit_statement emits a Vec iterator for with an explicit index name" {
   fi.index_name = "idx";
   fi.has_index_name = true;
   fi.item_name = "item";
+  fi.item_is_destructure = false;
+  fi.item_destructure_names.init(0);
   fi.iterable = iterable;
   fi.body = body;
   Node n = node_new(.StatementFor(.Iter(fi)));
@@ -16303,6 +16359,8 @@ test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Ve
   fi.index_name = "";
   fi.has_index_name = false;
   fi.item_name = "item";
+  fi.item_is_destructure = false;
+  fi.item_destructure_names.init(0);
   fi.iterable = iterable;
   fi.body = body;
   Node n = node_new(.StatementFor(.Iter(fi)));
@@ -16375,6 +16433,8 @@ test "emit_statement records a Vec iterator's own item as a known local, so a NE
   inner_fi.index_name = "";
   inner_fi.has_index_name = false;
   inner_fi.item_name = "et";
+  inner_fi.item_is_destructure = false;
+  inner_fi.item_destructure_names.init(0);
   inner_fi.iterable = inner_iterable;
   inner_fi.body = inner_body;
   Node* inner_for = malloc(sizeof(Node));
@@ -16391,6 +16451,8 @@ test "emit_statement records a Vec iterator's own item as a known local, so a NE
   outer_fi.index_name = "";
   outer_fi.has_index_name = false;
   outer_fi.item_name = "existing";
+  outer_fi.item_is_destructure = false;
+  outer_fi.item_destructure_names.init(0);
   outer_fi.iterable = outer_iterable;
   outer_fi.body = outer_body;
   Node n = node_new(.StatementFor(.Iter(outer_fi)));
@@ -16423,6 +16485,8 @@ test "emit_statement rejects an iterator for over a receiver that isn't a known 
   fi.index_name = "";
   fi.has_index_name = false;
   fi.item_name = "item";
+  fi.item_is_destructure = false;
+  fi.item_destructure_names.init(0);
   fi.iterable = iterable;
   fi.body = body;
   Node n = node_new(.StatementFor(.Iter(fi)));
@@ -21192,6 +21256,8 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   inner_fi.index_name = "";
   inner_fi.has_index_name = false;
   inner_fi.item_name = "s";
+  inner_fi.item_is_destructure = false;
+  inner_fi.item_destructure_names.init(0);
   inner_fi.iterable = inner_iterable;
   inner_fi.body = inner_body;
   Node* inner_for = malloc(sizeof(Node));
@@ -21207,6 +21273,8 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   outer_fi.index_name = "";
   outer_fi.has_index_name = false;
   outer_fi.item_name = "item";
+  outer_fi.item_is_destructure = false;
+  outer_fi.item_destructure_names.init(0);
   outer_fi.iterable = outer_iterable;
   outer_fi.body = outer_body;
   Node* outer_for = malloc(sizeof(Node));

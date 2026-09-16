@@ -554,6 +554,68 @@ test "a destructured name naming a compound resolves a later field access on it,
   assert equals(out, "5 9 10 6 11 12\n"), "expected a field access on either form's destructured compound name to resolve correctly";
 }
 
+test "a for loop destructures a Vec of tuples, one name per element" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `fun main() num {
+  `  Vec<(num, str)> pairs;
+  `  pairs.init(2);
+  `  pairs.push((1, "one"));
+  `  pairs.push((2, "two"));
+  `  for (k, v) : pairs {
+  `    printf("%lld=%s ", k, v);
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_destructure_vec_tuple", "a for loop destructures a Vec<(num, str)> end to end");
+  assert equals(out, "1=one 2=two "), "expected each pair's own elements bound to k and v in order";
+}
+
+test "a for loop's own destructuring name resolves a later field access on it" {
+  // The same class of bug `emit_let_destructure` had: a destructured
+  // for-loop item must also register each name with codegen's own
+  // known-locals table, not just declare it as a correctly-typed local.
+  str src = `use std.c.io;
+  `use std.vec;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  Vec<(num, Point)> items;
+  `  items.init(2);
+  `  items.push((1, Point{x = 3, y = 4}));
+  `  for (id, pt) : items {
+  `    printf("%lld %lld %lld\n", id, pt.x, pt.y);
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_destructure_field_access", "a for-destructured compound name's own field resolves");
+  assert equals(out, "1 3 4\n"), "expected the destructured compound name's own field access to resolve correctly";
+}
+
+test "a for loop over a Vec of tuples compiles under MSVC's strict, non-GNU C" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `fun main() num {
+  `  Vec<(num, str)> pairs;
+  `  pairs.init(1);
+  `  pairs.push((7, "seven"));
+  `  for (k, v) : pairs {
+  `    printf("%lld %s\n", k, v);
+  `  }
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(src, "for_destructure_msvc_shape", "a for-destructured Vec of tuples under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "for_destructure_msvc_strict",
+    "a for loop over a Vec of tuples compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "7 seven"), format(
+    "expected the destructured for-loop values to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}
+
 test "a declared-type destructuring pattern compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
   str src = `use std.c.io;
   `fun main() num {

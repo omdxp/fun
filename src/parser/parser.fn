@@ -4190,10 +4190,143 @@ impl Parser {
       fi.index_name = index_name;
       fi.has_index_name = has_index_name;
       fi.item_name = item_name;
+      fi.item_is_destructure = false;
+      fi.item_destructure_names.init(0);
       fi.iterable = iterable_ptr;
       fi.body = body;
       node.kind = .StatementFor(.Iter(fi));
     }
+    fit for_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // True when the `for` loop starting here is a destructuring iterator
+  // form (`for (a, b) : pairs { ... }`), not a parenthesized boolean
+  // condition (`for (x > 0) { ... }`) - both start with a balanced
+  // `(...)` group, disambiguated the same way `_looks_like_tuple_type_declaration`
+  // already disambiguates a bare-type declaration from a tuple-literal
+  // expression statement: by what follows the group's own close. A
+  // single `:` here can only be this form (an ordinary condition's own
+  // `{` follows directly, and `::` is the unrelated index-tracking
+  // iterator form, which never starts with `(` at all).
+  _looks_like_for_destructure_iter() flag {
+    num off = 0;
+    num depth = 0;
+    for true {
+      let t = self.state.token_peek_n(off);
+      if t.is_none() {
+        ret false;
+      }
+      let tok = t.unwrap();
+      if token_is_operator(tok, "(") {
+        depth = depth + 1;
+      } elif token_is_symbol(tok, ')') {
+        depth = depth - 1;
+        if depth == 0 {
+          off = off + 1;
+          break;
+        }
+      }
+      off = off + 1;
+    }
+    let after = self.state.token_peek_n(off);
+    ret after.is_some() && token_is_operator(after.unwrap(), ":");
+  }
+
+  // Parses `for (a, b) : pairs { ... }`: a destructuring loop variable,
+  // one name per element of the iterable's own tuple-typed element.
+  // Mirrors `_parse_for_range_or_iter`'s own `.Iter` shape closely, just
+  // with a name list instead of a single identifier - no index-tracking
+  // combined form (`for (a, b) :: pairs` is not supported; the plain
+  // `for i, item :: xs` two-name form already covers index tracking).
+  _parse_for_iter_destructure(Option<Token> for_tok) Option<ParseErrorKind> {
+    let lperr = self.state.expect_op("(");
+    if lperr.is_some() {
+      ret lperr;
+    }
+    Vec<str> names;
+    names.init(2);
+    for true {
+      let nt = self.state.token_next();
+      if nt.is_none() || nt.unwrap().type != .Identifier {
+        report_expected_identifier(self.state, nt, "expected a bound name in 'for' destructuring pattern");
+        ret .Some(.InvalidIdentifier);
+      }
+      str nname = "";
+      fit nt.unwrap().data {
+        .Sval(s) -> { nname = s; }
+        _ -> {}
+      }
+      names.push(nname);
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+    let rperr = self.state.expect_sym(')');
+    if rperr.is_some() {
+      ret rperr;
+    }
+    if names.len < 2 {
+      self.state.err("a 'for' destructuring pattern must bind at least two names");
+      ret .Some(.InvalidStatement);
+    }
+    let cerr = self.state.expect_op(":");
+    if cerr.is_some() {
+      ret cerr;
+    }
+
+    let ierr = self.parse_expressionable_root();
+    if ierr.is_some() {
+      ret ierr;
+    }
+    let maybe_iterable = self.state.node_pop();
+    if maybe_iterable.is_none() {
+      self.state.err("expected for iterable expression");
+      ret .Some(.InvalidExpression);
+    }
+    Node* iterable_ptr = malloc(sizeof(Node));
+    *iterable_ptr = maybe_iterable.unwrap();
+
+    self.state.new_scope();
+    for name : names {
+      ScopeEntity name_entity = scope_entity_new(name);
+      name_entity.on_stack = true;
+      ScopeEntity* name_entity_ptr = malloc(sizeof(ScopeEntity));
+      *name_entity_ptr = name_entity;
+      self.state.push_scope_entity(name_entity_ptr);
+    }
+
+    let berr = self.parse_body_multiple_statements();
+    self.state.finish_scope();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected for body");
+      ret .Some(.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    ForIterNode fi;
+    fi.index_name = "";
+    fi.has_index_name = false;
+    fi.item_name = "";
+    fi.item_is_destructure = true;
+    fi.item_destructure_names = names;
+    fi.iterable = iterable_ptr;
+    fi.body = body;
+
+    Node node = node_new(.StatementFor(.Iter(fi)));
     fit for_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -4251,6 +4384,10 @@ impl Parser {
       }
       self.create_node(&node);
       ret .None;
+    }
+
+    if self.state.next_token_is_operator("(") && self._looks_like_for_destructure_iter() {
+      ret self._parse_for_iter_destructure(for_tok);
     }
 
     flag is_legacy = false;
@@ -10221,6 +10358,79 @@ test "parse_for_statement parses an iterator loop with an index" {
           assert equals(fi.item_name, "item"), "expected item name 'item'";
         }
         _ -> { panic("expected .Iter"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement parses a destructuring iterator loop" {
+  Vec<str> names;
+  names.init(0);
+  names.push("pairs");
+  ParseState st = _state_with_declared("for (k, v) : pairs { k; v; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for (k, v) : pairs { ... }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Iter(fi) -> {
+          assert !fi.has_index_name, "expected no separate index name";
+          assert fi.item_is_destructure, "expected item_is_destructure set";
+          assert fi.item_destructure_names.len == 2, "expected two destructured names";
+          assert equals(fi.item_destructure_names.get(0), "k"), "expected the first name 'k'";
+          assert equals(fi.item_destructure_names.get(1), "v"), "expected the second name 'v'";
+          fit fi.iterable.kind {
+            .Identifier(s) -> { assert equals(s, "pairs"), "expected iterable 'pairs'"; }
+            _ -> { panic("expected Identifier 'pairs'"); }
+          }
+        }
+        _ -> { panic("expected .Iter"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement rejects a single-name destructuring pattern" {
+  Vec<str> names;
+  names.init(0);
+  names.push("pairs");
+  ParseState st = _state_with_declared("for (k) : pairs { }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  let err = p.parse_for_statement();
+  assert err.is_some(), "expected a single-name 'for (k) : pairs' to be rejected";
+}
+
+test "parse_for_statement still parses an ordinary parenthesized condition, not a destructuring pattern" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("for (x < 3) { x; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for (x < 3) { ... }' to parse as an ordinary condition loop";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> {
+          assert fc.has_condition, "expected a real condition, not the infinite-loop form";
+        }
+        _ -> { panic("expected .Cond, not a destructuring iterator misparse"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }

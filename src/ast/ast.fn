@@ -406,6 +406,12 @@ pub compound ForIterNode {
   str index_name;
   flag has_index_name;
   str item_name;
+  // A destructuring loop variable (`for (a, b) : pairs`), naming each
+  // element of the iterable's own tuple-typed element instead of a
+  // single `item_name`. `item_name` stays empty/unused when this is
+  // set - mirrors `VariableNode.is_destructure`/`destructure_names`.
+  flag item_is_destructure;
+  Vec<str> item_destructure_names;
   Node* iterable;
   Node* body;
 }
@@ -1169,6 +1175,7 @@ fun _free_node_contents(Node* n) {
         .Iter(it) -> {
           node_free(it.iterable);
           node_free(it.body);
+          it.item_destructure_names.free();
         }
       }
     }
@@ -1547,6 +1554,7 @@ pub fun node_clone(Node n) Node {
           ForIterNode ci = it;
           ci.iterable = node_clone_ptr(it.iterable);
           ci.body = node_clone_ptr(it.body);
+          ci.item_destructure_names = _clone_str_vec(&it.item_destructure_names);
           c.kind = .StatementFor(.Iter(ci));
         }
       }

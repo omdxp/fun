@@ -181,7 +181,11 @@ pub fun print_node(Node* node, num depth) {
           if it.has_index_name {
             _line(depth + 1, format("Index: {str}", it.index_name));
           }
-          _line(depth + 1, format("Item: {str}", it.item_name));
+          if it.item_is_destructure {
+            _line(depth + 1, format("Item (destructured): ({str})", join(&it.item_destructure_names, ", ")));
+          } else {
+            _line(depth + 1, format("Item: {str}", it.item_name));
+          }
           _line(depth + 1, "Iterable:");
           print_node(it.iterable, depth + 2);
           _line(depth + 1, "Body:");

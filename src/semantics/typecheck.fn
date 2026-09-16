@@ -2777,7 +2777,7 @@ impl Checker {
       }
       .StatementElse(body) -> { self.check_statement(body, env); }
       .StatementDefer(inner) -> { self.check_statement(inner, env); }
-      .StatementFor(kind) -> { self.check_for(kind, env); }
+      .StatementFor(kind) -> { self.check_for(stmt, kind, env); }
       .StatementFit(f) -> { self.check_fit(f, env); }
       .Expression(_) -> { self.walk_expr(stmt, env); }
       .ExpressionParenthesis(_) -> { self.walk_expr(stmt, env); }
@@ -2815,7 +2815,7 @@ impl Checker {
     }
   }
 
-  check_for(ForKind kind, TypeEnv* env) {
+  check_for(Node* stmt, ForKind kind, TypeEnv* env) {
     env.push();
     fit kind {
       .Cond(c) -> {
@@ -2830,7 +2830,50 @@ impl Checker {
       }
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
-        if it.has_index_name && equals(iterable_type.name, "Map") &&
+        if it.item_is_destructure {
+          // `for (a, b) : pairs`: the loop item is a tuple, destructured
+          // into its own names the same way a declared-type `let`
+          // destructuring pattern is - a real element-type mismatch or
+          // arity mismatch is a compile error here too, not a silent
+          // Unknown fallback, the same standard `check_let_destructure`
+          // already holds tuple destructuring to.
+          flag matched = false;
+          if iterable_type.generic_args.len >= 1 {
+            let elem = iterable_type.generic_args.get(0);
+            if elem.is_tuple && elem.tuple_members.len == it.item_destructure_names.len {
+              matched = true;
+              num idi = 0;
+              for name : it.item_destructure_names {
+                env.define(name, elem.tuple_members.get(idi));
+                idi = idi + 1;
+              }
+            } elif elem.is_tuple {
+              self.fail(
+                format(
+                "'for' destructuring pattern has {num} name(s) but the iterable's own element has {num} element(s)",
+                it.item_destructure_names.len,
+                elem.tuple_members.len
+                ),
+                stmt
+              );
+              matched = true;
+              for name : it.item_destructure_names {
+                env.define(name, checked_unknown());
+              }
+            }
+          }
+          if !matched {
+            // Not confidently known to be a tuple-elemented iterable
+            // (an unresolved reference, or a collection type the
+            // checker doesn't model structurally) - binding each name
+            // as Unknown lets the rest of the function keep checking,
+            // the same leniency an ordinary for-loop item already gets
+            // just below.
+            for name : it.item_destructure_names {
+              env.define(name, checked_unknown());
+            }
+          }
+        } elif it.has_index_name && equals(iterable_type.name, "Map") &&
           iterable_type.generic_args.len == 2 {
           // `for key, val :: someMap`: the two-variable form names a
           // key/value pair for a Map, not an index/item pair the way

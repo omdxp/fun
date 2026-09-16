@@ -2703,7 +2703,28 @@ fun _collect_locals(
           if !is_map {
             item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
           }
-          items.push(_item(fi.item_name, .Variable, item_type));
+          if fi.item_is_destructure {
+            Vec<str> fd_members2;
+            fd_members2.init(0);
+            flag fd_split = starts_with(item_type, "(");
+            if fd_split {
+              fd_members2 = split_signature_params(item_type);
+            }
+            num fdi2 = 0;
+            for fdi2 < fi.item_destructure_names.len {
+              str fd_type2 = "";
+              if fd_split && fdi2 < fd_members2.len {
+                fd_type2 = fd_members2.get(fdi2);
+              }
+              items.push(_item(fi.item_destructure_names.get(fdi2), .Variable, fd_type2));
+              fdi2 = fdi2 + 1;
+            }
+            if fd_split {
+              free_params_vec(&fd_members2);
+            }
+          } else {
+            items.push(_item(fi.item_name, .Variable, item_type));
+          }
           _collect_locals(tokens, fi.body, items, program, file, line);
         }
         .Cond(fc) -> { _collect_locals(tokens, fc.body, items, program, file, line); }

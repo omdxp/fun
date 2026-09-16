@@ -1387,6 +1387,40 @@ test "a for loop's own two-variable form types a Map's key/value pair, not an al
   );
 }
 
+test "a for loop's own destructuring form binds each name to its own tuple element type" {
+  accepts(
+    `compound Vec<T> {
+    `  T v;
+    `}
+    `fun main() num {
+    `  Vec<(num, str)> pairs;
+    `  for (k, v) : pairs {
+    `    num n = k;
+    `    str s = v;
+    `  }
+    `  ret 0;
+    `}`,
+    "expected each destructured name to type as its own tuple element"
+  );
+}
+
+test "a for loop's own destructuring form rejects an arity mismatch against the iterable's element" {
+  rejects(
+    `compound Vec<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Vec<(num, str)> pairs;
+    `  for (a, b, c) : pairs {
+    `    _ = a;
+    `    _ = b;
+    `    _ = c;
+    `  }
+    `}`,
+    "expected a three-name pattern not to fit a two-element tuple"
+  );
+}
+
 test "a name declared twice at top level is rejected, even across different kinds" {
   // Fun's transitive, non-scoped import model merges every declaration
   // into one flat program before codegen, so two top-level names that

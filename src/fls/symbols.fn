@@ -1163,6 +1163,11 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
     ret out;
   }
   num depth = 0;
+  // A generic argument can itself be a tuple type (`Vec<(num, str)>`),
+  // whose own comma must not be mistaken for a top-level separator -
+  // tracked the same depth-aware way `split_signature_params` already
+  // tracks both `(` and `<` together.
+  num paren_depth = 0;
   num start = open + 1;
   num i = start;
   num n = len(detail);
@@ -1170,6 +1175,12 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
     chr c = detail[i];
     if c == '<' {
       depth = depth + 1;
+    } elif c == '(' {
+      paren_depth = paren_depth + 1;
+    } elif c == ')' {
+      if paren_depth > 0 {
+        paren_depth = paren_depth - 1;
+      }
     } elif c == '>' {
       if depth == 0 {
         str piece = trim(substr(detail, start, i - start));
@@ -1179,7 +1190,7 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
         ret out;
       }
       depth = depth - 1;
-    } elif c == ',' && depth == 0 {
+    } elif c == ',' && depth == 0 && paren_depth == 0 {
       str piece = trim(substr(detail, start, i - start));
       if !equals(piece, "") {
         out.push(piece);
@@ -4112,7 +4123,24 @@ fun _lookup_in_body(
             }
             ret .Some(_declaration(name, .Local, format("{str} {str}", index_type, name), body.pos));
           }
-          if equals(fi.item_name, name) {
+          if fi.item_is_destructure {
+            num fdi = 0;
+            for fdi < fi.item_destructure_names.len {
+              if equals(fi.item_destructure_names.get(fdi), name) {
+                str tup_item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
+                str fd_detail = name;
+                if starts_with(tup_item_type, "(") {
+                  Vec<str> fd_members = split_signature_params(tup_item_type);
+                  if fdi < fd_members.len {
+                    fd_detail = format("{str} {str}", fd_members.get(fdi), name);
+                  }
+                  free_params_vec(&fd_members);
+                }
+                ret .Some(_declaration(name, .Local, fd_detail, body.pos));
+              }
+              fdi = fdi + 1;
+            }
+          } elif equals(fi.item_name, name) {
             str item_type = map_value;
             if !is_map {
               item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);

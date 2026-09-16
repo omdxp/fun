@@ -6228,6 +6228,53 @@ test "hover on a declared-type destructuring binding name shows its own real ele
   assert contains(hovered_ref, "dec"), format("expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}", hovered_ref);
 }
 
+test "hover on a for-loop destructuring binding name shows its own real element type" {
+  // `_lookup_in_body`'s `.StatementFor`/`.Iter` case had the same gap
+  // `.Variable` did before this whole fix: it only ever checked a
+  // single `fi.item_name`, which stays "" for a destructuring loop
+  // variable, so `for (k, v) : pairs { ... }` never resolved `k`/`v`
+  // through hover at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fordestrhover.fn";
+  doc.path = "fordestrhover.fn";
+  doc.text = `fun main() {
+  `  Vec<(num, str)> pairs;
+  `  for (k, v) : pairs {
+  `    print(k);
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hovered_k = hover(&reads, doc, 2, 7);
+  assert contains(hovered_k, "num"), format("expected 'k's own hover to show its real tuple element type 'num', got: {str}", hovered_k);
+  str hovered_v = hover(&reads, doc, 2, 10);
+  assert contains(hovered_v, "str"), format("expected 'v's own hover to show its real tuple element type 'str', got: {str}", hovered_v);
+  str hovered_k_ref = hover(&reads, doc, 3, 10);
+  assert contains(hovered_k_ref, "num"), format("expected a later reference to 'k' to resolve too, not just its own binding site, got: {str}", hovered_k_ref);
+}
+
+test "inlay hints offer a for-loop destructuring binding as a known local for completion" {
+  str src = `fun main() {
+  `  Vec<(num, str)> pairs;
+  `  for (k, v) : pairs {
+  `
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fordestrcompletion.fn";
+  doc.path = "fordestrcompletion.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 3, 4, false);
+  assert contains(items, `"label":"k"`), "expected the first destructured for-loop name offered as a completion, not skipped as a blank item_name";
+  assert contains(items, `"label":"v"`), "expected the second destructured for-loop name offered too";
+}
+
 test "hover on an inferred-form destructuring binding name shows a best-effort literal type" {
   // The inferred form (`let (a, b) = expr;`) has no declared tuple type
   // to read element types off of - when the initializer is itself a
