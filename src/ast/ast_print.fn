@@ -280,6 +280,14 @@ pub fun print_node(Node* node, num depth) {
         }
       }
     }
+    .TupleLiteral(tl) -> {
+      _line(depth + 1, format("Elements ({num}):", tl.elements.len));
+      num tli = 0;
+      for tli < tl.elements.len {
+        print_node(tl.elements.get(tli), depth + 2);
+        tli = tli + 1;
+      }
+    }
     .Import(i) -> {
       _line(depth + 1, format("Path: {str}", i.path));
       if i.has_alias {

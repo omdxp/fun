@@ -135,6 +135,50 @@ Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
 forward-declared types are supported.
 
+### Tuples
+
+`(T1, T2, ...)` groups two or more differently-typed values into one
+real type, usable anywhere a type is: a variable's declared type, a
+function parameter or return type, or a generic argument - with no
+separate `compound` declaration needed.
+
+```fun
+use std.io;
+
+fun min_max(num a, num b) (num, num) {
+  if a < b {
+    ret (a, b);
+  }
+  ret (b, a);
+}
+
+fun main() {
+  (num, str) person = (30, "Ada");
+  println_fmt("{num} {str}", person.0, person.1);
+
+  let (low, high) = min_max(9, 3);
+  println_fmt("{num} {num}", low, high);
+}
+```
+
+- A tuple **literal** needs at least two comma-separated elements:
+  `(1, "hi")`. A single parenthesized value (`(1)`) stays an ordinary
+  grouped expression, not a one-element tuple.
+- Read an element back **positionally** with `.0`, `.1`, and so on; an
+  out-of-range index is a compile-time error. A tuple-of-tuples needs
+  its own parens around the outer access (`(t.0).1`) - bare chained
+  access (`t.0.1`) is not supported yet, since `0.1` would otherwise
+  lex as a single decimal number.
+- **`let (a, b, c) = expr;`** destructures a tuple into individually-
+  typed names in one step. `expr` is evaluated exactly once no matter
+  how many names it destructures into, and each name must actually be
+  used or it's an `unused_variable` warning like any other local
+  (prefix with `_` to opt out, same convention as elsewhere).
+- A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
+  as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
+  for the `als Args = (num, str);` pattern this enables with generic
+  aliases.
+
 ## Variables
 
 Variables can be explicitly typed or inferred with `let`.
@@ -591,6 +635,11 @@ fun main() {
   variable: `Drawable d = &square;` then `d.area()`. This is still a
   value type, not a pointer - `Drawable*` follows the same explicit-
   pointer-at-the-use-site rule as any other alias.
+- An alias's own body can be a [tuple](#tuples) (`als Args = (num,
+  str);`), and it's then an ordinary generic type parameter like any
+  other: `als Callback<A, R> = fun(A) R;` plus `Callback<Args, str>`
+  expands to `fun((num, str)) str` - no special-casing needed anywhere
+  once tuples themselves exist.
 
 ## Functions
 

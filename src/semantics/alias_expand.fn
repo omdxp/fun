@@ -86,11 +86,13 @@ fun _free_node_ptr_vec(Vec<Node*>* v) {
 // mirroring `dtype_clone`'s own shallow-copy-then-take-ownership idiom.
 fun _replace_dtype(DataType* dt, DataType replacement) {
   Vec<DataType*> old_generic_args = dt.generic_args;
+  Vec<DataType*> old_tuple_members = dt.tuple_members;
   Vec<Node*> old_array_brackets = dt.array_brackets;
   flag old_has_fn_sig = dt.has_fn_sig;
   FnTypeSig* old_fn_sig = dt.fn_sig;
   *dt = replacement;
   _free_dtype_ptr_vec(&old_generic_args);
+  _free_dtype_ptr_vec(&old_tuple_members);
   _free_node_ptr_vec(&old_array_brackets);
   if old_has_fn_sig && old_fn_sig != nil {
     _free_dtype_ptr_vec(&old_fn_sig.params);
@@ -123,6 +125,11 @@ fun _substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* args) {
   for i < dt.generic_args.len {
     _substitute_params(dt.generic_args.get(i), params, args);
     i = i + 1;
+  }
+  num ti = 0;
+  for ti < dt.tuple_members.len {
+    _substitute_params(dt.tuple_members.get(ti), params, args);
+    ti = ti + 1;
   }
   if dt.has_fn_sig && dt.fn_sig != nil {
     num p = 0;
@@ -161,6 +168,11 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
   for i < dt.generic_args.len {
     _expand_dtype(dt.generic_args.get(i), resolved, saw_unresolved);
     i = i + 1;
+  }
+  num ti = 0;
+  for ti < dt.tuple_members.len {
+    _expand_dtype(dt.tuple_members.get(ti), resolved, saw_unresolved);
+    ti = ti + 1;
   }
   if dt.has_fn_sig && dt.fn_sig != nil {
     num p = 0;

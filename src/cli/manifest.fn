@@ -486,6 +486,8 @@ pub fun manifest_const_node(str name, str value) Node {
   v.val = val;
   v.has_val = true;
   v.is_const = true;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   ret node_new(.Variable(v));
 }
 

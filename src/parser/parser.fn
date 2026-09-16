@@ -826,17 +826,89 @@ impl ParseState {
     ret .None;
   }
 
+  // Parses a tuple type (`(num, str)`): a comma-separated `parse_datatype`
+  // run of at least two members, then the same trailing pointer-depth
+  // suffix every other datatype shape gets. A single `(T)` is rejected
+  // (this position has no ordinary parenthesized-grouping meaning the
+  // way a value expression does, so there's no ambiguity to fall back
+  // to) rather than silently treated as one-member.
+  pub parse_tuple_type_datatype(DataType* dt) Option<ParseErrorKind> {
+    let operr = self.expect_op("(");
+    if operr.is_some() {
+      ret operr;
+    }
+    Vec<DataType*> members;
+    members.init(0);
+    for true {
+      DataType* mdt = malloc(sizeof(DataType));
+      *mdt = dtype_new();
+      let merr = self.parse_datatype(mdt);
+      if merr.is_some() {
+        dtype_free(mdt);
+        num fi = 0;
+        for fi < members.len {
+          dtype_free(members.get(fi));
+          fi = fi + 1;
+        }
+        members.free();
+        ret merr;
+      }
+      members.push(mdt);
+      if self.next_token_is_operator(",") {
+        self.token_next();
+        continue;
+      }
+      break;
+    }
+    let cperr = self.expect_sym(')');
+    if cperr.is_some() {
+      num fi2 = 0;
+      for fi2 < members.len {
+        dtype_free(members.get(fi2));
+        fi2 = fi2 + 1;
+      }
+      members.free();
+      ret cperr;
+    }
+    if members.len < 2 {
+      self.err("a tuple type must have at least two members");
+      num fi3 = 0;
+      for fi3 < members.len {
+        dtype_free(members.get(fi3));
+        fi3 = fi3 + 1;
+      }
+      members.free();
+      ret .Some(.InvalidDataType);
+    }
+
+    dt.kind = .Unknown;
+    dt.type_str = "";
+    dt.is_tuple = true;
+    dt.tuple_members = members;
+
+    let ptr_depth = self.parse_get_pointer_depth();
+    if ptr_depth > 0 {
+      dt.flags.is_pointer = true;
+      dt.pointer_depth = ptr_depth;
+    }
+    ret .None;
+  }
+
   // Parses a type annotation into `dt`: a builtin scalar keyword or
   // user-defined/identifier-based name (optionally alias-qualified,
   // `mod.Type`), its generic arguments if any, then a trailing run of
   // `*` pointer-depth markers. A leading `fun` keyword delegates to
-  // `parse_fn_type_datatype` instead. Trailing array-bracket suffixes
+  // `parse_fn_type_datatype` instead, and a leading `(` to
+  // `parse_tuple_type_datatype`. Trailing array-bracket suffixes
   // (`num[5]`, `str[]`) are handled separately by
   // `parse_array_brackets`, called explicitly by each site that allows
   // one.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
+    }
+    if self.next_token_is_operator("(") {
+      ret self.parse_tuple_type_datatype(dt);
     }
     let tok = self.token_next();
     if tok.is_none() {
@@ -1380,6 +1452,29 @@ pub fun parser_new(ParseState* state) Parser {
   p.pending_call_generic_args.init(0);
   p.has_pending_call_generic_args = false;
   ret p;
+}
+
+// Flattens a left-associative `.Expression{op:","}` chain (the shape
+// `parse_expressionable_root` already builds for any comma-separated run
+// inside parens, call-argument list or not) into its own leaves, in
+// order - mirroring `_call_args`'s own identical unwind shape in
+// typecheck.fn, minus the call-specific cases that don't apply to a bare
+// parenthesized group's own interior.
+fun _flatten_paren_comma_chain(Node* node, Vec<Node*>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") && e.has_left && e.has_right {
+        _flatten_paren_comma_chain(e.left, out);
+        _flatten_paren_comma_chain(e.right, out);
+        ret;
+      }
+    }
+    _ -> {}
+  }
+  out.push(node);
 }
 
 impl Parser {
@@ -2300,6 +2395,35 @@ impl Parser {
       ret rparen_err;
     }
 
+    // A bare (no preceding callee) `(a, b, ...)` with 2+ comma-separated
+    // elements is a tuple literal, not the C-comma-operator-shaped
+    // `.ExpressionParenthesis` every other parenthesized group gets - the
+    // call-argument path below (`has_left_node`) is a completely
+    // different shape and never reaches here.
+    if !has_left_node {
+      Node* exp_for_flatten = malloc(sizeof(Node));
+      *exp_for_flatten = exp_node;
+      Vec<Node*> flattened;
+      flattened.init(2);
+      _flatten_paren_comma_chain(exp_for_flatten, &flattened);
+      if flattened.len >= 2 {
+        TupleLiteralNode tln = tuple_literal_node_new();
+        tln.elements = flattened;
+        Node tuple_node = node_new(.TupleLiteral(tln));
+        self.create_node(&tuple_node);
+        ret self.parse_additional_expression();
+      }
+      // 0 or 1 elements: the base case above pushed `exp_for_flatten`
+      // itself unchanged (or nothing, for an empty `()`, which stays
+      // `.Blank` the same way it already did) - reuse it directly as
+      // the ordinary `.ExpressionParenthesis` payload instead of
+      // discarding it and allocating a second copy.
+      flattened.free();
+      Node paren_node0 = node_new(.ExpressionParenthesis(exp_for_flatten));
+      self.create_node(&paren_node0);
+      ret self.parse_additional_expression();
+    }
+
     Node* exp = malloc(sizeof(Node));
     *exp = exp_node;
     Node paren_node = node_new(.ExpressionParenthesis(exp));
@@ -3018,6 +3142,8 @@ impl Parser {
     v.val = nil;
     v.has_val = false;
     v.is_const = is_const;
+    v.is_destructure = false;
+    v.destructure_names.init(0);
 
     if has_value {
       self.state.token_next();
@@ -3060,13 +3186,158 @@ impl Parser {
     ret .None;
   }
 
+  // Parses `let (a, b, c) = expr;`: a tuple-destructuring `let`, always
+  // type-inferred (there is no explicit-type destructuring form). Builds
+  // one real statement `VariableNode` (`is_destructure=true`,
+  // `destructure_names`) for codegen/warn-unused to walk, then - unlike
+  // `_parse_fit_arm`'s own binding loop, which wraps its bindings in a
+  // fresh `new_scope()`/`finish_scope()` pair since they're arm-body-
+  // local - pushes each destructured name as its own lightweight scope
+  // entity directly into the CURRENT (enclosing) scope, since these names
+  // live for the rest of it, exactly like an ordinary `let`.
+  _parse_let_destructure(flag is_public) Option<ParseErrorKind> {
+    let start_tok = self.state.token_peek_next();
+
+    let lperr = self.state.expect_op("(");
+    if lperr.is_some() {
+      ret lperr;
+    }
+
+    Vec<str> names;
+    names.init(2);
+    Vec<Token> name_tokens;
+    name_tokens.init(2);
+    for true {
+      let nt = self.state.token_next();
+      if nt.is_none() || nt.unwrap().type != .Identifier {
+        report_expected_identifier(self.state, nt, "expected a bound name in 'let' destructuring pattern");
+        ret .Some(.InvalidIdentifier);
+      }
+      str nname = "";
+      fit nt.unwrap().data {
+        .Sval(s) -> { nname = s; }
+        _ -> {}
+      }
+      if self.state.get_scope_entity(nname) != nil {
+        let msg = format("variable '{str}' already declared", nname);
+        defer free(msg);
+        self.state.err(msg);
+        ret .Some(.InvalidStatement);
+      }
+      names.push(nname);
+      name_tokens.push(nt.unwrap());
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+    let rperr = self.state.expect_sym(')');
+    if rperr.is_some() {
+      ret rperr;
+    }
+    if names.len < 2 {
+      self.state.err("a 'let' destructuring pattern must bind at least two names");
+      ret .Some(.InvalidStatement);
+    }
+
+    let eqerr = self.state.expect_op("=");
+    if eqerr.is_some() {
+      ret eqerr;
+    }
+    let prev_stop_comma = self.stop_at_comma;
+    self.stop_at_comma = true;
+    let verr = self.parse_expressionable_root();
+    self.stop_at_comma = prev_stop_comma;
+    if verr.is_some() {
+      ret verr;
+    }
+    let maybe_val = self.state.node_pop();
+    if maybe_val.is_none() {
+      self.state.err("expected initializer expression");
+      ret .Some(.InvalidStatement);
+    }
+    Node* val = malloc(sizeof(Node));
+    *val = maybe_val.unwrap();
+
+    DataType* dt = malloc(sizeof(DataType));
+    *dt = dtype_new();
+    dt.type_str = "__let_infer__";
+
+    VariableNode v;
+    v.var_type = dt;
+    v.name = "";
+    v.val = val;
+    v.has_val = true;
+    v.is_const = false;
+    v.is_destructure = true;
+    v.destructure_names = names;
+
+    Node node = node_new(.Variable(v));
+    if start_tok.is_some() {
+      node.pos = start_tok.unwrap().pos;
+      node.has_pos = true;
+    }
+    node.flags.is_public = is_public;
+
+    Node* node_ptr = malloc(sizeof(Node));
+    *node_ptr = node;
+    self.create_node(node_ptr);
+
+    num ni = 0;
+    for ni < names.len {
+      str name = names.get(ni);
+      Pos name_pos = name_tokens.get(ni).pos;
+      ni = ni + 1;
+
+      DataType* bdt = malloc(sizeof(DataType));
+      *bdt = dtype_new();
+      // The `__let_infer__` sentinel, same as an ordinary `let`'s own
+      // declared type: this is what makes `type_name_of_local`/
+      // `infer_let_local_type` re-run inference against the whole
+      // destructuring statement's own initializer for fls hover/inlay-
+      // hints, instead of finding nothing at all. Real per-element
+      // precision (showing `str` for `b`, not the whole tuple `(num,
+      // str)`) is a follow-up - `infer_let_local_type` has no concept
+      // yet of "pick element N of the inferred type" - but this is a
+      // real improvement over hover finding nothing, since a bare
+      // `dtype_new()` here never even reaches that fallback.
+      bdt.type_str = "__let_infer__";
+
+      VariableNode bv;
+      bv.var_type = bdt;
+      bv.name = name;
+      bv.val = nil;
+      bv.has_val = false;
+      bv.is_const = false;
+      bv.is_destructure = false;
+      bv.destructure_names.init(0);
+
+      Node bvar = node_new(.Variable(bv));
+      bvar.pos = name_pos;
+      bvar.has_pos = true;
+      Node* bvar_ptr = malloc(sizeof(Node));
+      *bvar_ptr = bvar;
+      ScopeEntity* bentity = self.new_scope_entity(bvar_ptr);
+      self.state.push_scope_entity(bentity);
+    }
+    name_tokens.free();
+
+    ret self.state.expect_sym(';');
+  }
+
   // Parses `let <name> = value;`: the declared type is the `__let_infer__`
   // sentinel, since real type inference happens at typecheck time, and an
-  // initializer is mandatory.
+  // initializer is mandatory. A leading `(` instead of a name is a
+  // destructuring `let` (`let (a, b, c) = expr;`), delegated to
+  // `_parse_let_destructure`.
   pub parse_let_declaration(flag is_public) Option<ParseErrorKind> {
     let kw_err = self.state.expect_keyword("let");
     if kw_err.is_some() {
       ret kw_err;
+    }
+
+    if self.state.next_token_is_operator("(") {
+      ret self._parse_let_destructure(is_public);
     }
 
     DataType* dt = malloc(sizeof(DataType));
@@ -3668,6 +3939,8 @@ impl Parser {
       vv.val = nil;
       vv.has_val = false;
       vv.is_const = false;
+      vv.is_destructure = false;
+      vv.destructure_names.init(0);
 
       Node vnode = node_new(.Variable(vv));
       vnode.pos = fn_node_ptr.pos;
@@ -3690,6 +3963,12 @@ impl Parser {
         if rt.type == .Keyword {
           fit rt.data {
             .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
+            _ -> {}
+          }
+        }
+        if rt.type == .Operator {
+          fit rt.data {
+            .Sval(s) -> { looks_like_type = looks_like_type || equals(s, "("); }
             _ -> {}
           }
         }
@@ -4284,6 +4563,8 @@ impl Parser {
         bv.val = nil;
         bv.has_val = false;
         bv.is_const = false;
+        bv.is_destructure = false;
+        bv.destructure_names.init(0);
 
         Node bvar = node_new(.Variable(bv));
         Node* bvar_ptr = malloc(sizeof(Node));
@@ -5509,6 +5790,10 @@ impl Parser {
       }
     }
 
+    if token_is_operator(t, "(") && self._looks_like_tuple_type_declaration() {
+      ret self._parse_bare_type_variable_declaration(false);
+    }
+
     if token_is_symbol(t, '{') {
       ret self.parse_body();
     }
@@ -5518,6 +5803,49 @@ impl Parser {
       ret eerr;
     }
     ret self.state.expect_sym(';');
+  }
+
+  // True when the statement starting here is a bare tuple-type variable
+  // declaration (`(num, str) t;`), not an ordinary parenthesized/tuple-
+  // literal expression statement: scans past the balanced `(...)` group
+  // (and any trailing pointer-depth stars) and checks whether an
+  // identifier - the declared name - follows, rather than an operator
+  // continuing an expression. Nothing valid today looks like "a
+  // parenthesized group immediately followed by a bare identifier with
+  // no operator between them" (an expression statement has no
+  // postfix-continuation shape that starts with a bare identifier), so
+  // this can only add new valid syntax, never misread existing code -
+  // the same argument the single-identifier-led lookahead above already
+  // relies on for `Point p;` vs `w * h;`.
+  _looks_like_tuple_type_declaration() flag {
+    num off = 0;
+    num depth = 0;
+    for true {
+      let t = self.state.token_peek_n(off);
+      if t.is_none() {
+        ret false;
+      }
+      let tok = t.unwrap();
+      if token_is_operator(tok, "(") {
+        depth = depth + 1;
+      } elif token_is_symbol(tok, ')') {
+        depth = depth - 1;
+        if depth == 0 {
+          off = off + 1;
+          break;
+        }
+      }
+      off = off + 1;
+    }
+    for true {
+      let t = self.state.token_peek_n(off);
+      if t.is_none() || !token_is_operator(t.unwrap(), "*") {
+        break;
+      }
+      off = off + 1;
+    }
+    let after = self.state.token_peek_n(off);
+    ret after.is_some() && after.unwrap().type == .Identifier;
   }
 
   // Parses `imp path;` or `imp path as alias;`, including parent-
@@ -6187,6 +6515,12 @@ impl Parser {
               _ -> {}
             }
           }
+          if rt.type == .Operator {
+            fit rt.data {
+              .Sval(s) -> { looks_like_type = looks_like_type || equals(s, "("); }
+              _ -> {}
+            }
+          }
           if looks_like_type {
             let rderr = self.state.parse_datatype(rtype);
             if rderr.is_some() {
@@ -6552,6 +6886,8 @@ impl Parser {
     selfv.val = nil;
     selfv.has_val = false;
     selfv.is_const = false;
+    selfv.is_destructure = false;
+    selfv.destructure_names.init(0);
 
     Node self_node = node_new(.Variable(selfv));
     self_node.pos = mname_tok.unwrap().pos;
@@ -6596,6 +6932,12 @@ impl Parser {
         if rt.type == .Keyword {
           fit rt.data {
             .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
+            _ -> {}
+          }
+        }
+        if rt.type == .Operator {
+          fit rt.data {
+            .Sval(s) -> { looks_like_type = looks_like_type || equals(s, "("); }
             _ -> {}
           }
         }
@@ -7121,6 +7463,140 @@ test "parse_datatype reads a user-defined type as a function-type parameter's ow
   let p0 = dt.fn_sig.params.get(0);
   assert equals(p0.type_str, "Token"), "expected the param's own type_str 'Token'";
   assert equals(dt.fn_sig.rtype.type_str, "Node"), "expected the return type's own type_str 'Node'";
+}
+
+test "parse_tuple_type_datatype parses a two-member tuple type" {
+  ParseState st = _state_from("(num, str)");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected '(num, str)' to parse";
+  assert dt.is_tuple, "expected is_tuple set";
+  assert dt.tuple_members.len == 2, "expected two members";
+  assert dt.tuple_members.get(0).kind == .Num, "expected the first member Num";
+  assert dt.tuple_members.get(1).kind == .Str, "expected the second member Str";
+}
+
+test "parse_tuple_type_datatype parses a three-member tuple type with a user-defined member" {
+  ParseState st = _state_from("(num, dec, User)");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected the three-member tuple to parse";
+  assert dt.tuple_members.len == 3, "expected three members";
+  assert equals(dt.tuple_members.get(2).type_str, "User"), "expected the third member's own type_str 'User'";
+}
+
+test "parse_tuple_type_datatype parses a trailing pointer depth" {
+  ParseState st = _state_from("(num, str)*");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected '(num, str)*' to parse";
+  assert dt.is_tuple, "expected is_tuple set";
+  assert dt.pointer_depth == 1, "expected pointer_depth 1";
+}
+
+test "parse_tuple_type_datatype parses a nested tuple member" {
+  ParseState st = _state_from("((num, str), chr)");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected a nested tuple type to parse";
+  assert dt.tuple_members.len == 2, "expected two top-level members";
+  let inner = dt.tuple_members.get(0);
+  assert inner.is_tuple, "expected the first member to itself be a tuple";
+  assert inner.tuple_members.len == 2, "expected the inner tuple's own two members";
+}
+
+test "_looks_like_tuple_type_declaration distinguishes a bare-type statement from an ordinary tuple literal" {
+  ParseState st1 = _state_from("(num, str) t;");
+  Parser p1 = parser_new(&st1);
+  assert p1._looks_like_tuple_type_declaration(), "expected '(num, str) t;' to look like a declaration";
+
+  ParseState st2 = _state_from("(1, 2);");
+  Parser p2 = parser_new(&st2);
+  assert !p2._looks_like_tuple_type_declaration(), "expected a bare tuple literal statement to not look like a declaration";
+}
+
+test "parse_statement parses a bare tuple-type variable declaration" {
+  ParseState st = _state_from("(num, str) t;");
+  Scope root = scope_new();
+  st.scope_root = &root;
+  st.has_scope_root = true;
+  st.scope_current = &root;
+  st.has_scope_current = true;
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected the tuple-type declaration to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.name, "t"), "expected the variable name 't'";
+      assert v.var_type.is_tuple, "expected the declared type to be a tuple";
+    }
+    _ -> { panic("expected a Variable node"); }
+  }
+}
+
+test "parse_for_parenthesis builds a TupleLiteral for a bare 2+ comma-separated group" {
+  ParseState st = _state_from("(1, 2, 3)");
+  Parser p = parser_new(&st);
+  assert p.parse_for_parenthesis().is_none(), "expected '(1, 2, 3)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .TupleLiteral(tl) -> { assert tl.elements.len == 3, "expected three elements"; }
+    _ -> { panic("expected a TupleLiteral node"); }
+  }
+}
+
+test "parse_for_parenthesis still builds an ordinary ExpressionParenthesis for a single grouped value" {
+  ParseState st = _state_from("(1)");
+  Parser p = parser_new(&st);
+  assert p.parse_for_parenthesis().is_none(), "expected '(1)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .ExpressionParenthesis(inner) -> {}
+    _ -> {
+      panic("expected an ExpressionParenthesis node, not a tuple literal, for a single-element group");
+    }
+  }
+}
+
+test "parse_for_parenthesis still builds an ordinary call for a callee-preceded parenthesized argument list" {
+  ParseState st = _state_from("f(1, 2, 3)");
+  Parser p = parser_new(&st);
+  st.token_next();
+  Node fnode = node_new(.Identifier("f"));
+  p.create_node(&fnode);
+  assert p.parse_for_parenthesis().is_none(), "expected 'f(1, 2, 3)' to parse as a call";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected a call-shaped '()' expression, not a bare tuple";
+    }
+    _ -> { panic("expected an Expression call node"); }
+  }
+}
+
+test "_parse_let_destructure parses names and the initializer" {
+  ParseState st = _state_from("let (a, b, c) = (1, 2, 3);");
+  Scope root = scope_new();
+  st.scope_root = &root;
+  st.has_scope_root = true;
+  st.scope_current = &root;
+  st.has_scope_current = true;
+  Parser p = parser_new(&st);
+  assert p.parse_let_declaration(false).is_none(), "expected the destructuring let to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert v.is_destructure, "expected is_destructure set";
+      assert v.destructure_names.len == 3, "expected three destructured names";
+      assert equals(v.destructure_names.get(0), "a"), "expected the first name 'a'";
+      assert equals(v.destructure_names.get(2), "c"), "expected the third name 'c'";
+      assert v.has_val, "expected an initializer";
+    }
+    _ -> { panic("expected a Variable node"); }
+  }
+}
+
+test "_parse_let_destructure rejects a single-name destructuring pattern" {
+  ParseState st = _state_from("let (a) = 1;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_let_declaration(false).is_some(), "expected a single-name 'let (a) = 1;' to be rejected";
 }
 
 test "parse_generic_type_args reads a single generic argument" {

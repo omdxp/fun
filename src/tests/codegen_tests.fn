@@ -347,3 +347,81 @@ test "'use'/'flag' compile and run end to end, as real alternate spellings of 'i
   str out = run_source(src, "use_flag_alt_spellings", "'use'/'flag' end to end");
   assert equals(out, "ok\n"), "expected 'use'/'flag' to compile and run identically to 'imp'/'bin'";
 }
+
+test "a tuple literal constructs and positional access reads each element back" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) t = (1, "hi");
+  `  printf("%lld %s\n", t.0, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_construct_and_positional_access", "tuple literal + positional access end to end");
+  assert equals(out, "1 hi\n"), "expected the tuple's own elements read back positionally";
+}
+
+test "let destructuring binds each name to its own element's real value" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  let (a, b, c) = (1, 2, 3);
+  `  printf("%lld\n", a + b + c);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_let_destructure_values", "let destructuring end to end");
+  assert equals(out, "6\n"), "expected each destructured name bound to its own element";
+}
+
+test "let destructuring evaluates its initializer exactly once" {
+  str src = `use std.c.io;
+  `num calls = 0;
+  `fun make_pair() (num, num) {
+  `  calls = calls + 1;
+  `  ret (10, 20);
+  `}
+  `fun main() num {
+  `  let (a, b) = make_pair();
+  `  printf("%lld %lld %lld\n", a, b, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_destructure_evaluates_once", "let destructuring evaluate-once correctness");
+  assert equals(out, "10 20 1\n"), "expected the initializer call counted exactly once, not once per destructured name";
+}
+
+test "a function returning a tuple works end to end" {
+  str src = `use std.c.io;
+  `fun pair() (num, str) {
+  `  ret (7, "seven");
+  `}
+  `fun main() num {
+  `  let (n, s) = pair();
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_function_return", "tuple-returning function end to end");
+  assert equals(out, "7 seven\n"), "expected the returned tuple's own elements to destructure correctly";
+}
+
+test "a tuple works as an ordinary generic argument end to end" {
+  str src = `use std.c.io;
+  `compound Box<T> { T v; }
+  `fun main() num {
+  `  Box<(num, str)> b = Box<(num, str)>{v = (1, "hi")};
+  `  printf("%lld %s\n", b.v.0, b.v.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_generic_argument", "tuple as a generic argument end to end");
+  assert equals(out, "1 hi\n"), "expected a tuple to plug into an existing generic compound like any other type";
+}
+
+test "a generic alias bound to a tuple works end to end, the original motivating case" {
+  str src = `use std.c.io;
+  `als Args = (num, str);
+  `als Callback<A, R> = fun(A) R;
+  `fun describe(Args a) str { ret a.1; }
+  `fun apply(Callback<Args, str> cb, Args a) str { ret cb(a); }
+  `fun main() num {
+  `  printf("%s\n", apply(describe, (1, "hi")));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_generic_alias_callback", "tuple-bodied generic alias end to end");
+  assert equals(out, "hi\n"), "expected the tuple-bodied alias to expand and run exactly like a hand-written tuple type";
+}

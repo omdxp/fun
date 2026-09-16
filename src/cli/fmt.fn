@@ -575,7 +575,11 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
       ret false;
     }
   }
-  if !_is_type_token(next) {
+  // A tuple type's own opening paren also starts a generic argument
+  // (`Box<(num, str)>`), unlike an ordinary parenthesized value - a
+  // `(` never otherwise opens a type-token position right after `<`.
+  flag next_is_tuple_open = next.type == .Operator && equals(token_text(next), "(");
+  if !_is_type_token(next) && !next_is_tuple_open {
     ret false;
   }
   if in_decl_only {
@@ -720,6 +724,20 @@ fun _needs_space_at(
     ret block_brace;
   }
   if equals(c, "(") || equals(c, "[") {
+    // A tuple return type's own opening paren, right after a function's
+    // param-list-closing ')' (`fun f() (num, str) {`), is a real
+    // exception to the "binds tight" rule just below: still inside the
+    // function's own declaration (`in_decl_only`), not a call/index
+    // continuing some value the way `foo()()`/`foo()[0]` would be.
+    if in_decl_only && equals(c, "(") && equals(p, ")") {
+      ret true;
+    }
+    // A tuple type's own opening paren binds tight to a generic `<`
+    // just opened for it (`Box<(num, str)>`), the same as any other
+    // type argument would.
+    if equals(p, "<") && angle_depth > 0 {
+      ret false;
+    }
     // A call or an index binds to the name before it, unlike a
     // parenthesized operand after a keyword or an operator.
     if _is_close_run(p) > 0 {
@@ -729,11 +747,15 @@ fun _needs_space_at(
       ret true;
     }
     if prev.type == .Keyword {
+      // `let (a, b, c) = expr;`: a destructuring `let` is the only
+      // shape where `(` ever directly follows the keyword at all (an
+      // ordinary `let name = ...;` always has an identifier there
+      // instead), so this is unconditionally safe.
       ret equals(p, "ret") || equals(p, "if") || equals(p, "elif") || equals(p, "for") ||
         equals(
         p,
         "fit"
-      ) || equals(p, "assert") || equals(p, "await");
+      ) || equals(p, "assert") || equals(p, "await") || equals(p, "let");
     }
     if prev.type == .Operator && _operator_needs_spaces(p) {
       ret true;

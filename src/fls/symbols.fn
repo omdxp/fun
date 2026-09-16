@@ -85,6 +85,33 @@ pub fun render_type(DataType* dt) str {
     ret "";
   }
   StringBuilder b = string_builder_init(32);
+  if dt.is_tuple {
+    // A tuple type (`(num, str)`) has no base name of its own - its own
+    // member types, in `tuple_members`, are everything there is to show,
+    // written back the same way they were declared.
+    b.append("(");
+    num ti = 0;
+    for ti < dt.tuple_members.len {
+      if ti > 0 {
+        b.append(", ");
+      }
+      str member_text = render_type(dt.tuple_members.get(ti));
+      b.append(member_text);
+      free(member_text);
+      ti = ti + 1;
+    }
+    b.append(")");
+    num tstars = dt.pointer_depth;
+    if dt.flags.is_pointer && tstars == 0 {
+      tstars = 1;
+    }
+    num ts = 0;
+    for ts < tstars {
+      b.append("*");
+      ts = ts + 1;
+    }
+    ret b.build();
+  }
   if dt.has_fn_sig && dt.fn_sig != nil {
     // A function-typed value (`fun(A, B) R`): `_base_type_name` would
     // otherwise just show the parser's own fixed placeholder text
@@ -1598,7 +1625,26 @@ pub fun bare_type_expr(str type_expr) str {
 // `type_name_of_local` and `chain_receiver_type`, since a field's own
 // `Declaration.detail` reads the same shape a local's does.
 pub fun bare_type_from_detail(str detail) str {
-  num space = index_of_char(detail, ' ');
+  // The *last* top-level space, not the first: a tuple's own rendered
+  // form (`"(num, str) t"`) or a function type's (`"fun(A, B) R name"`)
+  // carries real spaces of its own inside `(`/`<`, which the first-space
+  // approach this used to take would cut through, splitting mid-type
+  // instead of at the real type/name boundary.
+  num depth = 0;
+  num space = -1;
+  num i = 0;
+  num n = len(detail);
+  for i < n {
+    chr c = detail[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ' ' && depth == 0 {
+      space = i;
+    }
+    i = i + 1;
+  }
   if space <= 0 {
     ret "";
   }

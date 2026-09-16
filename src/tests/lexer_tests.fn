@@ -60,6 +60,54 @@ test "a character read ahead of the cursor is put back, not consumed" {
   }
 }
 
+test "a dot right after a value that already ends an operand starts tuple positional access, not a float" {
+  // `t.0` (tuple positional access): unlike a genuinely leading `.5`, the
+  // '.' here follows an identifier that already completes a value, so it
+  // must lex as three separate tokens, not one collapsed `Dec` literal.
+  let lexed = tokenize("t.0", "tupleaccess.fn");
+  assert lexed.is_ok(), "expected 't.0' to lex";
+  Vec<Token> tokens = lexed.unwrap();
+  defer tokens.free();
+  assert tokens.len == 3, "expected three tokens: identifier, dot, number";
+  assert tokens.get(0).type == .Identifier, "expected 't' as an identifier";
+  assert token_is_operator(tokens.get(1), "."), "expected a real '.' operator token";
+  fit tokens.get(2).data {
+    .Num(n) -> { assert n == 0, "expected the index 0, not a decimal 0.0"; }
+    _ -> { panic("expected the index to lex as a plain integer Number, not a Dec"); }
+  }
+
+  // A multi-digit index must survive intact (`t.12`, not a `Dec(0.12)`-style
+  // collapse).
+  let lexed2 = tokenize("t.12", "tupleaccess2.fn");
+  assert lexed2.is_ok(), "expected 't.12' to lex";
+  Vec<Token> tokens2 = lexed2.unwrap();
+  defer tokens2.free();
+  assert tokens2.len == 3, "expected three tokens for a multi-digit index too";
+  fit tokens2.get(2).data {
+    .Num(n) -> { assert n == 12, "expected the full multi-digit index 12"; }
+    _ -> { panic("expected a plain integer Number for a multi-digit index"); }
+  }
+
+  // A closing ')'/']' also already ends an operand.
+  let lexed3 = tokenize("(x).0", "tupleaccess3.fn");
+  assert lexed3.is_ok(), "expected '(x).0' to lex";
+  Vec<Token> tokens3 = lexed3.unwrap();
+  defer tokens3.free();
+  assert tokens3.len == 5, "expected 5 tokens: (, x, ), ., 0";
+
+  // A genuinely bare leading-dot float in value position is unaffected -
+  // nothing before it to end an operand.
+  let bare = tokenize(".5", "barefloat.fn");
+  assert bare.is_ok(), "expected a bare '.5' to still lex";
+  Vec<Token> btokens = bare.unwrap();
+  defer btokens.free();
+  assert btokens.len == 1, "expected a bare leading-dot float to stay one token";
+  fit btokens.get(0).data {
+    .Dec(d) -> { assert d == 0.5, "expected the decimal value 0.5"; }
+    _ -> { panic("expected a bare '.5' to still lex as one Dec token"); }
+  }
+}
+
 test "lexes a line comment" {
   let toks = lex_ok("// This is a comment\n");
   assert toks.len >= 1, "expected at least the comment token";

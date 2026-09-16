@@ -1499,6 +1499,20 @@ impl Analysis {
         }
       }
       .Variable(v) -> {
+        // A destructuring `let (a, b, c) = expr;` has no single `v.name`
+        // of its own (it's inert, "") - each destructured name gets its
+        // own check instead, same `_`-prefix-suppresses convention.
+        // Checked first: `v.name` being empty would otherwise itself
+        // report as a bogus "unused variable ''" on every destructuring
+        // `let`, regardless of whether its real names are used.
+        if v.is_destructure {
+          for dname : v.destructure_names {
+            if !read.has(dname) && !starts_with(dname, "_") {
+              self.report(.UnusedVariable, format("unused variable '{str}'", dname), stmt);
+            }
+          }
+          ret;
+        }
         // A name beginning with `_` says the value is being discarded on
         // purpose, so there is nothing to report.
         if !read.has(v.name) && !starts_with(v.name, "_") {

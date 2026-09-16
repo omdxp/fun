@@ -270,6 +270,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
         source_line
       );
     }
+    if starts_with(type_name, "(") {
+      // A tuple-typed receiver (`render_type`'s own `"(num, str)"`
+      // rendering) has no named declaration for `_members_of`'s
+      // lookup-by-name to find - its "fields" are purely positional.
+      _tuple_element_completions(type_name, &items);
+      ret _reply(&items);
+    }
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items, snippets);
     } else {
@@ -2369,6 +2376,54 @@ fun _enum_variant_completions(Vec<Node>* program, str type_name, Vec<Item>* item
       _ -> {}
     }
   }
+}
+
+// A tuple-typed receiver's own "fields", offered as `0`, `1`, ... up to
+// its arity - `rendered_type` is `render_type`'s own text for it
+// (`"(num, str)"`), split on its top-level commas (respecting nested
+// `(`/`)`/`<`/`>` depth, so a member that's itself a tuple or a generic
+// instantiation doesn't get split apart). Not `_members_of`'s
+// lookup-by-name shape: a tuple has no declaration to look up.
+fun _tuple_element_completions(str rendered_type, Vec<Item>* items) {
+  if len(rendered_type) < 2 {
+    ret;
+  }
+  str inner = substr(rendered_type, 1, len(rendered_type) - 2);
+  Vec<str> members;
+  members.init(4);
+  num depth = 0;
+  num start = 0;
+  num i = 0;
+  num n = len(inner);
+  for i < n {
+    chr c = inner[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      members.push(trim(substr(inner, start, i - start)));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < n {
+    members.push(trim(substr(inner, start, n - start)));
+  }
+  free(inner);
+
+  num mi = 0;
+  for mi < members.len {
+    str midx = format("{num}", mi);
+    // `_item` copies every field of its own (via `_snippet_item`), so
+    // the member text `members` owns can be freed right after, and the
+    // borrowed `midx`/label text doesn't need to outlive this call.
+    items.push(_item(midx, .Field, members.get(mi)));
+    free(midx);
+    free(members.get(mi));
+    mi = mi + 1;
+  }
+  members.free();
 }
 
 fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets) {

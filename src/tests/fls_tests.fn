@@ -1105,6 +1105,21 @@ test "hover on a type alias declaration shows its own resolved body" {
   assert contains(hovered, "als Callback<A, R> = fun(A) R"), "expected the alias's own declared form";
 }
 
+test "hover on a tuple-typed function param and return type renders the real member types" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tuplehover.fn";
+  doc.path = "tuplehover.fn";
+  doc.text = `fun swap(num a, str b) (str, num) {
+  `  ret (b, a);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 4);
+  assert contains(hovered, "(str, num)"), "expected the tuple return type rendered with real member types, not a placeholder";
+}
+
 test "hover on a bound-list type alias shows its own alternatives" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -1204,6 +1219,26 @@ test "go-to-definition on a type alias reference jumps to its own declaration" {
   // 'Meters' is used as a type on line 2 (0-indexed), declared on line 0.
   str jumped = definition(&reads, doc, 2, 4);
   assert contains(jumped, `"line":0`), "expected the alias's own declaration line";
+}
+
+test "go-to-definition inside a tuple type's own parenthesized slot resolves the member type, no crash" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupletypedef.fn";
+  doc.path = "tupletypedef.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `fun main() {
+  `  (num, Point) t;
+  `}`;
+  doc.version = 1;
+
+  // A tuple type has no single identifier of its own to jump from - only
+  // each member type does. 'Point' sits inside the parens on line 4.
+  str jumped = definition(&reads, doc, 4, 8);
+  assert contains(jumped, `"line":0`), "expected the tuple's own Point member to resolve to its real declaration";
 }
 
 test "completion offers a declared type alias name alongside compound/enum/quirk" {
@@ -5820,6 +5855,49 @@ test "hover on a generic compound shows a generic-instantiation bound alongside 
   assert contains(hovered, "T: num | Slot<num>"), "expected the generic-instantiation bound to render in full, not just its base name";
 }
 
+test "completion after '.' on a tuple-typed receiver offers each positional element" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupledotcompletion.fn";
+  doc.path = "tupledotcompletion.fn";
+  doc.text = `fun main() {
+  `  (num, str) t = (5, "hi");
+  `  t.zzz;
+  `}`;
+  doc.version = 1;
+
+  // Right after the '.' on line 2 - keeping a real (if nonsense)
+  // trailing identifier after it is what keeps this document fully
+  // parseable, the same way every other dot-completion test here does;
+  // the cursor position alone is what drives completion, not the text.
+  str out = completion(&reads, doc, 2, 4, false);
+  assert contains(out, `"label":"0"`), "expected the first positional element offered";
+  assert contains(out, `"label":"1"`), "expected the second positional element offered";
+  assert contains(out, `"detail":"num"`), "expected element 0's own type as detail";
+  assert contains(out, `"detail":"str"`), "expected element 1's own type as detail";
+}
+
+test "completion inside a tuple type's own parenthesized slot offers ordinary types" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupletypecompletion.fn";
+  doc.path = "tupletypecompletion.fn";
+  doc.text = `fun helper() num {
+  `  ret 1;
+  `}
+  `fun main() {
+  `  (num, nu) t;
+  `}`;
+  doc.version = 1;
+
+  // Cursor right after the partial "nu" inside the second slot, on line
+  // 4: `  (num, nu) t;`.
+  str out = completion(&reads, doc, 4, 11, false);
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside a tuple type's own slot";
+}
+
 test "completion inside a type-param bound offers a quirk and a builtin type, never a function" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -6050,6 +6128,34 @@ test "hover resolves a field access chained onto a propagation whose unwrapped t
 
   str hovered = hover(&reads, doc, 4, 19);
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' even when Point is behind a pointer";
+}
+
+test "hover on a 'let' tuple-destructuring binding name does not crash" {
+  // A destructured name's own scope entity carries the `__let_infer__`
+  // sentinel (the same as an ordinary `let`'s own declared type) so it
+  // at least reaches the same re-inference path a plain `let` binding
+  // does, but `infer_let_local_type` has no concept yet of "pick
+  // element N of the inferred type" - it was built for the ordinary
+  // one-name-one-value shape. Real per-element hover precision here
+  // (showing `str` for `b`, not nothing or the whole tuple) is a
+  // genuine follow-up, not something this asserts on yet; what matters
+  // for now is that hovering never crashes fls.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letdestrhover.fn";
+  doc.path = "letdestrhover.fn";
+  doc.text = `fun main() {
+  `  let (a, b) = (1, "hi");
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  // 'a' on line 1, right where it's bound. Answers *something* (even
+  // "null" is a valid, well-formed reply, not a crash) rather than
+  // hanging or aborting.
+  str hovered = hover(&reads, doc, 1, 7);
+  assert len(hovered) >= 0, "expected hover to return normally, not crash";
 }
 
 test "hover on a fit destructuring binding resolves through a propagated field-access subject" {

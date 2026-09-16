@@ -1,0 +1,68 @@
+// Tuple types: `(num, str)` groups fixed, differently-typed values into one
+// real, first-class type - usable as a variable type, a function parameter or
+// return type, and a generic argument, with no separate compound declaration
+// needed.
+// 
+// A tuple literal `(1, "hi")` needs at least two comma-separated elements: a
+// single parenthesized value stays an ordinary grouped expression. Read an
+// element back positionally with `.0`, `.1`, ... A tuple-of-tuples needs
+// parens around the outer access (`(t.0).1`) - bare chained access (`t.0.1`)
+// is not supported yet. `let (a, b, c) = expr;` destructures a tuple into
+// individually-typed names in one step, evaluating `expr` exactly once no
+// matter how many names it destructures into.
+
+use std.io;
+
+// A function may take and return a tuple like any other type.
+fun min_max(num a, num b) (num, num) {
+  if a < b {
+    ret (a, b);
+  }
+  ret (b, a);
+}
+
+// Tuples nest inside an existing generic compound like any other type
+// argument - no special-casing needed for `Box<(num, str)>`.
+compound Box<T> {
+  T value;
+}
+
+// A tuple works just as well as a generic alias's own body: `Args` below is
+// an ordinary alias, and `Callback<Args, R>` treats it as an ordinary type
+// parameter, no different from `Callback<num, R>`.
+als Args = (num, str);
+als Callback<A, R> = fun(A) R;
+
+fun describe(Args a) str {
+  ret format("{num} -> {str}", a.0, a.1);
+}
+
+fun apply(Callback<Args, str> cb, Args a) str {
+  ret cb(a);
+}
+
+fun main() {
+  // Construction and positional access.
+  (num, str) person = (30, "Ada");
+  println_fmt("person: {} years, name {}", person.0, person.1);
+
+  // A tuple-of-tuples: chained access needs its own parens.
+  ((num, num), str) nested = ((1, 2), "pair");
+  println_fmt("nested first element: {}", (nested.0).0);
+
+  // `let` destructuring.
+  let (low, high) = min_max(9, 3);
+  println_fmt("min_max: {} {}", low, high);
+
+  // The initializer runs exactly once, however many names it destructures
+  // into - useful when it has a real side effect, not just a plain literal.
+  let (mn, mx) = min_max(20, 4);
+  println_fmt("min_max again: {} {}", mn, mx);
+
+  // Generic interaction.
+  Box<(num, str)> boxed = Box<(num, str)>{value = (7, "seven")};
+  println_fmt("boxed: {} {}", boxed.value.0, boxed.value.1);
+
+  // The alias-bound tuple from above, used exactly like any other type.
+  println_fmt("apply: {}", apply(describe, (5, "five")));
+}

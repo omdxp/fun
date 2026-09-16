@@ -444,6 +444,9 @@ pub compound Codegen {
   num call_recv_temp_counter;
   // Unique counter for `emit_for_iter`'s Set/Map iterator temp names.
   num for_iter_temp_counter;
+  // Unique counter for `emit_let_destructure`'s own initializer temp
+  // names.
+  num let_destructure_temp_counter;
   // How many levels deep emission is nested inside a scratch buffer with
   // `hoist_insert_pos`/`current_stmt_start_pos` suspended (0 when not
   // nested); every scratch-buffer swap shares the counter, since any can
@@ -588,6 +591,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_body_start_pos = .None;
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
+  g.let_destructure_temp_counter = 0;
   g.va_call_counter = 0;
   g.try_call_counter = 0;
   g.hoist_scratch_depth = 0;
@@ -787,6 +791,17 @@ fun _is_hex_digit(chr c) flag {
   ret (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
+// True for one of the 5 ordinary arithmetic operators - used by
+// `infer_let_expr_type`'s own numeric-widening fallback, not a general
+// operator classifier (comparison/logical/bitwise operators are handled
+// elsewhere and never need a declared type resolved this way).
+fun is_arithmetic_operator(str op) flag {
+  fit op {
+    "+", "-", "*", "/", "%" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
 // True when `dt` is a pointer of any depth, matching `write_type`'s
 // `ptr_depth`/`flags.is_pointer` check.
 fun dtype_is_pointer(DataType dt) flag {
@@ -948,6 +963,53 @@ impl Codegen {
     if self.type_subst_param_names.len == 0 {
       ret dt;
     }
+    // A tuple's own members never live in `generic_args` (its `type_str`
+    // is always empty, so the ordinary "does dt itself name a param"
+    // check just below would never match one anyway) - substituted here,
+    // one level deep, the same way the generic_args loop below does for
+    // an ordinary generic instantiation's own arguments.
+    if dt.is_tuple {
+      DataType out = dtype_new();
+      out.is_tuple = true;
+      out.pointer_depth = dt.pointer_depth;
+      out.flags = dt.flags;
+      Vec<DataType*> new_members;
+      new_members.init(0);
+      for m : dt.tuple_members {
+        flag substituted = false;
+        if m.generic_args.len == 0 && !m.is_tuple {
+          for i : 0..self.type_subst_param_names.len {
+            if equals(self.type_subst_param_names.get(i), m.type_str) {
+              if i < self.type_subst_arg_dtypes.len {
+                let arg_dt3 = self.type_subst_arg_dtypes.get(i);
+                DataType* sub3 = malloc(sizeof(DataType));
+                *sub3 = *arg_dt3;
+                sub3.pointer_depth = sub3.pointer_depth + m.pointer_depth;
+                new_members.push(sub3);
+                substituted = true;
+                break;
+              }
+              DataType* sub4 = malloc(sizeof(DataType));
+              *sub4 = dtype_new();
+              sub4.type_str = self.type_subst_arg_type_strs.get(i);
+              num extra2 = 0;
+              if self.type_subst_arg_is_pointer.get(i) {
+                extra2 = 1;
+              }
+              sub4.pointer_depth = m.pointer_depth + extra2;
+              new_members.push(sub4);
+              substituted = true;
+              break;
+            }
+          }
+        }
+        if !substituted {
+          new_members.push(m);
+        }
+      }
+      out.tuple_members = new_members;
+      ret out;
+    }
     if dt.generic_args.len == 0 {
       for i : 0..self.type_subst_param_names.len {
         if equals(self.type_subst_param_names.get(i), dt.type_str) {
@@ -1059,6 +1121,9 @@ impl Codegen {
   resolve_type_name(DataType dt) Option<str> {
     dt.type_str = self.strip_known_alias_prefix(dt.type_str);
     let rdt = self.resolve_type_subst(dt);
+    if rdt.is_tuple {
+      ret self.ensure_tuple_instantiated(rdt);
+    }
     if rdt.generic_args.len == 0 {
       ret .Some(rdt.type_str);
     }
@@ -1073,6 +1138,104 @@ impl Codegen {
     // A concrete instantiation of a generic quirk used directly as a
     // type: neither a compound nor an enum template recognizes it.
     ret self.ensure_quirk_instantiated(rdt);
+  }
+
+  // Synthesizes (and, on first use, emits) the C struct backing a tuple
+  // type, mangled `__Tuple__<member1>[_ptrN]__<member2>[_ptrN]...` - the
+  // leading double underscore is deliberate: an ordinary `Tuple__...`
+  // scheme would collide with a user's own `compound Tuple<A, B>`
+  // instantiated the same shape (nothing stops a user compound from
+  // being named that), while `__`-prefixed is reserved compiler-sentinel
+  // space, matching `__let_infer__`/`__auto_type` elsewhere. Simpler
+  // than `ensure_compound_instantiated`: there is no separate template
+  // to look up by name first - `dt.tuple_members` (already one-level
+  // substituted by `resolve_type_subst`) already *is* the template, so
+  // this resolves (and, on first use, emits) each member directly. No
+  // self-referential forward-declare is needed the way a compound
+  // sometimes does: a tuple has no name of its own to recursively
+  // reference until it's already fully resolved.
+  ensure_tuple_instantiated(DataType dt) Option<str> {
+    StringBuilder name_sb = string_builder_init(24);
+    name_sb.append("__Tuple");
+    Vec<str> member_names;
+    member_names.init(0);
+    Vec<flag> member_is_ptr;
+    member_is_ptr.init(0);
+    Vec<num> member_ptr_depth;
+    member_ptr_depth.init(0);
+    Vec<DataType> member_dtypes;
+    member_dtypes.init(0);
+    for m : dt.tuple_members {
+      let mname = self.resolve_type_name(*m)?;
+      name_sb.append("__");
+      name_sb.append(mname);
+      flag mptr = dtype_is_pointer(*m);
+      num pdepth = m.pointer_depth;
+      if mptr && pdepth == 0 {
+        pdepth = 1;
+      }
+      if mptr {
+        name_sb.append("_ptr");
+        name_sb.append(format_num(pdepth));
+      }
+      // A by-value plain-compound/enum member (`(num, User)`, `User`
+      // embedded directly, not `User*`) needs its own real body to
+      // exist before this struct's own typedef can - the same
+      // dependency `ensure_compound_instantiated`'s own Pass 1 forces
+      // for a generic compound's by-value fields. Skipped for a
+      // pointer member (only needs the forward-declared name) and
+      // while nested inside another type's own scratch-buffer swap
+      // (`self.state != self.root_state`), matching that precedent's
+      // own guard exactly.
+      if !mptr && self.state == self.root_state {
+        self.ensure_plain_type_emitted(mname);
+      }
+      member_names.push(mname);
+      member_is_ptr.push(mptr);
+      member_ptr_depth.push(pdepth);
+      member_dtypes.push(*m);
+    }
+    str mangled_name = name_sb.build();
+
+    num ei = 0;
+    for ei < self.emitted_generic_instantiations.len {
+      if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
+        ret .Some(mangled_name);
+      }
+      ei = ei + 1;
+    }
+    self.emitted_generic_instantiations.push(mangled_name);
+
+    CodegenState tuple_scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    self.state = &tuple_scratch;
+    self.state.write("typedef struct {\n");
+    Vec<str> field_names;
+    field_names.init(0);
+    num wi = 0;
+    for wi < member_names.len {
+      self.state.write("  ");
+      self.write_type_name(member_names.get(wi));
+      num pdi = 0;
+      for pdi < member_ptr_depth.get(wi) {
+        self.state.write("*");
+        pdi = pdi + 1;
+      }
+      str fname = format("_{num}", wi);
+      self.state.write(" ");
+      self.state.write(fname);
+      self.state.write(";\n");
+      field_names.push(fname);
+      wi = wi + 1;
+    }
+    self.state.write("} ");
+    self.state.write(mangled_name);
+    self.state.write(";\n\n");
+    self.state = saved_state;
+    self.emit_hoisted(tuple_scratch.out.build());
+
+    self.record_compound_typed(mangled_name, field_names, member_names, member_is_ptr, member_dtypes);
+    ret .Some(mangled_name);
   }
 
   // Appends a rendered typedef or method definition at the current tail
@@ -1253,9 +1416,13 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 {
+      if arg.generic_args.len > 0 || arg.is_tuple {
         // Resolved (and, on first use, emitted) first, so it's already
-        // hoisted before the outer type's mangled name is built.
+        // hoisted before the outer type's mangled name is built. A
+        // tuple argument (`Vec<(num, str)>`) has no `generic_args` of
+        // its own (its members live in `tuple_members` instead), so
+        // `arg.type_str` alone (empty for a tuple) would otherwise
+        // silently mangle to nothing here.
         arg_name = self.resolve_type_name(*arg)?;
       }
       name_sb.append("__");
@@ -1382,7 +1549,7 @@ impl Codegen {
       // reuse the substitution machinery a generic impl method's body
       // gets.
       if !matched_bare_param {
-        if field_dt.generic_args.len > 0 {
+        if field_dt.generic_args.len > 0 || field_dt.is_tuple {
           let nested_name = self.resolve_type_name(*field_dt);
           if nested_name.is_some() {
             resolved_type = nested_name.unwrap();
@@ -1541,9 +1708,11 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 {
+      if arg.generic_args.len > 0 || arg.is_tuple {
         // A nested generic argument resolves first, recursing to
-        // arbitrary depth.
+        // arbitrary depth. A tuple argument's own members live in
+        // `tuple_members`, not `generic_args`, so it needs the same
+        // early-resolve treatment here too.
         let nested_name = self.resolve_type_name(*arg);
         if nested_name.is_none() {
           ret .None;
@@ -1980,6 +2149,17 @@ impl Codegen {
   // and offers no name-only forward-declare for a generic instantiation.
   prototype_type_is_unsafe_early(DataType dt) flag {
     if dt.generic_args.len > 0 {
+      ret true;
+    }
+    // A tuple's own synthesized struct is exactly as lazily-resolved as
+    // a generic instantiation - `ensure_tuple_instantiated` may need to
+    // force one of its by-value members' own body to exist first
+    // (`ensure_plain_type_emitted`), which assumes the current write
+    // position is a safe splice point. The early pass writes prototypes
+    // before any of that is guaranteed, so a tuple-typed param/return
+    // here would try to splice mid-prototype-line - unsafe for exactly
+    // the same reason a generic instantiation already is.
+    if dt.is_tuple {
       ret true;
     }
     // A concrete impl's `self` parameter carries an already-mangled bare
@@ -4813,6 +4993,48 @@ impl Codegen {
         self.state.write("}");
         ret .None;
       }
+      // A tuple literal (`(1, 2, 3)`): self-typed structurally from each
+      // element's own inferred type, the same way a bare `[...]` array
+      // literal self-types below - there's no declared target type
+      // available here to resolve against instead. Lowers to a GNU C
+      // compound literal against the tuple's own synthesized, mangled
+      // struct (`ensure_tuple_instantiated`), `._N = value` per element.
+      .TupleLiteral(tl) -> {
+        DataType dt = dtype_new();
+        dt.is_tuple = true;
+        for el : tl.elements {
+          let mdt = self.infer_let_expr_type(el);
+          if mdt.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          DataType* member = malloc(sizeof(DataType));
+          *member = mdt.unwrap();
+          dt.tuple_members.push(member);
+        }
+        let mangled = self.resolve_type_name(dt);
+        if mangled.is_none() {
+          ret .Some(.UnsupportedNode);
+        }
+        self.state.write("(");
+        self.state.write(mangled.unwrap());
+        self.state.write("){");
+        flag tl_first = true;
+        num tl_idx = 0;
+        for el : tl.elements {
+          if !tl_first {
+            self.state.write(", ");
+          }
+          tl_first = false;
+          self.state.write(format("._{num} = ", tl_idx));
+          let eerr = self.emit_expr(*el);
+          if eerr.is_some() {
+            ret eerr;
+          }
+          tl_idx = tl_idx + 1;
+        }
+        self.state.write("}");
+        ret .None;
+      }
       // A bare `[elem, elem, ...]` array literal. Inside a declaration
       // already providing the array's own type
       // (`in_array_initializer`), just the bare `{...}` initializer
@@ -7120,6 +7342,25 @@ impl Codegen {
     if !e.has_left || !e.has_right {
       ret .Some(.InvalidNode);
     }
+    // Tuple positional access (`t.0`): the RHS is a plain `Number` token,
+    // not an `Identifier` - resolved and emitted through the same
+    // `resolve_field_chain` machinery `infer_let_expr_type`'s own
+    // `op == "."` case already uses for type resolution, since that now
+    // has its own tuple-aware branch.
+    flag right_is_number = false;
+    fit e.right.kind {
+      .Number(_) -> { right_is_number = true; }
+      _ -> {}
+    }
+    if right_is_number {
+      Node dot_node = node_new(.Expression(e));
+      let chain = self.resolve_field_chain(&dot_node);
+      if chain.is_none() {
+        ret .Some(.UnsupportedNode);
+      }
+      self.state.write(chain.unwrap().text);
+      ret .None;
+    }
     str field_name = "";
     fit e.right.kind {
       .Identifier(name) -> { field_name = name; }
@@ -7673,6 +7914,51 @@ impl Codegen {
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
           ret .None;
         }
+        // Tuple positional access (`t.0`): the RHS is a plain `Number`
+        // token, never an `Identifier` the way an ordinary field name
+        // is - resolved against the receiver's own recorded tuple
+        // member types directly, since there's no `lookup_compound_field`
+        // entry to look a bare digit up as (a tuple's own synthesized
+        // struct is recorded with `_N` field names, not the digits
+        // themselves).
+        flag right_is_number = false;
+        num tuple_idx = 0;
+        fit inner_e.right.kind {
+          .Number(ndata) -> {
+            fit ndata {
+              .Num(n) -> {
+                right_is_number = true;
+                tuple_idx = n;
+              }
+              _ -> {}
+            }
+          }
+          _ -> {}
+        }
+        if right_is_number {
+          let recv_rt = self.resolve_field_chain(inner_e.left)?;
+          let recv_dt = recv_rt.dtype?;
+          if !recv_dt.is_tuple || tuple_idx < 0 || tuple_idx >= recv_dt.tuple_members.len {
+            ret .None;
+          }
+          let member_dt = *recv_dt.tuple_members.get(tuple_idx);
+          let member_name = self.resolve_type_name(member_dt)?;
+          StringBuilder tsb = string_builder_init(8);
+          tsb.append(recv_rt.text);
+          if recv_rt.is_pointer {
+            tsb.append("->_");
+          } else {
+            tsb.append("._");
+          }
+          tsb.append(format_num(tuple_idx));
+          ChainResolution tr;
+          tr.text = tsb.build();
+          tr.type_name = member_name;
+          tr.is_pointer = dtype_is_pointer(member_dt);
+          tr.dtype = .Some(member_dt);
+          tr.is_call_result = recv_rt.is_call_result;
+          ret .Some(tr);
+        }
         str field_name = "";
         fit inner_e.right.kind {
           .Identifier(name) -> { field_name = name; }
@@ -7859,6 +8145,43 @@ impl Codegen {
     ret .Some(info);
   }
 
+  // `let (a, b, c) = expr;`: the initializer is always hoisted into its
+  // own temp first, unconditionally - `let (a, b) = compute_pair();`
+  // must call `compute_pair()` exactly once, not once per destructured
+  // name, and detecting a "trivial" initializer that could skip the temp
+  // safely (accounting for indexing/dereference side effects) is its own
+  // real problem this doesn't attempt to solve for a negligible extra
+  // local's worth of savings.
+  emit_let_destructure(VariableNode v) Option<CodegenErrorKind> {
+    if !v.has_val {
+      ret .Some(.InvalidNode);
+    }
+    self.let_destructure_temp_counter = self.let_destructure_temp_counter + 1;
+    str tmp_name = format("__fun_destructure_tmp{num}", self.let_destructure_temp_counter);
+
+    self.state.write_indent();
+    self.state.write("__auto_type ");
+    self.state.write(tmp_name);
+    self.state.write(" = ");
+    let verr = self.emit_expr(*v.val);
+    if verr.is_some() {
+      ret verr;
+    }
+    self.state.write(";\n");
+
+    num i = 0;
+    for name : v.destructure_names {
+      self.state.write_indent();
+      self.state.write("__auto_type ");
+      self.state.write(name);
+      self.state.write(" = ");
+      self.state.write(tmp_name);
+      self.state.write(format("._{num};\n", i));
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Emits one statement plus its trailing newline.
   // `StatementIf`/`StatementElseIf`/`StatementElse` aren't handled here:
   // they're only valid chained together, which needs the sibling
@@ -8033,6 +8356,9 @@ impl Codegen {
         ret .None;
       }
       .Variable(v) -> {
+        if v.is_destructure {
+          ret self.emit_let_destructure(v);
+        }
         self.state.write_indent();
         // `let NAME = <expr>;` (the `__let_infer__` sentinel from
         // `parse_let`) writes `infer_let_expr_type`'s resolved Fun type
@@ -11883,6 +12209,24 @@ impl Codegen {
           _ -> { ret .None; }
         }
       }
+      // A tuple literal's own type is built structurally, bottom-up from
+      // each element's own inferred type - there is no declared target
+      // to resolve against here, mirroring typecheck's own `.TupleLiteral`
+      // inference exactly (see `infer` in typecheck.fn).
+      .TupleLiteral(tl) -> {
+        DataType dt = dtype_new();
+        dt.is_tuple = true;
+        for el : tl.elements {
+          let mdt = self.infer_let_expr_type(el);
+          if mdt.is_none() {
+            ret .None;
+          }
+          DataType* member = malloc(sizeof(DataType));
+          *member = mdt.unwrap();
+          dt.tuple_members.push(member);
+        }
+        ret .Some(dt);
+      }
       .String(_) -> {
         DataType dt = dtype_new();
         dt.type_str = "str";
@@ -11969,6 +12313,29 @@ impl Codegen {
             }
           }
           ret .None;
+        }
+        // An ordinary arithmetic operator (`+`, `-`, `*`, `/`, `%`): not
+        // needed for `let`'s own `__auto_type` fallback (GCC infers a
+        // plain scalar correctly on its own), but a tuple literal element
+        // shaped this way (`(a + b, a - b)`) needs a real declared type
+        // up front to build its own synthesized struct's mangled name
+        // before anything can be emitted. Mirrors typecheck's own
+        // "arithmetic on two numeric kinds widens to the wider one" rule
+        // (`can_assign`'s `_is_numeric` branch) rather than reproducing
+        // full operator-precedence semantics - correct for the numeric
+        // operators this reaches, which is all real tuple-element
+        // arithmetic needs.
+        if is_arithmetic_operator(e.op) && e.has_left && e.has_right {
+          let left_dt_opt = self.infer_let_expr_type(e.left);
+          let right_dt_opt = self.infer_let_expr_type(e.right);
+          if left_dt_opt.is_some() && right_dt_opt.is_some() {
+            let left_dt = left_dt_opt.unwrap();
+            let right_dt = right_dt_opt.unwrap();
+            if equals(right_dt.type_str, "dec") && equals(left_dt.type_str, "num") {
+              ret .Some(right_dt);
+            }
+            ret .Some(left_dt);
+          }
         }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
@@ -14540,6 +14907,8 @@ test "emit_statement emits a variable declaration with an initializer" {
   v.val = val;
   v.has_val = true;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
   assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
   assert equals(st.out.build(), "int64_t x = 5;\n"), "expected 'int64_t x = 5;\\n'";
@@ -14587,6 +14956,8 @@ test "emit_statement infers a 'let' declaration's type from a plain function cal
   v.val = val;
   v.has_val = true;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
@@ -14645,6 +15016,8 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
   v.val = val;
   v.has_val = true;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
@@ -14694,6 +15067,8 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> get_params;
@@ -14772,6 +15147,8 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   hparam.name = "h";
   hparam.has_val = false;
   hparam.is_const = false;
+  hparam.is_destructure = false;
+  hparam.destructure_names.init(0);
   Node* h_param = malloc(sizeof(Node));
   *h_param = node_new(.Variable(hparam));
   Vec<Node*> check_params;
@@ -14811,6 +15188,8 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   letv.val = call_node;
   letv.has_val = true;
   letv.is_const = false;
+  letv.is_destructure = false;
+  letv.destructure_names.init(0);
   Node* let_stmt = malloc(sizeof(Node));
   *let_stmt = node_new(.Variable(letv));
 
@@ -14902,6 +15281,8 @@ test "emit_statement emits an uninitialized variable declaration" {
   v.val = nil;
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
   assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
   assert equals(st.out.build(), "bool done;\n"), "expected 'bool done;\\n'";
@@ -15305,6 +15686,8 @@ test "emit_function emits parameters, and a call to it" {
   va.name = "a";
   va.has_val = false;
   va.is_const = false;
+  va.is_destructure = false;
+  va.destructure_names.init(0);
   Node* param_a = malloc(sizeof(Node));
   *param_a = node_new(.Variable(va));
 
@@ -15316,6 +15699,8 @@ test "emit_function emits parameters, and a call to it" {
   vb.name = "b";
   vb.has_val = false;
   vb.is_const = false;
+  vb.is_destructure = false;
+  vb.destructure_names.init(0);
   Node* param_b = malloc(sizeof(Node));
   *param_b = node_new(.Variable(vb));
 
@@ -15393,6 +15778,8 @@ test "emit_function_param emits a function-type parameter using C's function-poi
   cbv.name = "cb";
   cbv.has_val = false;
   cbv.is_const = false;
+  cbv.is_destructure = false;
+  cbv.destructure_names.init(0);
   Node param = node_new(.Variable(cbv));
 
   assert g.emit_function_param(param).is_none(), "expected the function-type parameter to emit";
@@ -15431,6 +15818,8 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   cbv.name = "cb";
   cbv.has_val = false;
   cbv.is_const = false;
+  cbv.is_destructure = false;
+  cbv.destructure_names.init(0);
   Node* cb_param = malloc(sizeof(Node));
   *cb_param = node_new(.Variable(cbv));
 
@@ -15442,6 +15831,8 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   av.name = "a";
   av.has_val = false;
   av.is_const = false;
+  av.is_destructure = false;
+  av.destructure_names.init(0);
   Node* a_param = malloc(sizeof(Node));
   *a_param = node_new(.Variable(av));
 
@@ -15453,6 +15844,8 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   bv.name = "b";
   bv.has_val = false;
   bv.is_const = false;
+  bv.is_destructure = false;
+  bv.destructure_names.init(0);
   Node* b_param = malloc(sizeof(Node));
   *b_param = node_new(.Variable(bv));
 
@@ -17207,6 +17600,8 @@ test "emit_statement resolves a bare-shorthand 'ret' against the enclosing funct
   xv.name = "x";
   xv.has_val = false;
   xv.is_const = false;
+  xv.is_destructure = false;
+  xv.destructure_names.init(0);
   Node* x_param = malloc(sizeof(Node));
   *x_param = node_new(.Variable(xv));
   Vec<Node*> params;
@@ -17448,6 +17843,8 @@ test "emit_impl emits each method as a mangled top-level C function, with self r
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -17519,6 +17916,8 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -17586,6 +17985,8 @@ test "register_impl_methods lets emit_method_call resolve a quirk-implementing i
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -17700,6 +18101,8 @@ fun _box_num_var_decl(str name) Node {
   v.name = name;
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   ret node_new(.Variable(v));
 }
 
@@ -17742,6 +18145,8 @@ fun _opt_num_var_decl(str name) Node {
   v.name = name;
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   ret node_new(.Variable(v));
 }
 
@@ -17897,6 +18302,8 @@ fun _record_box_get_impl(Codegen* g) {
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -18096,6 +18503,8 @@ test "pub transpile registers a generic impl's method metadata even when a PLAIN
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -18465,6 +18874,8 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   selfv.name = "self";
   selfv.has_val = false;
   selfv.is_const = false;
+  selfv.is_destructure = false;
+  selfv.destructure_names.init(0);
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(.Variable(selfv));
   Vec<Node*> margs;
@@ -18786,6 +19197,8 @@ test "ensure_compound_instantiated rejects an unrecognized generic template name
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected an unrecognized generic template name to be rejected rather than guessed";
@@ -18812,6 +19225,8 @@ test "ensure_compound_instantiated rejects a wrong generic argument count" {
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Box (one type param) instantiated with two arguments to be rejected";
@@ -18841,6 +19256,8 @@ test "ensure_compound_instantiated rejects a nested generic argument whose OWN t
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Box<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
@@ -18871,6 +19288,8 @@ test "ensure_compound_instantiated instantiates a nested generic argument (Box<B
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Box<Box<num>> to instantiate, resolving the nested Box<num> first";
@@ -18898,6 +19317,8 @@ test "ensure_compound_instantiated mangles a pointer-typed generic argument dist
   v.name = "b";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Box<Node*> to instantiate";
@@ -19019,6 +19440,8 @@ test "ensure_enum_instantiated rejects an unrecognized generic template name" {
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected an unrecognized generic enum template name to be rejected rather than guessed";
@@ -19045,6 +19468,8 @@ test "ensure_enum_instantiated rejects a wrong generic argument count" {
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Opt (one type param) instantiated with two arguments to be rejected";
@@ -19074,6 +19499,8 @@ test "ensure_enum_instantiated rejects a nested generic argument whose OWN templ
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Opt<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
@@ -19104,6 +19531,8 @@ test "ensure_enum_instantiated instantiates a nested generic argument (Opt<Box<n
   v.name = "x";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Opt<Box<num>> to instantiate, resolving the nested Box<num> first";
@@ -19131,6 +19560,8 @@ test "ensure_enum_instantiated mangles a pointer-typed generic argument distinct
   v.name = "o";
   v.has_val = false;
   v.is_const = false;
+  v.is_destructure = false;
+  v.destructure_names.init(0);
   Node n = node_new(.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Opt<Node*> to instantiate";
@@ -19561,6 +19992,8 @@ test "pub transpile resolves a bare-shorthand call argument against the callee's
   kindv.name = "kind";
   kindv.has_val = false;
   kindv.is_const = false;
+  kindv.is_destructure = false;
+  kindv.destructure_names.init(0);
   Node* kind_param = malloc(sizeof(Node));
   *kind_param = node_new(.Variable(kindv));
 
@@ -19667,6 +20100,8 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   pv.name = "value";
   pv.has_val = false;
   pv.is_const = false;
+  pv.is_destructure = false;
+  pv.destructure_names.init(0);
   Node* param = malloc(sizeof(Node));
   *param = node_new(.Variable(pv));
   Vec<Node*> params;
@@ -19999,6 +20434,8 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   wv.name = "value";
   wv.has_val = false;
   wv.is_const = false;
+  wv.is_destructure = false;
+  wv.destructure_names.init(0);
   Node* wparam = malloc(sizeof(Node));
   *wparam = node_new(.Variable(wv));
   Vec<Node*> wparams;
@@ -20181,6 +20618,8 @@ test "pub transpile infers a generic function's type param from the CALLER's exp
   okv.name = "value";
   okv.has_val = false;
   okv.is_const = false;
+  okv.is_destructure = false;
+  okv.destructure_names.init(0);
   Node* ok_param = malloc(sizeof(Node));
   *ok_param = node_new(.Variable(okv));
   Vec<Node*> ok_params;
@@ -20390,6 +20829,8 @@ test "emit_function resets the locals table's type-name column between functions
   xv.name = "x";
   xv.has_val = false;
   xv.is_const = false;
+  xv.is_destructure = false;
+  xv.destructure_names.init(0);
   Node* x_param = malloc(sizeof(Node));
   *x_param = node_new(.Variable(xv));
   Vec<Node*> fa_params;
@@ -20430,6 +20871,8 @@ test "emit_function resets the locals table's type-name column between functions
   ov.name = "o";
   ov.has_val = false;
   ov.is_const = false;
+  ov.is_destructure = false;
+  ov.destructure_names.init(0);
   Node* o_param = malloc(sizeof(Node));
   *o_param = node_new(.Variable(ov));
   Vec<Node*> fb_params;
@@ -20527,6 +20970,8 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   av.name = "unused";
   av.has_val = false;
   av.is_const = false;
+  av.is_destructure = false;
+  av.destructure_names.init(0);
   Node* a_param = malloc(sizeof(Node));
   *a_param = node_new(.Variable(av));
   Vec<Node*> fa_params;
@@ -20580,6 +21025,8 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   bv.name = "y";
   bv.has_val = false;
   bv.is_const = false;
+  bv.is_destructure = false;
+  bv.destructure_names.init(0);
   Node* b_param = malloc(sizeof(Node));
   *b_param = node_new(.Variable(bv));
   Vec<Node*> fb_params;

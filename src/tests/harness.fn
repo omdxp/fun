@@ -124,6 +124,10 @@ pub fun transpile_file(str path) Result<str, str> {
     ret .Err(parsed.unwrap_err());
   }
   let merged = parsed.unwrap();
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
 
   CodegenState st = codegen_state_new();
   Codegen cg = codegen_new(&st);
@@ -149,6 +153,10 @@ pub fun transpile_file_forcing_msvc(str path) Result<str, str> {
     ret .Err(parsed.unwrap_err());
   }
   let merged = parsed.unwrap();
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
 
   CodegenState st = codegen_state_new();
   Codegen cg = codegen_new(&st);
@@ -175,6 +183,10 @@ pub fun transpile_file_forcing_msvc_with_debug_info(str path) Result<str, str> {
     ret .Err(parsed.unwrap_err());
   }
   let merged = parsed.unwrap();
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
 
   CodegenState st = codegen_state_new();
   Codegen cg = codegen_new(&st);

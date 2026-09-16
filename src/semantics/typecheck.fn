@@ -39,6 +39,11 @@ pub compound CheckedType {
   // against it, rather than degrading to unknown.
   flag has_fn_sig;
   FnTypeSig* fn_sig;
+  // A real tuple type (`(num, str)`). Like a function type, this has no
+  // `name` of its own, so `is_unknown` must never treat one as
+  // unresolved just because `name` is empty.
+  flag is_tuple;
+  Vec<CheckedType> tuple_members;
 }
 
 pub fun checked_unknown() CheckedType {
@@ -53,6 +58,8 @@ pub fun checked_unknown() CheckedType {
   t.generic_args.init(0);
   t.has_fn_sig = false;
   t.fn_sig = nil;
+  t.is_tuple = false;
+  t.tuple_members.init(0);
   ret t;
 }
 
@@ -90,6 +97,12 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   }
   t.has_fn_sig = dt.has_fn_sig;
   t.fn_sig = dt.fn_sig;
+  t.is_tuple = dt.is_tuple;
+  num ti = 0;
+  for ti < dt.tuple_members.len {
+    t.tuple_members.push(checked_from_dtype(dt.tuple_members.get(ti)));
+    ti = ti + 1;
+  }
   ret t;
 }
 
@@ -121,6 +134,13 @@ pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) Chec
 // rejects what it does not understand.
 pub fun is_unknown(CheckedType t) flag {
   if t.base != .Unknown {
+    ret false;
+  }
+  // A tuple has no `name` of its own, same as a function type already
+  // carries `has_fn_sig` instead of a name - neither is "the checker
+  // doesn't understand this", so neither reaches the empty-name check
+  // below, which exists for a genuine placeholder/unresolved reference.
+  if t.is_tuple || t.has_fn_sig {
     ret false;
   }
   // A `let` carries a placeholder until its value is known, which is
@@ -250,6 +270,16 @@ pub fun can_assign(CheckedType to, CheckedType from) flag {
     ret false;
   }
   if to.base == .Unknown {
+    // A tuple has no `name` of its own (both sides would read "" and
+    // wrongly compare equal below) - arity is the only check this
+    // standalone, `self`-less function can make; per-element
+    // compatibility is `assignable`'s own job, via `tuple_members_agree`.
+    if to.is_tuple || from.is_tuple {
+      if !to.is_tuple || !from.is_tuple {
+        ret false;
+      }
+      ret to.tuple_members.len == from.tuple_members.len;
+    }
     ret equals(to.name, from.name);
   }
   ret true;
@@ -833,6 +863,9 @@ impl Checker {
       // when they were instantiated with the same arguments: a
       // `Box<num>` is not a `Box<str>`, though both are written `Box`
       // and compare equal by name alone.
+      if !self.tuple_members_agree(to, from) {
+        ret false;
+      }
       ret self.generic_args_agree(to, from);
     }
     // A name the program never declares is a type parameter that no
@@ -989,6 +1022,30 @@ impl Checker {
       if !self.names_a_declared_type(want) || !self.names_a_declared_type(got) {
         continue;
       }
+      if !self.assignable(want, got) {
+        ret false;
+      }
+    }
+    ret true;
+  }
+
+  // The tuple counterpart to `generic_args_agree`: `can_assign` already
+  // confirmed matching arity (all it can check, being a standalone
+  // function with no `self` to recurse with) - this checks each element
+  // pairwise. Neither side being a tuple says nothing to disagree about,
+  // matching `generic_args_agree`'s own "nothing to compare" default.
+  tuple_members_agree(CheckedType to, CheckedType from) flag {
+    if !to.is_tuple || !from.is_tuple {
+      ret true;
+    }
+    if to.tuple_members.len != from.tuple_members.len {
+      ret false;
+    }
+    num i = 0;
+    for i < to.tuple_members.len {
+      CheckedType want = to.tuple_members.get(i);
+      CheckedType got = from.tuple_members.get(i);
+      i = i + 1;
       if !self.assignable(want, got) {
         ret false;
       }
@@ -1447,6 +1504,14 @@ impl Checker {
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
       .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
       .CompoundInit(init) -> { ret self.infer_compound_init(node, init, env); }
+      .TupleLiteral(tl) -> {
+        CheckedType out = checked_unknown();
+        out.is_tuple = true;
+        for el : tl.elements {
+          out.tuple_members.push(self.infer(el, env));
+        }
+        ret out;
+      }
       .Unary(u) -> { ret self.infer_unary(node, u, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
@@ -1693,6 +1758,61 @@ impl Checker {
       ret checked_unknown();
     }
     CheckedType receiver = self.infer(e.left, env);
+    // Tuple positional access (`t.0`): the RHS lexes/parses as a plain
+    // `Number` token (a real int, never a `Dec`, since the lexer only
+    // treats a post-operand `.digit` as a leading-dot float when nothing
+    // already ends a value before it), not an `Identifier` the way an
+    // ordinary field name is - `_callee_name` below returns "" for it,
+    // which is why this has to be checked first, not folded into the
+    // ordinary field-name path.
+    flag right_is_number = false;
+    num tuple_index = 0;
+    fit e.right.kind {
+      .Number(data) -> {
+        fit data {
+          .Num(n) -> {
+            right_is_number = true;
+            tuple_index = n;
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+    if right_is_number {
+      // A receiver the checker genuinely can't resolve (most commonly a
+      // generic method's own un-substituted return type - `Vec<T>.get`
+      // returns a method's declared return type as-is with no generic
+      // substitution, a pre-existing gap this positional-access check
+      // must not be stricter about than the ordinary field-name path
+      // just below already is: that path's own `self.compounds.at(...)`
+      // lookup silently falls through to `checked_unknown()` for exactly
+      // this case, deferring entirely to codegen's own separate,
+      // independent type resolution rather than reporting a real error
+      // here. Covers both shapes an unresolved receiver actually takes
+      // in practice: an empty name (`is_unknown`) and a real but
+      // undeclared one, like a raw type-param name (`names_a_declared_type`).
+      if !receiver.is_tuple &&
+        (is_unknown(receiver) || !self.names_a_declared_type(receiver)) {
+        ret checked_unknown();
+      }
+      if !receiver.is_tuple {
+        self.fail(format("no field named '{num}'", tuple_index), node);
+        ret checked_unknown();
+      }
+      if tuple_index < 0 || tuple_index >= receiver.tuple_members.len {
+        self.fail(
+          format(
+          "tuple has no element {num} (it has {num} element(s))",
+          tuple_index,
+          receiver.tuple_members.len
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+      ret receiver.tuple_members.get(tuple_index);
+    }
     str field = _callee_name(e.right);
     if equals(field, "") {
       ret checked_unknown();
@@ -2620,7 +2740,13 @@ impl Checker {
         }
         env.pop();
       }
-      .Variable(v) -> { self.check_variable(stmt, v, env); }
+      .Variable(v) -> {
+        if v.is_destructure {
+          self.check_let_destructure(stmt, v, env);
+        } else {
+          self.check_variable(stmt, v, env);
+        }
+      }
       .StatementReturn(value) -> { self.check_return(stmt, value, env); }
       .StatementIf(ifn) -> {
         self.check_condition(ifn.condition, env);
@@ -2875,6 +3001,51 @@ impl Checker {
       }
     }
     env.bind(v.name, declared, v.is_const);
+  }
+
+  // `let (a, b, c) = expr;`: unlike an ordinary `let`, whose real
+  // inferred type is never written back onto the AST (it lives only in
+  // `TypeEnv` via `env.bind` above), this is the only place a
+  // destructured name's type is ever resolved at all - each one gets its
+  // own `env.bind` call, one per element, exactly like an ordinary
+  // `let`'s single call just repeated positionally.
+  check_let_destructure(Node* stmt, VariableNode v, TypeEnv* env) {
+    if !v.has_val {
+      ret;
+    }
+    CheckedType value = self.infer(v.val, env);
+    if is_unknown(value) {
+      // Nothing to destructure against yet (an unresolved reference,
+      // already reported elsewhere) - binding each name as Unknown lets
+      // the rest of the function keep checking instead of cascading.
+      for name : v.destructure_names {
+        env.bind(name, checked_unknown(), false);
+      }
+      ret;
+    }
+    if !value.is_tuple {
+      self.fail(
+        format("cannot destructure a non-tuple value of type {str}", type_name(value)),
+        stmt
+      );
+      ret;
+    }
+    if value.tuple_members.len != v.destructure_names.len {
+      self.fail(
+        format(
+        "destructuring pattern has {num} name(s) but the value has {num} element(s)",
+        v.destructure_names.len,
+        value.tuple_members.len
+        ),
+        stmt
+      );
+      ret;
+    }
+    num i = 0;
+    for name : v.destructure_names {
+      env.bind(name, value.tuple_members.get(i), false);
+      i = i + 1;
+    }
   }
 
   check_return(Node* stmt, Node* value, TypeEnv* env) {
