@@ -1119,6 +1119,41 @@ test "hover on a bound-list type alias shows its own alternatives" {
   assert contains(hovered, "als Numeric = num | dec"), "expected the alias's own bound-list body";
 }
 
+test "hover on a bare enum-variant shorthand nested inside another shorthand's own call resolves" {
+  // `.Some(.InvalidDataType)` as a `ret`'s own value: `.InvalidDataType`
+  // is not itself the return value (`.Some(...)` is), so it has to be
+  // resolved as `.Some`'s own argument - and `.Some` is a bare
+  // shorthand constructor, not a method call on some receiver, which
+  // `_call_arg_expected_type` used to get wrong (it always assumed a
+  // dot before the callee meant a real receiver expression, so it went
+  // looking for one before `ret`, found nothing usable, and silently
+  // failed).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///nestedshorthand.fn";
+  doc.path = "nestedshorthand.fn";
+  doc.text = `enum Option<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `enum ParseErrorKind {
+  `  InvalidDataType,
+  `  InvalidIdentifier,
+  `}
+  `fun try_parse() Option<ParseErrorKind> {
+  `  ret .Some(.InvalidDataType);
+  `}
+  `fun main() {}`;
+  doc.version = 1;
+
+  // 'InvalidDataType' sits on line 9 (0-indexed), inside '.Some('s own
+  // argument list.
+  str hovered = hover(&reads, doc, 9, 15);
+  assert !equals(hovered, "null"), "expected real hover text, not nothing";
+  assert contains(hovered, "InvalidDataType"), "expected the variant's own name in the hover";
+}
+
 test "hover on a chained type alias also shows what it ultimately resolves to" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

@@ -907,6 +907,33 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
   }
 
   num callee_idx = index_of_token(tokens, callee);
+
+  if _is_dot_shorthand(tokens, callee) {
+    // A bare `.Variant(...)` constructor call, not a method call on a
+    // receiver (`.Some(x)`, not `recv.Some(x)`) - the dot right before
+    // `callee` here means nothing about a receiver, so this must be
+    // resolved before the method-call branch below ever looks at it
+    // (it would otherwise walk back looking for a receiver expression
+    // that was never there, most often landing on `ret` itself and
+    // failing silently). What type `.Some(...)` itself needs to be is
+    // exactly the same question `is_return_value`/`enclosing_return_dtype`
+    // already answer for a bare shorthand used directly as `ret`'s own
+    // value (`ret .Some(x);`) - reused here since the shorthand's own
+    // name and position work the same way whether it sits directly
+    // after `ret` or nested inside another call's own argument list
+    // (`ret .Some(.SomeOtherVariant);`).
+    if is_return_value(tokens, callee) {
+      let rdt = enclosing_return_dtype(program, file, line);
+      if rdt.is_some() {
+        let payload = variant_payload_type_typed(program, rdt.unwrap(), callee_name, arg_index);
+        if payload.is_some() {
+          ret payload.unwrap();
+        }
+      }
+    }
+    ret "";
+  }
+
   let before_callee = token_before(tokens, callee_idx);
   str signature = "";
   if before_callee.is_some() && token_is_operator(before_callee.unwrap(), ".") {

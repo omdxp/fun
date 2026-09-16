@@ -4995,6 +4995,49 @@ pub fun variant_payload_type(
   ret .None;
 }
 
+// Like `variant_payload_type`, but resolved against a real `DataType*`
+// (an enclosing return type, most commonly) rather than a bare
+// `enum_name` + pre-stringified `concrete_args` - the same
+// `dt.type_str`/`dt.generic_args` pattern `enum_variant_declaration_typed`
+// already uses, reused here for a bare dot-shorthand constructor call
+// found NESTED inside another call's own argument list (`ret
+// .Some(.SomeVariant)`, where the outer `.Some(...)` is itself the
+// return value): `.SomeVariant`'s own expected type is `Some`'s payload
+// at position 0, substituted against whatever the enclosing return type
+// instantiated `Option`'s own type param as.
+pub fun variant_payload_type_typed(Vec<Node>* program, DataType* dt, str variant_name, num idx) Option<str> {
+  if dt == nil {
+    ret .None;
+  }
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, dt.type_str) {
+          continue;
+        }
+        num v = 0;
+        for v < e.variants.len {
+          EnumVariant variant = e.variants.get(v);
+          v = v + 1;
+          if !equals(variant.name, variant_name) {
+            continue;
+          }
+          if idx < 0 || idx >= variant.payload.len {
+            ret .None;
+          }
+          str subst = _substituted_payload_type(variant.payload.get(idx), e.type_params, dt.generic_args);
+          ret .Some(subst);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
 // A fit arm's own payload binding named `name`, if `line` falls
 // within that arm: its pattern through the end of its body. Its type
 // is the matching positional payload type of whichever variant the
