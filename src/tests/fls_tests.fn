@@ -4071,6 +4071,74 @@ test "inlay hints infer a let local's own type from a literal, a plain call, and
   assert equals(inlay_hints(&reads, doc, 0, 0), "[]"), "expected no hints outside the requested range";
 }
 
+test "hover on a tuple's own positional access shows the real element type, not a bare number literal" {
+  // A bare digit right after '.' on a value (`t.0`) used to fall
+  // straight into the ordinary `.Number` literal-doc branch, showing
+  // "the number zero" instead of ever recognizing this as positional
+  // tuple access at all - a real, previously-undiscovered gap.
+  str src = `fun main() num {
+  `  (num, str) t = (1, "hi");
+  `  ret t.0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///t0hover.fn";
+  doc.path = "t0hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 8);
+  assert contains(hovered, "num"), format("expected 't.0' to hover as its own real element type 'num', got: {str}", hovered);
+  assert contains(hovered, "Positional element 0"), format("expected the hover to say which positional element this is, got: {str}", hovered);
+  assert !contains(hovered, "decimal:"), format("expected this to no longer fall through to the plain-integer-literal doc, got: {str}", hovered);
+}
+
+test "inlay hints cover a destructuring let, one hint per name at its own position" {
+  // Before this, `let (a, b) = ...;` matched no hint at all: the scan
+  // only ever checked the single token right after `let`, expecting an
+  // Identifier, and a destructuring pattern has '(' there instead.
+  str src = `fun main() num {
+  `  let (a, b) = (1, "hi");
+  `  ret a;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///destrhints.fn";
+  doc.path = "destrhints.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"label":": num"`), "expected a hint for 'a', typed from its own literal element";
+  assert contains(hints, `"label":": str"`), "expected a hint for 'b', typed from its own literal element";
+  // 'a' sits at column 7, 'b' at column 10, in "  let (a, b) = ..." - the
+  // hint itself lands right after each name (its own end_col), matching
+  // how an ordinary let-inferred hint is positioned.
+  assert contains(hints, `"line":1,"character":8`), "expected 'a's own hint positioned right after it, not after 'let' or the pattern's own '('";
+  assert contains(hints, `"line":1,"character":11`), "expected 'b's own hint positioned right after it too";
+}
+
+test "inlay hints show nothing for a declared-type destructuring pattern, the type is already written" {
+  // Unlike the inferred form above, `(num, str) (a, b) = expr;` already
+  // spells its own type out in source - an inlay hint would be pure
+  // noise, the same reason an ordinary `num x = 1;` gets no hint either.
+  str src = `fun main() num {
+  `  (num, str) (a, b) = (1, "hi");
+  `  ret a;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///decldestrhints.fn";
+  doc.path = "decldestrhints.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert equals(inlay_hints(&reads, doc, 0, 10), "[]"), "expected no hints for an already-declared tuple type";
+}
+
 test "inlay hints cover a char literal, a field read, an impl method's own local, and a bare copy" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -6130,32 +6198,78 @@ test "hover resolves a field access chained onto a propagation whose unwrapped t
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' even when Point is behind a pointer";
 }
 
-test "hover on a 'let' tuple-destructuring binding name does not crash" {
-  // A destructured name's own scope entity carries the `__let_infer__`
-  // sentinel (the same as an ordinary `let`'s own declared type) so it
-  // at least reaches the same re-inference path a plain `let` binding
-  // does, but `infer_let_local_type` has no concept yet of "pick
-  // element N of the inferred type" - it was built for the ordinary
-  // one-name-one-value shape. Real per-element hover precision here
-  // (showing `str` for `b`, not nothing or the whole tuple) is a
-  // genuine follow-up, not something this asserts on yet; what matters
-  // for now is that hovering never crashes fls.
+test "hover on a declared-type destructuring binding name shows its own real element type" {
+  // A declared-type destructuring pattern's own AST carries a REAL tuple
+  // `DataType` directly (`_parse_destructure_body`'s `has_declared_type`
+  // branch) - `_destructure_binding_detail` reads each element straight
+  // off `var_type.tuple_members`, no re-inference needed. Checked at
+  // both the binding site itself and a later reference to it - before
+  // `_lookup_in_body` learned about `is_destructure` at all, NEITHER
+  // ever resolved (a destructuring `VariableNode`'s own `v.name` is
+  // always "", so the ordinary `equals(v.name, name)` check could never
+  // match a destructured name), a real, previously-undiscovered gap
+  // this fixes for the binding site and every later reference alike.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///letdestrhover.fn";
-  doc.path = "letdestrhover.fn";
+  doc.uri = "file:///decldestrhover.fn";
+  doc.path = "decldestrhover.fn";
+  doc.text = `fun main() {
+  `  (dec, str) (a, b) = (1, "hi");
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 1, 14);
+  assert contains(hovered_a, "dec"), format("expected the first destructured name's own hover to show its real declared element type 'dec', got: {str}", hovered_a);
+  str hovered_b = hover(&reads, doc, 1, 17);
+  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its real declared element type 'str', got: {str}", hovered_b);
+  str hovered_ref = hover(&reads, doc, 2, 8);
+  assert contains(hovered_ref, "dec"), format("expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}", hovered_ref);
+}
+
+test "hover on an inferred-form destructuring binding name shows a best-effort literal type" {
+  // The inferred form (`let (a, b) = expr;`) has no declared tuple type
+  // to read element types off of - when the initializer is itself a
+  // bare tuple literal, each element's own type is still typeable
+  // directly from its own literal shape (`_literal_elem_type_text`),
+  // real precision for the common case even without a full typecheck.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inferreddestrhover.fn";
+  doc.path = "inferreddestrhover.fn";
   doc.text = `fun main() {
   `  let (a, b) = (1, "hi");
   `  print(a);
   `}`;
   doc.version = 1;
 
-  // 'a' on line 1, right where it's bound. Answers *something* (even
-  // "null" is a valid, well-formed reply, not a crash) rather than
-  // hanging or aborting.
-  str hovered = hover(&reads, doc, 1, 7);
-  assert len(hovered) >= 0, "expected hover to return normally, not crash";
+  str hovered_a = hover(&reads, doc, 1, 7);
+  assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to show its best-effort literal type 'num', got: {str}", hovered_a);
+  str hovered_b = hover(&reads, doc, 1, 10);
+  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its best-effort literal type 'str', got: {str}", hovered_b);
+}
+
+test "hover on an inferred-form destructuring binding from a call still resolves the name, untyped" {
+  // A call-returned tuple has no literal shape to read element types
+  // from, and no declared type either - this still resolves the name
+  // itself (go-to-definition, "what is this") rather than nothing at
+  // all, just without a type annotation.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inferredcalldestrhover.fn";
+  doc.path = "inferredcalldestrhover.fn";
+  doc.text = `fun pair() (num, str) { ret (1, "hi"); }
+  `fun main() {
+  `  let (a, b) = pair();
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 2, 7);
+  assert contains(hovered_a, "a"), format("expected the destructured name to resolve even without a real element type, got: {str}", hovered_a);
 }
 
 test "hover on a fit destructuring binding resolves through a propagated field-access subject" {

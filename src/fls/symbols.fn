@@ -3950,6 +3950,67 @@ fun _last_line(Node* body) num {
   ret last;
 }
 
+// A best-effort type for a bare literal node (`.Number`/`.String`/
+// `.Character`/`.Boolean`), the same handful of shapes a tuple
+// literal's own element is realistically ever written as directly.
+// Empty for anything else (a call, a nested expression, ...) - not a
+// full typecheck, just enough to give a destructuring pattern's own
+// inferred-form name a real type when its initializer is a plain
+// literal tuple, the overwhelmingly common case.
+fun _literal_elem_type_text(Node* el) str {
+  if el == nil {
+    ret "";
+  }
+  fit el.kind {
+    .Number(td) -> {
+      fit td {
+        .Dec(_) -> { ret "dec"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String(_) -> { ret "str"; }
+    .Character(_) -> { ret "chr"; }
+    .Boolean(_) -> { ret "flag"; }
+    _ -> { ret ""; }
+  }
+}
+
+// The hover/go-to-definition detail for the `idx`th name in a
+// destructuring `VariableNode`'s own `destructure_names`. A declared
+// tuple type (`(num, str) (a, b) = expr;`) gives real precision
+// directly from its own `tuple_members`; the inferred form (`let (a,
+// b) = expr;`) falls back to typing the initializer's own literal
+// elements when it is a bare tuple literal, and to the bare name alone
+// (still resolvable, just untyped) for anything else - `_lookup_in_body`
+// otherwise had NO case at all for a destructuring `VariableNode`
+// (`v.name` is always "" for one, so the ordinary `equals(v.name,
+// name)` check below can never match), meaning neither destructuring
+// form's own names ever resolved through hover, go-to-definition, or a
+// later reference to them at all, not just imprecisely - a real,
+// previously-undiscovered gap this fixes for both forms uniformly.
+fun _destructure_binding_detail(VariableNode v, num idx) str {
+  if v.var_type != nil && v.var_type.is_tuple && idx < v.var_type.tuple_members.len {
+    str elem_type_text = render_type(v.var_type.tuple_members.get(idx));
+    str out = format("{str} {str}", elem_type_text, v.destructure_names.get(idx));
+    free(elem_type_text);
+    ret out;
+  }
+  if v.has_val && v.val != nil {
+    fit v.val.kind {
+      .TupleLiteral(tl) -> {
+        if idx < tl.elements.len {
+          str lit_type = _literal_elem_type_text(tl.elements.get(idx));
+          if !equals(lit_type, "") {
+            ret format("{str} {str}", lit_type, v.destructure_names.get(idx));
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret v.destructure_names.get(idx);
+}
+
 // A variable declared anywhere in `body`, including inside a nested
 // block, since a name is in scope for everything that follows it.
 fun _lookup_in_body(
@@ -3965,7 +4026,15 @@ fun _lookup_in_body(
   }
   fit body.kind {
     .Variable(v) -> {
-      if equals(v.name, name) {
+      if v.is_destructure {
+        num dni = 0;
+        for dni < v.destructure_names.len {
+          if equals(v.destructure_names.get(dni), name) {
+            ret .Some(_declaration(name, .Local, _destructure_binding_detail(v, dni), body.pos));
+          }
+          dni = dni + 1;
+        }
+      } elif equals(v.name, name) {
         StringBuilder b = string_builder_init(32);
         str local_type_text = render_type(v.var_type);
         b.append(local_type_text);

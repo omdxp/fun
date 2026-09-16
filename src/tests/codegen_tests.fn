@@ -533,6 +533,27 @@ test "a declared-type destructuring pattern's own initializer is evaluated exact
   assert equals(out, "10 20 1\n"), "expected the initializer call counted exactly once, matching the inferred form's own evaluate-once guarantee";
 }
 
+test "a destructured name naming a compound resolves a later field access on it, both forms" {
+  // Real bug: `emit_let_destructure` emitted a correctly-typed C local
+  // for each destructured name but never registered any of them with
+  // codegen's own known-locals table (`record_local_typed`, what the
+  // ordinary non-destructure `.Variable` case already calls) - a later
+  // field access on a destructured compound-typed name (`pt.x`) failed
+  // with "unknown identifier 'pt'" even though the emitted C was
+  // correct, since codegen's own field-chain resolver had no idea `pt`
+  // existed at all.
+  str src = `use std.c.io;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  let (n, pt) = (5, Point{x = 9, y = 10});
+  `  (num, Point) (n2, pt2) = (6, Point{x = 11, y = 12});
+  `  printf("%lld %lld %lld %lld %lld %lld\n", n, pt.x, pt.y, n2, pt2.x, pt2.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_destructure_compound_field_access", "a destructured compound name's own field resolves after it, inferred and declared forms alike");
+  assert equals(out, "5 9 10 6 11 12\n"), "expected a field access on either form's destructured compound name to resolve correctly";
+}
+
 test "a declared-type destructuring pattern compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
   str src = `use std.c.io;
   `fun main() num {

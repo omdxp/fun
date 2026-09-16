@@ -98,6 +98,33 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       ret NO_HOVER;
     }
     .Number -> {
+      // A bare whole-number digit right after '.' on a value
+      // (`t.0`) is positional tuple access, not a numeric literal -
+      // resolved against the receiver's own rendered tuple type
+      // (`chain_receiver_type`, the same whole-chain walk an
+      // ordinary `.field`/`.method` receiver already gets) instead of
+      // falling to the literal docs below.
+      if read.parsed {
+        fit t.data {
+          .Num(idx) -> {
+            if _preceded_by_dot(&tokens, t) {
+              str recv_type = chain_receiver_type(&tokens, t, &read.program.nodes, doc.path, line + 1);
+              if starts_with(recv_type, "(") {
+                Vec<str> members = split_signature_params(recv_type);
+                if idx >= 0 && idx < members.len {
+                  str elem_doc = format("Positional element {num} of {str}.", idx, recv_type);
+                  let hres = _hover_result(_doc(members.get(idx), elem_doc), span_of(t, doc.text));
+                  free(elem_doc);
+                  free_params_vec(&members);
+                  ret hres;
+                }
+                free_params_vec(&members);
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
       fit t.data {
         .Num(n) -> { ret _hover_result(_int_literal_doc(n), span_of(t, doc.text)); }
         .Dec(d) -> { ret _hover_result(_dec_literal_doc(d), span_of(t, doc.text)); }

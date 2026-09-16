@@ -8280,6 +8280,24 @@ impl Codegen {
       self.state.write(" = ");
       self.state.write(tmp_name);
       self.state.write(format("._{num};\n", i));
+      // Without this, codegen's own known-locals table never learns a
+      // destructured name exists at all - a later field access on it
+      // (`pt.x` after `let (n, pt) = (5, Point{...});`) failed with
+      // "unknown identifier 'pt'" even though the emitted C declared it
+      // correctly, since `record_local_typed` (what the ordinary,
+      // non-destructure `.Variable` case already calls) was never
+      // reached for any destructured name.
+      if tuple_dt.is_some() {
+        let td2 = tuple_dt.unwrap();
+        if td2.is_tuple && i < td2.tuple_members.len {
+          let elem_dt = *td2.tuple_members.get(i);
+          let elem_resolved = self.resolve_type_name(elem_dt);
+          if elem_resolved.is_some() {
+            let elem_subst = self.resolve_type_subst(elem_dt);
+            self.record_local_typed(name, elem_resolved.unwrap(), dtype_is_pointer(elem_subst), elem_subst);
+          }
+        }
+      }
       i = i + 1;
     }
     ret .None;

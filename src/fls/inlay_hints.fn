@@ -55,6 +55,52 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       continue;
     }
     Token name_tok = name_tok_opt.unwrap();
+    // A destructuring `let (a, b) = expr;` has no single bound name
+    // right after `let` to hang a hint off of the way an ordinary
+    // `let` does below - each name inside the pattern gets its own
+    // hint instead, resolved the same way a hover on it would be
+    // (`lookup`, now `is_destructure`-aware) rather than through
+    // `infer_let_local_type`, which was built for the single-name
+    // shape only.
+    if token_is_operator(name_tok, "(") {
+      num k = index_of_token(&tokens, name_tok) + 1;
+      for k < tokens.len {
+        Token nt = tokens.get(k);
+        k = k + 1;
+        if token_is_symbol(nt, ')') {
+          break;
+        }
+        fit nt.type {
+          .Identifier -> {}
+          _ -> { continue; }
+        }
+        str dname = token_word(nt);
+        let decl = lookup(&tokens, &program.nodes, dname, doc.path, src_line);
+        if decl.is_none() {
+          continue;
+        }
+        str detail = decl.unwrap().detail;
+        num dname_len = len(dname);
+        if len(detail) <= dname_len || !ends_with(detail, dname) {
+          continue;
+        }
+        str dtype = substr(detail, 0, len(detail) - dname_len - 1);
+        if any {
+          b.append(",");
+        }
+        any = true;
+        b.append(`{"position":{"line":`);
+        b.append_num(line0);
+        b.append(`,"character":`);
+        b.append_num(byte_col_to_utf16_char(doc.text, line0, nt.pos.end_col - 1));
+        b.append(`},"label":`);
+        str dlabel = format(": {str}", dtype);
+        json_quote_into(&b, dlabel);
+        free(dlabel);
+        b.append(`,"kind":1,"paddingLeft":true}`);
+      }
+      continue;
+    }
     fit name_tok.type {
       .Identifier -> {}
       _ -> { continue; }
