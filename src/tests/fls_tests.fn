@@ -1119,6 +1119,75 @@ test "hover on a bound-list type alias shows its own alternatives" {
   assert contains(hovered, "als Numeric = num | dec"), "expected the alias's own bound-list body";
 }
 
+test "hover on a bare enum-variant shorthand nested inside another shorthand's own call resolves" {
+  // `.Some(.InvalidDataType)` as a `ret`'s own value: `.InvalidDataType`
+  // is not itself the return value (`.Some(...)` is), so it has to be
+  // resolved as `.Some`'s own argument - and `.Some` is a bare
+  // shorthand constructor, not a method call on some receiver, which
+  // `_call_arg_expected_type` used to get wrong (it always assumed a
+  // dot before the callee meant a real receiver expression, so it went
+  // looking for one before `ret`, found nothing usable, and silently
+  // failed).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///nestedshorthand.fn";
+  doc.path = "nestedshorthand.fn";
+  doc.text = `enum Option<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `enum ParseErrorKind {
+  `  InvalidDataType,
+  `  InvalidIdentifier,
+  `}
+  `fun try_parse() Option<ParseErrorKind> {
+  `  ret .Some(.InvalidDataType);
+  `}
+  `fun main() {}`;
+  doc.version = 1;
+
+  // 'InvalidDataType' sits on line 9 (0-indexed), inside '.Some('s own
+  // argument list.
+  str hovered = hover(&reads, doc, 9, 15);
+  assert !equals(hovered, "null"), "expected real hover text, not nothing";
+  assert contains(hovered, "InvalidDataType"), "expected the variant's own name in the hover";
+}
+
+test "hover on a chained type alias also shows what it ultimately resolves to" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alschain.fn";
+  doc.path = "alschain.fn";
+  doc.text = `als Base = num;
+  `als Middle = Base;
+  `als Top = Middle;
+  `fun main() {}`;
+  doc.version = 1;
+
+  // 'Top' is on line 2 (0-indexed); its own immediate body is 'Middle',
+  // but the reader benefits from seeing it bottoms out at 'num'.
+  str hovered = hover(&reads, doc, 2, 6);
+  assert contains(hovered, "als Top = Middle"), "expected the alias's own immediate body";
+  assert contains(hovered, "resolves to num"), "expected the fully-resolved chain shown too";
+}
+
+test "hover on a non-chained type alias shows no redundant 'resolves to'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alsnochain.fn";
+  doc.path = "alsnochain.fn";
+  doc.text = `als Meters = num;
+  `fun main() {}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 6);
+  assert contains(hovered, "als Meters = num"), "expected the alias's own body";
+  assert !contains(hovered, "resolves to"), "expected no redundant chain note when the body isn't itself an alias reference";
+}
+
 test "go-to-definition on a type alias reference jumps to its own declaration" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -1797,6 +1866,32 @@ test "workspace symbol search matches by name, case-insensitively, across every 
 
   assert equals(workspace_symbols(&docs, &reads, &symbols, "nope_no_such_symbol"), "[]"), "expected no matches";
   assert !equals(workspace_symbols(&docs, &reads, &symbols, ""), "[]"), "expected an empty query to match everything";
+}
+
+test "a type alias appears in both the workspace symbol table and the document outline" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+
+  Document doc;
+  doc.uri = "file:///aliassym.fn";
+  // `docs.opened` derives its own path from the uri, keeping the
+  // leading slash - matching that here keeps this doc's cache entry
+  // shared between the workspace_symbols and document_symbols calls
+  // below, instead of two separately-keyed analyses of the same file.
+  doc.path = "/aliassym.fn";
+  doc.text = "als Meters = num;\nfun main() {}";
+  doc.version = 1;
+  docs.opened(doc.uri, doc.text, 1);
+
+  let matches = workspace_symbols(&docs, &reads, &symbols, "meters");
+  assert contains(matches, `"name":"Meters"`), "expected the alias to show up in a workspace symbol search";
+
+  let outline = document_symbols(&reads, doc);
+  assert contains(outline, `"name":"Meters"`), "expected the alias in the document outline too";
 }
 
 test "workspace symbol search scores and sorts matches: exact, then prefix, then substring, then fuzzy subsequence" {
@@ -5613,6 +5708,8 @@ test "a keyword's own skeleton covers fuzz and asm too, not just the more common
   assert contains(out, `"label":"fuzz"`), "expected the fuzz keyword itself to be offered";
   assert contains(out, `raw* `), "expected fuzz's own skeleton with its two fixed params";
   assert contains(out, `"label":"asm"`), "expected the asm keyword itself to be offered";
+  assert contains(out, `"label":"als"`), "expected the als keyword itself to be offered";
+  assert contains(out, `als ${1:Name} = ${0:type};`), "expected als's own skeleton";
 }
 
 test "a trigger still writes its whole shape even while the document does not parse" {

@@ -20,6 +20,7 @@ use std.io;
 use std.vec;
 use std.map;
 use std.option;
+use std.set;
 
 // One alias's own body, resolved against every other alias in the same
 // program up to the round it was last processed. `is_resolved` is false
@@ -32,6 +33,11 @@ compound _ResolvedAlias {
   flag is_bound_list;
   DataType* body;
   Vec<str> bound_alternatives;
+  // Set the moment any reference to this alias is seen, whether that
+  // reference resolves cleanly or not - used to drive the
+  // `unused_type_alias` warning, which needs to know about a real
+  // reference before this pass erases it by substituting the alias away.
+  flag is_used;
 }
 
 fun _unresolved_marker() _ResolvedAlias {
@@ -44,7 +50,8 @@ fun _unresolved_marker() _ResolvedAlias {
   type_params = empty_params,
   is_bound_list = false,
   body = nil,
-  bound_alternatives = empty_alts}
+  bound_alternatives = empty_alts,
+  is_used = false}
   ;
 }
 
@@ -169,6 +176,10 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
     ret;
   }
   _ResolvedAlias ra = found.unwrap();
+  if !ra.is_used {
+    ra.is_used = true;
+    resolved.put(dt.type_str, ra);
+  }
   if !ra.is_resolved {
     *saw_unresolved = true;
     ret;
@@ -210,6 +221,10 @@ fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>*
       continue;
     }
     _ResolvedAlias ra = found.unwrap();
+    if !ra.is_used {
+      ra.is_used = true;
+      resolved.put(alt, ra);
+    }
     if !ra.is_resolved {
       *saw_unresolved = true;
       out.push(alt);
@@ -235,6 +250,16 @@ fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>*
 // quirk method's own signature, and every generic bound-list's own
 // alternatives (function, compound, and impl - a method's own bound list
 // is covered via the function-shaped branch inside `.Impl`'s methods).
+// `fit node.kind { .Function(f) -> {...} }` gives `f` as a plain VALUE
+// copy of the payload, not a reference into `node` itself: mutating a
+// pointer FIELD on that copy (`f.rtype`, a `DataType*`) still reaches
+// the same shared, heap-allocated `DataType` the real node points to,
+// but mutating a VALUE field (`f.type_param_forced_insts`, a
+// `Vec<Vec<str>>`, not a pointer) only changes the copy - it is lost the
+// instant this function returns unless written back into `node.kind`
+// explicitly. Every branch below that touches a `Vec`-shaped value field
+// (as opposed to a `DataType*` pointer field) reassigns `node.kind`
+// afterward for exactly this reason.
 fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
   flag unused = false;
   num i = 0;
@@ -242,7 +267,10 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
     Node* node = &nodes.data[i];
     i = i + 1;
     fit node.kind {
-      .Function(f) -> { _expand_function_shaped(f, resolved, &unused); }
+      .Function(f) -> {
+        _expand_function_shaped(&f, resolved, &unused);
+        node.kind = .Function(f);
+      }
       .Variable(v) -> { _expand_dtype(v.var_type, resolved, &unused); }
       .Compound(c) -> {
         num fi = 0;
@@ -253,6 +281,7 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
         }
         if c.has_type_param_forced_insts {
           _expand_forced_insts(&c.type_param_forced_insts, resolved, &unused);
+          node.kind = .Compound(c);
         }
       }
       .Quirk(q) -> {
@@ -272,6 +301,7 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
       .Impl(im) -> {
         if im.has_type_param_forced_insts {
           _expand_forced_insts(&im.type_param_forced_insts, resolved, &unused);
+          node.kind = .Impl(im);
         }
         num mi = 0;
         for mi < im.methods.len {
@@ -281,7 +311,10 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
             continue;
           }
           fit m.kind {
-            .Function(f) -> { _expand_function_shaped(f, resolved, &unused); }
+            .Function(f) -> {
+              _expand_function_shaped(&f, resolved, &unused);
+              m.kind = .Function(f);
+            }
             _ -> {}
           }
         }
@@ -291,7 +324,7 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
   }
 }
 
-fun _expand_function_shaped(FunctionNode f, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+fun _expand_function_shaped(FunctionNode* f, Map<str, _ResolvedAlias>* resolved, flag* unused) {
   if f.has_rtype {
     _expand_dtype(f.rtype, resolved, unused);
   }
@@ -362,14 +395,93 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
   }
 }
 
+// `insts` is one Cartesian-product row per combo, one bound string per
+// type-param POSITION within each row (not a flat alternatives list) -
+// `_expand_bound_alternatives` alone isn't the right shape here: splicing
+// a bound-list alias's alternatives into a single position must multiply
+// the number of ROWS (one per alternative), never grow one row's own
+// entry count, or a later position's value would land in the wrong type
+// param's slot. Rebuilds `insts` from scratch via a small per-row
+// cross-product, mirroring the same Cartesian-product idiom
+// `parse_type_params_with_constraints` itself already uses to build these
+// rows in the first place.
 fun _expand_forced_insts(Vec<Vec<str>>* insts, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+  Vec<Vec<str>> out;
+  out.init(insts.len);
   num c = 0;
   for c < insts.len {
     Vec<str> combo = insts.get(c);
-    _expand_bound_alternatives(&combo, resolved, unused);
-    insts.set(c, combo);
     c = c + 1;
+    _expand_combo_into(&combo, resolved, unused, &out);
   }
+  insts.free();
+  *insts = out;
+}
+
+// Expands each position of `combo` independently (a position naming a
+// bound-list alias becomes that many alternatives; a position naming an
+// ordinary alias becomes its own single rendered text; anything else
+// stays exactly one, unchanged) via `_expand_bound_alternatives` itself
+// (run on a one-entry list, so its existing per-entry logic is the only
+// place this decision is made), then cross-products across positions so
+// every combination of an expanded position's own alternatives becomes
+// its own row in `out`.
+fun _expand_combo_into(Vec<str>* combo, Map<str, _ResolvedAlias>* resolved, flag* unused, Vec<Vec<str>>* out) {
+  Vec<Vec<str>> per_position;
+  per_position.init(combo.len);
+  num i = 0;
+  for i < combo.len {
+    Vec<str> one;
+    one.init(1);
+    one.push(combo.get(i));
+    _expand_bound_alternatives(&one, resolved, unused);
+    per_position.push(one);
+    i = i + 1;
+  }
+
+  Vec<Vec<str>> combos;
+  combos.init(1);
+  Vec<str> seed;
+  seed.init(combo.len);
+  combos.push(seed);
+  num p = 0;
+  for p < per_position.len {
+    Vec<str> pos = per_position.get(p);
+    p = p + 1;
+    Vec<Vec<str>> next;
+    next.init(0);
+    num e = 0;
+    for e < combos.len {
+      Vec<str> existing = combos.get(e);
+      e = e + 1;
+      num a = 0;
+      for a < pos.len {
+        str alt = pos.get(a);
+        a = a + 1;
+        Vec<str> grown;
+        grown.init(existing.len + 1);
+        num k = 0;
+        for k < existing.len {
+          grown.push(existing.get(k));
+          k = k + 1;
+        }
+        grown.push(alt);
+        next.push(grown);
+      }
+      existing.free();
+    }
+    combos.free();
+    combos = next;
+    pos.free();
+  }
+  per_position.free();
+
+  num r = 0;
+  for r < combos.len {
+    out.push(combos.get(r));
+    r = r + 1;
+  }
+  combos.free();
 }
 
 // Expands every `als` reference anywhere in `nodes` before typecheck
@@ -399,6 +511,43 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
   if raw_aliases.len() == 0 {
     raw_aliases.free();
     ret .None;
+  }
+
+  // An alias name colliding with another top-level declaration is caught
+  // here, not by typecheck's own `_check_duplicate_top_level`: that
+  // registration pass has no `.TypeAlias` case at all (an alias is never
+  // itself a typechecked declaration, only ever a stand-in expanded away
+  // before typecheck runs), so without this check the collision would go
+  // completely unnoticed and this function would silently replace every
+  // real reference to the other declaration with the alias's own body
+  // instead. Matches `_check_duplicate_top_level`'s own checked kinds
+  // exactly (function, compound, enum, global variable) - quirks aren't
+  // checked against each other today either, so they're left out here too
+  // rather than holding aliases to a stricter standard than everything
+  // else.
+  num ci = 0;
+  for ci < nodes.len {
+    Node* node = &nodes.data[ci];
+    ci = ci + 1;
+    str other_name = "";
+    fit node.kind {
+      .Function(f) -> {
+        if f.has_name {
+          other_name = f.name;
+        }
+      }
+      .Compound(c) -> { other_name = c.name; }
+      .Enum(e) -> { other_name = e.name; }
+      .Variable(v) -> { other_name = v.name; }
+      _ -> {}
+    }
+    if equals(other_name, "") {
+      continue;
+    }
+    if raw_aliases.has(other_name) {
+      raw_aliases.free();
+      ret .Some(format("'{str}' is already declared as a type alias", other_name));
+    }
   }
 
   // Resolve the alias table against itself: an alias's own body may
@@ -431,6 +580,14 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
         _expand_dtype(a.body, &resolved, &saw_unresolved);
       }
       raw_aliases.put(name, a);
+      // A prior name processed earlier in this same round may already
+      // have marked this alias `is_used` (by referencing it in its own
+      // body) - preserve that instead of resetting it back to false here.
+      flag prev_used = false;
+      let prev = resolved.at(name);
+      if prev.is_some() {
+        prev_used = prev.unwrap().is_used;
+      }
       resolved.put(
         name,
         _ResolvedAlias{
@@ -438,7 +595,8 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
         type_params = a.type_params,
         is_bound_list = a.is_bound_list,
         body = a.body,
-        bound_alternatives = a.bound_alternatives}
+        bound_alternatives = a.bound_alternatives,
+        is_used = prev_used}
 
       );
       if saw_unresolved {
@@ -457,8 +615,71 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
 
   _expand_program(nodes, &resolved);
 
+  // Every real reference just got erased by the substitution above -
+  // record each alias's own final `is_used` verdict back onto its real
+  // declaration node now, while `resolved` still has it, so the
+  // `unused_type_alias` warning (which runs after this pass) has
+  // something to check.
+  num wi = 0;
+  for wi < nodes.len {
+    Node* node = &nodes.data[wi];
+    wi = wi + 1;
+    fit node.kind {
+      .TypeAlias(a) -> {
+        let ra = resolved.at(a.name);
+        if ra.is_some() {
+          a.was_used = ra.unwrap().is_used;
+          node.kind = .TypeAlias(a);
+        }
+      }
+      _ -> {}
+    }
+  }
+
   names.free();
   raw_aliases.free();
   resolved.free();
   ret .None;
+}
+
+// Propagates each `TypeAlias` declaration's own `was_used` flag from one
+// node list to another, matched by name.
+// 
+// A caller that runs `expand_type_aliases` against one tree but reports
+// `unused_type_alias` against a different one (the CLI's own
+// `entry_nodes`, kept as a separate parse from `nodes` so warnings stay
+// scoped to declarations in the entry file; fls's own disposable
+// expansion clone, kept separate from the shared, cached tree hover and
+// completion read from) needs this: expansion only ever stamps the flag
+// onto the exact `Node` objects it walked, and the flag is lost the
+// moment that tree goes out of scope otherwise.
+pub fun sync_type_alias_usage(Vec<Node>* from, Vec<Node>* to) {
+  Set<str> used_names = set_init("", 8);
+  defer used_names.free();
+  num i = 0;
+  for i < from.len {
+    Node* node = &from.data[i];
+    i = i + 1;
+    fit node.kind {
+      .TypeAlias(a) -> {
+        if a.was_used {
+          used_names.add(a.name);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  i = 0;
+  for i < to.len {
+    Node* node = &to.data[i];
+    i = i + 1;
+    fit node.kind {
+      .TypeAlias(a) -> {
+        a.was_used = used_names.has(a.name);
+        node.kind = .TypeAlias(a);
+      }
+      _ -> {}
+    }
+  }
 }

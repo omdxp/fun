@@ -87,6 +87,9 @@ fun -in examples/<example>.fn
 - advanced/unused_compound_warning.fn
 - advanced/unused_compound_allow.fn
 - advanced/unused_compound_expect.fn
+- advanced/unused_type_alias_warning.fn
+- advanced/unused_type_alias_allow.fn
+- advanced/unused_type_alias_expect.fn
 - advanced/fit_unreachable_branch_warning.fn
 - advanced/unreachable_code_warning.fn
 - advanced/assert_constant_warning.fn

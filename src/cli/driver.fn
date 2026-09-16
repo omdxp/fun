@@ -383,6 +383,11 @@ pub fun compile_to_c_mode(
   if alias_err.is_some() {
     ret .Err(alias_err.unwrap());
   }
+  // `merged.entry_nodes` is a separate parse from `merged.nodes` (see its
+  // own doc comment), so the `was_used` flag expansion just stamped onto
+  // `merged.nodes` never reaches it on its own - the `unused_type_alias`
+  // warning below reports against `entry_nodes`, so it needs its own copy.
+  sync_type_alias_usage(&merged.nodes, &merged.entry_nodes);
 
   // Type checking runs over the merged program, so a call into an
   // imported module is checked against the signature it was declared

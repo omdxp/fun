@@ -38,6 +38,7 @@ pub fun warning_id_name(WarningId id) str {
     .UnusedImport -> { ret "unused_import"; }
     .UnusedFunction -> { ret "unused_function"; }
     .UnusedCompound -> { ret "unused_compound"; }
+    .UnusedTypeAlias -> { ret "unused_type_alias"; }
     .MissingReturn -> { ret "missing_return"; }
     .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
     .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
@@ -1633,6 +1634,15 @@ impl Analysis {
         .Variable(v) -> {
           if v.is_const && !node.flags.is_public && !read.has(v.name) {
             self.report(.UnusedVariable, format("unused constant '{str}'", v.name), node);
+          }
+        }
+        .TypeAlias(a) -> {
+          // `read` can't see this: expansion already substituted every
+          // real reference away before this pass ever runs, so
+          // `was_used` (set by `expand_type_aliases` itself, while the
+          // reference still existed) is the only real signal left.
+          if !node.flags.is_public && !a.was_used {
+            self.report(.UnusedTypeAlias, format("unused type alias '{str}'", a.name), node);
           }
         }
         _ -> {}

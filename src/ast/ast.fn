@@ -137,6 +137,7 @@ pub enum WarningId {
   UnusedImport,
   UnusedFunction,
   UnusedCompound,
+  UnusedTypeAlias,
   MissingReturn,
   BlockingForkDeadlock,
   SharedMutableCaptureRace,
@@ -167,6 +168,7 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "unused_import" -> { ret .Some(.UnusedImport); }
     "unused_function" -> { ret .Some(.UnusedFunction); }
     "unused_compound" -> { ret .Some(.UnusedCompound); }
+    "unused_type_alias" -> { ret .Some(.UnusedTypeAlias); }
     "missing_return" -> { ret .Some(.MissingReturn); }
     "blocking_fork_deadlock" -> { ret .Some(.BlockingForkDeadlock); }
     "shared_mutable_capture_race" -> { ret .Some(.SharedMutableCaptureRace); }
@@ -204,6 +206,7 @@ impl WarningId as To<str> {
       .UnusedImport -> { ret "unused_import"; }
       .UnusedFunction -> { ret "unused_function"; }
       .UnusedCompound -> { ret "unused_compound"; }
+      .UnusedTypeAlias -> { ret "unused_type_alias"; }
       .MissingReturn -> { ret "missing_return"; }
       .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
       .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
@@ -539,6 +542,11 @@ pub compound TypeAliasNode {
   DataType* body;
   Vec<str> bound_alternatives;
   flag is_bound_list;
+  // Set by `expand_type_aliases` itself once a real reference is seen
+  // anywhere in the program, since expansion substitutes every such
+  // reference away before the `unused_type_alias` warning ever runs -
+  // by then, nothing else can tell a used alias from an unused one.
+  flag was_used;
 }
 
 pub fun type_alias_node_new() TypeAliasNode {
@@ -549,6 +557,7 @@ pub fun type_alias_node_new() TypeAliasNode {
   a.body = nil;
   a.bound_alternatives.init(0);
   a.is_bound_list = false;
+  a.was_used = false;
   ret a;
 }
 

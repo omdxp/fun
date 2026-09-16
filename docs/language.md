@@ -507,7 +507,12 @@ fun main() {
 
 This lets one body work for a fixed set of concrete types; the compiler
 monomorphizes each concrete instantiation and rejects a call/instantiation
-whose type argument isn't in the declared bound at compile time.
+whose type argument isn't in the declared bound at compile time. A bound
+alternative can also name a quirk instead of a concrete type, checked by
+"does this type implement it" rather than an exact match, or be a full type
+expression like a generic instantiation (`T: User | Vec<num>`), not just a
+bare identifier - a bound list is a union of concrete types, quirks, and
+type expressions, mixed freely.
 
 ### Generic quirks
 
@@ -528,6 +533,64 @@ instantiation.
   VecIter<T> as Iterator<T>`) is a different, symbolic binding that
   resolves through the enclosing type's own generic instantiation
   instead of naming one concrete type.
+
+### Type Aliases
+
+`als Name<T1, T2> = <type>;` names a reusable type expression, expanded
+wherever it's referenced before typechecking ever runs - the compiler
+never sees the alias name itself, only its fully-resolved body, so it's
+never a textual macro: the underlying type is still fully enforced.
+
+```fun
+use std.io;
+
+// A non-generic alias: just a shorter, more meaningful name.
+als Meters = num;
+
+// A generic alias whose body is a function type.
+als Callback<A, R> = fun(A) R;
+
+fun square(num x) num {
+  ret x * x;
+}
+
+fun apply(Callback<num, num> cb, num x) num {
+  ret cb(x);
+}
+
+// A bound-list alias: stands for a union of types, spliced into a
+// generic constraint wherever it's referenced.
+als Numeric = num | dec;
+
+fun double<T: Numeric>(T x) T {
+  ret x + x;
+}
+
+fun main() {
+  Meters distance = 5;
+  println_fmt("distance={num} applied={num} doubled={num}", distance, apply(square, 4), double(3));
+}
+```
+
+- An alias can be `pub`, same as any other top-level declaration.
+- An alias's own body can reference another alias (`als Top = Middle;`);
+  a reference cycle among aliases is a compile-time error, not infinite
+  recursion.
+- **An alias's own body can never be a pointer type**
+  (`als NodePtr = Node*;` is rejected, and so is a pointer-typed
+  alternative in a bound-list alias's own body): the point of writing
+  `Node* x;` is that the pointer is visible right there at the use site,
+  not hidden behind a name that reads like an ordinary value. Applying a
+  pointer at a *reference* to a non-pointer alias (`Meters* m;`) is
+  unaffected - the pointer is still written explicitly there, exactly
+  like any other type.
+- A bound-list alias (the `a | b` form) can't itself be generic - it has
+  no single instantiation site of its own the way an ordinary alias does.
+- An alias's own body can name a quirk (`als Drawable = Shape;`), and
+  dynamic dispatch through it works exactly like a plain quirk-typed
+  variable: `Drawable d = &square;` then `d.area()`. This is still a
+  value type, not a pointer - `Drawable*` follows the same explicit-
+  pointer-at-the-use-site rule as any other alias.
 
 ## Functions
 
@@ -851,6 +914,7 @@ behavior.
 - `unused_import` (with `-warn-unused`)
 - `unused_function` (with `-warn-unused`)
 - `unused_compound` (with `-warn-unused`)
+- `unused_type_alias` (with `-warn-unused`)
 - `missing_return`: a non-`void` function/method that can reach the end
   of its body without returning a value. Always checked, not gated
   behind `-warn-unused`.
@@ -886,10 +950,11 @@ behavior.
   that ID, but compilation fails if no such warning is emitted later.
 
 `allow`/`expect` are statement directives that work inside function
-bodies; `unused_variable`, `unused_import`, `unused_function`, and
-`unused_compound` may also be controlled at module scope for the next
-top-level declaration or import. The reason string is required and
-documents why the warning is being allowed/expected.
+bodies; `unused_variable`, `unused_import`, `unused_function`,
+`unused_compound`, and `unused_type_alias` may also be controlled at
+module scope for the next top-level declaration or import. The reason
+string is required and documents why the warning is being
+allowed/expected.
 
 ```fun
 fun bad() num* {
@@ -929,6 +994,9 @@ See also:
 - examples/advanced/unused_compound_warning.fn
 - examples/advanced/unused_compound_allow.fn
 - examples/advanced/unused_compound_expect.fn
+- examples/advanced/unused_type_alias_warning.fn
+- examples/advanced/unused_type_alias_allow.fn
+- examples/advanced/unused_type_alias_expect.fn
 - examples/advanced/fit_unreachable_branch_warning.fn
 - examples/advanced/unreachable_code_warning.fn
 - examples/advanced/assert_constant_warning.fn
