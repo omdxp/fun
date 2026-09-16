@@ -1119,6 +1119,40 @@ test "hover on a bound-list type alias shows its own alternatives" {
   assert contains(hovered, "als Numeric = num | dec"), "expected the alias's own bound-list body";
 }
 
+test "hover on a chained type alias also shows what it ultimately resolves to" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alschain.fn";
+  doc.path = "alschain.fn";
+  doc.text = `als Base = num;
+  `als Middle = Base;
+  `als Top = Middle;
+  `fun main() {}`;
+  doc.version = 1;
+
+  // 'Top' is on line 2 (0-indexed); its own immediate body is 'Middle',
+  // but the reader benefits from seeing it bottoms out at 'num'.
+  str hovered = hover(&reads, doc, 2, 6);
+  assert contains(hovered, "als Top = Middle"), "expected the alias's own immediate body";
+  assert contains(hovered, "resolves to num"), "expected the fully-resolved chain shown too";
+}
+
+test "hover on a non-chained type alias shows no redundant 'resolves to'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alsnochain.fn";
+  doc.path = "alsnochain.fn";
+  doc.text = `als Meters = num;
+  `fun main() {}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 6);
+  assert contains(hovered, "als Meters = num"), "expected the alias's own body";
+  assert !contains(hovered, "resolves to"), "expected no redundant chain note when the body isn't itself an alias reference";
+}
+
 test "go-to-definition on a type alias reference jumps to its own declaration" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -5613,6 +5647,8 @@ test "a keyword's own skeleton covers fuzz and asm too, not just the more common
   assert contains(out, `"label":"fuzz"`), "expected the fuzz keyword itself to be offered";
   assert contains(out, `raw* `), "expected fuzz's own skeleton with its two fixed params";
   assert contains(out, `"label":"asm"`), "expected the asm keyword itself to be offered";
+  assert contains(out, `"label":"als"`), "expected the als keyword itself to be offered";
+  assert contains(out, `als ${1:Name} = ${0:type};`), "expected als's own skeleton";
 }
 
 test "a trigger still writes its whole shape even while the document does not parse" {

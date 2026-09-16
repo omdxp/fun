@@ -627,6 +627,66 @@ fun _infer_global_const_type(Node* val) str {
   }
 }
 
+// The alias named `name`'s own `.TypeAlias` node, wherever in `program`
+// it's declared, or `.None`.
+fun _find_type_alias(Vec<Node>* program, str name) Option<TypeAliasNode> {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .TypeAlias(a) -> {
+        if equals(a.name, name) {
+          ret .Some(a);
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret .None;
+}
+
+// What `body` ultimately resolves to, chasing a chain of bare
+// alias-name references (`als Top = Middle;` where `Middle` is itself
+// an alias) - "" when `body` isn't itself a pure reference to another
+// alias (nothing further to show beyond the immediate body hover
+// already renders), or when the chain doesn't bottom out within a
+// generous bound (a real cycle is already a compile error; this is
+// just a display-time safety net for an invalid mid-edit document,
+// never meant to run long on a real program). Generic args/pointer
+// depth on the reference stop the chase - those describe a genuine use
+// of the alias, not a bare re-export of it.
+fun _resolve_alias_chain_display(Vec<Node>* program, DataType* body) str {
+  if body == nil || body.generic_args.len > 0 || body.pointer_depth > 0 ||
+    body.flags.is_pointer {
+    ret "";
+  }
+  num depth = 0;
+  str current = body.type_str;
+  flag hopped = false;
+  for depth < 20 {
+    depth = depth + 1;
+    let found = _find_type_alias(program, current);
+    if found.is_none() {
+      break;
+    }
+    TypeAliasNode a = found.unwrap();
+    if a.is_bound_list {
+      ret "";
+    }
+    if a.body == nil || a.body.generic_args.len > 0 || a.body.pointer_depth > 0 ||
+      a.body.flags.is_pointer {
+      ret "";
+    }
+    current = a.body.type_str;
+    hopped = true;
+  }
+  if !hopped {
+    ret "";
+  }
+  ret current;
+}
+
 // The declaration of `name` as seen from `file` at `line`: a parameter
 // or local of the function that line sits in, before anything the whole
 // program shares.
@@ -724,6 +784,11 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
             str body_text = render_type(a.body);
             b.append(body_text);
             free(body_text);
+            str resolved = _resolve_alias_chain_display(program, a.body);
+            if !equals(resolved, "") {
+              b.append("  // resolves to ");
+              b.append(resolved);
+            }
           }
           ret .Some(_declaration_vis(name, .TypeAlias, b.build(), n.pos, n.flags.is_public));
         }

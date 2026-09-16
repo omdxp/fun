@@ -1222,6 +1222,44 @@ test "a bound-list type alias's own expansion agrees with a hand-written bound l
   );
 }
 
+test "a bound-list type alias on a generic impl's own constraint monomorphizes for an allowed instantiation" {
+  str src = `use std.c.io;
+  `als Numeric = num | dec;
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: Numeric> {
+  `  describe() str { ret "numeric"; }
+  `}
+  `fun main() num {
+  `  Wrapper<num> w = Wrapper<num>{value = 5};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  assert_emits(
+    src,
+    "Wrapper__num__describe",
+    "a bound-list type alias on a generic impl's own constraint monomorphizes for an allowed instantiation"
+  );
+}
+
+test "a bound-list type alias on a generic impl's own constraint does not monomorphize for a disallowed instantiation" {
+  str src = `use std.c.io;
+  `als Numeric = num | dec;
+  `compound Wrapper<T> { T value; }
+  `impl Wrapper<T: Numeric> {
+  `  describe() str { ret "numeric"; }
+  `}
+  `fun main() num {
+  `  Wrapper<str> w = Wrapper<str>{value = "nope"};
+  `  printf("%s\n", w.describe());
+  `  ret 0;
+  `}`;
+  assert_not_emits(
+    src,
+    "Wrapper__str__describe(Wrapper__str* self) {",
+    "expected a disallowed instantiation's method body to stay unemitted"
+  );
+}
+
 test "a quirk-bounded generic impl monomorphizes for a real implementor" {
   str src = `use std.c.io;
   `quirk Renderable { render() str; }

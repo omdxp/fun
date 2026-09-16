@@ -507,7 +507,12 @@ fun main() {
 
 This lets one body work for a fixed set of concrete types; the compiler
 monomorphizes each concrete instantiation and rejects a call/instantiation
-whose type argument isn't in the declared bound at compile time.
+whose type argument isn't in the declared bound at compile time. A bound
+alternative can also name a quirk instead of a concrete type, checked by
+"does this type implement it" rather than an exact match, or be a full type
+expression like a generic instantiation (`T: User | Vec<num>`), not just a
+bare identifier - a bound list is a union of concrete types, quirks, and
+type expressions, mixed freely.
 
 ### Generic quirks
 

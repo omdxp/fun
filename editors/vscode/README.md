@@ -17,7 +17,7 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 
 **Type a real keyword to write its whole shape** — accepting `fun` writes a full declaration with the places to fill marked, not just the bare word:
 
-`fun`, `compound`, `enum`, `quirk`, `impl`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `imp`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
+`fun`, `compound`, `enum`, `quirk`, `impl`, `als`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `imp`, `use`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
 
 **Short triggers for a common multi-line shape**, offered alongside ordinary completions:
 

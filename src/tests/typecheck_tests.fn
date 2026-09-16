@@ -1001,6 +1001,45 @@ test "a duplicate type alias name is rejected" {
   ), "expected the duplicate alias name rejected";
 }
 
+test "a type alias name colliding with another declaration kind is rejected" {
+  // Silently allowing this would have `expand_type_aliases` replace every
+  // real reference to the compound with the alias's own body instead -
+  // a real, silent-wrong-behavior bug, not just a missing diagnostic.
+  assert contains(
+    check(`compound Foo { num x; }
+    `als Foo = num;
+    `fun main() {}`),
+    "already declared as a type alias"
+  ), "expected the alias-vs-compound name collision rejected";
+  assert contains(
+    check(`als square = num;
+    `fun square(num x) num { ret x * x; }
+    `fun main() {}`),
+    "already declared as a type alias"
+  ), "expected the alias-vs-function name collision rejected";
+}
+
+test "a bound-list type alias is usable as a generic constraint on a compound" {
+  accepts(
+    `als Numeric = num | dec;
+    `compound Box<T: Numeric> { T value; }
+    `fun main() num {
+    `  Box<num> b = Box<num>{value = 5};
+    `  ret b.value;
+    `}`,
+    "expected the bound-list alias spliced into a compound's own constraint"
+  );
+  assert contains(
+    check(`als Numeric = num | dec;
+    `compound Box<T: Numeric> { T value; }
+    `fun main() str {
+    `  Box<str> b = Box<str>{value = "nope"};
+    `  ret b.value;
+    `}`),
+    "does not accept"
+  ), "expected a type outside a compound's bound-list alias rejected";
+}
+
 test "a type alias reference cycle is rejected" {
   assert contains(
     check(`als A = B;
