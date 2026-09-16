@@ -60,23 +60,49 @@ fun _free_dtype_ptr_vec(Vec<DataType*>* v) {
   v.free();
 }
 
+// Frees a Vec<Node*> owned the same way `array_brackets` is - the local
+// counterpart to ast.fn's own private `_free_node_vec`.
+fun _free_node_ptr_vec(Vec<Node*>* v) {
+  num i = 0;
+  for i < v.len {
+    node_free(v.get(i));
+    i = i + 1;
+  }
+  v.free();
+}
+
 // Overwrites `*dt` with `replacement`'s own field values, freeing
-// whatever `dt` used to own first (its old generic_args and fn_sig -
-// nothing else in the program can still be pointing at either, since the
-// walk below visits each DataType exactly once). `dt`'s own pointer
-// identity stays stable; only its contents change, mirroring
-// `dtype_clone`'s own shallow-copy-then-take-ownership idiom.
+// whatever `dt` used to own first (its old generic_args, array_brackets,
+// and fn_sig - nothing else in the program can still be pointing at any
+// of them, since the walk below visits each DataType exactly once).
+// `dt`'s own pointer identity stays stable; only its contents change,
+// mirroring `dtype_clone`'s own shallow-copy-then-take-ownership idiom.
 fun _replace_dtype(DataType* dt, DataType replacement) {
   Vec<DataType*> old_generic_args = dt.generic_args;
+  Vec<Node*> old_array_brackets = dt.array_brackets;
   flag old_has_fn_sig = dt.has_fn_sig;
   FnTypeSig* old_fn_sig = dt.fn_sig;
   *dt = replacement;
   _free_dtype_ptr_vec(&old_generic_args);
+  _free_node_ptr_vec(&old_array_brackets);
   if old_has_fn_sig && old_fn_sig != nil {
     _free_dtype_ptr_vec(&old_fn_sig.params);
     dtype_free(old_fn_sig.rtype);
     free(old_fn_sig);
   }
+}
+
+// A fresh, independently-owned clone of `*src`'s own contents, as a
+// value rather than the pointer `dtype_clone` itself returns - frees
+// that pointer's own outer shell immediately after moving its contents
+// out, so a caller assigning straight into a local (`DataType x =
+// _cloned_value(src);`) doesn't leak the shell `dtype_clone` malloc'd
+// to carry it back.
+fun _cloned_value(DataType* src) DataType {
+  DataType* c = dtype_clone(src);
+  DataType v = *c;
+  free(c);
+  ret v;
 }
 
 // Substitutes every bare occurrence of one of `params` (an alias's own
@@ -103,7 +129,7 @@ fun _substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* args) {
   for j < params.len && j < args.len {
     if equals(params.get(j), dt.type_str) {
       DataType* arg = args.get(j);
-      DataType sub = *dtype_clone(arg);
+      DataType sub = _cloned_value(arg);
       sub.pointer_depth = sub.pointer_depth + dt.pointer_depth;
       _replace_dtype(dt, sub);
       ret;
@@ -155,7 +181,7 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
     ret;
   }
 
-  DataType expanded = *dtype_clone(ra.body);
+  DataType expanded = _cloned_value(ra.body);
   if ra.type_params.len > 0 {
     _substitute_params(&expanded, &ra.type_params, &dt.generic_args);
   }

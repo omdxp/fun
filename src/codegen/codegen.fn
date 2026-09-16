@@ -13055,8 +13055,11 @@ impl Codegen {
       // single transpile call.  On Windows, committed stack pages are never
       // decommitted, so running the full test suite (hundreds of sequential
       // transpile calls) accumulates a high-water mark that exceeds 8 MB.
-      // Reserve 64 MB so the suite fits today and has ample room to grow.
-      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:67108864\")\n#endif\n");
+      // Reserve 128 MB: 64 MB was "ample room to grow" until the type-alias
+      // expansion pass added its own real recursive tree walk (over every
+      // DataType and function body in the program) on top of the parser's
+      // own, pushing the accumulated high-water mark past the old reserve.
+      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#endif\n");
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
