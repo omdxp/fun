@@ -1868,6 +1868,32 @@ test "workspace symbol search matches by name, case-insensitively, across every 
   assert !equals(workspace_symbols(&docs, &reads, &symbols, ""), "[]"), "expected an empty query to match everything";
 }
 
+test "a type alias appears in both the workspace symbol table and the document outline" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  WorkspaceSymbolTable symbols = workspace_symbol_table_new();
+  defer symbols.free();
+
+  Document doc;
+  doc.uri = "file:///aliassym.fn";
+  // `docs.opened` derives its own path from the uri, keeping the
+  // leading slash - matching that here keeps this doc's cache entry
+  // shared between the workspace_symbols and document_symbols calls
+  // below, instead of two separately-keyed analyses of the same file.
+  doc.path = "/aliassym.fn";
+  doc.text = "als Meters = num;\nfun main() {}";
+  doc.version = 1;
+  docs.opened(doc.uri, doc.text, 1);
+
+  let matches = workspace_symbols(&docs, &reads, &symbols, "meters");
+  assert contains(matches, `"name":"Meters"`), "expected the alias to show up in a workspace symbol search";
+
+  let outline = document_symbols(&reads, doc);
+  assert contains(outline, `"name":"Meters"`), "expected the alias in the document outline too";
+}
+
 test "workspace symbol search scores and sorts matches: exact, then prefix, then substring, then fuzzy subsequence" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
