@@ -425,3 +425,68 @@ test "a generic alias bound to a tuple works end to end, the original motivating
   str out = run_source(src, "tuple_generic_alias_callback", "tuple-bodied generic alias end to end");
   assert equals(out, "hi\n"), "expected the tuple-bodied alias to expand and run exactly like a hand-written tuple type";
 }
+
+test "a numeric element widens against its declared tuple position, not the literal's own bare structural type" {
+  str src = `use std.c.io;
+  `fun pair() (dec, str) {
+  `  ret (1, "hi");
+  `}
+  `fun show((dec, str) p) {
+  `  printf("%f %s\n", p.0, p.1);
+  `}
+  `fun main() num {
+  `  (dec, str) t = (1, "hi");
+  `  printf("%f %s\n", t.0, t.1);
+  `  let (a, b) = pair();
+  `  printf("%f %s\n", a, b);
+  `  show((2, "yo"));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_numeric_widening", "a num literal widens into a declared dec tuple position end to end");
+  assert equals(out, "1.000000 hi\n1.000000 hi\n2.000000 yo\n"), "expected every declared-dec tuple position to widen the literal, not mismatch the structurally-inferred num struct";
+}
+
+test "let destructuring compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
+  str src = `use std.c.io;
+  `fun min_max(num a, num b) (num, num) {
+  `  if a < b {
+  `    ret (a, b);
+  `  }
+  `  ret (b, a);
+  `}
+  `fun main() num {
+  `  let (low, high) = min_max(9, 3);
+  `  printf("%lld %lld\n", low, high);
+  `  ret 0;
+  `}`;
+  // `__auto_type` is a GNU extension MSVC rejects outright; `emit_let_destructure`
+  // must resolve a real declared/inferred C type for both its own hoisted
+  // temp and each destructured name under `msvc_mode`, the same fallback
+  // every other `__auto_type` site in codegen already has.
+  str out_c = emit_c_with_imports_forcing_msvc(src, "tuple_destructure_msvc_shape", "let destructuring under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_destructure_msvc_strict",
+    "let destructuring compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert equals(out_msvc, "3 9\n"), "expected the destructured values to actually run correctly under the strict MSVC-shaped compile";
+}
+
+test "let destructuring from a tuple-returning function compiles under MSVC's strict, non-GNU C" {
+  str src = `use std.c.io;
+  `fun pair() (num, str) {
+  `  ret (7, "seven");
+  `}
+  `fun main() num {
+  `  let (n, s) = pair();
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_fn_return_destructure_msvc_strict",
+    "destructuring a tuple-returning function's call result under a real strict (non-GNU) compile"
+  );
+  assert equals(out_msvc, "7 seven\n"), "expected the call-returned tuple to destructure and run correctly under the strict MSVC-shaped compile";
+}

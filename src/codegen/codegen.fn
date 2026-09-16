@@ -181,6 +181,14 @@ pub compound Codegen {
   // Same idea as `expected_enum_type`, for a bare `.{ field = value }`
   // compound-literal shorthand.
   str expected_compound_type;
+  // Same idea again, for a bare tuple literal (`(1, "hi")`): a tuple has
+  // no name of its own to resolve against, so the expected shape is a
+  // real `DataType`, not a string. Lets a numeric element widen against
+  // its declared position (`(dec, str) t = (1, "hi");` builds the `dec`-
+  // shaped struct directly, instead of self-typing `num` from the bare
+  // literal and mismatching the declared C struct type).
+  flag has_expected_tuple_type;
+  DataType expected_tuple_type;
   // True while emitting a context where a bare `{...}` brace-list is the
   // correct form for an array literal: an array variable's initializer, a
   // nested row, or a compound-init field value. When false, a bare array
@@ -606,6 +614,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
   g.expected_compound_type = "";
+  g.has_expected_tuple_type = false;
+  g.expected_tuple_type = dtype_new();
   g.in_array_initializer = false;
   g.quirk_names.init(0);
   g.emitted_quirk_impl_vtables.init(0);
@@ -4993,23 +5003,34 @@ impl Codegen {
         self.state.write("}");
         ret .None;
       }
-      // A tuple literal (`(1, 2, 3)`): self-typed structurally from each
-      // element's own inferred type, the same way a bare `[...]` array
-      // literal self-types below - there's no declared target type
-      // available here to resolve against instead. Lowers to a GNU C
-      // compound literal against the tuple's own synthesized, mangled
-      // struct (`ensure_tuple_instantiated`), `._N = value` per element.
+      // A tuple literal (`(1, 2, 3)`): built against the expected type
+      // from context when one is set (`expected_tuple_type`, the same
+      // idea as `expected_enum_type`/`expected_compound_type`) so a
+      // numeric element widens correctly against its declared position
+      // (`(dec, str) t = (1, "hi");` builds the real `dec`-shaped struct
+      // directly, rather than self-typing `num` from the bare literal
+      // and mismatching the declared C struct type). Falls back to
+      // self-typing structurally from each element's own inferred type,
+      // the same way a bare `[...]` array literal self-types below, when
+      // no expected type reaches here.
       .TupleLiteral(tl) -> {
         DataType dt = dtype_new();
         dt.is_tuple = true;
-        for el : tl.elements {
-          let mdt = self.infer_let_expr_type(el);
-          if mdt.is_none() {
-            ret .Some(.UnsupportedNode);
+        flag used_expected = self.has_expected_tuple_type &&
+          self.expected_tuple_type.is_tuple &&
+          self.expected_tuple_type.tuple_members.len == tl.elements.len;
+        if used_expected {
+          dt = self.expected_tuple_type;
+        } else {
+          for el : tl.elements {
+            let mdt = self.infer_let_expr_type(el);
+            if mdt.is_none() {
+              ret .Some(.UnsupportedNode);
+            }
+            DataType* member = malloc(sizeof(DataType));
+            *member = mdt.unwrap();
+            dt.tuple_members.push(member);
           }
-          DataType* member = malloc(sizeof(DataType));
-          *member = mdt.unwrap();
-          dt.tuple_members.push(member);
         }
         let mangled = self.resolve_type_name(dt);
         if mangled.is_none() {
@@ -5205,6 +5226,8 @@ impl Codegen {
             }
           }
         }
+        flag prev_has_expected_tuple = self.has_expected_tuple_type;
+        DataType prev_expected_tuple = self.expected_tuple_type;
         if resolves_rhs_shorthand {
           let lhs_resolved = self.resolve_field_chain(e.left);
           if lhs_resolved.is_some() {
@@ -5214,12 +5237,21 @@ impl Codegen {
             // left-hand type, so both are set here; the AST already
             // distinguishes which applies.
             self.expected_compound_type = lhs_type_name;
+            if lhs_resolved.unwrap().dtype.is_some() {
+              let lhs_dt = lhs_resolved.unwrap().dtype.unwrap();
+              if lhs_dt.is_tuple {
+                self.has_expected_tuple_type = true;
+                self.expected_tuple_type = lhs_dt;
+              }
+            }
           }
         }
         let rerr = self.emit_expr(*e.right);
         if resolves_rhs_shorthand {
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
+          self.has_expected_tuple_type = prev_has_expected_tuple;
+          self.expected_tuple_type = prev_expected_tuple;
         }
         if rerr.is_some() {
           ret rerr;
@@ -6360,8 +6392,14 @@ impl Codegen {
         }
       }
       str prev_expected = self.expected_enum_type;
+      flag prev_has_expected_tuple2 = self.has_expected_tuple_type;
+      DataType prev_expected_tuple2 = self.expected_tuple_type;
       flag arg_did_quirk_coerce = false;
       if ptype.is_some() {
+        if ptype.unwrap().is_tuple {
+          self.has_expected_tuple_type = true;
+          self.expected_tuple_type = ptype.unwrap();
+        }
         let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
@@ -6385,6 +6423,8 @@ impl Codegen {
       }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
+      self.has_expected_tuple_type = prev_has_expected_tuple2;
+      self.expected_tuple_type = prev_expected_tuple2;
       if aerr.is_some() {
         ret aerr;
       }
@@ -6455,9 +6495,15 @@ impl Codegen {
       needs_separator = true;
       str prev_expected_e = self.expected_enum_type;
       str prev_expected_c = self.expected_compound_type;
+      flag prev_has_expected_tuple3 = self.has_expected_tuple_type;
+      DataType prev_expected_tuple3 = self.expected_tuple_type;
       if param_types.is_some() {
         let ptypes = param_types.unwrap();
         if i < ptypes.len {
+          if ptypes.get(i).is_tuple {
+            self.has_expected_tuple_type = true;
+            self.expected_tuple_type = *ptypes.get(i);
+          }
           let resolved = self.resolve_type_name(*ptypes.get(i));
           if resolved.is_some() {
             self.expected_enum_type = resolved.unwrap();
@@ -6468,6 +6514,8 @@ impl Codegen {
       let derr = self.emit_expr(*d);
       self.expected_enum_type = prev_expected_e;
       self.expected_compound_type = prev_expected_c;
+      self.has_expected_tuple_type = prev_has_expected_tuple3;
+      self.expected_tuple_type = prev_expected_tuple3;
       if derr.is_some() {
         ret derr;
       }
@@ -8159,11 +8207,39 @@ impl Codegen {
     self.let_destructure_temp_counter = self.let_destructure_temp_counter + 1;
     str tmp_name = format("__fun_destructure_tmp{num}", self.let_destructure_temp_counter);
 
+    // The tuple's own shape, declared or inferred: MSVC has no
+    // `__auto_type`, so every declarator here needs a real resolved C
+    // type instead, the same fallback every other `__auto_type` site
+    // already gives it (see `msvc_mode` at the `ret`-statement temp
+    // just above).
+    Option<DataType> tuple_dt = .None;
+    if v.var_type.is_tuple {
+      tuple_dt = .Some(*v.var_type);
+    } else {
+      tuple_dt = self.infer_let_expr_type(v.val);
+    }
+
     self.state.write_indent();
-    self.state.write("__auto_type ");
+    flag wrote_tmp_type = false;
+    if self.msvc_mode && tuple_dt.is_some() {
+      let twt = self.write_type(tuple_dt.unwrap());
+      wrote_tmp_type = twt.is_some();
+    }
+    if !wrote_tmp_type {
+      self.state.write("__auto_type");
+    }
+    self.state.write(" ");
     self.state.write(tmp_name);
     self.state.write(" = ");
+    flag prev_has_expected_tuple = self.has_expected_tuple_type;
+    DataType prev_expected_tuple = self.expected_tuple_type;
+    if tuple_dt.is_some() && tuple_dt.unwrap().is_tuple {
+      self.has_expected_tuple_type = true;
+      self.expected_tuple_type = tuple_dt.unwrap();
+    }
     let verr = self.emit_expr(*v.val);
+    self.has_expected_tuple_type = prev_has_expected_tuple;
+    self.expected_tuple_type = prev_expected_tuple;
     if verr.is_some() {
       ret verr;
     }
@@ -8172,7 +8248,18 @@ impl Codegen {
     num i = 0;
     for name : v.destructure_names {
       self.state.write_indent();
-      self.state.write("__auto_type ");
+      flag wrote_name_type = false;
+      if self.msvc_mode && tuple_dt.is_some() {
+        let td = tuple_dt.unwrap();
+        if td.is_tuple && i < td.tuple_members.len {
+          let nwt = self.write_type(*td.tuple_members.get(i));
+          wrote_name_type = nwt.is_some();
+        }
+      }
+      if !wrote_name_type {
+        self.state.write("__auto_type");
+      }
+      self.state.write(" ");
       self.state.write(name);
       self.state.write(" = ");
       self.state.write(tmp_name);
@@ -8278,8 +8365,17 @@ impl Codegen {
             }
             let prev_expected = self.expected_enum_type;
             self.expected_enum_type = self.current_fn_rtype_name;
+            flag prev_has_expected_tuple4 = self.has_expected_tuple_type;
+            DataType prev_expected_tuple4 = self.expected_tuple_type;
+            if self.current_fn_rtype_dt.is_some() &&
+              self.current_fn_rtype_dt.unwrap().is_tuple {
+              self.has_expected_tuple_type = true;
+              self.expected_tuple_type = self.current_fn_rtype_dt.unwrap();
+            }
             let eerr = self.emit_expr(*exp);
             self.expected_enum_type = prev_expected;
+            self.has_expected_tuple_type = prev_has_expected_tuple4;
+            self.expected_tuple_type = prev_expected_tuple4;
             if eerr.is_some() {
               ret eerr;
             }
@@ -8311,8 +8407,17 @@ impl Codegen {
           }
           let prev_expected = self.expected_enum_type;
           self.expected_enum_type = self.current_fn_rtype_name;
+          flag prev_has_expected_tuple5 = self.has_expected_tuple_type;
+          DataType prev_expected_tuple5 = self.expected_tuple_type;
+          if self.current_fn_rtype_dt.is_some() &&
+            self.current_fn_rtype_dt.unwrap().is_tuple {
+            self.has_expected_tuple_type = true;
+            self.expected_tuple_type = self.current_fn_rtype_dt.unwrap();
+          }
           let eerr = self.emit_expr(*exp);
           self.expected_enum_type = prev_expected;
+          self.has_expected_tuple_type = prev_has_expected_tuple5;
+          self.expected_tuple_type = prev_expected_tuple5;
           if eerr.is_some() {
             ret eerr;
           }
@@ -8670,6 +8775,12 @@ impl Codegen {
           // `let_is_bracket_literal` already declared an explicitly-typed
           // array above, so `emit_expr`'s `.Bracket` case needs only the
           // brace-list form, no compound-literal cast wrapper.
+          flag prev_has_expected_tuple6 = self.has_expected_tuple_type;
+          DataType prev_expected_tuple6 = self.expected_tuple_type;
+          if !is_let && v.var_type.is_tuple {
+            self.has_expected_tuple_type = true;
+            self.expected_tuple_type = *v.var_type;
+          }
           let verr = self.emit_expr(*v.val);
           if did_quirk_coerce {
             self.state.write(")");
@@ -8677,6 +8788,8 @@ impl Codegen {
           self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
+          self.has_expected_tuple_type = prev_has_expected_tuple6;
+          self.expected_tuple_type = prev_expected_tuple6;
           if verr.is_some() {
             ret verr;
           }
