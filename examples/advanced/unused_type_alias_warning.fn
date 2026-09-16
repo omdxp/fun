@@ -1,0 +1,14 @@
+// Demonstrates the optional unused_type_alias warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_type_alias_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "unused type alias 'Hidden'"
+// - Program still runs normally.
+
+als Hidden = num;
+
+fun main() {
+}

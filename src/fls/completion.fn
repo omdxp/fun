@@ -469,7 +469,7 @@ fun _import_dir(str current_file, str parent_specifier) str {
 // of sync with what a real diagnostic's own message prefix carries.
 fun _all_warning_ids() Vec<str> {
   Vec<str> out;
-  out.init(14);
+  out.init(15);
   out.push(warning_id_name(.ReturnLocalPtr));
   out.push(warning_id_name(.FitNonExhaustive));
   out.push(warning_id_name(.FitUnreachableBranch));
@@ -479,6 +479,7 @@ fun _all_warning_ids() Vec<str> {
   out.push(warning_id_name(.UnusedImport));
   out.push(warning_id_name(.UnusedFunction));
   out.push(warning_id_name(.UnusedCompound));
+  out.push(warning_id_name(.UnusedTypeAlias));
   out.push(warning_id_name(.MissingReturn));
   out.push(warning_id_name(.BlockingForkDeadlock));
   out.push(warning_id_name(.SharedMutableCaptureRace));

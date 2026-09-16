@@ -34,6 +34,29 @@ fun double<T: Numeric>(T x) T {
   ret x + x;
 }
 
+// An alias's body can also name a quirk, and dynamic dispatch through it
+// works exactly like a plain quirk-typed variable: `Drawable` is still a
+// value type, never a pointer.
+quirk Shape {
+  area() num;
+}
+
+compound Square {
+  num side;
+}
+
+impl Square as Shape {
+  area() num {
+    ret self.side * self.side;
+  }
+}
+
+als Drawable = Shape;
+
+fun describe(Drawable d) num {
+  ret d.area();
+}
+
 fun main() {
   Meters distance = 5;
   println_fmt("distance: {num}", distance);
@@ -41,6 +64,11 @@ fun main() {
   println_fmt("applied: {num}", apply(square, 4));
 
   println_fmt("doubled: {num} {dec}", double(3), double(1.5));
+
+  Square sq;
+  sq.side = 4;
+  Drawable d = &sq;
+  println_fmt("described: {num}", describe(d));
 
   // Declaring `Meters d = "far";`, calling `apply(square, "4")`, or
   // calling `double("nope")` would now all be compile-time errors: an

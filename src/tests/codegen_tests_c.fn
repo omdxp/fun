@@ -1207,6 +1207,31 @@ test "a generic function-type alias emits the real callback signature, not the a
   assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
 }
 
+test "a type alias naming a quirk still dispatches dynamically through the alias" {
+  str src = `use std.c.io;
+  `quirk Shape {
+  `  area() num;
+  `}
+  `compound Square {
+  `  num side;
+  `}
+  `impl Square as Shape {
+  `  area() num { ret self.side * self.side; }
+  `}
+  `als Drawable = Shape;
+  `fun describe(Drawable d) num { ret d.area(); }
+  `fun main() num {
+  `  Square s;
+  `  s.side = 4;
+  `  Drawable d = &s;
+  `  printf("%lld\n", describe(d));
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a type alias naming a quirk still dispatches dynamically through the alias");
+  assert !contains(out, "Drawable"), "expected the alias name to never reach emitted C";
+  assert contains(out, "Shape"), "expected the real quirk type to reach emitted C";
+}
+
 test "a bound-list type alias's own expansion agrees with a hand-written bound list" {
   str src = `use std.c.io;
   `als Numeric = num | dec;

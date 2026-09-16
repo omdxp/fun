@@ -5208,6 +5208,7 @@ impl Parser {
       .UnusedImport -> { ret true; }
       .UnusedFunction -> { ret true; }
       .UnusedCompound -> { ret true; }
+      .UnusedTypeAlias -> { ret true; }
       _ -> { ret false; }
     }
   }
@@ -5231,7 +5232,7 @@ impl Parser {
     let maybe_id = warning_id_from_string(id_name);
     if maybe_id.is_none() {
       let msg = format(
-        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow)",
+        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow)",
         id_name
       );
       defer free(msg);
@@ -5242,7 +5243,7 @@ impl Parser {
 
     if !self.has_current_function &&
       !self._warning_control_is_valid_in_module_scope(warning_id) {
-      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, and unused_compound may be controlled at module scope");
+      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, unused_compound, and unused_type_alias may be controlled at module scope");
       ret .Some(.InvalidStatement);
     }
 

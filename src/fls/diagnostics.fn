@@ -212,6 +212,12 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     type_error_diag = _at_start(DIAG_SEVERITY_ERROR, alias_err.unwrap());
   }
   let checked = typecheck_program(&alias_checked_nodes);
+  // The clone above is the only tree expansion ever touched, so it is
+  // also the only place `was_used` (needed by the `unused_type_alias`
+  // warning below) ever got set - propagate it onto both trees `analyze`
+  // actually reads before the clone is thrown away.
+  sync_type_alias_usage(&alias_checked_nodes, &program.nodes);
+  sync_type_alias_usage(&alias_checked_nodes, &program.entry_nodes);
   free_node_tree(&alias_checked_nodes);
   if !has_type_error && checked.is_err() {
     TypeError e = checked.unwrap_err();

@@ -586,6 +586,11 @@ fun main() {
   like any other type.
 - A bound-list alias (the `a | b` form) can't itself be generic - it has
   no single instantiation site of its own the way an ordinary alias does.
+- An alias's own body can name a quirk (`als Drawable = Shape;`), and
+  dynamic dispatch through it works exactly like a plain quirk-typed
+  variable: `Drawable d = &square;` then `d.area()`. This is still a
+  value type, not a pointer - `Drawable*` follows the same explicit-
+  pointer-at-the-use-site rule as any other alias.
 
 ## Functions
 
@@ -909,6 +914,7 @@ behavior.
 - `unused_import` (with `-warn-unused`)
 - `unused_function` (with `-warn-unused`)
 - `unused_compound` (with `-warn-unused`)
+- `unused_type_alias` (with `-warn-unused`)
 - `missing_return`: a non-`void` function/method that can reach the end
   of its body without returning a value. Always checked, not gated
   behind `-warn-unused`.
@@ -944,10 +950,11 @@ behavior.
   that ID, but compilation fails if no such warning is emitted later.
 
 `allow`/`expect` are statement directives that work inside function
-bodies; `unused_variable`, `unused_import`, `unused_function`, and
-`unused_compound` may also be controlled at module scope for the next
-top-level declaration or import. The reason string is required and
-documents why the warning is being allowed/expected.
+bodies; `unused_variable`, `unused_import`, `unused_function`,
+`unused_compound`, and `unused_type_alias` may also be controlled at
+module scope for the next top-level declaration or import. The reason
+string is required and documents why the warning is being
+allowed/expected.
 
 ```fun
 fun bad() num* {
@@ -987,6 +994,9 @@ See also:
 - examples/advanced/unused_compound_warning.fn
 - examples/advanced/unused_compound_allow.fn
 - examples/advanced/unused_compound_expect.fn
+- examples/advanced/unused_type_alias_warning.fn
+- examples/advanced/unused_type_alias_allow.fn
+- examples/advanced/unused_type_alias_expect.fn
 - examples/advanced/fit_unreachable_branch_warning.fn
 - examples/advanced/unreachable_code_warning.fn
 - examples/advanced/assert_constant_warning.fn
