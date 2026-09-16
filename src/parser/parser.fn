@@ -3187,15 +3187,28 @@ impl Parser {
   }
 
   // Parses `let (a, b, c) = expr;`: a tuple-destructuring `let`, always
-  // type-inferred (there is no explicit-type destructuring form). Builds
-  // one real statement `VariableNode` (`is_destructure=true`,
+  // type-inferred. Delegates to `_parse_destructure_body`, which also
+  // backs the declared-type form (`(num, str) (a, b) = expr;`).
+  _parse_let_destructure(flag is_public) Option<ParseErrorKind> {
+    ret self._parse_destructure_body(is_public, false, nil);
+  }
+
+  // Shared core for both destructuring forms: `let (a, b, c) = expr;`
+  // (`has_declared_type = false`, always type-inferred) and the bare
+  // declared-type form `(num, str) (a, b) = expr;` (`has_declared_type
+  // = true`, `declared_dt` already parsed by the caller). Builds one
+  // real statement `VariableNode` (`is_destructure=true`,
   // `destructure_names`) for codegen/warn-unused to walk, then - unlike
   // `_parse_fit_arm`'s own binding loop, which wraps its bindings in a
   // fresh `new_scope()`/`finish_scope()` pair since they're arm-body-
   // local - pushes each destructured name as its own lightweight scope
   // entity directly into the CURRENT (enclosing) scope, since these names
   // live for the rest of it, exactly like an ordinary `let`.
-  _parse_let_destructure(flag is_public) Option<ParseErrorKind> {
+  _parse_destructure_body(
+    flag is_public,
+    flag has_declared_type,
+    DataType* declared_dt
+  ) Option<ParseErrorKind> {
     let start_tok = self.state.token_peek_next();
 
     let lperr = self.state.expect_op("(");
@@ -3210,7 +3223,7 @@ impl Parser {
     for true {
       let nt = self.state.token_next();
       if nt.is_none() || nt.unwrap().type != .Identifier {
-        report_expected_identifier(self.state, nt, "expected a bound name in 'let' destructuring pattern");
+        report_expected_identifier(self.state, nt, "expected a bound name in a destructuring pattern");
         ret .Some(.InvalidIdentifier);
       }
       str nname = "";
@@ -3236,7 +3249,7 @@ impl Parser {
       ret rperr;
     }
     if names.len < 2 {
-      self.state.err("a 'let' destructuring pattern must bind at least two names");
+      self.state.err("a destructuring pattern must bind at least two names");
       ret .Some(.InvalidStatement);
     }
 
@@ -3259,9 +3272,12 @@ impl Parser {
     Node* val = malloc(sizeof(Node));
     *val = maybe_val.unwrap();
 
-    DataType* dt = malloc(sizeof(DataType));
-    *dt = dtype_new();
-    dt.type_str = "__let_infer__";
+    DataType* dt = declared_dt;
+    if !has_declared_type {
+      dt = malloc(sizeof(DataType));
+      *dt = dtype_new();
+      dt.type_str = "__let_infer__";
+    }
 
     VariableNode v;
     v.var_type = dt;
@@ -3283,25 +3299,36 @@ impl Parser {
     *node_ptr = node;
     self.create_node(node_ptr);
 
+    // A declared tuple type with a matching arity gives each name its own
+    // real element type directly - real precision fls hover, unlike the
+    // inferred form below, gets for free with no re-inference needed.
+    flag use_declared_elem_types = has_declared_type && dt.is_tuple &&
+      dt.tuple_members.len == names.len;
+
     num ni = 0;
     for ni < names.len {
       str name = names.get(ni);
       Pos name_pos = name_tokens.get(ni).pos;
-      ni = ni + 1;
 
-      DataType* bdt = malloc(sizeof(DataType));
-      *bdt = dtype_new();
-      // The `__let_infer__` sentinel, same as an ordinary `let`'s own
-      // declared type: this is what makes `type_name_of_local`/
-      // `infer_let_local_type` re-run inference against the whole
-      // destructuring statement's own initializer for fls hover/inlay-
-      // hints, instead of finding nothing at all. Real per-element
-      // precision (showing `str` for `b`, not the whole tuple `(num,
-      // str)`) is a follow-up - `infer_let_local_type` has no concept
-      // yet of "pick element N of the inferred type" - but this is a
-      // real improvement over hover finding nothing, since a bare
-      // `dtype_new()` here never even reaches that fallback.
-      bdt.type_str = "__let_infer__";
+      DataType* bdt = nil;
+      if use_declared_elem_types {
+        bdt = dtype_clone(dt.tuple_members.get(ni));
+      } else {
+        bdt = malloc(sizeof(DataType));
+        *bdt = dtype_new();
+        // The `__let_infer__` sentinel, same as an ordinary `let`'s own
+        // declared type: this is what makes `type_name_of_local`/
+        // `infer_let_local_type` re-run inference against the whole
+        // destructuring statement's own initializer for fls hover/inlay-
+        // hints, instead of finding nothing at all. Real per-element
+        // precision (showing `str` for `b`, not the whole tuple `(num,
+        // str)`) is a follow-up for the inferred form - `infer_let_local_type`
+        // has no concept yet of "pick element N of the inferred type" -
+        // but this is a real improvement over hover finding nothing,
+        // since a bare `dtype_new()` here never even reaches that fallback.
+        bdt.type_str = "__let_infer__";
+      }
+      ni = ni + 1;
 
       VariableNode bv;
       bv.var_type = bdt;
@@ -5806,17 +5833,20 @@ impl Parser {
   }
 
   // True when the statement starting here is a bare tuple-type variable
-  // declaration (`(num, str) t;`), not an ordinary parenthesized/tuple-
-  // literal expression statement: scans past the balanced `(...)` group
-  // (and any trailing pointer-depth stars) and checks whether an
-  // identifier - the declared name - follows, rather than an operator
+  // declaration (`(num, str) t;`) or a bare declared-type destructuring
+  // declaration (`(num, str) (a, b) = expr;`), not an ordinary
+  // parenthesized/tuple-literal expression statement: scans past the
+  // balanced `(...)` group (and any trailing pointer-depth stars) and
+  // checks whether an identifier - the declared name - or another `(` -
+  // the destructuring pattern - follows, rather than an operator
   // continuing an expression. Nothing valid today looks like "a
-  // parenthesized group immediately followed by a bare identifier with
-  // no operator between them" (an expression statement has no
-  // postfix-continuation shape that starts with a bare identifier), so
-  // this can only add new valid syntax, never misread existing code -
-  // the same argument the single-identifier-led lookahead above already
-  // relies on for `Point p;` vs `w * h;`.
+  // parenthesized group immediately followed by a bare identifier, or by
+  // another `(`, with no operator between them": a 2+-element tuple is
+  // never itself callable, so a bare `(...)(...)` expression statement
+  // was always a type error either way - reinterpreting it as a
+  // destructuring declaration can only add new valid syntax, never
+  // misread existing code, the same argument the single-identifier-led
+  // lookahead above already relies on for `Point p;` vs `w * h;`.
   _looks_like_tuple_type_declaration() flag {
     num off = 0;
     num depth = 0;
@@ -5845,7 +5875,10 @@ impl Parser {
       off = off + 1;
     }
     let after = self.state.token_peek_n(off);
-    ret after.is_some() && after.unwrap().type == .Identifier;
+    if after.is_none() {
+      ret false;
+    }
+    ret after.unwrap().type == .Identifier || token_is_operator(after.unwrap(), "(");
   }
 
   // Parses `imp path;` or `imp path as alias;`, including parent-
@@ -7156,6 +7189,13 @@ impl Parser {
     if derr.is_some() {
       ret derr;
     }
+    // A declared tuple type followed by its own parenthesized pattern
+    // (`(num, str) (a, b) = expr;`) is a destructuring declaration, not
+    // a single-name one - `_parse_destructure_body` consumes its own
+    // trailing ';', unlike `parse_variable` below.
+    if self.state.next_token_is_operator("(") {
+      ret self._parse_destructure_body(is_public, true, dt);
+    }
     let verr = self.parse_variable(dt, is_public, false, false);
     if verr.is_some() {
       ret verr;
@@ -7597,6 +7637,42 @@ test "_parse_let_destructure rejects a single-name destructuring pattern" {
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   assert p.parse_let_declaration(false).is_some(), "expected a single-name 'let (a) = 1;' to be rejected";
+}
+
+test "_looks_like_tuple_type_declaration also recognizes a declared-type destructuring pattern" {
+  ParseState st = _state_from("(num, str) (a, b) = expr;");
+  Parser p = parser_new(&st);
+  assert p._looks_like_tuple_type_declaration(), "expected a declared-type destructuring pattern to look like a declaration too";
+}
+
+test "parse_statement parses a bare declared-type destructuring declaration" {
+  ParseState st = _state_from("(num, str) (a, b) = (1, \"hi\");");
+  Scope root = scope_new();
+  st.scope_root = &root;
+  st.has_scope_root = true;
+  st.scope_current = &root;
+  st.has_scope_current = true;
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected the declared-type destructuring statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert v.is_destructure, "expected is_destructure set";
+      assert v.var_type.is_tuple, "expected the declared type to itself be a tuple, not the '__let_infer__' sentinel";
+      assert v.var_type.tuple_members.len == 2, "expected two declared tuple members";
+      assert v.destructure_names.len == 2, "expected two destructured names";
+      assert equals(v.destructure_names.get(0), "a"), "expected the first name 'a'";
+      assert equals(v.destructure_names.get(1), "b"), "expected the second name 'b'";
+    }
+    _ -> { panic("expected a Variable node"); }
+  }
+}
+
+test "a declared-type destructuring pattern rejects a single name too" {
+  ParseState st = _state_from("(num, str) (a) = (1, \"hi\");");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_some(), "expected a single-name declared-type destructuring pattern to be rejected";
 }
 
 test "parse_generic_type_args reads a single generic argument" {

@@ -505,3 +505,50 @@ test "let destructuring from a tuple-returning function compiles under MSVC's st
     out_msvc
   );
 }
+
+test "a declared-type destructuring pattern binds each name to its own declared element type end to end" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (dec, str) (a, b) = (1, "hi");
+  `  printf("%f %s\n", a, b);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_declared_destructure_widening", "a declared-type destructuring pattern widens a num literal into its own dec position");
+  assert equals(out, "1.000000 hi\n"), "expected the declared dec position to widen the num literal, exactly like an ordinary declared dec variable";
+}
+
+test "a declared-type destructuring pattern's own initializer is evaluated exactly once" {
+  str src = `use std.c.io;
+  `num calls = 0;
+  `fun make_pair() (num, num) {
+  `  calls = calls + 1;
+  `  ret (10, 20);
+  `}
+  `fun main() num {
+  `  (num, num) (a, b) = make_pair();
+  `  printf("%lld %lld %lld\n", a, b, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_declared_destructure_once", "a declared-type destructuring pattern evaluates its initializer exactly once");
+  assert equals(out, "10 20 1\n"), "expected the initializer call counted exactly once, matching the inferred form's own evaluate-once guarantee";
+}
+
+test "a declared-type destructuring pattern compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) (n, s) = (7, "seven");
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(src, "tuple_declared_destructure_msvc_shape", "a declared-type destructuring pattern under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_declared_destructure_msvc_strict",
+    "a declared-type destructuring pattern compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "7 seven"), format(
+    "expected the declared-type destructured values to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}

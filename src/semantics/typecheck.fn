@@ -152,6 +152,25 @@ pub fun is_unknown(CheckedType t) flag {
 pub const str LET_INFER_TYPE = "__let_infer__";
 
 pub fun type_name(CheckedType t) str {
+  if t.is_tuple {
+    StringBuilder tb = string_builder_init(16);
+    tb.append("(");
+    num ti = 0;
+    for ti < t.tuple_members.len {
+      if ti > 0 {
+        tb.append(", ");
+      }
+      tb.append(type_name(t.tuple_members.get(ti)));
+      ti = ti + 1;
+    }
+    tb.append(")");
+    num pi = 0;
+    for pi < t.pointer_depth {
+      tb.append("*");
+      pi = pi + 1;
+    }
+    ret tb.build();
+  }
   str base = "unknown";
   fit t.base {
     .Void -> { base = "void"; }
@@ -3014,6 +3033,46 @@ impl Checker {
       ret;
     }
     CheckedType value = self.infer(v.val, env);
+    // A declared tuple type (`(num, str) (a, b) = expr;`) wins the same
+    // way an ordinary declared variable's own type does: the initializer
+    // must fit it (numeric widening included), and each name binds to
+    // its own DECLARED element type, not the initializer's own inferred
+    // one - real precision even when the initializer's own shape is
+    // wider than what typecheck can pin down (e.g through the pre-
+    // existing generic-method-return-type gap `infer_field` already
+    // works around elsewhere).
+    if !equals(v.var_type.type_str, "__let_infer__") {
+      CheckedType declared = checked_from_dtype(v.var_type);
+      if !declared.is_tuple || declared.tuple_members.len != v.destructure_names.len {
+        self.fail(
+          format(
+          "a destructuring pattern with {num} name(s) needs a {num}-element declared tuple type, not {str}",
+          v.destructure_names.len,
+          v.destructure_names.len,
+          type_name(declared)
+          ),
+          stmt
+        );
+        ret;
+      }
+      if !is_unknown(value) && !self.assignable(declared, value) {
+        self.fail(
+          format(
+          "cannot initialize a destructuring pattern of type {str} with {str}",
+          type_name(declared),
+          type_name(value)
+          ),
+          stmt
+        );
+        ret;
+      }
+      num di = 0;
+      for name : v.destructure_names {
+        env.bind(name, declared.tuple_members.get(di), false);
+        di = di + 1;
+      }
+      ret;
+    }
     if is_unknown(value) {
       // Nothing to destructure against yet (an unresolved reference,
       // already reported elsewhere) - binding each name as Unknown lets

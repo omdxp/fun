@@ -1756,3 +1756,46 @@ test "a generic alias bound to a tuple works as an ordinary type parameter" {
     "expected a tuple-bodied generic alias to expand and typecheck like any other alias"
   );
 }
+
+test "a declared-type destructuring pattern binds each name to its own declared element type" {
+  accepts(
+    `fun main() num {
+    `  (dec, str) (a, b) = (1, "hi");
+    `  dec x = a;
+    `  _ = b;
+    `  ret 0;
+    `}`,
+    "expected the first name to type as the declared dec, widened from the num literal"
+  );
+  rejects(
+    `fun main() {
+    `  (dec, str) (a, b) = (1, "hi");
+    `  num x = a;
+    `  _ = b;
+    `  _ = x;
+    `}`,
+    "expected the declared dec type to be enforced, not narrow back into a num"
+  );
+}
+
+test "a declared-type destructuring pattern rejects an arity mismatch against its own declared type" {
+  rejects(
+    `fun main() {
+    `  (num, str) (a, b) = (1, 2, 3);
+    `  _ = a;
+    `  _ = b;
+    `}`,
+    "expected a two-member declared tuple type not to fit a three-element initializer"
+  );
+}
+
+test "a declared-type destructuring pattern rejects an element type mismatch against its own declared type" {
+  rejects(
+    `fun main() {
+    `  (num, str) (a, b) = ("hi", 1);
+    `  _ = a;
+    `  _ = b;
+    `}`,
+    "expected swapped element types not to fit the declared tuple type"
+  );
+}

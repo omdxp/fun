@@ -174,6 +174,11 @@ fun main() {
   how many names it destructures into, and each name must actually be
   used or it's an `unused_variable` warning like any other local
   (prefix with `_` to opt out, same convention as elsewhere).
+- **`(T1, T2) (a, b) = expr;`** destructures with an explicit declared
+  type instead of inferring one, the same way `dec x = 1;` declares a
+  type rather than inferring it: each name gets its own declared
+  element type, and `expr` must fit the declared type as a whole
+  (numeric widening included), not just whatever it happens to infer to.
 - A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
   as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
   for the `als Args = (num, str);` pattern this enables with generic

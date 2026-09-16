@@ -9,7 +9,11 @@
 // parens around the outer access (`(t.0).1`) - bare chained access (`t.0.1`)
 // is not supported yet. `let (a, b, c) = expr;` destructures a tuple into
 // individually-typed names in one step, evaluating `expr` exactly once no
-// matter how many names it destructures into.
+// matter how many names it destructures into. `(T1, T2) (a, b) = expr;`
+// destructures with an explicit declared type instead of inferring it,
+// the same as an ordinary declared variable - each name gets its own
+// declared element type, and the initializer must fit it (numeric
+// widening included), not just whatever it happens to infer to.
 
 use std.io;
 
@@ -58,6 +62,12 @@ fun main() {
   // into - useful when it has a real side effect, not just a plain literal.
   let (mn, mx) = min_max(20, 4);
   println_fmt("min_max again: {} {}", mn, mx);
+
+  // A declared-type destructuring pattern: `weight` widens the num literal
+  // into its own declared `dec` position, exactly like an ordinary
+  // declared `dec` variable would.
+  (dec, str) (weight, unit) = (70, "kg");
+  println_fmt("declared destructure: {} {}", weight, unit);
 
   // Generic interaction.
   Box<(num, str)> boxed = Box<(num, str)>{value = (7, "seven")};
