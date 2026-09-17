@@ -743,6 +743,16 @@ compound Checker {
   // quirk-typed-parameter coercion - the two are deliberately different
   // strictness levels, not a shared notion of "satisfies this quirk".
   Map<str, Set<str>> quirk_implementors;
+  // A quirk implementor's own declared argument type for that quirk
+  // (`Range` -> `num` for `impl Range as Iterator<num>`), keyed by
+  // `"{type_name}::{quirk_name}"` - lets a for-loop's own general
+  // `Iterator<T>` element-type resolution read the real `Elem` a type
+  // declared, not just confirm the relationship exists the way
+  // `implements_quirk` alone does. Absent for a bare `as Quirk` with no
+  // argument, or a symbolic binding whose argument is the enclosing
+  // impl's own erased type param (never independently useful without
+  // that impl's own concrete instantiation).
+  Map<str, CheckedType> quirk_elem_by_type;
   // Enums whose variants carry no payload, which stand for the numbers
   // they are written as.
   Set<str> plain_enums;
@@ -783,6 +793,7 @@ fun _checker_new() Checker {
   c.declared_at.init(32);
   c.quirks = set_init("", 16);
   c.quirk_implementors.init(16);
+  c.quirk_elem_by_type.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
   c.enum_names = set_init("", 16);
@@ -872,6 +883,45 @@ impl Checker {
       ret true;
     }
     ret implementors.has(named.name);
+  }
+
+  // `t`'s own declared argument type for `quirk_name` (`Elem` in
+  // `Iterator<Elem>`), substituted against `t`'s own concrete
+  // `generic_args` when the implementor is itself generic - `Elem` for
+  // `RingBuf<num>` implementing `Iterator<T>` on its own type param `T`
+  // is `num`, not the bare `T` `quirk_elem_by_type` recorded at
+  // registration time. `.None` when `t` doesn't implement `quirk_name`
+  // at all, or the impl took no argument for it.
+  quirk_arg_of(CheckedType t, str quirk_name) Option<CheckedType> {
+    if !self.implements_quirk(t, quirk_name) {
+      ret .None;
+    }
+    CheckedType named = t;
+    named.name = self.canonical_type_name(t.name);
+    str mangled = mangled_name(named);
+    StringBuilder mangled_key_sb = string_builder_init(24);
+    mangled_key_sb.append(mangled);
+    mangled_key_sb.append("::");
+    mangled_key_sb.append(quirk_name);
+    let by_mangled = self.quirk_elem_by_type.at(mangled_key_sb.build());
+    if by_mangled.is_some() {
+      ret by_mangled;
+    }
+    StringBuilder bare_key_sb = string_builder_init(24);
+    bare_key_sb.append(named.name);
+    bare_key_sb.append("::");
+    bare_key_sb.append(quirk_name);
+    let by_bare = self.quirk_elem_by_type.at(bare_key_sb.build());
+    if by_bare.is_none() {
+      ret .None;
+    }
+    CheckedType elem = by_bare.unwrap();
+    let info = self.compounds.at(named.name);
+    if info.is_none() || !info.unwrap().is_generic {
+      ret .Some(elem);
+    }
+    CompoundInfo holder = info.unwrap();
+    ret .Some(substitute(elem, &holder.type_params, &named.generic_args));
   }
 
   // True when a value of type `from` can stand where `to` is expected,
@@ -2942,6 +2992,13 @@ impl Checker {
       }
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
+        // The real general resolution: does the iterable's own type
+        // directly implement `Iterator<Elem>`? Covers `Range`, and any
+        // user-defined type with its own `impl X as Iterator<T>` -
+        // `.None` for Vec/Set/Map today, which don't implement it
+        // directly yet (a later step), so those still fall through to
+        // the structural/lenient cases below unchanged.
+        let elem_opt = self.quirk_arg_of(iterable_type, "Iterator");
         if it.item_is_destructure {
           // `for (a, b) : pairs`: the loop item is a tuple, destructured
           // into its own names the same way a declared-type `let`
@@ -2950,8 +3007,14 @@ impl Checker {
           // Unknown fallback, the same standard `check_let_destructure`
           // already holds tuple destructuring to.
           flag matched = false;
-          if iterable_type.generic_args.len >= 1 {
-            let elem = iterable_type.generic_args.get(0);
+          Option<CheckedType> destructure_elem = .None;
+          if elem_opt.is_some() {
+            destructure_elem = elem_opt;
+          } elif iterable_type.generic_args.len >= 1 {
+            destructure_elem = .Some(iterable_type.generic_args.get(0));
+          }
+          if destructure_elem.is_some() {
+            let elem = destructure_elem.unwrap();
             if elem.is_tuple && elem.tuple_members.len == it.item_destructure_names.len {
               matched = true;
               num idi = 0;
@@ -2993,18 +3056,27 @@ impl Checker {
           // value types, not an always-num index.
           env.define(it.index_name, iterable_type.generic_args.get(0));
           env.define(it.item_name, iterable_type.generic_args.get(1));
-        } elif equals(iterable_type.name, "Range") {
-          // `for i : a..b`: the parser desugars this into an ordinary
-          // `.Iter` loop over a constructed `Range` value (see
-          // `_parse_for_range_or_iter`); `i` is always `.Num`, matching
-          // the dedicated `.Range` typing this replaces. A real general
-          // `Iterator<T>` element-type resolution (working the same way
-          // for Range as for any other implementor, not a name check
-          // like this one) is planned as a follow-up.
-          env.define(it.item_name, checked_of(.Num));
+        } elif it.has_index_name && elem_opt.is_some() {
+          let elem = elem_opt.unwrap();
+          if elem.is_tuple && elem.tuple_members.len == 2 {
+            // A two-name form over anything else yielding a pair (a
+            // future Map migrated onto Iterator<(K, V)>, or a user type
+            // doing the same) destructures it the same way, rather than
+            // this being Map-specific.
+            env.define(it.index_name, elem.tuple_members.get(0));
+            env.define(it.item_name, elem.tuple_members.get(1));
+          } else {
+            // Otherwise, "enumerate": a running 0-based count alongside
+            // the item, the general form Vec/array's own index/item
+            // behavior below is really a special case of.
+            env.define(it.index_name, checked_of(.Num));
+            env.define(it.item_name, elem);
+          }
+        } elif elem_opt.is_some() {
+          env.define(it.item_name, elem_opt.unwrap());
         } else {
           // What the loop walks holds values of a type the checker
-          // does not model yet.
+          // does not model yet (Vec/Set/array today).
           env.define(it.item_name, checked_unknown());
           if it.has_index_name {
             env.define(it.index_name, checked_of(.Num));
@@ -3481,6 +3553,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer checker.declared_at.free();
   defer checker.quirks.free();
   defer _free_quirk_implementors_map(&checker.quirk_implementors);
+  defer checker.quirk_elem_by_type.free();
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
@@ -3607,6 +3680,16 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         checker.register_impl(block);
         if block.has_quirk_name {
           checker.record_quirk_impl(block.type_name, block.quirk_name);
+          if block.has_quirk_arg_dtype {
+            StringBuilder qeb_key_sb = string_builder_init(24);
+            qeb_key_sb.append(block.type_name);
+            qeb_key_sb.append("::");
+            qeb_key_sb.append(block.quirk_name);
+            checker.quirk_elem_by_type.put(
+              qeb_key_sb.build(),
+              checked_from_dtype(block.quirk_arg_dtype)
+            );
+          }
         }
       }
       _ -> {}

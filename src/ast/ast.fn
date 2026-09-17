@@ -680,6 +680,15 @@ pub compound ImplNode {
   // identity, registered alongside `quirk_name` above.
   str quirk_concrete_instantiation;
   flag has_quirk_concrete_instantiation;
+  // The quirk's own single type argument (`num` in `as Iterator<num>`,
+  // `T` in a symbolic `as Iterator<T>`), as a real `DataType` rather than
+  // only the pre-mangled string above - needed to resolve it structurally
+  // (substituting a symbolic reference against a receiver's own concrete
+  // `generic_args`), not just to recognize it as a fixed identity. Set
+  // whenever the quirk name is followed by `<...>` at all, symbolic or
+  // concrete alike; absent for a bare `as Quirk` with no argument.
+  DataType* quirk_arg_dtype;
+  flag has_quirk_arg_dtype;
   // Set when this impl targets a concrete instantiation of an
   // already-generic type (`impl Vec<num> { ... }`, `type_name` mangled
   // to `Vec__num`): the full, un-mangled DataType, so codegen can force
@@ -704,6 +713,8 @@ pub fun impl_node_new() ImplNode {
   i.has_quirk_name = false;
   i.quirk_concrete_instantiation = "";
   i.has_quirk_concrete_instantiation = false;
+  i.quirk_arg_dtype = nil;
+  i.has_quirk_arg_dtype = false;
   i.concrete_dtype = nil;
   i.has_concrete_dtype = false;
   i.methods.init(0);
@@ -1229,6 +1240,9 @@ fun _free_node_contents(Node* n) {
       if im.has_concrete_dtype {
         dtype_free(im.concrete_dtype);
       }
+      if im.has_quirk_arg_dtype {
+        dtype_free(im.quirk_arg_dtype);
+      }
       _free_node_vec(&im.methods);
     }
     .TypeAlias(a) -> {
@@ -1627,6 +1641,9 @@ pub fun node_clone(Node n) Node {
       ci.type_param_forced_insts = _clone_str_str_vec(&im.type_param_forced_insts);
       if im.has_concrete_dtype {
         ci.concrete_dtype = dtype_clone(im.concrete_dtype);
+      }
+      if im.has_quirk_arg_dtype {
+        ci.quirk_arg_dtype = dtype_clone(im.quirk_arg_dtype);
       }
       ci.methods = _clone_node_vec(&im.methods);
       c.kind = .Impl(ci);
