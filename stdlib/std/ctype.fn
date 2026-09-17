@@ -1,4 +1,4 @@
-// Ergonomic `chr`/`bin` wrappers over `std.c.ctype`'s raw `num`-returning C
+// Ergonomic `chr`/`flag` wrappers over `std.c.ctype`'s raw `num`-returning C
 // bindings, so lexer-style code reads naturally (`is_digit(c)` instead of
 // `isdigit(c) != 0`), with `c` passed as a plain `chr` instead of needing to
 // be widened to `num` first.

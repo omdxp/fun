@@ -9,9 +9,9 @@
 // local imports by path, never through the manifest - `[[deps]]` is the
 // one deliberate exception: a git-fetched dependency has no path to
 // resolve by until it has actually been fetched, so its own root gets
-// named here and reached through `imp deps.<name>...` (see
+// named here and reached through `use deps.<name>...` (see
 // `src/cli/deps.fn` for resolution/fetching, `src/parser/
-// import_resolver.fn` for the `deps.`-prefixed `imp` branch).
+// import_resolver.fn` for the `deps.`-prefixed `use` branch).
 
 use ..ast.ast;
 use ..lexer.lexdefs;
@@ -43,7 +43,7 @@ pub enum DepRef {
 }
 
 // One `[[deps]]` entry: a git-fetched dependency, importable as
-// `imp deps.<name>...` once resolved. `path` is the subfolder inside the
+// `use deps.<name>...` once resolved. `path` is the subfolder inside the
 // repo the dependency's own source root lives at ("" means the repo
 // root itself) - this is what lets a dependency live in an arbitrary
 // subfolder of someone else's repo with no cooperation needed from the
@@ -110,7 +110,7 @@ impl Manifest {
   }
 }
 
-// A dependency `name`, safe to appear as an `imp deps.<name>...` path
+// A dependency `name`, safe to appear as an `use deps.<name>...` path
 // segment: must look like an ordinary identifier, since it becomes part
 // of a dotted import path. Also reused to validate `token_env` (a real
 // environment-variable name has the same shape).
@@ -135,7 +135,7 @@ pub fun is_safe_dep_name(str s) flag {
   }
   // A dependency named e.g. "fun" or "flag" would otherwise compile
   // fine as an identifier here, but break the moment anything writes
-  // `imp deps.<name>...`: the lexer tokenizes that segment as the
+  // `use deps.<name>...`: the lexer tokenizes that segment as the
   // reserved word, not a plain identifier, and the import fails to
   // parse. Reject it before it ever gets written into fun.toml.
   if is_keyword(s) {
@@ -726,7 +726,7 @@ test "a [deps] entry named after a reserved keyword is rejected" {
   `[deps]
   `async = { git = "https://github.com/user/somejson" }`;
   let r = parse_manifest(text);
-  assert r.is_err(), "expected a dependency literally named after a keyword to be rejected, imp deps.async... would never parse";
+  assert r.is_err(), "expected a dependency literally named after a keyword to be rejected, use deps.async... would never parse";
 }
 
 test "a [deps] entry with a path-traversal path is rejected" {

@@ -4,7 +4,7 @@
 // the only thing in this codebase with real, already-correct TLS/SSH
 // handling - there is no HTTP/TLS client anywhere in the stdlib. A
 // dependency is never executed as part of resolution: it is source
-// text, parsed and compiled the same as any other `imp`, the same way
+// text, parsed and compiled the same as any other `use`, the same way
 // a plain relative import already works. `fun.lock` pins the exact
 // resolved commit for every entry; a `tag`/`branch` only re-resolves on
 // an explicit `fun deps update`, never implicitly - see `resolve_all`.
@@ -12,7 +12,7 @@
 // `resolve_all` also walks transitively: a fetched dependency that has
 // its own `fun.toml` with its own `[deps]` gets those resolved too, all
 // flattened into the one project-level `fun.lock` and the one flat
-// `imp deps.<name>...` namespace. The project's own `[deps]` always
+// `use deps.<name>...` namespace. The project's own `[deps]` always
 // wins a same-name claim from somewhere deeper in the graph; two
 // different transitive sources claiming the same name at genuinely
 // different commits is a hard error naming both, since nothing else
@@ -433,7 +433,7 @@ fun _index_of_name(Vec<ResolvedDep>* v, str name) num {
 // The one thing `fun build`/`test`/`fuzz` call: resolves every `[deps]`
 // entry in `m`, then floods outward through every fetched dependency's
 // own `fun.toml` to resolve its transitive `[deps]` too, all flattened
-// into one `fun.lock` and one flat `imp deps.<name>...` namespace.
+// into one `fun.lock` and one flat `use deps.<name>...` namespace.
 // Reuses the lockfile's own already-resolved commit whenever a
 // manifest's spec for that name hasn't changed (so an ordinary build
 // never re-resolves `tag`/`branch` over the network), fetching anything

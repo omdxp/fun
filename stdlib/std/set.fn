@@ -1,4 +1,4 @@
-// Generic set built on Map<T, bin>.
+// Generic set built on Map<T, flag>.
 
 use std.map;
 use std.vec;
@@ -6,7 +6,7 @@ use std.string;
 use std.quirks;
 use std.option;
 
-// Generic set backed by Map<T, bin>.
+// Generic set backed by Map<T, flag>.
 pub compound Set<T> {
   // Backing map.
   Map<T, flag> map;

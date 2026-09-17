@@ -5478,7 +5478,7 @@ impl Codegen {
   }
 
   // Counts each typed `{kind}` placeholder in a `format()` literal's
-  // format string (`{str}`/`{num}`/`{dec}`/`{bin}`/`{chr}`/`{ptr}`/`{raw}`),
+  // format string (`{str}`/`{num}`/`{dec}`/`{flag}`/`{chr}`/`{ptr}`/`{raw}`),
   // mirroring the reference compiler's own placeholder recognition:
   // `{{`/`}}` are escaped braces, and a bare `{}` opts the whole string
   // out of counting (returns `.None`), since it takes the general vararg
@@ -5497,24 +5497,21 @@ impl Codegen {
         if i + 1 < n && fmt[i + 1] == '}' {
           ret .None;
         }
-        if i + 4 < n && fmt[i + 4] == '}' {
-          // Three placeholder chars read as one combined key and matched
-          // in a single `fit`, rather than an `a == .. && b == .. && d ==
-          // ..` chain per word - `fit` only matches one value at a time,
-          // so a short key built from the three chars is the idiom that
-          // stands in for real multi-value matching here.
-          StringBuilder word_key = string_builder_init(3);
-          word_key.append_char(fmt[i + 1]);
-          word_key.append_char(fmt[i + 2]);
-          word_key.append_char(fmt[i + 3]);
+        // The placeholder word's own length varies (`flag` is 4 chars,
+        // every other one is 3), so the closing `}` is found by
+        // scanning forward rather than assumed at a fixed offset.
+        num close = self._format_placeholder_close(fmt, i + 1);
+        if close > 0 {
+          str word = substr(fmt, i + 1, close - i - 1);
           flag matched = false;
-          fit word_key.build() {
-            "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { matched = true; }
+          fit word {
+            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { matched = true; }
             _ -> {}
           }
+          free(word);
           if matched {
             count = count + 1;
-            i = i + 5;
+            i = close + 1;
             continue;
           }
         }
@@ -5524,7 +5521,29 @@ impl Codegen {
     ret .Some(count);
   }
 
-  // The placeholder type word (`str`/`num`/`dec`/`bin`/`chr`/`ptr`/`raw`)
+  // The index of the `}` closing a placeholder word starting at `start`
+  // (`fmt[start]` is the first letter after `{`), bounded to a short
+  // lookahead so an unrelated `{` used as ordinary text never scans off
+  // to a distant, unrelated `}`. -1 when no `}` closes within that
+  // bound.
+  _format_placeholder_close(str fmt, num start) num {
+    num n = len(fmt);
+    num max_word_len = 5;
+    num j = start;
+    num limit = start + max_word_len;
+    if limit > n {
+      limit = n;
+    }
+    for j < limit {
+      if fmt[j] == '}' {
+        ret j;
+      }
+      j = j + 1;
+    }
+    ret -1;
+  }
+
+  // The placeholder type word (`str`/`num`/`dec`/`flag`/`chr`/`ptr`/`raw`)
   // at each vararg position `fmt` requests, in order; `""` for a bare
   // `{}` or anything unparseable at that position. Used so an explicit
   // `{ptr}`/`{raw}` can force raw-pointer formatting for that argument
@@ -5547,25 +5566,20 @@ impl Codegen {
           i = i + 2;
           continue;
         }
-        if i + 4 < n && fmt[i + 4] == '}' {
-          // Same combined-key idiom as `count_format_placeholders` above:
-          // the three placeholder chars, read as one key, are already the
-          // exact word to store, so no branch chain is needed at all.
-          StringBuilder word_key2 = string_builder_init(3);
-          word_key2.append_char(fmt[i + 1]);
-          word_key2.append_char(fmt[i + 2]);
-          word_key2.append_char(fmt[i + 3]);
-          str word = word_key2.build();
+        num close2 = self._format_placeholder_close(fmt, i + 1);
+        if close2 > 0 {
+          str word = substr(fmt, i + 1, close2 - i - 1);
           flag known_word = false;
           fit word {
-            "str", "num", "dec", "bin", "chr", "ptr", "raw" -> { known_word = true; }
+            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { known_word = true; }
             _ -> {}
           }
           if known_word {
             out.push(word);
-            i = i + 5;
+            i = close2 + 1;
             continue;
           }
+          free(word);
         }
       }
       i = i + 1;
@@ -6301,7 +6315,7 @@ impl Codegen {
     // `resolve_type_subst`; only fires when a substitution context is
     // active and the argument matches one of its params. Falls through
     // to an unconditional check below for a bare builtin scalar keyword
-    // argument (`sizeof(bin)`, `sizeof(chr)`, ...), since
+    // argument (`sizeof(flag)`, `sizeof(chr)`, ...), since
     // `write_type_name` passes an unrecognized name through
     // `map_type_to_c` unchanged.
     if equals(callee_name, "sizeof") && args.len == 1 {
@@ -10689,7 +10703,7 @@ impl Codegen {
   // already being a function pointer; it is recorded under an empty type
   // name so a later `.field` off it is rejected rather than guessed.
   // Writes `dtype name`, in whatever order C wants the name written. A
-  // function type puts it inside the declarator, `bin (*name)(num)`, so
+  // function type puts it inside the declarator, `flag (*name)(num)`, so
   // a type and a name cannot simply be written one after the other.
   write_named_type(DataType dtype, str name) Option<CodegenErrorKind> {
     if !dtype.has_fn_sig {
@@ -11417,7 +11431,7 @@ impl Codegen {
           self.state.write_indent_pinned(node.pos);
           self.state.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'b': vargs.data[__fun_vi] = fmt_bin((bool)va_arg(__fun_ap, int)); break;\n");
+          self.state.write("case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n");
           self.state.write_indent_pinned(node.pos);
           self.state.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
           self.state.write_indent_pinned(node.pos);
@@ -12317,7 +12331,7 @@ impl Codegen {
           ret .Some(self.resolve_field_chain(arg)?.type_name);
         }
         if !equals(e.op, "()") || !e.has_left {
-          // A comparison yields `bin`; other binary operators yield
+          // A comparison yields `flag`; other binary operators yield
           // whichever operand resolves, so an argument like `n - 1`
           // still infers a type param.
           if equals(e.op, "==") || equals(e.op, "!=") || equals(e.op, "<") ||

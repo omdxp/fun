@@ -66,7 +66,7 @@ pub fun print_node(Node* node, num depth) {
     .Identifier(name) -> { _line(depth + 1, format("Name: {str}", name)); }
     .String(s) -> { _line(depth + 1, format("Value: \"{str}\"", s)); }
     .Character(c) -> { _line(depth + 1, format("Value: '{chr}'", c)); }
-    .Boolean(v) -> { _line(depth + 1, format("Value: {bin}", v)); }
+    .Boolean(v) -> { _line(depth + 1, format("Value: {flag}", v)); }
     .Nil -> {}
     .Panic(msg) -> {
       _line(depth + 1, "Message:");
@@ -236,7 +236,7 @@ pub fun print_node(Node* node, num depth) {
     }
     .StatementAsm(a) -> {
       _line(depth + 1, format("Template: {str}", a.template));
-      _line(depth + 1, format("Volatile: {bin}", a.is_volatile));
+      _line(depth + 1, format("Volatile: {flag}", a.is_volatile));
       if a.has_arch {
         _line(depth + 1, format("Arch: {str}", a.arch_name));
       }

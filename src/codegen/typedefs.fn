@@ -89,7 +89,7 @@ test "map_type_to_c maps builtin scalars to their C spellings" {
   assert equals(map_type_to_c("num"), "int64_t"), "expected 'num' -> 'int64_t'";
   assert equals(map_type_to_c("dec"), "double"), "expected 'dec' -> 'double'";
   assert equals(map_type_to_c("str"), "char*"), "expected 'str' -> 'char*'";
-  assert equals(map_type_to_c("flag"), "bool"), "expected 'bin'/'flag' -> 'bool'";
+  assert equals(map_type_to_c("flag"), "bool"), "expected 'flag' -> 'bool'";
   assert equals(map_type_to_c("chr"), "char"), "expected 'chr' -> 'char'";
   assert equals(map_type_to_c("raw"), "void"), "expected 'raw' -> 'void'";
 }
