@@ -7223,6 +7223,8 @@ impl Parser {
     flag has_quirk_name = false;
     str quirk_concrete_instantiation = "";
     flag has_quirk_concrete_instantiation = false;
+    DataType* quirk_arg_dtype = nil;
+    flag has_quirk_arg_dtype = false;
 
     if peek_after_type.is_some() && token_is_keyword(peek_after_type.unwrap(), "as") {
       self.state.token_next(); // consume 'as'
@@ -7250,6 +7252,10 @@ impl Parser {
         let qgaerr = self.state.parse_generic_type_args(quirk_dt);
         if qgaerr.is_some() {
           ret qgaerr;
+        }
+        if quirk_dt.generic_args.len >= 1 {
+          quirk_arg_dtype = quirk_dt.generic_args.get(0);
+          has_quirk_arg_dtype = true;
         }
         flag is_symbolic = _dtype_references_any_param(quirk_dt, type_params);
         if !is_symbolic {
@@ -7305,6 +7311,8 @@ impl Parser {
     impln.has_quirk_name = has_quirk_name;
     impln.quirk_concrete_instantiation = quirk_concrete_instantiation;
     impln.has_quirk_concrete_instantiation = has_quirk_concrete_instantiation;
+    impln.quirk_arg_dtype = quirk_arg_dtype;
+    impln.has_quirk_arg_dtype = has_quirk_arg_dtype;
     impln.concrete_dtype = impl_concrete_dt;
     impln.has_concrete_dtype = has_impl_concrete_dt;
     impln.methods = methods;

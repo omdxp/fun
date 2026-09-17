@@ -1918,3 +1918,78 @@ test "a fit tuple pattern rejects matching against a non-tuple subject" {
     "expected a tuple pattern not to be usable against a plain num subject"
   );
 }
+
+test "a for loop's own item resolves the real Elem of a direct Iterator<T> implementor" {
+  // `quirk_arg_of` replacing the earlier `checked_unknown()` fallback:
+  // a field access on the loop item only type-checks if its real
+  // element type (Box, not Unknown) actually resolved.
+  accepts(
+    `enum Option<T> { Some(T), None }
+    `quirk Iterator<T> { next() Option<T>; }
+    `compound Box { num n; }
+    `compound Boxes { num idx; num limit; }
+    `impl Boxes as Iterator<Box> {
+    `  pub next() Option<Box> {
+    `    if self.idx >= self.limit { ret Option.None; }
+    `    self.idx = self.idx + 1;
+    `    ret Option.Some(Box{n = self.idx});
+    `  }
+    `}
+    `fun main() {
+    `  Boxes bs = Boxes{idx = 0, limit = 3};
+    `  num total = 0;
+    `  for b : bs {
+    `    total = total + b.n;
+    `  }
+    `}`,
+    "expected the loop item's real element type (Box) to resolve, letting a field access on it type-check"
+  );
+}
+
+test "a for loop's own destructuring form works over a direct Iterator<T> implementor, not just Vec" {
+  accepts(
+    `enum Option<T> { Some(T), None }
+    `quirk Iterator<T> { next() Option<T>; }
+    `compound Pairs { num idx; num limit; }
+    `impl Pairs as Iterator<(num, num)> {
+    `  pub next() Option<(num, num)> {
+    `    if self.idx >= self.limit { ret Option.None; }
+    `    num v = self.idx;
+    `    self.idx = self.idx + 1;
+    `    ret Option.Some((v, v * 2));
+    `  }
+    `}
+    `fun main() {
+    `  Pairs ps = Pairs{idx = 0, limit = 3};
+    `  num total = 0;
+    `  for (a, b) : ps {
+    `    total = total + a + b;
+    `  }
+    `}`,
+    "expected destructuring to work over a non-Vec Iterator implementor's own tuple Elem"
+  );
+}
+
+test "a for loop's own two-name form enumerates a direct Iterator<T> implementor's non-tuple Elem" {
+  accepts(
+    `enum Option<T> { Some(T), None }
+    `quirk Iterator<T> { next() Option<T>; }
+    `compound Letters { num idx; num limit; }
+    `impl Letters as Iterator<num> {
+    `  pub next() Option<num> {
+    `    if self.idx >= self.limit { ret Option.None; }
+    `    num v = self.idx;
+    `    self.idx = self.idx + 1;
+    `    ret Option.Some(v);
+    `  }
+    `}
+    `fun main() {
+    `  Letters ls = Letters{idx = 0, limit = 3};
+    `  num total = 0;
+    `  for i, v :: ls {
+    `    total = total + i + v;
+    `  }
+    `}`,
+    "expected the two-name form to enumerate (i: num count, v: real Elem) for a non-tuple Elem"
+  );
+}
