@@ -455,6 +455,11 @@ pub compound Codegen {
   // Unique counter for `emit_let_destructure`'s own initializer temp
   // names.
   num let_destructure_temp_counter;
+  // Unique counter for `emit_inlined_iterator_next`'s per-splice-site
+  // local-hygiene renaming (each inlined `next()` body's own locals get a
+  // fresh suffix so nested/sibling `for` loops splicing the same method
+  // never collide).
+  num iter_inline_local_counter;
   // How many levels deep emission is nested inside a scratch buffer with
   // `hoist_insert_pos`/`current_stmt_start_pos` suspended (0 when not
   // nested); every scratch-buffer swap shares the counter, since any can
@@ -600,6 +605,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.call_recv_temp_counter = 0;
   g.for_iter_temp_counter = 0;
   g.let_destructure_temp_counter = 0;
+  g.iter_inline_local_counter = 0;
   g.va_call_counter = 0;
   g.try_call_counter = 0;
   g.hoist_scratch_depth = 0;
@@ -9033,6 +9039,470 @@ impl Codegen {
     }
   }
 
+  // Pushes `name` onto `names` unless it's already present. Small linear
+  // scan: `next()` bodies declare a handful of locals at most, nowhere
+  // near enough for this to matter against a real lookup structure.
+  _push_unique_local_name(Vec<str>* names, str name) {
+    num i = 0;
+    for i < names.len {
+      if equals(names.get(i), name) {
+        ret;
+      }
+      i = i + 1;
+    }
+    names.push(name);
+  }
+
+  // Parallel to `_push_unique_local_name`'s `names`: returns the fresh
+  // replacement for `name` if one was recorded, `.None` otherwise (the
+  // common case, most identifiers in a `next()` body are field/function
+  // references, not one of its own locals).
+  _lookup_local_rename(Vec<str> orig, Vec<str> fresh, str name) Option<str> {
+    num i = 0;
+    for i < orig.len {
+      if equals(orig.get(i), name) {
+        ret .Some(fresh.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Collects every name a `next()` method body declares or receives
+  // implicitly, so `emit_inlined_iterator_next` can give each one a fresh,
+  // collision-proof name before splicing the body directly into a `for`
+  // loop's own generated C: nested/sibling `for` loops inlining the same
+  // method, or a name the surrounding loop's own body already uses, must
+  // never collide with a spliced copy's locals. Seeds `out` with `"self"`
+  // unconditionally, since the receiver never appears as an ordinary
+  // `Variable` node in the body itself - it's an implicit method
+  // parameter - but every `self.field` reference inside still needs
+  // rewriting to whatever the spliced copy's own cursor variable is named.
+  collect_inline_next_locals(Node* n, Vec<str>* out) {
+    if n == nil {
+      ret;
+    }
+    fit n.kind {
+      .Variable(v) -> {
+        if !equals(v.name, "") {
+          self._push_unique_local_name(out, v.name);
+        }
+        num dni = 0;
+        for dni < v.destructure_names.len {
+          self._push_unique_local_name(out, v.destructure_names.get(dni));
+          dni = dni + 1;
+        }
+        if v.has_val {
+          self.collect_inline_next_locals(v.val, out);
+        }
+      }
+      .Expression(e) -> {
+        if e.has_left {
+          self.collect_inline_next_locals(e.left, out);
+        }
+        if e.has_right {
+          self.collect_inline_next_locals(e.right, out);
+        }
+      }
+      .ExpressionParenthesis(inner) -> { self.collect_inline_next_locals(inner, out); }
+      .Unary(u) -> { self.collect_inline_next_locals(u.operand, out); }
+      .Tenary(t) -> {
+        self.collect_inline_next_locals(t.cond, out);
+        self.collect_inline_next_locals(t.then_val, out);
+        self.collect_inline_next_locals(t.else_val, out);
+      }
+      .Bracket(inner) -> { self.collect_inline_next_locals(inner, out); }
+      .CompoundInit(c) -> {
+        for f : c.fields {
+          self.collect_inline_next_locals(f.value, out);
+        }
+      }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          self.collect_inline_next_locals(el, out);
+        }
+      }
+      .Body(b) -> {
+        for s : b.statements {
+          self.collect_inline_next_locals(s, out);
+        }
+      }
+      .StatementReturn(inner) -> {
+        if inner != nil {
+          self.collect_inline_next_locals(inner, out);
+        }
+      }
+      .StatementIf(s) -> {
+        self.collect_inline_next_locals(s.condition, out);
+        self.collect_inline_next_locals(s.body, out);
+      }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            if c.has_condition {
+              self.collect_inline_next_locals(c.condition, out);
+            }
+            self.collect_inline_next_locals(c.body, out);
+          }
+          _ -> {}
+        }
+      }
+      .StatementAssert(a) -> {
+        self.collect_inline_next_locals(a.condition, out);
+        if a.has_message {
+          self.collect_inline_next_locals(a.message, out);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Rewrites every `Identifier`/declared-name occurrence in `n` (already a
+  // private clone, per `emit_inlined_iterator_next`) from `orig[i]` to
+  // `fresh[i]`, mirroring `collect_inline_next_locals`'s own traversal
+  // shape exactly so every name it found gets rewritten everywhere it's
+  // used.
+  apply_inline_next_renames(Node* n, Vec<str> orig, Vec<str> fresh) {
+    if n == nil {
+      ret;
+    }
+    fit n.kind {
+      .Identifier(name) -> {
+        let renamed = self._lookup_local_rename(orig, fresh, name);
+        if renamed.is_some() {
+          n.kind = .Identifier(renamed.unwrap());
+        }
+      }
+      .Variable(v) -> {
+        if !equals(v.name, "") {
+          let renamed = self._lookup_local_rename(orig, fresh, v.name);
+          if renamed.is_some() {
+            v.name = renamed.unwrap();
+          }
+        }
+        num dni = 0;
+        for dni < v.destructure_names.len {
+          let dn_renamed = self._lookup_local_rename(
+            orig,
+            fresh,
+            v.destructure_names.get(dni)
+          );
+          if dn_renamed.is_some() {
+            v.destructure_names.set(dni, dn_renamed.unwrap());
+          }
+          dni = dni + 1;
+        }
+        if v.has_val {
+          self.apply_inline_next_renames(v.val, orig, fresh);
+        }
+        n.kind = .Variable(v);
+      }
+      .Expression(e) -> {
+        if e.has_left {
+          self.apply_inline_next_renames(e.left, orig, fresh);
+        }
+        if e.has_right {
+          self.apply_inline_next_renames(e.right, orig, fresh);
+        }
+      }
+      .ExpressionParenthesis(inner) -> { self.apply_inline_next_renames(inner, orig, fresh); }
+      .Unary(u) -> { self.apply_inline_next_renames(u.operand, orig, fresh); }
+      .Tenary(t) -> {
+        self.apply_inline_next_renames(t.cond, orig, fresh);
+        self.apply_inline_next_renames(t.then_val, orig, fresh);
+        self.apply_inline_next_renames(t.else_val, orig, fresh);
+      }
+      .Bracket(inner) -> { self.apply_inline_next_renames(inner, orig, fresh); }
+      .CompoundInit(c) -> {
+        for f : c.fields {
+          self.apply_inline_next_renames(f.value, orig, fresh);
+        }
+      }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          self.apply_inline_next_renames(el, orig, fresh);
+        }
+      }
+      .Body(b) -> {
+        for s : b.statements {
+          self.apply_inline_next_renames(s, orig, fresh);
+        }
+      }
+      .StatementReturn(inner) -> {
+        if inner != nil {
+          self.apply_inline_next_renames(inner, orig, fresh);
+        }
+      }
+      .StatementIf(s) -> {
+        self.apply_inline_next_renames(s.condition, orig, fresh);
+        self.apply_inline_next_renames(s.body, orig, fresh);
+      }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            if c.has_condition {
+              self.apply_inline_next_renames(c.condition, orig, fresh);
+            }
+            self.apply_inline_next_renames(c.body, orig, fresh);
+          }
+          _ -> {}
+        }
+      }
+      .StatementAssert(a) -> {
+        self.apply_inline_next_renames(a.condition, orig, fresh);
+        if a.has_message {
+          self.apply_inline_next_renames(a.message, orig, fresh);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // True when `n` (a `next()` body, or a sub-statement of one) uses only
+  // the control-flow shapes `emit_inlined_next_stmt` actually understands:
+  // a bare `if` (no `elif`/`else` chain yet), a condition-form `for`, and
+  // ordinary statements. `fit`, `elif`/`else`, and any nested iteration
+  // form are real gaps in this first version, not silent miscompiles -
+  // reported here so the caller can fall back to the older, always-correct
+  // call-based dispatch instead of attempting to inline something this
+  // pass doesn't fully understand yet.
+  _next_body_inlinable(Node* n) flag {
+    if n == nil {
+      ret true;
+    }
+    fit n.kind {
+      .StatementElseIf(_) -> { ret false; }
+      .StatementElse(_) -> { ret false; }
+      .StatementFit(_) -> { ret false; }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            if c.has_condition && !self._next_body_inlinable(c.condition) {
+              ret false;
+            }
+            ret self._next_body_inlinable(c.body);
+          }
+          _ -> { ret false; }
+        }
+      }
+      .Body(b) -> {
+        for s : b.statements {
+          if !self._next_body_inlinable(s) {
+            ret false;
+          }
+        }
+        ret true;
+      }
+      .StatementIf(s) -> { ret self._next_body_inlinable(s.body); }
+      _ -> { ret true; }
+    }
+  }
+
+  // Emits one statement from an already-cloned-and-renamed `next()` body
+  // inline, recursing through the handful of control-flow shapes
+  // `_next_body_inlinable` confirmed are present, and delegating every
+  // ordinary statement (a ordinary `let`, an expression statement, and so
+  // on - none of which can themselves contain a `ret` needing this
+  // treatment) straight to the shared `emit_statement`. A `ret .Some(x)`
+  // becomes binding `fi.item_name` from `x`, running the `for` loop's own
+  // user-written body, then `continue`; a `ret .None` becomes `break`.
+  emit_inlined_next_stmt(
+    Node stmt,
+    ForIterNode fi,
+    DataType elem_dt
+  ) Option<CodegenErrorKind> {
+    self.mark_node(stmt);
+    if stmt.has_pos {
+      self.state.set_pending_line_directive(stmt.pos);
+    }
+    fit stmt.kind {
+      .StatementReturn(inner) -> {
+        if inner == nil {
+          ret .Some(.UnsupportedNode);
+        }
+        flag yields_value = false;
+        Node* payload = nil;
+        fit inner.kind {
+          .Expression(e) -> {
+            if equals(e.op, "()") && e.has_right {
+              yields_value = true;
+              payload = e.right;
+            }
+          }
+          _ -> {}
+        }
+        if !yields_value {
+          self.state.write_indent();
+          self.state.write("break;\n");
+          ret .None;
+        }
+        self.state.write_indent();
+        if self.msvc_mode {
+          let ewt = self.write_type(elem_dt);
+          if ewt.is_none() {
+            self.state.write("int64_t");
+          }
+        } else {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
+        self.state.write(fi.item_name);
+        self.state.write(" = ");
+        let perr = self.emit_expr(*payload);
+        if perr.is_some() {
+          ret perr;
+        }
+        self.state.write(";\n");
+        let elem_name = self.resolve_type_name(elem_dt);
+        if elem_name.is_some() {
+          self.record_local_typed(
+            fi.item_name,
+            elem_name.unwrap(),
+            dtype_is_pointer(elem_dt),
+            elem_dt
+          );
+        }
+        self.loop_defer_marks.push(self.defer_stack.len);
+        let berr = self.emit_body(*fi.body);
+        self.loop_defer_marks.pop();
+        if berr.is_some() {
+          ret berr;
+        }
+        self.state.write_indent();
+        self.state.write("continue;\n");
+        ret .None;
+      }
+      .Body(b) -> {
+        for s : b.statements {
+          let serr = self.emit_inlined_next_stmt(*s, fi, elem_dt);
+          if serr.is_some() {
+            ret serr;
+          }
+        }
+        ret .None;
+      }
+      .StatementIf(s) -> {
+        self.state.write_indent();
+        self.state.write("if (");
+        let cerr = self.emit_expr(*s.condition);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(") {\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        let berr = self.emit_inlined_next_stmt(*s.body, fi, elem_dt);
+        self.state.indent_level = self.state.indent_level - 1;
+        if berr.is_some() {
+          ret berr;
+        }
+        self.state.write_indent();
+        self.state.write("}\n");
+        ret .None;
+      }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            self.state.write_indent();
+            if c.has_condition {
+              self.state.write("for (;");
+              let fcerr = self.emit_expr(*c.condition);
+              if fcerr.is_some() {
+                ret fcerr;
+              }
+              self.state.write(";) {\n");
+            } else {
+              self.state.write("for (;;) {\n");
+            }
+            self.state.indent_level = self.state.indent_level + 1;
+            self.loop_defer_marks.push(self.defer_stack.len);
+            let fberr = self.emit_inlined_next_stmt(*c.body, fi, elem_dt);
+            self.loop_defer_marks.pop();
+            self.state.indent_level = self.state.indent_level - 1;
+            if fberr.is_some() {
+              ret fberr;
+            }
+            self.state.write_indent();
+            self.state.write("}\n");
+            ret .None;
+          }
+          _ -> { ret .Some(.UnsupportedNode); }
+        }
+      }
+      _ -> { ret self.emit_statement(stmt); }
+    }
+  }
+
+  // Clones a plain (non-generic) type's own already-located `next()`
+  // method body so the shared template `Node`s are never mutated,
+  // hygienically renames every local it declares (including its own
+  // implicit `self`) so splicing it inline can't collide with the
+  // surrounding loop's own names, and emits it inside `for (;;) { ... }`
+  // via `emit_inlined_next_stmt` - full method inlining, not a function
+  // call, per the project's own performance bar for this mechanism.
+  emit_inlined_iterator_next(
+    Node* next_body,
+    str owner_type,
+    ForIterNode fi,
+    DataType elem_dt,
+    str arr_text
+  ) Option<CodegenErrorKind> {
+    DataType owner_dt = dtype_new();
+    owner_dt.type_str = owner_type;
+    let owner_name_opt = self.resolve_type_name(owner_dt);
+    if owner_name_opt.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    str owner_c_name = owner_name_opt.unwrap();
+
+    Node* body_clone = node_clone_ptr(next_body);
+
+    Vec<str> orig_names;
+    orig_names.init(4);
+    orig_names.push("self");
+    self.collect_inline_next_locals(body_clone, &orig_names);
+
+    self.iter_inline_local_counter = self.iter_inline_local_counter + 1;
+    Vec<str> fresh_names;
+    fresh_names.init(orig_names.len);
+    num ni = 0;
+    for ni < orig_names.len {
+      StringBuilder fresh_sb = string_builder_init(24);
+      fresh_sb.append("__fun_iter_local");
+      fresh_sb.append(format_num(self.iter_inline_local_counter));
+      fresh_sb.append("_");
+      fresh_sb.append(orig_names.get(ni));
+      fresh_names.push(fresh_sb.build());
+      ni = ni + 1;
+    }
+    self.apply_inline_next_renames(body_clone, orig_names, fresh_names);
+
+    let self_rename = self._lookup_local_rename(orig_names, fresh_names, "self");
+    if self_rename.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    str self_local = self_rename.unwrap();
+
+    self.state.write_indent();
+    self.state.write(owner_c_name);
+    self.state.write("* ");
+    self.state.write(self_local);
+    self.state.write(" = &");
+    self.state.write(arr_text);
+    self.state.write(";\n");
+    self.record_local_typed(self_local, owner_c_name, true, owner_dt);
+    self.state.write_indent();
+    self.state.write("for (;;) {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    let ierr = self.emit_inlined_next_stmt(*body_clone, fi, elem_dt);
+    self.state.indent_level = self.state.indent_level - 1;
+    if ierr.is_some() {
+      ret ierr;
+    }
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
+  }
+
   // Emits `for item : arr { ... }` and `for i, item :: arr { ... }` as a
   // Vec fast path: `for (int64_t idx = 0; idx < arr.len; idx++) {
   // __auto_type item = arr.data[idx]; ... }`, reading `Vec<T>`'s
@@ -9319,6 +9789,7 @@ impl Codegen {
       // own iterator state.
       str user_iter_elem_type = "";
       flag has_user_iter = false;
+      Option<ImplNode> user_iter_impl = .None;
       for n2 : self.all_nodes {
         fit n2.kind {
           .Impl(i2) -> {
@@ -9336,21 +9807,63 @@ impl Codegen {
               qpfx.append("__");
               user_iter_elem_type = strip_prefix(i2.quirk_concrete_instantiation, qpfx.build());
               has_user_iter = true;
+              user_iter_impl = .Some(i2);
             }
           }
           _ -> {}
         }
       }
       if has_user_iter {
+        DataType elem_dt2 = dtype_new();
+        elem_dt2.type_str = user_iter_elem_type;
+
+        // Full-body inlining (the general mechanism) when the found
+        // `next()`'s own shape is one `_next_body_inlinable` actually
+        // understands; otherwise this falls through to the always-correct
+        // call-based dispatch below, a deliberate, honest scope boundary
+        // for this first version - see `_next_body_inlinable`'s own doc
+        // comment.
+        if user_iter_impl.is_some() {
+          let impl_node = user_iter_impl.unwrap();
+          // A quirk-qualified impl's own methods are parsed with their
+          // generated name already, `Owner__Quirk__bare` (see
+          // `_parse_impl_method`), not the bare method name.
+          StringBuilder next_pfx_sb = string_builder_init(24);
+          next_pfx_sb.append(coll_dt.type_str);
+          next_pfx_sb.append("__Iterator__next");
+          str next_qualified = next_pfx_sb.build();
+          Node* next_body_probe = nil;
+          for m2 : impl_node.methods {
+            fit m2.kind {
+              .Function(fnv2) -> {
+                if equals(fnv2.name, next_qualified) && fnv2.has_body {
+                  next_body_probe = fnv2.body;
+                }
+              }
+              _ -> {}
+            }
+          }
+          if next_body_probe != nil && self._next_body_inlinable(next_body_probe) {
+            let inline_err = self.emit_inlined_iterator_next(
+              next_body_probe,
+              coll_dt.type_str,
+              fi,
+              elem_dt2,
+              arr_text
+            );
+            if inline_err.is_some() {
+              ret inline_err;
+            }
+            ret .None;
+          }
+        }
+
         let next_mangled_opt = self.lookup_impl_method(coll_dt.type_str, "next");
         if next_mangled_opt.is_none() {
           ret .Some(.UnsupportedNode);
         }
         self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
         str next_mangled = next_mangled_opt.unwrap();
-
-        DataType elem_dt2 = dtype_new();
-        elem_dt2.type_str = user_iter_elem_type;
 
         DataType opt_dt = dtype_new();
         opt_dt.type_str = "Option";
