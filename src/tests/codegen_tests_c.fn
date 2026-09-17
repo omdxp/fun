@@ -466,7 +466,7 @@ test "a rotating sink writes what was logged to its file" {
   assert contains(out, "first line"), "expected the line to reach the file";
 }
 
-test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
+test "for item : iterable inlines a user Iterator's own next() body; break exits the loop" {
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
   `quirk Iterator<T> { next() Option<T>; }
@@ -490,7 +490,86 @@ test "for item : iterable drives a user Iterator via next()/Option; break exits 
   `  ret 0;
   `}`;
   let out = emit_c(src, "for item : iterable drives a user Iterator");
-  assert contains(out, "Counter__Iterator__next"), "expected the loop to call next()";
+  // The loop no longer calls `next()`, its own body is spliced directly
+  // inline (a hygienically-renamed clone of it, hence the `__fun_iter_local`
+  // prefix): `Counter__Iterator__next` still exists as a real emitted C
+  // function (there's no dead-code elimination in this compiler, so an
+  // unused function still gets emitted), but the `for` loop's own generated
+  // code never calls it.
+  assert contains(out, "__fun_iter_local"), "expected the loop to splice next()'s own body inline";
+  assert !contains(out, "Counter__Iterator__next(&c)"), "expected no direct call to next(), it should be inlined";
+}
+
+test "an inlined Iterator's own next() with a nested for/if (ret two levels deep) still yields correctly" {
+  str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Evens { num idx; num limit; }
+  `impl Evens as Iterator<num> {
+  `  pub next() Option<num> {
+  `    for self.idx < self.limit {
+  `      let at = self.idx;
+  `      self.idx = self.idx + 1;
+  `      if at % 2 == 0 {
+  `        ret Option.Some(at);
+  `      }
+  `    }
+  `    ret Option.None;
+  `  }
+  `}
+  `fun main() num {
+  `  Evens e = Evens{idx = 0, limit = 10};
+  `  num sum = 0;
+  `  for x : e {
+  `    sum = sum + x;
+  `  }
+  `  printf("%lld\n", sum);
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "inlined_next_nested_for_if",
+    "an inlined Iterator's next() with a nested for/if still yields correctly"
+  );
+  // 0 + 2 + 4 + 6 + 8 = 20.
+  assert contains(out, "20"), "expected the nested-scan next() to still yield every even value";
+}
+
+test "two for loops inlining the same Iterator type in one function don't collide" {
+  str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Counter { num cur; num limit; }
+  `impl Counter as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.cur >= self.limit { ret Option.None; }
+  `    num v = self.cur;
+  `    self.cur = self.cur + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
+  `fun make_counter(num limit) Counter {
+  `  ret Counter{cur = 0, limit = limit};
+  `}
+  `fun main() num {
+  `  Counter a = make_counter(2);
+  `  num total = 0;
+  `  for x : a {
+  `    Counter b = make_counter(2);
+  `    for y : b {
+  `      total = total + x * 10 + y;
+  `    }
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "inlined_next_no_collision",
+    "two for loops inlining the same Iterator type don't collide"
+  );
+  // (0*10+0)+(0*10+1)+(1*10+0)+(1*10+1) = 0+1+10+11 = 22.
+  assert contains(out, "22"), "expected each splice site's own hygienically-renamed locals not to collide";
 }
 
 test "for k, v :: map binds each key to its value" {
