@@ -15606,6 +15606,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   some_branch.body = true_body;
   some_branch.bindings = some_bindings;
   some_branch.has_bindings = true;
+  some_branch.is_tuple_pattern = false;
 
   FitStmtNode fitn = fit_stmt_node_new();
   fitn.exp = fit_subj;
