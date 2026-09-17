@@ -165,10 +165,12 @@ fun main() {
   `(1, "hi")`. A single parenthesized value (`(1)`) stays an ordinary
   grouped expression, not a one-element tuple.
 - Read an element back **positionally** with `.0`, `.1`, and so on; an
-  out-of-range index is a compile-time error. A tuple-of-tuples needs
-  its own parens around the outer access (`(t.0).1`) - bare chained
-  access (`t.0.1`) is not supported yet, since `0.1` would otherwise
-  lex as a single decimal number.
+  out-of-range index is a compile-time error. A tuple-of-tuples chains
+  directly - `t.0.1` reads element `1` of `t`'s own element `0` - even
+  though `0.1` would otherwise lex as one decimal number: the compiler
+  splits it back into two positional hops from the token's own raw
+  source digits, not its parsed value, so a multi-digit chained index
+  (`t.0.10`) still reads back correctly as element `10`, not `1`.
 - **`let (a, b, c) = expr;`** destructures a tuple into individually-
   typed names in one step. `expr` is evaluated exactly once no matter
   how many names it destructures into, and each name must actually be
@@ -179,6 +181,12 @@ fun main() {
   type rather than inferring it: each name gets its own declared
   element type, and `expr` must fit the declared type as a whole
   (numeric widening included), not just whatever it happens to infer to.
+- **`for (a, b) : pairs { ... }`** destructures each element of a
+  tuple-elemented iterable (`Vec<(K, V)>`) into its own names per
+  iteration, the same way `let` destructures a plain tuple value - no
+  combined index-tracking form (`for (a, b) :: xs` is not supported;
+  the existing `for i, item :: xs` two-name form already covers index
+  tracking).
 - A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
   as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
   for the `als Args = (num, str);` pattern this enables with generic

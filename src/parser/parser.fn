@@ -1477,6 +1477,14 @@ fun _flatten_paren_comma_chain(Node* node, Vec<Node*>* out) {
   out.push(node);
 }
 
+// The two integer indices `_split_chained_tuple_index` reads back out of
+// a chained positional access's own raw digit text (`t.0.1` -> whole 0,
+// frac 1).
+compound ChainedTupleIndexParts {
+  num whole;
+  num frac;
+}
+
 impl Parser {
   // Creates and registers a new node in the parse state's node list,
   // stamping its `binded` owner/function context from whatever body/
@@ -2323,7 +2331,106 @@ impl Parser {
       self.state.err("expected an operator or ';' between expressions");
       ret .Some(.InvalidExpression);
     }
+    // Fixes up any chained tuple positional access (`t.0.1`) anywhere in
+    // the just-parsed expression, once and only here, at the root: a
+    // `.` operator combine's own RHS-parse is greedy (it doesn't stop
+    // at a following ',', matching every other binary operator's own
+    // RHS-parse), so a following call argument, or another comma-
+    // separated element, can end up nested INSIDE what looks like a
+    // '.''s own right side until `parse_reorder_expression` un-nests it
+    // back out - and reordering itself can leave the '.' node anywhere
+    // in the tree, not only at the top of whichever single
+    // `parse_normal_expression` call happened to combine it, so this
+    // has to walk the WHOLE finished tree rather than checking any one
+    // combine's own immediate result.
+    let maybe_top = self.state.node_pop();
+    if maybe_top.is_some() {
+      Node top = maybe_top.unwrap();
+      self._fix_chained_tuple_access(&top);
+      self.state.nodes.push(top);
+    }
     ret .None;
+  }
+
+  // Walks `node`'s own subtree (post-order: children before the node
+  // itself, so a deeper chained access fixes up first) and splits any
+  // `.` access whose right side is a Dec-shaped number - real chained
+  // tuple positional access (`t.0.1`), never a genuine decimal literal
+  // in this position - back into two nested `.` accesses, reading the
+  // real whole/fractional indices from the token's own raw source text
+  // (`_split_chained_tuple_index`), not the parsed float value, which
+  // loses a trailing-zero index like `.10` vs `.1`.
+  _fix_chained_tuple_access(Node* node) {
+    if node == nil {
+      ret;
+    }
+    fit node.kind {
+      .Expression(e) -> {
+        if e.has_left {
+          self._fix_chained_tuple_access(e.left);
+        }
+        if e.has_right {
+          self._fix_chained_tuple_access(e.right);
+        }
+        if !equals(e.op, ".") || !e.has_right {
+          ret;
+        }
+        flag rhs_is_dec = false;
+        fit e.right.kind {
+          .Number(data) -> {
+            fit data {
+              .Dec(_) -> { rhs_is_dec = true; }
+              _ -> {}
+            }
+          }
+          _ -> {}
+        }
+        if !rhs_is_dec || !e.right.has_pos {
+          ret;
+        }
+        let chain_split = self._split_chained_tuple_index(e.right.pos);
+        if chain_split.is_none() {
+          ret;
+        }
+        let parts = chain_split.unwrap();
+        Node* whole_num = malloc(sizeof(Node));
+        *whole_num = node_new(.Number(.Num(parts.whole)));
+        whole_num.pos = e.right.pos;
+        whole_num.has_pos = true;
+
+        ExprNode inner_e = expr_node_new();
+        inner_e.left = e.left;
+        inner_e.has_left = true;
+        inner_e.right = whole_num;
+        inner_e.has_right = true;
+        inner_e.op = ".";
+        Node* inner_node = malloc(sizeof(Node));
+        *inner_node = node_new(.Expression(inner_e));
+        inner_node.pos = node.pos;
+        inner_node.has_pos = node.has_pos;
+
+        Node* frac_num = malloc(sizeof(Node));
+        *frac_num = node_new(.Number(.Num(parts.frac)));
+        frac_num.pos = e.right.pos;
+        frac_num.has_pos = true;
+
+        ExprNode outer_e = expr_node_new();
+        outer_e.left = inner_node;
+        outer_e.has_left = true;
+        outer_e.right = frac_num;
+        outer_e.has_right = true;
+        outer_e.op = ".";
+        node.kind = .Expression(outer_e);
+      }
+      .ExpressionParenthesis(inner) -> { self._fix_chained_tuple_access(inner); }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          self._fix_chained_tuple_access(el);
+        }
+      }
+      .Bracket(inner2) -> { self._fix_chained_tuple_access(inner2); }
+      _ -> {}
+    }
   }
 
   // If the next token is an operator, parses another full expressionable
@@ -5242,6 +5349,33 @@ impl Parser {
       ret .None;
     }
     ret .Some(idx);
+  }
+
+  // The two integer indices `_split_chained_tuple_index` reads back out
+  // of a chained positional access's own raw digit text (`t.0.1` -> whole
+  // 0, frac 1).
+  _split_chained_tuple_index(Pos pos) Option<ChainedTupleIndexParts> {
+    let start_idx_opt = self._source_index_from_line_col(self.state.input_source, pos.line, pos.start_col);
+    let end_idx_opt = self._source_index_from_line_col(self.state.input_source, pos.end_line, pos.end_col);
+    if start_idx_opt.is_none() || end_idx_opt.is_none() {
+      ret .None;
+    }
+    num s_idx = start_idx_opt.unwrap();
+    num e_idx = end_idx_opt.unwrap();
+    if e_idx <= s_idx || e_idx > len(self.state.input_source) {
+      ret .None;
+    }
+    str raw_text = substr(self.state.input_source, s_idx, e_idx - s_idx);
+    num dot_at = index_of_char(raw_text, '.');
+    if dot_at <= 0 || dot_at >= len(raw_text) - 1 {
+      ret .None;
+    }
+    str whole_text = substr(raw_text, 0, dot_at);
+    str frac_text = substr(raw_text, dot_at + 1, len(raw_text) - dot_at - 1);
+    ChainedTupleIndexParts parts;
+    parts.whole = parse_int(whole_text);
+    parts.frac = parse_int(frac_text);
+    ret .Some(parts);
   }
 
   // Captures an asm block's `{ ... }` body as raw source text, appending
@@ -10739,6 +10873,96 @@ test "parse_normal_expression desugars a channel receive to '.recv()'" {
       }
     }
     _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_normal_expression splits a chained tuple positional access into two nested field accesses" {
+  Vec<str> names;
+  names.init(0);
+  names.push("t");
+  ParseState st = _state_with_declared("t.0.1", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 't.0.1' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(outer) -> {
+      assert equals(outer.op, "."), "expected the outer node to be a '.' access";
+      fit outer.right.kind {
+        .Number(data) -> {
+          fit data {
+            .Num(n) -> { assert n == 1, "expected the outer access's own index to be 1"; }
+            _ -> { panic("expected a plain integer index on the outer access, not a Dec"); }
+          }
+        }
+        _ -> { panic("expected a Number node on the outer access's own right side"); }
+      }
+      fit outer.left.kind {
+        .Expression(inner) -> {
+          assert equals(inner.op, "."), "expected the inner node to also be a '.' access";
+          fit inner.left.kind {
+            .Identifier(s) -> { assert equals(s, "t"), "expected the innermost receiver 't'"; }
+            _ -> { panic("expected Identifier 't'"); }
+          }
+          fit inner.right.kind {
+            .Number(data2) -> {
+              fit data2 {
+                .Num(n2) -> { assert n2 == 0, "expected the inner access's own index to be 0"; }
+                _ -> { panic("expected a plain integer index on the inner access, not a Dec"); }
+              }
+            }
+            _ -> { panic("expected a Number node on the inner access's own right side"); }
+          }
+        }
+        _ -> {
+          panic("expected the outer access's own left side to itself be a '.' Expression, not a single combined node");
+        }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_normal_expression splits a multi-digit chained index from its own raw source text, not the lossy parsed decimal" {
+  Vec<str> names;
+  names.init(0);
+  names.push("t");
+  ParseState st = _state_with_declared("t.0.10", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 't.0.10' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(outer) -> {
+      fit outer.right.kind {
+        .Number(data) -> {
+          fit data {
+            .Num(n) -> {
+              assert n == 10, "expected the outer access's own index to read back as 10, not 1";
+            }
+            _ -> { panic("expected a plain integer index, not a Dec"); }
+          }
+        }
+        _ -> { panic("expected a Number node"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_normal_expression leaves a plain decimal literal alone outside a '.' access" {
+  ParseState st = _state_from("1.5");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '1.5' to parse as an ordinary decimal literal";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Number(data) -> {
+      fit data {
+        .Dec(d) -> {
+          assert d == 1.5, "expected the plain decimal value 1.5, unaffected by the chained-access split";
+        }
+        _ -> { panic("expected a Dec value"); }
+      }
+    }
+    _ -> { panic("expected a bare Number node, not a '.' expression"); }
   }
 }
 

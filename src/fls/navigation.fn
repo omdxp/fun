@@ -122,6 +122,47 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
               }
             }
           }
+          // A chained positional access (`t.0.1`) lexes as ONE Dec token
+          // ("0.1"), parsed by `parser.fn`'s own `_split_chained_tuple_index`
+          // into two hops from its raw source text - resolved here the
+          // same way, one `split_signature_params` per hop, since the
+          // token-stream walk `chain_receiver_type` does can only ever
+          // see a single `.` before this token (there's no second lexed
+          // '.'/digit pair to walk through).
+          .Dec(_) -> {
+            if _preceded_by_dot(&tokens, t) {
+              let hops = _split_chained_index_text(t.pos, doc.text);
+              if hops.is_some() {
+                let hp = hops.unwrap();
+                str recv_type2 = chain_receiver_type(&tokens, t, &read.program.nodes, doc.path, line + 1);
+                if starts_with(recv_type2, "(") {
+                  Vec<str> outer_members = split_signature_params(recv_type2);
+                  if hp.whole >= 0 && hp.whole < outer_members.len {
+                    str inner_type = outer_members.get(hp.whole);
+                    if starts_with(inner_type, "(") {
+                      Vec<str> inner_members = split_signature_params(inner_type);
+                      if hp.frac >= 0 && hp.frac < inner_members.len {
+                        str elem_doc2 = format(
+                          "Positional element {num} of {str}, itself element {num} of {str}.",
+                          hp.frac,
+                          inner_type,
+                          hp.whole,
+                          recv_type2
+                        );
+                        let hres2 = _hover_result(_doc(inner_members.get(hp.frac), elem_doc2), span_of(t, doc.text));
+                        free(elem_doc2);
+                        free_params_vec(&inner_members);
+                        free_params_vec(&outer_members);
+                        ret hres2;
+                      }
+                      free_params_vec(&inner_members);
+                    }
+                  }
+                  free_params_vec(&outer_members);
+                }
+              }
+            }
+          }
           _ -> {}
         }
       }
@@ -1182,6 +1223,72 @@ fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
     ret impl_doc;
   }
   ret impl_doc;
+}
+
+// The two integer indices a chained positional access's own raw digit
+// text splits into (`t.0.1` -> whole 0, frac 1).
+compound ChainedIndexHops {
+  num whole;
+  num frac;
+}
+
+// The byte offset in `text` of `line`/`col` (both 1-based), walking
+// newlines from the start - the fls-side twin of `parser.fn`'s own
+// `_source_index_from_line_col` (same shape, `doc.text` in place of
+// `self.state.input_source`; fls parses each document independently, so
+// nothing here can reach a `Parser`'s own method).
+fun _source_index_from_line_col_fls(str text, num line, num col) Option<num> {
+  if line == 0 || col == 0 {
+    ret .None;
+  }
+  num n = len(text);
+  num current_line = 1;
+  num line_start = 0;
+  num i = 0;
+  for i < n && current_line < line {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      line_start = i + 1;
+    }
+    i = i + 1;
+  }
+  if current_line != line {
+    ret .None;
+  }
+  num idx = line_start + (col - 1);
+  if idx > n {
+    ret .None;
+  }
+  ret .Some(idx);
+}
+
+// Splits a chained positional access's own Dec-lexed token ("0.1") at
+// its internal '.' into two integer indices, read from `text` itself
+// rather than the parsed float value - "0.10" and "0.1" parse to the
+// identical `dec`, but mean different chained indices (element 10 vs
+// element 1). Mirrors `parser.fn`'s own `_split_chained_tuple_index`.
+fun _split_chained_index_text(Pos pos, str text) Option<ChainedIndexHops> {
+  let start_idx_opt = _source_index_from_line_col_fls(text, pos.line, pos.start_col);
+  let end_idx_opt = _source_index_from_line_col_fls(text, pos.end_line, pos.end_col);
+  if start_idx_opt.is_none() || end_idx_opt.is_none() {
+    ret .None;
+  }
+  num s_idx = start_idx_opt.unwrap();
+  num e_idx = end_idx_opt.unwrap();
+  if e_idx <= s_idx || e_idx > len(text) {
+    ret .None;
+  }
+  str raw_text = substr(text, s_idx, e_idx - s_idx);
+  num dot_at = index_of_char(raw_text, '.');
+  if dot_at <= 0 || dot_at >= len(raw_text) - 1 {
+    ret .None;
+  }
+  str whole_text = substr(raw_text, 0, dot_at);
+  str frac_text = substr(raw_text, dot_at + 1, len(raw_text) - dot_at - 1);
+  ChainedIndexHops hops;
+  hops.whole = parse_int(whole_text);
+  hops.frac = parse_int(frac_text);
+  ret .Some(hops);
 }
 
 // `code` shown as a Fun snippet, with `prose` under it. A fence is

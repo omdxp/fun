@@ -4094,6 +4094,30 @@ test "hover on a tuple's own positional access shows the real element type, not 
   assert !contains(hovered, "decimal:"), format("expected this to no longer fall through to the plain-integer-literal doc, got: {str}", hovered);
 }
 
+test "hover on a chained positional access resolves the inner element's own real type" {
+  // Before this, a Dec-lexed chained-access token ('0.0') fell straight
+  // into the ordinary decimal-literal doc branch, showing "A 64-bit
+  // floating-point literal" for what is really a nested tuple index -
+  // actively misleading, not just imprecise. Resolved the same way
+  // parser.fn's own `_split_chained_tuple_index` resolves the AST split:
+  // from the token's own raw source text, not the parsed float value.
+  str src = `fun main() num {
+  `  ((num, str), flag) t = ((1, "hi"), true);
+  `  ret t.0.0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chainhover.fn";
+  doc.path = "chainhover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 9);
+  assert contains(hovered, "num"), format("expected 't.0.0' to hover as its own real inner element type 'num', got: {str}", hovered);
+  assert !contains(hovered, "floating-point literal"), format("expected this to no longer fall through to the plain-decimal-literal doc, got: {str}", hovered);
+}
+
 test "inlay hints cover a destructuring let, one hint per name at its own position" {
   // Before this, `let (a, b) = ...;` matched no hint at all: the scan
   // only ever checked the single token right after `let`, expecting an

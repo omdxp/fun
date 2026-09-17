@@ -635,3 +635,26 @@ test "a declared-type destructuring pattern compiles under MSVC's strict, non-GN
     out_msvc
   );
 }
+
+test "a bare chained positional access reads a tuple-of-tuples' own inner element end to end" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  ((num, str), flag) t = ((1, "hi"), true);
+  `  printf("%lld %s %d\n", t.0.0, t.0.1, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_chained_positional_access", "a bare chained positional access reads the inner tuple's own element end to end");
+  assert equals(out, "1 hi 1\n"), "expected 't.0.0'/'t.0.1' to read the inner tuple's own elements, and 't.1' the outer flag";
+}
+
+test "a multi-digit chained index reads back from its own raw source digits, not the lossy parsed decimal" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  ((num, num, num, num, num, num, num, num, num, num, num), str) t =
+  `    ((0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10), "eleven");
+  `  printf("%lld %s\n", t.0.10, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_chained_multidigit_index", "a multi-digit chained index (0.10) reads element 10, not element 1");
+  assert equals(out, "10 eleven\n"), "expected 't.0.10' to read the inner tuple's own 11th element, not silently truncate to index 1";
+}

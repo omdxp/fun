@@ -5,17 +5,22 @@
 // 
 // A tuple literal `(1, "hi")` needs at least two comma-separated elements: a
 // single parenthesized value stays an ordinary grouped expression. Read an
-// element back positionally with `.0`, `.1`, ... A tuple-of-tuples needs
-// parens around the outer access (`(t.0).1`) - bare chained access (`t.0.1`)
-// is not supported yet. `let (a, b, c) = expr;` destructures a tuple into
-// individually-typed names in one step, evaluating `expr` exactly once no
-// matter how many names it destructures into. `(T1, T2) (a, b) = expr;`
-// destructures with an explicit declared type instead of inferring it,
-// the same as an ordinary declared variable - each name gets its own
-// declared element type, and the initializer must fit it (numeric
-// widening included), not just whatever it happens to infer to.
+// element back positionally with `.0`, `.1`, ... and chain directly into a
+// tuple-of-tuples (`t.0.1`) - the compiler splits a chained index back apart
+// from its own raw source digits, not its parsed decimal value, so a
+// multi-digit index still reads correctly. `let (a, b, c) = expr;`
+// destructures a tuple into individually-typed names in one step, evaluating
+// `expr` exactly once no matter how many names it destructures into.
+// `(T1, T2) (a, b) = expr;` destructures with an explicit declared type
+// instead of inferring it, the same as an ordinary declared variable - each
+// name gets its own declared element type, and the initializer must fit it
+// (numeric widening included), not just whatever it happens to infer to.
+// `for (a, b) : pairs { ... }` destructures a tuple-elemented iterable's own
+// element into names per iteration, the same way `let` destructures a plain
+// tuple value.
 
 use std.io;
+use std.vec;
 
 // A function may take and return a tuple like any other type.
 fun min_max(num a, num b) (num, num) {
@@ -50,9 +55,9 @@ fun main() {
   (num, str) person = (30, "Ada");
   println_fmt("person: {} years, name {}", person.0, person.1);
 
-  // A tuple-of-tuples: chained access needs its own parens.
+  // A tuple-of-tuples: bare chained access reads the inner element directly.
   ((num, num), str) nested = ((1, 2), "pair");
-  println_fmt("nested first element: {}", (nested.0).0);
+  println_fmt("nested first element: {}", nested.0.0);
 
   // `let` destructuring.
   let (low, high) = min_max(9, 3);
@@ -68,6 +73,15 @@ fun main() {
   // declared `dec` variable would.
   (dec, str) (weight, unit) = (70, "kg");
   println_fmt("declared destructure: {} {}", weight, unit);
+
+  // `for` destructuring: one name per element of a Vec<(K, V)>'s own item.
+  Vec<(num, str)> pairs;
+  pairs.init(2);
+  pairs.push((1, "one"));
+  pairs.push((2, "two"));
+  for (k, v) : pairs {
+    println_fmt("pair: {} = {}", k, v);
+  }
 
   // Generic interaction.
   Box<(num, str)> boxed = Box<(num, str)>{value = (7, "seven")};

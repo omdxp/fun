@@ -1833,3 +1833,30 @@ test "a declared-type destructuring pattern rejects an element type mismatch aga
     "expected swapped element types not to fit the declared tuple type"
   );
 }
+
+test "a chained positional access on a tuple-of-tuples reads the inner element's own type" {
+  accepts(
+    `fun main() num {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  ret t.0.0;
+    `}`,
+    "expected 't.0.0' to read as num, the inner tuple's own first element"
+  );
+  rejects(
+    `fun main() {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  str s = t.0.0;
+    `}`,
+    "expected the inner tuple's own num element not to fit a str"
+  );
+}
+
+test "a chained positional access out of the inner tuple's own range is rejected" {
+  rejects(
+    `fun main() num {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  ret t.0.5;
+    `}`,
+    "expected an out-of-range chained index to be a real error"
+  );
+}

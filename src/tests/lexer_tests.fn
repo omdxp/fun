@@ -95,6 +95,26 @@ test "a dot right after a value that already ends an operand starts tuple positi
   defer tokens3.free();
   assert tokens3.len == 5, "expected 5 tokens: (, x, ), ., 0";
 
+  // A chained positional access (`t.0.1`) still lexes to just three
+  // tokens: the second '.' never gets its own token at all, since
+  // ordinary number lexing already reads "0.1" as one Dec value once
+  // it's mid-scan - unaffected by the leading-dot gate above, which
+  // only ever applies before a NEW token starts. The parser is what
+  // splits this one Dec token back into two positional hops
+  // (`parse_normal_expression`'s own `_split_chained_tuple_index`), not
+  // the lexer.
+  let lexed_chain = tokenize("t.0.1", "chaindebug.fn");
+  assert lexed_chain.is_ok(), "expected 't.0.1' to lex";
+  Vec<Token> tokens_chain = lexed_chain.unwrap();
+  defer tokens_chain.free();
+  assert tokens_chain.len == 3, "expected three tokens: identifier, dot, one combined Dec number";
+  assert tokens_chain.get(0).type == .Identifier, "expected 't' as an identifier";
+  assert token_is_operator(tokens_chain.get(1), "."), "expected a real '.' operator token";
+  fit tokens_chain.get(2).data {
+    .Dec(d) -> { assert d == 0.1, "expected the combined decimal value 0.1"; }
+    _ -> { panic("expected the second/third hop to lex as one combined Dec token"); }
+  }
+
   // A genuinely bare leading-dot float in value position is unaffected -
   // nothing before it to end an operand.
   let bare = tokenize(".5", "barefloat.fn");

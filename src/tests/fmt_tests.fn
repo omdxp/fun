@@ -577,3 +577,14 @@ test "a call chained directly onto another call's own result still binds tight, 
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "g(5)(6);"), "expected a genuine chained call to stay tight, not gain a space meant for a declared-type destructuring pattern";
 }
+
+test "a bare chained positional access round-trips through formatting unchanged" {
+  // fmt works from the raw token stream, never the parse tree, so the
+  // parser's own split into two nested '.' expressions is invisible to
+  // it - the single "0.1" token is just re-emitted as written.
+  str src = `fun main() num {
+  `  ret t.0.1;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "t.0.1;"), "expected a chained positional access to format unchanged, not split or re-spaced";
+}
