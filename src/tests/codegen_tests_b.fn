@@ -113,7 +113,7 @@ test "pointer field access uses arrow" {
 // already fixed on the reference side. Not deduping costs nothing but
 // emitted C size, which this test doesn't check.
 test "structurally identical quirks each dispatch correctly, independently" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Speaker { speak() str; }
   `quirk Talker { speak() str; }
   `compound Dog { num age; }
@@ -159,7 +159,7 @@ test "asm block preserves newlines" {
 }
 
 test "transitive std.net import emits socket headers" {
-  str src = `imp std.net;
+  str src = `use std.net;
   `fun main() {
   `  ret;
   `}`;
@@ -183,7 +183,7 @@ test "main num return emits exit status" {
 }
 
 test "hexadecimal literals with a-f and A-F digits compile" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  num a = 0xdead;
   `  num b = 0xBEEF;
@@ -296,7 +296,7 @@ test "raw string literal: multi-line block joins lines with a real newline" {
 }
 
 test "single-letter quirk name emits impl method bodies" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Q { getX() num; }
   `compound Foo { num x; }
   `impl Foo as Q { getX() num { ret self.x; } }
@@ -313,7 +313,7 @@ test "single-letter quirk name emits impl method bodies" {
 }
 
 test "stacked unary operator does not crash the parser" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() {
   `  num a = 5;
   `  num b = ~~a;
@@ -323,7 +323,7 @@ test "stacked unary operator does not crash the parser" {
 }
 
 test "member-access multiplied by an identifier parses as multiplication" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound O { num v; }
   `compound W { O inner; }
   `compound S { num id; }
@@ -340,7 +340,7 @@ test "member-access multiplied by an identifier parses as multiplication" {
 }
 
 test "double pointer dereference emits two stars" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun set_via(num** pp, num val) { **pp = val; }
   `fun main() num {
   `  num x = 5;
@@ -365,7 +365,7 @@ test "double pointer dereference emits two stars" {
 // test "field access on element of array-of-pointers emits arrow" { }
 
 test "fit on a string value lowers to strcmp chain" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun classify(str s) {
   `  fit s {
   `    "go" -> { printf("going\n"); },
@@ -384,7 +384,7 @@ test "fit on a string value lowers to strcmp chain" {
 }
 
 test "local array of compound stays in the function body" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound P { num x; }
   `fun main() num {
   `  P[] pts = [P{x = 1}, P{x = 2}, P{x = 3}];
@@ -398,8 +398,8 @@ test "local array of compound stays in the function body" {
 }
 
 test "local T[] initialized from a pointer emits a C pointer, not an array" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `fun main() num {
   `  raw* mem = malloc(24);
   `  num[] a = mem;
@@ -413,7 +413,7 @@ test "local T[] initialized from a pointer emits a C pointer, not an array" {
 }
 
 test "compound initializer field after an address-of-valued field parses correctly" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Engine { num power; }
   `compound Car { Engine* motor; num wheels; }
   `fun main() num {
@@ -430,7 +430,7 @@ test "compound initializer field after an address-of-valued field parses correct
 }
 
 test "a generic compound's impl of a plain quirk coerces and dispatches dynamically" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Lenable { size() num; }
   `compound Box<T> { T v; }
   `impl Box<T> as Lenable { size() num { ret sizeof(T); } }
@@ -449,7 +449,7 @@ test "a generic compound's impl of a plain quirk coerces and dispatches dynamica
 }
 
 test "two instantiations of the same generic compound's quirk impl share one vtable" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Lenable { size() num; addTo(num n) num; }
   `compound Box<T> { T v; }
   `impl Box<T> as Lenable {
@@ -473,7 +473,7 @@ test "two instantiations of the same generic compound's quirk impl share one vta
 }
 
 test "sizeof works with generic types, generic instances, and locals" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> { T v; }
   `compound Pair<A, B> { A a; B b; }
   `fun main() num {
@@ -499,7 +499,7 @@ test "sizeof works with generic types, generic instances, and locals" {
 // the check belongs and where its tests live (typecheck_tests.fn).
 
 test "P5: non-zero and runtime divisors still compile" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  num x = 2;
   `  num a = 10 / 2;
@@ -512,7 +512,7 @@ test "P5: non-zero and runtime divisors still compile" {
 }
 
 test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  num[2][3] m;
   `  m[0][0] = 5;
@@ -535,7 +535,7 @@ test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
 test "P3: float literals and the range operator coexist" {
   // A trailing dot is a decimal, but a doubled one is the range
   // operator and its first dot must not be eaten by the number.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  dec a = 1e1;
   `  dec b = 1.5e-1;
@@ -557,13 +557,13 @@ test "P3: float literals and the range operator coexist" {
 }
 
 test "P3: comparison operators do not maximal-munch a following minus" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  num a = 5;
-  `  bin ge = a >=-1;
-  `  bin le = a <=-1;
-  `  bin eq = a ==-5;
-  `  bin ne = a !=-5;
+  `  flag ge = a >=-1;
+  `  flag le = a <=-1;
+  `  flag eq = a ==-5;
+  `  flag ne = a !=-5;
   `  num sh = 4; sh >>= 1;
   `  ret 0;
   `}`;
@@ -576,7 +576,7 @@ test "P3: comparison operators do not maximal-munch a following minus" {
 }
 
 test "P3: enum variants accept explicit negative values" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum E { A = -1, B = 0, C = 5 }
   `fun main() num {
   `  E a = E.A;
@@ -591,7 +591,7 @@ test "P3: enum variants accept explicit negative values" {
 }
 
 test "P3: uninstantiated generic compound does not trip false cyclic-dependency" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `pub compound Box<T> { T v; }
   `pub compound Node<T> { T val; Node<T>* next; }
   `fun main() num {
@@ -632,11 +632,11 @@ test "P3: two unrelated compounds sharing a third by value is not a false cycle"
 }
 
 test "private field (leading underscore): same-module read/write/self access works" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound User { num id; num _password; }
   `impl User {
   `  pub set_pw(num p) { self._password = p; }
-  `  pub check(num p) bin { ret self._password == p; }
+  `  pub check(num p) flag { ret self._password == p; }
   `}
   `fun main() num {
   `  User u = User{id = 1, _password = 42};
@@ -655,7 +655,7 @@ test "private field (leading underscore): same-module read/write/self access wor
 }
 
 test "data-carrying enum: construct + pattern-match with payload bindings" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Val { I(num), Pair(num, num), Nil }
   `fun sum(Val v) num {
   `  fit v {
@@ -679,7 +679,7 @@ test "data-carrying enum: construct + pattern-match with payload bindings" {
 }
 
 test "data-carrying enum: shorthand .Variant(x) and _ catch-all" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Opt { Some(num), None }
   `fun get(Opt o) num {
   `  fit o {
@@ -696,7 +696,7 @@ test "data-carrying enum: shorthand .Variant(x) and _ catch-all" {
 }
 
 test "data-carrying enum: shorthand construction in typed var-init and return" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Opt { Some(num), None }
   `fun mk(num x) Opt { ret .Some(x); }
   `fun get(Opt o) num {
@@ -718,7 +718,7 @@ test "data-carrying enum: shorthand construction in typed var-init and return" {
 }
 
 test "plain (payload-free) enum still lowers to a C enum" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Color { Red, Green, Blue }
   `fun main() num { Color c = Color.Green; ret 0; }`;
   let out = emit_c(src, "plain (payload-free) enum still lowers to a C enum");
@@ -727,7 +727,7 @@ test "plain (payload-free) enum still lowers to a C enum" {
 }
 
 test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Speaker { speak() str; }
   `compound Dog { num age; }
   `impl Dog as Speaker { speak() str { ret "woof"; } }
@@ -746,7 +746,7 @@ test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" 
 }
 
 test "generic compound coerces to a quirk at a call site and via var-init" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Sized { size() num; }
   `compound Box<T> { T v; }
   `impl Box<num> as Sized { size() num { ret 8; } }
@@ -764,7 +764,7 @@ test "generic compound coerces to a quirk at a call site and via var-init" {
 }
 
 test "quirk method dispatched on a call result materializes the receiver once" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound St { num v; }
   `quirk Weighted { weight() num; }
   `impl St as Weighted { weight() num { ret self.v; } }
@@ -791,7 +791,7 @@ test "fixed-size array compound field is inline, not a pointer" {
   // array brackets, so `num[3] data;` silently became a bare
   // `int64_t data;`, not malformed, just missing its array-ness
   // entirely, which read as accepted rather than rejected.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Grid { num[3] data; }
   `fun main() num {
   `  Grid g;
@@ -809,7 +809,7 @@ test "fixed-size array compound field is inline, not a pointer" {
 }
 
 test "fixed-size array field is inline on a generic compound too" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> { T v; num[3] data; }
   `fun main() num {
   `  Box<num> b;
@@ -822,7 +822,7 @@ test "fixed-size array field is inline on a generic compound too" {
 }
 
 test "array-literal struct field init on a generic compound" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> { T v; num[3] data; }
   `fun main() num {
   `  Box<num> b = Box<num>{v = 1, data = [10, 20, 30]};
@@ -851,7 +851,7 @@ test "P0: unsized array compound field stays a pointer" {
 // `transpile_source` (lex/parse/codegen only, no typechecker).
 
 test "P0: char escapes are preserved and an unknown escape is rejected" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num { printf("%d %d %d\n", '\r', '\t', '\0'); ret 0; }`;
   let out = emit_c(src, "P0: char escapes are preserved and an unknown escape is rejected");
   assert contains(out, "'\\r'"), "expected the carriage-return escape";
@@ -865,7 +865,7 @@ test "P0: char escapes are preserved and an unknown escape is rejected" {
 
 test "P0: block comment is lexed; unterminated and stray token error cleanly" {
   str src = `/* a top-level block comment */
-  `imp std.c.io;
+  `use std.c.io;
   `fun main() num {
   `  /* multi
   `     line */
@@ -894,7 +894,7 @@ test "P0: pathologically deep expression errors cleanly instead of crashing" {
 }
 
 test "P1: plain-impl method chaining on call results materializes once" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound C { num v; }
   `impl C { add(num n) C { C r; r.v = self.v + n; ret r; } get() num { ret self.v; } }
   `fun mk(num n) C { C c; c.v = n; ret c; }
@@ -918,7 +918,7 @@ test "quirk coercion from &arr[i] and &struct.field, plus quirk array element di
   // declared quirk slot (`arr[i] = &x;`) turned out to need the same
   // coercion wrapper a declaration's own initializer gets, which nothing
   // but a `let`/typed declaration had ever triggered.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Item { num v; }
   `quirk HasV { getV() num; }
   `impl Item as HasV { getV() num { ret self.v; } }
@@ -952,7 +952,7 @@ test "returning a coerced self from a quirk method, and chaining onto a quirk-re
   // resolving a chained call's receiver type needs a quirk-typed call
   // result's return type read from the quirk's own declaration, since no
   // single concrete impl owns a dynamically-dispatched call.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Item { num v; }
   `quirk Chain { self_ref() Chain; getV() num; }
   `impl Item as Chain { self_ref() Chain { ret self; } getV() num { ret self.v; } }
@@ -980,7 +980,7 @@ test "returning a coerced self from a quirk method, and chaining onto a quirk-re
 }
 
 test "P1: fit on dec, comma multi-label, duplicate enum case" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Color { Red, Green, Blue }
   `fun main() num {
   `  dec d = 1.0;
@@ -999,10 +999,10 @@ test "P1: fit on dec, comma multi-label, duplicate enum case" {
 }
 
 test "P1: sizeof of primitive/pointer/compound/generic variables" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound P { num x; num y; }
   `fun main() num {
-  `  num n = 0; str s = ""; dec d = 0.0; bin b = true; num* p = &n; P pt;
+  `  num n = 0; str s = ""; dec d = 0.0; flag b = true; num* p = &n; P pt;
   `  printf("%lld %lld %lld\n", sizeof(n), sizeof(p), sizeof(pt));
   `  ret 0;
   `}`;
@@ -1014,7 +1014,7 @@ test "P1: sizeof of primitive/pointer/compound/generic variables" {
 }
 
 test "P1: pointer-as-array element field access uses dot, array-literal call arg" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Point { num x; num y; }
   `fun main() num {
   `  Point p; p.x = 5; p.y = 6;
@@ -1025,7 +1025,7 @@ test "P1: pointer-as-array element field access uses dot, array-literal call arg
   let out = emit_c(src, "P1: pointer-as-array element field access uses dot");
   assert contains(out, "pts[0].x"), "expected a dot access, not an arrow, on the dereferenced element";
 
-  str src2 = `imp std.c.io;
+  str src2 = `use std.c.io;
   `fun sum3(num[] arr) num { ret arr[0] + arr[1] + arr[2]; }
   `fun main() num { printf("%lld\n", sum3([1, 2, 3])); ret 0; }`;
   let out2 = emit_c(src2, "P1: array literal as a bare call argument");
@@ -1033,7 +1033,7 @@ test "P1: pointer-as-array element field access uses dot, array-literal call arg
 }
 
 test "P1: let inference from dereferenced generic pointer yields the value type" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> { T v; }
   `fun main() num {
   `  Box<num> b; b.v = 7;
@@ -1056,7 +1056,7 @@ test "a hex string escape is bounded to two digits" {
   // to compile as "hex escape sequence out of range". A hex digit
   // immediately following the escape's two digits now starts its own
   // adjacent literal, which C concatenates back: `"\x42" "C"`.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  str s = "\x42C";
   `  printf("%s\n", s);
@@ -1071,8 +1071,8 @@ test "a hex string escape is bounded to two digits" {
 // actually happens.
 
 test "format's argument count is checked against its own placeholders" {
-  str src = `imp std.c.io;
-  `imp std.io;
+  str src = `use std.c.io;
+  `use std.io;
   `fun main() num {
   `  str s = format("{num} {num}", 1);
   `  printf("%s\n", s);
@@ -1092,7 +1092,7 @@ test "sizeof measures a pointer type" {
   // The stars belong to the type, not to the expression around it: a
   // `*` here is a pointer rather than a multiplication, and only when
   // what follows the run closes the call.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Node { num v; }
   `fun main() num {
   `  num n = 4;
@@ -1112,7 +1112,7 @@ test "sizeof measures a pointer type" {
 // test "reaudit: sizeof accepts pointer types" { }
 
 test "reaudit: await binds tighter than a following binary operator" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `async fun inc(num x) num { ret x + 1; }
   `async fun main() {
   `  num r = await inc(5) + 1;
@@ -1122,7 +1122,7 @@ test "reaudit: await binds tighter than a following binary operator" {
 }
 
 test "reaudit: defer that mutates a returned variable does not corrupt the value" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun expr_ret() num {
   `  num x = 5;
   `  defer x = 999;
@@ -1138,7 +1138,7 @@ test "reaudit: defer that mutates a returned variable does not corrupt the value
 }
 
 test "a function value works as a local, a function's own return type, and a compound field, not just a parameter" {
-  str src = `imp std.io;
+  str src = `use std.io;
   `fun add(num a, num b) num { ret a + b; }
   `fun get_op() fun(num, num) num { ret add; }
   `compound Ops { fun(num, num) num op; }
@@ -1162,8 +1162,8 @@ test "a function value works as a local, a function's own return type, and a com
 }
 
 test "postfix '?' unwraps a let-bound Option and propagates '.None', both observed at runtime" {
-  str src = `imp std.c.io;
-  `imp std.option;
+  str src = `use std.c.io;
+  `use std.option;
   `fun half(num x) Option<num> {
   `  if x % 2 == 1 { ret .None; }
   `  ret .Some(x / 2);
@@ -1187,8 +1187,8 @@ test "postfix '?' unwraps a let-bound Option and propagates '.None', both observ
 }
 
 test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observed at runtime" {
-  str src = `imp std.c.io;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.result;
   `fun half(num x) Result<num, str> {
   `  if x % 2 == 1 { ret .Err("odd"); }
   `  ret .Ok(x / 2);
@@ -1212,9 +1212,9 @@ test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observe
 }
 
 test "postfix '?'/'!' work fully inline, nested in a compound literal field, not just let-bound" {
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
   `compound Wrapped { num v; }
   `fun half(num x) Option<num> {
   `  if x % 2 == 1 { ret .None; }
@@ -1245,8 +1245,8 @@ test "postfix '?'/'!' work fully inline, nested in a compound literal field, not
 }
 
 test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
-  str src = `imp std.c.io;
-  `imp std.option;
+  str src = `use std.c.io;
+  `use std.option;
   `fun half(num x) Option<num> {
   `  if x % 2 == 1 { ret .None; }
   `  ret .Some(x / 2);
@@ -1281,9 +1281,9 @@ test "postfix '!' still hoists under MSVC when used inline as a field-access rec
   // hoist gate to also recognize a still-reachable outer statement
   // start via `root_stmt_start_pos`, the same fallback `emit_hoisted`
   // itself already uses for a nested scratch buffer.
-  str src = `imp std.c.io;
-  `imp std.result;
-  `imp std.string;
+  str src = `use std.c.io;
+  `use std.result;
+  `use std.string;
   `compound Field { str type_name; }
   `fun lookup_result(str s) Result<Field, str> {
   `  if equals(s, "") { ret .Err("empty"); }
@@ -1310,9 +1310,9 @@ test "postfix '?'/'!' propagate through a 'self.method()' call, not just a plain
   // resolving to the wrong lookup key. Both fixed at the root
   // (parser.fn's reorder pass, typecheck.fn's `_method_leaf_name`); this
   // proves the real end-to-end idiom compiles and runs correctly.
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
   `compound Box { num v; }
   `impl Box {
   `  half() Option<num> {
@@ -1360,10 +1360,10 @@ test "postfix '?'/'!' chain a further field access inline, with no intermediate 
   // ordinary `emit_expr` path into a scratch buffer, the same way a
   // call-as-receiver already is, then resolving its own unwrapped type
   // the way `infer_let_expr_type`'s `?`/`!` case already does.
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.result;
-  `imp std.string;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
+  `use std.string;
   `compound Field { str type_name; }
   `fun lookup_option(str s) Option<Field> {
   `  if equals(s, "") { ret .None; }
@@ -1397,26 +1397,26 @@ test "postfix '?'/'!' chain a further field access inline, with no intermediate 
 }
 
 test "'fit expr?'/'fit expr!' match directly on a propagated subject, with no intermediate 'let'" {
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
   `enum Color { Red, Green, Blue }
-  `fun pick_option(bin want) Option<Color> {
+  `fun pick_option(flag want) Option<Color> {
   `  if !want { ret .None; }
   `  ret .Some(.Green);
   `}
-  `fun pick_result(bin want) Result<Color, str> {
+  `fun pick_result(flag want) Result<Color, str> {
   `  if !want { ret .Err("no color"); }
   `  ret .Ok(.Blue);
   `}
-  `fun describe_option(bin want) Option<str> {
+  `fun describe_option(flag want) Option<str> {
   `  fit pick_option(want)? {
   `    .Red -> { ret .Some("red"); }
   `    .Green -> { ret .Some("green"); }
   `    .Blue -> { ret .Some("blue"); }
   `  }
   `}
-  `fun describe_result(bin want) Result<str, str> {
+  `fun describe_result(flag want) Result<str, str> {
   `  fit pick_result(want)! {
   `    .Red -> { ret .Ok("red"); }
   `    .Green -> { ret .Ok("green"); }
@@ -1450,14 +1450,14 @@ test "'fit expr!' evaluates a propagated subject exactly once under MSVC codegen
   // return on every arm check - wrong under MSVC specifically, where the
   // hoisted form has no statement-expression to wrap repeated evaluation
   // safely.
-  str src = `imp std.c.io;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.result;
   `enum Color { Red, Green, Blue }
-  `fun pick_result(bin want) Result<Color, str> {
+  `fun pick_result(flag want) Result<Color, str> {
   `  if !want { ret .Err("no color"); }
   `  ret .Ok(.Blue);
   `}
-  `fun describe_result(bin want) Result<str, str> {
+  `fun describe_result(flag want) Result<str, str> {
   `  fit pick_result(want)! {
   `    .Red -> { ret .Ok("red"); }
   `    .Green -> { ret .Ok("green"); }
@@ -1484,8 +1484,8 @@ test "a method call dispatches on an indexed element reached through a field cha
   // binding a pointer first. Generalized to resolve the base being
   // indexed through the ordinary receiver path instead of only a
   // bare local's own declaration.
-  str src = `imp std.c.io;
-  `imp std.vec;
+  str src = `use std.c.io;
+  `use std.vec;
   `compound Box { num v; }
   `impl Box {
   `  pub describe() num { ret self.v; }
@@ -1518,7 +1518,7 @@ test "'&' on a call result hoists an addressable temp instead of emitting invali
   // below it, which already knew to hoist a call result into a temp
   // first. '&make()' compiled to '&make()' directly, an rvalue address
   // C rejects outright.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box { num v; }
   `fun make(num x) Box { ret Box{v = x}; }
   `fun takes(Box* b) num { ret b.v; }
@@ -1541,7 +1541,7 @@ test "'&' on a bare or qualified enum-variant shorthand hoists an addressable, c
   // silently produced an 'int*' temp, incompatible with a 'Sink*'
   // parameter. The hoist needs to use the resolved enum type explicitly
   // when it's known, not just under MSVC.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Sink { Stdout, Stderr }
   `fun takes(Sink* s) num {
   `  fit *s {
@@ -1564,7 +1564,7 @@ test "'&' on a bare or qualified enum-variant shorthand hoists an addressable, c
 }
 
 test "'&' on an enum-variant shorthand emits an explicit type for the hoisted temp, not '__auto_type'" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Sink { Stdout, Stderr }
   `fun takes(Sink* s) num { ret 0; }
   `fun main() num { ret takes(&.Stdout); }`;
@@ -1583,7 +1583,7 @@ test "a method dispatches on a global compound variable, not just a local" {
   // local_type_name/local_dtype tracking a function body's own receiver
   // resolution reads, so '_b.method()' anywhere failed as an unsupported
   // node, regardless of whether the type was generic.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box { num v; }
   `impl Box {
   `  pub set(num x) { self.v = x; }
@@ -1605,8 +1605,8 @@ test "a method dispatches on a global generic compound instantiation" {
   // init' since the instantiation's methods were never reachable from
   // a global receiver. Same root cause and fix as the plain-compound
   // case above, exercised against a real generic instantiation.
-  str src = `imp std.c.io;
-  `imp std.map;
+  str src = `use std.c.io;
+  `use std.map;
   `Map<str, num> _seen;
   `fun main() num {
   `  _seen.init(8);
@@ -1642,8 +1642,8 @@ test "chaining a field access directly onto a Vec<T*>.get(...) call uses '->', n
   // (likely a side effect of this session's other resolve_field_chain/
   // method-dispatch-on-a-returned-value work) - the comment is removed,
   // this locks the capability in with a real test.
-  str src = `imp std.c.io;
-  `imp std.vec;
+  str src = `use std.c.io;
+  `use std.vec;
   `compound Item { num v; }
   `fun main() num {
   `  Vec<Item*> items;
@@ -1689,9 +1689,9 @@ test "a propagation nested inside another propagation's own call argument hoists
   // mechanisms silently collided over the same field. Fixed by
   // temporarily substituting root_stmt_start_pos in for root_hoist_pos
   // for the duration of just this one splice.
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.string;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.string;
   `fun lookup(str s) Option<str> {
   `  if equals(s, "type_name") { ret .Some("Inner"); }
   `  ret .None;
@@ -1757,10 +1757,10 @@ test "a propagation used as a receiver does not corrupt hoist_insert_pos for a g
   // braces instead of at file scope. This reproduced even outside MSVC
   // mode: a full C function definition is never valid nested inside
   // another one, GNU statement-expression support notwithstanding.
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.map;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.map;
+  `use std.c.io;
   `compound Table {
   `  Map<str, num> methods;
   `}
@@ -1794,9 +1794,9 @@ test "fit's own subject can be a propagation's field access, with no intermediat
   // resolve_field_chain `.Unary` receiver branch as the generic-method
   // trigger case above, with `fit` as the caller instead of a further
   // method call.
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `enum Kind { A, B }
   `compound Node { Kind kind; }
   `fun get_node(str s) Option<Node> {
@@ -1843,9 +1843,9 @@ test "a ? chained straight onto another ?'s own receiver access (a?.b?) evaluate
   // `_resolve_propagation_field_rtype`, a type-only resolver
   // (recursive, so any depth of stacking stays side-effect-free) mirroring
   // `_resolve_call_rtype`'s existing precedent for a plain call operand.
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `compound Inner {
   `  Option<num> maybe_val;
   `}
@@ -1879,9 +1879,9 @@ test "a ? chained straight onto another ?'s own receiver access (a?.b?) evaluate
 }
 
 test "a stacked propagation's own None still triggers the outer function's early return, with no wasted extra call" {
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `compound Inner {
   `  Option<num> maybe_val;
   `}
@@ -1918,9 +1918,9 @@ test "a stacked propagation's own None still triggers the outer function's early
 }
 
 test "three levels of stacked propagation still evaluate the outermost call exactly once" {
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `compound Innermost {
   `  Option<num> v;
   `}
@@ -1959,9 +1959,9 @@ test "three levels of stacked propagation still evaluate the outermost call exac
 }
 
 test "Result propagation chained onto another !'s own receiver access evaluates the outer call exactly once" {
-  str src = `imp std.result;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.result;
+  `use std.string;
+  `use std.c.io;
   `compound Inner {
   `  Result<num, str> maybe_val;
   `}
@@ -1998,9 +1998,9 @@ test "Result propagation chained onto another !'s own receiver access evaluates 
 }
 
 test "let v = a?.b? evaluates the outer call exactly once" {
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `compound Inner {
   `  Option<num> maybe_val;
   `}
@@ -2121,9 +2121,9 @@ test "-g debug info tags a propagation's own MSVC-hoisted temp-and-guard, not ju
   // exercises this at all (the propagation stays on the enclosing
   // statement's own already-tagged line), so this needs the MSVC path
   // specifically to catch.
-  str src = `imp std.option;
-  `imp std.string;
-  `imp std.c.io;
+  str src = `use std.option;
+  `use std.string;
+  `use std.c.io;
   `fun get_val(num n) Option<num> {
   `  if n > 0 {
   `    ret .Some(n * 2);
@@ -2151,9 +2151,9 @@ test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
   // path. GNU mode renders the whole thing inline as a statement
   // expression on the enclosing statement's own line, so this needs the
   // MSVC path specifically to catch.
-  str src = `imp std.option;
-  `imp std.io;
-  `imp std.quirks;
+  str src = `use std.option;
+  `use std.io;
+  `use std.quirks;
   `compound Point {
   `  num x;
   `  num y;

@@ -6,8 +6,8 @@ use harness;
 use std.string;
 
 test "std.vec: push and get monomorphize on the element type" {
-  str src = `imp std.vec;
-  `imp std.c.io;
+  str src = `use std.vec;
+  `use std.c.io;
   `fun main() num {
   `  Vec<num> v;
   `  v.init(4);
@@ -21,7 +21,7 @@ test "std.vec: push and get monomorphize on the element type" {
 }
 
 test "std.vec: two element types produce separate instantiations" {
-  str src = `imp std.vec;
+  str src = `use std.vec;
   `fun main() num {
   `  Vec<num> a;
   `  a.init(2);
@@ -37,8 +37,8 @@ test "std.vec: two element types produce separate instantiations" {
 }
 
 test "std.map: put and get monomorphize on both key and value types" {
-  str src = `imp std.map;
-  `imp std.c.io;
+  str src = `use std.map;
+  `use std.c.io;
   `fun main() num {
   `  Map<str, num> m;
   `  m.init(8);
@@ -52,7 +52,7 @@ test "std.map: put and get monomorphize on both key and value types" {
 }
 
 test "std.option: Some and None resolve against the declared type" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `fun main() num {
   `  Option<num> a = .Some(5);
   `  Option<num> b = .None;
@@ -67,8 +67,8 @@ test "std.option: Some and None resolve against the declared type" {
 }
 
 test "std.result: Ok and Err carry their payloads" {
-  str src = `imp std.result;
-  `imp std.error;
+  str src = `use std.result;
+  `use std.error;
   `fun try_it(num n) Result<num, Error> {
   `  if n < 0 {
   `    ret err_kind(.Invalid, "negative", 0);
@@ -87,8 +87,8 @@ test "std.result: Ok and Err carry their payloads" {
 }
 
 test "std.string: builder append and build resolve through the impl" {
-  str src = `imp std.string;
-  `imp std.c.io;
+  str src = `use std.string;
+  `use std.c.io;
   `fun main() num {
   `  StringBuilder b = string_builder_init(8);
   `  b.append("hi");
@@ -101,7 +101,7 @@ test "std.string: builder append and build resolve through the impl" {
 }
 
 test "std.io: println_fmt lowers to the variadic format helper" {
-  str src = `imp std.io;
+  str src = `use std.io;
   `fun main() num {
   `  println_fmt("n={}", 42);
   `  ret 0;
@@ -112,7 +112,7 @@ test "std.io: println_fmt lowers to the variadic format helper" {
 }
 
 test "std.set: add and has monomorphize on the element type" {
-  str src = `imp std.set;
+  str src = `use std.set;
   `fun main() num {
   `  Set<str> s = set_init("", 8);
   `  s.add("a");
@@ -126,7 +126,7 @@ test "std.set: add and has monomorphize on the element type" {
 }
 
 test "std.channel: send and recv monomorphize on the payload type" {
-  str src = `imp std.channel;
+  str src = `use std.channel;
   `fun main() num {
   `  Channel<num> ch = channel_new(0, 4);
   `  ch.send(1);
@@ -138,8 +138,8 @@ test "std.channel: send and recv monomorphize on the payload type" {
 }
 
 test "for-each over a Vec iterates by length and index" {
-  str src = `imp std.vec;
-  `imp std.c.io;
+  str src = `use std.vec;
+  `use std.c.io;
   `fun main() num {
   `  Vec<num> v;
   `  v.init(4);
@@ -156,9 +156,9 @@ test "for-each over a Vec iterates by length and index" {
 }
 
 test "a quirk implemented by a stdlib type dispatches through its vtable" {
-  str src = `imp std.vec;
-  `imp std.quirks;
-  `imp std.c.io;
+  str src = `use std.vec;
+  `use std.quirks;
+  `use std.c.io;
   `fun main() num {
   `  Vec<num> v;
   `  v.init(2);

@@ -6,7 +6,7 @@ use harness;
 use std.string;
 
 test "if/elif/else transpiles" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() {
   `  num x = 1;
   `  if x == 1 { printf("a\n"); }
@@ -33,7 +33,7 @@ test "while-style for loop transpiles to a C for" {
 }
 
 test "range for loop emits an indexed C for" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() {
   `  for i : 0..3 {
   `    printf("%d\n", i);
@@ -112,7 +112,7 @@ test "pointer parameters and address-of emit C pointer syntax" {
 }
 
 test "defer emits the deferred call at fall-through" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  defer printf("bye\n");
   `  printf("hi\n");
@@ -316,7 +316,7 @@ test "debug info pins every line of an async function's synthesized trampoline b
   // per statement - a real, separate gap from the ordinary-statement
   // case, closed by write_line_pinned re-anchoring every line inside a
   // multi-line write back to one fixed position.
-  str src = `imp std.task;
+  str src = `use std.task;
   `async fun worker(WaitGroup* wg) {
   `  wg.done();
   `}`;
@@ -334,7 +334,7 @@ test "debug info pins every line of an async function's synthesized trampoline b
   assert contains(out, `#line 2 "test.fn"`), "expected the trampoline's own lines pinned to worker's declaration";
 }
 
-test "'use'/'flag' compile and run end to end, as real alternate spellings of 'imp'/'bin'" {
+test "'use'/'flag' compile and run end to end" {
   str src = `use std.c.io;
   `
   `fun main() num {
@@ -344,8 +344,8 @@ test "'use'/'flag' compile and run end to end, as real alternate spellings of 'i
   `  }
   `  ret 0;
   `}`;
-  str out = run_source(src, "use_flag_alt_spellings", "'use'/'flag' end to end");
-  assert equals(out, "ok\n"), "expected 'use'/'flag' to compile and run identically to 'imp'/'bin'";
+  str out = run_source(src, "use_flag_end_to_end", "'use'/'flag' end to end");
+  assert equals(out, "ok\n"), "expected 'use'/'flag' to compile and run correctly";
 }
 
 test "a tuple literal constructs and positional access reads each element back" {

@@ -7,16 +7,16 @@ use std.string;
 
 // The exhaustiveness warning for this fixture is checked in
 // warning_tests.fn ("a fit over num or a pointer with no catch-all is
-// noticed" covers this shape's bin analog too, via the same code path).
-test "fit bin missing false lowers to a single comparison" {
-  str src = `imp std.c.io;
+// noticed" covers this shape's flag analog too, via the same code path).
+test "fit flag missing false lowers to a single comparison" {
+  str src = `use std.c.io;
   `fun main() {
-  `  bin x = true;
+  `  flag x = true;
   `  fit x {
   `    true -> { printf("T\n"); }
   `  }
   `}`;
-  let out = emit_c(src, "fit bin missing false lowers to a single comparison");
+  let out = emit_c(src, "fit flag missing false lowers to a single comparison");
   assert contains(out, "x == true"), "expected the true branch comparison";
   assert !contains(out, "x == false"), "expected no false branch";
 }
@@ -25,9 +25,9 @@ test "fit bin missing false lowers to a single comparison" {
 // warning_tests.fn, against an enum subject; the underlying analysis is
 // the same code path regardless of subject type.
 test "fit duplicate bool branch still lowers both branches" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() {
-  `  bin x = true;
+  `  flag x = true;
   `  fit x {
   `    true -> { printf("T1\n"); },
   `    true -> { printf("T2\n"); },
@@ -44,29 +44,29 @@ test "fit duplicate bool branch still lowers both branches" {
 // are checked in warning_tests.fn, where the warning controls themselves
 // are tested against what the analysis reports.
 
-test "fit bin exhausted via default lowers the catch-all to else" {
-  str src = `imp std.c.io;
+test "fit flag exhausted via default lowers the catch-all to else" {
+  str src = `use std.c.io;
   `fun main() {
-  `  bin x = true;
+  `  flag x = true;
   `  fit x {
   `    true -> { printf("T\n"); },
   `    _ -> { printf("D\n"); }
   `  }
   `}`;
-  let out = emit_c(src, "fit bin exhausted via default lowers the catch-all to else");
+  let out = emit_c(src, "fit flag exhausted via default lowers the catch-all to else");
   assert contains(out, "x == true"), "expected the true branch comparison";
   assert contains(out, "else {"), "expected the catch-all to lower to else";
 }
 
-test "fit bin default only lowers to an unconditional block" {
-  str src = `imp std.c.io;
+test "fit flag default only lowers to an unconditional block" {
+  str src = `use std.c.io;
   `fun main() {
-  `  bin x = true;
+  `  flag x = true;
   `  fit x {
   `    _ -> { printf("D\n"); }
   `  }
   `}`;
-  let out = emit_c(src, "fit bin default only lowers to an unconditional block");
+  let out = emit_c(src, "fit flag default only lowers to an unconditional block");
   assert contains(out, "printf(\"D"), "expected the catch-all body";
   assert !contains(out, "x =="), "expected no comparison for a catch-all-only fit";
 }
@@ -75,7 +75,7 @@ test "fit bin default only lowers to an unconditional block" {
 // warning_tests.fn ("a fit over num or a pointer with no catch-all is
 // noticed").
 test "fit num lowers to a value comparison" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() {
   `  num x = 1;
   `  fit x {
@@ -90,8 +90,8 @@ test "fit num lowers to a value comparison" {
 // warning_tests.fn ("a fit over num or a pointer with no catch-all is
 // noticed").
 test "fit pointer lowers to a NULL comparison" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `fun main() {
   `  raw* p = malloc(1);
   `  fit p {
@@ -103,7 +103,7 @@ test "fit pointer lowers to a NULL comparison" {
 }
 
 test "fit enum exhausted via all variants lowers every variant" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Color {
   `  Red;
   `  Green;
@@ -126,7 +126,7 @@ test "fit enum exhausted via all variants lowers every variant" {
 // The exhaustiveness warning for this shape is checked in
 // warning_tests.fn ("a fit that misses a case is noticed").
 test "fit enum missing variant lowers only the handled variants" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Color {
   `  Red;
   `  Green;
@@ -146,7 +146,7 @@ test "fit enum missing variant lowers only the handled variants" {
 }
 
 test "fit enum dot shorthand resolves against the condition's type" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Color {
   `  Red;
   `  Green;

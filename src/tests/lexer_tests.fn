@@ -275,12 +275,14 @@ test "'flag' lexes as a Keyword token, already the canonical spelling" {
   assert equals(tok_text(first), "flag"), "expected 'flag' to lex as itself, the canonical spelling";
 }
 
-test "'imp'/'bin' still accepted as input, now canonicalized to 'use'/'flag'" {
+test "'imp'/'bin' are no longer reserved words, lexing as ordinary identifiers" {
   let imp_tokens = lex_ok("imp std.io;");
   defer imp_tokens.free();
-  assert equals(tok_text(imp_tokens.get(0)), "use"), "expected 'imp' to canonicalize to 'use'";
+  assert imp_tokens.get(0).type == .Identifier, "expected 'imp' to lex as a plain identifier, not the removed keyword";
+  assert equals(tok_text(imp_tokens.get(0)), "imp"), "expected 'imp' to read back as its own literal text now, no canonicalization left to apply";
 
   let bin_tokens = lex_ok("bin ok = true;");
   defer bin_tokens.free();
-  assert equals(tok_text(bin_tokens.get(0)), "flag"), "expected 'bin' to canonicalize to 'flag'";
+  assert bin_tokens.get(0).type == .Identifier, "expected 'bin' to lex as a plain identifier, not the removed keyword";
+  assert equals(tok_text(bin_tokens.get(0)), "bin"), "expected 'bin' to read back as its own literal text now, no canonicalization left to apply";
 }

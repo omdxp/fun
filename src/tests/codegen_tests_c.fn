@@ -8,7 +8,7 @@ use std.fs;
 use std.string;
 
 test "ra3: no crash on field access of a generic-impl method returning a compound" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Inner { num code; }
   `compound Box<T> { T v; }
   `impl Box<T> { get_inner() Inner { Inner i; i.code = 42; ret i; } }
@@ -22,7 +22,7 @@ test "ra3: no crash on field access of a generic-impl method returning a compoun
 }
 
 test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound C { num val; }
   `quirk QC { gv() num; }
   `impl C as QC { gv() num { ret self.val; } }
@@ -42,7 +42,7 @@ test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method
 }
 
 test "ra3: deep method chains (generic-method chain)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> { T value; }
   `impl Box<T> { pub get() T { ret self.value; } pub with(T x) Box<T> { ret Box<T>{value = x}; } }
   `fun main() num {
@@ -56,7 +56,7 @@ test "ra3: deep method chains (generic-method chain)" {
 }
 
 test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Inner { num v; }
   `compound Outer { Inner* inner; }
   `quirk HasV { getV() num; }
@@ -81,7 +81,7 @@ test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field"
 }
 
 test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `quirk Named { name() str; }
   `compound Box<T> { T[] data; num n; }
   `impl Box<T> { pub fill(T[] src, num c) { self.data = src; self.n = c; } pub at(num i) T { ret self.data[i]; } }
@@ -104,7 +104,7 @@ test "ra3: generic T[] param accepts a concrete array arg; extra pub method in a
 }
 
 test "P3: nil literal lowers to NULL and coerces to pointer/str" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Node { num val; Node* next; }
   `fun main() num {
   `  num* p = nil;
@@ -124,7 +124,7 @@ test "P3: nil literal lowers to NULL and coerces to pointer/str" {
 // fixtures that need a channel declare a local stand-in rather than pulling
 // in `std.channel`.
 test "P3: fork spawns virtual threads onto the M:N scheduler" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `async fun worker(num v) { printf("%lld\n", v * 10); }
   `fun main() num {
   `  fork worker(1);
@@ -139,7 +139,7 @@ test "P3: fork spawns virtual threads onto the M:N scheduler" {
 }
 
 test "P3: channel operators ch <- v and <-ch desugar to send/recv" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Channel<T> { T v; }
   `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
   `fun main() num {
@@ -157,11 +157,11 @@ test "P3: channel operators ch <- v and <-ch desugar to send/recv" {
 }
 
 test "P3: a <- b is a channel send, but x < -y stays a comparison (munch)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun main() num {
   `  num a = 5; num y = 3;
-  `  bin lt = a < -y;
-  `  bin gt = a > -y;
+  `  flag lt = a < -y;
+  `  flag gt = a > -y;
   `  printf("%d %d\n", lt, gt);
   `  ret 0;
   `}`;
@@ -171,7 +171,7 @@ test "P3: a <- b is a channel send, but x < -y stays a comparison (munch)" {
 }
 
 test "fork target async fn is not flagged unused" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Channel<T> { T v; }
   `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
   `async fun worker(Channel<num>* out, num v) {
@@ -189,7 +189,7 @@ test "fork target async fn is not flagged unused" {
 }
 
 test "channel of a data-carrying enum, received and matched with fit" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Channel<T> { T v; }
   `impl Channel<T> { pub send(T x) { self.v = x; } pub recv() T { ret self.v; } }
   `enum Msg { Compute(num), Result(num), Stop }
@@ -217,7 +217,7 @@ test "channel of a data-carrying enum, received and matched with fit" {
 }
 
 test "generic data enum: Option<num> construct, pass, fit, payload binding" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
   `fun describe(Option<num> o) num {
   `  fit o {
@@ -237,7 +237,7 @@ test "generic data enum: Option<num> construct, pass, fit, payload binding" {
 }
 
 test "generic data enum: Result<T, E> with two type params and mixed payloads" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Res<T, E> { Ok(T), Err(E) }
   `fun main() num {
   `  Res<num, str> a = Res.Ok(7);
@@ -257,7 +257,7 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
 }
 
 test "generic fn returning a generic enum monomorphizes the enum type (regression)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum RR<T> { Ok(T), Closed, Error(num) }
   `fun wrap<T>(num rc, T value) RR<T> {
   `  if rc == 0 { ret RR.Ok(value); }
@@ -276,7 +276,7 @@ test "generic fn returning a generic enum monomorphizes the enum type (regressio
 }
 
 test "generic fn returning a generic enum monomorphizes the enum type via a local" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum RR<T> { Ok(T), Closed, Error(num) }
   `fun wrap<T>(num rc, T value) RR<T> {
   `  if rc == 0 { ret RR.Ok(value); }
@@ -299,7 +299,7 @@ test "generic fn returning a generic enum monomorphizes the enum type via a loca
 }
 
 test "default parameter values: free fn, method, multi-default, explicit override" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun three(num a, num b = 2, num c = 3) num { ret a * 100 + b * 10 + c; }
   `compound Box { num v; }
   `impl Box {
@@ -336,7 +336,7 @@ test "default parameter rejected: default references self" {
 test "a call omitting every default-carrying argument compiles" {
   // The separator between arguments was written unconditionally, so a
   // call that supplied none at all still opened with one: `f(, 1, 2)`.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun f(num a = 1, num b = 2) num { ret a + b; }
   `fun main() num {
   `  printf("%lld\n", f());
@@ -350,7 +350,7 @@ test "a call omitting every default-carrying argument compiles" {
 // gap (historical): a call omitting every argument to an all-defaulted function emitted a
 // leading comma, producing invalid C.
 // test "default parameter longhand enum values work for generic enums" {
-// str src = `imp std.c.io;
+// str src = `use std.c.io;
 // `enum Option<T> { Some(T), None }
 // `fun pick(Option<num> v = Option.None) num {
 // `  fit v {
@@ -372,7 +372,7 @@ test "a generic function's own trailing default is filled at its call site" {
   // site rather than through the plain-function registry, so its
   // defaults were never looked up at all: `pick__num(1)` called a
   // function declared with two parameters.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun pick<T>(T v, num n = 3) num { ret n; }
   `fun main() num {
   `  printf("%lld\n", pick(1));
@@ -386,7 +386,7 @@ test "a method's own default does not collide with its receiver" {
   // The receiver is written before any default, so the separator that
   // starts a bare call's argument list is wrong here: it produced
   // `C__add(&c5)`, concatenating the receiver and the default.
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound C { num v; }
   `impl C {
   `  pub add(num a = 5) num { ret self.v + a; }
@@ -404,9 +404,9 @@ test "a method's own default does not collide with its receiver" {
 // gap (historical): a generic function with a trailing defaulted parameter, called without
 // it, is neither monomorphized nor emitted.
 // test "default parameter after a generic-typed param: omitting the trailing default still typechecks" {
-// str src = `imp std.c.io;
+// str src = `use std.c.io;
 // `compound Node<T> { T value; Node<T>* next; }
-// `fun show<T>(Node<T>* head, bin with_addr = false) T {
+// `fun show<T>(Node<T>* head, flag with_addr = false) T {
 // `  if with_addr { printf("with_addr=true\n"); } else { printf("with_addr=false\n"); }
 // `  ret head.value;
 // `}
@@ -424,10 +424,10 @@ test "a method's own default does not collide with its receiver" {
 // }
 
 test "quirk-impl method call chains onto a call-expression receiver" {
-  str src = `imp std.c.io;
-  `quirk Sized { len() num; is_empty() bin; }
+  str src = `use std.c.io;
+  `quirk Sized { len() num; is_empty() flag; }
   `compound Bag<T> { num len; }
-  `impl Bag<T> as Sized { pub len() num { ret self.len; } pub is_empty() bin { ret self.len == 0; } }
+  `impl Bag<T> as Sized { pub len() num { ret self.len; } pub is_empty() flag { ret self.len == 0; } }
   `fun make_bag() Bag<num> {
   `  Bag<num> v;
   `  v.len = 2;
@@ -443,9 +443,9 @@ test "quirk-impl method call chains onto a call-expression receiver" {
 }
 
 test "a rotating sink writes what was logged to its file" {
-  str src = `imp std.io;
-  `imp std.fs;
-  `imp std.c.io;
+  str src = `use std.io;
+  `use std.fs;
+  `use std.c.io;
   `fun main() num {
   `  RotatingSink r = rotating_sink_new("fun-out/rotate_probe.log", 4096, 2);
   `  Sink s = Sink.Rotating(&r);
@@ -467,7 +467,7 @@ test "a rotating sink writes what was logged to its file" {
 }
 
 test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
   `quirk Iterator<T> { next() Option<T>; }
   `compound Counter { num cur; num limit; }
@@ -494,8 +494,8 @@ test "for item : iterable drives a user Iterator via next()/Option; break exits 
 }
 
 test "for k, v :: map binds each key to its value" {
-  str src = `imp std.c.io;
-  `imp std.map;
+  str src = `use std.c.io;
+  `use std.map;
   `fun main() num {
   `  Map<str, num> m;
   `  m.init(8);
@@ -516,7 +516,7 @@ test "for k, v :: map binds each key to its value" {
 }
 
 test "default parameter values: free fn + method, omitting trailing args fills defaults" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun base() num { ret 100; }
   `fun three(num a, num b = 2, num c = base()) num { ret a * 1000 + b * 10 + c; }
   `compound Box { num v; }
@@ -539,8 +539,8 @@ test "default parameter values: free fn + method, omitting trailing args fills d
 }
 
 test "the watchdog stops a program waiting on a channel nothing sends to" {
-  str src = `imp std.c.io;
-  `imp std.channel;
+  str src = `use std.c.io;
+  `use std.channel;
   `fun main() num {
   `  Channel<num> ch = channel_new(1);
   `  num v = 0;
@@ -569,8 +569,8 @@ test "the watchdog stops a program waiting on a channel nothing sends to" {
 }
 
 test "a value renders through Display when written as {}" {
-  str src = `imp std.io;
-  `imp std.quirks;
+  str src = `use std.io;
+  `use std.quirks;
   `compound Point {
   `  num x;
   `}
@@ -593,8 +593,8 @@ test "a value renders through Display when written as {}" {
 }
 
 test "every branch of an exhaustive fit can render through Display" {
-  str src = `imp std.io;
-  `imp std.quirks;
+  str src = `use std.io;
+  `use std.quirks;
   `enum Shape {
   `  Dot,
   `  Line,
@@ -630,8 +630,8 @@ test "an explicit '{ptr}' shows the raw pointer even when the pointee implements
   // Display always rendered through to_string(), even when the format
   // string explicitly wrote '{ptr}' asking for the raw address. '{}'
   // (a bare placeholder) still prefers Display, unaffected.
-  str src = `imp std.io;
-  `imp std.quirks;
+  str src = `use std.io;
+  `use std.quirks;
   `compound Point {
   `  num x;
   `}
@@ -662,8 +662,8 @@ test "an explicit '{ptr}' shows the raw pointer even when the pointee implements
 
 test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
   StringBuilder src_b = string_builder_init(256);
-  src_b.append("imp std.io;\n");
-  src_b.append("imp std.quirks;\n");
+  src_b.append("use std.io;\n");
+  src_b.append("use std.quirks;\n");
   src_b.append("compound Node {\n");
   src_b.append("  num v;\n");
   src_b.append("  Node* next;\n");
@@ -694,8 +694,8 @@ test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
 }
 
 test "'{ptr}' vs Display renders correctly at runtime" {
-  str src = `imp std.io;
-  `imp std.quirks;
+  str src = `use std.io;
+  `use std.quirks;
   `compound Point {
   `  num x;
   `}
@@ -724,8 +724,8 @@ test "'{ptr}' vs Display renders correctly at runtime" {
 }
 
 test "'{ptr}' skips Display under MSVC codegen too, not just the GNU path" {
-  str src = `imp std.io;
-  `imp std.quirks;
+  str src = `use std.io;
+  `use std.quirks;
   `compound Point {
   `  num x;
   `}
@@ -763,9 +763,9 @@ test "a private name in one file does not collide with the same name in another"
   ), "expected to stage the second file";
   defer remove_file("src/tests/fixtures/priv_sibling_b.fn");
 
-  str src = `imp priv_sibling_a;
-  `imp priv_sibling_b;
-  `imp std.c.io;
+  str src = `use priv_sibling_a;
+  `use priv_sibling_b;
+  `use std.c.io;
   `fun main() num {
   `  printf("%lld\n", from_a() + from_b());
   `  ret 0;
@@ -780,7 +780,7 @@ test "a private name in one file does not collide with the same name in another"
 }
 
 test "fit statement with an explicit catch-all branch compiles and evaluates correctly" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Token { Num(num), Ident, Plus, Minus, Star, Slash, LParen, RParen, Eof }
   `fun classify(Token t) num {
   `  fit t {
@@ -813,14 +813,14 @@ test "a program spread over several files merges into one" {
   defer remove_file("src/tests/fixtures/spread_types.fn");
   assert write_string(
     "src/tests/fixtures/spread_ops.fn",
-    `imp spread_types;
+    `use spread_types;
     `pub fun area(Point p) num { ret p.x * p.y; }`
   ), "expected to stage the operations";
   defer remove_file("src/tests/fixtures/spread_ops.fn");
 
-  str src = `imp spread_types;
-  `imp spread_ops;
-  `imp std.c.io;
+  str src = `use spread_types;
+  `use spread_ops;
+  `use std.c.io;
   `fun main() num {
   `  Point p;
   `  p.x = 3;
@@ -838,7 +838,7 @@ test "a program spread over several files merges into one" {
 }
 
 test "fit on a chr subject checks every branch, not just the first (regression)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun classify(chr c) str {
   `  fit c {
   `    '+' -> { ret "plus"; }
@@ -863,7 +863,7 @@ test "fit on a chr subject checks every branch, not just the first (regression)"
 }
 
 test "an enum variant payload of a generic-compound type matches its own declared type" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Bag<T> { T first; }
   `impl Bag<T> { pub get() T { ret self.first; } }
   `enum E { A(str, Bag<num>) }
@@ -891,7 +891,7 @@ test "an enum variant payload of a generic-compound type matches its own declare
 }
 
 test "sizeof(generic type param) is not resolved against an unrelated global type of the same bare name" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum E { Variant }
   `compound Pair<T, E> { T a; }
   `impl Pair<T, E> { pub esize() num { ret sizeof(E); } }
@@ -908,7 +908,7 @@ test "sizeof(generic type param) is not resolved against an unrelated global typ
 }
 
 test "a generic container instantiated with a pointer type argument mangles distinctly" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Node { num value; }
   `compound Bag<T> { T slot; }
   `impl Bag<T> { pub put(T v) { self.slot = v; } pub get() T { ret self.slot; } }
@@ -936,7 +936,7 @@ test "a generic container instantiated with a pointer type argument mangles dist
 }
 
 test "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Node { num value; }
   `quirk Box<T> { get() T; }
   `compound PtrBox { Node* held; }
@@ -961,7 +961,7 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
 }
 
 test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Node { num value; }
   `fun main() num {
   `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
@@ -972,8 +972,8 @@ test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
 }
 
 test "self-referential recursive generic enum (List<T>) via generic helper functions" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `enum List<T> { Cons(T, List<T>*), Nil }
   `fun list_nil<T>(T type_hint) List<T>* {
   `  List<T>* n = malloc(sizeof(List<T>));
@@ -1005,8 +1005,8 @@ test "self-referential recursive generic enum (List<T>) via generic helper funct
 }
 
 test "a plain (non-generic) function can fit-match and destructure a concrete generic-enum instantiation through a pointer" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `enum List<T> { Cons(T, List<T>*), Nil }
   `fun list_nil<T>(T type_hint) List<T>* {
   `  List<T>* n = malloc(sizeof(List<T>));
@@ -1043,7 +1043,7 @@ test "a plain (non-generic) function can fit-match and destructure a concrete ge
 // "1 + 2 + 3" over a hand-built List<num> printed 6.
 
 test "a generic function can call itself recursively (self-recursive generic function call)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun countdown<T>(T label, num n) num {
   `  if n <= 0 { ret 0; }
   `  ret 1 + countdown(label, n - 1);
@@ -1061,8 +1061,8 @@ test "a generic function can call itself recursively (self-recursive generic fun
 }
 
 test "a generic array-typed value (T[]) compares against nil like any other pointer" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `compound Box<T> {
   `  T[] data;
   `}
@@ -1092,8 +1092,8 @@ test "a generic array-typed value (T[]) compares against nil like any other poin
 }
 
 test "a wait group lets every forked task finish" {
-  str src = `imp std.c.io;
-  `imp std.task;
+  str src = `use std.c.io;
+  `use std.task;
   `async fun worker(WaitGroup* wg, num i) {
   `  printf("task %lld\n", i);
   `  wg.done();
@@ -1118,7 +1118,7 @@ test "a wait group lets every forked task finish" {
 }
 
 test "a generic function calling a DIFFERENT generic function from its own body gets that callee emitted (indirect instantiation)" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun identity<T>(T x) T {
   `  ret x;
   `}
@@ -1147,7 +1147,7 @@ test "a generic function calling a DIFFERENT generic function from its own body 
 }
 
 test "indirect generic instantiation discovery does not cross-substitute unrelated generic functions sharing a type param name" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> {
   `  T value;
   `}
@@ -1175,7 +1175,7 @@ test "indirect generic instantiation discovery does not cross-substitute unrelat
 }
 
 test "a self-recursive CONSTRAINED generic function calling itself with the abstract T passes its own bound" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun sum_down<T: num | dec>(T n) T {
   `  if n <= 0 {
   `    ret n;
@@ -1373,7 +1373,7 @@ test "a generic-instantiation-bounded impl does not monomorphize for a mismatchi
 // A call violating a generic bound is rejected by the typechecker,
 // where the check and its tests live (typecheck_tests.fn).
 // test "a self-recursive CONSTRAINED generic function rejects a bound violation" {
-// str src = `imp std.c.io;
+// str src = `use std.c.io;
 // `fun sum_down<T: num | dec>(T n) T {
 // `  if n <= 0 {
 // `    ret n;
@@ -1389,7 +1389,7 @@ test "a generic-instantiation-bounded impl does not monomorphize for a mismatchi
 // }
 
 test "a generic impl method calling a DIFFERENT generic free function from its own body gets that callee emitted" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun identity<T>(T x) T {
   `  ret x;
   `}
@@ -1416,7 +1416,7 @@ test "a generic impl method calling a DIFFERENT generic free function from its o
 }
 
 test "an impl method can declare its OWN generic type parameter beyond the impl's" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun identity<T>(T x) T {
   `  ret x;
   `}
@@ -1445,7 +1445,7 @@ test "an impl method can declare its OWN generic type parameter beyond the impl'
 }
 
 test "an impl method's own generic type param also works on a non-generic impl/compound" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `fun identity<T>(T x) T {
   `  ret x;
   `}
@@ -1472,7 +1472,7 @@ test "an impl method's own generic type param also works on a non-generic impl/c
 }
 
 test "a method with its own type param calling a SIBLING method that also has its own type param" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> {
   `  T value;
   `}
@@ -1499,7 +1499,7 @@ test "a method with its own type param calling a SIBLING method that also has it
 }
 
 test "method chaining on a generic method's own-type-param call result monomorphizes correctly" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `compound Box<T> {
   `  T value;
   `}
@@ -1528,7 +1528,7 @@ test "method chaining on a generic method's own-type-param call result monomorph
 }
 
 test "constructing a generic enum from a method's own type param does not cross-substitute via a name collision" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `enum Maybe<T> {
   `  Has(T),
   `  None,
@@ -1555,7 +1555,7 @@ test "constructing a generic enum from a method's own type param does not cross-
 }
 
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
-  str src = `imp std.c.io;
+  str src = `use std.c.io;
   `pub fun fork() num {
   `  ret 42;
   `}
@@ -1570,8 +1570,8 @@ test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
 }
 
 test "array return types: T[] is a valid function return type, with a body and signature-only" {
-  str src = `imp std.c.io;
-  `imp std.c.mem;
+  str src = `use std.c.io;
+  `use std.c.mem;
   `pub fun unused_signature_only() str[];
   `fun make_names() str[] {
   `  str[] out = malloc(sizeof(str) * 3);
@@ -1594,13 +1594,13 @@ test "array return types: T[] is a valid function return type, with a body and s
 }
 
 test "a built program observes the file system and other processes" {
-  str src = `imp std.c.io;
-  `imp std.fs;
-  `imp std.process;
-  `imp std.vec;
-  `imp std.string;
-  `imp std.result;
-  `imp std.runtime_backend;
+  str src = `use std.c.io;
+  `use std.fs;
+  `use std.process;
+  `use std.vec;
+  `use std.string;
+  `use std.result;
+  `use std.runtime_backend;
   `fun main() num {
   `  make_dir_all("fun-out/observe_probe");
   `  write_string("fun-out/observe_probe/a.txt", "content");
