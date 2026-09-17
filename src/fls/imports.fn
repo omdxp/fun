@@ -1,6 +1,6 @@
 // Import hover and go to definition.
 // 
-// Hovering (or jumping to) a segment of an `imp` statement's own
+// Hovering (or jumping to) a segment of a `use` statement's own
 // dotted path answers the same question as any other declaration:
 // where does this lead. A segment resolving to a real file shows that
 // file's own leading doc comment (or jumps to it); one resolving to a
@@ -23,7 +23,7 @@ use std.fs;
 use std.path;
 use std.c.mem;
 
-// Where an `imp`-path segment at `line`/`character` (in a document
+// Where a `use`-path segment at `line`/`character` (in a document
 // whose own path is `current_file`) leads: a resolved file path (a
 // real .fn module) or a directory's own README.md, when present. ""
 // when the cursor isn't on an import segment at all, or the segment
@@ -109,7 +109,7 @@ fun _resolve_specifier(str current_file, str specifier) str {
   ret "";
 }
 
-// What `imp path as name;` resolves to, when this document itself
+// What `use path as name;` resolves to, when this document itself
 // declares that alias. Lets hovering or jumping from the alias at a
 // use site (`cmath.sqrt(...)`), not just from inside the import
 // statement that names it, lead somewhere too. Only this document's
@@ -176,8 +176,8 @@ pub fun import_alias_target_from_tokens(Vec<Token>* tokens, str current_file, st
   ret "";
 }
 
-// Every `imp` statement's own dotted path in this document, resolved
-// to a real file, aliased or not, deduplicated. What a plain `imp
+// Every `use` statement's own dotted path in this document, resolved
+// to a real file, aliased or not, deduplicated. What a plain `use
 // std.vec;` (no `as`) brings into scope unqualified can't be reached
 // through `import_alias_target`/`import_alias_target_from_tokens` at
 // all, since there's no alias name to look up by; a caller wanting
@@ -222,7 +222,7 @@ pub fun resolved_import_paths(Vec<Token>* tokens, str current_file) Vec<str> {
   ret out;
 }
 
-// One link per `imp` statement's own dotted path, spanning the whole
+// One link per `use` statement's own dotted path, spanning the whole
 // specifier and pointing at what it resolves to, the same target
 // `import_target` would give for a cursor anywhere in it. A client
 // renders these as clickable/hoverable ranges up front, without a
@@ -301,9 +301,9 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
   ret b.build();
 }
 
-// True when `t` sits somewhere in an `imp path.path;` statement's own
+// True when `t` sits somewhere in an `use path.path;` statement's own
 // path, judged by walking back from it past dots and identifiers only
-// until the nearest keyword: `imp` means yes, anything else (or
+// until the nearest keyword: `use` means yes, anything else (or
 // running off the front of the file) means no.
 fun _is_import_segment(Vec<Token>* tokens, Token t) flag {
   num i = index_of_token(tokens, t);
@@ -377,7 +377,7 @@ fun _specifier_through(Vec<Token>* tokens, Token t) str {
 }
 
 // True for `.`, `..`, `...`: a run of dots lexes as one operator
-// token, not several, so a parent-traversal segment (`imp
+// token, not several, so a parent-traversal segment (`use
 // ..lexer.lexer;`) needs its own check, not `token_is_operator(t,
 // ".")` alone, which only ever matches a single dot.
 fun _is_dot_run_token(Token t) flag {

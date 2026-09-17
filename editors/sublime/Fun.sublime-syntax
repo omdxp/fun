@@ -37,9 +37,9 @@ contexts:
     - match: '`'
       scope: punctuation.definition.string.begin.fun
       push: raw_quoted
-    - match: \b(imp|use|as|pub|fun|als|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|fuzz|allow|expect)\b
+    - match: \b(use|as|pub|fun|als|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|fuzz|allow|expect)\b
       scope: keyword.control.fun
-    - match: \b(void|raw|num|dec|f32|f64|str|bin|flag|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
+    - match: \b(void|raw|num|dec|f32|f64|str|flag|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
       scope: storage.type.fun
     - match: \b(size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|time_t|clock_t)\b
       scope: support.type.fun

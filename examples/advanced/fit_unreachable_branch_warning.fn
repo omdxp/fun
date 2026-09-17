@@ -5,7 +5,7 @@
 // 
 // Expected:
 // - A warning like:
-// "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values"
+// "fit catch-all '_' branch is unreachable because earlier branches already cover all flag values"
 // - Program still runs normally.
 
 use std.c.io;

@@ -11,11 +11,11 @@
   "Syntax table for fun-mode.")
 
 (defconst fun-keywords
-  '("imp" "use" "as" "pub" "fun" "als" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
+  '("use" "as" "pub" "fun" "als" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
     "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "fork" "break" "continue" "assert" "allow" "expect" "let"))
 
 (defconst fun-types
-  '("void" "raw" "num" "dec" "f32" "f64" "str" "bin" "flag" "chr"))
+  '("void" "raw" "num" "dec" "f32" "f64" "str" "flag" "chr"))
 
 (defconst fun-support-types
   '("size_t" "ptrdiff_t" "ssize_t" "intptr_t" "uintptr_t"

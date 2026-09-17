@@ -1,11 +1,11 @@
-// Demonstrates the transpiler warning for non-exhaustive `fit` on `bin`.
+// Demonstrates the transpiler warning for non-exhaustive `fit` on `flag`.
 // 
 // Run:
 // fun -in .\examples\advanced\fit_exhaustive_warning.fn
 // 
 // Expected:
 // - A warning like:
-// "fit statement is not exhausted for bin condition (missing false branch)"
+// "fit statement is not exhausted for flag condition (missing false branch)"
 // - Program still runs normally.
 
 use std.c.io;

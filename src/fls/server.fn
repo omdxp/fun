@@ -669,7 +669,7 @@ impl Server {
     _free_result(folding_result, "[]");
   }
 
-  // One link per `imp` statement's own dotted path, pointing at the
+  // One link per `use` statement's own dotted path, pointing at the
   // file or directory it resolves to.
   answer_document_link(str id, JsonValue message) {
     JsonValue params = _field(message, "params");

@@ -6,7 +6,7 @@
 // In Fun, you use these identifiers directly after importing this module.
 // 
 // Import:
-// - `imp std.c.limits;`
+// - `use std.c.limits;`
 // 
 // Integer limits
 // - `CHAR_BIT`:

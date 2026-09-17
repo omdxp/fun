@@ -23,7 +23,7 @@ fun main() num {
 
   // A JSON logger emits one object per line — ideal for log aggregators.
   Logger j = logger_json(.Debug).with_timestamps(false);
-  j.warn_r("cache miss").str_field("key", "user:42").bin_field("cold", true).emit();
+  j.warn_r("cache miss").str_field("key", "user:42").flag_field("cold", true).emit();
 
   // Route errors to stderr while everything else goes to stdout.
   Logger r = logger_init(.Info).with_timestamps(false).route_errors(true);

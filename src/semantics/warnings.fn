@@ -1109,7 +1109,7 @@ impl Analysis {
       if truths == 2 {
         self.report(
           .FitUnreachableBranch,
-          "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values",
+          "fit catch-all '_' branch is unreachable because earlier branches already cover all flag values",
           stmt
         );
       }
@@ -1126,7 +1126,7 @@ impl Analysis {
     }
     if equals(over, "") {
       // No fixed value set to enumerate, so a catch-all is the only
-      // way to be exhaustive. `bin` is excluded: the `truths` counter
+      // way to be exhaustive. `flag` is excluded: the `truths` counter
       // above already covers it correctly.
       str subj_type = self._fit_subject_type(f);
       if equals(subj_type, "num") || equals(subj_type, "str") || equals(subj_type, "chr") ||

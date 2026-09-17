@@ -802,8 +802,8 @@ pub fun format_dec(dec d, num places) str {
   ret buf;
 }
 
-// Formats a bin as "true" or "false" (static string, do not free).
-pub fun format_bin(flag b) str {
+// Formats a flag as "true" or "false" (static string, do not free).
+pub fun format_flag(flag b) str {
   if b {
     ret "true";
   }

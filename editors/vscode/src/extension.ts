@@ -530,8 +530,8 @@ const C_TO_FUN_TYPES: ReadonlyMap<string, string> = new Map([
   ["char*", "str"],
   ["const char *", "str"],
   ["const char*", "str"],
-  ["bool", "bin"],
-  ["_Bool", "bin"],
+  ["bool", "flag"],
+  ["_Bool", "flag"],
   ["char", "chr"],
   // void* → raw* (opaque pointer); plain void stays as void (Fun's own void keyword)
   ["void *", "raw*"],

@@ -214,7 +214,7 @@ test "a generic method on a let-inferred receiver specializes, not the bare temp
 }
 
 test "hover and inlay hints show a let-inferred local's own concrete generic type, not just the bare template" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `fun make() Option<num> {
   `  Option<num> o;
   `  ret o;
@@ -498,7 +498,7 @@ test "hovering a stdlib import path segment resolves at every depth" {
   Document doc;
   doc.uri = "file:///stdlib_hover_probe.fn";
   doc.path = "src/tests/fixtures/stdlib_hover_probe.fn";
-  doc.text = "imp std.c.io;\n\nfun main() num {\n  ret 0;\n}\n";
+  doc.text = "use std.c.io;\n\nfun main() num {\n  ret 0;\n}\n";
   doc.version = 1;
 
   // `std` alone: the stdlib root's own README.
@@ -570,10 +570,10 @@ test "completion offers a generic type snippet with a tab stop per type param" {
 }
 
 test "a function completion item carries structured labelDetails" {
-  str src = `fun probe(str name, num count) bin {
+  str src = `fun probe(str name, num count) flag {
   `  ret true;
   `}
-  `fun caller() bin {
+  `fun caller() flag {
   `  ret probe("x", 1);
   `}`;
   AnalysisCache reads = analysis_cache_new();
@@ -597,9 +597,9 @@ test "a method completion item's own labelDetails excludes the implicit self" {
   `  num len;
   `}
   `impl Buffer {
-  `  pub resize(num n) bin { self.len = n; ret true; }
+  `  pub resize(num n) flag { self.len = n; ret true; }
   `}
-  `fun helper(Buffer b) bin {
+  `fun helper(Buffer b) flag {
   `  ret b.resize(1);
   `}`;
   AnalysisCache reads = analysis_cache_new();
@@ -616,10 +616,10 @@ test "a method completion item's own labelDetails excludes the implicit self" {
 }
 
 test "completion offers a call snippet with one tab stop per parameter" {
-  str src = `fun probe(str name, num count) bin {
+  str src = `fun probe(str name, num count) flag {
   `  ret true;
   `}
-  `fun caller() bin {
+  `fun caller() flag {
   `  ret probe("x", 1);
   `}`;
   AnalysisCache reads = analysis_cache_new();
@@ -683,7 +683,7 @@ test "dot-completion merges a method declared in a different file than the type"
   Document doc;
   doc.uri = "file:///cross_method_probe.fn";
   doc.path = "src/tests/fixtures/_cross_method_probe.fn";
-  doc.text = `imp _cross_method_helper;
+  doc.text = `use _cross_method_helper;
   `fun use_it(Widget w) num {
   `  ret w.value();
   `}`;
@@ -691,11 +691,11 @@ test "dot-completion merges a method declared in a different file than the type"
 
   // Right after `w.`, mid-word on the line that reads it.
   str out = completion(&reads, doc, 2, 8, false);
-  assert contains(out, `"label":"value"`), "expected a method declared in a different file (via imp) to be offered";
+  assert contains(out, `"label":"value"`), "expected a method declared in a different file (via use) to be offered";
 }
 
 test "a bare capitalized condition isn't mistaken for a compound-init literal" {
-  str src = `const bin Ready = true;
+  str src = `const flag Ready = true;
   `fun check() num {
   `  if Ready {
   `    ret 1;
@@ -810,7 +810,7 @@ test "a local name wins over a function of the same name" {
 }
 
 test "a function is spelled back as its signature" {
-  str src = `fun probe(str name, num count) bin { ret true; }`;
+  str src = `fun probe(str name, num count) flag { ret true; }`;
   let merged = parse_program_with_source("sig.fn", src);
   assert merged.is_ok(), "expected the program to parse";
   ProgramMergeResult program = merged.unwrap();
@@ -871,7 +871,7 @@ test "the 'See also' footer never links a cross-file type that isn't pub" {
   defer remove_file("src/tests/fixtures/_see_also_priv.fn");
   write_string(
     "src/tests/fixtures/_see_also_lib.fn",
-    `imp _see_also_priv;
+    `use _see_also_priv;
     `pub fun make() Secret {
     `  Secret s;
     `  ret s;
@@ -884,7 +884,7 @@ test "the 'See also' footer never links a cross-file type that isn't pub" {
   Document doc;
   doc.uri = "file:///see_also_probe.fn";
   doc.path = "src/tests/fixtures/_see_also_probe.fn";
-  doc.text = `imp _see_also_lib;
+  doc.text = `use _see_also_lib;
   `fun user() num {
   `  let s = make();
   `  ret 0;
@@ -1452,10 +1452,10 @@ test "hovering 'as' reads contextually: import alias vs quirk impl" {
   Document import_doc;
   import_doc.uri = "file:///aliasimport.fn";
   import_doc.path = "aliasimport.fn";
-  import_doc.text = "imp std.io as io2;\n";
+  import_doc.text = "use std.io as io2;\n";
   import_doc.version = 1;
   str import_hover = hover(&reads, import_doc, 0, 11);
-  assert contains(import_hover, "Binds an import to a different name"), "expected the import-alias doc for 'as' inside an imp statement";
+  assert contains(import_hover, "Binds an import to a different name"), "expected the import-alias doc for 'as' inside a use statement";
   assert !contains(import_hover, "Names the quirk"), "expected the impl-quirk doc not to leak into an import context";
 
   Document impl_doc;
@@ -1477,8 +1477,8 @@ test "hovering 'as' reads contextually: import alias vs quirk impl" {
 }
 
 test "hover and go-to-definition on an import path segment resolve to the module or its stdlib README" {
-  str src = `imp std.io;
-  `imp std.channel;
+  str src = `use std.io;
+  `use std.channel;
   `
   `fun main() num {
   `  ret 0;
@@ -1491,7 +1491,7 @@ test "hover and go-to-definition on an import path segment resolve to the module
   doc.text = src;
   doc.version = 1;
 
-  // On `channel` in `imp std.channel;`: the module's own leading doc
+  // On `channel` in `use std.channel;`: the module's own leading doc
   // comment.
   str module_hover = hover(&reads, doc, 1, 9);
   assert contains(module_hover, "channel"), "expected std.channel's own leading doc comment";
@@ -1513,7 +1513,7 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
   // is-this-an-import-segment check and the specifier reconstruction
   // used to only recognize a single '.', silently dropping the whole
   // '..' prefix and resolving relative to the wrong directory.
-  str src = `imp ..lexer.lexer;
+  str src = `use ..lexer.lexer;
   `
   `fun main() num {
   `  ret 0;
@@ -1540,16 +1540,16 @@ test "hover and go-to-definition resolve a parent-traversal import ('..')" {
   Document doc2;
   doc2.uri = "file:///src/parser/importprobe.fn";
   doc2.path = "src/parser/importprobe.fn";
-  doc2.text = "imp ....src.lexer.lexer;\n";
+  doc2.text = "use ....src.lexer.lexer;\n";
   doc2.version = 1;
   str deep_hover = hover(&reads, doc2, 0, 18);
   assert contains(deep_hover, "Vec<Token>"), "expected the same doc comment through a four-dot path";
 }
 
 test "documentLink covers a resolvable import's own path, and silently skips one that doesn't resolve" {
-  str src = `imp std.io;
-  `imp ..lexer.lexer;
-  `imp nope.nope;
+  str src = `use std.io;
+  `use ..lexer.lexer;
+  `use nope.nope;
   `
   `fun main() num {
   `  ret 0;
@@ -1568,15 +1568,15 @@ test "documentLink covers a resolvable import's own path, and silently skips one
   assert contains(out, "lexer/lexer.fn"), "expected the '..' parent-traversal link target";
   assert !contains(out, "nope"), "expected an unresolvable specifier to be skipped, not reported as a broken link";
 
-  // `imp std.io;` starts at column 0; the specifier itself ("std.io")
+  // `use std.io;` starts at column 0; the specifier itself ("std.io")
   // starts right after the keyword and its trailing space, column 4,
   // through column 10.
-  assert contains(out, `"start":{"line":0,"character":4}`), "expected the link range to start at the specifier, not the 'imp' keyword";
+  assert contains(out, `"start":{"line":0,"character":4}`), "expected the link range to start at the specifier, not the 'use' keyword";
   assert contains(out, `"character":10}`), "expected the link range to end at the specifier's own last character";
 }
 
-test "hover, go-to-definition, and dot-completion resolve an import alias at a use site, not just inside the imp statement" {
-  str src = `imp std.c.math as cmath;
+test "hover, go-to-definition, and dot-completion resolve an import alias at a use site, not just inside the use statement" {
+  str src = `use std.c.math as cmath;
   `
   `fun main() num {
   `  ret cmath.sqrt(4.0);
@@ -1589,7 +1589,7 @@ test "hover, go-to-definition, and dot-completion resolve an import alias at a u
   doc.text = src;
   doc.version = 1;
 
-  // On 'cmath' at the call site (line 3), not inside the imp
+  // On 'cmath' at the call site (line 3), not inside the use
   // statement itself: the aliased module's own leading doc comment.
   str alias_hover = hover(&reads, doc, 3, 7);
   assert contains(alias_hover, "C math library"), "expected the aliased module's own doc comment when hovering the alias at a use site";
@@ -1631,7 +1631,7 @@ test "hover, go-to-definition, and completion cover a C builtin the language acc
 }
 
 test "hover shows a doc comment for a method declared in another, imported file" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `fun main() num {
   `  Option<num> o;
   `  num v = o.unwrap();
@@ -2346,7 +2346,7 @@ test "completion lists an import path's own directory, filtered by what's typed 
   Document doc;
   doc.uri = "file:///here.fn";
   doc.path = path_join(base, "here.fn");
-  doc.text = "imp sub";
+  doc.text = "use sub";
   doc.version = 1;
 
   str out = completion(&reads, doc, 0, 7, false);
@@ -2354,9 +2354,9 @@ test "completion lists an import path's own directory, filtered by what's typed 
   assert !contains(out, "sibling_a"), "expected the non-matching sibling filtered out";
   assert !contains(out, "sibling_b"), "expected the non-matching sibling filtered out";
 
-  // The unfiltered case, right after 'imp ' with nothing typed: every
+  // The unfiltered case, right after 'use ' with nothing typed: every
   // sibling and the synthetic 'std' entry point.
-  doc.text = "imp ";
+  doc.text = "use ";
   str out_all = completion(&reads, doc, 0, 4, false);
   assert contains(out_all, `"label":"std","kind":19`), "expected the synthetic stdlib entry point";
   assert contains(out_all, `"label":"subdir","kind":19`), "expected the sibling directory";
@@ -2370,7 +2370,7 @@ test "completion offers the synthetic 'deps' entry point alongside 'std'" {
   Document doc;
   doc.uri = "file:///here.fn";
   doc.path = "here.fn";
-  doc.text = "imp ";
+  doc.text = "use ";
   doc.version = 1;
 
   str out = completion(&reads, doc, 0, 4, false);
@@ -2389,7 +2389,7 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   // dependency's root for a bare 'deps.mylib' specifier?
   str direct_resolved = resolve_import_path(current_file, "deps.mylib");
 
-  let lexed = tokenize("imp deps.mylib.some;\n", "main.fn");
+  let lexed = tokenize("use deps.mylib.some;\n", "main.fn");
   assert lexed.is_ok(), "expected the source to lex";
   Vec<Token> tokens = lexed.unwrap();
   defer tokens.free();
@@ -2398,7 +2398,7 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   flag target_is_dir = is_dir(target);
   flag target_exists = exists(target);
   assert target_is_dir, format(
-    "expected 'mylib' to resolve to a real directory - resolve_import_path directly: {str} | import_target (tokenizer path): {str} | is_dir: {bin} | exists: {bin}",
+    "expected 'mylib' to resolve to a real directory - resolve_import_path directly: {str} | import_target (tokenizer path): {str} | is_dir: {flag} | exists: {flag}",
     direct_resolved, target, target_is_dir, target_exists
   );
 
@@ -2407,7 +2407,7 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   Document doc;
   doc.uri = "file:///deps_project/src/main.fn";
   doc.path = current_file;
-  doc.text = "imp deps.mylib.some;\n";
+  doc.text = "use deps.mylib.some;\n";
   doc.version = 1;
 
   // On `mylib`: the dependency's own resolved root (no README there, so
@@ -2425,7 +2425,7 @@ test "hover on a 'deps.<name>.<module>' segment shows the fetched module's own d
   Document doc;
   doc.uri = "file:///deps_project/src/main.fn";
   doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
-  doc.text = "imp deps.mylib.some;\n";
+  doc.text = "use deps.mylib.some;\n";
   doc.version = 1;
 
   // On `some`: the fetched module file itself.
@@ -2442,27 +2442,27 @@ test "go-to-definition on a 'deps.<name>.<module>' segment jumps to the fetched 
   Document doc;
   doc.uri = "file:///deps_project/src/main.fn";
   doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
-  doc.text = "imp deps.mylib.some;\n";
+  doc.text = "use deps.mylib.some;\n";
   doc.version = 1;
 
   str module_def = definition(&reads, doc, 0, 17);
   assert contains(module_def, "some.fn"), format("expected a jump straight to the dependency's fetched module file, got: {str}", module_def);
 }
 
-test "completion lists a project's own resolved dependency names for 'imp deps.'" {
+test "completion lists a project's own resolved dependency names for 'use deps.'" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///main.fn";
   doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
-  doc.text = "imp deps.";
+  doc.text = "use deps.";
   doc.version = 1;
 
   str out = completion(&reads, doc, 0, 9, false);
   assert contains(out, `"label":"mylib","kind":19`), "expected the locked dependency's own name offered";
 }
 
-test "completion lists a dependency's own modules for 'imp deps.<name>.'" {
+test "completion lists a dependency's own modules for 'use deps.<name>.'" {
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
@@ -2471,7 +2471,7 @@ test "completion lists a dependency's own modules for 'imp deps.<name>.'" {
   Document doc;
   doc.uri = "file:///main.fn";
   doc.path = "src/parser/import_resolver_fixtures/deps_project/src/main.fn";
-  doc.text = "imp deps.mylib.";
+  doc.text = "use deps.mylib.";
   doc.version = 1;
 
   str out = completion(&reads, doc, 0, 15, false);
@@ -2548,8 +2548,8 @@ test "hover resolves a chain ending in a call, including generic specialization 
   // stdlib container's own method (get, is_none, ...) always returned
   // its bare unspecialized template. User-reported, from real hovers
   // in this very codebase's own parser.fn.
-  str src = `imp std.vec;
-  `imp std.option;
+  str src = `use std.vec;
+  `use std.option;
   `compound Box {
   `  num n;
   `}
@@ -2582,7 +2582,7 @@ test "hover resolves a chain ending in a call, including generic specialization 
   // A stdlib generic's own method, reached through a call in the
   // middle of the chain (not just a plain field), specializes
   // correctly at the very end too.
-  str src2 = `imp std.vec;
+  str src2 = `use std.vec;
   `compound Holder {
   `  Vec<num> nums;
   `}
@@ -2774,7 +2774,7 @@ test "hover on a sized array local shows its own declared size, not a bare '[]'"
 }
 
 test "hover on a module-alias-qualified type shows it written the way it was, not the internal mangled name" {
-  // User-reported: `imp std.log as l;` then `l.Logger logger` hovered
+  // User-reported: `use std.log as l;` then `l.Logger logger` hovered
   // as "l__Logger logger" - parser.fn's own parse_datatype mangles a
   // qualified type's type_str to "l__Logger" for symbol lookup, and
   // fls's own render_type showed that internal form verbatim instead
@@ -2784,7 +2784,7 @@ test "hover on a module-alias-qualified type shows it written the way it was, no
   Document doc;
   doc.uri = "file:///aliastype.fn";
   doc.path = "aliastype.fn";
-  doc.text = `imp std.log as l;
+  doc.text = `use std.log as l;
   `fun main() {
   `  l.Logger logger = l.logger_init(l.LogLevel.Debug);
   `  _ = logger;
@@ -2863,12 +2863,12 @@ test "hovering a constant shows its own literal value, not just its type" {
   // rather than making a reader go find the declaration.
   str src = `const num LIMIT = 42;
   `const str GREETING = "hi";
-  `const bin ENABLED = true;
+  `const flag ENABLED = true;
   `const num NEGATIVE = -1;
   `fun main() num {
   `  num a = LIMIT;
   `  str b = GREETING;
-  `  bin c = ENABLED;
+  `  flag c = ENABLED;
   `  num d = NEGATIVE;
   `  ret 0;
   `}`;
@@ -2886,8 +2886,8 @@ test "hovering a constant shows its own literal value, not just its type" {
   str hovered_str = hover(&reads, doc, 6, 10);
   assert contains(hovered_str, `const str GREETING = \"hi\"`), "expected the constant's own string literal value shown, quoted";
 
-  str hovered_bin = hover(&reads, doc, 7, 10);
-  assert contains(hovered_bin, "const flag ENABLED = true"), "expected the constant's own boolean literal value shown";
+  str hovered_flag = hover(&reads, doc, 7, 11);
+  assert contains(hovered_flag, "const flag ENABLED = true"), "expected the constant's own boolean literal value shown";
 
   str hovered_neg = hover(&reads, doc, 8, 10);
   assert contains(hovered_neg, "const num NEGATIVE = -1"), "expected a negative numeric literal (a unary minus over the literal) shown with its sign";
@@ -2898,7 +2898,7 @@ test "a let local's inferred type resolves through a call-ending chain, not just
   // receiver.method() hop; a longer chain (`a.b.get(...)`) fell
   // through to the bare-read fallback and showed the raw
   // __let_infer__ sentinel instead of a real type. User-reported.
-  str src = `imp std.vec;
+  str src = `use std.vec;
   `compound Holder {
   `  Vec<num> nums;
   `}
@@ -3086,7 +3086,7 @@ test "hover resolves a let bound to calling through an alias-bound function-type
 }
 
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `fun main() num {
   `  Option<num> o;
   `  num v = o.unwrap_or(5);
@@ -4693,7 +4693,7 @@ test "code actions offer to remove an unused import and to silence any warning" 
   Document doc;
   doc.uri = "file:///unused.fn";
   doc.path = "unused.fn";
-  doc.text = `imp std.io;
+  doc.text = `use std.io;
   `
   `fun main() num {
   `  ret 0;
@@ -4824,7 +4824,7 @@ test "code actions implement a quirk's missing method with its exact declared si
   `}
   `quirk Q {
   `  a() num;
-  `  b(num n) bin;
+  `  b(num n) flag;
   `}
   `impl Point as Q {
   `  a() num { ret self.x; }
@@ -4959,7 +4959,7 @@ test "completion classifies a name's own kind from raw token shape when the text
 }
 
 test "dot-completion after an import alias lists the aliased module's own functions even while the document does not parse" {
-  str src = `imp std.c.math as cmath;
+  str src = `use std.c.math as cmath;
   `
   `fun main() num {
   `  ret cmath.sqrt(4.0
@@ -5073,8 +5073,8 @@ test "dot-completion scopes to a local's own declared type even while the docume
 }
 
 test "dot-completion on a generic-typed local reaches a stdlib type through a plain import, even while the document does not parse" {
-  str src = `imp std.vec;
-  `imp std.string;
+  str src = `use std.vec;
+  `use std.string;
   `
   `fun main() {
   `  Vec<str> lines = split_lines("a\nb");
@@ -5090,7 +5090,7 @@ test "dot-completion on a generic-typed local reaches a stdlib type through a pl
   doc.version = 1;
 
   // Line 5, right after 'lines.'. 'Vec' is never declared in this
-  // document at all, only reached through a plain (unaliased) `imp
+  // document at all, only reached through a plain (unaliased) `use
   // std.vec;` - the receiver's own generic type annotation (the `<`/
   // `>` between the base type and the name) also has to be walked
   // past correctly to find 'Vec' in the first place.
@@ -5247,7 +5247,7 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
 }
 
 test "a bare '.Variant' shorthand resolves a field-access fit subject even when the field's own type is declared in an imported file, not the current document" {
-  str src = `imp ..ast.ast;
+  str src = `use ..ast.ast;
   `
   `fun probe(Node* n) num {
   `  fit n.kind {
@@ -5303,13 +5303,13 @@ test "a bare '.Variant' shorthand completes to a channel's own element type's va
 }
 
 test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a propagation, with no intermediate 'let'" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `enum Color { Red, Green, Blue }
-  `fun pick(bin want) Option<Color> {
+  `fun pick(flag want) Option<Color> {
   `  if !want { ret .None; }
   `  ret .Some(.Green);
   `}
-  `fun describe(bin want) Option<str> {
+  `fun describe(flag want) Option<str> {
   `  fit pick(want)? {
   `    . -> { ret .Some("x"); }
   `  }
@@ -5334,7 +5334,7 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
 }
 
 test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a propagated bare local, while the document does not parse" {
-  str src = `imp std.option;
+  str src = `use std.option;
   `enum Color { Red, Green, Blue }
   `fun describe(Option<Color> c) num {
   `  fit c? {
@@ -5714,7 +5714,7 @@ test "semantic tokens classify a function declaration, a type, a keyword styled 
   `}
   `fun main() num {
   `  Widget w;
-  `  bin ok = true;
+  `  flag ok = true;
   `  ret 0;
   `}`;
   doc.version = 1;
@@ -6138,7 +6138,7 @@ test "completion offers 'sizeof', never a real lexer keyword but contextual at a
   Document doc;
   doc.uri = "file:///sizeofcompletion.fn";
   doc.path = "sizeofcompletion.fn";
-  doc.text = `imp std.c.mem;
+  doc.text = `use std.c.mem;
   `fun main() {
   `  raw* p = malloc(
   `}`;
@@ -6217,14 +6217,14 @@ test "hover on '?' and postfix '!' shows propagation doc text, prefix '!' does n
   Document opt_doc;
   opt_doc.uri = "file:///propq.fn";
   opt_doc.path = "propq.fn";
-  opt_doc.text = `imp std.option;
+  opt_doc.text = `use std.option;
   `fun get() Option<num> { ret .None; }
   `fun main() Option<num> {
   `  num v = get()?;
   `  ret .Some(v);
   `}
   `fun notprop() {
-  `  bin b = !true;
+  `  flag b = !true;
   `}`;
   opt_doc.version = 1;
 
@@ -6237,7 +6237,7 @@ test "hover on '?' and postfix '!' shows propagation doc text, prefix '!' does n
   Document res_doc;
   res_doc.uri = "file:///propbang.fn";
   res_doc.path = "propbang.fn";
-  res_doc.text = `imp std.result;
+  res_doc.text = `use std.result;
   `fun get() Result<num, str> { ret .Err("x"); }
   `fun main() Result<num, str> {
   `  num v = get()!;
@@ -6265,7 +6265,7 @@ test "hover resolves a field access chained inline onto a propagation, with no i
   Document doc;
   doc.uri = "file:///inlineprop.fn";
   doc.path = "inlineprop.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Point { num x; num y; }
   `fun get() Option<Point> { ret .None; }
   `fun main() Option<num> {
@@ -6290,7 +6290,7 @@ test "hover resolves a field access chained onto a propagation whose unwrapped t
   Document doc;
   doc.uri = "file:///inlineproppointer.fn";
   doc.path = "inlineproppointer.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Point { num x; num y; }
   `fun get() Option<Point*> { ret .None; }
   `fun main() Option<num> {
@@ -6458,7 +6458,7 @@ test "dot-completion offers positional indices for a tuple-typed local, still mi
   str items = completion(&reads, doc, 2, 4, false);
   assert contains(items, `"label":"0"`), format("expected positional index '0' offered for the tuple local, got: {str}", items);
   assert contains(items, `"label":"1"`), format("expected positional index '1' offered too, got: {str}", items);
-  assert !contains(items, `"label":"imp"`), format("expected the tuple match to replace the unfiltered keyword dump, not add to it, got: {str}", items);
+  assert !contains(items, `"label":"use"`), format("expected the tuple match to replace the unfiltered keyword dump, not add to it, got: {str}", items);
 }
 
 test "dot-completion offers positional indices for a tuple-typed compound field, still mid-typing (unparsed document)" {
@@ -6540,7 +6540,7 @@ test "hover on a fit destructuring binding resolves through a propagated field-a
   Document doc;
   doc.uri = "file:///inlinepropdestructure.fn";
   doc.path = "inlinepropdestructure.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `enum Kind { Leaf(num), Branch(num) }
   `compound Node { Kind kind; }
   `fun get() Option<Node*> { ret .None; }
@@ -6562,7 +6562,7 @@ test "dot-completion offers a propagated receiver's own unwrapped-type members, 
   Document doc;
   doc.uri = "file:///inlinepropcomp.fn";
   doc.path = "inlinepropcomp.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Point { num x; num y; }
   `fun get() Option<Point> { ret .None; }
   `fun main() Option<num> {
@@ -6590,7 +6590,7 @@ test "dot-completion offers a propagated receiver's own members when the unwrapp
   Document doc;
   doc.uri = "file:///inlinepropcomppointer.fn";
   doc.path = "inlinepropcomppointer.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Point { num x; num y; }
   `fun get() Option<Point*> { ret .None; }
   `fun main() Option<num> {
@@ -6609,7 +6609,7 @@ test "hover on a let-bound '?' propagation shows the unwrapped type, and complet
   Document doc;
   doc.uri = "file:///propunwrap.fn";
   doc.path = "propunwrap.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Point { num x; num y; }
   `fun get() Option<Point> { ret .None; }
   `fun main() Option<Point> {
@@ -6634,7 +6634,7 @@ test "hover on a let-bound '?' propagation resolves a generic compound instantia
   Document doc;
   doc.uri = "file:///propgeneric.fn";
   doc.path = "propgeneric.fn";
-  doc.text = `imp std.option;
+  doc.text = `use std.option;
   `compound Box<T> { T v; }
   `fun get_box() Option<Box<num>> { ret .None; }
   `fun main() Option<Box<num>> {
@@ -6651,54 +6651,6 @@ test "hover on a let-bound '?' propagation resolves a generic compound instantia
   str comp = completion(&reads, doc, 5, 12, false);
   assert contains(comp, `"label":"v"`), "expected Box<num>'s own field 'v' to be offered";
   assert !contains(comp, `"label":"get_box"`), "expected filtering to Box<num>'s own members, not every name in scope";
-}
-
-test "hover on 'use'/'flag' matches hover on 'imp'/'bin' exactly, real fls parity for the alternate spellings" {
-  AnalysisCache reads = analysis_cache_new();
-  defer reads.free();
-
-  Document imp_doc;
-  imp_doc.uri = "file:///imp_spelling.fn";
-  imp_doc.path = "imp_spelling.fn";
-  imp_doc.text = "imp std.io;\n";
-  imp_doc.version = 1;
-  str imp_hover = hover(&reads, imp_doc, 0, 1);
-
-  Document use_doc;
-  use_doc.uri = "file:///use_spelling.fn";
-  use_doc.path = "use_spelling.fn";
-  use_doc.text = "use std.io;\n";
-  use_doc.version = 1;
-  str use_hover = hover(&reads, use_doc, 0, 1);
-
-  // 'imp' and 'use' are the same length, so their hover JSON (which
-  // embeds the token's own source span alongside its doc text) is
-  // truly byte-identical, not just similar.
-  assert equals(imp_hover, use_hover), "expected 'use' to hover identically to 'imp', same canonicalized keyword";
-
-  Document bin_doc;
-  bin_doc.uri = "file:///bin_spelling.fn";
-  bin_doc.path = "bin_spelling.fn";
-  bin_doc.text = "fun main() {\n  bin ok = true;\n}\n";
-  bin_doc.version = 1;
-  str bin_hover = hover(&reads, bin_doc, 1, 3);
-
-  Document flag_doc;
-  flag_doc.uri = "file:///flag_spelling.fn";
-  flag_doc.path = "flag_spelling.fn";
-  flag_doc.text = "fun main() {\n  flag ok = true;\n}\n";
-  flag_doc.version = 1;
-  str flag_hover = hover(&reads, flag_doc, 1, 3);
-
-  // 'bin' and 'flag' differ in length, so the embedded source span
-  // legitimately differs even though the doc content is identical
-  // (both resolve through the same canonicalized keyword text) -
-  // compare the markdown content itself, not the whole span-bearing
-  // JSON payload.
-  num bin_value_end = index_of_str(bin_hover, `},"range"`);
-  num flag_value_end = index_of_str(flag_hover, `},"range"`);
-  assert bin_value_end > 0 && flag_value_end > 0, "expected both hovers to carry a range";
-  assert equals(substr(bin_hover, 0, bin_value_end), substr(flag_hover, 0, flag_value_end)), "expected 'flag' hover content to match 'bin', same canonicalized keyword";
 }
 
 test "hover on a fit tuple pattern's binding position shows its own element type" {
@@ -6749,7 +6701,7 @@ test "completion offers a fit tuple pattern's binding names as known locals" {
   assert contains(items, `"label":"s"`), "expected the tuple pattern's own binding name 's' offered as a known local";
 }
 
-test "completion offers both 'imp'/'use' and 'bin'/'flag' as keyword suggestions" {
+test "completion offers 'use'/'flag' as keyword suggestions, not the removed 'imp'/'bin' spellings" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -6759,8 +6711,8 @@ test "completion offers both 'imp'/'use' and 'bin'/'flag' as keyword suggestions
   doc.version = 1;
 
   str comp = completion(&reads, doc, 0, 0, false);
-  assert contains(comp, `"label":"imp"`), "expected 'imp' still offered";
-  assert contains(comp, `"label":"use"`), "expected 'use' offered alongside 'imp'";
-  assert contains(comp, `"label":"bin"`), "expected 'bin' still offered";
-  assert contains(comp, `"label":"flag"`), "expected 'flag' offered alongside 'bin'";
+  assert contains(comp, `"label":"use"`), "expected 'use' offered";
+  assert contains(comp, `"label":"flag"`), "expected 'flag' offered";
+  assert !contains(comp, `"label":"imp"`), "expected the removed 'imp' spelling not to be offered anymore";
+  assert !contains(comp, `"label":"bin"`), "expected the removed 'bin' spelling not to be offered anymore";
 }

@@ -43,7 +43,7 @@ pub enum FieldVal {
   Str(str),
   Num(num),
   Dec(dec),
-  Bin(flag)
+  Flag(flag)
 }
 
 // An ordered key/value pair attached to a log record.
@@ -79,10 +79,10 @@ pub fun fdec(str k, dec v) Field {
 }
 
 // Builds a boolean-valued field.
-pub fun fbin(str k, flag v) Field {
+pub fun fflag(str k, flag v) Field {
   Field f;
   f.key = k;
-  f.val = FieldVal.Bin(v);
+  f.val = FieldVal.Flag(v);
   ret f;
 }
 
@@ -174,7 +174,7 @@ fun field_val_text_into(StringBuilder* b, FieldVal* v) {
     .Str(s) -> { b.append(s); }
     .Num(n) -> { b.append_num(n); }
     .Dec(d) -> { b.append_dec(d, 6); }
-    .Bin(x) -> { b.append(format_bin(x)); }
+    .Flag(x) -> { b.append(format_flag(x)); }
   }
 }
 
@@ -188,7 +188,7 @@ fun field_val_json_into(StringBuilder* b, FieldVal* v) {
     }
     .Num(n) -> { b.append_num(n); }
     .Dec(d) -> { b.append_dec(d, 6); }
-    .Bin(x) -> { b.append(format_bin(x)); }
+    .Flag(x) -> { b.append(format_flag(x)); }
   }
 }
 
@@ -251,8 +251,8 @@ impl LogRecord {
   }
 
   // Attaches a boolean-valued field; chainable.
-  pub bin_field(str k, flag v) LogRecord {
-    ret self.field(k, FieldVal.Bin(v));
+  pub flag_field(str k, flag v) LogRecord {
+    ret self.field(k, FieldVal.Flag(v));
   }
 
   // Render the record and write it to its destination.
@@ -485,10 +485,10 @@ impl Logger {
   }
 
   // Logs a single boolean field under `label`, with no message.
-  pub log_bin(LogLevel level, str label, flag value) {
+  pub log_flag(LogLevel level, str label, flag value) {
     if level >= self.level {
       let r = self.record(level, "");
-      r.bin_field(label, value).emit();
+      r.flag_field(label, value).emit();
     }
   }
 }

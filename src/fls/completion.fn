@@ -70,7 +70,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   defer items.free();
 
   // Line-based, independent of whether the rest of the document
-  // parses: half-written `imp a.b.` is exactly when a reader wants
+  // parses: half-written `use a.b.` is exactly when a reader wants
   // this most, and exactly when the usual AST-driven path below has
   // nothing to offer.
   if _try_import_completions(&items, doc.path, doc.text, line, character) {
@@ -293,7 +293,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items, snippets);
     } else {
-      // `receiver` may be an import alias (`imp std.c.math as cmath;`)
+      // `receiver` may be an import alias (`use std.c.math as cmath;`)
       // rather than a value at all. `cmath.` names a module, not a
       // type, so nothing above resolves it. What the alias's own
       // module contributes is already merged into `program.nodes`, so
@@ -317,7 +317,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   ret _reply(&items);
 }
 
-// Directory/file listing for whatever's typed so far in an `imp
+// Directory/file listing for whatever's typed so far in a `use
 // a.b.c` path, filling `items` and returning true when the cursor
 // sits in one at all (even with zero matches), worked out purely
 // from the current line's own text, independent of tokens or a
@@ -336,10 +336,7 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
     ret false;
   }
   str stripped = trim_left(substr(raw_line, 0, cut));
-  // 'imp' is still accepted as an alternate spelling of the now-canonical
-  // 'use' (see canonical_keyword_text) - both are exactly 3 characters,
-  // so the fixed offsets below work unchanged for either.
-  if !starts_with(stripped, "use") && !starts_with(stripped, "imp") {
+  if !starts_with(stripped, "use") {
     ret false;
   }
   num rest_len = len(stripped) - 3;
@@ -350,24 +347,24 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
   if after_kw != ' ' && after_kw != '\t' {
     ret false;
   }
-  str after_imp = trim_left(substr(stripped, 3, rest_len));
-  num semi = index_of_char(after_imp, ';');
+  str after_use = trim_left(substr(stripped, 3, rest_len));
+  num semi = index_of_char(after_use, ';');
   if semi >= 0 {
-    after_imp = substr(after_imp, 0, semi);
+    after_use = substr(after_use, 0, semi);
   }
 
-  num last_dot = last_index_of_char(after_imp, '.');
+  num last_dot = last_index_of_char(after_use, '.');
   str parent_specifier = "";
-  str partial = after_imp;
+  str partial = after_use;
   if last_dot >= 0 {
-    parent_specifier = substr(after_imp, 0, last_dot);
-    partial = substr(after_imp, last_dot + 1, len(after_imp) - last_dot - 1);
+    parent_specifier = substr(after_use, 0, last_dot);
+    partial = substr(after_use, last_dot + 1, len(after_use) - last_dot - 1);
   }
 
   if equals(parent_specifier, "deps") {
     // "deps" itself is never a real directory - what it names is
     // whichever dependencies this project's own fun.lock has actually
-    // resolved, the same list `imp deps.<name>...` can reach.
+    // resolved, the same list `use deps.<name>...` can reach.
     let locked = read_lock(deps_project_root(current_file));
     defer locked.free();
     num d = 0;
@@ -434,7 +431,7 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
     saw_any_fn = true;
   }
 
-  // `imp std.` when std/ holds only subdirectories (like c/) still
+  // `use std.` when std/ holds only subdirectories (like c/) still
   // surfaces the common leaf modules living one level deeper, the
   // same convenience the reference offers.
   if equals(parent_specifier, "std") && saw_c_dir && !saw_any_fn {
@@ -605,7 +602,7 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
     "mainio",
     .Snippet,
     "an entry point that prints",
-    "imp std.c.io;\n\nfun main() num {\n  printf(\"${1:hello}\\n\");\n  ret 0;\n}"
+    "use std.c.io;\n\nfun main() num {\n  printf(\"${1:hello}\\n\");\n  ret 0;\n}"
   ));
   items.push(_snippet_item(
     "fore",
@@ -1476,7 +1473,7 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
 
 // `_param_type_from_tokens`'s own cross-file fallback: `callee_name`
 // is very often declared in an imported file, not the current
-// document (`err_kind`, reached only through `imp std.result;`, the
+// document (`err_kind`, reached only through `use std.result;`, the
 // exact real-world shape this reproduced on). Each import is parsed
 // fresh and searched via the real AST this time.
 fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str callee_name, num arg_index) str {
@@ -1720,7 +1717,7 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
 
 // A named top-level function's own declared return type's first
 // generic argument, read straight off the tokens - `Color` from
-// `fun pick(bin want) Option<Color> {`. What a fit subject's own
+// `fun pick(flag want) Option<Color> {`. What a fit subject's own
 // propagated call operand needs while the document doesn't parse
 // (`fit pick(want)? { . }`), since there is no declaration token to
 // walk back from the way a local's own already has just below.
@@ -2941,9 +2938,6 @@ fun _skeleton(str word) str {
   }
   if equals(word, "asm") {
     ret "asm { $0 };";
-  }
-  if equals(word, "imp") {
-    ret "imp ${1:std.io};";
   }
   if equals(word, "use") {
     ret "use ${1:std.io};";

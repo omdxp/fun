@@ -1591,7 +1591,7 @@ pub fun deps_update_command(str name) num {
 
 // The starter `src/main.fn` an `init`ed executable target gets.
 fun _init_main_source() str {
-  ret `imp std.io;
+  ret `use std.io;
   `
   `fun main(str[] args) {
   `  println("Hello, World!");
@@ -2240,7 +2240,7 @@ fun _declares_top_level_block(str path, str keyword) flag {
     ret false;
   }
   Vec<Token> tokens = lexed.unwrap();
-  // Deep: returns a plain `bin`, nothing aliasing these tokens' own
+  // Deep: returns a plain `flag`, nothing aliasing these tokens' own
   // strings escapes this function.
   defer free_token_vec(&tokens);
 
@@ -2461,8 +2461,8 @@ pub fun collect_unformatted(str root) Vec<str> {
 }
 
 test "lists the modules a file imports, aliases and stdlib included" {
-  str src = `imp sub.helper;
-  `imp std.io as out;
+  str src = `use sub.helper;
+  `use std.io as out;
   `
   `fun main() num {
   `  ret 0;

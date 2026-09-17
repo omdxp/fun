@@ -1,4 +1,4 @@
-// Demonstrates an exhaustive `fit` on `bin` (no warning).
+// Demonstrates an exhaustive `fit` on `flag` (no warning).
 // 
 // Run:
 // fun -in .\examples\advanced\fit_exhaustive_ok.fn

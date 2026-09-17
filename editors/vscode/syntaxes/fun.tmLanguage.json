@@ -123,7 +123,7 @@
       "patterns": [
         {
           "name": "storage.type.fun",
-          "match": "\\b(void|raw|num|dec|f32|f64|str|bin|flag|chr|i[1-9][0-9]*|u[1-9][0-9]*)\\b"
+          "match": "\\b(void|raw|num|dec|f32|f64|str|flag|chr|i[1-9][0-9]*|u[1-9][0-9]*)\\b"
         },
         {
           "name": "support.type.fun",
@@ -152,7 +152,7 @@
         },
         {
           "name": "meta.function.call.fun",
-          "match": "\\b(?!imp\\b|use\\b|as\\b|pub\\b|fun\\b|als\\b|compound\\b|quirk\\b|impl\\b|enum\\b|let\\b|const\\b|if\\b|elif\\b|else\\b|fit\\b|ret\\b|for\\b|async\\b|await\\b|fork\\b|break\\b|continue\\b|defer\\b|assert\\b|panic\\b|test\\b|fuzz\\b|allow\\b|expect\\b|true\\b|false\\b|nil\\b)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "match": "\\b(?!use\\b|as\\b|pub\\b|fun\\b|als\\b|compound\\b|quirk\\b|impl\\b|enum\\b|let\\b|const\\b|if\\b|elif\\b|else\\b|fit\\b|ret\\b|for\\b|async\\b|await\\b|fork\\b|break\\b|continue\\b|defer\\b|assert\\b|panic\\b|test\\b|fuzz\\b|allow\\b|expect\\b|true\\b|false\\b|nil\\b)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
           "captures": {
             "1": { "name": "entity.name.function.fun" }
           }
@@ -175,7 +175,7 @@
       "patterns": [
         {
           "name": "keyword.control.fun",
-          "match": "\\b(imp|use|as|pub|fun|als|compound|quirk|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|fuzz|allow|expect)\\b"
+          "match": "\\b(use|as|pub|fun|als|compound|quirk|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|fuzz|allow|expect)\\b"
         }
       ]
     }

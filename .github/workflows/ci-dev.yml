@@ -41,10 +41,30 @@ jobs:
       - name: Build fun and fls
         timeout-minutes: 10
         run: |
+          # 3-stage bootstrap, same reasoning as release.yml: the
+          # resolved `fun` on PATH is an already-released version, so
+          # a PR that changes compiler behavior the compiler's own
+          # source now relies on (a new runtime API, a new format
+          # placeholder, etc.) needs its own fresh binary to compile
+          # correctly, not just the old bootstrap's. Each stage must
+          # be invoked by its own explicit path - `fun build` installs
+          # under this checkout's own fun-out/bin/, separate from
+          # wherever setup-fun installed bare `fun` on PATH.
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            # On Windows specifically, from a copy of the previous
+            # stage's binary rather than the file in place - Windows
+            # won't let a running .exe overwrite its own file (unlike
+            # POSIX), so building from a copy elsewhere leaves the
+            # in-place path free for the new stage's own output.
             FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build
+            cp fun-out/bin/fun.exe stage1-fun.exe
+            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage1-fun.exe build
+            cp fun-out/bin/fun.exe stage2-fun.exe
+            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage2-fun.exe build
           else
             FUN_STDLIB_DIR="$PWD/stdlib" fun build
+            FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
+            FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
           fi
       - name: Run the test suite on ${{ matrix.lane }}
         timeout-minutes: 20
@@ -77,5 +97,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build fun
         timeout-minutes: 10
-        run: FUN_STDLIB_DIR="$PWD/stdlib" fun build
+        run: |
+          # Same 3-stage bootstrap as the build job; see its comment.
+          FUN_STDLIB_DIR="$PWD/stdlib" fun build
+          FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
+          FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
       - run: FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun -fmt-check-all

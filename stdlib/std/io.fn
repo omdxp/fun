@@ -30,7 +30,7 @@ pub fun print_dec(dec d) {
 }
 
 // Print a boolean to stdout (no newline).
-pub fun print_bin(flag b) {
+pub fun print_flag(flag b) {
   if b {
     printf("true");
   } else {
@@ -70,11 +70,23 @@ pub fun fmt_dec(dec d) str {
 }
 
 // Format a boolean into a new string buffer.
-pub fun fmt_bin(flag b) str {
+pub fun fmt_flag(flag b) str {
   if b {
     ret _dup_str("true");
   }
   ret _dup_str("false");
+}
+
+// Bootstrap-compatibility alias: a released `fun` binary built before
+// the `bin` keyword's removal has its own vararg format dispatch
+// hardcoded to call `fmt_bin` by name, baked into that binary's own
+// compiled codegen. Building this repo's compiler from source with
+// such a binary (the first stage of the 3-stage bootstrap every CI
+// build and release does) needs this symbol to exist until the
+// bootstrap baseline moves past that release; safe to remove once it
+// does.
+pub fun fmt_bin(flag b) str {
+  ret fmt_flag(b);
 }
 
 // Format a character into a new string buffer.
@@ -130,16 +142,32 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
         i = i + 2;
         continue;
       }
-      if i + 4 < n && fmt[i + 4] == '}' {
-        // `{xyz}` is a typed placeholder only when `xyz` names a recognized
-        // type (str/num/dec/bin/chr/ptr/raw); any other `{xyz}` is literal text.
-        let a = fmt[i + 1];
-        let b2 = fmt[i + 2];
-        let d = fmt[i + 3];
-        flag is_typed = (a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') ||
-          (a == 'd' && b2 == 'e' && d == 'c') || (a == 'b' && b2 == 'i' && d == 'n') ||
-          (a == 'c' && b2 == 'h' && d == 'r') || (a == 'p' && b2 == 't' && d == 'r') ||
-          (a == 'r' && b2 == 'a' && d == 'w');
+      // `{word}` is a typed placeholder only when `word` names a
+      // recognized type (str/num/dec/flag/chr/ptr/raw); any other
+      // `{word}` is literal text. The word's own length varies (`flag`
+      // is 4 characters, every other one is 3), so the closing `}` is
+      // found by scanning forward within a short bound rather than
+      // assumed at a fixed offset.
+      num close = -1;
+      num max_word_len = 5;
+      num limit = i + 1 + max_word_len;
+      if limit > n {
+        limit = n;
+      }
+      num j = i + 1;
+      for j < limit {
+        if fmt[j] == '}' {
+          close = j;
+          break;
+        }
+        j = j + 1;
+      }
+      if close > 0 {
+        str word = substr(fmt, i + 1, close - i - 1);
+        flag is_typed = equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
+          equals(word, "flag") || equals(word, "chr") || equals(word, "ptr") ||
+          equals(word, "raw");
+        free(word);
         if is_typed {
           if arg_i < argc {
             b.append(args.get(arg_i));
@@ -147,7 +175,7 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
           } else {
             b.append("{}");
           }
-          i = i + 5;
+          i = close + 1;
           continue;
         }
       }
@@ -162,7 +190,7 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
   ret out;
 }
 // Format a string using "{}" placeholders: {} or {str} for a string, {num},
-// {dec}, {bin}, {chr}, {ptr} for other types. A `{` that starts none of
+// {dec}, {flag}, {chr}, {ptr} for other types. A `{` that starts none of
 // those is written as it stands; write "{{" where one would otherwise be
 // read as a placeholder. A `}` is always written as it stands, so text
 // made of braces, such as JSON, survives being formatted.

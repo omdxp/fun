@@ -22,7 +22,7 @@ use std.runtime_backend;
 
 // Transpiles `src` and returns the emitted C, or an error describing the
 // stage that rejected it. Imports are not resolved: `src` is compiled on
-// its own, so a test may name `imp` targets it never calls into.
+// its own, so a test may name `use` targets it never calls into.
 pub fun transpile_source(str src) Result<str, str> {
   let tok_result = tokenize(src, "test.fn");
   if tok_result.is_err() {

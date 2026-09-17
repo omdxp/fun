@@ -1,4 +1,4 @@
-// Resolves and merges a whole `imp`-connected program into one flat
+// Resolves and merges a whole `use`-connected program into one flat
 // `Vec<Node>`, so `codegen.transpile` (which only ever sees a single
 // file's worth of top-level declarations at a time) can be handed a
 // multi-file program's declarations all at once, in one pass, with no
@@ -24,7 +24,7 @@ use std.sync;
 use std.channel;
 use std.c.mem;
 
-// Converts one `imp`-statement's dotted `path` into an actual `.fn` file
+// Converts one `use`-statement's dotted `path` into an actual `.fn` file
 // path under `root`: segments join with `/`, and a run of N consecutive
 // `.` characters becomes `N / 2` `../` parent segments plus one extra
 // `/` when N is odd (a single `.` between segments, e.g. `lexer.token`,
@@ -211,7 +211,7 @@ fun _resolve_deps_path(str input_file_path, str import_path) str {
   ret _convert_dotted_path(root_opt.unwrap(), remaining);
 }
 
-// Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
+// Resolves one `use`-statement's dotted `path` to an actual `.fn` file
 // path. A `std.`-prefixed path resolves against the stdlib root, a
 // `deps.`-prefixed path against that dependency's own fetched root
 // (see `_resolve_deps_path`), neither relative to the importing file so
@@ -234,7 +234,7 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 }
 
 // Recursively resolves, parses, and merges `entry_path` and every file it
-// (transitively) `imp`s into one `Vec<Node>`. An aliased import is
+// (transitively) `use`s into one `Vec<Node>`. An aliased import is
 // traversed like an unaliased one; each file is parsed at most once
 // (tracked by resolved path in a `Set<str>`), so a diamond or cyclic
 // import terminates instead of looping or duplicating declarations.
@@ -573,7 +573,7 @@ fun _preload_claim(PreloadShared* shared, str path) {
 }
 
 // Reads (or takes the given `source` for) and lexes `path`, parses just
-// its `imp` statements to discover the import graph accurately (via the
+// its `use` statements to discover the import graph accurately (via the
 // real `Parser.parse_import`, since a full `Parser.parse()` needs
 // `is_known_compound_symbol` to already know about not-yet-visited
 // files, the circularity this whole pass exists to avoid), claiming and

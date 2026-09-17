@@ -6,7 +6,7 @@
 // you typically *use the names directly* after importing this module.
 // 
 // Import:
-// - `imp std.c.def;`
+// - `use std.c.def;`
 // 
 // Common typedef names (all treated as numeric-compatible in Fun, except
 // `max_align_t` which is an opaque named type)

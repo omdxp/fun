@@ -17,7 +17,7 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 
 **Type a real keyword to write its whole shape** — accepting `fun` writes a full declaration with the places to fill marked, not just the bare word:
 
-`fun`, `compound`, `enum`, `quirk`, `impl`, `als`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `imp`, `use`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
+`fun`, `compound`, `enum`, `quirk`, `impl`, `als`, `fit`, `if`, `elif`, `else`, `for`, `test`, `fuzz`, `asm`, `use`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
 
 **Short triggers for a common multi-line shape**, offered alongside ordinary completions:
 
@@ -104,7 +104,7 @@ Every `fuzz "..."` block gets a **▶ Fuzz** button, which runs that one target 
 Breakpoints are set directly on `.fn` source lines. When a breakpoint is hit:
 
 - **Call stack** shows Fun function names and `.fn` file/line numbers.
-- **Variables panel** shows variable names from your Fun code with Fun type names (`num`, `str`, `bin`, `dec`, `raw*`, etc.) instead of C equivalents.
+- **Variables panel** shows variable names from your Fun code with Fun type names (`num`, `str`, `flag`, `dec`, `raw*`, etc.) instead of C equivalents.
 - **Watch** and **Debug Console** expressions also display Fun types.
 - Internal C boilerplate frames (e.g. async helpers) are marked as secondary and collapsed by default.
 

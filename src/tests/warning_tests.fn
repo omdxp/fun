@@ -365,7 +365,7 @@ test "a fit over a propagated field access is checked too" {
   // propagated operand either. Found reviewing symbols.fn's own
   // `fit covering_fit(...)?.kind { ... }`, whose missing `_ ->` arms
   // would otherwise never have been checked at all.
-  str src = `imp std.option;
+  str src = `use std.option;
   `enum Shape { Circle, Square }
   `compound Box { Shape kind; }
   `fun get() Option<Box*> { ret .None; }
@@ -401,7 +401,7 @@ test "a fit missing several variants names every one of them, not just the first
 }
 
 test "a fit over num or a pointer with no catch-all is noticed" {
-  // Neither has a closed value set the way bin/enum do, so a catch-all
+  // Neither has a closed value set the way flag/enum do, so a catch-all
   // is the only way to be exhaustive.
   str num_src = `fun main() num {
   `  num x = 1;
@@ -412,7 +412,7 @@ test "a fit over num or a pointer with no catch-all is noticed" {
   `}`;
   assert contains(notice(num_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for num";
 
-  str ptr_src = `imp std.c.mem;
+  str ptr_src = `use std.c.mem;
   `fun main() num {
   `  raw* p = malloc(1);
   `  fit p {
@@ -454,12 +454,12 @@ test "a fit over chr, str, or dec with no catch-all is noticed too, not just num
   assert contains(notice(dec_src, false), "fit_non_exhaustive"), "expected the missing catch-all noticed for dec";
 }
 
-test "a fit over bin with both true and false covered is not double-flagged by the catch-all check" {
-  // bin's own exhaustiveness is already decided by the truths counter
-  // above this check; bin falls through to here too once it passes
+test "a fit over flag with both true and false covered is not double-flagged by the catch-all check" {
+  // flag's own exhaustiveness is already decided by the truths counter
+  // above this check; flag falls through to here too once it passes
   // (it names no enum), so the catch-all check must not re-flag it.
   str src = `fun main() num {
-  `  bin b = true;
+  `  flag b = true;
   `  fit b {
   `    true -> { ret 1; }
   `    false -> { ret 0; }
@@ -468,9 +468,9 @@ test "a fit over bin with both true and false covered is not double-flagged by t
   assert !contains(notice(src, false), "fit_non_exhaustive"), "expected no warning when both truth values are covered";
 }
 
-test "a fit over bin with a catch-all after both truth values are already covered is noticed" {
+test "a fit over flag with a catch-all after both truth values are already covered is noticed" {
   str src = `fun main() num {
-  `  bin b = true;
+  `  flag b = true;
   `  fit b {
   `    true -> { ret 1; }
   `    false -> { ret 0; }
@@ -636,7 +636,7 @@ test "an unmet expect reports its own position, not the top of the file, and is 
 }
 
 test "a missing_return warning reports the function's own declaration line, not the top of the file" {
-  str src = `imp std.io;
+  str src = `use std.io;
   `
   `fun main() num {
   `  println("hi");

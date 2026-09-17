@@ -270,7 +270,7 @@ test "reports an error on a missing semicolon without crashing" {
 }
 
 test "reports an error on a malformed dot without crashing" {
-  str src = `imp std.;
+  str src = `use std.;
   `fun main() {
   `  ret;
   `}`;
@@ -447,7 +447,7 @@ test "peeking stays correct as the token cursor moves" {
 // wall-clock timing comparison, which is too noisy to assert on here.
 
 test "top-level declarations are found by where they start and end" {
-  str src = `imp std.io;
+  str src = `use std.io;
   `
   `// A holder.
   `compound Box {

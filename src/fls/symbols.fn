@@ -226,7 +226,7 @@ fun _base_type_name(DataType* dt) str {
 
 // A module-alias-qualified type's own internal name, written the way a
 // reader wrote it rather than the mangled form the parser keeps
-// internally for symbol lookup (`imp std.log as l;` then `l.Logger`
+// internally for symbol lookup (`use std.log as l;` then `l.Logger`
 // parses `type_str` to "l__Logger" - parser.fn's own
 // `parse_datatype`). Left alone for a generic instantiation's own
 // mangled name (`Vec__num`, `Box__Node_ptr1`), whose first segment is

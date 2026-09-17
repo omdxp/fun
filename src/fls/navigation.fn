@@ -194,7 +194,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   let declared = resolve_at(cache, doc, &tokens, t, line);
   if declared.is_none() {
     // Not a declared symbol at all, but it may still be an import
-    // alias (`imp std.c.math as cmath;`) used at a call site
+    // alias (`use std.c.math as cmath;`) used at a call site
     // (`cmath.sqrt(...)`) rather than in the import statement itself,
     // the only other shape `import_target` above doesn't already
     // cover, since the cursor here isn't on the import path.
@@ -256,7 +256,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   if equals(d.pos.filename, doc.path) {
     source_text = doc.text;
   } elif !equals(d.pos.filename, "") {
-    // A symbol declared in another file (reached through an `imp`)
+    // A symbol declared in another file (reached through a `use`)
     // needs that file's own text, not the current document's, since
     // its doc comment sits above the declaration wherever that file
     // actually lives, not at the same line number here. Read fresh
@@ -444,7 +444,7 @@ pub fun definition_workspace_wide(
 // method answers with, pointing at `d`'s own declaration. `doc` is the
 // document the request was made against, reused directly when `d`
 // turns out to sit in that same file; a declaration reached through an
-// `imp` needs that other file's own text read fresh, the same
+// `use` needs that other file's own text read fresh, the same
 // same-file-or-read pattern `hover()` uses for a doc comment.
 fun _location_result(Document doc, Declaration d) str {
   if equals(d.pos.filename, "") {
@@ -1146,7 +1146,7 @@ fun _import_hover_result(str target, Span s) str {
 }
 
 // `as` reads two different ways depending on the statement it sits
-// in: naming an import alias (`imp mod as alias;`) or naming the
+// in: naming an import alias (`use mod as alias;`) or naming the
 // quirk an impl block implements (`impl Type as Quirk { ... }`).
 // Told apart by walking back from `t` past the identifiers and dots
 // that make up whatever comes before it, to the keyword that started
@@ -1157,7 +1157,7 @@ fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
     `Names the quirk an impl block implements for a type.`
   );
   str import_doc = _doc(
-    `imp module.path as alias;`,
+    `use module.path as alias;`,
     `Binds an import to a different name, reached afterward as
     `alias.name instead of the module's own leading segment.`
   );

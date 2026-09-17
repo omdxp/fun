@@ -69,7 +69,7 @@ pub fun top_level_ranges(Vec<Token>* tokens) Vec<DeclRange> {
         started = _back_over_trivia(tokens, i);
         inside = true;
       } elif inside && token_is_symbol(t, ';') && _ends_without_brace(tokens, started, i) {
-        // One with no body of its own, an `imp` line or a bare binding,
+        // One with no body of its own, a `use` line or a bare binding,
         // ends at its semicolon.
         _push_range(&out, tokens, started, i + 1);
         inside = false;
@@ -185,7 +185,7 @@ fun _starts_declaration(Token t) flag {
   fit t.data {
     .Sval(word) -> {
       fit word {
-        "imp", "use", "pub", "fun", "async", "compound", "enum", "quirk", "impl", "const", "test",
+        "use", "pub", "fun", "async", "compound", "enum", "quirk", "impl", "const", "test",
         "fuzz" -> { ret true; }
         _ -> { ret false; }
       }

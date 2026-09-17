@@ -40,7 +40,7 @@ fun main() {
   printf("sizeof(num)     = %d\n", sizeof(num));
   printf("sizeof(dec)     = %d\n", sizeof(dec));
   printf("sizeof(str)     = %d\n", sizeof(str));
-  printf("sizeof(bin)     = %d\n", sizeof(flag));
+  printf("sizeof(flag)    = %d\n", sizeof(flag));
   printf("sizeof(chr)     = %d\n", sizeof(chr));
 
   // Custom types.

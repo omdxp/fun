@@ -1370,15 +1370,34 @@ fun _fun_format_specs(str fmt) Vec<str> {
       i = i + 2;
       continue;
     }
-    if i + 4 < n && fmt[i + 4] == '}' {
-      str word = substr(fmt, i + 1, 3);
+    // The placeholder word's own length varies (`flag` is 4 chars,
+    // every other one is 3), so the closing `}` is found by scanning
+    // forward within a short bound rather than assumed at a fixed
+    // offset.
+    num close = -1;
+    num max_word_len = 5;
+    num limit = i + 1 + max_word_len;
+    if limit > n {
+      limit = n;
+    }
+    num j = i + 1;
+    for j < limit {
+      if fmt[j] == '}' {
+        close = j;
+        break;
+      }
+      j = j + 1;
+    }
+    if close > 0 {
+      str word = substr(fmt, i + 1, close - i - 1);
       if equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
-        equals(word, "bin") || equals(word, "chr") || equals(word, "ptr") ||
+        equals(word, "flag") || equals(word, "chr") || equals(word, "ptr") ||
         equals(word, "raw") {
         out.push(word);
-        i = i + 5;
+        i = close + 1;
         continue;
       }
+      free(word);
     }
     i = i + 1;
   }
@@ -1473,7 +1492,7 @@ fun _data_type_for(str want_name) DataTypeType {
   if equals(want_name, "dec") {
     ret .Dec;
   }
-  if equals(want_name, "bin") {
+  if equals(want_name, "flag") {
     ret .Bin;
   }
   ret .Chr;
@@ -2437,7 +2456,7 @@ impl Checker {
         continue;
       }
       // A C-style `%d`/`%x`/... conversion is written for any
-      // integral value in ordinary C code, `bin` included (`0`/`1`,
+      // integral value in ordinary C code, `flag` included (`0`/`1`,
       // as idiomatic there as it is unusual in Fun's own type
       // discipline) - widened here, and only here: `{num}`, Fun's
       // own explicit placeholder spelling, still means exactly num.
@@ -2736,7 +2755,7 @@ impl Checker {
     if is_unknown(t) || t.base == .Bin {
       ret;
     }
-    self.fail(format("a condition expects bin, found {str}", type_name(t)), condition);
+    self.fail(format("a condition expects flag, found {str}", type_name(t)), condition);
   }
 
   // Walks an expression written as a statement, for the checks made

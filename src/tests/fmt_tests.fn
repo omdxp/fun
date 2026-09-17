@@ -105,9 +105,9 @@ test "formats pointer and address-of spacing" {
 
 test "groups imports and globals at top" {
   str src = `fun main() num{ret 0;}
-  `imp std.c.io;
+  `use std.c.io;
   `num x=1;
-  `imp foo.bar;
+  `use foo.bar;
   `num y=2;`;
   str want = `use std.c.io;
   `use foo.bar;
@@ -124,7 +124,7 @@ test "groups imports and globals at top" {
 
 test "keeps unused warning controls attached to grouped imports and globals" {
   str src = `allow unused_import, "keep attached";
-  `imp std.option;
+  `use std.option;
   `allow unused_variable, "keep attached";
   `num value=1;
   `fun main(){}`;
@@ -141,10 +141,10 @@ test "keeps unused warning controls attached to grouped imports and globals" {
 }
 
 test "formats parent traversal imports" {
-  str src = `imp std.c.io;
-  `imp .. defs.user;
-  `imp ..  defs.greeter;
-  `imp .... defs.greeter;
+  str src = `use std.c.io;
+  `use .. defs.user;
+  `use ..  defs.greeter;
+  `use .... defs.greeter;
   `fun main() void{ }`;
   str want = `use std.c.io;
   `use ..defs.user;
@@ -285,7 +285,7 @@ test "keeps space after ret before unary reference" {
 }
 
 test "keeps space before unary minus after comparisons" {
-  str src = `fun f(num x) bin{if x<=-1000000000{ret true;}ret false;}`;
+  str src = `fun f(num x) flag{if x<=-1000000000{ret true;}ret false;}`;
   str want = `fun f(num x) flag {
   `  if x <= -1000000000 {
   `    ret true;
@@ -308,7 +308,7 @@ test "reports the stage that rejected the input" {
 }
 
 test "wraps an over-long fit arm's own conditions, filling each line rather than one per line" {
-  str src = `fun classify(str text) bin {
+  str src = `fun classify(str text) flag {
   `  fit text {
   `    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
   `      ret true;
@@ -327,7 +327,7 @@ test "wraps an over-long fit arm's own conditions, filling each line rather than
 }
 
 test "a fit arm's own conditions that already fit stay on one line" {
-  str src = `fun classify(str text) bin {
+  str src = `fun classify(str text) flag {
   `  fit text {
   `    "fun", "enum" -> { ret true; }
   `    _ -> { ret false; }
@@ -360,7 +360,7 @@ test "an over-long fit arm still wraps after an earlier arm's own body collapsed
 }
 
 test "wraps an over-long boolean chain, filling each line rather than one operand per line" {
-  str src = `fun is_typed(chr a, chr b2, chr d) bin {
+  str src = `fun is_typed(chr a, chr b2, chr d) flag {
   `  ret (a == 's' && b2 == 't' && d == 'r') || (a == 'n' && b2 == 'u' && d == 'm') || (a == 'd' && b2 == 'e' && d == 'c') || (a == 'b' && b2 == 'i' && d == 'n') || (a == 'c' && b2 == 'h' && d == 'r');
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -388,7 +388,7 @@ test "wraps an over-long boolean chain, filling each line rather than one operan
 }
 
 test "a boolean chain that already fits stays on one line" {
-  str src = `fun f(bin a, bin b) bin {
+  str src = `fun f(flag a, flag b) flag {
   `  ret a || b;
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -399,7 +399,7 @@ test "a boolean chain nested inside a call's own parens defers to the call's own
   // The chain itself sits inside an already-open paren (the call), so
   // it must not force its own extra continuation indent on top of
   // whatever the call's own argument wrapping already does.
-  str src = `fun f(bin a, bin b, bin c, bin d, bin e, bin g, bin h, bin j, bin k, bin l) bin {
+  str src = `fun f(flag a, flag b, flag c, flag d, flag e, flag g, flag h, flag j, flag k, flag l) flag {
   `  ret takes(a == true && b == true && c == true && d == true && e == true && g == true && h == true, j, k, l);
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -412,7 +412,7 @@ test "a wrapped chain followed by an already-multi-line nested call keeps the ca
   // own arguments were already written across multiple lines, pushing
   // its closing paren one level too deep instead of back to the
   // statement's own indent.
-  str src = `fun f(bin a, bin b) bin {
+  str src = `fun f(flag a, flag b) flag {
   `  if a == true && b == true && a == true && b == true && a == true && b == true || takes(
   `    a,
   `    b
@@ -430,9 +430,9 @@ test "postfix '++'/'--'/'?'/'!' stay glued to their own operand, not spaced like
   // every one of these (already true for `++`/`--`, before `?`/`!`
   // existed to expose it) formatted with a wrong leading space
   // (`x ++`), as if postfix were a binary operator.
-  str src = `imp std.c.io;
-  `imp std.option;
-  `imp std.result;
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
   `fun half(num x) Option<num> { ret .Some(x); }
   `fun to_result(num x) Result<num, str> { ret .Ok(x); }
   `fun main() num {
@@ -453,7 +453,7 @@ test "postfix '++'/'--'/'?'/'!' stay glued to their own operand, not spaced like
 }
 
 test "prefix '!' still keeps its own leading space, unaffected by the postfix fix" {
-  str src = `fun test_not(bin a, bin b) bin {
+  str src = `fun test_not(flag a, flag b) flag {
   `  ret !a && !b;
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -468,15 +468,15 @@ test "a postfix '?'/'!' followed by another unary-capable operator ('*') stays a
   // '*' already gets right after a closing ')'/']' or an identifier.
   // '!' is resolved by looking one token further back, since it shares
   // its text with prefix logical-NOT ('!*x', not '! *x').
-  str src = `imp std.option;
-  `imp std.result;
+  str src = `use std.option;
+  `use std.result;
   `fun half(num x) Option<num> { ret .Some(x); }
   `fun to_result(num x) Result<num, str> { ret .Ok(x); }
   `fun main() num {
   `  num a = half(1)? * 2;
   `  num b = to_result(1)! * 2;
-  `  bin p = !*nil;
-  `  bin q = !!true;
+  `  flag p = !*nil;
+  `  flag q = !!true;
   `  ret 0;
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -494,8 +494,8 @@ test "a postfix '?'/'!' followed by a chained field access stays glued, not spac
   // same spacing an ordinary binary operator gets before a value. '!'
   // is resolved the same postfix-vs-prefix way the two regressions
   // above already do, one token further back.
-  str src = `imp std.option;
-  `imp std.result;
+  str src = `use std.option;
+  `use std.result;
   `compound Point { num x; }
   `fun half(num x) Option<Point> { ret .None; }
   `fun to_result(num x) Result<Point, str> { ret .Err("e"); }
@@ -509,23 +509,6 @@ test "a postfix '?'/'!' followed by a chained field access stays glued, not spac
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "half(1)?.x;"), "expected postfix '?' before '.field' to stay glued, no space";
   assert contains(got, "to_result(1)!.x;"), "expected postfix '!' before '.field' to stay glued, no space";
-}
-
-test "'imp'/'bin' format forward to the current canonical spelling 'use'/'flag'" {
-  str src = `imp std.c.io;
-  `
-  `fun main() num {
-  `  bin ok = true;
-  `  if ok {
-  `    printf("ok\n");
-  `  }
-  `  ret 0;
-  `}`;
-  str got = format_source(src, "t.fn").unwrap();
-  assert contains(got, "use std.c.io;"), "expected 'imp' to format forward to the canonical 'use'";
-  assert !contains(got, "imp std.c.io;"), "expected no trace of the alternate spelling after formatting";
-  assert contains(got, "flag ok = true;"), "expected 'bin' to format forward to the canonical 'flag'";
-  assert !contains(got, "bin ok"), "expected no trace of the alternate spelling after formatting";
 }
 
 test "a tuple type binds tight in a declaration, a return type, and a generic argument" {

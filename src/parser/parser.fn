@@ -957,7 +957,7 @@ impl ParseState {
     }
     dt.type_str = name;
 
-    // Qualified user-defined types via module alias (`imp mod as m; m.Type`).
+    // Qualified user-defined types via module alias (`use mod as m; m.Type`).
     // Mangled internally as `a__b` to match symbol/type naming.
     if dt_token.type == .Identifier {
       for self.next_token_is_operator(".") || self.next_token_is_symbol('.') {
@@ -6366,15 +6366,15 @@ impl Parser {
     ret after.unwrap().type == .Identifier || token_is_operator(after.unwrap(), "(");
   }
 
-  // Parses `imp path;` or `imp path as alias;`, including parent-
-  // traversal path segments (`imp ..defs.user;`, `imp ...deep.thing;`).
+  // Parses `use path;` or `use path as alias;`, including parent-
+  // traversal path segments (`use ..defs.user;`, `use ...deep.thing;`).
   // Each pair of leading dots means "go up one directory"; `leading_dots`
   // sums the length of every leading all-dot operator token, so this
   // works whether the lexer handed back `..` as one token or `.` `.` as
   // two. The path and alias are recorded on the `Import` node but not
   // resolved; `import_resolver.fn` does that.
   pub parse_import() Option<ParseErrorKind> {
-    let imp_tok = self.state.token_next(); // consume 'imp'
+    let use_tok = self.state.token_next(); // consume 'use'
 
     num leading_dots = 0;
     for true {
@@ -6472,7 +6472,7 @@ impl Parser {
     imp_node_data.has_alias = has_alias;
 
     Node node = node_new(.Import(imp_node_data));
-    fit imp_tok {
+    fit use_tok {
       .Some(t) -> {
         node.pos = t.pos;
         node.has_pos = true;
@@ -7525,7 +7525,7 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `imp`, `test`, `compound`, `enum`, `quirk`,
+  // Parses one top-level item: `use`, `test`, `compound`, `enum`, `quirk`,
   // `impl`, `pub`/`async fun`/`fun`, or a bare-datatype-keyword global
   // variable (`num x = 5;`). Anything `parse_statement` already
   // understands is delegated there directly, so a bare top-level
@@ -7960,12 +7960,12 @@ test "parse_datatype reads a function-type parameter with two params and a retur
 }
 
 test "parse_datatype reads a zero-arg function-type parameter" {
-  ParseState st = _state_from("fun() bin");
+  ParseState st = _state_from("fun() flag");
   DataType dt = dtype_new();
-  assert st.parse_datatype(&dt).is_none(), "expected 'fun() bin' to parse";
+  assert st.parse_datatype(&dt).is_none(), "expected 'fun() flag' to parse";
   assert dt.has_fn_sig, "expected has_fn_sig set";
   assert dt.fn_sig.params.len == 0, "expected no params";
-  assert dt.fn_sig.rtype.kind == .Bin, "expected the return type bin";
+  assert dt.fn_sig.rtype.kind == .Bin, "expected the return type flag";
 }
 
 test "parse_datatype defaults an omitted function-type return type to void" {
@@ -8838,15 +8838,15 @@ test "parse_expressionable_root parses 'sizeof(Type)' as an ordinary call" {
   }
 }
 
-test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword operand" {
+test "parse_expressionable_root parses 'sizeof(flag)' with a builtin type keyword operand" {
   // Unlike a custom type name (`sizeof(Point)`, an ordinary `.Identifier`
   // token, handled by `is_sizeof_type_operand`), a builtin scalar type
-  // name (`bin`/`num`/`str`/...) lexes as a `.Keyword` token, which
+  // name (`flag`/`num`/`str`/...) lexes as a `.Keyword` token, which
   // `parse_expressionable_single` handles as a primary-expression case
   // alongside `nil`/`panic`/`await`.
-  ParseState st = _state_from("sizeof(bin)");
+  ParseState st = _state_from("sizeof(flag)");
   Parser p = parser_new(&st);
-  assert p.parse_expressionable_root().is_none(), "expected 'sizeof(bin)' to parse";
+  assert p.parse_expressionable_root().is_none(), "expected 'sizeof(flag)' to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Expression(e) -> {
@@ -8859,9 +8859,9 @@ test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword
         .ExpressionParenthesis(inner) -> {
           fit inner.kind {
             .Identifier(s2) -> {
-              assert equals(s2, "flag"), "expected the operand 'bin' folded into a plain Identifier node, canonicalized to 'flag'";
+              assert equals(s2, "flag"), "expected the operand 'flag' folded into a plain Identifier node";
             }
-            _ -> { panic("expected Identifier 'bin'"); }
+            _ -> { panic("expected Identifier 'flag'"); }
           }
         }
         _ -> { panic("expected a parenthesized argument"); }
@@ -8872,11 +8872,11 @@ test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword
 }
 
 test "parse_expressionable_root rejects a bare builtin type keyword outside of sizeof(...)" {
-  // The sizeof-operand case stays scoped to that one context: 'bin' on its
+  // The sizeof-operand case stays scoped to that one context: 'flag' on its
   // own still isn't a value expression.
-  ParseState st = _state_from("bin");
+  ParseState st = _state_from("flag");
   Parser p = parser_new(&st);
-  assert p.parse_expressionable_root().is_some(), "expected a bare 'bin' outside sizeof(...) to still be rejected";
+  assert p.parse_expressionable_root().is_some(), "expected a bare 'flag' outside sizeof(...) to still be rejected";
 }
 
 test "parse_expressionable_root rejects two adjacent string literals with no operator between them" {
@@ -9510,13 +9510,13 @@ test "parse_body parses a bare-datatype-keyword variable declaration (no 'let')"
 test "parse_statement dispatches a bare-datatype-keyword declaration" {
   Vec<str> names;
   names.init(0);
-  ParseState st = _state_with_declared("bin done = false;", names);
+  ParseState st = _state_with_declared("flag done = false;", names);
   Parser p = parser_new(&st);
-  assert p.parse_statement().is_none(), "expected 'bin done = false;' to parse as a statement";
+  assert p.parse_statement().is_none(), "expected 'flag done = false;' to parse as a statement";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Variable(v) -> {
-      assert equals(v.var_type.type_str, "flag"), "expected an explicit 'bin'/'flag' type, canonicalized";
+      assert equals(v.var_type.type_str, "flag"), "expected an explicit 'flag' type";
     }
     _ -> { panic("expected a Variable statement"); }
   }
@@ -10503,9 +10503,9 @@ test "parse stops cleanly at end of input" {
 }
 
 test "parse_import parses a simple dotted path with no alias" {
-  ParseState st = _state_from("imp std.io;");
+  ParseState st = _state_from("use std.io;");
   Parser p = parser_new(&st);
-  assert p.parse_import().is_none(), "expected 'imp std.io;' to parse";
+  assert p.parse_import().is_none(), "expected 'use std.io;' to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Import(impn) -> {
@@ -10517,9 +10517,9 @@ test "parse_import parses a simple dotted path with no alias" {
 }
 
 test "parse_import parses an alias" {
-  ParseState st = _state_from("imp std.io as io;");
+  ParseState st = _state_from("use std.io as io;");
   Parser p = parser_new(&st);
-  assert p.parse_import().is_none(), "expected 'imp std.io as io;' to parse";
+  assert p.parse_import().is_none(), "expected 'use std.io as io;' to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Import(impn) -> {
@@ -10532,9 +10532,9 @@ test "parse_import parses an alias" {
 }
 
 test "parse_import parses leading '..' parent-traversal segments" {
-  ParseState st = _state_from("imp ..lexer.token;");
+  ParseState st = _state_from("use ..lexer.token;");
   Parser p = parser_new(&st);
-  assert p.parse_import().is_none(), "expected 'imp ..lexer.token;' to parse";
+  assert p.parse_import().is_none(), "expected 'use ..lexer.token;' to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Import(impn) -> {
@@ -10545,7 +10545,7 @@ test "parse_import parses leading '..' parent-traversal segments" {
 }
 
 test "parse_import rejects an odd number of leading dots" {
-  ParseState st = _state_from("imp .lexer.token;");
+  ParseState st = _state_from("use .lexer.token;");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_import();
@@ -10553,7 +10553,7 @@ test "parse_import rejects an odd number of leading dots" {
 }
 
 test "parse parses an import at the top level" {
-  ParseState st = _state_from("imp std.vec; fun main() num { ret 0; }");
+  ParseState st = _state_from("use std.vec; fun main() num { ret 0; }");
   Parser p = parser_new(&st);
   assert p.parse().is_none(), "expected the whole file to parse";
   assert st.nodes.len == 2, "expected 2 top-level nodes";
@@ -11507,7 +11507,7 @@ test "parse_top_level_declaration dispatches 'compound' and 'enum'" {
 }
 
 test "parse_quirk parses method signatures with args and return types" {
-  ParseState st = _state_from("quirk Sized { len() num; is_empty() bin; }");
+  ParseState st = _state_from("quirk Sized { len() num; is_empty() flag; }");
   Parser p = parser_new(&st);
   assert p.parse_quirk(true).is_none(), "expected the quirk to parse";
   let top = st.nodes.get(st.nodes.len - 1);
@@ -11523,7 +11523,7 @@ test "parse_quirk parses method signatures with args and return types" {
       assert m0.args.len == 0, "expected 'len' to take no args";
       let m1 = q.methods.get(1);
       assert equals(m1.name, "is_empty"), "expected second method 'is_empty'";
-      assert equals(m1.rtype.type_str, "flag"), "expected 'is_empty' to return 'bin', canonicalized to 'flag'";
+      assert equals(m1.rtype.type_str, "flag"), "expected 'is_empty' to return 'flag'";
     }
     _ -> { panic("expected a Quirk node"); }
   }
@@ -11932,11 +11932,7 @@ test "parse_fit_statement names the reserved word when a destructuring binding c
   Vec<str> names;
   names.init(0);
   names.push("x");
-  // 'imp' is still valid input (an accepted alternate spelling of 'use'),
-  // so the diagnostic below names the canonicalized token text - what the
-  // token actually carries by this point, same as every other keyword
-  // use - not the literal characters typed.
-  ParseState st = _state_with_declared("fit x { .Circle(imp) -> { } }", names);
+  ParseState st = _state_with_declared("fit x { .Circle(use) -> { } }", names);
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_fit_statement();

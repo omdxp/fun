@@ -645,7 +645,7 @@ test "a constrained compound accepts only the instantiations it lists" {
     `  T val;
     `}
     `fun main() {
-    `  Box<bin> b = Box<bin>{val = true};
+    `  Box<flag> b = Box<flag>{val = true};
     `}`,
     "expected the unlisted instantiation to be rejected"
   );
@@ -1341,7 +1341,7 @@ test "format()'s own {type} placeholders are checked against the arguments passe
   );
 }
 
-test "printf's own %-specifiers are checked against the arguments passed, bin widened to num" {
+test "printf's own %-specifiers are checked against the arguments passed, flag widened to num" {
   rejects(
     `pub fun printf(str fmt, ...) num;
     `fun main() num {
@@ -1353,11 +1353,11 @@ test "printf's own %-specifiers are checked against the arguments passed, bin wi
   accepts(
     `pub fun printf(str fmt, ...) num;
     `fun main() num {
-    `  bin ok = true;
+    `  flag ok = true;
     `  printf("%d\n", ok);
     `  ret 0;
     `}`,
-    "expected a bin argument accepted against %d, idiomatic C usage"
+    "expected a flag argument accepted against %d, idiomatic C usage"
   );
   accepts(
     `pub fun printf(str fmt, ...) num;
@@ -1606,8 +1606,8 @@ test "postfix '!' with a mismatched error type is rejected" {
 test "prefix '!' on a bool is unaffected by postfix '?'/'!' handling" {
   accepts(
     `fun main() {
-    `  bin b = true;
-    `  bin out = !b;
+    `  flag b = true;
+    `  flag out = !b;
     `  _ = out;
     `}`,
     "expected prefix logical-NOT on a bool to still typecheck"
