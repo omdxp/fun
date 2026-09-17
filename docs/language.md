@@ -967,6 +967,15 @@ fun main() {
   signatures; C provides the implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from
   `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
+- **C's own reserved words** (`do`, `int`, `for`, `void`, ...) can't
+  name a plain top-level function, a function parameter, or a `let`/
+  `const`/global variable - none of these are reserved in Fun itself,
+  but each is emitted to C verbatim, so a collision would fail C
+  compilation rather than Fun's own. Caught at parse time with a clear
+  error instead. A generic function's own name is exempt: it always
+  monomorphizes with its concrete type arguments (`double<T>` becomes
+  `double__num`, `double__dec`, ...), so it never actually reaches C
+  bare - `fun double<T: num | dec>(T x) T { ret x + x; }` is fine.
 
 See Platforms & Compilers for C compiler selection and per-platform
 behavior.
