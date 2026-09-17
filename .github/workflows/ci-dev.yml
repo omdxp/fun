@@ -51,9 +51,16 @@ jobs:
           # under this checkout's own fun-out/bin/, separate from
           # wherever setup-fun installed bare `fun` on PATH.
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            # On Windows specifically, from a copy of the previous
+            # stage's binary rather than the file in place - Windows
+            # won't let a running .exe overwrite its own file (unlike
+            # POSIX), so building from a copy elsewhere leaves the
+            # in-place path free for the new stage's own output.
             FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build
-            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun.exe build
-            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun.exe build
+            cp fun-out/bin/fun.exe stage1-fun.exe
+            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage1-fun.exe build
+            cp fun-out/bin/fun.exe stage2-fun.exe
+            FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage2-fun.exe build
           else
             FUN_STDLIB_DIR="$PWD/stdlib" fun build
             FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
