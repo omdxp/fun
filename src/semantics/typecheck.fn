@@ -2940,10 +2940,6 @@ impl Checker {
         }
         self.check_statement(c.body, env);
       }
-      .Range(r) -> {
-        env.define(r.index_name, checked_of(.Num));
-        self.check_statement(r.body, env);
-      }
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
         if it.item_is_destructure {
@@ -2997,6 +2993,15 @@ impl Checker {
           // value types, not an always-num index.
           env.define(it.index_name, iterable_type.generic_args.get(0));
           env.define(it.item_name, iterable_type.generic_args.get(1));
+        } elif equals(iterable_type.name, "Range") {
+          // `for i : a..b`: the parser desugars this into an ordinary
+          // `.Iter` loop over a constructed `Range` value (see
+          // `_parse_for_range_or_iter`); `i` is always `.Num`, matching
+          // the dedicated `.Range` typing this replaces. A real general
+          // `Iterator<T>` element-type resolution (working the same way
+          // for Range as for any other implementor, not a name check
+          // like this one) is planned as a follow-up.
+          env.define(it.item_name, checked_of(.Num));
         } else {
           // What the loop walks holds values of a type the checker
           // does not model yet.

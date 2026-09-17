@@ -5,14 +5,30 @@ use harness;
 use std.string;
 
 test "for range transpiles" {
+  // `transpile_source` doesn't resolve imports, so `Range`'s own
+  // `Iterator<num>` impl is inlined here rather than imported.
   str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Range { num start; num end; }
+  `impl Range as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.start >= self.end { ret Option.None; }
+  `    num v = self.start;
+  `    self.start = self.start + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
   `fun main() {
   `  for i : 0..3 {
   `    printf("%d\n", i);
   `  }
   `}`;
   let out = emit_c(src, "for range transpiles");
-  assert contains(out, "for (int64_t i = 0; i < 3; i++)"), "expected an indexed C for over the range";
+  // Desugars into a Range value driven through the general Iterator
+  // inlining mechanism, not a hand-written tight C for of its own.
+  assert contains(out, "Range"), "expected a real Range value to back the loop";
+  assert contains(out, "__fun_iter_local"), "expected Range's own next() to be inlined, not called";
 }
 
 test "for array item transpiles" {

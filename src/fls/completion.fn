@@ -2794,10 +2794,6 @@ fun _collect_locals(
     // `_lookup_in_body`, whose `.StatementFor` case this mirrors.
     .StatementFor(fk) -> {
       fit fk {
-        .Range(fr) -> {
-          items.push(_item(fr.index_name, .Variable, "num"));
-          _collect_locals(tokens, fr.body, items, program, file, line);
-        }
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";

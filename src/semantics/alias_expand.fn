@@ -390,7 +390,6 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
     .StatementFor(kind) -> {
       fit kind {
         .Cond(c) -> { _expand_body(c.body, resolved, unused); }
-        .Range(r) -> { _expand_body(r.body, resolved, unused); }
         .Iter(it) -> { _expand_body(it.body, resolved, unused); }
       }
     }

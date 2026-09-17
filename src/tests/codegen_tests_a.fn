@@ -57,7 +57,21 @@ test "defer inside fit branch runs only for matched branch" {
 }
 
 test "defer in range loop runs at each iteration end" {
+  // `transpile_source` doesn't resolve imports, so `Range`'s own
+  // `Iterator<num>` impl is inlined here rather than imported - see
+  // codegen_tests_c.fn's user-Iterator test for the same pattern.
   str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Range { num start; num end; }
+  `impl Range as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.start >= self.end { ret Option.None; }
+  `    num v = self.start;
+  `    self.start = self.start + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
   `fun logLine(str msg) { printf("%s\n", msg); }
   `fun main() num {
   `  for i : 0..3 {
@@ -67,7 +81,6 @@ test "defer in range loop runs at each iteration end" {
   `  ret 0;
   `}`;
   let out = emit_c(src, "defer in range loop runs at each iteration end");
-  assert contains(out, "i < 3"), "expected the range bound";
   assert contains(out, "logLine(\"defer iter\")"), "expected the loop-body defer to be emitted";
 }
 

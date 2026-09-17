@@ -535,7 +535,20 @@ test "P4: multi-dimensional array indexing (2D/3D) type-checks" {
 test "P3: float literals and the range operator coexist" {
   // A trailing dot is a decimal, but a doubled one is the range
   // operator and its first dot must not be eaten by the number.
+  // `transpile_source` doesn't resolve imports, so `Range`'s own
+  // `Iterator<num>` impl is inlined here rather than imported.
   str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Range { num start; num end; }
+  `impl Range as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.start >= self.end { ret Option.None; }
+  `    num v = self.start;
+  `    self.start = self.start + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
   `fun main() num {
   `  dec a = 1e1;
   `  dec b = 1.5e-1;
@@ -553,7 +566,7 @@ test "P3: float literals and the range operator coexist" {
   assert contains(out, "0.15"), "expected a negative exponent folded";
   assert contains(out, "20"), "expected an explicitly positive exponent folded";
   assert contains(out, "1.0"), "expected a trailing dot to read as a decimal";
-  assert contains(out, "i < 3"), "expected the range operator to survive beside them";
+  assert contains(out, "Range"), "expected the range operator to survive beside them, parsed into a real Range";
 }
 
 test "P3: comparison operators do not maximal-munch a following minus" {

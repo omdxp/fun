@@ -260,10 +260,6 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
           }
           _collect_reads_excluding_declarations(c.body, out);
         }
-        .Range(r) -> {
-          _collect_reads(r.range_expr, out);
-          _collect_reads_excluding_declarations(r.body, out);
-        }
         .Iter(it) -> {
           _collect_reads(it.iterable, out);
           _collect_reads_excluding_declarations(it.body, out);
@@ -682,7 +678,6 @@ fun _writes_through(Node* body, str param) flag {
     .StatementFor(kind) -> {
       fit kind {
         .Cond(c) -> { ret _writes_through(c.body, param); }
-        .Range(r) -> { ret _writes_through(r.body, param); }
         .Iter(it) -> { ret _writes_through(it.body, param); }
       }
       ret false;
@@ -890,10 +885,6 @@ impl Analysis {
           .Cond(c) -> {
             self.check_forking_loop(stmt, c.body);
             self.walk_body(c.body, locals);
-          }
-          .Range(r) -> {
-            self.check_forking_loop(stmt, r.body);
-            self.walk_body(r.body, locals);
           }
           .Iter(it) -> {
             self.check_forking_loop(stmt, it.body);
@@ -1526,7 +1517,6 @@ impl Analysis {
       .StatementFor(kind) -> {
         fit kind {
           .Cond(c) -> { self.report_unused_declarations(c.body, read); }
-          .Range(r) -> { self.report_unused_declarations(r.body, read); }
           .Iter(it) -> { self.report_unused_declarations(it.body, read); }
         }
       }
@@ -2149,10 +2139,6 @@ fun _collect_reads(Node* node, Set<str>* out) {
             _collect_reads(c.condition, out);
           }
           _collect_reads(c.body, out);
-        }
-        .Range(r) -> {
-          _collect_reads(r.range_expr, out);
-          _collect_reads(r.body, out);
         }
         .Iter(it) -> {
           _collect_reads(it.iterable, out);
