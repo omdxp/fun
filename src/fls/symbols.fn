@@ -2660,6 +2660,41 @@ pub fun chain_ending_receiver(
     if last_is_call {
       let f = lookup_top_level(program, name);
       if f.is_none() {
+        // Not a real top-level function - `name` may still be a local
+        // or parameter whose own declared type IS a function type
+        // (`fun(num, num) num cb`), called directly (`cb(1, 3)`).
+        // `type_name_of_local` already renders exactly that bare type
+        // text - but fls's own lightweight AST never runs the real
+        // compiler's `expand_type_aliases` pass, so a parameter typed
+        // through a bound alias (`als Callback = fun(num, num) num;`,
+        // `Callback cb`) reads back as the bare alias name "Callback"
+        // here, not the function shape it stands for - resolved one
+        // extra hop through `_find_type_alias` when the type doesn't
+        // already start with "fun(" itself. Either way, the call's own
+        // result is whatever sits after the function type's own param
+        // list closing paren, the same `_signature_params_close` scan
+        // an ordinary function's own return type already resolves
+        // through.
+        str local_fn_type = type_name_of_local(tokens, program, name, file, line);
+        if !starts_with(local_fn_type, "fun(") {
+          let alias = _find_type_alias(program, local_fn_type);
+          if alias.is_some() && alias.unwrap().body != nil {
+            local_fn_type = render_type(alias.unwrap().body);
+          }
+        }
+        if starts_with(local_fn_type, "fun(") {
+          num close = _signature_params_close(local_fn_type);
+          if close >= 0 {
+            str rtype_text = trim(substr(local_fn_type, close + 1, len(local_fn_type) - close - 1));
+            if !equals(rtype_text, "") && !equals(rtype_text, "void") {
+              empty.type_name = bare_type_expr(rtype_text);
+              empty.full_type_name = rtype_text;
+              empty.generic_args = generic_args_of_detail(rtype_text);
+              ret empty;
+            }
+            free(rtype_text);
+          }
+        }
         ret empty;
       }
       flag substituted = false;

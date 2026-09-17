@@ -1349,6 +1349,36 @@ impl ParseState {
   }
 }
 
+// True for one of C's own reserved words (C89 through C11) - a Fun
+// identifier spelled the same way transpiles verbatim into an illegal
+// C declaration (`void do(...)`, "do" being a C keyword, `int for;`,
+// ...). None of these are reserved in Fun itself, so nothing else
+// already stops a reader from writing one; catching it here gives one
+// clear Fun-level error instead of the C compiler's own cascading,
+// hard-to-trace ones (an unrelated-looking parse failure several
+// hundred lines into the generated file, an unmatched brace, ...).
+fun _is_c_reserved_keyword(str name) flag {
+  fit name {
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "int", "long", "register", "return", "short",
+    "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+    "volatile", "while", "inline", "restrict", "_Bool", "_Complex", "_Imaginary", "_Alignas",
+    "_Alignof", "_Atomic", "_Generic", "_Noreturn", "_Static_assert", "_Thread_local" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// A binding-name diagnostic for a name colliding with a C reserved
+// word (see `_is_c_reserved_keyword`).
+fun report_c_reserved_name(ParseState* state, str name) {
+  str msg = format(
+    "'{str}' is a reserved word in C and cannot be used as a name here - the generated C would fail to compile",
+    name
+  );
+  state.err(msg);
+  free(msg);
+}
+
 // A binding-name diagnostic for `tok`: names the specific reserved word
 // when `tok` is a keyword token rather than the identifier a binding
 // position expects (a parameter, a `let`, a fit destructuring bind),
@@ -3230,6 +3260,16 @@ impl Parser {
       _ -> {}
     }
 
+    // A parameter, `let`/`const`, or global variable's own name is
+    // emitted to C verbatim (unlike a compound field, which is always
+    // reached through its own struct - `foo.for` is fine in C even
+    // though `for` alone never would be - so this check only applies
+    // here, not to field parsing, which never calls `parse_variable`).
+    if _is_c_reserved_keyword(name) {
+      report_c_reserved_name(self.state, name);
+      ret .Some(.InvalidIdentifier);
+    }
+
     if self.state.get_scope_entity(name) != nil {
       let msg = format("variable '{str}' already declared", name);
       defer free(msg);
@@ -3977,6 +4017,19 @@ impl Parser {
     fit ident_tok.data {
       .Sval(s) -> { fname = s; }
       _ -> {}
+    }
+
+    // A bare, non-generic top-level function's own name is emitted to
+    // C verbatim, unlike an impl method's (always mangled with its
+    // owning type, `parse_impl`'s own separate path - never reaches
+    // here) or a generic function's own (always mangled with its
+    // concrete type arguments at every monomorphized instantiation,
+    // `double<T>` becoming `double__num`/`double__dec` and so on,
+    // never a bare `double`) - so only the plain, non-generic shape
+    // risks colliding with one of C's own reserved words.
+    if !self.state.next_token_is_operator("<") && _is_c_reserved_keyword(fname) {
+      report_c_reserved_name(self.state, fname);
+      ret .Some(.InvalidIdentifier);
     }
 
     FunctionNode fnv = function_node_new();
@@ -11898,6 +11951,64 @@ test "parse_function names the reserved word when a parameter collides with a ke
   let err = p.parse_function(false, false);
   assert err.is_some(), "expected an error for a reserved-word parameter name";
   assert contains(st.error_message, "'raw' is a reserved word"), "expected the diagnostic to name the reserved word, not a bare 'expected identifier'";
+}
+
+test "parse_function rejects a function named after a C reserved word" {
+  // "do" is not reserved in Fun itself (nothing stopped a reader from
+  // writing it before this), but the generated C is `void do(...)`,
+  // which fails to compile - caught here instead, with one clear
+  // Fun-level diagnostic, rather than the C compiler's own cascading
+  // "expected identifier or '('"/"expected 'while' in do/while loop"
+  // errors deep in the generated file.
+  ParseState st = _state_from("fun do(num x) num { ret x; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_some(), "expected an error for a function named after a C reserved word";
+  assert contains(st.error_message, "'do' is a reserved word in C"), "expected the diagnostic to name the C keyword collision specifically";
+}
+
+test "parse_variable rejects a parameter named after a C reserved word" {
+  // "int" (unlike "for"/"void") is a C keyword but not one of Fun's
+  // own, so this exercises the new C-specific check itself rather than
+  // the pre-existing Fun-keyword one above.
+  ParseState st = _state_from("fun run(num int) num { ret int; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_some(), "expected an error for a parameter named after a C reserved word";
+  assert contains(st.error_message, "'int' is a reserved word in C"), "expected the diagnostic to name the C keyword collision specifically";
+}
+
+test "parse_variable rejects a 'let' local named after a C reserved word" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("fun run() { let int = 5; }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_some(), "expected an error for a local variable named after a C reserved word";
+  assert contains(st.error_message, "'int' is a reserved word in C"), "expected the diagnostic to name the C keyword collision specifically";
+}
+
+test "_is_c_reserved_keyword accepts an ordinary identifier that merely resembles a C keyword" {
+  assert !_is_c_reserved_keyword("doer"), "expected a longer identifier sharing a prefix with a C keyword to stay unaffected";
+  assert !_is_c_reserved_keyword("run"), "expected an ordinary identifier to stay unaffected";
+  assert _is_c_reserved_keyword("do"), "expected the exact C keyword itself to be flagged";
+  assert _is_c_reserved_keyword("void"), "expected another common C keyword to be flagged too";
+}
+
+test "parse_function accepts a GENERIC function named after a C reserved word, always mangled at codegen" {
+  // Unlike a plain function, a generic one's own name is never emitted
+  // to C bare - `double<T>` monomorphizes to `double__num`/`double__dec`
+  // per concrete instantiation, so nothing here actually risks
+  // colliding with C's own `double` keyword the way a non-generic
+  // `fun double(...)` would.
+  ParseState st = _state_from("fun double<T>(T x) T { ret x; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_none(), "expected a generic function's own name to be exempt from the C-reserved-word check";
 }
 
 test "parse_fit_statement rejects an assignment used as a branch pattern" {

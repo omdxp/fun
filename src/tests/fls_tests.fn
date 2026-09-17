@@ -3034,6 +3034,57 @@ test "go-to-definition on a parameter resolves to the parameter, not an unrelate
   assert contains(def, `"line":3`), "expected a jump to the parameter's own declaration line, not the field's";
 }
 
+test "hover resolves a let bound to calling through a plain function-typed parameter" {
+  // `chain_ending_receiver`'s own call-at-base-of-chain branch only
+  // ever looked a callee up as a real top-level function
+  // (`lookup_top_level`); a parameter typed `fun(num, num) num` called
+  // directly (`cb(1, 3)`) isn't one, so it fell straight through to an
+  // empty result - `res` showed no type at all, on hover or as an
+  // inlay hint.
+  str src = `fun run(fun(num, num) num cb) {
+  `  let res = cb(1, 3);
+  `  print(res);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fnparamcall.fn";
+  doc.path = "fnparamcall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 7);
+  assert contains(hovered, "num res"), format("expected 'res' to resolve to the function-typed parameter's own declared return type, got: {str}", hovered);
+  str hints = inlay_hints(&reads, doc, 0, 5);
+  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+}
+
+test "hover resolves a let bound to calling through an alias-bound function-typed parameter" {
+  // Same root cause as the plain case above, plus one more hop: a
+  // parameter typed through a bound alias (`als Callback = fun(num,
+  // num) num;`, `Callback cb`) reads back as the bare name "Callback"
+  // from fls's own lightweight per-document analysis, which never runs
+  // the real compiler's `expand_type_aliases` pass - resolved one
+  // extra step through the alias's own declared body.
+  str src = `als Callback = fun(num, num) num;
+  `fun run(Callback cb) {
+  `  let res = cb(1, 3);
+  `  print(res);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliasparamcall.fn";
+  doc.path = "aliasparamcall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 7);
+  assert contains(hovered, "num res"), format("expected 'res' to resolve through the alias to its own real return type, got: {str}", hovered);
+  str hints = inlay_hints(&reads, doc, 0, 5);
+  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+}
+
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
   str src = `imp std.option;
   `fun main() num {
