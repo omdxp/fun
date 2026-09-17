@@ -56,10 +56,25 @@ jobs:
             # won't let a running .exe overwrite its own file (unlike
             # POSIX), so building from a copy elsewhere leaves the
             # in-place path free for the new stage's own output.
+            #
+            # `editbin /STACK:` patches each stage's own PE header with
+            # a larger stack reserve directly, after the fact. This is
+            # needed regardless of the `/link /STACK:` flag `fun` itself
+            # now passes to cl.exe (src/cli/driver.fn): that flag only
+            # takes effect for a binary linked BY a `fun` build that
+            # already contains it, but stage1-fun.exe here is linked by
+            # whatever `fun` setup-fun just installed (an already-released
+            # build predating this fix). Without patching stage1-fun.exe
+            # itself, it keeps the old default 1 MB stack and can crash
+            # self-compiling for stage 2, regardless of what the *source*
+            # being compiled says to do - the fix only "arrives" one
+            # bootstrap generation late otherwise.
             FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build
             cp fun-out/bin/fun.exe stage1-fun.exe
+            editbin /STACK:134217728 stage1-fun.exe
             FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage1-fun.exe build
             cp fun-out/bin/fun.exe stage2-fun.exe
+            editbin /STACK:134217728 stage2-fun.exe
             FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" ./stage2-fun.exe build
           else
             FUN_STDLIB_DIR="$PWD/stdlib" fun build
