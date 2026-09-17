@@ -443,9 +443,17 @@ pub compound FitBranch {
   flag has_condition;
   Node* body;
   // Positional binding names for a data-carrying-enum destructuring arm
-  // (`Shape.Circle(r)` binds ["r"]). Empty for a non-destructuring arm.
+  // (`Shape.Circle(r)` binds ["r"]), or for a tuple-pattern arm's own
+  // binding positions (below). Empty for a non-destructuring arm.
   Vec<str> bindings;
   flag has_bindings;
+  // True when `condition` is a `.TupleLiteral` used as a structural
+  // pattern (`(0, y) -> ...`) rather than an ordinary value expression -
+  // each element is either a literal to match positionally or a bare
+  // identifier binding that position's value, read directly off
+  // `condition`'s own `.TupleLiteral` elements rather than duplicated
+  // here, so freeing/cloning `condition` already owns them.
+  flag is_tuple_pattern;
 }
 
 pub fun fit_branch_new() FitBranch {
@@ -455,6 +463,7 @@ pub fun fit_branch_new() FitBranch {
   b.body = nil;
   b.bindings.init(0);
   b.has_bindings = false;
+  b.is_tuple_pattern = false;
   ret b;
 }
 

@@ -4556,6 +4556,147 @@ impl Parser {
     ret .None;
   }
 
+  // True when the cursor sits at a `(` opening a genuine >=2-element
+  // tuple pattern (`(0, y) -> ...`) rather than an ordinary grouped value
+  // pattern (`(1 + 2) -> ...`) - a balanced-paren scan for a top-level
+  // comma before the matching `)`, the same signal
+  // `parse_for_parenthesis`'s own tuple-literal branch uses to tell a
+  // real tuple apart from plain grouping.
+  _looks_like_fit_tuple_pattern() flag {
+    let p0_opt = self.state.token_peek_n(0);
+    if p0_opt.is_none() || !token_is_operator(p0_opt.unwrap(), "(") {
+      ret false;
+    }
+    num off = 1;
+    num depth = 1;
+    for true {
+      let t = self.state.token_peek_n(off);
+      if t.is_none() {
+        ret false;
+      }
+      let tok = t.unwrap();
+      if token_is_operator(tok, "(") {
+        depth = depth + 1;
+      } elif token_is_symbol(tok, ')') {
+        depth = depth - 1;
+        if depth == 0 {
+          ret false;
+        }
+      } elif token_is_operator(tok, ",") && depth == 1 {
+        ret true;
+      }
+      off = off + 1;
+    }
+    ret false;
+  }
+
+  // Tries to parse a structural tuple fit pattern at the cursor:
+  // `(pos, pos, ...) -> ...`, where each position is either a bare
+  // (non-`_`) identifier - a binding, bound to that position's own value
+  // inside the arm body - a bare `_` - a wildcard, matched but not bound
+  // - or an arbitrary guard expression, compared against that position's
+  // own value. A binding/wildcard position is read directly off its own
+  // raw token, never through the general expression parser: that parser
+  // rejects a bare identifier it can't already resolve (see
+  // `Parser.in_fit_condition`'s own doc comment), which a fresh pattern
+  // binding never can be yet. A guard position parses through the
+  // general expression parser same as any other value, with
+  // `stop_at_comma` forced on so it stops at its own trailing `,`/`)`
+  // rather than greedily consuming the rest of the pattern (mirroring
+  // `parse_variable`'s own default-value parse). On a match, consumes
+  // the whole `(...)` group, builds `*out_condition` as an ordinary
+  // `.TupleLiteral` (the same node shape a tuple value literal builds),
+  // fills `*out_bindings` with the binding-position names in order, and
+  // sets `*out_matched` true. On no match, consumes nothing.
+  _try_parse_fit_tuple_pattern(
+    flag* out_matched,
+    Node* out_condition,
+    Vec<str>* out_bindings
+  ) Option<ParseErrorKind> {
+    *out_matched = false;
+    if !self._looks_like_fit_tuple_pattern() {
+      ret .None;
+    }
+
+    let lparen_tok = self.state.token_next(); // '('
+
+    Vec<Node*> elements;
+    elements.init(2);
+    Vec<str> binds;
+    binds.init(0);
+
+    for !self.state.next_token_is_symbol(')') {
+      flag consumed_as_binding = false;
+      let p0_opt = self.state.token_peek_n(0);
+      let p1_opt = self.state.token_peek_n(1);
+      if p0_opt.is_some() && p0_opt.unwrap().type == .Identifier && p1_opt.is_some() {
+        let p1 = p1_opt.unwrap();
+        if token_is_operator(p1, ",") || token_is_symbol(p1, ')') {
+          let nt = self.state.token_next().unwrap();
+          str ename = "";
+          fit nt.data {
+            .Sval(s) -> { ename = s; }
+            _ -> {}
+          }
+          Node el = node_new(.Identifier(ename));
+          el.pos = nt.pos;
+          el.has_pos = true;
+          el.flags.inside_expression = true;
+          Node* el_ptr = malloc(sizeof(Node));
+          *el_ptr = el;
+          elements.push(el_ptr);
+          if !equals(ename, "_") {
+            binds.push(ename);
+          }
+          consumed_as_binding = true;
+        }
+      }
+      if !consumed_as_binding {
+        let prev_stop_comma = self.stop_at_comma;
+        self.stop_at_comma = true;
+        let eerr = self.parse_expressionable_root();
+        self.stop_at_comma = prev_stop_comma;
+        if eerr.is_some() {
+          ret eerr;
+        }
+        let maybe_el = self.state.node_pop();
+        if maybe_el.is_none() {
+          self.state.err("expected a value inside a fit tuple pattern");
+          ret .Some(.InvalidExpression);
+        }
+        Node* el_ptr2 = malloc(sizeof(Node));
+        *el_ptr2 = maybe_el.unwrap();
+        elements.push(el_ptr2);
+      }
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+
+    let rparen_err = self.state.expect_sym(')');
+    if rparen_err.is_some() {
+      ret rparen_err;
+    }
+
+    if elements.len < 2 {
+      self.state.err("a fit tuple pattern needs at least two positions");
+      ret .Some(.InvalidToken);
+    }
+
+    TupleLiteralNode tln = tuple_literal_node_new();
+    tln.elements = elements;
+    Node tuple_node = node_new(.TupleLiteral(tln));
+    tuple_node.pos = lparen_tok.unwrap().pos;
+    tuple_node.has_pos = true;
+    tuple_node.flags.inside_expression = true;
+
+    *out_condition = tuple_node;
+    *out_bindings = binds;
+    *out_matched = true;
+    ret .None;
+  }
+
   // Tries to parse a data-carrying-enum destructuring fit pattern at the
   // cursor: `Enum.Variant(a, b)` or shorthand `.Variant(a, b)`. On a
   // match, consumes those tokens, sets `*out_condition` to the variant-
@@ -4711,68 +4852,87 @@ impl Parser {
       ret dxerr;
     }
 
+    flag is_tuple_pattern = false;
     if destructure_matched {
       arm_condition = destructure_condition;
       bindings = destructure_bindings;
     } else {
-      flag is_dot_shorthand = false;
-      Pos op_pos;
-      fit self.state.token_peek_next() {
-        .Some(t) -> {
-          op_pos = t.pos;
-          if t.type == .Operator {
-            str op = "";
-            fit t.data {
-              .Sval(s) -> { op = s; }
-              _ -> {}
-            }
-            is_dot_shorthand = equals(op, ".");
-          }
-        }
-        .None -> {}
+      flag tuple_pattern_matched = false;
+      Node tuple_pattern_condition = node_new(.Blank);
+      Vec<str> tuple_pattern_bindings;
+      tuple_pattern_bindings.init(0);
+      let txerr = self._try_parse_fit_tuple_pattern(
+        &tuple_pattern_matched,
+        &tuple_pattern_condition,
+        &tuple_pattern_bindings
+      );
+      if txerr.is_some() {
+        ret txerr;
       }
-
-      if is_dot_shorthand {
-        self.state.token_next(); // consume '.'
-        let ierr = self.parse_single_token_to_node();
-        if ierr.is_some() {
-          ret ierr;
-        }
-        let maybe_right = self.state.node_pop();
-        if maybe_right.is_none() {
-          self.state.err("expected identifier after '.' in fit pattern");
-          ret .Some(.InvalidExpression);
-        }
-        Node node_right = maybe_right.unwrap();
-        node_right.flags.inside_expression = true;
-
-        Node blank_left = node_new(.Blank);
-        blank_left.pos = op_pos;
-        blank_left.has_pos = true;
-        blank_left.flags.inside_expression = true;
-
-        self.make_expression_node(&blank_left, &node_right, ".", op_pos);
-        fit self.state.node_pop() {
-          .Some(built) -> {
-            arm_condition = built;
-            self.parse_reorder_expression(&arm_condition);
+      if tuple_pattern_matched {
+        arm_condition = tuple_pattern_condition;
+        bindings = tuple_pattern_bindings;
+        is_tuple_pattern = true;
+      } else {
+        flag is_dot_shorthand = false;
+        Pos op_pos;
+        fit self.state.token_peek_next() {
+          .Some(t) -> {
+            op_pos = t.pos;
+            if t.type == .Operator {
+              str op = "";
+              fit t.data {
+                .Sval(s) -> { op = s; }
+                _ -> {}
+              }
+              is_dot_shorthand = equals(op, ".");
+            }
           }
-          .None -> {
+          .None -> {}
+        }
+
+        if is_dot_shorthand {
+          self.state.token_next(); // consume '.'
+          let ierr = self.parse_single_token_to_node();
+          if ierr.is_some() {
+            ret ierr;
+          }
+          let maybe_right = self.state.node_pop();
+          if maybe_right.is_none() {
+            self.state.err("expected identifier after '.' in fit pattern");
+            ret .Some(.InvalidExpression);
+          }
+          Node node_right = maybe_right.unwrap();
+          node_right.flags.inside_expression = true;
+
+          Node blank_left = node_new(.Blank);
+          blank_left.pos = op_pos;
+          blank_left.has_pos = true;
+          blank_left.flags.inside_expression = true;
+
+          self.make_expression_node(&blank_left, &node_right, ".", op_pos);
+          fit self.state.node_pop() {
+            .Some(built) -> {
+              arm_condition = built;
+              self.parse_reorder_expression(&arm_condition);
+            }
+            .None -> {
+              self.state.err("expected fit branch condition expression");
+              ret .Some(.InvalidExpression);
+            }
+          }
+        } else {
+          let cerr = self.parse_expressionable_root();
+          if cerr.is_some() {
+            ret cerr;
+          }
+          let maybe_cond = self.state.node_pop();
+          if maybe_cond.is_none() {
             self.state.err("expected fit branch condition expression");
             ret .Some(.InvalidExpression);
           }
+          arm_condition = maybe_cond.unwrap();
         }
-      } else {
-        let cerr = self.parse_expressionable_root();
-        if cerr.is_some() {
-          ret cerr;
-        }
-        let maybe_cond = self.state.node_pop();
-        if maybe_cond.is_none() {
-          self.state.err("expected fit branch condition expression");
-          ret .Some(.InvalidExpression);
-        }
-        arm_condition = maybe_cond.unwrap();
       }
     }
 
@@ -4807,6 +4967,7 @@ impl Parser {
       branch.condition = cond_ptr;
       branch.has_condition = true;
     }
+    branch.is_tuple_pattern = is_tuple_pattern;
     flag has_bindings = bindings.len > 0;
     if has_bindings {
       branch.bindings = bindings;

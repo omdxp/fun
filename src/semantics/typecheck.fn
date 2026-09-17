@@ -2791,27 +2791,124 @@ impl Checker {
   // be taken, so it is a mistake rather than a dead branch.
   check_fit(FitStmtNode f, TypeEnv* env) {
     str subject = "";
+    CheckedType subject_type = checked_unknown();
+    flag have_subject_type = false;
     if f.exp != nil {
-      CheckedType held = self.infer(f.exp, env);
-      subject = held.name;
+      subject_type = self.infer(f.exp, env);
+      subject = subject_type.name;
+      have_subject_type = true;
     }
     for branch : f.branches {
       if branch.has_condition {
-        str named = _branch_enum_name(branch.condition);
-        if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
-          self.fail(
-            format(
-            "fit branch names '{str}' but the value being matched is a '{str}'",
-            named,
-            subject
-            ),
-            branch.condition
-          );
+        if branch.is_tuple_pattern {
+          self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
+        } else {
+          str named = _branch_enum_name(branch.condition);
+          if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
+            self.fail(
+              format(
+              "fit branch names '{str}' but the value being matched is a '{str}'",
+              named,
+              subject
+              ),
+              branch.condition
+            );
+          }
         }
       }
       env.push();
+      if branch.is_tuple_pattern && branch.has_condition && have_subject_type &&
+        subject_type.is_tuple {
+        self.bind_fit_tuple_pattern(branch, subject_type, env);
+      }
       self.check_statement(branch.body, env);
       env.pop();
+    }
+  }
+
+  // Verifies a `(pattern, ...) -> ...` tuple-pattern arm's own shape: the
+  // subject must itself be tuple-typed with the same arity as the pattern,
+  // and each literal position (a binding position skips this - it accepts
+  // any value at its own position) must fit the subject's own element type
+  // at that position, the same way an ordinary `fit` label already has to
+  // fit the subject's type.
+  check_fit_tuple_pattern_condition(
+    FitBranch branch,
+    CheckedType subject_type,
+    flag have_subject_type
+  ) {
+    if !have_subject_type || !subject_type.is_tuple {
+      self.fail("a tuple pattern in 'fit' needs a tuple-typed subject", branch.condition);
+      ret;
+    }
+    fit branch.condition.kind {
+      .TupleLiteral(tl) -> {
+        if tl.elements.len != subject_type.tuple_members.len {
+          self.fail(
+            format(
+            "a tuple pattern with {num} position(s) needs a {num}-element tuple subject, not '{str}'",
+            tl.elements.len,
+            subject_type.tuple_members.len,
+            type_name(subject_type)
+            ),
+            branch.condition
+          );
+          ret;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Binds each non-wildcard binding position of a tuple-pattern arm to its
+  // own element type from the subject, and typechecks each literal
+  // position against that same element type - real errors either way, not
+  // a silent Unknown fallback, matching the standard `check_let_destructure`
+  // and the for-loop's own tuple destructuring already hold tuple patterns
+  // to elsewhere in this file. Caller has already verified the arity
+  // matches and pushed a fresh `env` scope for the arm body.
+  bind_fit_tuple_pattern(FitBranch branch, CheckedType subject_type, TypeEnv* env) {
+    fit branch.condition.kind {
+      .TupleLiteral(tl) -> {
+        if tl.elements.len != subject_type.tuple_members.len {
+          ret;
+        }
+        num i = 0;
+        for el : tl.elements {
+          CheckedType member = subject_type.tuple_members.get(i);
+          flag is_binding = false;
+          flag is_wildcard = false;
+          str bname = "";
+          fit el.kind {
+            .Identifier(s) -> {
+              if equals(s, "_") {
+                is_wildcard = true;
+              } else {
+                is_binding = true;
+                bname = s;
+              }
+            }
+            _ -> {}
+          }
+          if is_binding {
+            env.define(bname, member);
+          } elif !is_wildcard {
+            let lit_type = self.infer(el, env);
+            if !self.assignable(member, lit_type) {
+              self.fail(
+                format(
+                "a tuple pattern position expects a '{str}', not '{str}'",
+                type_name(member),
+                type_name(lit_type)
+                ),
+                el
+              );
+            }
+          }
+          i = i + 1;
+        }
+      }
+      _ -> {}
     }
   }
 

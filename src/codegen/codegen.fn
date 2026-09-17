@@ -9829,11 +9829,20 @@ impl Codegen {
     str subj_name = "";
     flag subj_is_pointer = false;
     Option<str> subj_type = .None;
+    // Only populated for the subject shapes a tuple-pattern branch can
+    // actually match against (a bare local or a field chain) - a
+    // call/await/propagation subject only ever resolves a type *name*
+    // below, not the full `DataType` a tuple pattern needs to read
+    // `tuple_members` off of, so a tuple-pattern arm against one of those
+    // subjects reports `.UnsupportedNode` rather than silently matching
+    // nothing.
+    Option<DataType> subj_dtype = .None;
     fit f.exp.kind {
       .Identifier(name) -> {
         subj_name = name;
         subj_type = self.lookup_local_type_name(name);
         subj_is_pointer = self.lookup_local_is_pointer(name).unwrap_or(false);
+        subj_dtype = self.lookup_local_dtype(name);
       }
       .Unary(u) -> {
         // An `await`-wrapped call subject (`fit await self.foo(...)`).
@@ -10108,6 +10117,7 @@ impl Codegen {
           subj_name = r.text;
           subj_type = .Some(r.type_name);
           subj_is_pointer = r.is_pointer;
+          subj_dtype = r.dtype;
         }
       }
       _ -> { ret .Some(.UnsupportedNode); }
@@ -10124,6 +10134,24 @@ impl Codegen {
         }
         default_body = br.body;
         has_default = true;
+        continue;
+      }
+
+      if br.is_tuple_pattern {
+        if subj_dtype.is_none() {
+          ret .Some(.UnsupportedNode);
+        }
+        let terr = self.emit_fit_tuple_branch(
+          subj_name,
+          subj_is_pointer,
+          subj_dtype.unwrap(),
+          br,
+          wrote_branch
+        );
+        if terr.is_some() {
+          ret terr;
+        }
+        wrote_branch = true;
         continue;
       }
 
@@ -10287,6 +10315,160 @@ impl Codegen {
       self.state.write("}");
     }
     self.state.write("\n");
+    ret .None;
+  }
+
+  // Emits one `(pattern, ...) -> { body }` tuple-structural-pattern `fit`
+  // branch. Each element of `br.condition`'s own `.TupleLiteral` is either
+  // a bare (non-`_`) identifier, a binding position, matched
+  // unconditionally and bound to `subj._N` inside the branch body, or a
+  // literal, a guard position, compared against `subj._N` with `&&`
+  // joining multiple guard positions - mirroring `emit_fit_enum_branch`'s
+  // own `tag == ...` guard plus `payload.Variant._N` binding shape, just
+  // with the guard built from arbitrary positions instead of a single tag
+  // check.
+  emit_fit_tuple_branch(
+    str subj_name,
+    flag subj_is_pointer,
+    DataType subj_dtype,
+    FitBranch br,
+    flag wrote_branch
+  ) Option<CodegenErrorKind> {
+    if !subj_dtype.is_tuple {
+      ret .Some(.UnsupportedNode);
+    }
+    Vec<Node*> elements;
+    elements.init(0);
+    fit br.condition.kind {
+      .TupleLiteral(tl) -> { elements = tl.elements; }
+      _ -> { ret .Some(.UnsupportedNode); }
+    }
+    if elements.len != subj_dtype.tuple_members.len {
+      ret .Some(.UnsupportedNode);
+    }
+
+    if wrote_branch {
+      self.state.write(" else if (");
+    } else {
+      self.state.write("if (");
+    }
+
+    flag wrote_guard = false;
+    num gi = 0;
+    for el : elements {
+      // A bare identifier position (whether a real binding or the `_`
+      // wildcard) matches unconditionally and contributes no guard term
+      // - only a genuine value/guard expression does.
+      flag is_bare_identifier = false;
+      fit el.kind {
+        .Identifier(_) -> { is_bare_identifier = true; }
+        _ -> {}
+      }
+      if !is_bare_identifier {
+        if wrote_guard {
+          self.state.write(" && ");
+        }
+        wrote_guard = true;
+        flag is_str_label = false;
+        fit el.kind {
+          .String(_) -> { is_str_label = true; }
+          _ -> {}
+        }
+        str accessor = ".";
+        if subj_is_pointer {
+          accessor = "->";
+        }
+        if is_str_label {
+          self.state.write("strcmp(");
+          self.state.write(subj_name);
+          self.state.write(accessor);
+          self.state.write("_");
+          self.state.write(format_num(gi));
+          self.state.write(", ");
+          let lerr = self.emit_expr(*el);
+          if lerr.is_some() {
+            ret lerr;
+          }
+          self.state.write(") == 0");
+        } else {
+          self.state.write(subj_name);
+          self.state.write(accessor);
+          self.state.write("_");
+          self.state.write(format_num(gi));
+          self.state.write(" == ");
+          let lerr2 = self.emit_expr(*el);
+          if lerr2.is_some() {
+            ret lerr2;
+          }
+        }
+      }
+      gi = gi + 1;
+    }
+    if !wrote_guard {
+      // A pattern with no literal positions at all (every position is a
+      // binding or a wildcard) always matches - the guard condition is
+      // trivially true, same as an enum branch with only bindings.
+      self.state.write("1");
+    }
+    self.state.write(") {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+
+    num bi = 0;
+    for bel : elements {
+      flag is_binding2 = false;
+      str bname = "";
+      fit bel.kind {
+        .Identifier(s) -> {
+          if !equals(s, "_") {
+            is_binding2 = true;
+            bname = s;
+          }
+        }
+        _ -> {}
+      }
+      if is_binding2 {
+        self.state.write_indent();
+        let member_dt = *subj_dtype.tuple_members.get(bi);
+        flag wrote_bind_type = false;
+        if self.msvc_mode {
+          let bwt = self.write_type(member_dt);
+          wrote_bind_type = bwt.is_some();
+        }
+        if !wrote_bind_type {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
+        self.state.write(bname);
+        self.state.write(" = ");
+        self.state.write(subj_name);
+        if subj_is_pointer {
+          self.state.write("->_");
+        } else {
+          self.state.write("._");
+        }
+        self.state.write(format_num(bi));
+        self.state.write(";\n");
+        let member_resolved = self.resolve_type_name(member_dt);
+        if member_resolved.is_some() {
+          let member_subst = self.resolve_type_subst(member_dt);
+          self.record_local_typed(
+            bname,
+            member_resolved.unwrap(),
+            dtype_is_pointer(member_subst),
+            member_subst
+          );
+        }
+      }
+      bi = bi + 1;
+    }
+
+    let berr = self.emit_body(*br.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
     ret .None;
   }
 

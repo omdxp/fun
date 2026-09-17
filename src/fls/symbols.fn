@@ -5185,6 +5185,46 @@ pub fun variant_payload_type_typed(Vec<Node>* program, DataType* dt, str variant
 // within that arm: its pattern through the end of its body. Its type
 // is the matching positional payload type of whichever variant the
 // arm's own condition names, resolved against the fit's subject.
+// The tuple-pattern subject's own element index a `br.bindings[binding_idx]`
+// binding name reads from - a tuple pattern's binding list only records
+// the binding *positions* in order (skipping literal/wildcard positions,
+// the same list a non-tuple `.Variant(a, b)` arm already builds), so
+// recovering the actual subject position it belongs to means walking
+// `br.condition`'s own `.TupleLiteral` elements and counting bare-binding
+// identifiers up to the `binding_idx`'th one. -1 when not found.
+pub fun _fit_tuple_binding_position(FitBranch br, num binding_idx) num {
+  if br.condition == nil {
+    ret -1;
+  }
+  num result = -1;
+  fit br.condition.kind {
+    .TupleLiteral(tl) -> {
+      num seen = 0;
+      num pos = 0;
+      for el : tl.elements {
+        flag is_binding = false;
+        fit el.kind {
+          .Identifier(s) -> {
+            if !equals(s, "_") {
+              is_binding = true;
+            }
+          }
+          _ -> {}
+        }
+        if is_binding {
+          if seen == binding_idx {
+            result = pos;
+          }
+          seen = seen + 1;
+        }
+        pos = pos + 1;
+      }
+    }
+    _ -> {}
+  }
+  ret result;
+}
+
 fun _lookup_fit_binding(
   Vec<Token>* tokens,
   Node* body,
@@ -5229,7 +5269,30 @@ fun _lookup_fit_binding(
             }
             k = k + 1;
           }
-          if idx >= 0 {
+          if idx >= 0 && br.is_tuple_pattern {
+            num tuple_idx = _fit_tuple_binding_position(br, idx);
+            str tuple_type = fit_subject_type(tokens, program, f.exp, file, line);
+            if tuple_idx >= 0 && !equals(tuple_type, "") && br.body != nil {
+              let pieces = split_signature_params(tuple_type);
+              if tuple_idx < pieces.len {
+                StringBuilder tb = string_builder_init(24);
+                tb.append(pieces.get(tuple_idx));
+                tb.append(" ");
+                tb.append(name);
+                Pos tuple_decl_pos = body.pos;
+                if br.body.has_pos {
+                  tuple_decl_pos = br.body.pos;
+                }
+                if br.has_condition && br.condition != nil && br.condition.has_pos {
+                  tuple_decl_pos = br.condition.pos;
+                }
+                str tuple_detail = tb.build();
+                free_params_vec(&pieces);
+                ret .Some(_declaration(name, .Local, tuple_detail, tuple_decl_pos));
+              }
+              free_params_vec(&pieces);
+            }
+          } elif idx >= 0 {
             str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
             if !equals(enum_name, "") {
               Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);

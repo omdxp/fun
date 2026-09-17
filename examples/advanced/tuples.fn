@@ -17,7 +17,9 @@
 // (numeric widening included), not just whatever it happens to infer to.
 // `for (a, b) : pairs { ... }` destructures a tuple-elemented iterable's own
 // element into names per iteration, the same way `let` destructures a plain
-// tuple value.
+// tuple value. `fit` also matches a tuple structurally: each position is
+// either a binding (a bare name), a wildcard (`_`), or a guard (any other
+// expression, compared against that position's own value).
 
 use std.io;
 use std.vec;
@@ -89,4 +91,13 @@ fun main() {
 
   // The alias-bound tuple from above, used exactly like any other type.
   println_fmt("apply: {}", apply(describe, (5, "five")));
+
+  // `fit` on a tuple: the first arm's literal position (0) only matches
+  // when the subject's own first element is 0, binding `s` to the second
+  // either way once it does; the second arm binds both positions.
+  (num, str) status = (0, "ready");
+  fit status {
+    (0, s) -> { println_fmt("ok: {}", s); }
+    (code, s) -> { println_fmt("error {}: {}", code, s); }
+  }
 }

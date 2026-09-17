@@ -2663,7 +2663,25 @@ fun _collect_locals(
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
         i = i + 1;
-        if branch.has_bindings && !equals(enum_name, "") {
+        // `enum_name` doubles as the subject's own rendered type text
+        // for a tuple pattern (a bare local's tuple type renders as
+        // "(num, str)", the same string `fit_subject_type` returns for
+        // an enum subject's name) - split apart the same way a tuple
+        // type's own rendered detail is elsewhere in this file, rather
+        // than treated as an enum name.
+        if branch.is_tuple_pattern && branch.has_bindings {
+          let tuple_pieces = split_signature_params(enum_name);
+          num tbi = 0;
+          for tbi < branch.bindings.len {
+            str tuple_binding_name = branch.bindings.get(tbi);
+            num tuple_pos = _fit_tuple_binding_position(branch, tbi);
+            if tuple_pos >= 0 && tuple_pos < tuple_pieces.len {
+              items.push(_item(tuple_binding_name, .Variable, tuple_pieces.get(tuple_pos)));
+            }
+            tbi = tbi + 1;
+          }
+          free_params_vec(&tuple_pieces);
+        } elif branch.has_bindings && !equals(enum_name, "") {
           str variant_name = branch_variant_name(branch);
           num bi = 0;
           for bi < branch.bindings.len {

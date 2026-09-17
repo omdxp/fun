@@ -1860,3 +1860,61 @@ test "a chained positional access out of the inner tuple's own range is rejected
     "expected an out-of-range chained index to be a real error"
   );
 }
+
+test "a fit tuple pattern binds each name to its own element type" {
+  accepts(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (0, s) -> { str s2 = s; _ = s2; },
+    `    (n, s) -> { str s3 = s; _ = s3; }
+    `  }
+    `}`,
+    "expected each binding position's own name to resolve as its element type (str), fitting a str variable"
+  );
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (n, s) -> { num bad = s; _ = bad; }
+    `  }
+    `}`,
+    "expected a binding position's own element type (str) not to fit a declared num"
+  );
+}
+
+test "a fit tuple pattern rejects a literal position whose type doesn't fit the subject's own element type" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    ("no", s) -> { _ = s; }
+    `  }
+    `}`,
+    "expected a str literal not to fit the subject's own first element type (num)"
+  );
+}
+
+test "a fit tuple pattern rejects an arity mismatch against the subject's own element count" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (0, s, extra) -> { _ = s; }
+    `  }
+    `}`,
+    "expected a three-position pattern not to fit a two-element tuple subject"
+  );
+}
+
+test "a fit tuple pattern rejects matching against a non-tuple subject" {
+  rejects(
+    `fun main() {
+    `  num n = 1;
+    `  fit n {
+    `    (0, y) -> { _ = y; }
+    `  }
+    `}`,
+    "expected a tuple pattern not to be usable against a plain num subject"
+  );
+}

@@ -191,6 +191,22 @@ fun main() {
   as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
   for the `als Args = (num, str);` pattern this enables with generic
   aliases.
+- **`fit`** matches a tuple subject structurally: `(0, y) -> ...` matches
+  when element `0` equals `0`, binding `y` to element `1`. Each position
+  is independent - a bare (non-`_`) identifier binds that position's own
+  value, `_` matches without binding, and anything else (a literal, or
+  any other expression) is a guard that position's own value must equal.
+  A later branch is only reached when an earlier one's guard positions
+  don't all match:
+  ```fun
+  fun main() {
+    (num, str) t = (0, "go");
+    fit t {
+      (0, s) -> { println_fmt("zero, {str}", s); }
+      (n, s) -> { println_fmt("{num}, {str}", n, s); }
+    }
+  }
+  ```
 
 ## Variables
 

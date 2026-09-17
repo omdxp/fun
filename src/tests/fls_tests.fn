@@ -6521,6 +6521,54 @@ test "hover on 'use'/'flag' matches hover on 'imp'/'bin' exactly, real fls parit
   assert equals(substr(bin_hover, 0, bin_value_end), substr(flag_hover, 0, flag_value_end)), "expected 'flag' hover content to match 'bin', same canonicalized keyword";
 }
 
+test "hover on a fit tuple pattern's binding position shows its own element type" {
+  // `_lookup_fit_binding`'s `br.bindings` index doesn't line up with the
+  // tuple's own element position for a mixed literal/binding pattern
+  // (bindings skip literal and wildcard positions), so resolving a
+  // binding's own type needs `_fit_tuple_binding_position` to map the
+  // binding back onto its real subject position first.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fittuplehover.fn";
+  doc.path = "fittuplehover.fn";
+  doc.text = `fun main() {
+  `  (num, str) t = (1, "hi");
+  `  fit t {
+  `    (0, s) -> {
+  `      print(s);
+  `    }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hovered_decl = hover(&reads, doc, 3, 8);
+  assert contains(hovered_decl, "str"), format("expected the binding 's' at its own tuple pattern position to show its real element type 'str', got: {str}", hovered_decl);
+  str hovered_ref = hover(&reads, doc, 4, 12);
+  assert contains(hovered_ref, "str"), format("expected a later reference to 's' to resolve too, not just its own binding site, got: {str}", hovered_ref);
+}
+
+test "completion offers a fit tuple pattern's binding names as known locals" {
+  str src = `fun main() {
+  `  (num, str) t = (1, "hi");
+  `  fit t {
+  `    (0, s) -> {
+  `
+  `    }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fittuplecompletion.fn";
+  doc.path = "fittuplecompletion.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 4, 0, false);
+  assert contains(items, `"label":"s"`), "expected the tuple pattern's own binding name 's' offered as a known local";
+}
+
 test "completion offers both 'imp'/'use' and 'bin'/'flag' as keyword suggestions" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
