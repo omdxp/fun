@@ -137,7 +137,7 @@ test "std.channel: send and recv monomorphize on the payload type" {
   assert contains(out, "Channel__num__send"), "expected the monomorphized send";
 }
 
-test "for-each over a Vec iterates by length and index" {
+test "for-each over a Vec iterates every element in order" {
   str src = `use std.vec;
   `use std.c.io;
   `fun main() num {
@@ -145,14 +145,120 @@ test "for-each over a Vec iterates by length and index" {
   `  v.init(4);
   `  v.push(1);
   `  v.push(2);
+  `  v.push(3);
   `  for x : v {
   `    printf("%lld\n", x);
   `  }
   `  ret 0;
   `}`;
-  let out = emit_c_with_imports(src, "sl_vec_iter", "for-each over Vec");
-  assert contains(out, ".len"), "expected the length bound";
-  assert contains(out, ".data["), "expected indexed element access";
+  let out = run_source(src, "sl_vec_iter", "for-each over Vec");
+  assert equals(out, "1\n2\n3\n"), "expected each element printed in order";
+}
+
+test "for-each over a Vec with an explicit index name enumerates from zero" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(4);
+  `  v.push(10);
+  `  v.push(20);
+  `  v.push(30);
+  `  for i, x :: v {
+  `    printf("%lld:%lld\n", i, x);
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_iter_idx", "for-each over Vec with index");
+  assert equals(out, "0:10\n1:20\n2:30\n"), "expected a running 0-based index alongside each element";
+}
+
+test "destructuring for-each over a Vec<(A, B)> binds both tuple fields" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun main() num {
+  `  Vec<(num, num)> v;
+  `  v.init(4);
+  `  v.push((1, 10));
+  `  v.push((2, 20));
+  `  for (a, b) : v {
+  `    printf("%lld+%lld\n", a, b);
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_iter_destructure", "destructuring for-each over Vec");
+  assert equals(out, "1+10\n2+20\n"), "expected both tuple fields bound per element";
+}
+
+test "a for-each over a real Vec<Vec<str>> resolves the nested item's own real element type" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun main() num {
+  `  Vec<str> inner;
+  `  inner.init(2);
+  `  inner.push("a");
+  `  inner.push("b");
+  `  Vec<Vec<str>> outer;
+  `  outer.init(2);
+  `  outer.push(inner);
+  `  for row : outer {
+  `    for s : row {
+  `      printf("%s\n", s);
+  `    }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_iter_nested", "nested Vec<Vec<str>> for-each");
+  assert equals(out, "a\nb\n"), "expected the inner loop to resolve 'row's real Vec<str> element type, not a stale/wrong one";
+}
+
+test "two independent for-each loops over the same Vec value don't corrupt each other's cursor" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(4);
+  `  v.push(1);
+  `  v.push(2);
+  `  v.push(3);
+  `  for x : v {
+  `    for y : v {
+  `      printf("%lld,%lld\n", x, y);
+  `    }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_iter_reentrant", "nested for-each over the same Vec");
+  assert equals(
+    out,
+    "1,1\n1,2\n1,3\n2,1\n2,2\n2,3\n3,1\n3,2\n3,3\n"
+  ), "expected the full cross product, proving each loop iterates its own copy's cursor";
+}
+
+test "for-each over Vec<num> and Vec<str> in separate functions each resolve their own element type" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun nums(Vec<num> v) num {
+  `  for x : v {
+  `    printf("%lld\n", x);
+  `  }
+  `  ret 0;
+  `}
+  `fun main() num {
+  `  Vec<str> s;
+  `  s.init(2);
+  `  s.push("hi");
+  `  for x : s {
+  `    printf("%s\n", x);
+  `  }
+  `  Vec<num> n;
+  `  n.init(2);
+  `  n.push(5);
+  `  nums(n);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_iter_two_fns", "Vec iteration across two functions");
+  assert equals(out, "hi\n5\n"), "expected each function's own local table to resolve its own Vec element type, not a stale one from the other function";
 }
 
 test "a quirk implemented by a stdlib type dispatches through its vtable" {

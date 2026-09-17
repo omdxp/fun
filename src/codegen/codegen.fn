@@ -9275,18 +9275,137 @@ impl Codegen {
     }
   }
 
+  // Binds a yielded `next()` payload to the `for` loop's own item/index
+  // names, per whichever of the three forms `fi` declares: an explicit
+  // destructure (`for (a, b) : x`) splits a hidden temp's tuple fields
+  // into `fi.item_destructure_names`; a two-name form where `Elem` is
+  // itself a 2-tuple (`for k, v :: map`) destructures the same way into
+  // `fi.index_name`/`fi.item_name`; any other two-name form enumerates,
+  // binding `fi.index_name` to a running 0-based count read from
+  // `idx_counter_name` (a real local declared once outside the `for
+  // (;;)` by the caller, so it persists correctly across `next()` calls
+  // that skip elements, e.g. a tombstone-filtering scan); a bare one name
+  // binds `fi.item_name` to the payload directly.
+  emit_inlined_next_bind(
+    ForIterNode fi,
+    DataType elem_dt,
+    str idx_counter_name,
+    Node* payload
+  ) Option<CodegenErrorKind> {
+    flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
+    elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
+    if fi.item_is_destructure || pair_two_name {
+      self.state.write_indent();
+      if self.msvc_mode {
+        let ewt = self.write_type(elem_dt);
+        if ewt.is_none() {
+          self.state.write("int64_t");
+        }
+      } else {
+        self.state.write("__auto_type");
+      }
+      self.state.write(" __fun_for_item = ");
+      let perr = self.emit_expr(*payload);
+      if perr.is_some() {
+        ret perr;
+      }
+      self.state.write(";\n");
+      if !elem_dt.is_tuple {
+        ret .Some(.UnsupportedNode);
+      }
+      Vec<str> names;
+      if fi.item_is_destructure {
+        names = fi.item_destructure_names;
+      } else {
+        names.init(2);
+        names.push(fi.index_name);
+        names.push(fi.item_name);
+      }
+      num fdi = 0;
+      for name : names {
+        self.state.write_indent();
+        flag wrote_fd_type = false;
+        if fdi < elem_dt.tuple_members.len {
+          if self.msvc_mode {
+            let fdwt = self.write_type(*elem_dt.tuple_members.get(fdi));
+            wrote_fd_type = fdwt.is_some();
+          }
+        }
+        if !wrote_fd_type {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
+        self.state.write(name);
+        self.state.write(" = __fun_for_item");
+        self.state.write(format("._{num};\n", fdi));
+        if fdi < elem_dt.tuple_members.len {
+          let fd_elem = *elem_dt.tuple_members.get(fdi);
+          let fd_resolved = self.resolve_type_name(fd_elem);
+          if fd_resolved.is_some() {
+            let fd_subst = self.resolve_type_subst(fd_elem);
+            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+          }
+        }
+        fdi = fdi + 1;
+      }
+      ret .None;
+    }
+    if fi.has_index_name {
+      self.state.write_indent();
+      self.state.write("int64_t ");
+      self.state.write(fi.index_name);
+      self.state.write(" = ");
+      self.state.write(idx_counter_name);
+      self.state.write("++;\n");
+      DataType idx_dt = dtype_new();
+      idx_dt.type_str = "num";
+      self.record_local_typed(fi.index_name, "num", false, idx_dt);
+    }
+    self.state.write_indent();
+    if self.msvc_mode {
+      let ewt = self.write_type(elem_dt);
+      if ewt.is_none() {
+        self.state.write("int64_t");
+      }
+    } else {
+      self.state.write("__auto_type");
+    }
+    self.state.write(" ");
+    self.state.write(fi.item_name);
+    self.state.write(" = ");
+    let perr = self.emit_expr(*payload);
+    if perr.is_some() {
+      ret perr;
+    }
+    self.state.write(";\n");
+    let elem_name = self.resolve_type_name(elem_dt);
+    if elem_name.is_some() {
+      self.record_local_typed(
+        fi.item_name,
+        elem_name.unwrap(),
+        dtype_is_pointer(elem_dt),
+        elem_dt
+      );
+    }
+    ret .None;
+  }
+
   // Emits one statement from an already-cloned-and-renamed `next()` body
   // inline, recursing through the handful of control-flow shapes
   // `_next_body_inlinable` confirmed are present, and delegating every
   // ordinary statement (a ordinary `let`, an expression statement, and so
   // on - none of which can themselves contain a `ret` needing this
   // treatment) straight to the shared `emit_statement`. A `ret .Some(x)`
-  // becomes binding `fi.item_name` from `x`, running the `for` loop's own
-  // user-written body, then `continue`; a `ret .None` becomes `break`.
+  // becomes binding the loop's item/index name(s) from `x` via
+  // `emit_inlined_next_bind`, running the `for` loop's own user-written
+  // body, then `continue`; a `ret .None` becomes `break`. `idx_counter_name`
+  // is the enumerate-form running-count local declared by the caller, or
+  // `""` when `fi` has no index name (see `emit_inlined_next_bind`).
   emit_inlined_next_stmt(
     Node stmt,
     ForIterNode fi,
-    DataType elem_dt
+    DataType elem_dt,
+    str idx_counter_name
   ) Option<CodegenErrorKind> {
     self.mark_node(stmt);
     if stmt.has_pos {
@@ -9313,31 +9432,9 @@ impl Codegen {
           self.state.write("break;\n");
           ret .None;
         }
-        self.state.write_indent();
-        if self.msvc_mode {
-          let ewt = self.write_type(elem_dt);
-          if ewt.is_none() {
-            self.state.write("int64_t");
-          }
-        } else {
-          self.state.write("__auto_type");
-        }
-        self.state.write(" ");
-        self.state.write(fi.item_name);
-        self.state.write(" = ");
-        let perr = self.emit_expr(*payload);
-        if perr.is_some() {
-          ret perr;
-        }
-        self.state.write(";\n");
-        let elem_name = self.resolve_type_name(elem_dt);
-        if elem_name.is_some() {
-          self.record_local_typed(
-            fi.item_name,
-            elem_name.unwrap(),
-            dtype_is_pointer(elem_dt),
-            elem_dt
-          );
+        let bind_err = self.emit_inlined_next_bind(fi, elem_dt, idx_counter_name, payload);
+        if bind_err.is_some() {
+          ret bind_err;
         }
         self.loop_defer_marks.push(self.defer_stack.len);
         let berr = self.emit_body(*fi.body);
@@ -9351,7 +9448,7 @@ impl Codegen {
       }
       .Body(b) -> {
         for s : b.statements {
-          let serr = self.emit_inlined_next_stmt(*s, fi, elem_dt);
+          let serr = self.emit_inlined_next_stmt(*s, fi, elem_dt, idx_counter_name);
           if serr.is_some() {
             ret serr;
           }
@@ -9367,7 +9464,7 @@ impl Codegen {
         }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
-        let berr = self.emit_inlined_next_stmt(*s.body, fi, elem_dt);
+        let berr = self.emit_inlined_next_stmt(*s.body, fi, elem_dt, idx_counter_name);
         self.state.indent_level = self.state.indent_level - 1;
         if berr.is_some() {
           ret berr;
@@ -9392,7 +9489,7 @@ impl Codegen {
             }
             self.state.indent_level = self.state.indent_level + 1;
             self.loop_defer_marks.push(self.defer_stack.len);
-            let fberr = self.emit_inlined_next_stmt(*c.body, fi, elem_dt);
+            let fberr = self.emit_inlined_next_stmt(*c.body, fi, elem_dt, idx_counter_name);
             self.loop_defer_marks.pop();
             self.state.indent_level = self.state.indent_level - 1;
             if fberr.is_some() {
@@ -9467,10 +9564,162 @@ impl Codegen {
     self.state.write(arr_text);
     self.state.write(";\n");
     self.record_local_typed(self_local, owner_c_name, true, owner_dt);
+
+    // The enumerate two-name form (`for i, x :: iter`, when `Elem` isn't
+    // itself a 2-tuple) needs a running 0-based count that survives
+    // across `next()` calls that skip elements (e.g. a tombstone-
+    // filtering scan), so it's a real local declared once here, before
+    // the loop, not something `emit_inlined_next_bind` can derive from
+    // the loop's own index variable the way the old direct-index fast
+    // path could.
+    flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
+    elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
+    str idx_counter_name = "";
+    if fi.has_index_name && !fi.item_is_destructure && !pair_two_name {
+      self.iter_inline_local_counter = self.iter_inline_local_counter + 1;
+      StringBuilder idxc_sb = string_builder_init(24);
+      idxc_sb.append("__fun_iter_idx");
+      idxc_sb.append(format_num(self.iter_inline_local_counter));
+      idx_counter_name = idxc_sb.build();
+      self.state.write_indent();
+      self.state.write("int64_t ");
+      self.state.write(idx_counter_name);
+      self.state.write(" = 0;\n");
+    }
+
     self.state.write_indent();
     self.state.write("for (;;) {\n");
     self.state.indent_level = self.state.indent_level + 1;
-    let ierr = self.emit_inlined_next_stmt(*body_clone, fi, elem_dt);
+    let ierr = self.emit_inlined_next_stmt(*body_clone, fi, elem_dt, idx_counter_name);
+    self.state.indent_level = self.state.indent_level - 1;
+    if ierr.is_some() {
+      ret ierr;
+    }
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
+  }
+
+  // `Vec<T>` implements `Iterator<T>` directly on itself, but it's
+  // generic, unlike `Range`/a plain user type: locating its own `next()`
+  // template and resolving `T` needs the same instantiation lookup and
+  // `type_subst_*` context `emit_one_generic_impl_method` already sets up
+  // for an ordinary generic method call - reused here rather than
+  // duplicated, just swapped for `emit_inlined_iterator_next`'s
+  // splice-the-body-inline emission instead of a direct call.
+  // 
+  // Always hoists the iterable into a fresh local copy first, identifier
+  // or not: `Vec<T>`'s own cursor (`__iter_pos`) now lives on the value
+  // itself, so a `for` loop must never mutate the caller's own variable
+  // through it - two independent loops over "the same" `Vec`, or one
+  // nested inside another over the same value, must not corrupt each
+  // other's position. A plain struct copy is cheap (a few fields, no
+  // deep copy of the backing array), and this same rule is exactly what
+  // already covered a non-identifier Vec iterable's own re-evaluation
+  // concern (`squares.keys()`) before this, just now applied uniformly.
+  // `owner_name` is `Vec<T>`'s own resolved, already-mangled instantiation
+  // name (`"Vec__num"`) - the caller resolves it however it has the
+  // iterable's type on hand (structurally, or already mangled-only, see
+  // `emit_for_iter`'s own two shapes for "this is a Vec" below), since
+  // either way leads to the same instantiation lookup here regardless.
+  emit_inlined_vec_iterator(
+    ForIterNode fi,
+    str arr_text,
+    str owner_name
+  ) Option<CodegenErrorKind> {
+    num inst_i = 0;
+    flag found_inst = false;
+    for inst_i < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(inst_i), owner_name) {
+        found_inst = true;
+        break;
+      }
+      inst_i = inst_i + 1;
+    }
+    if !found_inst {
+      ret .Some(.UnsupportedNode);
+    }
+    str base_name = self.instantiation_base_name.get(inst_i);
+    let arg_type_names = self.instantiation_arg_type_names.get(inst_i);
+    let arg_is_pointer = self.instantiation_arg_is_pointer.get(inst_i);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(inst_i);
+    if arg_dtypes.len < 1 {
+      ret .Some(.UnsupportedNode);
+    }
+    DataType elem_dt = *arg_dtypes.get(0);
+
+    Node* next_body = nil;
+    Vec<str> tmpl_type_params;
+    tmpl_type_params.init(0);
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !i.has_quirk_name || !equals(i.quirk_name, "Iterator") {
+            continue;
+          }
+          StringBuilder pfx = string_builder_init(16);
+          pfx.append(i.type_name);
+          pfx.append("__");
+          pfx.append(i.quirk_name);
+          pfx.append("__");
+          str prefix = pfx.build();
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                if equals(strip_prefix(fnv.name, prefix), "next") && fnv.has_body {
+                  next_body = fnv.body;
+                  tmpl_type_params = i.type_params;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    if next_body == nil {
+      ret .Some(.UnsupportedNode);
+    }
+
+    self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+    StringBuilder vtmp_sb = string_builder_init(24);
+    vtmp_sb.append("__fun_iter_src");
+    vtmp_sb.append(format_num(self.for_iter_temp_counter));
+    str vtmp = vtmp_sb.build();
+
+    self.state.write("{\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    self.state.write_indent();
+    self.state.write(owner_name);
+    self.state.write(" ");
+    self.state.write(vtmp);
+    self.state.write(" = ");
+    self.state.write(arr_text);
+    self.state.write(";\n");
+    DataType vtmp_dt = dtype_new();
+    vtmp_dt.type_str = owner_name;
+    self.record_local_typed(vtmp, owner_name, false, vtmp_dt);
+
+    let prev_params = self.type_subst_param_names;
+    let prev_arg_names = self.type_subst_arg_type_strs;
+    let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+    let prev_arg_dtypes = self.type_subst_arg_dtypes;
+    self.type_subst_param_names = tmpl_type_params;
+    self.type_subst_arg_type_strs = arg_type_names;
+    self.type_subst_arg_dtypes = arg_dtypes;
+    self.type_subst_arg_is_pointer = arg_is_pointer;
+
+    let ierr = self.emit_inlined_iterator_next(next_body, owner_name, fi, elem_dt, vtmp);
+
+    self.type_subst_param_names = prev_params;
+    self.type_subst_arg_type_strs = prev_arg_names;
+    self.type_subst_arg_is_pointer = prev_arg_ptrs;
+    self.type_subst_arg_dtypes = prev_arg_dtypes;
+
     self.state.indent_level = self.state.indent_level - 1;
     if ierr.is_some() {
       ret ierr;
@@ -9587,29 +9836,45 @@ impl Codegen {
       _ -> { ret .Some(.UnsupportedNode); }
     }
 
-    // A structurally knowable element `DataType` lets `item` be recorded
-    // as a known local of its real type below, so a nested iteration over
-    // it resolves too. `arr_dtype` being `.Some` doesn't guarantee that:
-    // a local from a monomorphized method's return type has an
-    // already-mangled `type_str` with empty `generic_args`. Either shape
-    // is recognized as a Vec, but only the structural one resolves the
-    // element type.
-    Option<DataType> elem_dt = .None;
+    // `Vec<T>` implements `Iterator<T>` directly (see
+    // `emit_inlined_vec_iterator`'s own doc comment) - resolved to its
+    // mangled instantiation name either structurally (`arr_dt.type_str
+    // == "Vec"` with real `generic_args`) or, when a local's own dtype
+    // only carries the already-mangled shape (a monomorphized method's
+    // return type, `"Vec__num"`, empty `generic_args`), directly from
+    // that name already being in its final form.
     flag is_vec = false;
+    str vec_owner_name = "";
     if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       if equals(arr_dt.type_str, "Vec") && arr_dt.generic_args.len == 1 {
-        elem_dt = .Some(self.resolve_type_subst(*arr_dt.generic_args.get(0)));
-        is_vec = true;
+        DataType vec_dt = dtype_new();
+        vec_dt.type_str = "Vec";
+        Vec<DataType*> vec_args;
+        vec_args.init(1);
+        DataType* velem_ptr = malloc(sizeof(DataType));
+        *velem_ptr = self.resolve_type_subst(*arr_dt.generic_args.get(0));
+        vec_args.push(velem_ptr);
+        vec_dt.generic_args = vec_args;
+        let vec_name_opt = self.resolve_type_name(vec_dt);
+        if vec_name_opt.is_some() {
+          vec_owner_name = vec_name_opt.unwrap();
+          is_vec = true;
+        }
       } elif equals(arr_dt.type_str, "Vec") || starts_with(arr_dt.type_str, "Vec__") {
+        vec_owner_name = arr_dt.type_str;
         is_vec = true;
       }
     }
     if !is_vec && arr_type_name.is_some() {
       let found_name = arr_type_name.unwrap();
       if equals(found_name, "Vec") || starts_with(found_name, "Vec__") {
+        vec_owner_name = found_name;
         is_vec = true;
       }
+    }
+    if is_vec {
+      ret self.emit_inlined_vec_iterator(fi, arr_text, vec_owner_name);
     }
     // A sized array local (`num[] arr`, not decayed to a pointer) has no
     // `.len`/`.data` in C, so its length comes from
@@ -9620,7 +9885,7 @@ impl Codegen {
     // `arr_dt.array_depth` wasn't populated at all.
     num raw_array_depth = 1;
     Option<DataType> raw_arr_dt = .None;
-    if !is_vec && arr_dtype.is_some() {
+    if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       if arr_dt.is_array && arr_dt.pointer_depth == 0 {
         is_raw_array = true;
@@ -9638,7 +9903,7 @@ impl Codegen {
     // instantiate `SetIter<T>`/`MapIter<K, V>`/`Option<T>`, and a bare
     // identifier receiver, since an rvalue receiver can't take `&` to
     // call `.iter()` on it.
-    if !is_vec && !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
+    if !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
       let coll_dt = arr_dtype.unwrap();
       flag is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
       flag is_map = equals(coll_dt.type_str, "Map") && coll_dt.generic_args.len == 2;
@@ -9979,46 +10244,13 @@ impl Codegen {
       }
     }
 
-    if !is_vec && !is_raw_array {
+    if !is_raw_array {
       ret .Some(.UnsupportedNode);
     }
 
     str idx_name = "__fun_i";
     if fi.has_index_name {
       idx_name = fi.index_name;
-    }
-
-    // A Vec-typed iterable that isn't a bare identifier, such as
-    // `squares.keys()`, is an rvalue: re-embedding `arr_text` in both the
-    // loop condition and the body would re-evaluate the call each time,
-    // re-allocating a Vec per iteration, so it is materialized into a
-    // temp up front. Raw arrays never reach here as a non-identifier,
-    // since the earlier `is_array` check requires a real local.
-    flag needs_vec_src_temp = is_vec && !iterable_is_identifier;
-    str vec_src_text = arr_text;
-    if needs_vec_src_temp {
-      self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
-      StringBuilder vsrc_sb = string_builder_init(24);
-      vsrc_sb.append("__fun_iter_src");
-      vsrc_sb.append(format_num(self.for_iter_temp_counter));
-      vec_src_text = vsrc_sb.build();
-      self.state.write("{\n");
-      self.state.indent_level = self.state.indent_level + 1;
-      self.state.write_indent();
-      if self.msvc_mode && arr_dtype.is_some() {
-        let vsrc_wt = self.write_type(arr_dtype.unwrap());
-        if vsrc_wt.is_none() {
-          self.state.write("int64_t");
-        }
-      } else {
-        self.state.write("__auto_type");
-      }
-      self.state.write(" ");
-      self.state.write(vec_src_text);
-      self.state.write(" = ");
-      self.state.write(arr_text);
-      self.state.write(";\n");
-      self.state.write_indent();
     }
 
     // A multi-dimensional raw array's length bound can't be computed from
@@ -10030,7 +10262,7 @@ impl Codegen {
     // default to `arr_text` with zero levels.
     str len_root = arr_text;
     num len_offset = 0;
-    if is_raw_array && iterable_is_identifier {
+    if iterable_is_identifier {
       let mdim = self.lookup_local_multidim(arr_text);
       if mdim.is_some() {
         let m = mdim.unwrap();
@@ -10043,34 +10275,28 @@ impl Codegen {
     // single-star pointer, and 2 or more for a deeper array's layer,
     // where `item` needs `__auto_type` to deduce a pointer-to-array type.
     num element_depth = 0;
-    if is_raw_array && raw_array_depth > 0 {
+    if raw_array_depth > 0 {
       element_depth = raw_array_depth - 1;
     }
     self.state.write("for (int64_t ");
     self.state.write(idx_name);
     self.state.write(" = 0; ");
     self.state.write(idx_name);
-    self.state.write(" < ");
-    if is_vec {
-      self.state.write(vec_src_text);
-      self.state.write(".len; ");
-    } else {
-      self.state.write("(int64_t)(sizeof(");
-      self.state.write(len_root);
-      num lo_i = 0;
-      for lo_i < len_offset {
-        self.state.write("[0]");
-        lo_i = lo_i + 1;
-      }
-      self.state.write(")/sizeof(");
-      self.state.write(len_root);
-      num lo_j = 0;
-      for lo_j < len_offset + 1 {
-        self.state.write("[0]");
-        lo_j = lo_j + 1;
-      }
-      self.state.write(")); ");
+    self.state.write(" < (int64_t)(sizeof(");
+    self.state.write(len_root);
+    num lo_i = 0;
+    for lo_i < len_offset {
+      self.state.write("[0]");
+      lo_i = lo_i + 1;
     }
+    self.state.write(")/sizeof(");
+    self.state.write(len_root);
+    num lo_j = 0;
+    for lo_j < len_offset + 1 {
+      self.state.write("[0]");
+      lo_j = lo_j + 1;
+    }
+    self.state.write(")); ");
     self.state.write(idx_name);
     self.state.write("++) {\n");
     self.state.indent_level = self.state.indent_level + 1;
@@ -10084,8 +10310,8 @@ impl Codegen {
     // When dims are known the full declaration is written here and the
     // generic suffix below is skipped.
     flag msvc_multidim_wrote_all = false;
-    if is_vec || element_depth >= 2 {
-      if self.msvc_mode && !is_vec && element_depth >= 2 {
+    if element_depth >= 2 {
+      if self.msvc_mode {
         // Try stored dimension sizes for a proper pointer-to-array type:
         // `elem_c_type (*item_name)[d2]...[dN] = arr[idx];`
         let d0 = self.lookup_local_arr_dim(len_root, len_offset + 2);
@@ -10114,15 +10340,6 @@ impl Codegen {
           // Dims unknown; fall back to a plain int64_t declaration.
           self.state.write("int64_t ");
         }
-      } elif self.msvc_mode && is_vec && elem_dt.is_some() {
-        let elem_wt = self.write_type(elem_dt.unwrap());
-        if elem_wt.is_none() {
-          self.state.write("int64_t");
-        }
-        self.state.write(" ");
-      } elif self.msvc_mode {
-        // Vec with unknown elem: best-effort fallback.
-        self.state.write("int64_t ");
       } else {
         self.state.write("__auto_type ");
       }
@@ -10148,73 +10365,22 @@ impl Codegen {
     if !msvc_multidim_wrote_all {
       self.state.write(item_write_name);
       self.state.write(" = ");
-      self.state.write(vec_src_text);
-      if is_vec {
-        self.state.write(".data[");
-      } else {
-        self.state.write("[");
-      }
+      self.state.write(arr_text);
+      self.state.write("[");
       self.state.write(idx_name);
       self.state.write("];\n");
     }
-    // `item` is recorded as a known local of the element type when
-    // `elem_dt` resolved above; otherwise it stays unrecorded, so a later
-    // `item.field` read is rejected rather than guessed. `*item` works
-    // either way, needing no locals lookup.
-    if elem_dt.is_some() {
-      let edt = elem_dt.unwrap();
-      let elem_name = self.resolve_type_name(edt);
-      if elem_name.is_some() {
-        self.record_local_typed(item_write_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
-      }
-    }
     if fi.item_is_destructure {
-      if elem_dt.is_some() && elem_dt.unwrap().is_tuple {
-        let edt2 = elem_dt.unwrap();
-        num fdi = 0;
-        for name : fi.item_destructure_names {
-          self.state.write_indent();
-          flag wrote_fd_type = false;
-          if fdi < edt2.tuple_members.len {
-            if self.msvc_mode {
-              let fdwt = self.write_type(*edt2.tuple_members.get(fdi));
-              wrote_fd_type = fdwt.is_some();
-            }
-          }
-          if !wrote_fd_type {
-            self.state.write("__auto_type");
-          }
-          self.state.write(" ");
-          self.state.write(name);
-          self.state.write(" = ");
-          self.state.write(item_write_name);
-          self.state.write(format("._{num};\n", fdi));
-          if fdi < edt2.tuple_members.len {
-            let fd_elem = *edt2.tuple_members.get(fdi);
-            let fd_resolved = self.resolve_type_name(fd_elem);
-            if fd_resolved.is_some() {
-              let fd_subst = self.resolve_type_subst(fd_elem);
-              self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
-            }
-          }
-          fdi = fdi + 1;
-        }
-      } else {
-        // The Vec's own real element type didn't resolve structurally
-        // here (the same pre-existing gap `elem_dt.is_some()` above
-        // already documents for an ordinary, non-destructuring item) -
-        // typecheck already requires a real tuple-shaped element for a
-        // destructuring for-loop to pass at all, so reaching here means
-        // codegen's own narrower structural resolution missed what
-        // typecheck already confirmed, not that the program is invalid.
-        ret .Some(.UnsupportedNode);
-      }
+      // A raw array's element type isn't resolved to a real tuple shape
+      // here, so a destructuring for-loop over one is unsupported;
+      // typecheck's own resolution is independent and unaffected.
+      ret .Some(.UnsupportedNode);
     }
     // A raw array's item is recorded at the decremented depth, so a
     // nested `for x : item` can resolve `is_raw_array` structurally for
     // `item`'s name rather than relying on its multidim root and depth,
     // registered separately just below.
-    if is_raw_array && raw_arr_dt.is_some() {
+    if raw_arr_dt.is_some() {
       DataType item_dt = raw_arr_dt.unwrap();
       item_dt.array_depth = element_depth;
       item_dt.is_array = element_depth > 0;
@@ -10235,11 +10401,6 @@ impl Codegen {
     self.state.indent_level = self.state.indent_level - 1;
     self.state.write_indent();
     self.state.write("}\n");
-    if needs_vec_src_temp {
-      self.state.indent_level = self.state.indent_level - 1;
-      self.state.write_indent();
-      self.state.write("}\n");
-    }
     ret .None;
   }
 
@@ -14375,7 +14536,14 @@ impl Codegen {
       // expansion pass added its own real recursive tree walk (over every
       // DataType and function body in the program) on top of the parser's
       // own, pushing the accumulated high-water mark past the old reserve.
-      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#endif\n");
+      // POSIX's own default 8 MB isn't immune either (confirmed directly:
+      // adding one more `num` field to `Vec<T>` alone, no logic change,
+      // was enough to push an already-close-to-the-edge test file over
+      // it on macOS) - `main`'s own body runs on a worker thread given an
+      // explicit large stack instead (see `emit_test_runner`), since
+      // POSIX has no equivalent of the Windows linker pragma for growing
+      // the *main* thread's stack after the process has already started.
+      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#else\n#include <pthread.h>\n#endif\n");
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
@@ -15388,7 +15556,18 @@ impl Codegen {
     self.state.write("    return \"\";\n");
     self.state.write("}\n\n");
 
-    self.state.write("int main(int argc, char** argv) {\n");
+    // The real work runs in `__fun_test_main_worker`, not `main` itself:
+    // on POSIX, `main` hands it off to a worker thread given an explicit
+    // large stack (see the `#include <pthread.h>` comment above for why -
+    // POSIX has no way to grow the *main* thread's own stack after the
+    // fact, unlike the Windows linker pragma). `argc`out parameters travel
+    // through a small struct since a pthread start function takes a
+    // single `void*`.
+    self.state.write("typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n");
+    self.state.write("static void* __fun_test_main_worker(void* __fun_test_argp) {\n");
+    self.state.write("    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n");
+    self.state.write("    int argc = __fun_test_a->argc;\n");
+    self.state.write("    char** argv = __fun_test_a->argv;\n");
     self.state.write("    const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
@@ -15407,10 +15586,30 @@ impl Codegen {
     self.state.write("    }\n");
     self.state.write("    if (filter && ran == 0) {\n");
     self.state.write("        printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
-    self.state.write("        return 1;\n");
+    self.state.write("        __fun_test_a->result = 1;\n");
+    self.state.write("        return 0;\n");
     self.state.write("    }\n");
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
-    self.state.write("    return passed == ran ? 0 : 1;\n");
+    self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
+    self.state.write("    return 0;\n");
+    self.state.write("}\n\n");
+    self.state.write("int main(int argc, char** argv) {\n");
+    self.state.write("    __fun_test_main_args __fun_test_a;\n");
+    self.state.write("    __fun_test_a.argc = argc;\n");
+    self.state.write("    __fun_test_a.argv = argv;\n");
+    self.state.write("    __fun_test_a.result = 0;\n");
+    self.state.write("#ifdef _WIN32\n");
+    self.state.write("    __fun_test_main_worker(&__fun_test_a);\n");
+    self.state.write("#else\n");
+    self.state.write("    pthread_attr_t __fun_test_attr;\n");
+    self.state.write("    pthread_attr_init(&__fun_test_attr);\n");
+    self.state.write("    pthread_attr_setstacksize(&__fun_test_attr, 134217728);\n");
+    self.state.write("    pthread_t __fun_test_thread;\n");
+    self.state.write("    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n");
+    self.state.write("    pthread_attr_destroy(&__fun_test_attr);\n");
+    self.state.write("    pthread_join(__fun_test_thread, (void**)0);\n");
+    self.state.write("#endif\n");
+    self.state.write("    return __fun_test_a.result;\n");
     self.state.write("}\n");
     ret .None;
   }
@@ -16978,207 +17177,6 @@ test "emit_statement emits an infinite for as while (1)" {
   `    return;
   `}
   ``), "expected 'while (1)'";
-}
-
-test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" {
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-  g.record_local("items", "Vec", false);
-
-  Node* iterable = malloc(sizeof(Node));
-  *iterable = node_new(.Identifier("items"));
-  Node* ret_stmt = malloc(sizeof(Node));
-  *ret_stmt = node_new(.StatementReturn(nil));
-  Vec<Node*> body_stmts;
-  body_stmts.init(0);
-  body_stmts.push(ret_stmt);
-  BodyNode bn;
-  bn.statements = body_stmts;
-  Node* body = malloc(sizeof(Node));
-  *body = node_new(.Body(bn));
-
-  ForIterNode fi;
-  fi.index_name = "";
-  fi.has_index_name = false;
-  fi.item_name = "item";
-  fi.item_is_destructure = false;
-  fi.item_destructure_names.init(0);
-  fi.iterable = iterable;
-  fi.body = body;
-  Node n = node_new(.StatementFor(.Iter(fi)));
-
-  assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
-  assert equals(
-    st.out.build(),
-    `for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {
-    `    __auto_type item = items.data[__fun_i];
-    `    return;
-    `}
-    ``
-  ), "expected a synthetic index name and the .len/.data fast path";
-}
-
-test "emit_statement emits a Vec iterator for with an explicit index name" {
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-  g.record_local("items", "Vec", false);
-
-  Node* iterable = malloc(sizeof(Node));
-  *iterable = node_new(.Identifier("items"));
-  BodyNode bn;
-  bn.statements.init(0);
-  Node* body = malloc(sizeof(Node));
-  *body = node_new(.Body(bn));
-
-  ForIterNode fi;
-  fi.index_name = "idx";
-  fi.has_index_name = true;
-  fi.item_name = "item";
-  fi.item_is_destructure = false;
-  fi.item_destructure_names.init(0);
-  fi.iterable = iterable;
-  fi.body = body;
-  Node n = node_new(.StatementFor(.Iter(fi)));
-
-  assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
-  assert equals(
-    st.out.build(),
-    `for (int64_t idx = 0; idx < items.len; idx++) {
-    `    __auto_type item = items.data[idx];
-    `}
-    ``
-  ), "expected the given index name used instead of the synthetic default";
-}
-
-test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Vec instantiation, not just the bare 'Vec' stand-in" {
-  // A real `Vec<str> local;` declaration records its local under
-  // `write_type`'s mangled name `Vec__str`, never the bare `Vec` the
-  // other tests hand-record. `emit_for_iter`'s Vec check must not
-  // require an exact `Vec` match, or it rejects every real declaration.
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-  g.record_local("items", "Vec__str", false);
-
-  Node* iterable = malloc(sizeof(Node));
-  *iterable = node_new(.Identifier("items"));
-  BodyNode bn;
-  bn.statements.init(0);
-  Node* body = malloc(sizeof(Node));
-  *body = node_new(.Body(bn));
-
-  ForIterNode fi;
-  fi.index_name = "";
-  fi.has_index_name = false;
-  fi.item_name = "item";
-  fi.item_is_destructure = false;
-  fi.item_destructure_names.init(0);
-  fi.iterable = iterable;
-  fi.body = body;
-  Node n = node_new(.StatementFor(.Iter(fi)));
-
-  assert g.emit_statement(n).is_none(), "expected the Vec__str iterator for to emit";
-  assert equals(
-    st.out.build(),
-    `for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {
-    `    __auto_type item = items.data[__fun_i];
-    `}
-    ``
-  ), "expected the same .len/.data fast path as the bare 'Vec' stand-in";
-}
-
-test "emit_statement records a Vec iterator's own item as a known local, so a NESTED iterator over it resolves" {
-  // Iterating `combos: Vec<Vec<str>>` and then its item needs the outer
-  // loop's item recorded as a known local, or the inner loop is
-  // rejected. `local_dtype` holds `combos`'s full `DataType`, so
-  // `emit_for_iter` reads the element type off `generic_args` instead of
-  // reverse-engineering it from a mangled name.
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-
-  CompoundNode vecc = compound_node_new();
-  vecc.name = "Vec";
-  vecc.type_params.push("T");
-  vecc.has_type_params = true;
-  CompoundField vecf;
-  vecf.name = "len";
-  DataType* vecfdt = malloc(sizeof(DataType));
-  *vecfdt = dtype_new();
-  vecfdt.type_str = "num";
-  vecf.dtype = vecfdt;
-  vecc.fields.push(vecf);
-  Node vec_tmpl_node = node_new(.Compound(vecc));
-  g.emit_compound(vec_tmpl_node);
-
-  DataType* inner_str_arg = malloc(sizeof(DataType));
-  *inner_str_arg = dtype_new();
-  inner_str_arg.type_str = "str";
-  DataType* inner_vec = malloc(sizeof(DataType));
-  *inner_vec = dtype_new();
-  inner_vec.type_str = "Vec";
-  inner_vec.generic_args.push(inner_str_arg);
-  DataType outer_vec = dtype_new();
-  outer_vec.type_str = "Vec";
-  outer_vec.generic_args.push(inner_vec);
-  g.record_local_typed("combos", "Vec__Vec__str", false, outer_vec);
-
-  // Pre-warms `Vec<str>`'s monomorphization into a throwaway buffer, so
-  // the assertion below matches the for-loop's exact text without the
-  // one-time `typedef struct Vec__str {...}` that element-type
-  // resolution would otherwise emit inline.
-  CodegenState warm_st = codegen_state_new();
-  CodegenState* real_state = g.state;
-  g.state = &warm_st;
-  g.resolve_type_name(*inner_vec);
-  g.state = real_state;
-
-  Node* outer_iterable = malloc(sizeof(Node));
-  *outer_iterable = node_new(.Identifier("combos"));
-
-  Node* inner_iterable = malloc(sizeof(Node));
-  *inner_iterable = node_new(.Identifier("existing"));
-  BodyNode inner_bn;
-  inner_bn.statements.init(0);
-  Node* inner_body = malloc(sizeof(Node));
-  *inner_body = node_new(.Body(inner_bn));
-  ForIterNode inner_fi;
-  inner_fi.index_name = "";
-  inner_fi.has_index_name = false;
-  inner_fi.item_name = "et";
-  inner_fi.item_is_destructure = false;
-  inner_fi.item_destructure_names.init(0);
-  inner_fi.iterable = inner_iterable;
-  inner_fi.body = inner_body;
-  Node* inner_for = malloc(sizeof(Node));
-  *inner_for = node_new(.StatementFor(.Iter(inner_fi)));
-  Vec<Node*> outer_stmts;
-  outer_stmts.init(0);
-  outer_stmts.push(inner_for);
-  BodyNode outer_bn;
-  outer_bn.statements = outer_stmts;
-  Node* outer_body = malloc(sizeof(Node));
-  *outer_body = node_new(.Body(outer_bn));
-
-  ForIterNode outer_fi;
-  outer_fi.index_name = "";
-  outer_fi.has_index_name = false;
-  outer_fi.item_name = "existing";
-  outer_fi.item_is_destructure = false;
-  outer_fi.item_destructure_names.init(0);
-  outer_fi.iterable = outer_iterable;
-  outer_fi.body = outer_body;
-  Node n = node_new(.StatementFor(.Iter(outer_fi)));
-
-  assert g.emit_statement(n).is_none(), "expected the nested Vec iterator for to emit, with 'existing' resolved as a known Vec__str local";
-  assert equals(
-    st.out.build(),
-    `for (int64_t __fun_i = 0; __fun_i < combos.len; __fun_i++) {
-    `    __auto_type existing = combos.data[__fun_i];
-    `    for (int64_t __fun_i = 0; __fun_i < existing.len; __fun_i++) {
-    `        __auto_type et = existing.data[__fun_i];
-    `    }
-    `}
-    ``
-  ), "expected the inner loop over 'existing' to emit via the same .len/.data fast path";
 }
 
 test "emit_statement rejects an iterator for over a receiver that isn't a known Vec local" {
@@ -21854,171 +21852,4 @@ test "emit_function resets the locals table's type-name column between functions
 
   assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, resolving 'o' as Opt not a stale leaked type";
   assert contains(st.out.build(), "o.tag == Opt_Some"), "expected the bare-shorthand pattern to resolve against Opt, not a leaked type name";
-}
-
-test "emit_function resets local_dtype (not just local_names/local_type_name) between functions" {
-  // `local_dtype`, which backs `emit_for_iter`'s structural element-type
-  // lookup, must be reset in `emit_function_named` like its three
-  // sibling columns, or a later function's local reads back an earlier
-  // one's stale dtype at a misaligned index.
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-
-  CompoundNode vecc = compound_node_new();
-  vecc.name = "Vec";
-  vecc.type_params.push("T");
-  vecc.has_type_params = true;
-  CompoundField vecf;
-  vecf.name = "len";
-  DataType* vecfdt = malloc(sizeof(DataType));
-  *vecfdt = dtype_new();
-  vecfdt.type_str = "num";
-  vecf.dtype = vecfdt;
-  vecc.fields.push(vecf);
-  Node vec_tmpl_node = node_new(.Compound(vecc));
-  g.emit_compound(vec_tmpl_node);
-
-  // fn_a: one param, `Vec<str> unused`, populates local_dtype's only
-  // entry (index 0) with a Vec<str> dtype, then returns.
-  DataType* str_arg_a = malloc(sizeof(DataType));
-  *str_arg_a = dtype_new();
-  str_arg_a.type_str = "str";
-  DataType* a_param_dt = malloc(sizeof(DataType));
-  *a_param_dt = dtype_new();
-  a_param_dt.type_str = "Vec";
-  a_param_dt.generic_args.push(str_arg_a);
-  VariableNode av;
-  av.var_type = a_param_dt;
-  av.name = "unused";
-  av.has_val = false;
-  av.is_const = false;
-  av.is_destructure = false;
-  av.destructure_names.init(0);
-  Node* a_param = malloc(sizeof(Node));
-  *a_param = node_new(.Variable(av));
-  Vec<Node*> fa_params;
-  fa_params.init(0);
-  fa_params.push(a_param);
-
-  Node* fa_ret = malloc(sizeof(Node));
-  *fa_ret = node_new(.StatementReturn(nil));
-  Vec<Node*> fa_stmts;
-  fa_stmts.init(0);
-  fa_stmts.push(fa_ret);
-  BodyNode fa_bn;
-  fa_bn.statements = fa_stmts;
-  Node* fa_body = malloc(sizeof(Node));
-  *fa_body = node_new(.Body(fa_bn));
-
-  FunctionNode fa = function_node_new();
-  fa.name = "fn_a";
-  fa.has_name = true;
-  DataType* fa_rtype = malloc(sizeof(DataType));
-  *fa_rtype = dtype_new();
-  fa_rtype.type_str = "void";
-  fa_rtype.kind = .Void;
-  fa.rtype = fa_rtype;
-  fa.has_rtype = true;
-  fa.args = fa_params;
-  fa.has_args = true;
-  fa.body = fa_body;
-  fa.has_body = true;
-  Node fa_node = node_new(.Function(fa));
-
-  assert g.emit_function(fa_node).is_none(), "expected fn_a to emit";
-
-  // `fn_b`'s one param, `Vec<Vec<str>> y`, is its own index-0 local.
-  // Without the reset, the lookup reads back `fn_a`'s stale `Vec<str>`
-  // entry at that index, giving `item` a too-shallow element type and
-  // rejecting the nested iteration.
-  DataType* str_arg_b = malloc(sizeof(DataType));
-  *str_arg_b = dtype_new();
-  str_arg_b.type_str = "str";
-  DataType* inner_vec_b = malloc(sizeof(DataType));
-  *inner_vec_b = dtype_new();
-  inner_vec_b.type_str = "Vec";
-  inner_vec_b.generic_args.push(str_arg_b);
-  DataType* b_param_dt = malloc(sizeof(DataType));
-  *b_param_dt = dtype_new();
-  b_param_dt.type_str = "Vec";
-  b_param_dt.generic_args.push(inner_vec_b);
-  VariableNode bv;
-  bv.var_type = b_param_dt;
-  bv.name = "y";
-  bv.has_val = false;
-  bv.is_const = false;
-  bv.is_destructure = false;
-  bv.destructure_names.init(0);
-  Node* b_param = malloc(sizeof(Node));
-  *b_param = node_new(.Variable(bv));
-  Vec<Node*> fb_params;
-  fb_params.init(0);
-  fb_params.push(b_param);
-
-  Node* outer_iterable = malloc(sizeof(Node));
-  *outer_iterable = node_new(.Identifier("y"));
-  Node* inner_iterable = malloc(sizeof(Node));
-  *inner_iterable = node_new(.Identifier("item"));
-  BodyNode inner_bn;
-  inner_bn.statements.init(0);
-  Node* inner_body = malloc(sizeof(Node));
-  *inner_body = node_new(.Body(inner_bn));
-  ForIterNode inner_fi;
-  inner_fi.index_name = "";
-  inner_fi.has_index_name = false;
-  inner_fi.item_name = "s";
-  inner_fi.item_is_destructure = false;
-  inner_fi.item_destructure_names.init(0);
-  inner_fi.iterable = inner_iterable;
-  inner_fi.body = inner_body;
-  Node* inner_for = malloc(sizeof(Node));
-  *inner_for = node_new(.StatementFor(.Iter(inner_fi)));
-  Vec<Node*> outer_stmts;
-  outer_stmts.init(0);
-  outer_stmts.push(inner_for);
-  BodyNode outer_bn;
-  outer_bn.statements = outer_stmts;
-  Node* outer_body = malloc(sizeof(Node));
-  *outer_body = node_new(.Body(outer_bn));
-  ForIterNode outer_fi;
-  outer_fi.index_name = "";
-  outer_fi.has_index_name = false;
-  outer_fi.item_name = "item";
-  outer_fi.item_is_destructure = false;
-  outer_fi.item_destructure_names.init(0);
-  outer_fi.iterable = outer_iterable;
-  outer_fi.body = outer_body;
-  Node* outer_for = malloc(sizeof(Node));
-  *outer_for = node_new(.StatementFor(.Iter(outer_fi)));
-  Vec<Node*> fb_stmts;
-  fb_stmts.init(0);
-  fb_stmts.push(outer_for);
-  BodyNode fb_bn;
-  fb_bn.statements = fb_stmts;
-  Node* fb_body = malloc(sizeof(Node));
-  *fb_body = node_new(.Body(fb_bn));
-
-  FunctionNode fb = function_node_new();
-  fb.name = "fn_b";
-  fb.has_name = true;
-  DataType* fb_rtype = malloc(sizeof(DataType));
-  *fb_rtype = dtype_new();
-  fb_rtype.type_str = "void";
-  fb_rtype.kind = .Void;
-  fb.rtype = fb_rtype;
-  fb.has_rtype = true;
-  fb.args = fb_params;
-  fb.has_args = true;
-  fb.body = fb_body;
-  fb.has_body = true;
-  Node fb_node = node_new(.Function(fb));
-
-  assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, with 'y' resolved as its OWN Vec<Vec<str>> dtype, not fn_a's stale Vec<str> entry";
-  assert contains(
-    st.out.build(),
-    `for (int64_t __fun_i = 0; __fun_i < item.len; __fun_i++) {
-    `            __auto_type s = item.data[__fun_i];
-    `        }
-    ``
-  ), "expected the NESTED loop over 'item' (Vec<str>) to emit via the .len/.data fast path, proving 'item' resolved its real (not stale) element type";
 }

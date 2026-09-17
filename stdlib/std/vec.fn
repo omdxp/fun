@@ -13,6 +13,12 @@ pub compound Vec<T> {
   num len;
   // Allocated storage capacity.
   num cap;
+  // A `for` loop always drives iteration through a fresh copy of the
+  // value it started from (never the caller's own variable), so this
+  // cursor never observably leaks across two independent loops over
+  // "the same" Vec, or a loop nested inside another over the same Vec.
+  // Compiler-internal, not meant to be read or written directly.
+  num __iter_pos;
 }
 
 fun _str_len(str s) num {
@@ -45,6 +51,7 @@ impl Vec<T> {
   pub init(num cap = 8) {
     self.len = 0;
     self.cap = 0;
+    self.__iter_pos = 0;
     if cap > 0 {
       self.grow(cap);
     }
@@ -304,14 +311,6 @@ impl Vec<T> {
     ret out;
   }
 
-  // Returns a forward iterator yielding each element once, in order.
-  pub iter() VecIter<T> {
-    VecIter<T> it;
-    it.src = self;
-    it.idx = 0;
-    ret it;
-  }
-
   // Sorts elements in place with a stable insertion sort, for any element type.
   // `cmp` follows the `strcmp` convention: negative when `a` sorts before `b`,
   // positive when after, 0 when equal.
@@ -333,22 +332,23 @@ impl Vec<T> {
   }
 }
 
-// Forward iterator over a Vec produced by `Vec.iter()`.
-pub compound VecIter<T> {
-  // Vector being iterated (borrowed, not owned).
-  Vec<T>* src;
-  // Index of the next element to yield.
-  num idx;
-}
-
-impl VecIter<T> as Iterator<T> {
-  // Returns the next element, or `None` once the end is reached.
+// Vec implements Iterator<T> directly: a `for` loop drives this through a
+// fresh copy of the value it started from (see `__iter_pos`'s own doc
+// comment), never the caller's own variable, so calling this by hand on a
+// value still being read elsewhere is the only case that needs the same
+// care.
+impl Vec<T> as Iterator<T> {
+  // Returns the next element, or `None` once the end is reached (and
+  // resets the cursor, so a value manually driven to exhaustion reads
+  // as fresh again - not load-bearing for a `for` loop, which always
+  // starts from its own copy regardless).
   pub next() Option<T> {
-    if self.idx >= self.src.len {
+    if self.__iter_pos >= self.len {
+      self.__iter_pos = 0;
       ret .None;
     }
-    T value = self.src.data[self.idx];
-    self.idx = self.idx + 1;
+    T value = self.data[self.__iter_pos];
+    self.__iter_pos = self.__iter_pos + 1;
     ret .Some(value);
   }
 }
