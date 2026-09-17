@@ -77,6 +77,18 @@ pub fun fmt_flag(flag b) str {
   ret _dup_str("false");
 }
 
+// Bootstrap-compatibility alias: a released `fun` binary built before
+// the `bin` keyword's removal has its own vararg format dispatch
+// hardcoded to call `fmt_bin` by name, baked into that binary's own
+// compiled codegen. Building this repo's compiler from source with
+// such a binary (the first stage of the 3-stage bootstrap every CI
+// build and release does) needs this symbol to exist until the
+// bootstrap baseline moves past that release; safe to remove once it
+// does.
+pub fun fmt_bin(flag b) str {
+  ret fmt_flag(b);
+}
+
 // Format a character into a new string buffer.
 pub fun fmt_chr(chr c) str {
   str buf = malloc(2);
