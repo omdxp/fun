@@ -1158,10 +1158,6 @@ fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
           }
           _rewrite_calls_in_node(fc.body, old_name, new_name);
         }
-        .Range(fr) -> {
-          _rewrite_calls_in_node(fr.range_expr, old_name, new_name);
-          _rewrite_calls_in_node(fr.body, old_name, new_name);
-        }
         .Iter(fi) -> {
           _rewrite_calls_in_node(fi.iterable, old_name, new_name);
           _rewrite_calls_in_node(fi.body, old_name, new_name);

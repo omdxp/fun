@@ -15,6 +15,7 @@ use ..parser.datatype_defs;
 use std.string;
 use std.option;
 use std.io;
+use std.range;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -667,7 +668,6 @@ fun node_contains_fork(Node* node) flag {
     .StatementFor(fk) -> {
       fit fk {
         .Cond(fc) -> { ret node_contains_fork(fc.body); }
-        .Range(fr) -> { ret node_contains_fork(fr.body); }
         .Iter(fi) -> { ret node_contains_fork(fi.body); }
       }
     }
@@ -8876,8 +8876,27 @@ impl Codegen {
         self.state.write_indent();
         fit fk {
           .Cond(fc) -> { ret self.emit_for_cond(fc); }
-          .Range(fr) -> { ret self.emit_for_range(fr); }
-          .Iter(fi) -> { ret self.emit_for_iter(fi); }
+          .Iter(fi) -> {
+            // A raw compound-init iterable expression (only reached via
+            // the range-for desugaring today, `for i : a..b` -> a
+            // constructed `Range{...}` value) needs hoisting into a real
+            // local first: `emit_for_iter` itself only understands a
+            // bare identifier or a chained field access/call as an
+            // iterable, matching every other rvalue-iterable case, which
+            // already gets hoisted the same way for the same reason
+            // (re-constructing it per iteration would be wrong, and its
+            // own `next()` needs a real addressable value to mutate its
+            // cursor through).
+            flag is_compound_init_iterable = false;
+            fit fi.iterable.kind {
+              .CompoundInit(_) -> { is_compound_init_iterable = true; }
+              _ -> {}
+            }
+            if is_compound_init_iterable {
+              ret self.emit_for_iter_hoisting_compound_init(fi);
+            }
+            ret self.emit_for_iter(fi);
+          }
         }
       }
       .StatementFit(f) -> {
@@ -8995,48 +9014,6 @@ impl Codegen {
     self.state.write_indent();
     self.state.write("}\n");
     ret .None;
-  }
-
-  // Emits `for i : start..end { ... }` as `for (int64_t i = start; i <
-  // end; i++) { ... }`. `range_expr` is always an
-  // `Expression{ op = ".." }` with start on the left and end on the right.
-  emit_for_range(ForRangeNode fr) Option<CodegenErrorKind> {
-    fit fr.range_expr.kind {
-      .Expression(e) -> {
-        if !equals(e.op, "..") || !e.has_left || !e.has_right {
-          ret .Some(.InvalidNode);
-        }
-        self.state.write("for (int64_t ");
-        self.state.write(fr.index_name);
-        self.state.write(" = ");
-        let serr = self.emit_expr(*e.left);
-        if serr.is_some() {
-          ret serr;
-        }
-        self.state.write("; ");
-        self.state.write(fr.index_name);
-        self.state.write(" < ");
-        let eerr = self.emit_expr(*e.right);
-        if eerr.is_some() {
-          ret eerr;
-        }
-        self.state.write("; ");
-        self.state.write(fr.index_name);
-        self.state.write("++) {\n");
-        self.state.indent_level = self.state.indent_level + 1;
-        self.loop_defer_marks.push(self.defer_stack.len);
-        let berr = self.emit_body(*fr.body);
-        self.loop_defer_marks.pop();
-        if berr.is_some() {
-          ret berr;
-        }
-        self.state.indent_level = self.state.indent_level - 1;
-        self.state.write_indent();
-        self.state.write("}\n");
-        ret .None;
-      }
-      _ -> { ret .Some(.InvalidNode); }
-    }
   }
 
   // Pushes `name` onto `names` unless it's already present. Small linear
@@ -9497,6 +9474,70 @@ impl Codegen {
     self.state.indent_level = self.state.indent_level - 1;
     if ierr.is_some() {
       ret ierr;
+    }
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
+  }
+
+  // Hoists a `for`'s own raw compound-init iterable expression (`for i :
+  // a..b`'s desugared `Range{start = a, end = b}`) into a real local
+  // first, then re-dispatches to `emit_for_iter` with the iterable
+  // swapped for a bare identifier referencing it - `emit_for_iter` itself
+  // never needs to know this iterable wasn't already a real variable.
+  // Single entry/exit around the hoist, unlike `emit_for_iter`'s own
+  // several return points, so wrapping the temp's scope in `{ ... }` and
+  // closing it correctly stays simple regardless of which of
+  // `emit_for_iter`'s own branches the re-dispatch lands in.
+  emit_for_iter_hoisting_compound_init(ForIterNode fi) Option<CodegenErrorKind> {
+    Option<DataType> ci_dtype = .None;
+    fit fi.iterable.kind {
+      .CompoundInit(c) -> {
+        if c.has_dtype {
+          ci_dtype = .Some(*c.init_dtype);
+        }
+      }
+      _ -> {}
+    }
+    if ci_dtype.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    let ci_name_opt = self.resolve_type_name(ci_dtype.unwrap());
+    if ci_name_opt.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    str ci_name = ci_name_opt.unwrap();
+
+    self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+    StringBuilder ci_tmp_sb = string_builder_init(24);
+    ci_tmp_sb.append("__fun_iter_src");
+    ci_tmp_sb.append(format_num(self.for_iter_temp_counter));
+    str ci_tmp = ci_tmp_sb.build();
+
+    self.state.write("{\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    self.state.write_indent();
+    self.state.write(ci_name);
+    self.state.write(" ");
+    self.state.write(ci_tmp);
+    self.state.write(" = ");
+    let cierr = self.emit_expr(*fi.iterable);
+    if cierr.is_some() {
+      ret cierr;
+    }
+    self.state.write(";\n");
+    self.record_local_typed(ci_tmp, ci_name, false, ci_dtype.unwrap());
+
+    ForIterNode fi2 = fi;
+    Node* new_iterable = malloc(sizeof(Node));
+    *new_iterable = node_new(.Identifier(ci_tmp));
+    fi2.iterable = new_iterable;
+
+    self.state.write_indent();
+    let ferr = self.emit_for_iter(fi2);
+    self.state.indent_level = self.state.indent_level - 1;
+    if ferr.is_some() {
+      ret ferr;
     }
     self.state.write_indent();
     self.state.write("}\n");
@@ -16937,46 +16978,6 @@ test "emit_statement emits an infinite for as while (1)" {
   `    return;
   `}
   ``), "expected 'while (1)'";
-}
-
-test "emit_statement emits a range for as a counted C for loop" {
-  CodegenState st = codegen_state_new();
-  Codegen g = codegen_new(&st);
-
-  Node* start = malloc(sizeof(Node));
-  *start = node_new(.Number(.Num(0)));
-  Node* end = malloc(sizeof(Node));
-  *end = node_new(.Identifier("n"));
-  ExprNode range = expr_node_new();
-  range.left = start;
-  range.has_left = true;
-  range.right = end;
-  range.has_right = true;
-  range.op = "..";
-  Node* range_node = malloc(sizeof(Node));
-  *range_node = node_new(.Expression(range));
-
-  Node* ret_stmt = malloc(sizeof(Node));
-  *ret_stmt = node_new(.StatementReturn(nil));
-  Vec<Node*> body_stmts;
-  body_stmts.init(0);
-  body_stmts.push(ret_stmt);
-  BodyNode bn;
-  bn.statements = body_stmts;
-  Node* body = malloc(sizeof(Node));
-  *body = node_new(.Body(bn));
-
-  ForRangeNode fr;
-  fr.index_name = "i";
-  fr.range_expr = range_node;
-  fr.body = body;
-  Node n = node_new(.StatementFor(.Range(fr)));
-
-  assert g.emit_statement(n).is_none(), "expected the for-range to emit";
-  assert equals(st.out.build(), `for (int64_t i = 0; i < n; i++) {
-  `    return;
-  `}
-  ``), "expected a counted C for loop";
 }
 
 test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" {

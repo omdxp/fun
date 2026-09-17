@@ -1,4 +1,5 @@
 use std.c.io;
+use std.range;
 
 fun main() {
   // for range

@@ -4157,18 +4157,13 @@ fun _lookup_in_body(
       }
     }
     // A `for`'s own loop variable (`item`/`index` in `for item : xs`,
-    // `for i, item :: xs`, or `index` in `for i : a..b`) is bound by
+    // `for i, item :: xs`, or `item` in `for i : a..b`, desugared into an
+    // ordinary `.Iter` loop over a constructed `Range` value) is bound by
     // the statement itself, not declared inside its body the way an
     // ordinary local is - checked here before recursing in, the same
     // shape a fit's own destructuring bindings already get above.
     .StatementFor(fk) -> {
       fit fk {
-        .Range(fr) -> {
-          if equals(fr.index_name, name) {
-            ret .Some(_declaration(name, .Local, format("num {str}", name), body.pos));
-          }
-          ret _lookup_in_body(tokens, fr.body, name, program, file, line);
-        }
         .Iter(fi) -> {
           str map_key = "";
           str map_value = "";
@@ -4889,17 +4884,13 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
   ret .None;
 }
 
-// The body of any of the three `for` loop shapes, so a caller
-// recursing through a function's statements doesn't need its own
-// three-way match just to keep descending.
-// The body of a `for` loop, whichever of the three shapes (bare
-// condition, range, or iterator) it was parsed as. Shared with
-// `completion.fn`, which needs the same descent to collect every
-// local in scope, not just look one up.
+// The body of either `for` loop shape, so a caller recursing through a
+// function's statements doesn't need its own match just to keep
+// descending. Shared with `completion.fn`, which needs the same descent
+// to collect every local in scope, not just look one up.
 pub fun for_body(ForKind fk) Node* {
   fit fk {
     .Cond(c) -> { ret c.body; }
-    .Range(r) -> { ret r.body; }
     .Iter(it) -> { ret it.body; }
   }
 }

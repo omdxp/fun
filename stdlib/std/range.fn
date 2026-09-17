@@ -1,0 +1,27 @@
+// A half-open integer range `[start, end)`. `for i : a..b { ... }`
+// desugars into constructing one of these and iterating it like any
+// other `Iterator`-implementing value, rather than a special form the
+// compiler hand-codes on its own.
+
+use quirks;
+use option;
+
+pub compound Range {
+  num start;
+  num end;
+}
+
+impl Range as Iterator<num> {
+  // Yields each value in `[start, end)`, advancing `start` by one per
+  // call. A `for` loop always drives this over a value constructed fresh
+  // for that loop, so mutating `start` here never leaks into a caller's
+  // own variable.
+  pub next() Option<num> {
+    if self.start >= self.end {
+      ret .None;
+    }
+    num v = self.start;
+    self.start = self.start + 1;
+    ret .Some(v);
+  }
+}

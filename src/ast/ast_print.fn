@@ -170,13 +170,6 @@ pub fun print_node(Node* node, num depth) {
           _line(depth + 1, "Body:");
           print_node(c.body, depth + 2);
         }
-        .Range(r) -> {
-          _line(depth + 1, format("Index: {str}", r.index_name));
-          _line(depth + 1, "Range:");
-          print_node(r.range_expr, depth + 2);
-          _line(depth + 1, "Body:");
-          print_node(r.body, depth + 2);
-        }
         .Iter(it) -> {
           if it.has_index_name {
             _line(depth + 1, format("Index: {str}", it.index_name));

@@ -4296,30 +4296,28 @@ impl Parser {
 
     self.state.new_scope();
 
-    if is_range {
-      if used_double_colon {
-        self.state.err("range for loop does not support 'i, item ::' form");
-        ret .Some(.InvalidStatement);
-      }
-      ScopeEntity item_entity = scope_entity_new(item_name);
-      item_entity.on_stack = true;
-      ScopeEntity* item_entity_ptr = malloc(sizeof(ScopeEntity));
-      *item_entity_ptr = item_entity;
-      self.state.push_scope_entity(item_entity_ptr);
-    } else {
-      if has_index_name {
-        ScopeEntity index_entity = scope_entity_new(index_name);
-        index_entity.on_stack = true;
-        ScopeEntity* index_entity_ptr = malloc(sizeof(ScopeEntity));
-        *index_entity_ptr = index_entity;
-        self.state.push_scope_entity(index_entity_ptr);
-      }
-      ScopeEntity item_entity = scope_entity_new(item_name);
-      item_entity.on_stack = true;
-      ScopeEntity* item_entity_ptr = malloc(sizeof(ScopeEntity));
-      *item_entity_ptr = item_entity;
-      self.state.push_scope_entity(item_entity_ptr);
+    if is_range && used_double_colon {
+      self.state.err("range for loop does not support 'i, item ::' form");
+      ret .Some(.InvalidStatement);
     }
+    // A range-for's own single name is `item_name` (`fi.item_name`, not
+    // `fi.index_name`): it's bound to each value the range yields, exactly
+    // what `item_name` already means for an ordinary `.Iter` loop - a
+    // range desugars into one below, not a distinct shape, so it shares
+    // this same scope-entity logic (`has_index_name` is always false for
+    // a range, so only `item_entity` ever pushes).
+    if has_index_name {
+      ScopeEntity index_entity = scope_entity_new(index_name);
+      index_entity.on_stack = true;
+      ScopeEntity* index_entity_ptr = malloc(sizeof(ScopeEntity));
+      *index_entity_ptr = index_entity;
+      self.state.push_scope_entity(index_entity_ptr);
+    }
+    ScopeEntity item_entity = scope_entity_new(item_name);
+    item_entity.on_stack = true;
+    ScopeEntity* item_entity_ptr = malloc(sizeof(ScopeEntity));
+    *item_entity_ptr = item_entity;
+    self.state.push_scope_entity(item_entity_ptr);
 
     let berr = self.parse_body_multiple_statements();
     self.state.finish_scope();
@@ -4335,27 +4333,74 @@ impl Parser {
     *body = maybe_body.unwrap();
 
     Node node = node_new(.Blank);
+    Node* iterable_ptr = nil;
     if is_range {
-      Node* range_ptr = malloc(sizeof(Node));
-      *range_ptr = iterable_node;
-      ForRangeNode fr;
-      fr.index_name = item_name;
-      fr.range_expr = range_ptr;
-      fr.body = body;
-      node.kind = .StatementFor(.Range(fr));
+      // `a..b` desugars into constructing a `Range{start = a, end = b}`
+      // value and feeding it through the ordinary `.Iter` path, like any
+      // other `Iterator`-implementing iterable - `e.left`/`e.right` are
+      // reused directly as the two field values, no re-parsing needed.
+      // A parse-statement call must push exactly one node (see
+      // `parse_body_multiple_statements`'s own single `node_pop()` per
+      // statement), so this can't also synthesize a preceding `let`
+      // statement to hold the constructed value in a bare identifier;
+      // `emit_for_iter`/`check_for` handle a bare `.CompoundInit`
+      // iterable (hoisted into a temp by codegen, same as any other
+      // rvalue iterable) instead.
+      // 
+      // `Range` is an ordinary stdlib type, not a compiler builtin - a
+      // file using `a..b` range-for needs its own `use std.range;`, the
+      // same as any other file needs `use std.option;` before using
+      // `Option` directly. Synthesizing that import automatically here
+      // was tried and reverted: pushing a top-level `.Import` node onto
+      // `self.state.nodes` while parsing is nested inside a method body
+      // (an `impl` block's own method-list assembly pops nodes off that
+      // same list by position) silently corrupts it, surfacing as
+      // "unsupported node: impl block" far from the real cause -
+      // confirmed by reproducing it with a minimal `impl Thing { scan()
+      // { for i : 0..n { ... } } }`. Not worth chasing a safe injection
+      // point for; requiring the import explicitly is consistent with
+      // how this language already works everywhere else.
+      Node* start_ptr = nil;
+      Node* end_ptr = nil;
+      fit iterable_node.kind {
+        .Expression(e) -> {
+          start_ptr = e.left;
+          end_ptr = e.right;
+        }
+        _ -> {}
+      }
+      DataType range_dt = dtype_new();
+      range_dt.type_str = "Range";
+      DataType* range_dt_ptr = malloc(sizeof(DataType));
+      *range_dt_ptr = range_dt;
+
+      CompoundInitNode range_init = compound_init_node_new();
+      range_init.has_dtype = true;
+      range_init.init_dtype = range_dt_ptr;
+      CompoundInitField start_field;
+      start_field.name = "start";
+      start_field.value = start_ptr;
+      range_init.fields.push(start_field);
+      CompoundInitField end_field;
+      end_field.name = "end";
+      end_field.value = end_ptr;
+      range_init.fields.push(end_field);
+
+      iterable_ptr = malloc(sizeof(Node));
+      *iterable_ptr = node_new(.CompoundInit(range_init));
     } else {
-      Node* iterable_ptr = malloc(sizeof(Node));
+      iterable_ptr = malloc(sizeof(Node));
       *iterable_ptr = iterable_node;
-      ForIterNode fi;
-      fi.index_name = index_name;
-      fi.has_index_name = has_index_name;
-      fi.item_name = item_name;
-      fi.item_is_destructure = false;
-      fi.item_destructure_names.init(0);
-      fi.iterable = iterable_ptr;
-      fi.body = body;
-      node.kind = .StatementFor(.Iter(fi));
     }
+    ForIterNode fi;
+    fi.index_name = index_name;
+    fi.has_index_name = has_index_name;
+    fi.item_name = item_name;
+    fi.item_is_destructure = false;
+    fi.item_destructure_names.init(0);
+    fi.iterable = iterable_ptr;
+    fi.body = body;
+    node.kind = .StatementFor(.Iter(fi));
     fit for_tok {
       .Some(t) -> {
         node.pos = t.pos;
@@ -10637,18 +10682,31 @@ test "parse_for_statement parses a range loop" {
   fit top.kind {
     .StatementFor(fk) -> {
       fit fk {
-        .Range(fr) -> {
-          assert equals(fr.index_name, "i"), "expected index name 'i'";
-          fit fr.range_expr.kind {
-            .Expression(e) -> { assert equals(e.op, ".."), "expected range op '..'"; }
-            _ -> { panic("expected an Expression range"); }
+        // A range desugars into an ordinary `.Iter` loop over a
+        // constructed `Range{start, end}` value, not a distinct AST
+        // shape - `i` is `fi.item_name`, and the iterable is a
+        // `.CompoundInit` for `Range` whose fields reuse the range
+        // expression's own left/right operands directly.
+        .Iter(fi) -> {
+          assert equals(fi.item_name, "i"), "expected item name 'i'";
+          assert !fi.has_index_name,
+          "expected no index name for a plain range loop";
+          fit fi.iterable.kind {
+            .CompoundInit(c) -> {
+              assert c.has_dtype, "expected a declared dtype on the desugared Range";
+              assert equals(c.init_dtype.type_str, "Range"), "expected the desugared iterable to be a Range";
+              assert c.fields.len == 2, "expected 'start' and 'end' fields";
+              assert equals(c.fields.get(0).name, "start"), "expected the first field to be 'start'";
+              assert equals(c.fields.get(1).name, "end"), "expected the second field to be 'end'";
+            }
+            _ -> { panic("expected a CompoundInit iterable"); }
           }
-          fit fr.body.kind {
+          fit fi.body.kind {
             .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the body"; }
             _ -> { panic("expected a Body node"); }
           }
         }
-        _ -> { panic("expected .Range"); }
+        _ -> { panic("expected .Iter"); }
       }
     }
     _ -> { panic("expected a StatementFor node"); }

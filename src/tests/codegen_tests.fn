@@ -32,16 +32,35 @@ test "while-style for loop transpiles to a C for" {
   assert contains(out, "i < 3"), "expected the loop condition";
 }
 
-test "range for loop emits an indexed C for" {
+test "range for loop desugars into a Range value and inlines its own Iterator" {
+  // `transpile_source` doesn't resolve imports (see its own doc
+  // comment), so this stands in for `std.range`/`std.quirks`/
+  // `std.option` with the same shape, matching how codegen_tests_c.fn's
+  // user-Iterator test does for its own `Counter` type.
   str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Range { num start; num end; }
+  `impl Range as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.start >= self.end { ret Option.None; }
+  `    num v = self.start;
+  `    self.start = self.start + 1;
+  `    ret Option.Some(v);
+  `  }
+  `}
   `fun main() {
   `  for i : 0..3 {
   `    printf("%d\n", i);
   `  }
   `}`;
-  let out = emit_c(src, "range for loop emits an indexed C for");
-  assert contains(out, "int64_t i = 0"), "expected the induction variable";
-  assert contains(out, "i < 3"), "expected the range bound";
+  let out = emit_c(src, "range for loop desugars into a Range value");
+  // `for i : a..b` desugars at parse time into constructing a `Range`
+  // value and iterating it through the same general `Iterator<T>`
+  // inlining mechanism any other implementor gets, not a hand-written
+  // tight C loop of its own.
+  assert contains(out, "Range"), "expected a real Range value to back the loop";
+  assert contains(out, "__fun_iter_local"), "expected Range's own next() to be inlined, not called";
 }
 
 test "compound declaration emits a C struct typedef" {

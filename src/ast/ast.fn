@@ -393,15 +393,12 @@ pub compound ForCondNode {
   Node* body;
 }
 
-// `for i : start..end { ... }`: iterate `index_name` over an integer range.
-pub compound ForRangeNode {
-  str index_name;
-  Node* range_expr;
-  Node* body;
-}
-
 // `for item : arr { ... }` or `for i, item :: arr { ... }`: iterate over an
 // array/Vec/Iterator-implementing value, optionally tracking an index.
+// `for i : start..end { ... }` is this shape too: the parser desugars a
+// range into constructing a `Range{start, end}` value and feeding it
+// through here like any other `Iterator`-implementing iterable, rather
+// than a distinct AST shape of its own.
 pub compound ForIterNode {
   str index_name;
   flag has_index_name;
@@ -416,10 +413,9 @@ pub compound ForIterNode {
   Node* body;
 }
 
-// Which of the three `for` loop shapes a StatementFor node is.
+// Which of the two `for` loop shapes a StatementFor node is.
 pub enum ForKind {
   Cond(ForCondNode),
-  Range(ForRangeNode),
   Iter(ForIterNode),
 }
 
@@ -1177,10 +1173,6 @@ fun _free_node_contents(Node* n) {
           }
           node_free(c.body);
         }
-        .Range(r) -> {
-          node_free(r.range_expr);
-          node_free(r.body);
-        }
         .Iter(it) -> {
           node_free(it.iterable);
           node_free(it.body);
@@ -1552,12 +1544,6 @@ pub fun node_clone(Node n) Node {
           }
           cc.body = node_clone_ptr(cond.body);
           c.kind = .StatementFor(.Cond(cc));
-        }
-        .Range(r) -> {
-          ForRangeNode cr = r;
-          cr.range_expr = node_clone_ptr(r.range_expr);
-          cr.body = node_clone_ptr(r.body);
-          c.kind = .StatementFor(.Range(cr));
         }
         .Iter(it) -> {
           ForIterNode ci = it;
