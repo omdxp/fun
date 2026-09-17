@@ -14,9 +14,9 @@ fun main() {
   num x = "hello";
   // invalid: str assigned to num
   num y = add(1, true);
-  // invalid: bin passed where num is expected
+  // invalid: flag passed where num is expected
   if 123 {
     ret;
   }
-  // invalid: condition must be bin
+  // invalid: condition must be flag
 }

@@ -25,6 +25,6 @@ fun main() num {
   p.nickname = some("Ally");
 
   let nick = p.nickname.unwrap_or("none");
-  println_fmt("root={dec} flip={bin} nick={str}", root, flip, nick);
+  println_fmt("root={dec} flip={flag} nick={str}", root, flip, nick);
   ret 0;
 }

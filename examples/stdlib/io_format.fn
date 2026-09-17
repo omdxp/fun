@@ -44,7 +44,7 @@ fun main() {
 
   str s_pt = pt.to_string();
   println_fmt(
-    "num={num} dec={dec} bin={bin} chr={chr} str={str} ptr={ptr} pt={str}",
+    "num={num} dec={dec} flag={flag} chr={chr} str={str} ptr={ptr} pt={str}",
     n,
     d,
     b,
