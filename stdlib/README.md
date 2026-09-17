@@ -86,7 +86,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/c/string.fn**: string.h bindings (strlen, memcpy, memset, etc.).
 - **std/c/time.fn**: time.h bindings (time, localtime, strftime, etc.).
 
-Fun maps `imp std.c.*;` imports to C standard headers during code generation. Actual implementations are provided by the C compiler/linker.
+Fun maps `use std.c.*;` imports to C standard headers during code generation. Actual implementations are provided by the C compiler/linker.
 
 Signature-only modules support tooling (IDE completion, future LSP).
 

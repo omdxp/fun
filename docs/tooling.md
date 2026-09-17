@@ -73,9 +73,9 @@ test "a token expires after its ttl" {
 fun main() {
   MockClock clk = mock_clock_at(0);
   Timestamp issued = clk.now();
-  println_fmt("expired at 0s? {bin}", is_expired(&clk, issued, 60));
+  println_fmt("expired at 0s? {flag}", is_expired(&clk, issued, 60));
   clk.advance(61);
-  println_fmt("expired at 61s? {bin}", is_expired(&clk, issued, 60));
+  println_fmt("expired at 61s? {flag}", is_expired(&clk, issued, 60));
 }
 ```
 
@@ -285,7 +285,7 @@ The Std Library tab documents every module interactively; this is a
 quick orientation.
 
 - `std.io`: file helpers + `print`/`println`/`print_num`/`print_dec`/
-  `print_bin`, plus a `Sink` stream (`Sink.Stdout`/`Stderr`/`Stdin`/
+  `print_flag`, plus a `Sink` stream (`Sink.Stdout`/`Stderr`/`Stdin`/
   `File(File)`) with `write`/`try_write`/`flush` and
   `write_to`/`writeln_to` for writing, `read_line_max`/`read_bytes` for
   reading, and a `RotatingSink` (size-capped, generation-rolling file
