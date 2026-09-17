@@ -5,7 +5,7 @@
 // `DataType`) and imports can't be circular. `NodeKind` is a flat
 // data-carrying enum with each variant's payload in its own dedicated
 // `compound`. Optional child nodes are plain `Node*` fields compared
-// against `nil`; optional `Vec<T>` fields pair a `bin has_X` flag with
+// against `nil`; optional `Vec<T>` fields pair a `flag has_X` flag with
 // an always-`.init(0)`-ed value, since an uninitialized `Vec<T>` reads
 // garbage length; always build node payloads through the `_new()`
 // constructors below, never a bare declaration.
@@ -482,7 +482,7 @@ pub fun fit_stmt_node_new() FitStmtNode {
   ret f;
 }
 
-// `imp path;` or `imp path as alias;`.
+// `use path;` or `use path as alias;`.
 pub compound ImportNode {
   str path;
   str alias;

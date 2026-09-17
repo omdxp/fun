@@ -8,16 +8,13 @@
 // disambiguation, is where those get recognized.
 
 use std.vec;
-use std.string;
 
-// True if `s` is a reserved word. `use`/`flag` are accepted alongside
-// `imp`/`bin` as alternate spellings during the transition tracked in
-// canonical_keyword_text below; both parse identically.
+// True if `s` is a reserved word.
 pub fun is_keyword(str s) flag {
   fit s {
-    "imp", "use", "pub", "fun", "as", "als", "enum", "compound", "quirk", "impl", "let", "const",
+    "use", "pub", "fun", "as", "als", "enum", "compound", "quirk", "impl", "let", "const",
     "defer",
-    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "flag", "chr", "if",
+    "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "flag", "chr", "if",
     "elif",
     "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue",
     "allow", "expect", "assert", "panic", "test", "fuzz" -> { ret true; }
@@ -30,8 +27,7 @@ pub fun is_keyword(str s) flag {
 // changed together.
 pub fun keywords() Vec<str> {
   Vec<str> out;
-  out.init(43);
-  out.push("imp");
+  out.init(41);
   out.push("use");
   out.push("pub");
   out.push("fun");
@@ -52,7 +48,6 @@ pub fun keywords() Vec<str> {
   out.push("num");
   out.push("dec");
   out.push("str");
-  out.push("bin");
   out.push("flag");
   out.push("chr");
   out.push("if");
@@ -82,31 +77,6 @@ pub fun is_boolean_keyword(str s) flag {
   fit s {
     "true", "false" -> { ret true; }
     _ -> { ret false; }
-  }
-}
-
-// The keyword text every consumer past the lexer actually sees: `imp`
-// canonicalizes to `use`, `bin` to `flag`, everything else passes through
-// unchanged. `imp`/`bin` are still accepted spellings a reader may type
-// (nothing about parsing changes), but the parser, formatter, and fls all
-// key off one spelling per keyword, so canonicalizing once here - the
-// single place a keyword's matched text turns into a token - means
-// nothing downstream needs to know a second spelling exists at all.
-// `use`/`flag` are canonical as of this flip: this repo's own source has
-// migrated (see the language-feedback keyword-rename plan), so `-fmt` now
-// rewrites the old spelling forward instead of back. `imp`/`bin` stay
-// accepted until Phase 3 drops them from is_keyword entirely.
-pub fun canonical_keyword_text(str s) str {
-  // The token this feeds is later freed as an owned allocation (see
-  // free_token_contents), same as the heap-allocated text the lexer
-  // read for every other token - a bare string literal here would get
-  // freed as if it were heap memory too, a real crash
-  // ("pointer being freed was not allocated"). substr forces a fresh
-  // heap copy, matching how every other token's own text is owned.
-  fit s {
-    "imp" -> { ret substr("use", 0, 3); }
-    "bin" -> { ret substr("flag", 0, 4); }
-    _ -> { ret s; }
   }
 }
 

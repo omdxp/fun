@@ -1,6 +1,6 @@
 // The read side of `fun.lock`: shared between `src/cli/deps.fn` (which
 // also resolves and fetches, writing the lock) and `import_resolver.fn`
-// (which only ever reads it, to turn an `imp deps.<name>...` path into
+// (which only ever reads it, to turn an `use deps.<name>...` path into
 // a real file path). Kept in `src/parser/` rather than `src/cli/`
 // deliberately: the parser layer must not depend on the CLI layer, and
 // this file pulls in nothing beyond `std.toml`/`std.fs`/`std.map`,
@@ -17,7 +17,7 @@ use std.sys;
 
 // One dependency, fully resolved: an exact commit pinned, and fetched
 // into the shared cache. `local_root` is `path` joined onto the
-// checkout - what `imp deps.<name>...` actually resolves against.
+// checkout - what `use deps.<name>...` actually resolves against.
 pub compound ResolvedDep {
   str name;
   str git;
