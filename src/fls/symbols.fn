@@ -1662,12 +1662,43 @@ pub fun bare_type_from_detail(str detail) str {
   ret bare_type_expr(substr(detail, 0, space));
 }
 
+// The index just past a rendered "name(args) RetType" signature's own
+// PARAM LIST closing paren - depth-tracked from the first `(`, not
+// `last_index_of_char`'s own string-final `)`: a tuple return type (or
+// a tuple-typed param) carries its own internal `)` further along the
+// string, so taking the string's last `)` unconditionally would land
+// inside a tuple return type's own parens rather than past them,
+// reading the return type as empty. -1 when `signature` has no `(` at
+// all.
+fun _signature_params_close(str signature) num {
+  num open = index_of_char(signature, '(');
+  if open < 0 {
+    ret -1;
+  }
+  num depth = 0;
+  num i = open;
+  num n = len(signature);
+  for i < n {
+    chr c = signature[i];
+    if c == '(' {
+      depth = depth + 1;
+    } elif c == ')' {
+      depth = depth - 1;
+      if depth == 0 {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
 // The bare return type of a rendered function/method signature
 // ("name(args) RetType"), generics/pointer stripped: everything after
-// its own last closing paren. "" for a declared void return, or a
-// signature with no return type written at all.
+// its own param list's closing paren. "" for a declared void return, or
+// a signature with no return type written at all.
 pub fun return_type_from_detail(str signature) str {
-  num close = last_index_of_char(signature, ')');
+  num close = _signature_params_close(signature);
   if close < 0 {
     ret "";
   }
@@ -1678,7 +1709,7 @@ pub fun return_type_from_detail(str signature) str {
 // generic args written out - the "full" half of the bare/full split
 // `ChainReceiver.full_type_name` documents.
 fun full_return_type_from_detail(str signature) str {
-  num close = last_index_of_char(signature, ')');
+  num close = _signature_params_close(signature);
   if close < 0 {
     ret "";
   }
@@ -1744,9 +1775,9 @@ fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
 
 // `detail` (a rendered "name(args) RetType" signature) with only the
 // return type kept, generics and pointer star intact: everything
-// after its own closing paren.
+// after the param list's own closing paren (`_signature_params_close`).
 fun _return_type_text(str detail) str {
-  num close = last_index_of_char(detail, ')');
+  num close = _signature_params_close(detail);
   if close < 0 {
     ret substr("", 0, 0);
   }
