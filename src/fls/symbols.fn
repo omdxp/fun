@@ -85,6 +85,33 @@ pub fun render_type(DataType* dt) str {
     ret "";
   }
   StringBuilder b = string_builder_init(32);
+  if dt.is_tuple {
+    // A tuple type (`(num, str)`) has no base name of its own - its own
+    // member types, in `tuple_members`, are everything there is to show,
+    // written back the same way they were declared.
+    b.append("(");
+    num ti = 0;
+    for ti < dt.tuple_members.len {
+      if ti > 0 {
+        b.append(", ");
+      }
+      str member_text = render_type(dt.tuple_members.get(ti));
+      b.append(member_text);
+      free(member_text);
+      ti = ti + 1;
+    }
+    b.append(")");
+    num tstars = dt.pointer_depth;
+    if dt.flags.is_pointer && tstars == 0 {
+      tstars = 1;
+    }
+    num ts = 0;
+    for ts < tstars {
+      b.append("*");
+      ts = ts + 1;
+    }
+    ret b.build();
+  }
   if dt.has_fn_sig && dt.fn_sig != nil {
     // A function-typed value (`fun(A, B) R`): `_base_type_name` would
     // otherwise just show the parser's own fixed placeholder text
@@ -1136,6 +1163,11 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
     ret out;
   }
   num depth = 0;
+  // A generic argument can itself be a tuple type (`Vec<(num, str)>`),
+  // whose own comma must not be mistaken for a top-level separator -
+  // tracked the same depth-aware way `split_signature_params` already
+  // tracks both `(` and `<` together.
+  num paren_depth = 0;
   num start = open + 1;
   num i = start;
   num n = len(detail);
@@ -1143,6 +1175,12 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
     chr c = detail[i];
     if c == '<' {
       depth = depth + 1;
+    } elif c == '(' {
+      paren_depth = paren_depth + 1;
+    } elif c == ')' {
+      if paren_depth > 0 {
+        paren_depth = paren_depth - 1;
+      }
     } elif c == '>' {
       if depth == 0 {
         str piece = trim(substr(detail, start, i - start));
@@ -1152,7 +1190,7 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
         ret out;
       }
       depth = depth - 1;
-    } elif c == ',' && depth == 0 {
+    } elif c == ',' && depth == 0 && paren_depth == 0 {
       str piece = trim(substr(detail, start, i - start));
       if !equals(piece, "") {
         out.push(piece);
@@ -1598,19 +1636,69 @@ pub fun bare_type_expr(str type_expr) str {
 // `type_name_of_local` and `chain_receiver_type`, since a field's own
 // `Declaration.detail` reads the same shape a local's does.
 pub fun bare_type_from_detail(str detail) str {
-  num space = index_of_char(detail, ' ');
+  // The *last* top-level space, not the first: a tuple's own rendered
+  // form (`"(num, str) t"`) or a function type's (`"fun(A, B) R name"`)
+  // carries real spaces of its own inside `(`/`<`, which the first-space
+  // approach this used to take would cut through, splitting mid-type
+  // instead of at the real type/name boundary.
+  num depth = 0;
+  num space = -1;
+  num i = 0;
+  num n = len(detail);
+  for i < n {
+    chr c = detail[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ' ' && depth == 0 {
+      space = i;
+    }
+    i = i + 1;
+  }
   if space <= 0 {
     ret "";
   }
   ret bare_type_expr(substr(detail, 0, space));
 }
 
+// The index just past a rendered "name(args) RetType" signature's own
+// PARAM LIST closing paren - depth-tracked from the first `(`, not
+// `last_index_of_char`'s own string-final `)`: a tuple return type (or
+// a tuple-typed param) carries its own internal `)` further along the
+// string, so taking the string's last `)` unconditionally would land
+// inside a tuple return type's own parens rather than past them,
+// reading the return type as empty. -1 when `signature` has no `(` at
+// all.
+fun _signature_params_close(str signature) num {
+  num open = index_of_char(signature, '(');
+  if open < 0 {
+    ret -1;
+  }
+  num depth = 0;
+  num i = open;
+  num n = len(signature);
+  for i < n {
+    chr c = signature[i];
+    if c == '(' {
+      depth = depth + 1;
+    } elif c == ')' {
+      depth = depth - 1;
+      if depth == 0 {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
 // The bare return type of a rendered function/method signature
 // ("name(args) RetType"), generics/pointer stripped: everything after
-// its own last closing paren. "" for a declared void return, or a
-// signature with no return type written at all.
+// its own param list's closing paren. "" for a declared void return, or
+// a signature with no return type written at all.
 pub fun return_type_from_detail(str signature) str {
-  num close = last_index_of_char(signature, ')');
+  num close = _signature_params_close(signature);
   if close < 0 {
     ret "";
   }
@@ -1621,7 +1709,7 @@ pub fun return_type_from_detail(str signature) str {
 // generic args written out - the "full" half of the bare/full split
 // `ChainReceiver.full_type_name` documents.
 fun full_return_type_from_detail(str signature) str {
-  num close = last_index_of_char(signature, ')');
+  num close = _signature_params_close(signature);
   if close < 0 {
     ret "";
   }
@@ -1687,9 +1775,9 @@ fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
 
 // `detail` (a rendered "name(args) RetType" signature) with only the
 // return type kept, generics and pointer star intact: everything
-// after its own closing paren.
+// after the param list's own closing paren (`_signature_params_close`).
 fun _return_type_text(str detail) str {
-  num close = last_index_of_char(detail, ')');
+  num close = _signature_params_close(detail);
   if close < 0 {
     ret substr("", 0, 0);
   }
@@ -2572,6 +2660,41 @@ pub fun chain_ending_receiver(
     if last_is_call {
       let f = lookup_top_level(program, name);
       if f.is_none() {
+        // Not a real top-level function - `name` may still be a local
+        // or parameter whose own declared type IS a function type
+        // (`fun(num, num) num cb`), called directly (`cb(1, 3)`).
+        // `type_name_of_local` already renders exactly that bare type
+        // text - but fls's own lightweight AST never runs the real
+        // compiler's `expand_type_aliases` pass, so a parameter typed
+        // through a bound alias (`als Callback = fun(num, num) num;`,
+        // `Callback cb`) reads back as the bare alias name "Callback"
+        // here, not the function shape it stands for - resolved one
+        // extra hop through `_find_type_alias` when the type doesn't
+        // already start with "fun(" itself. Either way, the call's own
+        // result is whatever sits after the function type's own param
+        // list closing paren, the same `_signature_params_close` scan
+        // an ordinary function's own return type already resolves
+        // through.
+        str local_fn_type = type_name_of_local(tokens, program, name, file, line);
+        if !starts_with(local_fn_type, "fun(") {
+          let alias = _find_type_alias(program, local_fn_type);
+          if alias.is_some() && alias.unwrap().body != nil {
+            local_fn_type = render_type(alias.unwrap().body);
+          }
+        }
+        if starts_with(local_fn_type, "fun(") {
+          num close = _signature_params_close(local_fn_type);
+          if close >= 0 {
+            str rtype_text = trim(substr(local_fn_type, close + 1, len(local_fn_type) - close - 1));
+            if !equals(rtype_text, "") && !equals(rtype_text, "void") {
+              empty.type_name = bare_type_expr(rtype_text);
+              empty.full_type_name = rtype_text;
+              empty.generic_args = generic_args_of_detail(rtype_text);
+              ret empty;
+            }
+            free(rtype_text);
+          }
+        }
         ret empty;
       }
       flag substituted = false;
@@ -3904,6 +4027,67 @@ fun _last_line(Node* body) num {
   ret last;
 }
 
+// A best-effort type for a bare literal node (`.Number`/`.String`/
+// `.Character`/`.Boolean`), the same handful of shapes a tuple
+// literal's own element is realistically ever written as directly.
+// Empty for anything else (a call, a nested expression, ...) - not a
+// full typecheck, just enough to give a destructuring pattern's own
+// inferred-form name a real type when its initializer is a plain
+// literal tuple, the overwhelmingly common case.
+fun _literal_elem_type_text(Node* el) str {
+  if el == nil {
+    ret "";
+  }
+  fit el.kind {
+    .Number(td) -> {
+      fit td {
+        .Dec(_) -> { ret "dec"; }
+        _ -> { ret "num"; }
+      }
+    }
+    .String(_) -> { ret "str"; }
+    .Character(_) -> { ret "chr"; }
+    .Boolean(_) -> { ret "flag"; }
+    _ -> { ret ""; }
+  }
+}
+
+// The hover/go-to-definition detail for the `idx`th name in a
+// destructuring `VariableNode`'s own `destructure_names`. A declared
+// tuple type (`(num, str) (a, b) = expr;`) gives real precision
+// directly from its own `tuple_members`; the inferred form (`let (a,
+// b) = expr;`) falls back to typing the initializer's own literal
+// elements when it is a bare tuple literal, and to the bare name alone
+// (still resolvable, just untyped) for anything else - `_lookup_in_body`
+// otherwise had NO case at all for a destructuring `VariableNode`
+// (`v.name` is always "" for one, so the ordinary `equals(v.name,
+// name)` check below can never match), meaning neither destructuring
+// form's own names ever resolved through hover, go-to-definition, or a
+// later reference to them at all, not just imprecisely - a real,
+// previously-undiscovered gap this fixes for both forms uniformly.
+fun _destructure_binding_detail(VariableNode v, num idx) str {
+  if v.var_type != nil && v.var_type.is_tuple && idx < v.var_type.tuple_members.len {
+    str elem_type_text = render_type(v.var_type.tuple_members.get(idx));
+    str out = format("{str} {str}", elem_type_text, v.destructure_names.get(idx));
+    free(elem_type_text);
+    ret out;
+  }
+  if v.has_val && v.val != nil {
+    fit v.val.kind {
+      .TupleLiteral(tl) -> {
+        if idx < tl.elements.len {
+          str lit_type = _literal_elem_type_text(tl.elements.get(idx));
+          if !equals(lit_type, "") {
+            ret format("{str} {str}", lit_type, v.destructure_names.get(idx));
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret v.destructure_names.get(idx);
+}
+
 // A variable declared anywhere in `body`, including inside a nested
 // block, since a name is in scope for everything that follows it.
 fun _lookup_in_body(
@@ -3919,7 +4103,15 @@ fun _lookup_in_body(
   }
   fit body.kind {
     .Variable(v) -> {
-      if equals(v.name, name) {
+      if v.is_destructure {
+        num dni = 0;
+        for dni < v.destructure_names.len {
+          if equals(v.destructure_names.get(dni), name) {
+            ret .Some(_declaration(name, .Local, _destructure_binding_detail(v, dni), body.pos));
+          }
+          dni = dni + 1;
+        }
+      } elif equals(v.name, name) {
         StringBuilder b = string_builder_init(32);
         str local_type_text = render_type(v.var_type);
         b.append(local_type_text);
@@ -3997,7 +4189,24 @@ fun _lookup_in_body(
             }
             ret .Some(_declaration(name, .Local, format("{str} {str}", index_type, name), body.pos));
           }
-          if equals(fi.item_name, name) {
+          if fi.item_is_destructure {
+            num fdi = 0;
+            for fdi < fi.item_destructure_names.len {
+              if equals(fi.item_destructure_names.get(fdi), name) {
+                str tup_item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
+                str fd_detail = name;
+                if starts_with(tup_item_type, "(") {
+                  Vec<str> fd_members = split_signature_params(tup_item_type);
+                  if fdi < fd_members.len {
+                    fd_detail = format("{str} {str}", fd_members.get(fdi), name);
+                  }
+                  free_params_vec(&fd_members);
+                }
+                ret .Some(_declaration(name, .Local, fd_detail, body.pos));
+              }
+              fdi = fdi + 1;
+            }
+          } elif equals(fi.item_name, name) {
             str item_type = map_value;
             if !is_map {
               item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
@@ -5042,6 +5251,46 @@ pub fun variant_payload_type_typed(Vec<Node>* program, DataType* dt, str variant
 // within that arm: its pattern through the end of its body. Its type
 // is the matching positional payload type of whichever variant the
 // arm's own condition names, resolved against the fit's subject.
+// The tuple-pattern subject's own element index a `br.bindings[binding_idx]`
+// binding name reads from - a tuple pattern's binding list only records
+// the binding *positions* in order (skipping literal/wildcard positions,
+// the same list a non-tuple `.Variant(a, b)` arm already builds), so
+// recovering the actual subject position it belongs to means walking
+// `br.condition`'s own `.TupleLiteral` elements and counting bare-binding
+// identifiers up to the `binding_idx`'th one. -1 when not found.
+pub fun _fit_tuple_binding_position(FitBranch br, num binding_idx) num {
+  if br.condition == nil {
+    ret -1;
+  }
+  num result = -1;
+  fit br.condition.kind {
+    .TupleLiteral(tl) -> {
+      num seen = 0;
+      num pos = 0;
+      for el : tl.elements {
+        flag is_binding = false;
+        fit el.kind {
+          .Identifier(s) -> {
+            if !equals(s, "_") {
+              is_binding = true;
+            }
+          }
+          _ -> {}
+        }
+        if is_binding {
+          if seen == binding_idx {
+            result = pos;
+          }
+          seen = seen + 1;
+        }
+        pos = pos + 1;
+      }
+    }
+    _ -> {}
+  }
+  ret result;
+}
+
 fun _lookup_fit_binding(
   Vec<Token>* tokens,
   Node* body,
@@ -5086,7 +5335,30 @@ fun _lookup_fit_binding(
             }
             k = k + 1;
           }
-          if idx >= 0 {
+          if idx >= 0 && br.is_tuple_pattern {
+            num tuple_idx = _fit_tuple_binding_position(br, idx);
+            str tuple_type = fit_subject_type(tokens, program, f.exp, file, line);
+            if tuple_idx >= 0 && !equals(tuple_type, "") && br.body != nil {
+              let pieces = split_signature_params(tuple_type);
+              if tuple_idx < pieces.len {
+                StringBuilder tb = string_builder_init(24);
+                tb.append(pieces.get(tuple_idx));
+                tb.append(" ");
+                tb.append(name);
+                Pos tuple_decl_pos = body.pos;
+                if br.body.has_pos {
+                  tuple_decl_pos = br.body.pos;
+                }
+                if br.has_condition && br.condition != nil && br.condition.has_pos {
+                  tuple_decl_pos = br.condition.pos;
+                }
+                str tuple_detail = tb.build();
+                free_params_vec(&pieces);
+                ret .Some(_declaration(name, .Local, tuple_detail, tuple_decl_pos));
+              }
+              free_params_vec(&pieces);
+            }
+          } elif idx >= 0 {
             str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
             if !equals(enum_name, "") {
               Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);

@@ -157,6 +157,19 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
         _alias_module_completions_fresh(alias_target, cache, &items, snippets);
       }
       if items.len == 0 {
+        // A tuple-typed receiver (`(num, str) t = ...;` or a compound
+        // field declared the same way) has no name token of its own
+        // for `_receiver_type_from_tokens`'s lookup-by-declared-type-
+        // name to find below - checked first, since this is exactly
+        // the shape a reader hits mid-typing a positional access
+        // (`t.` with nothing typed after the dot yet, the whole reason
+        // this token-only path runs at all rather than the parsed-tree
+        // one, which never sees a half-written `t.` as valid).
+        str tuple_local_type = _tuple_receiver_type_text(&tokens, doc.text, receiver);
+        if !equals(tuple_local_type, "") {
+          _tuple_element_completions(tuple_local_type, &items);
+          ret _reply(&items);
+        }
         // Not an alias either: `receiver` may still be a local whose
         // own declared type reads straight off the tokens too (the
         // `Type name` shape a declaration or a parameter always has),
@@ -269,6 +282,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
         doc.path,
         source_line
       );
+    }
+    if starts_with(type_name, "(") {
+      // A tuple-typed receiver (`render_type`'s own `"(num, str)"`
+      // rendering) has no named declaration for `_members_of`'s
+      // lookup-by-name to find - its "fields" are purely positional.
+      _tuple_element_completions(type_name, &items);
+      ret _reply(&items);
     }
     if !equals(type_name, "") {
       _members_of(&program.nodes, type_name, &items, snippets);
@@ -772,6 +792,89 @@ fun _enclosing_impl_type_from_tokens(Vec<Token>* tokens, num line, num character
       continue;
     }
     j = j - 1;
+  }
+  ret "";
+}
+
+// The byte offset in `text` of `line`/`col` (both 1-based) - this
+// file's own copy of navigation.fn's `_source_index_from_line_col_fls`
+// (same shape; each fls file parses/slices independently, nothing
+// shared to call into instead). -1 on a position outside `text`.
+fun _byte_offset_of(str text, num line, num col) num {
+  if line == 0 || col == 0 {
+    ret -1;
+  }
+  num n = len(text);
+  num current_line = 1;
+  num line_start = 0;
+  num i = 0;
+  for i < n && current_line < line {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      line_start = i + 1;
+    }
+    i = i + 1;
+  }
+  if current_line != line {
+    ret -1;
+  }
+  num idx = line_start + (col - 1);
+  if idx > n {
+    ret -1;
+  }
+  ret idx;
+}
+
+// The index of the `(` matching a `)` token at `close_idx`, scanning
+// backward, depth-tracked - the reverse direction of `symbols.fn`'s own
+// forward-scanning `matching_rparen`.
+fun _matching_lparen_backward(Vec<Token>* tokens, num close_idx) num {
+  num depth = 0;
+  num i = close_idx;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(t, "(") {
+      depth = depth - 1;
+      if depth == 0 {
+        ret i;
+      }
+    }
+    i = i - 1;
+  }
+  ret -1;
+}
+
+// The raw declared tuple-type text for `name` (e.g. "(num, str)"), read
+// the same token-only way `_receiver_type_from_tokens` reads a named
+// type below - but a tuple type has no name token of its own for that
+// function's lookup to find, only its own closing `)`, so this instead
+// walks back from THAT, depth-balancing to the matching `(`, and slices
+// the exact source text between them (byte-exact, so an arbitrarily
+// nested element type - a tuple-of-tuples, a generic - round-trips with
+// no token-by-token reconstruction needed). "" when `name`'s own
+// declared type isn't tuple-shaped.
+fun _tuple_receiver_type_text(Vec<Token>* tokens, str source_text, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == .Identifier && equals(token_word(t), name) {
+      num j = _prev_real_index(tokens, i);
+      if j >= 0 && token_is_symbol(tokens.get(j), ')') {
+        num open = _matching_lparen_backward(tokens, j);
+        if open >= 0 {
+          Token open_tok = tokens.get(open);
+          Token close_tok = tokens.get(j);
+          num start_off = _byte_offset_of(source_text, open_tok.pos.line, open_tok.pos.start_col);
+          num end_off = _byte_offset_of(source_text, close_tok.pos.line, close_tok.pos.end_col);
+          if start_off >= 0 && end_off > start_off {
+            ret substr(source_text, start_off, end_off - start_off);
+          }
+        }
+      }
+    }
+    i = i + 1;
   }
   ret "";
 }
@@ -2371,6 +2474,54 @@ fun _enum_variant_completions(Vec<Node>* program, str type_name, Vec<Item>* item
   }
 }
 
+// A tuple-typed receiver's own "fields", offered as `0`, `1`, ... up to
+// its arity - `rendered_type` is `render_type`'s own text for it
+// (`"(num, str)"`), split on its top-level commas (respecting nested
+// `(`/`)`/`<`/`>` depth, so a member that's itself a tuple or a generic
+// instantiation doesn't get split apart). Not `_members_of`'s
+// lookup-by-name shape: a tuple has no declaration to look up.
+fun _tuple_element_completions(str rendered_type, Vec<Item>* items) {
+  if len(rendered_type) < 2 {
+    ret;
+  }
+  str inner = substr(rendered_type, 1, len(rendered_type) - 2);
+  Vec<str> members;
+  members.init(4);
+  num depth = 0;
+  num start = 0;
+  num i = 0;
+  num n = len(inner);
+  for i < n {
+    chr c = inner[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      members.push(trim(substr(inner, start, i - start)));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < n {
+    members.push(trim(substr(inner, start, n - start)));
+  }
+  free(inner);
+
+  num mi = 0;
+  for mi < members.len {
+    str midx = format("{num}", mi);
+    // `_item` copies every field of its own (via `_snippet_item`), so
+    // the member text `members` owns can be freed right after, and the
+    // borrowed `midx`/label text doesn't need to outlive this call.
+    items.push(_item(midx, .Field, members.get(mi)));
+    free(midx);
+    free(members.get(mi));
+    mi = mi + 1;
+  }
+  members.free();
+}
+
 fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets) {
   num i = 0;
   for i < program.len {
@@ -2608,7 +2759,25 @@ fun _collect_locals(
       for i < fs.branches.len {
         FitBranch branch = fs.branches.get(i);
         i = i + 1;
-        if branch.has_bindings && !equals(enum_name, "") {
+        // `enum_name` doubles as the subject's own rendered type text
+        // for a tuple pattern (a bare local's tuple type renders as
+        // "(num, str)", the same string `fit_subject_type` returns for
+        // an enum subject's name) - split apart the same way a tuple
+        // type's own rendered detail is elsewhere in this file, rather
+        // than treated as an enum name.
+        if branch.is_tuple_pattern && branch.has_bindings {
+          let tuple_pieces = split_signature_params(enum_name);
+          num tbi = 0;
+          for tbi < branch.bindings.len {
+            str tuple_binding_name = branch.bindings.get(tbi);
+            num tuple_pos = _fit_tuple_binding_position(branch, tbi);
+            if tuple_pos >= 0 && tuple_pos < tuple_pieces.len {
+              items.push(_item(tuple_binding_name, .Variable, tuple_pieces.get(tuple_pos)));
+            }
+            tbi = tbi + 1;
+          }
+          free_params_vec(&tuple_pieces);
+        } elif branch.has_bindings && !equals(enum_name, "") {
           str variant_name = branch_variant_name(branch);
           num bi = 0;
           for bi < branch.bindings.len {
@@ -2648,7 +2817,28 @@ fun _collect_locals(
           if !is_map {
             item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
           }
-          items.push(_item(fi.item_name, .Variable, item_type));
+          if fi.item_is_destructure {
+            Vec<str> fd_members2;
+            fd_members2.init(0);
+            flag fd_split = starts_with(item_type, "(");
+            if fd_split {
+              fd_members2 = split_signature_params(item_type);
+            }
+            num fdi2 = 0;
+            for fdi2 < fi.item_destructure_names.len {
+              str fd_type2 = "";
+              if fd_split && fdi2 < fd_members2.len {
+                fd_type2 = fd_members2.get(fdi2);
+              }
+              items.push(_item(fi.item_destructure_names.get(fdi2), .Variable, fd_type2));
+              fdi2 = fdi2 + 1;
+            }
+            if fd_split {
+              free_params_vec(&fd_members2);
+            }
+          } else {
+            items.push(_item(fi.item_name, .Variable, item_type));
+          }
           _collect_locals(tokens, fi.body, items, program, file, line);
         }
         .Cond(fc) -> { _collect_locals(tokens, fc.body, items, program, file, line); }

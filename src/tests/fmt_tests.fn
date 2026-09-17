@@ -527,3 +527,64 @@ test "'imp'/'bin' format forward to the current canonical spelling 'use'/'flag'"
   assert contains(got, "flag ok = true;"), "expected 'bin' to format forward to the canonical 'flag'";
   assert !contains(got, "bin ok"), "expected no trace of the alternate spelling after formatting";
 }
+
+test "a tuple type binds tight in a declaration, a return type, and a generic argument" {
+  str src = `fun pair() ( num , str ) {
+  `  ret ( 1 , "hi" );
+  `}
+  `compound Box<T>{T v;}
+  `fun main() num {
+  `  ( num , str )t=(1,"hi");
+  `  Box<(num,str)> b=Box<(num,str)>{v=(1,"hi")};
+  `  ret t.0;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "fun pair() (num, str) {"), "expected the return type's own parens tight, no inner padding";
+  assert contains(got, "(num, str) t = (1, \"hi\");"), "expected the declared tuple type tight against its own name";
+  assert contains(got, "Box<(num, str)> b = Box<(num, str)>{v = (1, \"hi\")};"), "expected a tuple generic argument tight against '<'/'>' on both sides";
+}
+
+test "let destructuring formats with the canonical spacing" {
+  str src = `fun main() num {
+  `  let(a,b,c)=(1,2,3);
+  `  ret a+b+c;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "let (a, b, c) = (1, 2, 3);"), "expected the destructuring pattern spaced like an ordinary comma list";
+}
+
+test "a parenthesized dereference right after a keyword still binds its own '*' tight, unaffected by tuple-in-generic spacing" {
+  str src = `async fun main() {
+  `  let out = await (*pb).v.add(1);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "await (*pb).v.add(1);"), "expected the dereference star to stay glued to its own operand, not read as a tuple-type paren";
+}
+
+test "a declared-type destructuring pattern's own paren is spaced like the bare-type declaration form, not a call" {
+  str src = `fun main() num {
+  `  (num,str)(a,b)=(1,"hi");
+  `  ret a;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "(num, str) (a, b) = (1, \"hi\");"), "expected a space between the declared type and its own destructuring pattern, not a call-shaped '(num, str)(a, b)'";
+}
+
+test "a call chained directly onto another call's own result still binds tight, unaffected by the destructuring-pattern spacing fix" {
+  str src = `fun main() num {
+  `  ret g(5)(6);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "g(5)(6);"), "expected a genuine chained call to stay tight, not gain a space meant for a declared-type destructuring pattern";
+}
+
+test "a bare chained positional access round-trips through formatting unchanged" {
+  // fmt works from the raw token stream, never the parse tree, so the
+  // parser's own split into two nested '.' expressions is invisible to
+  // it - the single "0.1" token is just re-emitted as written.
+  str src = `fun main() num {
+  `  ret t.0.1;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "t.0.1;"), "expected a chained positional access to format unchanged, not split or re-spaced";
+}

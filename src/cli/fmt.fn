@@ -575,7 +575,11 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
       ret false;
     }
   }
-  if !_is_type_token(next) {
+  // A tuple type's own opening paren also starts a generic argument
+  // (`Box<(num, str)>`), unlike an ordinary parenthesized value - a
+  // `(` never otherwise opens a type-token position right after `<`.
+  flag next_is_tuple_open = next.type == .Operator && equals(token_text(next), "(");
+  if !_is_type_token(next) && !next_is_tuple_open {
     ret false;
   }
   if in_decl_only {
@@ -599,6 +603,47 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
     bt,
     ")"
   ) || equals(bt, "[") || equals(bt, ":") || equals(bt, "=");
+}
+
+// True when the `)` at `close_idx` closes a bare tuple type's own
+// declaration group (`(num, str) t;` or `(num, str) (a, b) = expr;`),
+// rather than a call's argument list or a grouped expression - decided
+// the same way `_is_generic_open` decides its own opening `<`: by what
+// sits before the GROUP'S own opening `(`, found here by a depth-
+// balanced backward scan since fmt has no parse tree to ask instead.
+// Only matters for the space right after this `)`: the destructuring
+// pattern's own `(num, str) (a, b)` needs one, the same way `(num, str)
+// t` already gets one from the ordinary identifier-spacing rule, but a
+// bare `(`/`[` immediately after a `)` otherwise always binds tight
+// (a call or an index continuing the value that `)` just closed).
+fun _is_bare_tuple_type_decl_close(Vec<Token>* tokens, num close_idx) flag {
+  num i = close_idx;
+  num depth = 0;
+  for i >= 0 {
+    str text = token_text(tokens.get(i));
+    if equals(text, ")") {
+      depth = depth + 1;
+    } elif equals(text, "(") {
+      depth = depth - 1;
+      if depth == 0 {
+        break;
+      }
+    }
+    i = i - 1;
+  }
+  if i < 0 {
+    ret false;
+  }
+  num before_idx = _prev_significant(tokens, i);
+  if before_idx < 0 {
+    ret true;
+  }
+  Token before = tokens.get(before_idx);
+  str bt = token_text(before);
+  if before.type == .Keyword {
+    ret equals(bt, "pub");
+  }
+  ret equals(bt, "{") || equals(bt, "}") || equals(bt, ";");
 }
 
 // True for a word that opens a declaration or a control structure, whose
@@ -720,6 +765,31 @@ fun _needs_space_at(
     ret block_brace;
   }
   if equals(c, "(") || equals(c, "[") {
+    // A tuple return type's own opening paren, right after a function's
+    // param-list-closing ')' (`fun f() (num, str) {`), is a real
+    // exception to the "binds tight" rule just below: still inside the
+    // function's own declaration (`in_decl_only`), not a call/index
+    // continuing some value the way `foo()()`/`foo()[0]` would be.
+    if in_decl_only && equals(c, "(") && equals(p, ")") {
+      ret true;
+    }
+    // A declared-type destructuring pattern's own opening paren
+    // (`(num, str) (a, b) = expr;`) needs the same space a bare tuple-
+    // type declaration's plain name already gets - real everywhere a
+    // statement can start, not just inside `in_decl_only` contexts like
+    // a function signature's own return type above.
+    if equals(c, "(") && equals(p, ")") {
+      num close_idx = _prev_significant(tokens, idx);
+      if close_idx >= 0 && _is_bare_tuple_type_decl_close(tokens, close_idx) {
+        ret true;
+      }
+    }
+    // A tuple type's own opening paren binds tight to a generic `<`
+    // just opened for it (`Box<(num, str)>`), the same as any other
+    // type argument would.
+    if equals(p, "<") && angle_depth > 0 {
+      ret false;
+    }
     // A call or an index binds to the name before it, unlike a
     // parenthesized operand after a keyword or an operator.
     if _is_close_run(p) > 0 {
@@ -729,11 +799,15 @@ fun _needs_space_at(
       ret true;
     }
     if prev.type == .Keyword {
+      // `let (a, b, c) = expr;`: a destructuring `let` is the only
+      // shape where `(` ever directly follows the keyword at all (an
+      // ordinary `let name = ...;` always has an identifier there
+      // instead), so this is unconditionally safe.
       ret equals(p, "ret") || equals(p, "if") || equals(p, "elif") || equals(p, "for") ||
         equals(
         p,
         "fit"
-      ) || equals(p, "assert") || equals(p, "await");
+      ) || equals(p, "assert") || equals(p, "await") || equals(p, "let");
     }
     if prev.type == .Operator && _operator_needs_spaces(p) {
       ret true;

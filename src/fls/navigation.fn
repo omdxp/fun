@@ -98,6 +98,27 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       ret NO_HOVER;
     }
     .Number -> {
+      // A bare whole-number digit right after '.' on a value (`t.0`)
+      // is positional tuple access, not a numeric literal, and a
+      // chain of these (`t.0.0.1`) walks arbitrarily deep through
+      // nested tuples - resolved against the receiver's own rendered
+      // tuple type (`chain_receiver_type`, the same whole-chain walk
+      // an ordinary `.field`/`.method` receiver already gets),
+      // narrowed one `split_signature_params` per hop.
+      if read.parsed {
+        flag is_chain_num = false;
+        fit t.data {
+          .Num(_) -> { is_chain_num = true; }
+          .Dec(_) -> { is_chain_num = true; }
+          _ -> {}
+        }
+        if is_chain_num && _preceded_by_dot(&tokens, t) {
+          let chained = _resolve_chained_tuple_hover(&tokens, t, &read.program.nodes, doc.path, line + 1, doc.text);
+          if !equals(chained, "") {
+            ret _hover_result(chained, span_of(t, doc.text));
+          }
+        }
+      }
       fit t.data {
         .Num(n) -> { ret _hover_result(_int_literal_doc(n), span_of(t, doc.text)); }
         .Dec(d) -> { ret _hover_result(_dec_literal_doc(d), span_of(t, doc.text)); }
@@ -717,6 +738,12 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
   Token bd = before_dot.unwrap();
   fit bd.type {
     .Identifier -> { ret true; }
+    // A Num/Dec segment right before this dot is itself an earlier hop
+    // of the same chained positional access (`t.0.0.1`'s middle `.0`,
+    // for instance) - `bd` being numeric here is exactly what makes
+    // `t` (`this` function's own argument) a THIRD-OR-DEEPER hop rather
+    // than the chain's first.
+    .Number -> { ret true; }
     _ -> {}
   }
   ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']') ||
@@ -1155,6 +1182,209 @@ fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
     ret impl_doc;
   }
   ret impl_doc;
+}
+
+// The two integer indices a chained positional access's own raw digit
+// text splits into (`t.0.1` -> whole 0, frac 1).
+compound ChainedIndexHops {
+  num whole;
+  num frac;
+}
+
+// The byte offset in `text` of `line`/`col` (both 1-based), walking
+// newlines from the start - the fls-side twin of `parser.fn`'s own
+// `_source_index_from_line_col` (same shape, `doc.text` in place of
+// `self.state.input_source`; fls parses each document independently, so
+// nothing here can reach a `Parser`'s own method).
+fun _source_index_from_line_col_fls(str text, num line, num col) Option<num> {
+  if line == 0 || col == 0 {
+    ret .None;
+  }
+  num n = len(text);
+  num current_line = 1;
+  num line_start = 0;
+  num i = 0;
+  for i < n && current_line < line {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      line_start = i + 1;
+    }
+    i = i + 1;
+  }
+  if current_line != line {
+    ret .None;
+  }
+  num idx = line_start + (col - 1);
+  if idx > n {
+    ret .None;
+  }
+  ret .Some(idx);
+}
+
+// Splits a chained positional access's own Dec-lexed token ("0.1") at
+// its internal '.' into two integer indices, read from `text` itself
+// rather than the parsed float value - "0.10" and "0.1" parse to the
+// identical `dec`, but mean different chained indices (element 10 vs
+// element 1). Mirrors `parser.fn`'s own `_split_chained_tuple_index`.
+fun _split_chained_index_text(Pos pos, str text) Option<ChainedIndexHops> {
+  let start_idx_opt = _source_index_from_line_col_fls(text, pos.line, pos.start_col);
+  let end_idx_opt = _source_index_from_line_col_fls(text, pos.end_line, pos.end_col);
+  if start_idx_opt.is_none() || end_idx_opt.is_none() {
+    ret .None;
+  }
+  num s_idx = start_idx_opt.unwrap();
+  num e_idx = end_idx_opt.unwrap();
+  if e_idx <= s_idx || e_idx > len(text) {
+    ret .None;
+  }
+  str raw_text = substr(text, s_idx, e_idx - s_idx);
+  num dot_at = index_of_char(raw_text, '.');
+  if dot_at <= 0 || dot_at >= len(raw_text) - 1 {
+    ret .None;
+  }
+  str whole_text = substr(raw_text, 0, dot_at);
+  str frac_text = substr(raw_text, dot_at + 1, len(raw_text) - dot_at - 1);
+  ChainedIndexHops hops;
+  hops.whole = parse_int(whole_text);
+  hops.frac = parse_int(frac_text);
+  ret .Some(hops);
+}
+
+// `v`, back to front.
+fun _reversed_num_vec(Vec<num> v) Vec<num> {
+  Vec<num> out;
+  out.init(v.len);
+  num i = v.len - 1;
+  for i >= 0 {
+    out.push(v.get(i));
+    i = i - 1;
+  }
+  v.free();
+  ret out;
+}
+
+// Every positional-index hop of a chained tuple access ending at `t`
+// (`t.0.0.1`'s own 0, 0, 1, outermost first), walking backward through
+// however many `.`-separated Num/Dec segments precede it. A Dec
+// segment ("0.1"-shaped - the lexer folds two chained digit runs into
+// one decimal token whenever the one right before it already ends an
+// operand) contributes two hops via `_split_chained_index_text`; a
+// bare Num segment contributes one. The walk stops at the first
+// non-numeric segment, the chain's own base receiver - `*out_base_hop`
+// is set to the outermost hop's own token (`t` itself for a single-hop
+// access), the same token the existing single-hop resolution already
+// passed to `chain_receiver_type` to resolve the base receiver's type.
+// Empty when `t` itself isn't numeric-chain-shaped.
+fun _chained_tuple_hops(Vec<Token>* tokens, Token t, str source_text, Token* out_base_hop) Vec<num> {
+  Vec<num> hops;
+  hops.init(4);
+  num cursor = index_of_token(tokens, t);
+  num leftmost_idx = cursor;
+  for true {
+    Token cur_tok = tokens.get(cursor);
+    flag consumed = false;
+    fit cur_tok.type {
+      .Number -> {
+        fit cur_tok.data {
+          .Dec(_) -> {
+            let split = _split_chained_index_text(cur_tok.pos, source_text);
+            if split.is_some() {
+              hops.push(split.unwrap().frac);
+              hops.push(split.unwrap().whole);
+              consumed = true;
+            }
+          }
+          .Num(n) -> {
+            hops.push(n);
+            consumed = true;
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+    if !consumed {
+      break;
+    }
+    leftmost_idx = cursor;
+    let dot_opt = token_before(tokens, cursor);
+    if dot_opt.is_none() || !token_is_operator(dot_opt.unwrap(), ".") {
+      break;
+    }
+    num dot_idx = index_of_token(tokens, dot_opt.unwrap());
+    let before_opt = token_before(tokens, dot_idx);
+    if before_opt.is_none() {
+      break;
+    }
+    cursor = index_of_token(tokens, before_opt.unwrap());
+  }
+  *out_base_hop = tokens.get(leftmost_idx);
+  ret _reversed_num_vec(hops);
+}
+
+// The hover doc text for a chained positional access ending at `t`
+// (any depth - `t.0`, `t.0.1`, `t.0.0.1`, ...), narrowing the base
+// receiver's own tuple type one `split_signature_params` per hop and
+// describing each step, outermost first. "" when the base doesn't
+// resolve to a tuple, or any hop is out of its own element's range.
+fun _resolve_chained_tuple_hover(
+  Vec<Token>* tokens,
+  Token t,
+  Vec<Node>* program,
+  str file,
+  num source_line,
+  str source_text
+) str {
+  Token base_hop = t;
+  let hops = _chained_tuple_hops(tokens, t, source_text, &base_hop);
+  defer hops.free();
+  if hops.len == 0 {
+    ret "";
+  }
+  str base_type = chain_receiver_type(tokens, base_hop, program, file, source_line);
+  if !starts_with(base_type, "(") {
+    ret "";
+  }
+  Vec<str> owned_types;
+  owned_types.init(hops.len + 1);
+  owned_types.push(base_type);
+  StringBuilder desc = string_builder_init(64);
+  str result = "";
+  num hi = 0;
+  for hi < hops.len {
+    num hop = hops.get(hi);
+    str current_type = owned_types.get(owned_types.len - 1);
+    Vec<str> members = split_signature_params(current_type);
+    if hop < 0 || hop >= members.len {
+      free_params_vec(&members);
+      break;
+    }
+    if hi > 0 {
+      desc.append(", itself element ");
+    } else {
+      desc.append("Positional element ");
+    }
+    desc.append_num(hop);
+    desc.append(" of ");
+    desc.append(current_type);
+    str next_type = substr(members.get(hop), 0, len(members.get(hop)));
+    owned_types.push(next_type);
+    free_params_vec(&members);
+    hi = hi + 1;
+    if hi == hops.len {
+      desc.append(".");
+      str desc_text = desc.build();
+      result = _doc(next_type, desc_text);
+      free(desc_text);
+    }
+  }
+  num fi = 0;
+  for fi < owned_types.len {
+    free(owned_types.get(fi));
+    fi = fi + 1;
+  }
+  owned_types.free();
+  ret result;
 }
 
 // `code` shown as a Fun snippet, with `prose` under it. A fence is

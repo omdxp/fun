@@ -39,6 +39,11 @@ pub compound CheckedType {
   // against it, rather than degrading to unknown.
   flag has_fn_sig;
   FnTypeSig* fn_sig;
+  // A real tuple type (`(num, str)`). Like a function type, this has no
+  // `name` of its own, so `is_unknown` must never treat one as
+  // unresolved just because `name` is empty.
+  flag is_tuple;
+  Vec<CheckedType> tuple_members;
 }
 
 pub fun checked_unknown() CheckedType {
@@ -53,6 +58,8 @@ pub fun checked_unknown() CheckedType {
   t.generic_args.init(0);
   t.has_fn_sig = false;
   t.fn_sig = nil;
+  t.is_tuple = false;
+  t.tuple_members.init(0);
   ret t;
 }
 
@@ -90,6 +97,12 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   }
   t.has_fn_sig = dt.has_fn_sig;
   t.fn_sig = dt.fn_sig;
+  t.is_tuple = dt.is_tuple;
+  num ti = 0;
+  for ti < dt.tuple_members.len {
+    t.tuple_members.push(checked_from_dtype(dt.tuple_members.get(ti)));
+    ti = ti + 1;
+  }
   ret t;
 }
 
@@ -123,6 +136,13 @@ pub fun is_unknown(CheckedType t) flag {
   if t.base != .Unknown {
     ret false;
   }
+  // A tuple has no `name` of its own, same as a function type already
+  // carries `has_fn_sig` instead of a name - neither is "the checker
+  // doesn't understand this", so neither reaches the empty-name check
+  // below, which exists for a genuine placeholder/unresolved reference.
+  if t.is_tuple || t.has_fn_sig {
+    ret false;
+  }
   // A `let` carries a placeholder until its value is known, which is
   // exactly what the checker fills in.
   ret equals(t.name, "") || equals(t.name, LET_INFER_TYPE);
@@ -132,6 +152,25 @@ pub fun is_unknown(CheckedType t) flag {
 pub const str LET_INFER_TYPE = "__let_infer__";
 
 pub fun type_name(CheckedType t) str {
+  if t.is_tuple {
+    StringBuilder tb = string_builder_init(16);
+    tb.append("(");
+    num ti = 0;
+    for ti < t.tuple_members.len {
+      if ti > 0 {
+        tb.append(", ");
+      }
+      tb.append(type_name(t.tuple_members.get(ti)));
+      ti = ti + 1;
+    }
+    tb.append(")");
+    num pi = 0;
+    for pi < t.pointer_depth {
+      tb.append("*");
+      pi = pi + 1;
+    }
+    ret tb.build();
+  }
   str base = "unknown";
   fit t.base {
     .Void -> { base = "void"; }
@@ -250,6 +289,16 @@ pub fun can_assign(CheckedType to, CheckedType from) flag {
     ret false;
   }
   if to.base == .Unknown {
+    // A tuple has no `name` of its own (both sides would read "" and
+    // wrongly compare equal below) - arity is the only check this
+    // standalone, `self`-less function can make; per-element
+    // compatibility is `assignable`'s own job, via `tuple_members_agree`.
+    if to.is_tuple || from.is_tuple {
+      if !to.is_tuple || !from.is_tuple {
+        ret false;
+      }
+      ret to.tuple_members.len == from.tuple_members.len;
+    }
     ret equals(to.name, from.name);
   }
   ret true;
@@ -833,6 +882,9 @@ impl Checker {
       // when they were instantiated with the same arguments: a
       // `Box<num>` is not a `Box<str>`, though both are written `Box`
       // and compare equal by name alone.
+      if !self.tuple_members_agree(to, from) {
+        ret false;
+      }
       ret self.generic_args_agree(to, from);
     }
     // A name the program never declares is a type parameter that no
@@ -989,6 +1041,30 @@ impl Checker {
       if !self.names_a_declared_type(want) || !self.names_a_declared_type(got) {
         continue;
       }
+      if !self.assignable(want, got) {
+        ret false;
+      }
+    }
+    ret true;
+  }
+
+  // The tuple counterpart to `generic_args_agree`: `can_assign` already
+  // confirmed matching arity (all it can check, being a standalone
+  // function with no `self` to recurse with) - this checks each element
+  // pairwise. Neither side being a tuple says nothing to disagree about,
+  // matching `generic_args_agree`'s own "nothing to compare" default.
+  tuple_members_agree(CheckedType to, CheckedType from) flag {
+    if !to.is_tuple || !from.is_tuple {
+      ret true;
+    }
+    if to.tuple_members.len != from.tuple_members.len {
+      ret false;
+    }
+    num i = 0;
+    for i < to.tuple_members.len {
+      CheckedType want = to.tuple_members.get(i);
+      CheckedType got = from.tuple_members.get(i);
+      i = i + 1;
       if !self.assignable(want, got) {
         ret false;
       }
@@ -1447,6 +1523,14 @@ impl Checker {
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
       .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
       .CompoundInit(init) -> { ret self.infer_compound_init(node, init, env); }
+      .TupleLiteral(tl) -> {
+        CheckedType out = checked_unknown();
+        out.is_tuple = true;
+        for el : tl.elements {
+          out.tuple_members.push(self.infer(el, env));
+        }
+        ret out;
+      }
       .Unary(u) -> { ret self.infer_unary(node, u, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
@@ -1693,6 +1777,61 @@ impl Checker {
       ret checked_unknown();
     }
     CheckedType receiver = self.infer(e.left, env);
+    // Tuple positional access (`t.0`): the RHS lexes/parses as a plain
+    // `Number` token (a real int, never a `Dec`, since the lexer only
+    // treats a post-operand `.digit` as a leading-dot float when nothing
+    // already ends a value before it), not an `Identifier` the way an
+    // ordinary field name is - `_callee_name` below returns "" for it,
+    // which is why this has to be checked first, not folded into the
+    // ordinary field-name path.
+    flag right_is_number = false;
+    num tuple_index = 0;
+    fit e.right.kind {
+      .Number(data) -> {
+        fit data {
+          .Num(n) -> {
+            right_is_number = true;
+            tuple_index = n;
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+    if right_is_number {
+      // A receiver the checker genuinely can't resolve (most commonly a
+      // generic method's own un-substituted return type - `Vec<T>.get`
+      // returns a method's declared return type as-is with no generic
+      // substitution, a pre-existing gap this positional-access check
+      // must not be stricter about than the ordinary field-name path
+      // just below already is: that path's own `self.compounds.at(...)`
+      // lookup silently falls through to `checked_unknown()` for exactly
+      // this case, deferring entirely to codegen's own separate,
+      // independent type resolution rather than reporting a real error
+      // here. Covers both shapes an unresolved receiver actually takes
+      // in practice: an empty name (`is_unknown`) and a real but
+      // undeclared one, like a raw type-param name (`names_a_declared_type`).
+      if !receiver.is_tuple &&
+        (is_unknown(receiver) || !self.names_a_declared_type(receiver)) {
+        ret checked_unknown();
+      }
+      if !receiver.is_tuple {
+        self.fail(format("no field named '{num}'", tuple_index), node);
+        ret checked_unknown();
+      }
+      if tuple_index < 0 || tuple_index >= receiver.tuple_members.len {
+        self.fail(
+          format(
+          "tuple has no element {num} (it has {num} element(s))",
+          tuple_index,
+          receiver.tuple_members.len
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+      ret receiver.tuple_members.get(tuple_index);
+    }
     str field = _callee_name(e.right);
     if equals(field, "") {
       ret checked_unknown();
@@ -2620,7 +2759,13 @@ impl Checker {
         }
         env.pop();
       }
-      .Variable(v) -> { self.check_variable(stmt, v, env); }
+      .Variable(v) -> {
+        if v.is_destructure {
+          self.check_let_destructure(stmt, v, env);
+        } else {
+          self.check_variable(stmt, v, env);
+        }
+      }
       .StatementReturn(value) -> { self.check_return(stmt, value, env); }
       .StatementIf(ifn) -> {
         self.check_condition(ifn.condition, env);
@@ -2632,7 +2777,7 @@ impl Checker {
       }
       .StatementElse(body) -> { self.check_statement(body, env); }
       .StatementDefer(inner) -> { self.check_statement(inner, env); }
-      .StatementFor(kind) -> { self.check_for(kind, env); }
+      .StatementFor(kind) -> { self.check_for(stmt, kind, env); }
       .StatementFit(f) -> { self.check_fit(f, env); }
       .Expression(_) -> { self.walk_expr(stmt, env); }
       .ExpressionParenthesis(_) -> { self.walk_expr(stmt, env); }
@@ -2646,31 +2791,128 @@ impl Checker {
   // be taken, so it is a mistake rather than a dead branch.
   check_fit(FitStmtNode f, TypeEnv* env) {
     str subject = "";
+    CheckedType subject_type = checked_unknown();
+    flag have_subject_type = false;
     if f.exp != nil {
-      CheckedType held = self.infer(f.exp, env);
-      subject = held.name;
+      subject_type = self.infer(f.exp, env);
+      subject = subject_type.name;
+      have_subject_type = true;
     }
     for branch : f.branches {
       if branch.has_condition {
-        str named = _branch_enum_name(branch.condition);
-        if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
-          self.fail(
-            format(
-            "fit branch names '{str}' but the value being matched is a '{str}'",
-            named,
-            subject
-            ),
-            branch.condition
-          );
+        if branch.is_tuple_pattern {
+          self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
+        } else {
+          str named = _branch_enum_name(branch.condition);
+          if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
+            self.fail(
+              format(
+              "fit branch names '{str}' but the value being matched is a '{str}'",
+              named,
+              subject
+              ),
+              branch.condition
+            );
+          }
         }
       }
       env.push();
+      if branch.is_tuple_pattern && branch.has_condition && have_subject_type &&
+        subject_type.is_tuple {
+        self.bind_fit_tuple_pattern(branch, subject_type, env);
+      }
       self.check_statement(branch.body, env);
       env.pop();
     }
   }
 
-  check_for(ForKind kind, TypeEnv* env) {
+  // Verifies a `(pattern, ...) -> ...` tuple-pattern arm's own shape: the
+  // subject must itself be tuple-typed with the same arity as the pattern,
+  // and each literal position (a binding position skips this - it accepts
+  // any value at its own position) must fit the subject's own element type
+  // at that position, the same way an ordinary `fit` label already has to
+  // fit the subject's type.
+  check_fit_tuple_pattern_condition(
+    FitBranch branch,
+    CheckedType subject_type,
+    flag have_subject_type
+  ) {
+    if !have_subject_type || !subject_type.is_tuple {
+      self.fail("a tuple pattern in 'fit' needs a tuple-typed subject", branch.condition);
+      ret;
+    }
+    fit branch.condition.kind {
+      .TupleLiteral(tl) -> {
+        if tl.elements.len != subject_type.tuple_members.len {
+          self.fail(
+            format(
+            "a tuple pattern with {num} position(s) needs a {num}-element tuple subject, not '{str}'",
+            tl.elements.len,
+            subject_type.tuple_members.len,
+            type_name(subject_type)
+            ),
+            branch.condition
+          );
+          ret;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Binds each non-wildcard binding position of a tuple-pattern arm to its
+  // own element type from the subject, and typechecks each literal
+  // position against that same element type - real errors either way, not
+  // a silent Unknown fallback, matching the standard `check_let_destructure`
+  // and the for-loop's own tuple destructuring already hold tuple patterns
+  // to elsewhere in this file. Caller has already verified the arity
+  // matches and pushed a fresh `env` scope for the arm body.
+  bind_fit_tuple_pattern(FitBranch branch, CheckedType subject_type, TypeEnv* env) {
+    fit branch.condition.kind {
+      .TupleLiteral(tl) -> {
+        if tl.elements.len != subject_type.tuple_members.len {
+          ret;
+        }
+        num i = 0;
+        for el : tl.elements {
+          CheckedType member = subject_type.tuple_members.get(i);
+          flag is_binding = false;
+          flag is_wildcard = false;
+          str bname = "";
+          fit el.kind {
+            .Identifier(s) -> {
+              if equals(s, "_") {
+                is_wildcard = true;
+              } else {
+                is_binding = true;
+                bname = s;
+              }
+            }
+            _ -> {}
+          }
+          if is_binding {
+            env.define(bname, member);
+          } elif !is_wildcard {
+            let lit_type = self.infer(el, env);
+            if !self.assignable(member, lit_type) {
+              self.fail(
+                format(
+                "a tuple pattern position expects a '{str}', not '{str}'",
+                type_name(member),
+                type_name(lit_type)
+                ),
+                el
+              );
+            }
+          }
+          i = i + 1;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  check_for(Node* stmt, ForKind kind, TypeEnv* env) {
     env.push();
     fit kind {
       .Cond(c) -> {
@@ -2685,7 +2927,50 @@ impl Checker {
       }
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
-        if it.has_index_name && equals(iterable_type.name, "Map") &&
+        if it.item_is_destructure {
+          // `for (a, b) : pairs`: the loop item is a tuple, destructured
+          // into its own names the same way a declared-type `let`
+          // destructuring pattern is - a real element-type mismatch or
+          // arity mismatch is a compile error here too, not a silent
+          // Unknown fallback, the same standard `check_let_destructure`
+          // already holds tuple destructuring to.
+          flag matched = false;
+          if iterable_type.generic_args.len >= 1 {
+            let elem = iterable_type.generic_args.get(0);
+            if elem.is_tuple && elem.tuple_members.len == it.item_destructure_names.len {
+              matched = true;
+              num idi = 0;
+              for name : it.item_destructure_names {
+                env.define(name, elem.tuple_members.get(idi));
+                idi = idi + 1;
+              }
+            } elif elem.is_tuple {
+              self.fail(
+                format(
+                "'for' destructuring pattern has {num} name(s) but the iterable's own element has {num} element(s)",
+                it.item_destructure_names.len,
+                elem.tuple_members.len
+                ),
+                stmt
+              );
+              matched = true;
+              for name : it.item_destructure_names {
+                env.define(name, checked_unknown());
+              }
+            }
+          }
+          if !matched {
+            // Not confidently known to be a tuple-elemented iterable
+            // (an unresolved reference, or a collection type the
+            // checker doesn't model structurally) - binding each name
+            // as Unknown lets the rest of the function keep checking,
+            // the same leniency an ordinary for-loop item already gets
+            // just below.
+            for name : it.item_destructure_names {
+              env.define(name, checked_unknown());
+            }
+          }
+        } elif it.has_index_name && equals(iterable_type.name, "Map") &&
           iterable_type.generic_args.len == 2 {
           // `for key, val :: someMap`: the two-variable form names a
           // key/value pair for a Map, not an index/item pair the way
@@ -2875,6 +3160,91 @@ impl Checker {
       }
     }
     env.bind(v.name, declared, v.is_const);
+  }
+
+  // `let (a, b, c) = expr;`: unlike an ordinary `let`, whose real
+  // inferred type is never written back onto the AST (it lives only in
+  // `TypeEnv` via `env.bind` above), this is the only place a
+  // destructured name's type is ever resolved at all - each one gets its
+  // own `env.bind` call, one per element, exactly like an ordinary
+  // `let`'s single call just repeated positionally.
+  check_let_destructure(Node* stmt, VariableNode v, TypeEnv* env) {
+    if !v.has_val {
+      ret;
+    }
+    CheckedType value = self.infer(v.val, env);
+    // A declared tuple type (`(num, str) (a, b) = expr;`) wins the same
+    // way an ordinary declared variable's own type does: the initializer
+    // must fit it (numeric widening included), and each name binds to
+    // its own DECLARED element type, not the initializer's own inferred
+    // one - real precision even when the initializer's own shape is
+    // wider than what typecheck can pin down (e.g through the pre-
+    // existing generic-method-return-type gap `infer_field` already
+    // works around elsewhere).
+    if !equals(v.var_type.type_str, "__let_infer__") {
+      CheckedType declared = checked_from_dtype(v.var_type);
+      if !declared.is_tuple || declared.tuple_members.len != v.destructure_names.len {
+        self.fail(
+          format(
+          "a destructuring pattern with {num} name(s) needs a {num}-element declared tuple type, not {str}",
+          v.destructure_names.len,
+          v.destructure_names.len,
+          type_name(declared)
+          ),
+          stmt
+        );
+        ret;
+      }
+      if !is_unknown(value) && !self.assignable(declared, value) {
+        self.fail(
+          format(
+          "cannot initialize a destructuring pattern of type {str} with {str}",
+          type_name(declared),
+          type_name(value)
+          ),
+          stmt
+        );
+        ret;
+      }
+      num di = 0;
+      for name : v.destructure_names {
+        env.bind(name, declared.tuple_members.get(di), false);
+        di = di + 1;
+      }
+      ret;
+    }
+    if is_unknown(value) {
+      // Nothing to destructure against yet (an unresolved reference,
+      // already reported elsewhere) - binding each name as Unknown lets
+      // the rest of the function keep checking instead of cascading.
+      for name : v.destructure_names {
+        env.bind(name, checked_unknown(), false);
+      }
+      ret;
+    }
+    if !value.is_tuple {
+      self.fail(
+        format("cannot destructure a non-tuple value of type {str}", type_name(value)),
+        stmt
+      );
+      ret;
+    }
+    if value.tuple_members.len != v.destructure_names.len {
+      self.fail(
+        format(
+        "destructuring pattern has {num} name(s) but the value has {num} element(s)",
+        v.destructure_names.len,
+        value.tuple_members.len
+        ),
+        stmt
+      );
+      ret;
+    }
+    num i = 0;
+    for name : v.destructure_names {
+      env.bind(name, value.tuple_members.get(i), false);
+      i = i + 1;
+    }
   }
 
   check_return(Node* stmt, Node* value, TypeEnv* env) {

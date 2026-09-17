@@ -135,6 +135,79 @@ Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
 forward-declared types are supported.
 
+### Tuples
+
+`(T1, T2, ...)` groups two or more differently-typed values into one
+real type, usable anywhere a type is: a variable's declared type, a
+function parameter or return type, or a generic argument - with no
+separate `compound` declaration needed.
+
+```fun
+use std.io;
+
+fun min_max(num a, num b) (num, num) {
+  if a < b {
+    ret (a, b);
+  }
+  ret (b, a);
+}
+
+fun main() {
+  (num, str) person = (30, "Ada");
+  println_fmt("{num} {str}", person.0, person.1);
+
+  let (low, high) = min_max(9, 3);
+  println_fmt("{num} {num}", low, high);
+}
+```
+
+- A tuple **literal** needs at least two comma-separated elements:
+  `(1, "hi")`. A single parenthesized value (`(1)`) stays an ordinary
+  grouped expression, not a one-element tuple.
+- Read an element back **positionally** with `.0`, `.1`, and so on; an
+  out-of-range index is a compile-time error. A tuple-of-tuples chains
+  directly - `t.0.1` reads element `1` of `t`'s own element `0` - even
+  though `0.1` would otherwise lex as one decimal number: the compiler
+  splits it back into two positional hops from the token's own raw
+  source digits, not its parsed value, so a multi-digit chained index
+  (`t.0.10`) still reads back correctly as element `10`, not `1`.
+- **`let (a, b, c) = expr;`** destructures a tuple into individually-
+  typed names in one step. `expr` is evaluated exactly once no matter
+  how many names it destructures into, and each name must actually be
+  used or it's an `unused_variable` warning like any other local
+  (prefix with `_` to opt out, same convention as elsewhere).
+- **`(T1, T2) (a, b) = expr;`** destructures with an explicit declared
+  type instead of inferring one, the same way `dec x = 1;` declares a
+  type rather than inferring it: each name gets its own declared
+  element type, and `expr` must fit the declared type as a whole
+  (numeric widening included), not just whatever it happens to infer to.
+- **`for (a, b) : pairs { ... }`** destructures each element of a
+  tuple-elemented iterable (`Vec<(K, V)>`) into its own names per
+  iteration, the same way `let` destructures a plain tuple value - no
+  combined index-tracking form (`for (a, b) :: xs` is not supported;
+  the existing `for i, item :: xs` two-name form already covers index
+  tracking).
+- A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
+  as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
+  for the `als Args = (num, str);` pattern this enables with generic
+  aliases.
+- **`fit`** matches a tuple subject structurally: `(0, y) -> ...` matches
+  when element `0` equals `0`, binding `y` to element `1`. Each position
+  is independent - a bare (non-`_`) identifier binds that position's own
+  value, `_` matches without binding, and anything else (a literal, or
+  any other expression) is a guard that position's own value must equal.
+  A later branch is only reached when an earlier one's guard positions
+  don't all match:
+  ```fun
+  fun main() {
+    (num, str) t = (0, "go");
+    fit t {
+      (0, s) -> { println_fmt("zero, {str}", s); }
+      (n, s) -> { println_fmt("{num}, {str}", n, s); }
+    }
+  }
+  ```
+
 ## Variables
 
 Variables can be explicitly typed or inferred with `let`.
@@ -591,6 +664,11 @@ fun main() {
   variable: `Drawable d = &square;` then `d.area()`. This is still a
   value type, not a pointer - `Drawable*` follows the same explicit-
   pointer-at-the-use-site rule as any other alias.
+- An alias's own body can be a [tuple](#tuples) (`als Args = (num,
+  str);`), and it's then an ordinary generic type parameter like any
+  other: `als Callback<A, R> = fun(A) R;` plus `Callback<Args, str>`
+  expands to `fun((num, str)) str` - no special-casing needed anywhere
+  once tuples themselves exist.
 
 ## Functions
 
@@ -889,6 +967,15 @@ fun main() {
   signatures; C provides the implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from
   `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
+- **C's own reserved words** (`do`, `int`, `for`, `void`, ...) can't
+  name a plain top-level function, a function parameter, or a `let`/
+  `const`/global variable - none of these are reserved in Fun itself,
+  but each is emitted to C verbatim, so a collision would fail C
+  compilation rather than Fun's own. Caught at parse time with a clear
+  error instead. A generic function's own name is exempt: it always
+  monomorphizes with its concrete type arguments (`double<T>` becomes
+  `double__num`, `double__dec`, ...), so it never actually reaches C
+  bare - `fun double<T: num | dec>(T x) T { ret x + x; }` is fine.
 
 See Platforms & Compilers for C compiler selection and per-platform
 behavior.

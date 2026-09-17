@@ -69,6 +69,13 @@ pub compound DataType {
   Vec<DataType*> generic_args;
   FnTypeSig* fn_sig;
   flag has_fn_sig;
+  // A real, permanently-persisting tuple type (`(num, str)`), kept
+  // separate from `generic_args` since a tuple has no single named
+  // declaration behind it the way a generic instantiation always does.
+  // `type_str` stays empty and `kind` stays `.Unknown` for a tuple,
+  // mirroring how `has_fn_sig`/`fn_sig` already relate to them.
+  flag is_tuple;
+  Vec<DataType*> tuple_members;
 }
 
 // Every DataType construction site must go through this constructor (see
@@ -85,6 +92,8 @@ pub fun dtype_new() DataType {
   dt.generic_args.init(0);
   dt.fn_sig = nil;
   dt.has_fn_sig = false;
+  dt.is_tuple = false;
+  dt.tuple_members.init(0);
   ret dt;
 }
 
@@ -304,6 +313,11 @@ pub compound VariableNode {
   // False for every other variable-shaped construction: a plain
   // `let`/typed local, a function parameter, or a method's `self`.
   flag is_const;
+  // True for `let (a, b, c) = expr;`: `name` is inert ("") and
+  // `destructure_names` holds the real bound names instead, each
+  // matched positionally against `val`'s own inferred tuple type.
+  flag is_destructure;
+  Vec<str> destructure_names;
 }
 
 // A `{ ... }` block: an ordered list of statements.
@@ -392,6 +406,12 @@ pub compound ForIterNode {
   str index_name;
   flag has_index_name;
   str item_name;
+  // A destructuring loop variable (`for (a, b) : pairs`), naming each
+  // element of the iterable's own tuple-typed element instead of a
+  // single `item_name`. `item_name` stays empty/unused when this is
+  // set - mirrors `VariableNode.is_destructure`/`destructure_names`.
+  flag item_is_destructure;
+  Vec<str> item_destructure_names;
   Node* iterable;
   Node* body;
 }
@@ -423,9 +443,17 @@ pub compound FitBranch {
   flag has_condition;
   Node* body;
   // Positional binding names for a data-carrying-enum destructuring arm
-  // (`Shape.Circle(r)` binds ["r"]). Empty for a non-destructuring arm.
+  // (`Shape.Circle(r)` binds ["r"]), or for a tuple-pattern arm's own
+  // binding positions (below). Empty for a non-destructuring arm.
   Vec<str> bindings;
   flag has_bindings;
+  // True when `condition` is a `.TupleLiteral` used as a structural
+  // pattern (`(0, y) -> ...`) rather than an ordinary value expression -
+  // each element is either a literal to match positionally or a bare
+  // identifier binding that position's value, read directly off
+  // `condition`'s own `.TupleLiteral` elements rather than duplicated
+  // here, so freeing/cloning `condition` already owns them.
+  flag is_tuple_pattern;
 }
 
 pub fun fit_branch_new() FitBranch {
@@ -435,6 +463,7 @@ pub fun fit_branch_new() FitBranch {
   b.body = nil;
   b.bindings.init(0);
   b.has_bindings = false;
+  b.is_tuple_pattern = false;
   ret b;
 }
 
@@ -740,6 +769,18 @@ pub fun asm_stmt_node_new() AsmStmtNode {
   ret a;
 }
 
+// A tuple value literal (`(1, 2, 3)`), 2+ elements - a single
+// parenthesized expression stays `.ExpressionParenthesis`, never this.
+pub compound TupleLiteralNode {
+  Vec<Node*> elements;
+}
+
+pub fun tuple_literal_node_new() TupleLiteralNode {
+  TupleLiteralNode t;
+  t.elements.init(0);
+  ret t;
+}
+
 // ===== The node kind itself =====
 pub enum NodeKind {
   Expression(ExprNode),
@@ -784,6 +825,7 @@ pub enum NodeKind {
   Bracket(Node*),
   // `Type{...}` or `.{...}`.
   CompoundInit(CompoundInitNode),
+  TupleLiteral(TupleLiteralNode),
   Import(ImportNode),
   Compound(CompoundNode),
   Quirk(QuirkNode),
@@ -824,6 +866,7 @@ pub fun node_kind_name(NodeKind kind) str {
     .Unary(_) -> { ret "unary expression"; }
     .Bracket(_) -> { ret "bracket literal"; }
     .CompoundInit(_) -> { ret "compound literal"; }
+    .TupleLiteral(_) -> { ret "tuple literal"; }
     .Variable(_) -> { ret "variable declaration"; }
     .Function(_) -> { ret "function"; }
     .Compound(_) -> { ret "compound declaration"; }
@@ -872,6 +915,7 @@ pub fun node_is_value_type(Node n) flag {
     .String(s) -> { ret true; }
     .Character(c) -> { ret true; }
     .CompoundInit(ci) -> { ret true; }
+    .TupleLiteral(tl) -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -894,6 +938,7 @@ pub fun node_is_expressionable(Node n) flag {
     // matrix, e.g.) needs to be a valid left operand for the following
     // ',' to continue chaining the outer literal's remaining elements.
     .Bracket(inner) -> { ret true; }
+    .TupleLiteral(tl) -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -993,6 +1038,7 @@ pub fun dtype_free(DataType* dt) {
   }
   _free_node_vec(&dt.array_brackets);
   _free_dtype_vec(&dt.generic_args);
+  _free_dtype_vec(&dt.tuple_members);
   if dt.has_fn_sig && dt.fn_sig != nil {
     _free_dtype_vec(&dt.fn_sig.params);
     if dt.fn_sig.rtype != nil {
@@ -1102,6 +1148,7 @@ fun _free_node_contents(Node* n) {
       if v.has_val {
         node_free(v.val);
       }
+      v.destructure_names.free();
     }
     .Function(f) -> {
       if f.has_rtype {
@@ -1137,6 +1184,7 @@ fun _free_node_contents(Node* n) {
         .Iter(it) -> {
           node_free(it.iterable);
           node_free(it.body);
+          it.item_destructure_names.free();
         }
       }
     }
@@ -1169,6 +1217,7 @@ fun _free_node_contents(Node* n) {
       }
       _free_compound_init_fields(&ci.fields);
     }
+    .TupleLiteral(tl) -> { _free_node_vec(&tl.elements); }
     .Compound(c) -> {
       _free_compound_fields(&c.fields);
       c.type_params.free();
@@ -1316,6 +1365,7 @@ pub fun dtype_clone(DataType* dt) DataType* {
   *c = *dt;
   c.array_brackets = _clone_node_vec(&dt.array_brackets);
   c.generic_args = _clone_dtype_vec(&dt.generic_args);
+  c.tuple_members = _clone_dtype_vec(&dt.tuple_members);
   if dt.has_fn_sig && dt.fn_sig != nil {
     FnTypeSig* fs = malloc(sizeof(FnTypeSig));
     fs.params = _clone_dtype_vec(&dt.fn_sig.params);
@@ -1465,6 +1515,7 @@ pub fun node_clone(Node n) Node {
       if v.has_val {
         cv.val = node_clone_ptr(v.val);
       }
+      cv.destructure_names = _clone_str_vec(&v.destructure_names);
       c.kind = .Variable(cv);
     }
     .Function(f) -> {
@@ -1512,6 +1563,7 @@ pub fun node_clone(Node n) Node {
           ForIterNode ci = it;
           ci.iterable = node_clone_ptr(it.iterable);
           ci.body = node_clone_ptr(it.body);
+          ci.item_destructure_names = _clone_str_vec(&it.item_destructure_names);
           c.kind = .StatementFor(.Iter(ci));
         }
       }
@@ -1558,6 +1610,11 @@ pub fun node_clone(Node n) Node {
       }
       cc.fields = _clone_compound_init_fields(&ci.fields);
       c.kind = .CompoundInit(cc);
+    }
+    .TupleLiteral(tl) -> {
+      TupleLiteralNode ctl = tl;
+      ctl.elements = _clone_node_vec(&tl.elements);
+      c.kind = .TupleLiteral(ctl);
     }
     .Compound(cn) -> {
       CompoundNode cc = cn;

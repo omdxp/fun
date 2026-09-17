@@ -347,3 +347,423 @@ test "'use'/'flag' compile and run end to end, as real alternate spellings of 'i
   str out = run_source(src, "use_flag_alt_spellings", "'use'/'flag' end to end");
   assert equals(out, "ok\n"), "expected 'use'/'flag' to compile and run identically to 'imp'/'bin'";
 }
+
+test "a tuple literal constructs and positional access reads each element back" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) t = (1, "hi");
+  `  printf("%lld %s\n", t.0, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_construct_and_positional_access", "tuple literal + positional access end to end");
+  assert equals(out, "1 hi\n"), "expected the tuple's own elements read back positionally";
+}
+
+test "let destructuring binds each name to its own element's real value" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  let (a, b, c) = (1, 2, 3);
+  `  printf("%lld\n", a + b + c);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_let_destructure_values", "let destructuring end to end");
+  assert equals(out, "6\n"), "expected each destructured name bound to its own element";
+}
+
+test "let destructuring evaluates its initializer exactly once" {
+  str src = `use std.c.io;
+  `num calls = 0;
+  `fun make_pair() (num, num) {
+  `  calls = calls + 1;
+  `  ret (10, 20);
+  `}
+  `fun main() num {
+  `  let (a, b) = make_pair();
+  `  printf("%lld %lld %lld\n", a, b, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_destructure_evaluates_once", "let destructuring evaluate-once correctness");
+  assert equals(out, "10 20 1\n"), "expected the initializer call counted exactly once, not once per destructured name";
+}
+
+test "a function returning a tuple works end to end" {
+  str src = `use std.c.io;
+  `fun pair() (num, str) {
+  `  ret (7, "seven");
+  `}
+  `fun main() num {
+  `  let (n, s) = pair();
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_function_return", "tuple-returning function end to end");
+  assert equals(out, "7 seven\n"), "expected the returned tuple's own elements to destructure correctly";
+}
+
+test "a tuple works as an ordinary generic argument end to end" {
+  str src = `use std.c.io;
+  `compound Box<T> { T v; }
+  `fun main() num {
+  `  Box<(num, str)> b = Box<(num, str)>{v = (1, "hi")};
+  `  printf("%lld %s\n", b.v.0, b.v.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_generic_argument", "tuple as a generic argument end to end");
+  assert equals(out, "1 hi\n"), "expected a tuple to plug into an existing generic compound like any other type";
+}
+
+test "a generic alias bound to a tuple works end to end, the original motivating case" {
+  str src = `use std.c.io;
+  `als Args = (num, str);
+  `als Callback<A, R> = fun(A) R;
+  `fun describe(Args a) str { ret a.1; }
+  `fun apply(Callback<Args, str> cb, Args a) str { ret cb(a); }
+  `fun main() num {
+  `  printf("%s\n", apply(describe, (1, "hi")));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_generic_alias_callback", "tuple-bodied generic alias end to end");
+  assert equals(out, "hi\n"), "expected the tuple-bodied alias to expand and run exactly like a hand-written tuple type";
+}
+
+test "a numeric element widens against its declared tuple position, not the literal's own bare structural type" {
+  str src = `use std.c.io;
+  `fun pair() (dec, str) {
+  `  ret (1, "hi");
+  `}
+  `fun show((dec, str) p) {
+  `  printf("%f %s\n", p.0, p.1);
+  `}
+  `fun main() num {
+  `  (dec, str) t = (1, "hi");
+  `  printf("%f %s\n", t.0, t.1);
+  `  let (a, b) = pair();
+  `  printf("%f %s\n", a, b);
+  `  show((2, "yo"));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_numeric_widening", "a num literal widens into a declared dec tuple position end to end");
+  assert equals(out, "1.000000 hi\n1.000000 hi\n2.000000 yo\n"), "expected every declared-dec tuple position to widen the literal, not mismatch the structurally-inferred num struct";
+}
+
+test "let destructuring compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
+  str src = `use std.c.io;
+  `fun min_max(num a, num b) (num, num) {
+  `  if a < b {
+  `    ret (a, b);
+  `  }
+  `  ret (b, a);
+  `}
+  `fun main() num {
+  `  let (low, high) = min_max(9, 3);
+  `  printf("%lld %lld\n", low, high);
+  `  ret 0;
+  `}`;
+  // `__auto_type` is a GNU extension MSVC rejects outright; `emit_let_destructure`
+  // must resolve a real declared/inferred C type for both its own hoisted
+  // temp and each destructured name under `msvc_mode`, the same fallback
+  // every other `__auto_type` site in codegen already has.
+  str out_c = emit_c_with_imports_forcing_msvc(src, "tuple_destructure_msvc_shape", "let destructuring under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_destructure_msvc_strict",
+    "let destructuring compiles and runs under a real strict (non-GNU) compile"
+  );
+  // `starts_with`, not an exact `equals` against a trailing '\n': every
+  // other `run_source_forcing_msvc` test in this file already relaxes
+  // this same way (a real Windows output-capture quirk around the final
+  // byte under the strict/MSVC path, unrelated to the actual computed
+  // values - confirmed directly against real Windows CI: the destructured
+  // values themselves came back exactly right, "3 9", only the trailing
+  // newline byte was ever in question). Still strictly stronger than a
+  // bare `contains`: this also catches wrong values or garbage preceding
+  // them, not just garbage after.
+  assert starts_with(out_msvc, "3 9"), format(
+    "expected the destructured values to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}
+
+test "let destructuring from a tuple-returning function compiles under MSVC's strict, non-GNU C" {
+  str src = `use std.c.io;
+  `fun pair() (num, str) {
+  `  ret (7, "seven");
+  `}
+  `fun main() num {
+  `  let (n, s) = pair();
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_fn_return_destructure_msvc_strict",
+    "destructuring a tuple-returning function's call result under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "7 seven"), format(
+    "expected the call-returned tuple to destructure and run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}
+
+test "a declared-type destructuring pattern binds each name to its own declared element type end to end" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (dec, str) (a, b) = (1, "hi");
+  `  printf("%f %s\n", a, b);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_declared_destructure_widening", "a declared-type destructuring pattern widens a num literal into its own dec position");
+  assert equals(out, "1.000000 hi\n"), "expected the declared dec position to widen the num literal, exactly like an ordinary declared dec variable";
+}
+
+test "a declared-type destructuring pattern's own initializer is evaluated exactly once" {
+  str src = `use std.c.io;
+  `num calls = 0;
+  `fun make_pair() (num, num) {
+  `  calls = calls + 1;
+  `  ret (10, 20);
+  `}
+  `fun main() num {
+  `  (num, num) (a, b) = make_pair();
+  `  printf("%lld %lld %lld\n", a, b, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_declared_destructure_once", "a declared-type destructuring pattern evaluates its initializer exactly once");
+  assert equals(out, "10 20 1\n"), "expected the initializer call counted exactly once, matching the inferred form's own evaluate-once guarantee";
+}
+
+test "a destructured name naming a compound resolves a later field access on it, both forms" {
+  // Real bug: `emit_let_destructure` emitted a correctly-typed C local
+  // for each destructured name but never registered any of them with
+  // codegen's own known-locals table (`record_local_typed`, what the
+  // ordinary non-destructure `.Variable` case already calls) - a later
+  // field access on a destructured compound-typed name (`pt.x`) failed
+  // with "unknown identifier 'pt'" even though the emitted C was
+  // correct, since codegen's own field-chain resolver had no idea `pt`
+  // existed at all.
+  str src = `use std.c.io;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  let (n, pt) = (5, Point{x = 9, y = 10});
+  `  (num, Point) (n2, pt2) = (6, Point{x = 11, y = 12});
+  `  printf("%lld %lld %lld %lld %lld %lld\n", n, pt.x, pt.y, n2, pt2.x, pt2.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_destructure_compound_field_access", "a destructured compound name's own field resolves after it, inferred and declared forms alike");
+  assert equals(out, "5 9 10 6 11 12\n"), "expected a field access on either form's destructured compound name to resolve correctly";
+}
+
+test "a for loop destructures a Vec of tuples, one name per element" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `fun main() num {
+  `  Vec<(num, str)> pairs;
+  `  pairs.init(2);
+  `  pairs.push((1, "one"));
+  `  pairs.push((2, "two"));
+  `  for (k, v) : pairs {
+  `    printf("%lld=%s ", k, v);
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_destructure_vec_tuple", "a for loop destructures a Vec<(num, str)> end to end");
+  assert equals(out, "1=one 2=two "), "expected each pair's own elements bound to k and v in order";
+}
+
+test "a for loop's own destructuring name resolves a later field access on it" {
+  // The same class of bug `emit_let_destructure` had: a destructured
+  // for-loop item must also register each name with codegen's own
+  // known-locals table, not just declare it as a correctly-typed local.
+  str src = `use std.c.io;
+  `use std.vec;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  Vec<(num, Point)> items;
+  `  items.init(2);
+  `  items.push((1, Point{x = 3, y = 4}));
+  `  for (id, pt) : items {
+  `    printf("%lld %lld %lld\n", id, pt.x, pt.y);
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_destructure_field_access", "a for-destructured compound name's own field resolves");
+  assert equals(out, "1 3 4\n"), "expected the destructured compound name's own field access to resolve correctly";
+}
+
+test "a for loop over a Vec of tuples compiles under MSVC's strict, non-GNU C" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `fun main() num {
+  `  Vec<(num, str)> pairs;
+  `  pairs.init(1);
+  `  pairs.push((7, "seven"));
+  `  for (k, v) : pairs {
+  `    printf("%lld %s\n", k, v);
+  `  }
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(src, "for_destructure_msvc_shape", "a for-destructured Vec of tuples under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "for_destructure_msvc_strict",
+    "a for loop over a Vec of tuples compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "7 seven"), format(
+    "expected the destructured for-loop values to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}
+
+test "a declared-type destructuring pattern compiles under MSVC's strict, non-GNU C, with no '__auto_type'" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) (n, s) = (7, "seven");
+  `  printf("%lld %s\n", n, s);
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(src, "tuple_declared_destructure_msvc_shape", "a declared-type destructuring pattern under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "tuple_declared_destructure_msvc_strict",
+    "a declared-type destructuring pattern compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "7 seven"), format(
+    "expected the declared-type destructured values to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}
+
+test "a bare chained positional access reads a tuple-of-tuples' own inner element end to end" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  ((num, str), flag) t = ((1, "hi"), true);
+  `  printf("%lld %s %d\n", t.0.0, t.0.1, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_chained_positional_access", "a bare chained positional access reads the inner tuple's own element end to end");
+  assert equals(out, "1 hi 1\n"), "expected 't.0.0'/'t.0.1' to read the inner tuple's own elements, and 't.1' the outer flag";
+}
+
+test "a multi-digit chained index reads back from its own raw source digits, not the lossy parsed decimal" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  ((num, num, num, num, num, num, num, num, num, num, num), str) t =
+  `    ((0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10), "eleven");
+  `  printf("%lld %s\n", t.0.10, t.1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_chained_multidigit_index", "a multi-digit chained index (0.10) reads element 10, not element 1");
+  assert equals(out, "10 eleven\n"), "expected 't.0.10' to read the inner tuple's own 11th element, not silently truncate to index 1";
+}
+
+test "fit matches a tuple pattern mixing a literal position with a binding position" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, num) t = (0, 7);
+  `  fit t {
+  `    (0, y) -> { printf("zero %lld\n", y); },
+  `    (x, y) -> { printf("other %lld %lld\n", x, y); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_mixed", "fit matches a tuple pattern mixing a literal position with a binding position");
+  assert equals(out, "zero 7\n"), "expected the literal-0 branch to match, binding y to 7";
+}
+
+test "fit falls through to a later tuple-pattern branch when an earlier literal position doesn't match" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, num) t = (3, 7);
+  `  fit t {
+  `    (0, y) -> { printf("zero %lld\n", y); },
+  `    (x, y) -> { printf("other %lld %lld\n", x, y); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_fallthrough", "fit falls through past a non-matching literal position to a later branch");
+  assert equals(out, "other 3 7\n"), "expected the second, all-binding branch to match since the first branch's literal position (0) didn't match 3";
+}
+
+test "fit tuple pattern's wildcard position matches anything without binding a name" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) t = (1, "ok");
+  `  fit t {
+  `    (1, _) -> { printf("matched\n"); },
+  `    (x, s) -> { printf("other %lld %s\n", x, s); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_wildcard", "fit tuple pattern's wildcard position matches without binding a name");
+  assert equals(out, "matched\n"), "expected the wildcard position to match position 1 without attempting to bind '_'";
+}
+
+test "fit tuple pattern with two literal positions requires both to match" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, num) t = (1, 2);
+  `  fit t {
+  `    (1, 3) -> { printf("wrong\n"); },
+  `    (1, 2) -> { printf("right\n"); },
+  `    (x, y) -> { printf("fallback\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_two_literals", "fit tuple pattern with two literal positions requires both to match");
+  assert equals(out, "right\n"), "expected only the branch matching both literal positions to fire";
+}
+
+test "fit tuple pattern matches a string literal position via strcmp" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (str, num) t = ("go", 5);
+  `  fit t {
+  `    ("go", n) -> { printf("go %lld\n", n); },
+  `    (s, n) -> { printf("other %s %lld\n", s, n); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_string_literal", "fit tuple pattern matches a string literal position via strcmp");
+  assert equals(out, "go 5\n"), "expected the string-literal position to match via strcmp, not pointer identity";
+}
+
+test "fit tuple pattern binds a name that resolves a later field access on it" {
+  str src = `use std.c.io;
+  `compound Point { num x; num y; }
+  `fun main() num {
+  `  (num, Point) t = (1, Point{x = 3, y = 4});
+  `  fit t {
+  `    (1, p) -> { printf("%lld %lld\n", p.x, p.y); },
+  `    (n, p) -> { printf("no\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "fit_tuple_pattern_binding_field_access", "fit tuple pattern's bound name resolves a later field access");
+  assert equals(out, "3 4\n"), "expected 'p' to be known as a Point local, resolving p.x/p.y";
+}
+
+test "a fit tuple pattern compiles under MSVC's strict, non-GNU C" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  (num, str) t = (1, "seven");
+  `  fit t {
+  `    (1, s) -> { printf("%lld %s\n", 1, s); },
+  `    (n, s) -> { printf("no\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(src, "fit_tuple_pattern_msvc_shape", "a fit tuple pattern under MSVC emits no '__auto_type'");
+  assert !contains(out_c, "__auto_type"), "expected a real resolved C type, not GNU's '__auto_type', under msvc_mode";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fit_tuple_pattern_msvc_strict",
+    "a fit tuple pattern compiles and runs under a real strict (non-GNU) compile"
+  );
+  assert starts_with(out_msvc, "1 seven"), format(
+    "expected the tuple-pattern binding to actually run correctly under the strict MSVC-shaped compile, got {str}",
+    out_msvc
+  );
+}

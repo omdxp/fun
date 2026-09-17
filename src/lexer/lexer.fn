@@ -778,6 +778,28 @@ impl Lexer {
     }
   }
 
+  // True when the most recently emitted token already completes a value
+  // (an identifier, a number/decimal/character literal, a string, a
+  // boolean, or a closing `)`/`]`) - the only context in which an
+  // immediately-following `.digit` is tuple positional access (`t.0`)
+  // rather than a leading-dot float literal (`.5`).
+  _prev_token_ends_operand() flag {
+    let last = self.tokens.last();
+    fit last {
+      .Some(t) -> {
+        fit t.type {
+          .Identifier -> { ret true; }
+          .Number -> { ret true; }
+          .String -> { ret true; }
+          .Boolean -> { ret true; }
+          .Symbol -> { ret token_is_symbol(t, ')') || token_is_symbol(t, ']'); }
+          _ -> { ret false; }
+        }
+      }
+      .None -> { ret false; }
+    }
+  }
+
   // Removes the just-checked bare-zero token from `self.tokens` before
   // replacing it with the real hex/binary literal (see the hex/binary
   // dispatch in `_next_inner`).
@@ -884,8 +906,11 @@ impl Lexer {
     }
 
     // Leading-dot float literal (`.5`): a '.' immediately followed by a
-    // digit starts a number, not a member-access/range operator.
-    if c == '.' && is_digit(self._peek2()) {
+    // digit starts a number, not a member-access operator - unless the
+    // previous token already completes a value (`t.0`, a tuple's
+    // positional access), in which case the '.' is an ordinary operator
+    // and the digit run that follows is its own plain Number token.
+    if c == '.' && is_digit(self._peek2()) && !self._prev_token_ends_operand() {
       let r = self._read_number();
       if r.is_err() {
         ret err_kind(.Parse, "invalid number literal", .None);

@@ -181,7 +181,11 @@ pub fun print_node(Node* node, num depth) {
           if it.has_index_name {
             _line(depth + 1, format("Index: {str}", it.index_name));
           }
-          _line(depth + 1, format("Item: {str}", it.item_name));
+          if it.item_is_destructure {
+            _line(depth + 1, format("Item (destructured): ({str})", join(&it.item_destructure_names, ", ")));
+          } else {
+            _line(depth + 1, format("Item: {str}", it.item_name));
+          }
           _line(depth + 1, "Iterable:");
           print_node(it.iterable, depth + 2);
           _line(depth + 1, "Body:");
@@ -278,6 +282,14 @@ pub fun print_node(Node* node, num depth) {
           print_node(field.value, depth + 3);
           fi = fi + 1;
         }
+      }
+    }
+    .TupleLiteral(tl) -> {
+      _line(depth + 1, format("Elements ({num}):", tl.elements.len));
+      num tli = 0;
+      for tli < tl.elements.len {
+        print_node(tl.elements.get(tli), depth + 2);
+        tli = tli + 1;
       }
     }
     .Import(i) -> {

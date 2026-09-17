@@ -1387,6 +1387,40 @@ test "a for loop's own two-variable form types a Map's key/value pair, not an al
   );
 }
 
+test "a for loop's own destructuring form binds each name to its own tuple element type" {
+  accepts(
+    `compound Vec<T> {
+    `  T v;
+    `}
+    `fun main() num {
+    `  Vec<(num, str)> pairs;
+    `  for (k, v) : pairs {
+    `    num n = k;
+    `    str s = v;
+    `  }
+    `  ret 0;
+    `}`,
+    "expected each destructured name to type as its own tuple element"
+  );
+}
+
+test "a for loop's own destructuring form rejects an arity mismatch against the iterable's element" {
+  rejects(
+    `compound Vec<T> {
+    `  T v;
+    `}
+    `fun main() {
+    `  Vec<(num, str)> pairs;
+    `  for (a, b, c) : pairs {
+    `    _ = a;
+    `    _ = b;
+    `    _ = c;
+    `  }
+    `}`,
+    "expected a three-name pattern not to fit a two-element tuple"
+  );
+}
+
 test "a name declared twice at top level is rejected, even across different kinds" {
   // Fun's transitive, non-scoped import model merges every declaration
   // into one flat program before codegen, so two top-level names that
@@ -1634,4 +1668,253 @@ test "a duplicate top-level name reports across different kinds too, not just ma
     `fun main() {}`
   );
   assert contains(msg, "'Shared' is already declared as a compound"), "expected the diagnostic to name the earlier declaration's own kind";
+}
+
+test "a tuple literal fits a matching tuple-typed declaration" {
+  accepts(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `}`,
+    "expected a two-member tuple literal to fit a matching declared tuple type"
+  );
+}
+
+test "a tuple literal with the wrong arity is rejected" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, 2, 3);
+    `}`,
+    "expected a three-element literal not to fit a two-member declared tuple type"
+  );
+}
+
+test "a tuple literal with a mismatched element type is rejected" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = ("hi", 1);
+    `}`,
+    "expected swapped element types not to fit the declared tuple type"
+  );
+}
+
+test "positional access on a tuple reads that element's own type" {
+  accepts(
+    `fun main() num {
+    `  (num, str) t = (1, "hi");
+    `  ret t.0;
+    `}`,
+    "expected 't.0' to read as num"
+  );
+}
+
+test "positional access out of a tuple's range is rejected" {
+  rejects(
+    `fun main() num {
+    `  (num, str) t = (1, "hi");
+    `  ret t.5;
+    `}`,
+    "expected an out-of-range tuple index to be a real error"
+  );
+}
+
+test "let destructuring binds each name to its own element type" {
+  accepts(
+    `fun main() num {
+    `  let (a, b) = (1, "hi");
+    `  num x = a;
+    `  _ = b;
+    `  ret x;
+    `}`,
+    "expected the first destructured name to type as num"
+  );
+  rejects(
+    `fun main() {
+    `  let (a, b) = (1, "hi");
+    `  num x = b;
+    `  _ = a;
+    `  _ = x;
+    `}`,
+    "expected the second destructured name to type as str, not fit a num"
+  );
+}
+
+test "let destructuring rejects an arity mismatch against the initializer" {
+  rejects(
+    `fun main() {
+    `  let (a, b) = (1, 2, 3);
+    `  _ = a;
+    `  _ = b;
+    `}`,
+    "expected a two-name pattern not to fit a three-member tuple initializer"
+  );
+}
+
+test "a function returning a tuple type destructures cleanly at the call site" {
+  accepts(
+    `fun pair() (num, str) {
+    `  ret (1, "hi");
+    `}
+    `fun main() num {
+    `  let (a, b) = pair();
+    `  _ = b;
+    `  ret a;
+    `}`,
+    "expected a tuple-returning function's result to destructure like any other tuple"
+  );
+}
+
+test "a tuple works as an ordinary generic argument" {
+  accepts(
+    `compound Box<T> { T v; }
+    `fun main() num {
+    `  Box<(num, str)> b = Box<(num, str)>{v = (1, "hi")};
+    `  ret b.v.0;
+    `}`,
+    "expected a tuple to plug into an existing generic compound like any other type"
+  );
+}
+
+test "a generic alias bound to a tuple works as an ordinary type parameter" {
+  // The motivating case for real tuples: `Args` is just an ordinary
+  // alias whose body happens to be a tuple, and `Callback<Args, str>`
+  // treats it as a completely ordinary generic type argument - no
+  // special-casing needed anywhere once tuples themselves exist.
+  accepts(
+    `als Args = (num, str);
+    `als Callback<A, R> = fun(A) R;
+    `fun describe(Args a) str { ret a.1; }
+    `fun apply(Callback<Args, str> cb, Args a) str { ret cb(a); }
+    `fun main() str {
+    `  ret apply(describe, (1, "hi"));
+    `}`,
+    "expected a tuple-bodied generic alias to expand and typecheck like any other alias"
+  );
+}
+
+test "a declared-type destructuring pattern binds each name to its own declared element type" {
+  accepts(
+    `fun main() num {
+    `  (dec, str) (a, b) = (1, "hi");
+    `  dec x = a;
+    `  _ = b;
+    `  ret 0;
+    `}`,
+    "expected the first name to type as the declared dec, widened from the num literal"
+  );
+  rejects(
+    `fun main() {
+    `  (dec, str) (a, b) = (1, "hi");
+    `  num x = a;
+    `  _ = b;
+    `  _ = x;
+    `}`,
+    "expected the declared dec type to be enforced, not narrow back into a num"
+  );
+}
+
+test "a declared-type destructuring pattern rejects an arity mismatch against its own declared type" {
+  rejects(
+    `fun main() {
+    `  (num, str) (a, b) = (1, 2, 3);
+    `  _ = a;
+    `  _ = b;
+    `}`,
+    "expected a two-member declared tuple type not to fit a three-element initializer"
+  );
+}
+
+test "a declared-type destructuring pattern rejects an element type mismatch against its own declared type" {
+  rejects(
+    `fun main() {
+    `  (num, str) (a, b) = ("hi", 1);
+    `  _ = a;
+    `  _ = b;
+    `}`,
+    "expected swapped element types not to fit the declared tuple type"
+  );
+}
+
+test "a chained positional access on a tuple-of-tuples reads the inner element's own type" {
+  accepts(
+    `fun main() num {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  ret t.0.0;
+    `}`,
+    "expected 't.0.0' to read as num, the inner tuple's own first element"
+  );
+  rejects(
+    `fun main() {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  str s = t.0.0;
+    `}`,
+    "expected the inner tuple's own num element not to fit a str"
+  );
+}
+
+test "a chained positional access out of the inner tuple's own range is rejected" {
+  rejects(
+    `fun main() num {
+    `  ((num, str), flag) t = ((1, "hi"), true);
+    `  ret t.0.5;
+    `}`,
+    "expected an out-of-range chained index to be a real error"
+  );
+}
+
+test "a fit tuple pattern binds each name to its own element type" {
+  accepts(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (0, s) -> { str s2 = s; _ = s2; },
+    `    (n, s) -> { str s3 = s; _ = s3; }
+    `  }
+    `}`,
+    "expected each binding position's own name to resolve as its element type (str), fitting a str variable"
+  );
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (n, s) -> { num bad = s; _ = bad; }
+    `  }
+    `}`,
+    "expected a binding position's own element type (str) not to fit a declared num"
+  );
+}
+
+test "a fit tuple pattern rejects a literal position whose type doesn't fit the subject's own element type" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    ("no", s) -> { _ = s; }
+    `  }
+    `}`,
+    "expected a str literal not to fit the subject's own first element type (num)"
+  );
+}
+
+test "a fit tuple pattern rejects an arity mismatch against the subject's own element count" {
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "hi");
+    `  fit t {
+    `    (0, s, extra) -> { _ = s; }
+    `  }
+    `}`,
+    "expected a three-position pattern not to fit a two-element tuple subject"
+  );
+}
+
+test "a fit tuple pattern rejects matching against a non-tuple subject" {
+  rejects(
+    `fun main() {
+    `  num n = 1;
+    `  fit n {
+    `    (0, y) -> { _ = y; }
+    `  }
+    `}`,
+    "expected a tuple pattern not to be usable against a plain num subject"
+  );
 }

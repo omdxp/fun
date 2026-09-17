@@ -1105,6 +1105,21 @@ test "hover on a type alias declaration shows its own resolved body" {
   assert contains(hovered, "als Callback<A, R> = fun(A) R"), "expected the alias's own declared form";
 }
 
+test "hover on a tuple-typed function param and return type renders the real member types" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tuplehover.fn";
+  doc.path = "tuplehover.fn";
+  doc.text = `fun swap(num a, str b) (str, num) {
+  `  ret (b, a);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 4);
+  assert contains(hovered, "(str, num)"), "expected the tuple return type rendered with real member types, not a placeholder";
+}
+
 test "hover on a bound-list type alias shows its own alternatives" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -1204,6 +1219,26 @@ test "go-to-definition on a type alias reference jumps to its own declaration" {
   // 'Meters' is used as a type on line 2 (0-indexed), declared on line 0.
   str jumped = definition(&reads, doc, 2, 4);
   assert contains(jumped, `"line":0`), "expected the alias's own declaration line";
+}
+
+test "go-to-definition inside a tuple type's own parenthesized slot resolves the member type, no crash" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupletypedef.fn";
+  doc.path = "tupletypedef.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `fun main() {
+  `  (num, Point) t;
+  `}`;
+  doc.version = 1;
+
+  // A tuple type has no single identifier of its own to jump from - only
+  // each member type does. 'Point' sits inside the parens on line 4.
+  str jumped = definition(&reads, doc, 4, 8);
+  assert contains(jumped, `"line":0`), "expected the tuple's own Point member to resolve to its real declaration";
 }
 
 test "completion offers a declared type alias name alongside compound/enum/quirk" {
@@ -2999,6 +3034,57 @@ test "go-to-definition on a parameter resolves to the parameter, not an unrelate
   assert contains(def, `"line":3`), "expected a jump to the parameter's own declaration line, not the field's";
 }
 
+test "hover resolves a let bound to calling through a plain function-typed parameter" {
+  // `chain_ending_receiver`'s own call-at-base-of-chain branch only
+  // ever looked a callee up as a real top-level function
+  // (`lookup_top_level`); a parameter typed `fun(num, num) num` called
+  // directly (`cb(1, 3)`) isn't one, so it fell straight through to an
+  // empty result - `res` showed no type at all, on hover or as an
+  // inlay hint.
+  str src = `fun run(fun(num, num) num cb) {
+  `  let res = cb(1, 3);
+  `  print(res);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fnparamcall.fn";
+  doc.path = "fnparamcall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 7);
+  assert contains(hovered, "num res"), format("expected 'res' to resolve to the function-typed parameter's own declared return type, got: {str}", hovered);
+  str hints = inlay_hints(&reads, doc, 0, 5);
+  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+}
+
+test "hover resolves a let bound to calling through an alias-bound function-typed parameter" {
+  // Same root cause as the plain case above, plus one more hop: a
+  // parameter typed through a bound alias (`als Callback = fun(num,
+  // num) num;`, `Callback cb`) reads back as the bare name "Callback"
+  // from fls's own lightweight per-document analysis, which never runs
+  // the real compiler's `expand_type_aliases` pass - resolved one
+  // extra step through the alias's own declared body.
+  str src = `als Callback = fun(num, num) num;
+  `fun run(Callback cb) {
+  `  let res = cb(1, 3);
+  `  print(res);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliasparamcall.fn";
+  doc.path = "aliasparamcall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 7);
+  assert contains(hovered, "num res"), format("expected 'res' to resolve through the alias to its own real return type, got: {str}", hovered);
+  str hints = inlay_hints(&reads, doc, 0, 5);
+  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+}
+
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
   str src = `imp std.option;
   `fun main() num {
@@ -4034,6 +4120,127 @@ test "inlay hints infer a let local's own type from a literal, a plain call, and
 
   // Nothing inside the given line range.
   assert equals(inlay_hints(&reads, doc, 0, 0), "[]"), "expected no hints outside the requested range";
+}
+
+test "hover on a tuple's own positional access shows the real element type, not a bare number literal" {
+  // A bare digit right after '.' on a value (`t.0`) used to fall
+  // straight into the ordinary `.Number` literal-doc branch, showing
+  // "the number zero" instead of ever recognizing this as positional
+  // tuple access at all - a real, previously-undiscovered gap.
+  str src = `fun main() num {
+  `  (num, str) t = (1, "hi");
+  `  ret t.0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///t0hover.fn";
+  doc.path = "t0hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 8);
+  assert contains(hovered, "num"), format("expected 't.0' to hover as its own real element type 'num', got: {str}", hovered);
+  assert contains(hovered, "Positional element 0"), format("expected the hover to say which positional element this is, got: {str}", hovered);
+  assert !contains(hovered, "decimal:"), format("expected this to no longer fall through to the plain-integer-literal doc, got: {str}", hovered);
+}
+
+test "hover on a chained positional access resolves the inner element's own real type" {
+  // Before this, a Dec-lexed chained-access token ('0.0') fell straight
+  // into the ordinary decimal-literal doc branch, showing "A 64-bit
+  // floating-point literal" for what is really a nested tuple index -
+  // actively misleading, not just imprecise. Resolved the same way
+  // parser.fn's own `_split_chained_tuple_index` resolves the AST split:
+  // from the token's own raw source text, not the parsed float value.
+  str src = `fun main() num {
+  `  ((num, str), flag) t = ((1, "hi"), true);
+  `  ret t.0.0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chainhover.fn";
+  doc.path = "chainhover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 9);
+  assert contains(hovered, "num"), format("expected 't.0.0' to hover as its own real inner element type 'num', got: {str}", hovered);
+  assert !contains(hovered, "floating-point literal"), format("expected this to no longer fall through to the plain-decimal-literal doc, got: {str}", hovered);
+}
+
+test "hover on a THREE-level chained positional access resolves the final element's own real type" {
+  // The original chained-access hover only ever unwound exactly two
+  // hops (a single Dec-lexed token's own whole/frac split): a third
+  // level (`t.0.0.1`, itself lexed as Dec("0.0") then a separate
+  // Num(1)) fell through to the plain-decimal-literal doc for the
+  // trailing '1', the same bug the two-level case above already fixed
+  // once, just one hop deeper - `_preceded_by_dot` also had to learn a
+  // Number segment (not just an identifier/`)`/`]`/`?`/`!`) counts as
+  // a valid receiver, or the deepest hop's own dot never even reached
+  // the chain-resolution path.
+  str src = `fun main() str {
+  `  (((num, str), flag), chr) t = (((1, "hi"), true), 'z');
+  `  ret t.0.0.1;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///triplechainhover.fn";
+  doc.path = "triplechainhover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered_mid = hover(&reads, doc, 2, 9);
+  assert contains(hovered_mid, "(num, str)"), format("expected 't.0.0' (the middle hop) to hover as its own real element type '(num, str)', got: {str}", hovered_mid);
+  str hovered_final = hover(&reads, doc, 2, 12);
+  assert contains(hovered_final, "str"), format("expected 't.0.0.1' (the final hop) to hover as its own real element type 'str', got: {str}", hovered_final);
+  assert !contains(hovered_final, "decimal literal"), format("expected this to no longer fall through to the plain-number-literal doc, got: {str}", hovered_final);
+}
+
+test "inlay hints cover a destructuring let, one hint per name at its own position" {
+  // Before this, `let (a, b) = ...;` matched no hint at all: the scan
+  // only ever checked the single token right after `let`, expecting an
+  // Identifier, and a destructuring pattern has '(' there instead.
+  str src = `fun main() num {
+  `  let (a, b) = (1, "hi");
+  `  ret a;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///destrhints.fn";
+  doc.path = "destrhints.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"label":": num"`), "expected a hint for 'a', typed from its own literal element";
+  assert contains(hints, `"label":": str"`), "expected a hint for 'b', typed from its own literal element";
+  // 'a' sits at column 7, 'b' at column 10, in "  let (a, b) = ..." - the
+  // hint itself lands right after each name (its own end_col), matching
+  // how an ordinary let-inferred hint is positioned.
+  assert contains(hints, `"line":1,"character":8`), "expected 'a's own hint positioned right after it, not after 'let' or the pattern's own '('";
+  assert contains(hints, `"line":1,"character":11`), "expected 'b's own hint positioned right after it too";
+}
+
+test "inlay hints show nothing for a declared-type destructuring pattern, the type is already written" {
+  // Unlike the inferred form above, `(num, str) (a, b) = expr;` already
+  // spells its own type out in source - an inlay hint would be pure
+  // noise, the same reason an ordinary `num x = 1;` gets no hint either.
+  str src = `fun main() num {
+  `  (num, str) (a, b) = (1, "hi");
+  `  ret a;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///decldestrhints.fn";
+  doc.path = "decldestrhints.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert equals(inlay_hints(&reads, doc, 0, 10), "[]"), "expected no hints for an already-declared tuple type";
 }
 
 test "inlay hints cover a char literal, a field read, an impl method's own local, and a bare copy" {
@@ -5820,6 +6027,49 @@ test "hover on a generic compound shows a generic-instantiation bound alongside 
   assert contains(hovered, "T: num | Slot<num>"), "expected the generic-instantiation bound to render in full, not just its base name";
 }
 
+test "completion after '.' on a tuple-typed receiver offers each positional element" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupledotcompletion.fn";
+  doc.path = "tupledotcompletion.fn";
+  doc.text = `fun main() {
+  `  (num, str) t = (5, "hi");
+  `  t.zzz;
+  `}`;
+  doc.version = 1;
+
+  // Right after the '.' on line 2 - keeping a real (if nonsense)
+  // trailing identifier after it is what keeps this document fully
+  // parseable, the same way every other dot-completion test here does;
+  // the cursor position alone is what drives completion, not the text.
+  str out = completion(&reads, doc, 2, 4, false);
+  assert contains(out, `"label":"0"`), "expected the first positional element offered";
+  assert contains(out, `"label":"1"`), "expected the second positional element offered";
+  assert contains(out, `"detail":"num"`), "expected element 0's own type as detail";
+  assert contains(out, `"detail":"str"`), "expected element 1's own type as detail";
+}
+
+test "completion inside a tuple type's own parenthesized slot offers ordinary types" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tupletypecompletion.fn";
+  doc.path = "tupletypecompletion.fn";
+  doc.text = `fun helper() num {
+  `  ret 1;
+  `}
+  `fun main() {
+  `  (num, nu) t;
+  `}`;
+  doc.version = 1;
+
+  // Cursor right after the partial "nu" inside the second slot, on line
+  // 4: `  (num, nu) t;`.
+  str out = completion(&reads, doc, 4, 11, false);
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside a tuple type's own slot";
+}
+
 test "completion inside a type-param bound offers a quirk and a builtin type, never a function" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -6052,6 +6302,227 @@ test "hover resolves a field access chained onto a propagation whose unwrapped t
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' even when Point is behind a pointer";
 }
 
+test "hover on a declared-type destructuring binding name shows its own real element type" {
+  // A declared-type destructuring pattern's own AST carries a REAL tuple
+  // `DataType` directly (`_parse_destructure_body`'s `has_declared_type`
+  // branch) - `_destructure_binding_detail` reads each element straight
+  // off `var_type.tuple_members`, no re-inference needed. Checked at
+  // both the binding site itself and a later reference to it - before
+  // `_lookup_in_body` learned about `is_destructure` at all, NEITHER
+  // ever resolved (a destructuring `VariableNode`'s own `v.name` is
+  // always "", so the ordinary `equals(v.name, name)` check could never
+  // match a destructured name), a real, previously-undiscovered gap
+  // this fixes for the binding site and every later reference alike.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///decldestrhover.fn";
+  doc.path = "decldestrhover.fn";
+  doc.text = `fun main() {
+  `  (dec, str) (a, b) = (1, "hi");
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 1, 14);
+  assert contains(hovered_a, "dec"), format("expected the first destructured name's own hover to show its real declared element type 'dec', got: {str}", hovered_a);
+  str hovered_b = hover(&reads, doc, 1, 17);
+  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its real declared element type 'str', got: {str}", hovered_b);
+  str hovered_ref = hover(&reads, doc, 2, 8);
+  assert contains(hovered_ref, "dec"), format("expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}", hovered_ref);
+}
+
+test "hover on a for-loop destructuring binding name shows its own real element type" {
+  // `_lookup_in_body`'s `.StatementFor`/`.Iter` case had the same gap
+  // `.Variable` did before this whole fix: it only ever checked a
+  // single `fi.item_name`, which stays "" for a destructuring loop
+  // variable, so `for (k, v) : pairs { ... }` never resolved `k`/`v`
+  // through hover at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fordestrhover.fn";
+  doc.path = "fordestrhover.fn";
+  doc.text = `fun main() {
+  `  Vec<(num, str)> pairs;
+  `  for (k, v) : pairs {
+  `    print(k);
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hovered_k = hover(&reads, doc, 2, 7);
+  assert contains(hovered_k, "num"), format("expected 'k's own hover to show its real tuple element type 'num', got: {str}", hovered_k);
+  str hovered_v = hover(&reads, doc, 2, 10);
+  assert contains(hovered_v, "str"), format("expected 'v's own hover to show its real tuple element type 'str', got: {str}", hovered_v);
+  str hovered_k_ref = hover(&reads, doc, 3, 10);
+  assert contains(hovered_k_ref, "num"), format("expected a later reference to 'k' to resolve too, not just its own binding site, got: {str}", hovered_k_ref);
+}
+
+test "inlay hints offer a for-loop destructuring binding as a known local for completion" {
+  str src = `fun main() {
+  `  Vec<(num, str)> pairs;
+  `  for (k, v) : pairs {
+  `
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fordestrcompletion.fn";
+  doc.path = "fordestrcompletion.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 3, 4, false);
+  assert contains(items, `"label":"k"`), "expected the first destructured for-loop name offered as a completion, not skipped as a blank item_name";
+  assert contains(items, `"label":"v"`), "expected the second destructured for-loop name offered too";
+}
+
+test "hover on a plain let bound to a tuple-returning call shows its own real tuple type" {
+  // `_return_type_text`/`return_type_from_detail`/`full_return_type_from_detail`
+  // all found a function's own return type by scanning for the LAST
+  // `)` in its rendered signature - correct for an ordinary scalar/
+  // pointer/generic return, but a TUPLE return type carries its own
+  // `)` further along the same string ("fun pair() (num, str)"), so
+  // the last `)` in the whole signature landed inside the tuple's own
+  // parens rather than past them, reading the return type as empty.
+  // `let p = pair();` (no destructuring at all) showed only the bare
+  // name "p" on hover, with no type, both at the declaration and at
+  // every later reference.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///lettuplecallhover.fn";
+  doc.path = "lettuplecallhover.fn";
+  doc.text = `fun pair() (num, str) {
+  `  ret (1, "hi");
+  `}
+  `fun main() {
+  `  let p = pair();
+  `  print(p);
+  `}`;
+  doc.version = 1;
+
+  str hovered_decl = hover(&reads, doc, 4, 6);
+  assert contains(hovered_decl, "(num, str) p"), format("expected 'p's own declaration to show its real tuple return type, got: {str}", hovered_decl);
+  str hovered_ref = hover(&reads, doc, 5, 8);
+  assert contains(hovered_ref, "(num, str) p"), format("expected a later reference to 'p' to resolve the same way, got: {str}", hovered_ref);
+}
+
+test "signature help on a call passing a tuple-typed argument shows the real parameter type" {
+  // Same root cause as the plain-let hover case above: the tuple-typed
+  // parameter's own text ("(num, str) t") sits after the FUNCTION's
+  // own param-list closing paren, itself found the same
+  // last-`)`-in-the-string way, so it too read as empty before the fix.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelptuple.fn";
+  doc.path = "sighelptuple.fn";
+  doc.text = `fun describe(num n, (num, str) t) str {
+  `  ret "";
+  `}
+  `fun main() {
+  `  describe(1, (2, "x"));
+  `}`;
+  doc.version = 1;
+
+  str help = signature_help(&reads, doc, 4, 13);
+  assert contains(help, `"label":"(num, str) t"`), format("expected the tuple-typed second parameter to render its own real type, got: {str}", help);
+  assert contains(help, `"activeParameter":1`), format("expected the cursor's own position (right after the first argument's comma) to mark parameter 1 active, got: {str}", help);
+}
+
+test "dot-completion offers positional indices for a tuple-typed local, still mid-typing (unparsed document)" {
+  // `_members_from_tokens` (the token-only completion path a half-
+  // written `t.` always hits, since it makes the whole document fail
+  // to parse) only ever matched a NAMED compound/enum/quirk/impl by
+  // its own declared name - a tuple type has none, so `t.` on a tuple
+  // local offered nothing from it and fell all the way through to an
+  // unfiltered dump of every keyword and C builtin. Fixed by reading
+  // the receiver's own raw tuple-type text directly off its
+  // declaration site's source span (`_tuple_receiver_type_text`) and
+  // routing it through the same `_tuple_element_completions` the
+  // fully-parsed path already had.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dottupleunparsed.fn";
+  doc.path = "dottupleunparsed.fn";
+  doc.text = `fun main() {
+  `  (num, str) t = (1, "x");
+  `  t.
+  `}`;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 2, 4, false);
+  assert contains(items, `"label":"0"`), format("expected positional index '0' offered for the tuple local, got: {str}", items);
+  assert contains(items, `"label":"1"`), format("expected positional index '1' offered too, got: {str}", items);
+  assert !contains(items, `"label":"imp"`), format("expected the tuple match to replace the unfiltered keyword dump, not add to it, got: {str}", items);
+}
+
+test "dot-completion offers positional indices for a tuple-typed compound field, still mid-typing (unparsed document)" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dottuplefieldunparsed.fn";
+  doc.path = "dottuplefieldunparsed.fn";
+  doc.text = `compound Box { (num, str) pair; }
+  `fun main() {
+  `  Box b;
+  `  b.pair.
+  `}`;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 3, 9, false);
+  assert contains(items, `"label":"0"`), format("expected positional index '0' offered for the tuple-typed field, got: {str}", items);
+  assert contains(items, `"label":"1"`), format("expected positional index '1' offered too, got: {str}", items);
+}
+
+test "hover on an inferred-form destructuring binding name shows a best-effort literal type" {
+  // The inferred form (`let (a, b) = expr;`) has no declared tuple type
+  // to read element types off of - when the initializer is itself a
+  // bare tuple literal, each element's own type is still typeable
+  // directly from its own literal shape (`_literal_elem_type_text`),
+  // real precision for the common case even without a full typecheck.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inferreddestrhover.fn";
+  doc.path = "inferreddestrhover.fn";
+  doc.text = `fun main() {
+  `  let (a, b) = (1, "hi");
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 1, 7);
+  assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to show its best-effort literal type 'num', got: {str}", hovered_a);
+  str hovered_b = hover(&reads, doc, 1, 10);
+  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its best-effort literal type 'str', got: {str}", hovered_b);
+}
+
+test "hover on an inferred-form destructuring binding from a call still resolves the name, untyped" {
+  // A call-returned tuple has no literal shape to read element types
+  // from, and no declared type either - this still resolves the name
+  // itself (go-to-definition, "what is this") rather than nothing at
+  // all, just without a type annotation.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inferredcalldestrhover.fn";
+  doc.path = "inferredcalldestrhover.fn";
+  doc.text = `fun pair() (num, str) { ret (1, "hi"); }
+  `fun main() {
+  `  let (a, b) = pair();
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 2, 7);
+  assert contains(hovered_a, "a"), format("expected the destructured name to resolve even without a real element type, got: {str}", hovered_a);
+}
+
 test "hover on a fit destructuring binding resolves through a propagated field-access subject" {
   // Regression: `_expr_type_name` (what `fit_subject_type` delegates
   // to for a `base.field` subject) had no case at all for `base` being
@@ -6228,6 +6699,54 @@ test "hover on 'use'/'flag' matches hover on 'imp'/'bin' exactly, real fls parit
   num flag_value_end = index_of_str(flag_hover, `},"range"`);
   assert bin_value_end > 0 && flag_value_end > 0, "expected both hovers to carry a range";
   assert equals(substr(bin_hover, 0, bin_value_end), substr(flag_hover, 0, flag_value_end)), "expected 'flag' hover content to match 'bin', same canonicalized keyword";
+}
+
+test "hover on a fit tuple pattern's binding position shows its own element type" {
+  // `_lookup_fit_binding`'s `br.bindings` index doesn't line up with the
+  // tuple's own element position for a mixed literal/binding pattern
+  // (bindings skip literal and wildcard positions), so resolving a
+  // binding's own type needs `_fit_tuple_binding_position` to map the
+  // binding back onto its real subject position first.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fittuplehover.fn";
+  doc.path = "fittuplehover.fn";
+  doc.text = `fun main() {
+  `  (num, str) t = (1, "hi");
+  `  fit t {
+  `    (0, s) -> {
+  `      print(s);
+  `    }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hovered_decl = hover(&reads, doc, 3, 8);
+  assert contains(hovered_decl, "str"), format("expected the binding 's' at its own tuple pattern position to show its real element type 'str', got: {str}", hovered_decl);
+  str hovered_ref = hover(&reads, doc, 4, 12);
+  assert contains(hovered_ref, "str"), format("expected a later reference to 's' to resolve too, not just its own binding site, got: {str}", hovered_ref);
+}
+
+test "completion offers a fit tuple pattern's binding names as known locals" {
+  str src = `fun main() {
+  `  (num, str) t = (1, "hi");
+  `  fit t {
+  `    (0, s) -> {
+  `
+  `    }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fittuplecompletion.fn";
+  doc.path = "fittuplecompletion.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str items = completion(&reads, doc, 4, 0, false);
+  assert contains(items, `"label":"s"`), "expected the tuple pattern's own binding name 's' offered as a known local";
 }
 
 test "completion offers both 'imp'/'use' and 'bin'/'flag' as keyword suggestions" {
