@@ -1858,7 +1858,8 @@ impl Codegen {
         variant_templates,
         type_params,
         arg_type_names,
-        arg_is_pointer
+        arg_is_pointer,
+        arg_dtypes
       );
     } else {
       self.state.write("typedef enum ");
@@ -3742,7 +3743,8 @@ impl Codegen {
     Vec<GenericEnumVariantTemplate> variant_templates,
     Vec<str> type_params,
     Vec<str> arg_type_names,
-    Vec<flag> arg_is_pointer
+    Vec<flag> arg_is_pointer,
+    Vec<DataType*> arg_dtypes
   ) {
     self.state.write("typedef enum ");
     self.state.write(mangled_name);
@@ -3771,23 +3773,40 @@ impl Codegen {
         resolved_payload_names.init(0);
         Vec<flag> resolved_payload_ptrs;
         resolved_payload_ptrs.init(0);
+        Vec<DataType> resolved_payload_dtypes;
+        resolved_payload_dtypes.init(0);
         for i < vt.payload_type_strs.len {
           str ptype = vt.payload_type_strs.get(i);
           flag pptr = vt.payload_is_pointer.get(i);
           str resolved_type = ptype;
           flag resolved_ptr = pptr;
+          // A payload's own real, substituted `DataType` (not just its
+          // flattened name) is needed too: a later `.0`/`.1` positional
+          // access on a tuple-typed payload (`Some((K, V))` substituted to
+          // `Some((num, flag))`) needs `is_tuple`/`tuple_members` on hand,
+          // which a bare mangled name string can never carry.
+          DataType resolved_dtype = dtype_new();
+          resolved_dtype.type_str = resolved_type;
+          if resolved_ptr {
+            resolved_dtype.pointer_depth = 1;
+          }
           // A payload written as the enum's own name (`List<T>*` inside
           // `List`'s own variant) refers to this instantiation itself,
           // not to a type parameter: nothing in `type_params` would ever
           // match it, since it names the enum, not a param.
           if equals(ptype, template_name) {
             resolved_type = mangled_name;
+            resolved_dtype = dtype_new();
+            resolved_dtype.type_str = mangled_name;
           } else {
             num pi = 0;
             for pi < type_params.len {
               if equals(type_params.get(pi), ptype) {
                 resolved_type = arg_type_names.get(pi);
                 resolved_ptr = arg_is_pointer.get(pi);
+                if pi < arg_dtypes.len {
+                  resolved_dtype = *arg_dtypes.get(pi);
+                }
               }
               pi = pi + 1;
             }
@@ -3801,16 +3820,18 @@ impl Codegen {
           self.state.write("; ");
           resolved_payload_names.push(resolved_type);
           resolved_payload_ptrs.push(resolved_ptr);
+          resolved_payload_dtypes.push(resolved_dtype);
           i = i + 1;
         }
         self.state.write("} ");
         self.state.write(vt.name);
         self.state.write(";\n");
-        self.record_enum_variant_payload(
+        self.record_enum_variant_payload_typed(
           mangled_name,
           vt.name,
           resolved_payload_names,
-          resolved_payload_ptrs
+          resolved_payload_ptrs,
+          resolved_payload_dtypes
         );
       }
     }
@@ -7389,14 +7410,28 @@ impl Codegen {
       // A bare enum-variant shorthand nested inside another variant's
       // construction (`.Ok(.Some(t))`) resolves against this position's
       // payload type. Anything unresolvable leaves `expected_enum_type`
-      // untouched.
+      // untouched. A tuple-typed payload position (`Some((K, V))`
+      // substituted to `Some((num, flag))`) needs `expected_tuple_type`
+      // set too, or a bare tuple-literal argument here falls back to
+      // structural inference of its own member expressions instead of
+      // its real declared position, the same gap `emit_inlined_next_bind`
+      // had before it started doing this.
       let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, i);
       str prev_expected = self.expected_enum_type;
+      flag prev_has_expected_tuple_evc = self.has_expected_tuple_type;
+      DataType prev_expected_tuple_evc = self.expected_tuple_type;
       if payload_info.is_some() {
-        self.expected_enum_type = payload_info.unwrap().type_name;
+        let payload_info_v = payload_info.unwrap();
+        self.expected_enum_type = payload_info_v.type_name;
+        if payload_info_v.dtype.is_some() && payload_info_v.dtype.unwrap().is_tuple {
+          self.has_expected_tuple_type = true;
+          self.expected_tuple_type = payload_info_v.dtype.unwrap();
+        }
       }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
+      self.has_expected_tuple_type = prev_has_expected_tuple_evc;
+      self.expected_tuple_type = prev_expected_tuple_evc;
       if aerr.is_some() {
         ret aerr;
       }

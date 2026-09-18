@@ -469,6 +469,46 @@ test "a generic method returning Option<(K, V)> doesn't collide with Option's ow
   assert equals(out, "called\n"), "expected the tuple Elem to substitute correctly with no conflicting instantiation";
 }
 
+test "fit matches a tuple-Elem-typed Option right after a let binds it from a generic method call" {
+  // `emit_tagged_union_enum_instance`, which writes a concrete generic
+  // enum instantiation's own C struct, recorded each payload position's
+  // resolved type through `record_enum_variant_payload` - name and
+  // pointer-ness only, with no real `DataType`. A later `.0`/`.1`
+  // positional access on a tuple-typed payload (`Some((K, V))`
+  // substituted to `Some((num, flag))`) needs `is_tuple`/`tuple_members`
+  // on that payload's own `DataType` to resolve, which a bare mangled
+  // name string can never carry, so `fit`'s own `.Some(pair)` binding
+  // left `pair` untyped and `pair.0` failed to resolve.
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Inner<K, V> {
+  `  K key;
+  `  V val;
+  `}
+  `impl Inner<K, V> {
+  `  pub scan() Option<(K, V)> {
+  `    ret .Some((self.key, self.val));
+  `  }
+  `}
+  `fun main() num {
+  `  Inner<num, flag> inner;
+  `  inner.key = 42;
+  `  inner.val = true;
+  `  let r = inner.scan();
+  `  fit r {
+  `    .Some(pair) -> { printf("%lld\n", pair.0); }
+  `    .None -> { printf("none\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "tuple_elem_fit_after_let",
+    "fit matches a tuple-Elem Option right after a let binds it"
+  );
+  assert equals(out, "42\n"), "expected fit's own '.Some(pair)' binding to resolve pair as a real (num, flag) tuple";
+}
+
 test "a generic alias bound to a tuple works end to end, the original motivating case" {
   str src = `use std.c.io;
   `als Args = (num, str);
