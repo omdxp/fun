@@ -431,6 +431,44 @@ test "a tuple works as an ordinary generic argument end to end" {
   assert equals(out, "1 hi\n"), "expected a tuple to plug into an existing generic compound like any other type";
 }
 
+test "a generic method returning Option<(K, V)> doesn't collide with Option's own generic instantiation" {
+  // A tuple-typed generic argument (`Option<(K, V)>`'s own `(K, V)`
+  // arg) used to slip past substitution entirely - `resolve_type_subst`
+  // only knew how to match a BARE type-param reference against the
+  // active substitution context, and a tuple's own identity lives in
+  // `tuple_members`, not `type_str`/`generic_args` (its `type_str` is
+  // always ""), so the match could never fire. That silently produced
+  // TWO different, conflicting instantiations of `Option<T>`'s own
+  // generic methods resolving through the SAME unsubstituted `(K, V)`
+  // tuple struct - a hard C compile error (conflicting declarations for
+  // the same mangled function name).
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Inner<K, V> {
+  `  K key;
+  `  V val;
+  `}
+  `impl Inner<K, V> {
+  `  pub scan() Option<(K, V)> {
+  `    ret .Some((self.key, self.val));
+  `  }
+  `}
+  `fun main() num {
+  `  Inner<num, flag> inner;
+  `  inner.key = 42;
+  `  inner.val = true;
+  `  let r = inner.scan();
+  `  printf("called\n");
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "tuple_elem_generic_method",
+    "a generic method returning Option<(K, V)> substitutes correctly"
+  );
+  assert equals(out, "called\n"), "expected the tuple Elem to substitute correctly with no conflicting instantiation";
+}
+
 test "a generic alias bound to a tuple works end to end, the original motivating case" {
   str src = `use std.c.io;
   `als Args = (num, str);
