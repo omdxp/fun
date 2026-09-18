@@ -114,25 +114,14 @@ impl Set<T> {
 }
 
 impl Set<T> as Iterator<T> {
-  // Next element, or `None` once exhausted. Scans the backing map's own
-  // slots directly (the same tombstone-skipping scan `Map<K, V>`'s own
-  // `next()` has) rather than calling `self.map.next()`: a quirk method
-  // whose own body calls another quirk method on a field of another
-  // generic type currently miscompiles in this compiler's generic-impl-
-  // method emission (a real, separate bug - see
-  // project_set_next_nested_quirk_call_bug memory), so this composes
-  // through the field's own cursor and slot arrays instead of through
-  // its quirk method.
+  // Next element, or `None` once exhausted. Delegates to the backing
+  // map's own tombstone-skipping scan, discarding the value half of its
+  // `(K, V)` pair.
   pub next() Option<T> {
-    for self.map.__iter_pos < self.map.cap {
-      let at = self.map.__iter_pos;
-      self.map.__iter_pos = self.map.__iter_pos + 1;
-      if self.map.used[at] != false && self.map.tomb[at] == false {
-        ret .Some(self.map.key_slots[at]);
-      }
+    fit self.map.next() {
+      .Some(pair) -> { ret .Some(pair.0); }
+      .None -> { ret .None; }
     }
-    self.map.__iter_pos = 0;
-    ret .None;
   }
 }
 
