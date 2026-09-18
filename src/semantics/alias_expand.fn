@@ -30,6 +30,9 @@ use std.set;
 compound _ResolvedAlias {
   flag is_resolved;
   Vec<str> type_params;
+  // Parallel to `type_params`: true at a position declared `(Name)`
+  // rather than bare `Name` - see `TypeAliasNode.type_param_is_spread`.
+  Vec<flag> type_param_is_spread;
   flag is_bound_list;
   DataType* body;
   Vec<str> bound_alternatives;
@@ -43,11 +46,14 @@ compound _ResolvedAlias {
 fun _unresolved_marker() _ResolvedAlias {
   Vec<str> empty_params;
   empty_params.init(0);
+  Vec<flag> empty_spread;
+  empty_spread.init(0);
   Vec<str> empty_alts;
   empty_alts.init(0);
   ret _ResolvedAlias{
   is_resolved = false,
   type_params = empty_params,
+  type_param_is_spread = empty_spread,
   is_bound_list = false,
   body = nil,
   bound_alternatives = empty_alts,
@@ -117,27 +123,72 @@ fun _cloned_value(DataType* src) DataType {
 // Substitutes every bare occurrence of one of `params` (an alias's own
 // declared type params) inside `dt` for the matching concrete argument
 // in `args`, recursively through `dt`'s own generic_args and fn_sig.
-fun _substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* args) {
+// `spread_flags` (parallel to `params`) marks a param declared `(Name)`
+// rather than bare `Name` - see `TypeAliasNode.type_param_is_spread`.
+fun _substitute_params(
+  DataType* dt,
+  Vec<str>* params,
+  Vec<DataType*>* args,
+  Vec<flag>* spread_flags
+) {
   if dt == nil {
     ret;
   }
   num i = 0;
   for i < dt.generic_args.len {
-    _substitute_params(dt.generic_args.get(i), params, args);
+    _substitute_params(dt.generic_args.get(i), params, args, spread_flags);
     i = i + 1;
   }
   num ti = 0;
   for ti < dt.tuple_members.len {
-    _substitute_params(dt.tuple_members.get(ti), params, args);
+    _substitute_params(dt.tuple_members.get(ti), params, args, spread_flags);
     ti = ti + 1;
   }
   if dt.has_fn_sig && dt.fn_sig != nil {
+    // A `fun((Args)) Ret`-shaped alias body whose single parameter
+    // position is bound BARE (no generic wrapping, no pointer) to a
+    // param DECLARED as a spread param (`(Args)` in the alias's own
+    // `<...>` list) and resolves to a real tuple spreads that tuple's
+    // own members into separate positional C parameters here - `Args =
+    // (num, dec, str)` expands `fun(Args) Ret` to `fun(num, dec, str)
+    // Ret`, not a single tuple-struct parameter. An ordinary (bare,
+    // non-spread) param keeps today's one-param-in, one-param-out shape
+    // via the plain recursive path below, even when its own argument
+    // happens to be a tuple - the explicit `(Args)` marker, not the
+    // argument's own shape, is what decides spreading.
+    Vec<DataType*> new_fn_params;
+    new_fn_params.init(0);
     num p = 0;
     for p < dt.fn_sig.params.len {
-      _substitute_params(dt.fn_sig.params.get(p), params, args);
+      let prm = dt.fn_sig.params.get(p);
+      flag spread = false;
+      if prm.generic_args.len == 0 && !prm.is_tuple && prm.pointer_depth == 0 {
+        num j2 = 0;
+        for j2 < params.len && j2 < args.len && j2 < spread_flags.len {
+          if equals(params.get(j2), prm.type_str) {
+            let arg2 = args.get(j2);
+            if spread_flags.get(j2) && arg2.is_tuple {
+              for tm : arg2.tuple_members {
+                new_fn_params.push(dtype_clone(tm));
+              }
+              spread = true;
+            }
+            break;
+          }
+          j2 = j2 + 1;
+        }
+      }
+      if spread {
+        dtype_free(prm);
+      } else {
+        _substitute_params(prm, params, args, spread_flags);
+        new_fn_params.push(prm);
+      }
       p = p + 1;
     }
-    _substitute_params(dt.fn_sig.rtype, params, args);
+    dt.fn_sig.params.free();
+    dt.fn_sig.params = new_fn_params;
+    _substitute_params(dt.fn_sig.rtype, params, args, spread_flags);
   }
   num j = 0;
   for j < params.len && j < args.len {
@@ -206,7 +257,7 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
 
   DataType expanded = _cloned_value(ra.body);
   if ra.type_params.len > 0 {
-    _substitute_params(&expanded, &ra.type_params, &dt.generic_args);
+    _substitute_params(&expanded, &ra.type_params, &dt.generic_args, &ra.type_param_is_spread);
   }
   // A pointer applied at the reference site stacks onto whatever the
   // alias's own body already carries (`als P = num*; P* x;` -> num**).
@@ -604,6 +655,7 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
         _ResolvedAlias{
         is_resolved = !saw_unresolved,
         type_params = a.type_params,
+        type_param_is_spread = a.type_param_is_spread,
         is_bound_list = a.is_bound_list,
         body = a.body,
         bound_alternatives = a.bound_alternatives,

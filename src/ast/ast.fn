@@ -563,6 +563,12 @@ pub fun quirk_method_sig_new() QuirkMethodSig {
 pub compound TypeAliasNode {
   str name;
   Vec<str> type_params;
+  // Parallel to `type_params`: true at a position parsed as `(Name)`
+  // rather than a bare `Name` - a spread param, whose tuple-typed
+  // argument spreads into separate positional parameters wherever it
+  // fills a whole `fun(...)` parameter position in `body`, instead of
+  // substituting in as one tuple-struct parameter.
+  Vec<flag> type_param_is_spread;
   flag has_type_params;
   DataType* body;
   Vec<str> bound_alternatives;
@@ -578,6 +584,7 @@ pub fun type_alias_node_new() TypeAliasNode {
   TypeAliasNode a;
   a.name = "";
   a.type_params.init(0);
+  a.type_param_is_spread.init(0);
   a.has_type_params = false;
   a.body = nil;
   a.bound_alternatives.init(0);
@@ -1247,6 +1254,7 @@ fun _free_node_contents(Node* n) {
     }
     .TypeAlias(a) -> {
       a.type_params.free();
+      a.type_param_is_spread.free();
       if a.is_bound_list {
         a.bound_alternatives.free();
       } else {
@@ -1320,6 +1328,17 @@ pub fun free_node_tree(Vec<Node>* nodes) {
 
 fun _clone_str_vec(Vec<str>* v) Vec<str> {
   Vec<str> out;
+  out.init(v.len);
+  num i = 0;
+  for i < v.len {
+    out.push(v.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
+fun _clone_flag_vec(Vec<flag>* v) Vec<flag> {
+  Vec<flag> out;
   out.init(v.len);
   num i = 0;
   for i < v.len {
@@ -1651,6 +1670,7 @@ pub fun node_clone(Node n) Node {
     .TypeAlias(a) -> {
       TypeAliasNode ca = a;
       ca.type_params = _clone_str_vec(&a.type_params);
+      ca.type_param_is_spread = _clone_flag_vec(&a.type_param_is_spread);
       if a.is_bound_list {
         ca.bound_alternatives = _clone_str_vec(&a.bound_alternatives);
       } else {

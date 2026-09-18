@@ -697,6 +697,76 @@ impl ParseState {
     ret .None;
   }
 
+  // Parses a type alias's own `<T1, (T2)>` type-param list: an ordinary
+  // bare name (`T1`) binds like any other generic param, while a
+  // parenthesized one (`(T2)`) marks a spread param - when the alias is
+  // instantiated with a tuple type for it, `_substitute_params` spreads
+  // that tuple's own members into separate positional parameters
+  // wherever `T2` appears as a whole `fun(...)` parameter position,
+  // rather than substituting it in as a single tuple-struct parameter.
+  // A dedicated parser rather than reusing `parse_type_params_with_
+  // constraints`: only an alias's own param list needs this marker, and
+  // aliases don't support `T: Bound` constraints today, so there's
+  // nothing else to share.
+  pub parse_alias_type_params(
+    Vec<str>* out_params,
+    Vec<flag>* out_is_spread
+  ) Option<ParseErrorKind> {
+    self.split_angle_opener_token_if_needed();
+    if !self.next_token_is_angle_open() {
+      ret .None;
+    }
+    self.token_next(); // consume '<'
+
+    for true {
+      flag is_spread = false;
+      if self.next_token_is_operator("(") {
+        self.token_next();
+        is_spread = true;
+      }
+      let tok = self.token_next();
+      if tok.is_none() || tok.unwrap().type != .Identifier {
+        self.err("expected generic parameter name");
+        ret .Some(.InvalidIdentifier);
+      }
+      str name = "";
+      fit tok.unwrap().data {
+        .Sval(s) -> { name = s; }
+        _ -> {}
+      }
+      if is_spread {
+        let closerr = self.expect_sym(')');
+        if closerr.is_some() {
+          ret closerr;
+        }
+      }
+      out_params.push(name);
+      out_is_spread.push(is_spread);
+
+      if self.next_token_is_operator(",") {
+        self.token_next();
+        continue;
+      }
+      break;
+    }
+
+    self.split_angle_closer_token_if_needed();
+    self.split_angle_closer_equals_token_if_needed();
+    if self.next_token_is_operator(">") {
+      let err = self.expect_op(">");
+      if err.is_some() {
+        ret err;
+      }
+    } else {
+      let err = self.expect_sym('>');
+      if err.is_some() {
+        ret err;
+      }
+    }
+
+    ret .None;
+  }
+
   // Parses a bracketed generic-argument list (`<T, U>`) into
   // `dt.generic_args`, if the next significant token opens one (a no-op
   // otherwise). Array-typed arguments (`Vec<num[]>`) aren't supported:
@@ -6856,15 +6926,9 @@ impl Parser {
 
     Vec<str> type_params;
     type_params.init(0);
-    Vec<Vec<str>> unused_forced_insts;
-    unused_forced_insts.init(0);
-    Vec<Vec<str>> unused_param_constraints;
-    unused_param_constraints.init(0);
-    let tperr = self.state.parse_type_params_with_constraints(
-      &type_params,
-      &unused_forced_insts,
-      &unused_param_constraints
-    );
+    Vec<flag> type_param_is_spread;
+    type_param_is_spread.init(0);
+    let tperr = self.state.parse_alias_type_params(&type_params, &type_param_is_spread);
     if tperr.is_some() {
       ret tperr;
     }
@@ -6901,6 +6965,7 @@ impl Parser {
     TypeAliasNode a = type_alias_node_new();
     a.name = name;
     a.type_params = type_params;
+    a.type_param_is_spread = type_param_is_spread;
     a.has_type_params = type_params.len > 0;
 
     if self.state.next_token_is_operator("|") {
