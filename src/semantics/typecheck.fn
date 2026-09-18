@@ -2104,6 +2104,25 @@ impl Checker {
     ret sig.rtype;
   }
 
+  // A quirk-bound alternative's own bare name, with any generic-arg
+  // suffix stripped (`Steppable<T>` -> `Steppable`). `quirk_implementors`
+  // only ever keys on a quirk's bare name (real membership is `impl X as
+  // Steppable<...> { ... }` having been seen for X at all, not which
+  // concrete argument it used), so a bound naming a generic quirk's own
+  // instantiation - including a self-referential one like `T:
+  // Steppable<T>`, where the type param the bound is even ATTACHED to is
+  // still the unsubstituted literal "T" here, before any instantiation
+  // site has supplied a real type for it - could otherwise never match:
+  // `implements_quirk` would look up a quirk registered under the
+  // literal, never-matching string "Steppable<T>" instead of "Steppable".
+  _bare_quirk_bound_name(str bound) str {
+    num lt = index_of_char(bound, '<');
+    if lt < 0 {
+      ret bound;
+    }
+    ret substr(bound, 0, lt);
+  }
+
   // Checks the arguments an instantiation supplies against the types its
   // parameters are allowed to stand for.
   check_instantiation(CheckedType t, Node* at) {
@@ -2141,12 +2160,12 @@ impl Checker {
         // membership (a genuine `impl X as quirk` block was seen), not
         // name equality - `bound` itself is never resolved against a
         // declared type/quirk table until now, so this is the first
-        // point either check is even possible. Known v1 gap: a bound
-        // naming a concrete instantiation of a *generic* quirk (`T:
-        // To<num>`) never matches here, since `self.quirks`/
-        // `quirk_implementors` only ever key on a quirk's bare name.
+        // point either check is even possible. A bound naming a
+        // concrete instantiation of a generic quirk (`T: To<num>`, or a
+        // self-referential one like `T: Steppable<T>`) is handled by
+        // `_bare_quirk_bound_name` stripping the `<...>` suffix first.
         if equals(bound, supplied_name) ||
-          self.implements_quirk(supplied, self.canonical_type_name(bound)) {
+          self.implements_quirk(supplied, self.canonical_type_name(self._bare_quirk_bound_name(bound))) {
           listed = true;
         }
       }
@@ -2206,9 +2225,11 @@ impl Checker {
         for a < allowed.len {
           str bound = allowed.get(a);
           // See the matching comment in `check_instantiation`: a quirk
-          // bound is checked by real membership, not name equality.
+          // bound is checked by real membership, not name equality,
+          // with any generic-arg suffix on the bound itself stripped
+          // first.
           if equals(bound, supplied_name) ||
-            self.implements_quirk(supplied, self.canonical_type_name(bound)) {
+            self.implements_quirk(supplied, self.canonical_type_name(self._bare_quirk_bound_name(bound))) {
             listed = true;
           }
           a = a + 1;

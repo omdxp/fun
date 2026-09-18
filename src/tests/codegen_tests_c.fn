@@ -1528,6 +1528,135 @@ test "a generic-instantiation-bounded impl does not monomorphize for a mismatchi
   );
 }
 
+test "a self-referential generic-quirk bound (T: Quirk<T>) monomorphizes for a real implementor" {
+  // `dtype_matches_constraint_name`'s own quirk-membership check only
+  // keys on a quirk's bare name; a bound naming a generic quirk's own
+  // instantiation (self-referential here - the bound is literally
+  // "Steppable<T>" at declaration time, before any instantiation
+  // supplies a real type for T) needs that `<...>` suffix stripped
+  // first, or a real implementor is never recognized.
+  str src = `use std.c.io;
+  `quirk Steppable<T> { succ() T; }
+  `compound Counter { num v; }
+  `impl Counter as Steppable<Counter> {
+  `  pub succ() Counter {
+  `    Counter c;
+  `    c.v = self.v + 1;
+  `    ret c;
+  `  }
+  `}
+  `compound Box<T: Steppable<T>> { T value; }
+  `impl Box<T: Steppable<T>> {
+  `  pub advance() T { ret self.value.succ(); }
+  `}
+  `fun main() num {
+  `  Counter a;
+  `  a.v = 1;
+  `  Box<Counter> bx = Box<Counter>{value = a};
+  `  let n = bx.advance();
+  `  printf("%lld\n", n.v);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "self_ref_quirk_bound", "a self-referential quirk bound monomorphizes for a real implementor");
+  assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
+}
+
+test "a generic user type implementing Iterator<T> directly on itself works in a for loop, not just Vec/Map/Set" {
+  // `emit_for_iter`'s own direct-dispatch fast path used to hardcode
+  // ["Vec", "Map", "Set"] - a generic user type implementing
+  // Iterator<T> directly (not through a plain, non-generic impl) fell
+  // through to a fallback path written only for the non-generic case,
+  // leaving Elem unsubstituted. Now discovered generically from
+  // registered generic Iterator impls, so a user's own generic type
+  // gets identical treatment.
+  str src = `use std.c.io;
+  `use std.quirks;
+  `use std.option;
+  `compound Counter { num v; }
+  `impl Counter as Steppable<Counter> {
+  `  pub succ() Counter {
+  `    Counter c;
+  `    c.v = self.v + 1;
+  `    ret c;
+  `  }
+  `  pub reached(Counter end) flag { ret self.v >= end.v; }
+  `}
+  `compound CountRange<T: Steppable<T>> { T start; T end; }
+  `impl CountRange<T: Steppable<T>> as Iterator<T> {
+  `  pub next() Option<T> {
+  `    if self.start.reached(self.end) { ret .None; }
+  `    T v = self.start;
+  `    self.start = self.start.succ();
+  `    ret .Some(v);
+  `  }
+  `}
+  `fun main() num {
+  `  Counter a;
+  `  a.v = 1;
+  `  Counter b;
+  `  b.v = 4;
+  `  num total = 0;
+  `  for c : CountRange<Counter>{start = a, end = b} {
+  `    total = total + c.v;
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "generic_user_type_iterator", "a generic user type's own Iterator<T> impl works in a for loop");
+  assert equals(out, "6\n"), "expected 1+2+3 over [1, 4) through the user's own generic Iterator<T> impl";
+}
+
+test "a next() body calling a further quirk method through self.<field> falls back to the call-based dispatch, not inlining" {
+  // `_next_body_inlinable` only checked statement-level control-flow
+  // shape before this fix - a next() body calling a quirk method
+  // through self.<field> (self.start.succ(), needing the nested
+  // generic instantiation resolved inside the inlined splice, which
+  // this pass doesn't do correctly yet) was wrongly accepted for
+  // inlining. Confirmed by the ABSENCE of the inlining pass's own
+  // telltale marker (__fun_iter_local, the renamed-local prefix
+  // emit_inlined_iterator_next always writes), contrasting with
+  // Range's own next() (plain arithmetic, no nested quirk calls),
+  // which IS still inlined - see "range for loop desugars into a Range
+  // value" nearby.
+  str src = `use std.c.io;
+  `use std.quirks;
+  `use std.option;
+  `compound Counter { num v; }
+  `impl Counter as Steppable<Counter> {
+  `  pub succ() Counter {
+  `    Counter c;
+  `    c.v = self.v + 1;
+  `    ret c;
+  `  }
+  `  pub reached(Counter end) flag { ret self.v >= end.v; }
+  `}
+  `compound CountRange<T: Steppable<T>> { T start; T end; }
+  `impl CountRange<T: Steppable<T>> as Iterator<T> {
+  `  pub next() Option<T> {
+  `    if self.start.reached(self.end) { ret .None; }
+  `    T v = self.start;
+  `    self.start = self.start.succ();
+  `    ret .Some(v);
+  `  }
+  `}
+  `fun main() num {
+  `  Counter a;
+  `  a.v = 1;
+  `  Counter b;
+  `  b.v = 3;
+  `  for c : CountRange<Counter>{start = a, end = b} {
+  `    printf("%lld\n", c.v);
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c_with_imports(
+    src,
+    "nested_self_call_fallback",
+    "next() body with a nested self-rooted quirk call falls back to call-based dispatch"
+  );
+  assert !contains(out, "__fun_iter_local"), "expected the call-based fallback, not the inlining pass, given the nested quirk call this pass can't yet resolve inline";
+}
+
 // A call violating a generic bound is rejected by the typechecker,
 // where the check and its tests live (typecheck_tests.fn).
 // test "a self-recursive CONSTRAINED generic function rejects a bound violation" {

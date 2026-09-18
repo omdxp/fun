@@ -1,0 +1,29 @@
+// A half-open range `[start, end)` over any type implementing
+// `Steppable<T>` - the generic counterpart to `Range` (`std.range`),
+// which stays fixed to `num` so the `a..b` syntax sugar it backs keeps
+// working exactly as it always has. `StepRange<T>` has no sugar of its
+// own: construct it directly, `for x : StepRange<MyType>{start = a,
+// end = b} { ... }`.
+
+use quirks;
+use option;
+
+pub compound StepRange<T: Steppable<T>> {
+  T start;
+  T end;
+}
+
+impl StepRange<T: Steppable<T>> as Iterator<T> {
+  // Yields each value in `[start, end)`, advancing `start` by one step
+  // per call. A `for` loop always drives this over a value constructed
+  // fresh for that loop, so mutating `start` here never leaks into a
+  // caller's own variable.
+  pub next() Option<T> {
+    if self.start.reached(self.end) {
+      ret .None;
+    }
+    T v = self.start;
+    self.start = self.start.succ();
+    ret .Some(v);
+  }
+}

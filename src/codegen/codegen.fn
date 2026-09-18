@@ -868,6 +868,19 @@ fun dtype_implements_quirk(Vec<Node> all_nodes, DataType dt, str quirk_name) fla
   ret false;
 }
 
+// A quirk-bound alternative's own bare name, with any generic-arg
+// suffix stripped (`Steppable<T>` -> `Steppable`) - see the matching
+// helper and comment on typecheck's own `Checker.implements_quirk`
+// call sites (`_bare_quirk_bound_name` there), the same gap in this
+// file's own independent bound-checking.
+fun _bare_quirk_bound_name(str bound) str {
+  num lt = index_of_char(bound, '<');
+  if lt < 0 {
+    ret bound;
+  }
+  ret substr(bound, 0, lt);
+}
+
 fun dtype_matches_constraint_name(DataType dt, str expected, Vec<Node> all_nodes) flag {
   fit dt.kind {
     .Num -> { ret equals(expected, "num"); }
@@ -895,11 +908,15 @@ fun dtype_matches_constraint_name(DataType dt, str expected, Vec<Node> all_nodes
         ret true;
       }
       // A bound naming a quirk is checked by real membership - is there
-      // a registered `impl dt as expected { ... }`? Known v1 gap
-      // (matching typecheck's `Checker.implements_quirk`): a bound
-      // naming a concrete instantiation of a *generic* quirk is not
-      // covered here either.
-      ret dtype_implements_quirk(all_nodes, dt, expected);
+      // a registered `impl dt as <bare quirk name> { ... }`?
+      // `dtype_implements_quirk` only ever keys on a quirk's bare name
+      // (matching typecheck's own `implements_quirk`), so a bound
+      // naming a concrete instantiation of a generic quirk - including
+      // a self-referential one like `T: Steppable<T>` - needs its
+      // `<...>` suffix stripped first, or it looks up a quirk
+      // registered under the never-matching literal string
+      // "Steppable<T>" instead of "Steppable".
+      ret dtype_implements_quirk(all_nodes, dt, _bare_quirk_bound_name(expected));
     }
   }
 }
@@ -9302,6 +9319,9 @@ impl Codegen {
     if n == nil {
       ret true;
     }
+    if self._contains_nested_dotted_call(n) {
+      ret false;
+    }
     fit n.kind {
       .StatementElseIf(_) -> { ret false; }
       .StatementElse(_) -> { ret false; }
@@ -9327,6 +9347,117 @@ impl Codegen {
       }
       .StatementIf(s) -> { ret self._next_body_inlinable(s.body); }
       _ -> { ret true; }
+    }
+  }
+
+  // True when `n` contains a call whose own receiver is itself a field
+  // access (`x.y.method(...)`, at least two dots deep before the call) -
+  // another real gap alongside `_next_body_inlinable`'s existing
+  // structural checks. A quirk-bounded generic's own field (`self.start`
+  // when `T: Steppable<T>`) calling a further quirk method on itself
+  // (`self.start.succ()`) needs its own generic-instantiation context
+  // resolved through the inlined splice's locally-declared `self`, which
+  // this first version of the inlining pass doesn't do correctly yet -
+  // falls back to the always-correct call-based dispatch instead.
+  // Mirrors `apply_inline_next_renames`'s own traversal shape so it
+  // reaches every expression position that traversal does.
+  // True when `n` is a `.`-chain (any depth) whose own root is the
+  // identifier `self` - `self.start.succ`'s own left side, for example,
+  // but not `Option.Some`'s (rooted at the type name `Option`) or a
+  // plain local variable's own chain.
+  _is_self_rooted_dotted_chain(Node* n) flag {
+    if n == nil {
+      ret false;
+    }
+    fit n.kind {
+      .Identifier(name) -> { ret equals(name, "self"); }
+      .Expression(e) -> {
+        if equals(e.op, ".") && e.has_left {
+          ret self._is_self_rooted_dotted_chain(e.left);
+        }
+        ret false;
+      }
+      _ -> { ret false; }
+    }
+  }
+
+  _contains_nested_dotted_call(Node* n) flag {
+    if n == nil {
+      ret false;
+    }
+    fit n.kind {
+      .Expression(e) -> {
+        // Only a chain rooted at `self` is the risky shape - a
+        // qualified enum-variant constructor (`Option.Some(v)`) is
+        // also `X.Y(...)` syntactically, but `X` there is a type name,
+        // not a value receiver, and constructs a literal rather than
+        // dispatching a method; already safely inlined before this
+        // check existed, so it must stay excluded.
+        if equals(e.op, "()") && e.has_left && self._is_self_rooted_dotted_chain(e.left) {
+          ret true;
+        }
+        if e.has_left && self._contains_nested_dotted_call(e.left) {
+          ret true;
+        }
+        if e.has_right && self._contains_nested_dotted_call(e.right) {
+          ret true;
+        }
+        ret false;
+      }
+      .ExpressionParenthesis(inner) -> { ret self._contains_nested_dotted_call(inner); }
+      .Unary(u) -> { ret self._contains_nested_dotted_call(u.operand); }
+      .Tenary(t) -> {
+        ret self._contains_nested_dotted_call(t.cond) ||
+          self._contains_nested_dotted_call(t.then_val) ||
+          self._contains_nested_dotted_call(t.else_val);
+        }
+      .Bracket(inner) -> { ret self._contains_nested_dotted_call(inner); }
+      .CompoundInit(c) -> {
+        for f : c.fields {
+          if self._contains_nested_dotted_call(f.value) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          if self._contains_nested_dotted_call(el) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .Body(b) -> {
+        for s : b.statements {
+          if self._contains_nested_dotted_call(s) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .Variable(v) -> { ret v.has_val && self._contains_nested_dotted_call(v.val); }
+      .StatementReturn(inner) -> {
+        ret inner != nil && self._contains_nested_dotted_call(inner);
+      }
+      .StatementIf(s) -> {
+        ret self._contains_nested_dotted_call(s.condition) ||
+          self._contains_nested_dotted_call(s.body);
+        }
+      .StatementFor(kind) -> {
+        fit kind {
+          .Cond(c) -> {
+            ret (c.has_condition && self._contains_nested_dotted_call(c.condition)) ||
+              self._contains_nested_dotted_call(c.body);
+            }
+          _ -> { ret false; }
+        }
+      }
+      .StatementAssert(a) -> {
+        ret self._contains_nested_dotted_call(a.condition) ||
+          (a.has_message && self._contains_nested_dotted_call(a.message));
+        }
+      _ -> { ret false; }
     }
   }
 
@@ -10118,6 +10249,29 @@ impl Codegen {
   // `Iterator`-quirk `.next()`. `idx` is `fi.index_name` when given, else
   // a synthetic `__fun_i`, and `__auto_type` lets the C compiler infer
   // `item`'s type, so `T` never needs to be known here.
+  // Every generic type's own base name that directly implements
+  // `Iterator<...>` on itself (`impl Vec<T> as Iterator<T>`, `impl
+  // StepRange<T: Steppable<T>> as Iterator<T>`, ...) - scanned from
+  // `self.generic_impl_templates` once per call site rather than a
+  // fixed list, so `emit_for_iter`'s own direct-dispatch fast path
+  // covers any user's own generic type the same way it already covers
+  // Vec/Map/Set, with nothing to update here when a new one is added.
+  _generic_direct_iterator_base_names() Vec<str> {
+    Vec<str> out;
+    out.init(4);
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if i.has_type_params && i.has_quirk_name && equals(i.quirk_name, "Iterator") {
+            out.push(i.type_name);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret out;
+  }
+
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
     // The iterable is either a plain identifier, checked structurally via
     // `lookup_local_dtype` or by name, or a chained field access resolved
@@ -10154,29 +10308,28 @@ impl Codegen {
       _ -> { ret .Some(.UnsupportedNode); }
     }
 
-    // `Vec<T>`/`Map<K, V>`/`Set<T>` all implement `Iterator<Elem>`
-    // directly (see `emit_inlined_generic_iterator`'s own doc comment) -
-    // resolved to the real instantiation's own mangled name either
-    // structurally (`arr_dt.type_str` naming one of them with real
-    // `generic_args`) or, when a local's own dtype only carries the
-    // already-mangled shape (a monomorphized method's return type,
-    // `"Vec__num"`, empty `generic_args`), directly from that name
-    // already being in its final form.
+    // Any generic type implementing `Iterator<Elem>` directly on itself
+    // (`Vec<T>`/`Map<K, V>`/`Set<T>`, and any other generic compound a
+    // user writes the same way, e.g. `StepRange<T: Steppable<T>>`; see
+    // `emit_inlined_generic_iterator`'s own doc comment) - resolved to
+    // the real instantiation's own mangled name either structurally
+    // (`arr_dt.type_str` naming one of them with real `generic_args`)
+    // or, when a local's own dtype only carries the already-mangled
+    // shape (a monomorphized method's return type, `"Vec__num"`, empty
+    // `generic_args`), directly from that name already being in its
+    // final form. `direct_iter_base_names` is discovered from
+    // `self.generic_impl_templates` itself (every generic impl quirk-
+    // qualified as `Iterator`), not a fixed list, so a user's own
+    // generic type gets exactly the same dispatch Vec/Map/Set do.
     flag is_direct_iter_coll = false;
     str direct_iter_owner_name = "";
-    Vec<str> direct_iter_base_names;
-    direct_iter_base_names.init(3);
-    direct_iter_base_names.push("Vec");
-    direct_iter_base_names.push("Map");
-    direct_iter_base_names.push("Set");
+    Vec<str> direct_iter_base_names = self._generic_direct_iterator_base_names();
+    defer direct_iter_base_names.free();
     if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       for base : direct_iter_base_names {
-        num want_args = 1;
-        if equals(base, "Map") {
-          want_args = 2;
-        }
-        if equals(arr_dt.type_str, base) && arr_dt.generic_args.len == want_args {
+        num want_args = arr_dt.generic_args.len;
+        if equals(arr_dt.type_str, base) && want_args > 0 {
           DataType coll_inst_dt = dtype_new();
           coll_inst_dt.type_str = base;
           Vec<DataType*> coll_inst_args;
