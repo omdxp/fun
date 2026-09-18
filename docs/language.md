@@ -669,6 +669,16 @@ fun main() {
   other: `als Callback<A, R> = fun(A) R;` plus `Callback<Args, str>`
   expands to `fun((num, str)) str` - no special-casing needed anywhere
   once tuples themselves exist.
+- A type param written in parentheses in the alias's own declaration
+  (`als Callback<(Args), Ret> = fun(Args) Ret;`) is a **spread** param:
+  when it's bound to a tuple and fills a whole `fun(...)` parameter
+  position in the alias's body, that tuple's own members spread into
+  separate positional parameters instead of staying one tuple-struct
+  parameter. `Callback<(num, dec, str), str>` expands to `fun(num, dec,
+  str) str`, matching a hand-written variable-arity function signature.
+  A bare (non-parenthesized) param bound to the same tuple stays a
+  single tuple-struct parameter, as above - the parentheses at the
+  declaration, not the argument's own shape, decide which.
 
 ## Functions
 

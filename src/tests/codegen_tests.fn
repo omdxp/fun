@@ -523,6 +523,29 @@ test "a generic alias bound to a tuple works end to end, the original motivating
   assert equals(out, "hi\n"), "expected the tuple-bodied alias to expand and run exactly like a hand-written tuple type";
 }
 
+test "a generic alias's fn-sig param spreads a tuple-bound arg into real positional parameters" {
+  // `als Callback<(Args), Ret> = fun(Args) Ret;` - the parenthesized
+  // `(Args)` marks it a SPREAD param, binding a whole list of types at
+  // once: `Callback<(num, dec, str), str>` expands to `fun(num, dec,
+  // str) str`, not a single tuple-struct parameter - the variable-arity
+  // case the now-reverted phase-6 feature originally existed for,
+  // rebuilt on real tuples instead of bespoke declaration syntax. A
+  // BARE (non-parenthesized) type param bound to a tuple stays a single
+  // tuple-struct parameter instead - see the adjacent "as an ordinary
+  // type parameter" test - so this marker, not the argument's own
+  // shape, is what decides spreading.
+  str src = `use std.c.io;
+  `als Callback<(Args), Ret> = fun(Args) Ret;
+  `fun describe(num a, dec b, str c) str { ret c; }
+  `fun apply(Callback<(num, dec, str), str> cb, num a, dec b, str c) str { ret cb(a, b, c); }
+  `fun main() num {
+  `  printf("%s\n", apply(describe, 1, 2.0, "hi"));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "tuple_alias_variadic_spread", "a tuple-bound alias fn-sig param spreads into real positional params");
+  assert equals(out, "hi\n"), "expected Args=(num, dec, str) to spread into three real C parameters, not one tuple-struct parameter";
+}
+
 test "a numeric element widens against its declared tuple position, not the literal's own bare structural type" {
   str src = `use std.c.io;
   `fun pair() (dec, str) {
