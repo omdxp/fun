@@ -1666,7 +1666,16 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
   // or chain operand here would need the AST-driven `fit_subject_type`
   // instead, which already covers this case; this token-only fallback
   // only runs while the document doesn't parse.
-  if token_is_operator(tokens.get(a), "?") || token_is_operator(tokens.get(a), "!") {
+  // `fit x?!(err) { ... }`: `tokens.get(a)` is `?!`'s own closing paren
+  // here, not `?!` itself - `a` is reassigned to the real operator
+  // token's own index first, the same shape used everywhere else this
+  // gap shows up.
+  let qb_op_a = qmark_bang_arg_close_paren(tokens, tokens.get(a));
+  if qb_op_a.is_some() {
+    a = index_of_token(tokens, qb_op_a.unwrap());
+  }
+  if token_is_operator(tokens.get(a), "?") || token_is_operator(tokens.get(a), "!") ||
+    token_is_operator(tokens.get(a), "?!") || token_is_operator(tokens.get(a), "!?") {
     num prop_subj = _prev_real_index(tokens, a);
     if prop_subj < 0 {
       ret "";
@@ -1948,7 +1957,15 @@ fun _propagation_receiver_type_before(
     ret "";
   }
   Token pt = prop_opt.unwrap();
-  if !token_is_operator(pt, "?") && !token_is_operator(pt, "!") {
+  // `x?!(err).field`: `pt` is `?!`'s own closing paren here, not `?!`
+  // itself - reassigned to the real operator token first, the same way
+  // `symbols.fn`'s own chain walker handles this shape.
+  let qb_op = qmark_bang_arg_close_paren(tokens, pt);
+  if qb_op.is_some() {
+    pt = qb_op.unwrap();
+  }
+  if !token_is_operator(pt, "?") && !token_is_operator(pt, "!") &&
+    !token_is_operator(pt, "?!") && !token_is_operator(pt, "!?") {
     ret "";
   }
   let operand_opt = token_before(tokens, index_of_token(tokens, pt));

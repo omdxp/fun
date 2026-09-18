@@ -775,8 +775,12 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
     .Number -> { ret true; }
     _ -> {}
   }
+  // `?!(err)`'s own case falls out of the `)` check above for free
+  // (it doesn't care which call/group the paren closes, just that
+  // something ending in `)` precedes the dot) - only the bare, no-
+  // argument `!?` needs its own explicit check here, same as `?`/`!`.
   ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']') ||
-  token_is_operator(bd, "?") || token_is_operator(bd, "!");
+  token_is_operator(bd, "?") || token_is_operator(bd, "!") || token_is_operator(bd, "!?");
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
