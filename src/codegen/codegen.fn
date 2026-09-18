@@ -4639,7 +4639,12 @@ impl Codegen {
   // `ret .None;` to build the early-return value, rather than
   // hand-writing new compound-literal text.
   emit_propagation(UnaryNode u) Option<CodegenErrorKind> {
-    flag is_option = equals(u.op, "?");
+    // The operand's own shape (Option vs Result) decides the failure
+    // tag/success accessor checked below - `?`/`?!` both operate on an
+    // Option operand, `!`/`!?` both on a Result operand. What differs
+    // between the base operator and its cross-type mirror is handled
+    // separately, in the early-return construction further down.
+    flag is_option = equals(u.op, "?") || equals(u.op, "?!");
     str none_or_err = "Err";
     str some_or_ok = "Ok";
     if is_option {
@@ -4679,8 +4684,7 @@ impl Codegen {
         } elif equals(inner_e.op, ".") && inner_e.has_left {
           fit inner_e.left.kind {
             .Unary(u2) -> {
-              if u2.is_left_operanded_unary &&
-                (equals(u2.op, "?") || equals(u2.op, "!")) {
+              if u2.is_left_operanded_unary && is_propagation_op(u2.op) {
                 let field_rdt = self._resolve_propagation_field_rtype(inner_e);
                 if field_rdt.is_some() {
                   let field_name = self.resolve_type_name(field_rdt.unwrap());
@@ -4753,7 +4757,11 @@ impl Codegen {
     CodegenState* early_ret_saved_state = self.state;
     self.state = &early_ret_scratch;
     str early_ret_text = "";
-    if is_option {
+    if equals(u.op, "?") || equals(u.op, "!?") {
+      // `?`'s own bare `.None`, and `!?`'s mirror discarding the
+      // Result's own error entirely - both just the no-payload variant
+      // of whatever the enclosing function returns (an `Option<...>`
+      // in both cases, enforced by typecheck).
       self.state.write("((");
       self.state.write(self.current_fn_rtype_name);
       self.state.write("){ .tag = ");
@@ -4761,7 +4769,7 @@ impl Codegen {
       self.state.write("_None })");
       early_ret_text = early_ret_scratch.out.build();
       self.state = early_ret_saved_state;
-    } else {
+    } elif equals(u.op, "!") {
       StringBuilder err_payload_sb = string_builder_init(32);
       err_payload_sb.append(try_name);
       err_payload_sb.append(".payload.Err._0");
@@ -4776,6 +4784,30 @@ impl Codegen {
       self.state = early_ret_saved_state;
       if ctor_err.is_some() {
         ret ctor_err;
+      }
+    } else {
+      // `?!(err)`: the operand itself is `.None` (no payload to reuse),
+      // so `err` - a fresh expression, not derived from `try_name` - is
+      // what fills the enclosing function's own error slot, wrapped in
+      // whatever shape that function's own return type needs: `.Err`
+      // for `Result<_, E>`, `.Some` for `Option<E>` (the error-channel
+      // convention this compiler's own codegen.fn uses throughout).
+      // Typecheck already confirmed the enclosing function returns one
+      // of these two.
+      str err_variant = "Some";
+      if self.current_fn_rtype_dt.is_some() &&
+        equals(self.current_fn_rtype_dt.unwrap().type_str, "Result") {
+        err_variant = "Err";
+      }
+      let ctor_err2 = self.emit_enum_variant_construction(
+        self.current_fn_rtype_name,
+        err_variant,
+        u.error_arg
+      );
+      early_ret_text = early_ret_scratch.out.build();
+      self.state = early_ret_saved_state;
+      if ctor_err2.is_some() {
+        ret ctor_err2;
       }
     }
 
@@ -5185,7 +5217,7 @@ impl Codegen {
         if equals(u.op, "await") {
           ret self.emit_await(u.operand);
         }
-        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+        if u.is_left_operanded_unary && is_propagation_op(u.op) {
           ret self.emit_propagation(u);
         }
         self.state.write("(");
@@ -7819,8 +7851,7 @@ impl Codegen {
     Option<DataType> operand_dt = .None;
     fit field_e.left.kind {
       .Unary(u2) -> {
-        if !u2.is_left_operanded_unary ||
-          !(equals(u2.op, "?") || equals(u2.op, "!")) {
+        if !u2.is_left_operanded_unary || !is_propagation_op(u2.op) {
           ret .None;
         }
         flag resolved = false;
@@ -7835,8 +7866,7 @@ impl Codegen {
             } elif equals(inner_e2.op, ".") && inner_e2.has_left {
               fit inner_e2.left.kind {
                 .Unary(u3) -> {
-                  if u3.is_left_operanded_unary &&
-                    (equals(u3.op, "?") || equals(u3.op, "!")) {
+                  if u3.is_left_operanded_unary && is_propagation_op(u3.op) {
                     let deeper_dt = self._resolve_propagation_field_rtype(inner_e2);
                     if deeper_dt.is_some() {
                       operand_dt = deeper_dt;
@@ -8155,7 +8185,7 @@ impl Codegen {
         // `emit_expr` path, which already lowers `?`/`!` itself, into a
         // scratch buffer), resolved to its own unwrapped type the same
         // way `infer_let_expr_type`'s own `?`/`!` case does.
-        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+        if u.is_left_operanded_unary && is_propagation_op(u.op) {
           // Type-only resolution of `u.operand`'s own type, same reason
           // `emit_propagation` avoids a plain `resolve_field_chain` call
           // here: `u.operand` may itself be another `?`/`!` chained onto
@@ -8179,8 +8209,7 @@ impl Codegen {
               } elif equals(operand_e.op, ".") && operand_e.has_left {
                 fit operand_e.left.kind {
                   .Unary(ou) -> {
-                    if ou.is_left_operanded_unary &&
-                      (equals(ou.op, "?") || equals(ou.op, "!")) {
+                    if ou.is_left_operanded_unary && is_propagation_op(ou.op) {
                       operand_dt_opt = self._resolve_propagation_field_rtype(operand_e);
                     }
                   }
@@ -10870,8 +10899,7 @@ impl Codegen {
           subj_name = fit_subj_name1;
           subj_type = resolved_await_rtype;
           subj_is_pointer = false;
-        } elif u.is_left_operanded_unary &&
-          (equals(u.op, "?") || equals(u.op, "!")) {
+        } elif u.is_left_operanded_unary && is_propagation_op(u.op) {
           // `fit expr?`/`fit expr!` (a propagation used directly as a fit
           // subject, with no intermediate `let`): resolves the operand's
           // own `Option<T>`/`Result<T,E>` instantiation to find `T` (the
@@ -13795,7 +13823,7 @@ impl Codegen {
         // `Result<T,E>`), not the whole Option/Result - needed so a
         // later `fit v { .Variant -> ... }` on `v` can resolve its own
         // shorthand variants.
-        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) {
+        if u.is_left_operanded_unary && is_propagation_op(u.op) {
           // Type-only resolution, same reason and same technique as the
           // identical note in resolve_field_chain's own `?`-as-receiver
           // case above: `u.operand` may itself be a further propagation
@@ -13811,8 +13839,7 @@ impl Codegen {
               } elif equals(prop_e.op, ".") && prop_e.has_left {
                 fit prop_e.left.kind {
                   .Unary(pu) -> {
-                    if pu.is_left_operanded_unary &&
-                      (equals(pu.op, "?") || equals(pu.op, "!")) {
+                    if pu.is_left_operanded_unary && is_propagation_op(pu.op) {
                       prop_dt_opt = self._resolve_propagation_field_rtype(prop_e);
                     }
                   }

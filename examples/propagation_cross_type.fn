@@ -1,0 +1,69 @@
+// Postfix `?!`/`!?`: the cross-type mirrors of `?`/`!` (see
+// propagation_basic.fn), bridging Option<->Result instead of
+// propagating a matching signal.
+// 
+// `expr?!(err)` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`;
+// `.None` returns `err` from the enclosing function immediately,
+// wrapped in whatever shape it needs - `.Err(err)` for `Result<_, E>`,
+// or `.Some(err)` for `Option<E>` (the error-channel convention where
+// `.Some` carries the error and `.None` means success). `expr!?`
+// unwraps a `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(_)`
+// returns `.None` immediately, discarding the error entirely.
+
+use std.c.io;
+use std.option;
+use std.result;
+
+fun find(num x) Option<num> {
+  if x > 0 {
+    ret .Some(x);
+  }
+  ret .None;
+}
+
+// `?!` turns a missing Option into a real Result error: an unfound `x`
+// short-circuits with `.Err("not found")` before `combine` ever reaches
+// its own `ret`.
+fun combine(num x) Result<num, str> {
+  let a = find(x)?!("not found");
+  ret .Ok(a + 1);
+}
+
+// The error-channel convention: an enclosing function returning
+// `Option<E>` instead of `Result<_, E>` gets `.Some(err)` on the
+// missing path.
+fun combine_default(num x) Option<num> {
+  let a = find(x)?!(-1);
+  ret .Some(a + 1);
+}
+
+fun parse(num x) Result<num, str> {
+  if x > 0 {
+    ret .Ok(x);
+  }
+  ret .Err("bad input");
+}
+
+// `!?` discards the error entirely: a failed parse short-circuits with
+// a bare `.None`, not the error text.
+fun safe_parse(num x) Option<num> {
+  num a = parse(x)!?;
+  ret .Some(a * 2);
+}
+
+fun main() num {
+  fit combine(5) {
+    .Ok(v) -> { printf("combine: %lld ok\n", v); }
+    .Err(e) -> { printf("combine: err=%s\n", e); }
+  }
+  fit combine(-5) {
+    .Ok(v) -> { printf("combine: unexpected ok=%lld\n", v); }
+    .Err(e) -> { printf("combine: err=%s\n", e); }
+  }
+
+  printf("combine_default: %lld %lld\n", combine_default(5).unwrap(), combine_default(-5).unwrap());
+
+  printf("safe_parse: %lld none=%d\n", safe_parse(5).unwrap(), safe_parse(-5).is_none());
+
+  ret 0;
+}

@@ -705,6 +705,19 @@ impl Lexer {
       }
     } elif (op0 == '!' || op0 == '*') && self._peek() == '=' {
       b.append_char(self._advance());
+    } elif op0 == '?' && self._peek() == '!' {
+      // `?` is otherwise always single (`op_treated_as_one`), so this
+      // is a narrow exception mirroring `!=`/`*=` just above: `?!` (the
+      // Option -> Result/Option-of-error propagation operator) is the
+      // one compound `?` ever participates in.
+      b.append_char(self._advance());
+    } elif op0 == '!' && self._peek() == '?' {
+      // The mirror: `!?` (Result -> Option propagation, discarding the
+      // error). `!` already isn't `op_treated_as_one`, so this reaches
+      // the general combining loop below on its own, but folding it
+      // here keeps both halves of the new operator pair next to each
+      // other and explicit, rather than one visible and one implicit.
+      b.append_char(self._advance());
     } elif !op_treated_as_one(op0) {
       num extra = 0;
       for extra < 2 {
@@ -1165,6 +1178,20 @@ test "lexes operators via maximal munch" {
   assert toks.len == 5, "expected 5 tokens";
   assert token_is_operator(toks.get(1), ">="), "expected '>=' as one token";
   assert token_is_operator(toks.get(3), "!="), "expected '!=' as one token";
+}
+
+test "lexes '?!' and '!?' as their own single tokens" {
+  // `?` is otherwise always single (`op_treated_as_one`); `?!`/`!?` are
+  // the one compound pair it (and `!`) ever folds into.
+  let toks = _lex("a?!(b) c!?");
+  assert token_is_operator(toks.get(1), "?!"), "expected '?!' as one token, not '?' then '!'";
+  let toks2 = _lex("c!?");
+  assert token_is_operator(toks2.get(1), "!?"), "expected '!?' as one token, not '!' then '?'";
+}
+
+test "'!=' still wins over '!?' when the next char is '='" {
+  let toks = _lex("a!=b");
+  assert token_is_operator(toks.get(1), "!="), "expected '!=' unaffected by the new '!?' rule";
 }
 
 test "lexes line and block comments" {

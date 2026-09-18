@@ -1091,7 +1091,12 @@ fun _rewrite_calls_in_node(Node* n, str old_name, str new_name) {
     }
     .ExpressionParenthesis(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
     .Panic(inner) -> { _rewrite_calls_in_node(inner, old_name, new_name); }
-    .Unary(u) -> { _rewrite_calls_in_node(u.operand, old_name, new_name); }
+    .Unary(u) -> {
+      _rewrite_calls_in_node(u.operand, old_name, new_name);
+      if u.has_error_arg {
+        _rewrite_calls_in_node(u.error_arg, old_name, new_name);
+      }
+    }
     .Tenary(t) -> {
       _rewrite_calls_in_node(t.cond, old_name, new_name);
       _rewrite_calls_in_node(t.then_val, old_name, new_name);

@@ -1242,8 +1242,7 @@ impl Analysis {
           }
           ret inner;
         }
-        if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
-          u.operand != nil {
+        if u.is_left_operanded_unary && is_propagation_op(u.op) && u.operand != nil {
           ret self._resolve_propagation_type(u.operand);
         }
       }
@@ -2103,7 +2102,12 @@ fun _collect_reads(Node* node, Set<str>* out) {
       }
     }
     .ExpressionParenthesis(inner) -> { _collect_reads(inner, out); }
-    .Unary(u) -> { _collect_reads(u.operand, out); }
+    .Unary(u) -> {
+      _collect_reads(u.operand, out);
+      if u.has_error_arg {
+        _collect_reads(u.error_arg, out);
+      }
+    }
     .Tenary(t) -> {
       _collect_reads(t.cond, out);
       _collect_reads(t.then_val, out);

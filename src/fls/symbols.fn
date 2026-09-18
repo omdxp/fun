@@ -1773,6 +1773,31 @@ fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
   ret .None;
 }
 
+// When `close_paren` is `?!`'s own error-argument closing paren
+// (`x?!(err)`, `close_paren` being the `)` right after `err`), the `?!`
+// token itself; `.None` otherwise. `?!(err)`'s own closing paren looks,
+// token-locally, exactly like an ordinary call's closing paren (the
+// same shape `_matching_lparen`'s every other caller already handles),
+// so every token-only chain/receiver walk in this module and in
+// completion.fn needs this same check before falling through to "is
+// this a plain call" - shared here rather than tripled, since getting
+// it wrong silently resolves `?!(err)`'s own receiver as `err`'s type
+// instead of the propagation's real unwrapped value.
+pub fun qmark_bang_arg_close_paren(Vec<Token>* tokens, Token close_paren) Option<Token> {
+  if !token_is_symbol(close_paren, ')') {
+    ret .None;
+  }
+  let lparen_idx = _matching_lparen(tokens, index_of_token(tokens, close_paren));
+  if lparen_idx.is_none() {
+    ret .None;
+  }
+  let before_lparen = token_before(tokens, lparen_idx.unwrap());
+  if before_lparen.is_none() || !token_is_operator(before_lparen.unwrap(), "?!") {
+    ret .None;
+  }
+  ret before_lparen;
+}
+
 // `detail` (a rendered "name(args) RetType" signature) with only the
 // return type kept, generics and pointer star intact: everything
 // after the param list's own closing paren (`_signature_params_close`).
@@ -2365,7 +2390,17 @@ pub fun chain_receiver(
     }
     Token seg_tok = before_dot.unwrap();
     flag is_call = false;
-    if token_is_operator(seg_tok, "?") || token_is_operator(seg_tok, "!") {
+    // `x?!(err).field`: `seg_tok` (the token right before the dot) is
+    // `?!`'s own closing paren here, not `?!` itself - reassigned to
+    // the real operator token first, so the check just below (and the
+    // existing propagation-handling branch it guards) catches this
+    // shape exactly the same way it already catches bare `?`/`!`.
+    let qb_op = qmark_bang_arg_close_paren(tokens, seg_tok);
+    if qb_op.is_some() {
+      seg_tok = qb_op.unwrap();
+    }
+    if token_is_operator(seg_tok, "?") || token_is_operator(seg_tok, "!") ||
+      token_is_operator(seg_tok, "?!") || token_is_operator(seg_tok, "!?") {
       // `get()?.field`/`x?.field`: the propagated operand used directly
       // as this segment's own receiver, with no intermediate `let`.
       // Resolves like a plain chain ending (the same machinery a `ret
@@ -2990,11 +3025,25 @@ fun _infer_type(
   // type as the answer. Best-effort like the rest of this file: `T`
   // itself might be its own generic type, whose own args aren't tracked
   // here, so `out_args` is cleared rather than left stale.
-  if (token_is_operator(op_tok, "?") || token_is_operator(op_tok, "!")) &&
+  if (token_is_operator(op_tok, "?") || token_is_operator(op_tok, "!") ||
+    token_is_operator(op_tok, "?!") || token_is_operator(op_tok, "!?")) &&
   out_args != nil && out_args.len > 0 {
     str unwrapped = out_args.get(0);
     out_args.init(0);
     end_idx = index_of_token(tokens, op_tok);
+    // `?!`'s own error argument sits right after it - skipped before
+    // looking for whatever comes next, or a chained `.field` right
+    // after `?!(err)` would be read starting from inside `err`'s own
+    // closing paren instead of past the whole group.
+    if token_is_operator(op_tok, "?!") {
+      let arg_open = token_after(tokens, end_idx + 1);
+      if arg_open.is_some() && token_is_operator(arg_open.unwrap(), "(") {
+        let arg_close = matching_rparen(tokens, index_of_token(tokens, arg_open.unwrap()));
+        if arg_close.is_some() {
+          end_idx = arg_close.unwrap();
+        }
+      }
+    }
     let after_prop = token_after(tokens, end_idx + 1);
     if after_prop.is_none() {
       ret unwrapped;
@@ -4524,8 +4573,7 @@ fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file
   fit expr.kind {
     .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
     .Unary(u) -> {
-      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
-        u.operand != nil {
+      if u.is_left_operanded_unary && is_propagation_op(u.op) && u.operand != nil {
         ret _propagated_operand_type(tokens, program, u.operand, file, line);
       }
       ret "";
@@ -4660,8 +4708,7 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
       // plain call vs. a method call's own return type - just reading
       // the full generic detail string instead of `_bare_return_type`,
       // since `T` itself (not the outer Option/Result) is what's needed.
-      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
-        u.operand != nil {
+      if u.is_left_operanded_unary && is_propagation_op(u.op) && u.operand != nil {
         ret _propagated_operand_type(tokens, program, u.operand, file, line);
       }
       if u.has_indirection && u.operand != nil {

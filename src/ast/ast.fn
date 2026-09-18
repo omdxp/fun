@@ -362,6 +362,23 @@ pub compound UnaryNode {
   Node* operand;
   flag has_indirection;
   num indirection_depth;
+  // The error value `expr?!(err)` supplies, propagated in whatever
+  // shape the enclosing function's own return type needs when `expr`
+  // is `.None`. Only ever set when `op` is `"?!"`; every other unary
+  // (including the mirror `!?`, which needs no argument) leaves this
+  // unset.
+  Node* error_arg;
+  flag has_error_arg;
+}
+
+// True for any of the four propagation operators (`?`/`!`/`?!`/`!?`),
+// as a left-operanded (postfix) unary's own `op` - the single shared
+// predicate every consumer (typecheck, codegen, fls, the unused-
+// variable/import checker) should use instead of its own repeated
+// `equals(op, "?") || equals(op, "!")`-style check, so a future fifth
+// propagation form only needs updating here.
+pub fun is_propagation_op(str op) flag {
+  ret equals(op, "?") || equals(op, "!") || equals(op, "?!") || equals(op, "!?");
 }
 
 // A ternary conditional expression: `cond ? then_val : else_val`.
@@ -1319,7 +1336,12 @@ fun _free_node_contents(Node* n) {
       _free_asm_operands(&a.inputs);
       a.clobbers.free();
     }
-    .Unary(u) -> { node_free(u.operand); }
+    .Unary(u) -> {
+      node_free(u.operand);
+      if u.has_error_arg {
+        node_free(u.error_arg);
+      }
+    }
     .Tenary(t) -> {
       node_free(t.cond);
       node_free(t.then_val);
@@ -1717,6 +1739,9 @@ pub fun node_clone(Node n) Node {
     .Unary(u) -> {
       UnaryNode cu = u;
       cu.operand = node_clone_ptr(u.operand);
+      if u.has_error_arg {
+        cu.error_arg = node_clone_ptr(u.error_arg);
+      }
       c.kind = .Unary(cu);
     }
     .Tenary(t) -> {

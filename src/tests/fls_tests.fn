@@ -5444,6 +5444,47 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
   assert !contains(out, `"detail":"in this file"`), "expected real variants, not the unscoped word list";
 }
 
+test "a bare '.Variant' shorthand completes correctly when the fit's own subject is a '?!(err)'/'!?' propagated bare local, while the document does not parse" {
+  // `_fit_header_subject_type`'s own token-only fallback needs to walk
+  // back past `?!`'s own `(err)` argument group to recognize this
+  // shape at all - same gap as the dot-completion/hover cases above,
+  // exercised here specifically through the unparsed-document fallback
+  // path rather than the AST-driven one.
+  str src = `use std.option;
+  `use std.result;
+  `enum Color { Red, Green, Blue }
+  `fun describe(Option<Color> c) num {
+  `  fit c?!("bad") {
+  `    .
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fitpropqbunparsed.fn";
+  doc.path = "fitpropqbunparsed.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 5, 5, false);
+  assert contains(out, `"label":"Blue","kind":20`), "expected Color's own variants through the '?!(err)'-propagated bare local, token-only";
+
+  str src2 = `use std.result;
+  `use std.option;
+  `enum Color { Red, Green, Blue }
+  `fun describe(Result<Color, str> c) num {
+  `  fit c!? {
+  `    .
+  `}`;
+  Document doc2;
+  doc2.uri = "file:///fitpropbqunparsed.fn";
+  doc2.path = "fitpropbqunparsed.fn";
+  doc2.text = src2;
+  doc2.version = 1;
+
+  str out2 = completion(&reads, doc2, 5, 5, false);
+  assert contains(out2, `"label":"Blue","kind":20`), "expected Color's own variants through the '!?'-propagated bare local, token-only";
+}
+
 test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
   str src = `enum Shape {
   `  Circle(num),
@@ -6365,6 +6406,40 @@ test "hover resolves a field access chained inline onto a propagation, with no i
   assert contains(hovered, "num x"), "expected 'x' to resolve through the propagated 'get()?' to Point's own field type";
 }
 
+test "hover resolves a field access chained onto a '?!(err)'/'!?' propagation, with no intermediate 'let'" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropqb.fn";
+  doc.path = "inlinepropqb.fn";
+  doc.text = `use std.option;
+  `use std.result;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Result<num, str> {
+  `  ret .Ok(get()?!("err").x);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 25);
+  assert contains(hovered, "num x"), "expected 'x' to resolve through the '?!(err)'-propagated 'get()' to Point's own field type";
+
+  Document doc2;
+  doc2.uri = "file:///inlinepropbq.fn";
+  doc2.path = "inlinepropbq.fn";
+  doc2.text = `use std.result;
+  `use std.option;
+  `compound Point { num x; num y; }
+  `fun get() Result<Point, str> { ret .Err("no"); }
+  `fun main() Option<num> {
+  `  ret .Some(get()!?.x);
+  `}`;
+  doc2.version = 1;
+
+  str hovered2 = hover(&reads, doc2, 5, 20);
+  assert contains(hovered2, "num x"), "expected 'x' to resolve through the '!?'-propagated 'get()' to Point's own field type";
+}
+
 test "hover resolves a field access chained onto a propagation whose unwrapped type is a pointer" {
   // Regression: `chain_receiver`'s own propagation case read the
   // unwrapped generic arg's raw text directly (`Point*` for
@@ -6644,6 +6719,51 @@ test "hover on a fit destructuring binding resolves through a propagated field-a
   assert contains(hovered, "num n"), "expected the destructuring binding 'n' to resolve through the propagated field-access subject";
 }
 
+test "dot-completion offers a '?!(err)'-propagated receiver's own unwrapped-type members" {
+  // `?!(err)`'s own closing paren sits right before the dot here, not
+  // the `?!` operator itself - `_propagation_receiver_type_before`
+  // needs to walk back past the whole `(err)` group to recognize this
+  // as a propagation receiver at all, the same gap `qmark_bang_arg_
+  // close_paren` (symbols.fn) exists to close everywhere it shows up.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropcompqb.fn";
+  doc.path = "inlinepropcompqb.fn";
+  doc.text = `use std.option;
+  `use std.result;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Result<num, str> {
+  `  ret .Ok(get()?!("err").x);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 5, 25, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' through the '?!(err)'-propagated receiver";
+  assert contains(comp, `"label":"y"`), "expected every field, not just the one already written";
+}
+
+test "dot-completion offers a '!?'-propagated receiver's own unwrapped-type members" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inlinepropcompbq.fn";
+  doc.path = "inlinepropcompbq.fn";
+  doc.text = `use std.result;
+  `use std.option;
+  `compound Point { num x; num y; }
+  `fun get() Result<Point, str> { ret .Err("no"); }
+  `fun main() Option<num> {
+  `  ret .Some(get()!?.x);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 5, 20, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' through the '!?'-propagated receiver";
+  assert contains(comp, `"label":"y"`), "expected every field, not just the one already written";
+}
+
 test "dot-completion offers a propagated receiver's own unwrapped-type members, with no intermediate 'let'" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -6714,6 +6834,54 @@ test "hover on a let-bound '?' propagation shows the unwrapped type, and complet
   assert contains(comp, `"label":"x"`), "expected Point's own field 'x' to be offered";
   assert contains(comp, `"label":"y"`), "expected Point's own field 'y' to be offered";
   assert !contains(comp, `"label":"get"`), "expected filtering to Point's own members, not every name in scope";
+}
+
+test "hover on a let-bound '?!(err)'/'!?' propagation shows the unwrapped type, and completion on it is filtered" {
+  // The forward-scanning `let`-type-inference path in symbols.fn (used
+  // for hover/inlay hints on the bound name itself, distinct from the
+  // backward chain-walking path the dot-completion/chained-hover tests
+  // above exercise) needs the same `?!`/`!?` recognition, plus - for
+  // `?!` specifically - skipping its own `(err)` argument group before
+  // looking for whatever follows.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///propunwrapqb.fn";
+  doc.path = "propunwrapqb.fn";
+  doc.text = `use std.option;
+  `use std.result;
+  `compound Point { num x; num y; }
+  `fun get() Option<Point> { ret .None; }
+  `fun main() Result<Point, str> {
+  `  let p = get()?!("err");
+  `  num vx = p.x;
+  `  ret .Ok(p);
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 6);
+  assert contains(hovered, "Point p"), "expected p's own type to be Point through '?!(err)', not Option<Point>";
+
+  str comp = completion(&reads, doc, 6, 13, false);
+  assert contains(comp, `"label":"x"`), "expected Point's own field 'x' to be offered";
+  assert contains(comp, `"label":"y"`), "expected Point's own field 'y' to be offered";
+
+  Document doc2;
+  doc2.uri = "file:///propunwrapbq.fn";
+  doc2.path = "propunwrapbq.fn";
+  doc2.text = `use std.result;
+  `use std.option;
+  `compound Point { num x; num y; }
+  `fun get() Result<Point, str> { ret .Err("no"); }
+  `fun main() Option<Point> {
+  `  let p = get()!?;
+  `  num vx = p.x;
+  `  ret .Some(p);
+  `}`;
+  doc2.version = 1;
+
+  str hovered2 = hover(&reads, doc2, 5, 6);
+  assert contains(hovered2, "Point p"), "expected p's own type to be Point through '!?', not Result<Point, str>";
 }
 
 test "hover on a let-bound '?' propagation resolves a generic compound instantiation, not the bare template" {
