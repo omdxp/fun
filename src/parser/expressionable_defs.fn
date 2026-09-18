@@ -151,10 +151,14 @@ pub fun is_indirection_operator(str op) flag {
 }
 
 // True if `op` is a left-operanded (postfix) unary operator: `x++`/`x--`,
-// or the propagation operators `x?` (Option) / `x!` (Result).
+// the propagation operators `x?` (Option) / `x!` (Result), or their
+// cross-type mirrors `x?!(err)` (Option -> the enclosing function's own
+// Result/Option-of-error shape) / `x!?` (Result -> Option, discarding
+// the error).
 pub fun is_left_operanded_unary_operator(str op) flag {
-  ret equals(op, "++") || equals(op, "--") || equals(op, "?") || equals(op, "!");
-}
+  ret equals(op, "++") || equals(op, "--") || equals(op, "?") || equals(op, "!") ||
+    equals(op, "?!") || equals(op, "!?");
+  }
 
 // True if `t` is an `Operator` token that, appearing after a complete
 // primary expression, is a binary/infix operator, i.e. it would combine

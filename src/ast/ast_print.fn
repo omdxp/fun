@@ -249,6 +249,10 @@ pub fun print_node(Node* node, num depth) {
       }
       _line(depth + 1, "Operand:");
       print_node(u.operand, depth + 2);
+      if u.has_error_arg {
+        _line(depth + 1, "Error arg:");
+        print_node(u.error_arg, depth + 2);
+      }
     }
     .Tenary(t) -> {
       _line(depth + 1, "Condition:");

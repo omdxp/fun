@@ -411,6 +411,59 @@ fun combine_result(num x) Result<num, str> {
   }
   ```
 
+### Cross-type propagation: `?!`/`!?`
+
+`?`/`!` only ever propagate a matching signal: an inner `.None` becomes
+an outer `.None`, an inner `.Err(e)` becomes an outer `.Err(e)`. `?!`
+and `!?` bridge the other direction, between `Option` and `Result`:
+
+```fun
+fun find(num x) Option<num> {
+  if x > 0 { ret .Some(x); }
+  ret .None;
+}
+
+fun combine(num x) Result<num, str> {
+  num a = find(x)?!("not found");  // .None -> .Err("not found") here
+  ret .Ok(a + 1);
+}
+
+fun parse(num x) Result<num, str> {
+  if x > 0 { ret .Ok(x); }
+  ret .Err("bad");
+}
+
+fun safe_parse(num x) Option<num> {
+  num a = parse(x)!?;              // .Err(_) -> .None here, discarded
+  ret .Some(a * 2);
+}
+```
+
+- `expr?!(err)` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`;
+  `.None` returns `err` from the enclosing function immediately, wrapped
+  in whatever shape it needs - `.Err(err)` if it returns `Result<_, E>`,
+  or `.Some(err)` if it returns `Option<E>` (the error-channel
+  convention where `.Some` carries the error and `.None` means success).
+  `err` must exactly match that slot's own type, the same
+  no-conversion discipline `!` already has.
+- `expr!?` unwraps a `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(_)`
+  returns `.None` from the enclosing function immediately, discarding
+  the error entirely. The enclosing function must return `Option<...>`;
+  no relationship between its own generic argument and `E` is required,
+  since `.None` carries no payload.
+- Each operator asks for exactly what it structurally needs: `?!` takes
+  an argument because conjuring an error value from nothing isn't
+  possible; `!?` takes none because discarding one needs nothing.
+  Reading order is mnemonic: `?!` starts Option-side and ends
+  Result/error-shaped ("this is optional, missing means this error");
+  `!?` starts Result-side and ends Option-shaped ("this can fail, I
+  only care whether it worked").
+- Same rules as `?`/`!`: pure sugar for the equivalent `if`/`ret` form,
+  works anywhere an expression is legal (a `let` initializer, a call
+  argument, a chained access, a `fit` subject), and both operators are
+  their own single tokens - `expr?!(err)`/`expr!?` never collide with
+  anything else, the way a space-free `!=` folds ahead of `?`/`!`.
+
 ## Compounds & Quirks
 
 Compounds are like C structs, and can have methods via `impl`.

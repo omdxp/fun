@@ -288,11 +288,13 @@ fun _is_closing(str text) flag {
 }
 
 // True when `text` is one of the postfix (left-operanded) unary
-// operators: `x++`/`x--`, or the propagation operators `x?`/`x!`.
-// Mirrors the parser's own `is_left_operanded_unary_operator`.
+// operators: `x++`/`x--`, the propagation operators `x?`/`x!`, or their
+// cross-type mirrors `x?!(err)`/`x!?`. Mirrors the parser's own
+// `is_left_operanded_unary_operator`.
 fun _is_postfix_unary_op(str text) flag {
-  ret equals(text, "++") || equals(text, "--") || equals(text, "?") || equals(text, "!");
-}
+  ret equals(text, "++") || equals(text, "--") || equals(text, "?") || equals(text, "!") ||
+    equals(text, "?!") || equals(text, "!?");
+  }
 
 // True when `prev` reads as a complete value a postfix operator could
 // attach to directly: a literal/identifier, or a closing `)`/`]` ending
@@ -809,6 +811,12 @@ fun _needs_space_at(
         "fit"
       ) || equals(p, "assert") || equals(p, "await") || equals(p, "let");
     }
+    // `?!`'s own error-value parenthesis binds tight, the same as a
+    // call's argument list - it reads as `expr?!(err)`, not an operator
+    // applied to a separately-grouped operand.
+    if equals(p, "?!") {
+      ret false;
+    }
     if prev.type == .Operator && _operator_needs_spaces(p) {
       ret true;
     }
@@ -838,7 +846,10 @@ fun _needs_space_at(
     // '!' is ambiguous with prefix logical-NOT, resolved the same way
     // as the binary-operator-disambiguation case above: postfix only
     // when its own preceding token itself ends a value.
-    if equals(p, "?") {
+    // `?!`/`!?` are their own single, unambiguous tokens (unlike bare
+    // `!`, which shares its text with prefix logical-NOT) - always a
+    // complete value here, the same as `?`.
+    if equals(p, "?") || equals(p, "?!") || equals(p, "!?") {
       ret false;
     }
     if equals(p, "!") {
@@ -911,7 +922,8 @@ fun _is_unary_prefix(Vec<Token>* tokens, num idx, Token prev, flag has_prev) fla
   // it's resolved by looking one token further back: postfix only if
   // its own preceding token itself ends a value ('to_result(x)! * 2'
   // vs '!*x', where the first '!' has no such predecessor).
-  if equals(p, "?") || equals(p, "++") || equals(p, "--") {
+  if equals(p, "?") || equals(p, "++") || equals(p, "--") || equals(p, "?!") ||
+    equals(p, "!?") {
     ret false;
   }
   if equals(p, "!") {
@@ -2144,6 +2156,23 @@ test "a for loop's own NON-generic compound-literal iterable is not mistaken for
   `}`;
   let out = format_source(src, "t.fn").unwrap();
   assert contains(out, "for x : Point{x = 1} {"), "expected the same fix to cover a plain, non-generic compound literal too";
+}
+
+test "'?!(err)' binds its own parenthesized argument tight, like a call" {
+  str src = `fun a() num {
+  `  num v = find(4)?!("missing");
+  `  ret v;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "find(4)?!(\"missing\")"), "expected no space between '?!' and its own parenthesized argument";
+}
+
+test "'!?' keeps no space before it, and none before a chained '.field'" {
+  str src = `fun a() num {
+  `  ret half(4)!?.x;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "half(4)!?.x"), "expected '!?' to bind tight to its operand and a following field access";
 }
 
 test "an if condition ending in a compound literal is not mistaken for the if's own body block" {

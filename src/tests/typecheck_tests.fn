@@ -1615,6 +1615,110 @@ test "postfix '?' on a non-Option expression is rejected" {
   );
 }
 
+test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() Result<num, str> {
+    `  num v = half(4)?!("negative");
+    `  ret .Ok(v);
+    `}`,
+    "expected '?!(err)' to unwrap Option<num> to num, propagating a matching str error into Result<num, str>"
+  );
+}
+
+test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Some(err) into an enclosing Option (error-channel convention)" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() Option<str> {
+    `  num v = half(4)?!("negative");
+    `  ret .Some("ok");
+    `}`,
+    "expected '?!(err)' to accept propagating err as .Some(err) into an enclosing Option<str>"
+  );
+}
+
+test "'?!(err)' rejects an err value that does not match the enclosing function's own error slot" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() Result<num, str> {
+    `  num v = half(4)?!(1);
+    `  ret .Ok(v);
+    `}`,
+    "expected a num err against a Result<num, str> (needs str) to be rejected"
+  );
+}
+
+test "'?!(err)' used outside a function returning Result<...> or Option<...> is rejected" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun main() num {
+    `  num v = half(4)?!(1);
+    `  ret v;
+    `}`,
+    "expected '?!(err)' inside a plain num-returning function to be rejected"
+  );
+}
+
+test "'!?' unwraps a Result to its wrapped value, propagating .Err(_) as .None into an enclosing Option" {
+  accepts(
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Option<T> { None, Some(T) }
+    `fun half(num x) Result<num, str> {
+    `  if x < 0 { ret .Err("negative"); }
+    `  ret .Ok(x);
+    `}
+    `fun main() Option<num> {
+    `  num v = half(4)!?;
+    `  ret .Some(v);
+    `}`,
+    "expected '!?' to unwrap Result<num, str> to num, discarding the error into an enclosing Option<num>"
+  );
+}
+
+test "'!?' used outside a function returning Option<...> is rejected" {
+  rejects(
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `fun half(num x) Result<num, str> {
+    `  if x < 0 { ret .Err("negative"); }
+    `  ret .Ok(x);
+    `}
+    `fun main() Result<num, str> {
+    `  num v = half(4)!?;
+    `  ret .Ok(v);
+    `}`,
+    "expected '!?' inside a Result-returning function (not Option) to be rejected"
+  );
+}
+
+test "'!?' on a non-Result expression is rejected" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `fun main() Option<num> {
+    `  num v = 4!?;
+    `  ret .Some(v);
+    `}`,
+    "expected '!?' on a plain num to be rejected"
+  );
+}
+
 test "postfix '!' on a non-Result expression is rejected" {
   rejects(
     `fun main() num {

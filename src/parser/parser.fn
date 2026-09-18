@@ -2777,6 +2777,7 @@ impl Parser {
     u.operand = operand;
     u.has_indirection = true;
     u.indirection_depth = depth;
+    u.has_error_arg = false;
 
     Node unode = node_new(.Unary(u));
     fit star_tok {
@@ -2834,6 +2835,7 @@ impl Parser {
     u.operand = operand;
     u.has_indirection = false;
     u.indirection_depth = 0;
+    u.has_error_arg = false;
 
     Node unode = node_new(.Unary(u));
     unode.pos = unary_tok.pos;
@@ -2880,6 +2882,37 @@ impl Parser {
     u.operand = node_left;
     u.has_indirection = false;
     u.indirection_depth = 0;
+    u.has_error_arg = false;
+
+    // `expr?!(err)` is the only left-operanded unary that itself takes
+    // an argument - the error value to propagate when `expr` is
+    // `.None`, in whatever shape the enclosing function's own return
+    // type needs (`.Err(err)` or `.Some(err)`; resolved in typecheck,
+    // not here). `!?` needs no argument (`.None` carries nothing to
+    // discard), so it's left exactly like `?`/`!` already are.
+    if equals(unary_op, "?!") {
+      let lparen_err = self.state.expect_op("(");
+      if lparen_err.is_some() {
+        ret lparen_err;
+      }
+      let aerr = self.parse_expressionable_root();
+      if aerr.is_some() {
+        ret aerr;
+      }
+      let maybe_arg = self.state.node_pop();
+      if maybe_arg.is_none() {
+        self.state.err("expected an error value inside '?!(...)'");
+        ret .Some(.InvalidExpression);
+      }
+      Node* arg_ptr = malloc(sizeof(Node));
+      *arg_ptr = maybe_arg.unwrap();
+      u.error_arg = arg_ptr;
+      u.has_error_arg = true;
+      let rparen_err = self.state.expect_sym(')');
+      if rparen_err.is_some() {
+        ret rparen_err;
+      }
+    }
 
     Node unode = node_new(.Unary(u));
     unode.pos = op_pos;
@@ -5408,6 +5441,7 @@ impl Parser {
     un.operand = operand;
     un.has_indirection = false;
     un.indirection_depth = 0;
+    un.has_error_arg = false;
 
     Node node = node_new(.Unary(un));
     fit await_tok {
@@ -9293,6 +9327,57 @@ test "parse_expressionable_root parses postfix '?' and '!' propagation" {
     }
     _ -> { panic("expected a Unary node"); }
   }
+}
+
+test "parse_expressionable_root parses postfix '?!(err)' and '!?' propagation" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("a?!(1)", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a?!(1)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert equals(u.op, "?!"), "expected op '?!'";
+      assert u.is_left_operanded_unary, "expected a postfix (left-operanded) unary";
+      assert u.has_error_arg, "expected '?!' to carry its own error-value argument";
+      fit u.operand.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected operand 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit u.error_arg.kind {
+        .Number(_) -> {}
+        _ -> { panic("expected the error argument to be the parsed number literal"); }
+      }
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+
+  ParseState st2 = _state_with_declared("b!?", names);
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_expressionable_root().is_none(), "expected 'b!?' to parse";
+  let top2 = st2.nodes.get(st2.nodes.len - 1);
+  fit top2.kind {
+    .Unary(u2) -> {
+      assert equals(u2.op, "!?"), "expected op '!?'";
+      assert u2.is_left_operanded_unary, "expected a postfix (left-operanded) unary";
+      assert !u2.has_error_arg, "expected '!?' to carry no error-value argument";
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "'?!' without its own parenthesized error argument is a parse error" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("a?! 1", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_expressionable_root();
+  assert err.is_some(), "expected '?!' with no parenthesized argument to be rejected";
 }
 
 test "postfix '?'/'!' work in full expression position, not just statement-final" {

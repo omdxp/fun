@@ -86,6 +86,21 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(q_doc, span_of(t, doc.text));
         }
       }
+      // `?!`/`!?` are their own single, unambiguous tokens (unlike bare
+      // `!`, which shares its text with prefix logical-NOT), so neither
+      // needs the postfix-position check just below.
+      if equals(op_word, "?!") {
+        str qb_doc = keyword_doc("?!");
+        if !equals(qb_doc, "") {
+          ret _hover_result(qb_doc, span_of(t, doc.text));
+        }
+      }
+      if equals(op_word, "!?") {
+        str bq_doc = keyword_doc("!?");
+        if !equals(bq_doc, "") {
+          ret _hover_result(bq_doc, span_of(t, doc.text));
+        }
+      }
       // `!` is ambiguous with prefix logical-NOT; only the postfix
       // reading (immediately after a value: a name, a literal, or a
       // closing `)`/`]`) is propagation.
@@ -1613,6 +1628,24 @@ pub fun keyword_doc(str word) str {
       `.Err(e) from the enclosing function immediately (the enclosing
       `function's own error type must be exactly E); otherwise
       `evaluates to the wrapped value.`
+    );
+  }
+  if equals(word, "?!") {
+    ret _doc(
+      `expr?!(err)`,
+      `Option -> Result/Option propagation. If expr (an Option<T>) is
+      `.None, returns err from the enclosing function immediately,
+      `wrapped in whatever shape it needs: .Err(err) if it returns
+      `Result<_, E>, or .Some(err) if it returns Option<E> (err must
+      `exactly match); otherwise evaluates to the wrapped value.`
+    );
+  }
+  if equals(word, "!?") {
+    ret _doc(
+      `expr!?`,
+      `Result -> Option propagation. If expr (a Result<T, E>) is
+      `.Err(_), returns .None from the enclosing function immediately,
+      `discarding the error; otherwise evaluates to the wrapped value.`
     );
   }
   if equals(word, "nil") {

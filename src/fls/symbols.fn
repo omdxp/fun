@@ -4524,8 +4524,7 @@ fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file
   fit expr.kind {
     .Identifier(s) -> { ret type_name_of_local(tokens, program, s, file, line); }
     .Unary(u) -> {
-      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
-        u.operand != nil {
+      if u.is_left_operanded_unary && is_propagation_op(u.op) && u.operand != nil {
         ret _propagated_operand_type(tokens, program, u.operand, file, line);
       }
       ret "";
@@ -4660,8 +4659,7 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
       // plain call vs. a method call's own return type - just reading
       // the full generic detail string instead of `_bare_return_type`,
       // since `T` itself (not the outer Option/Result) is what's needed.
-      if u.is_left_operanded_unary && (equals(u.op, "?") || equals(u.op, "!")) &&
-        u.operand != nil {
+      if u.is_left_operanded_unary && is_propagation_op(u.op) && u.operand != nil {
         ret _propagated_operand_type(tokens, program, u.operand, file, line);
       }
       if u.has_indirection && u.operand != nil {

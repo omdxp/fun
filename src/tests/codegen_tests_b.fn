@@ -1224,6 +1224,83 @@ test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observe
   assert contains(out, "104 odd"), "expected the '.Ok' path unwrapped and the '.Err' path propagated";
 }
 
+test "'?!(err)' unwraps a let-bound Option and propagates err as .Err(err) into an enclosing Result" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Result<num, str> {
+  `  num v = half(x)?!("odd");
+  `  ret .Ok(v + 100);
+  `}
+  `fun main() num {
+  `  Result<num, str> a = describe(8);
+  `  Result<num, str> b = describe(7);
+  `  printf("%lld %s\n", a.unwrap(), b.unwrap_err());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_opt_to_result_let",
+    "'?!(err)' propagates err as .Err(err) into an enclosing Result"
+  );
+  assert contains(out, "104 odd"), "expected the '.Some' path unwrapped and the '.None' path propagated as .Err(err)";
+}
+
+test "'?!(err)' unwraps a let-bound Option and propagates err as .Some(err) into an enclosing Option (error-channel convention)" {
+  str src = `use std.c.io;
+  `use std.option;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  num v = half(x)?!(-1);
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  Option<num> a = describe(8);
+  `  Option<num> b = describe(7);
+  `  printf("%lld %lld\n", a.unwrap(), b.unwrap());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_opt_to_opt_let",
+    "'?!(err)' propagates err as .Some(err) into an enclosing Option"
+  );
+  assert contains(out, "104 -1"), "expected the '.Some' path unwrapped and the '.None' path propagated as .Some(err), the error-channel convention";
+}
+
+test "'!?' unwraps a let-bound Result and propagates .Err(_) as .None into an enclosing Option, discarding the error" {
+  str src = `use std.c.io;
+  `use std.result;
+  `use std.option;
+  `fun half(num x) Result<num, str> {
+  `  if x % 2 == 1 { ret .Err("odd"); }
+  `  ret .Ok(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  num v = half(x)!?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  Option<num> a = describe(8);
+  `  Option<num> b = describe(7);
+  `  printf("%lld %d\n", a.unwrap(), b.is_none());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_result_to_opt_let",
+    "'!?' propagates .Err(_) as .None, discarding the error"
+  );
+  assert contains(out, "104 1"), "expected the '.Ok' path unwrapped and the '.Err' path propagated as bare .None";
+}
+
 test "postfix '?'/'!' work fully inline, nested in a compound literal field, not just let-bound" {
   str src = `use std.c.io;
   `use std.option;
@@ -1277,6 +1354,58 @@ test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU st
     src,
     "propagation_option_msvc",
     "postfix '?' hoists a temp and guard under MSVC codegen"
+  );
+  assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted";
+  assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
+}
+
+test "'?!(err)' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Result<num, str> {
+  `  num v = half(x)?!("odd");
+  `  ret .Ok(v + 100);
+  `}
+  `fun main() num {
+  `  Result<num, str> a = describe(8);
+  `  printf("%lld\n", a.unwrap());
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "propagation_opt_to_result_msvc",
+    "'?!(err)' hoists a temp and guard under MSVC codegen"
+  );
+  assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted";
+  assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
+}
+
+test "'!?' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
+  str src = `use std.c.io;
+  `use std.result;
+  `use std.option;
+  `fun half(num x) Result<num, str> {
+  `  if x % 2 == 1 { ret .Err("odd"); }
+  `  ret .Ok(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  num v = half(x)!?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  Option<num> a = describe(8);
+  `  printf("%lld\n", a.unwrap());
+  `  ret 0;
+  `}`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "propagation_result_to_opt_msvc",
+    "'!?' hoists a temp and guard under MSVC codegen"
   );
   assert contains(out_c, "__fun_try_"), "expected a propagation temp to be hoisted";
   assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
