@@ -603,7 +603,7 @@ instantiation.
   quirk-typed parameter/variable must name that same instantiation to
   dispatch.
 - A still-generic reference to a quirk's own type parameter (`impl
-  VecIter<T> as Iterator<T>`) is a different, symbolic binding that
+  Vec<T> as Iterator<T>`) is a different, symbolic binding that
   resolves through the enclosing type's own generic instantiation
   instead of naming one concrete type.
 
@@ -785,18 +785,83 @@ fun main() {
 
 ### For
 
-- Range: `for i : 0..10 { ... }`
 - Array: `for item : arr { ... }`
-- Indexed: `for i, item :: arr { ... }` (indexable sources only, arrays
-  and `Vec`).
-- Iterator: `for item : collection { ... }`, driving any value whose type
-  implements the `Iterator` quirk (`next() Option<T>`) or exposes an
-  `iter()` returning one. Desugars to the `next()`/`Option` protocol, so
-  `Vec`, `Set`, and `Map` (keys) iterate directly.
-- Map pairs: `for k, v :: map { ... }` binds each key to `k` and its
-  value to `v`.
+- Indexed array: `for i, item :: arr { ... }`
 - While-style (condition): `for i < len { ... }`
 - Infinite loop: `for true { ... }`
+- Everything else - a range, `Vec`, `Map`, `Set`, or any user-defined
+  type - iterates through the `Iterator<T>` quirk, below.
+
+A raw C array (`num[] arr`) is the one special case: it iterates by
+direct index, since it's a primitive language construct with no quirk
+impls of its own. Every other iterable dispatches structurally through
+`Iterator<T>`.
+
+#### Iterator\<T\>
+
+```fun
+pub quirk Iterator<T> {
+  next() Option<T>;
+}
+```
+
+Any type implementing `Iterator<T>` directly works with `for` - no
+`.iter()` indirection, no wrapper type. `for x : v { ... }` checks
+whether `v`'s own type implements `Iterator<Elem>` and, if so, splices
+that type's own `next()` body directly into the loop (full inlining,
+not a per-element function call): a yielded `.Some(x)` becomes binding
+the loop variable(s) and running the loop body; `.None` ends the loop.
+
+`Range` (`for i : a..b { ... }`, needs `use std.range;`), `Vec<T>`,
+`Map<K, V>` (`Iterator<(K, V)>`, yielding key/value pairs), and `Set<T>`
+all implement `Iterator<T>` this way already; so does any type you write
+yourself:
+
+```fun
+use std.option;
+
+compound Countdown { num n; }
+
+impl Countdown as Iterator<num> {
+  pub next() Option<num> {
+    if self.n <= 0 { ret .None; }
+    self.n = self.n - 1;
+    ret .Some(self.n + 1);
+  }
+}
+
+fun main() {
+  Countdown c = Countdown{n = 3};
+  for x : c {
+    // 3, 2, 1
+  }
+}
+```
+
+**Binding forms**, driven by the iterable's own `Elem` type (`T` in
+`Iterator<T>`):
+
+- One name (`for x : it { ... }`): `x` binds to `Elem` directly. For
+  `Map`, that means the whole `(K, V)` pair.
+- Two names (`for a, b :: it { ... }`): if `Elem` is itself a 2-tuple
+  (as `Map`'s is), `a`/`b` bind to its two fields - this is how
+  `for k, v :: someMap { ... }` gets a real key and value, not a pair.
+  Otherwise, it enumerates: `a` is a running 0-based count, `b` is
+  `Elem` - the same form arrays already use.
+- Destructuring (`for (a, b) : it { ... }`): binds `Elem`'s own tuple
+  fields by position, same arity/type rules as an ordinary `let`
+  destructure. Works over any `Iterator` whose `Elem` is a tuple, not
+  just `Map`.
+
+**Reentrancy**: a `for` loop always iterates a fresh copy of the value
+it started from, never the caller's own variable - a type implementing
+`Iterator<T>` directly typically needs a cursor field of its own (like
+`Vec<T>`'s `__iter_pos`), and this copy-before-iterate rule is what lets
+two independent loops over "the same" value, or one nested inside
+another over the same value, not corrupt each other's position. Driving
+`.next()` manually (outside a `for` loop) advances the real value's own
+cursor directly, with no such protection - the same as calling any
+other mutating method.
 
 This style is common in the standard library (for example `std/string.fn`,
 `std/net.fn`, and `std/fs.fn`).

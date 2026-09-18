@@ -572,6 +572,85 @@ test "two for loops inlining the same Iterator type in one function don't collid
   assert contains(out, "22"), "expected each splice site's own hygienically-renamed locals not to collide";
 }
 
+test "a plain type's call-based next() fallback supports the two-name enumerate form" {
+  // `next()`'s own body uses `elif`, a shape `_next_body_inlinable`
+  // never accepts, forcing the call-based fallback
+  // (`emit_called_iterator_next`) rather than the inline splice - this
+  // fallback didn't support `for i, x :: it` at all before, silently
+  // emitting an undeclared `i`.
+  str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Evens { num idx; num limit; }
+  `impl Evens as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.idx >= self.limit {
+  `      ret Option.None;
+  `    } elif self.idx < self.limit {
+  `      let at = self.idx;
+  `      self.idx = self.idx + 2;
+  `      ret Option.Some(at);
+  `    }
+  `    ret Option.None;
+  `  }
+  `}
+  `fun main() num {
+  `  Evens e = Evens{idx = 0, limit = 6};
+  `  num total = 0;
+  `  for i, x :: e {
+  `    total = total + i * 100 + x;
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "call_based_enumerate",
+    "call-based fallback supports two-name enumerate"
+  );
+  // i,x pairs: (0,0) (1,2) (2,4) -> 0 + 102 + 204 = 306.
+  assert contains(out, "306"), "expected the running index to enumerate correctly through the call-based fallback";
+}
+
+test "a plain type's call-based next() fallback supports destructuring a tuple Elem" {
+  // Same reasoning as the enumerate test above, for the destructure
+  // form and a tuple-shaped `Elem` - the fallback's own `elem_dt` used
+  // to come from string-stripping `quirk_concrete_instantiation`, which
+  // never represented a tuple at all.
+  str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Pairs { num idx; num limit; }
+  `impl Pairs as Iterator<(num, num)> {
+  `  pub next() Option<(num, num)> {
+  `    if self.idx >= self.limit {
+  `      ret Option.None;
+  `    } elif self.idx < self.limit {
+  `      let at = self.idx;
+  `      self.idx = self.idx + 1;
+  `      ret Option.Some((at, at * 10));
+  `    }
+  `    ret Option.None;
+  `  }
+  `}
+  `fun main() num {
+  `  Pairs p = Pairs{idx = 0, limit = 3};
+  `  num total = 0;
+  `  for (a, b) : p {
+  `    total = total + a + b;
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(
+    src,
+    "call_based_destructure",
+    "call-based fallback supports tuple destructuring"
+  );
+  // (0+0)+(1+10)+(2+20) = 33.
+  assert contains(out, "33"), "expected the tuple Elem to destructure correctly through the call-based fallback";
+}
+
 test "for k, v :: map binds each key to its value" {
   str src = `use std.c.io;
   `use std.map;
