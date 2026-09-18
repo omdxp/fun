@@ -135,22 +135,40 @@ pub compound BindedNode {
 // ===== Warning diagnostics =====
 
 // Stable identifier for a compiler warning category, used by diagnostics and
-// by `allow`/`expect` warning-control statements.
+// by `allow`/`expect` warning-control statements. Each variant's own hover
+// text (`warning_id_doc` in src/fls/navigation.fn) says the same thing at
+// more length; keep the two in sync.
 pub enum WarningId {
+  // Returning the address of one of the function's own locals.
   ReturnLocalPtr,
+  // A fit with no catch-all that doesn't cover every value its subject
+  // can hold.
   FitNonExhaustive,
+  // A fit branch an earlier branch in the same fit already covers.
   FitUnreachableBranch,
+  // A statement written after one that always exits its scope.
   UnreachableCode,
+  // An assert whose condition is a compile-time constant.
   AssertConstant,
+  // A local or top-level const nothing reads.
   UnusedVariable,
+  // A use statement naming a module nothing in the file reads from.
   UnusedImport,
+  // A private, non-main function with a body nothing calls.
   UnusedFunction,
+  // A private compound type nothing references.
   UnusedCompound,
+  // A private type alias nothing references.
   UnusedTypeAlias,
+  // A non-void function that can reach its end without returning a value.
   MissingReturn,
+  // A WaitGroup sized for one completion, done()'d from a fork inside a loop.
   BlockingForkDeadlock,
+  // A mutable compound forked into concurrently with no synchronization.
   SharedMutableCaptureRace,
+  // An integer literal that can't fit its declared arbitrary-width type.
   IntegerLiteralOutOfRange,
+  // More blocking sends issued into a bounded channel than it can hold.
   ChannelCapacityOverflow,
 }
 
@@ -185,6 +203,81 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
     _ -> { ret .None; }
   }
+}
+
+// One resolved `warning_id_or_plural_from_string` result: which id was
+// named, and whether the spelling that named it was singular or plural.
+pub compound WarningIdRef {
+  WarningId id;
+  WarningControlScope scope;
+}
+
+// Resolves `name` (an `allow`/`expect` statement's own identifier) to a
+// real `WarningId` plus whether it was written singular (`Next` scope -
+// covers just the next matching warning) or plural (`WholeFile` scope -
+// covers every one for the rest of the file). No warning id needs its
+// plural spelling registered by hand: `name` is tried as-is first, then
+// with a trailing `es` removed (`branches` -> `branch`), then with a
+// trailing `s` removed (`imports` -> `import`) - whichever first
+// resolves to a real id wins, so an accidental prefix match (`ranges`
+// stripped of `es` -> `rang`, not a real id) falls through to the next,
+// correct candidate rather than silently failing.
+pub fun warning_id_or_plural_from_string(str name) Option<WarningIdRef> {
+  let exact = warning_id_from_string(name);
+  if exact.is_some() {
+    ret .Some(WarningIdRef{id = exact.unwrap(), scope = .Next});
+  }
+  num n = len(name);
+  if n > 2 && equals(substr(name, n - 2, 2), "es") {
+    let es_stripped = warning_id_from_string(substr(name, 0, n - 2));
+    if es_stripped.is_some() {
+      ret .Some(WarningIdRef{id = es_stripped.unwrap(), scope = .WholeFile});
+    }
+  }
+  if n > 1 && name[n - 1] == 's' {
+    let s_stripped = warning_id_from_string(substr(name, 0, n - 1));
+    if s_stripped.is_some() {
+      ret .Some(WarningIdRef{id = s_stripped.unwrap(), scope = .WholeFile});
+    }
+  }
+  ret .None;
+}
+
+test "warning_id_or_plural_from_string resolves every warning id both singular and plural" {
+  // Covers all 15 ids, including the one irregular case
+  // (`fit_unreachable_branch` -> `...branches` needs the "es" strip,
+  // not a plain "s" strip) and the one that already ends in "e"
+  // (`integer_literal_out_of_range` -> `...ranges` is a plain "s"
+  // strip, not "es" - the "es" attempt on it must fail closed and fall
+  // through rather than matching a bogus "...rang").
+  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,integer_literal_out_of_range,channel_capacity_overflow";
+  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,integer_literal_out_of_ranges,channel_capacity_overflows";
+  Vec<str> sing = split(singulars, ',');
+  Vec<str> plur = split(plurals, ',');
+  assert sing.len == plur.len, "expected a matched singular/plural pair per id";
+  num i = 0;
+  for i < sing.len {
+    str s = sing.get(i);
+    str p = plur.get(i);
+    i = i + 1;
+
+    let sref_opt = warning_id_or_plural_from_string(s);
+    assert sref_opt.is_some(), "expected the singular id to resolve";
+    let sref = sref_opt.unwrap();
+    assert sref.scope == .Next, "expected the singular id to resolve as Next scope";
+
+    let pref_opt = warning_id_or_plural_from_string(p);
+    assert pref_opt.is_some(), "expected the plural id to resolve";
+    let pref = pref_opt.unwrap();
+    assert pref.scope == .WholeFile, "expected the plural id to resolve as WholeFile scope";
+
+    assert sref.id == pref.id, "expected the singular and plural spellings to resolve to the same underlying id";
+  }
+}
+
+test "warning_id_or_plural_from_string rejects an unknown id, singular-looking or plural-looking" {
+  assert warning_id_or_plural_from_string("not_a_real_id").is_none(), "expected a bogus id to be rejected";
+  assert warning_id_or_plural_from_string("not_a_real_ids").is_none(), "expected a bogus plural-looking id to be rejected too";
 }
 
 // `id.from(str)` mutates `*self` in place on a recognized name, matching
@@ -426,10 +519,22 @@ pub compound AssertNode {
   flag has_message;
 }
 
+// Whether a `WarningCtrlNode` covers just the next matching warning, or
+// every one for the rest of the file. Decided by which spelling was
+// written at the use site (`allow unused_import, "...";` vs `allow
+// unused_imports, "...";`), not a separate flag the author sets
+// explicitly - the plural form of a warning id's own name IS the
+// whole-file request.
+pub enum WarningControlScope {
+  Next,
+  WholeFile,
+}
+
 // `allow warning_id;` or `expect warning_id;` (see WarningControlAction).
 pub compound WarningCtrlNode {
   WarningControlAction action;
   WarningId id;
+  WarningControlScope scope;
   str reason;
 }
 

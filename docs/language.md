@@ -1107,16 +1107,24 @@ behavior.
 ### Control statements
 
 - `allow <warning_id>, "reason";` suppresses the next emitted warning
-  with that ID.
-- `expect <warning_id>, "reason";` also suppresses the next warning with
-  that ID, but compilation fails if no such warning is emitted later.
+  with that ID, then stops - a later occurrence of the same ID reports
+  normally again.
+- `allow <warning_id>s, "reason";` (the plural spelling of the same ID)
+  suppresses every emitted warning with that ID for the rest of the
+  file, not just the next one.
+- `expect <warning_id>, "reason";` / `expect <warning_id>s, "reason";`
+  follow the same singular/plural split, but compilation fails if that
+  ID is never emitted at all.
 
 `allow`/`expect` are statement directives that work inside function
 bodies; `unused_variable`, `unused_import`, `unused_function`,
 `unused_compound`, and `unused_type_alias` may also be controlled at
-module scope for the next top-level declaration or import. The reason
-string is required and documents why the warning is being
-allowed/expected.
+module scope, anywhere before the imports/declarations they cover. The
+reason string is required and documents why the warning is being
+allowed/expected. No warning ID needs a plural form registered by
+hand: `unused_imports`, `unused_variables`, `fit_non_exhaustives`, and
+so on all resolve automatically from the same ID's ordinary English
+plural.
 
 ```fun
 fun bad() num* {
@@ -1132,10 +1140,19 @@ fun partial(flag x) {
   }
 }
 
+fun noisy_helper() {
+  // Every unused local in here is deliberate scaffolding, not just
+  // the first one - the plural form covers the whole function.
+  allow unused_variables, "scaffolding while wiring the real call sites";
+  num a = 1;
+  num b = 2;
+}
+
 fun main() {
   partial(true);
   num* p = bad();
   _ = p;
+  noisy_helper();
 }
 ```
 
@@ -1143,12 +1160,14 @@ See also:
 
 - examples/advanced/warning_allow.fn
 - examples/advanced/warning_expect.fn
+- examples/advanced/warning_expect_plural.fn
 - examples/advanced/return_local_ptr_allow.fn
 - examples/advanced/unused_variable_warning.fn
 - examples/advanced/unused_variable_allow.fn
 - examples/advanced/unused_variable_expect.fn
 - examples/advanced/unused_import_warning.fn
 - examples/advanced/unused_import_allow.fn
+- examples/advanced/unused_import_allow_plural.fn
 - examples/advanced/unused_import_expect.fn
 - examples/advanced/unused_function_warning.fn
 - examples/advanced/unused_function_allow.fn

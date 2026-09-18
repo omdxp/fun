@@ -147,6 +147,20 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(sizeof_doc, span_of(t, doc.text));
         }
       }
+      // A warning id right after `allow`/`expect` (`allow
+      // unused_import, "...";`) is recognized the same contextual way
+      // `fork` is: never a lexer keyword, and never a real declared
+      // symbol either, singular or plural spelling alike.
+      let ctrl_kw = token_before(&tokens, index_of_token(&tokens, t));
+      if ctrl_kw.is_some() {
+        Token ckw = ctrl_kw.unwrap();
+        if token_is_keyword(ckw, "allow") || token_is_keyword(ckw, "expect") {
+          let wref = warning_id_or_plural_from_string(token_word(t));
+          if wref.is_some() {
+            ret _hover_result(warning_id_doc(wref.unwrap().id), span_of(t, doc.text));
+          }
+        }
+      }
       // A sized integer type (`i7`, `u23`, ...) is recognized the
       // same contextual way `fork` is: never a lexer keyword, just an
       // identifier shape the parser accepts wherever a type is
@@ -1810,17 +1824,21 @@ pub fun keyword_doc(str word) str {
   }
   if equals(word, "allow") {
     ret _doc(
-      `allow unused_variable;`,
-      `Silences a specific warning for the declaration or scope it
-      `precedes, deliberately overriding the usual warning-clean
-      `requirement.`
+      `allow unused_variable, "reason";`,
+      `Silences the next occurrence of a warning. The plural spelling of
+      `the same id (allow unused_variables, "reason";) silences every
+      `occurrence for the rest of the file instead of just the next
+      `one.`
     );
   }
   if equals(word, "expect") {
     ret _doc(
-      `expect unused_variable;`,
-      `Asserts that a specific warning does fire here; a build fails if
-      `it doesn't. Used to test the compiler's own warning detection.`
+      `expect unused_variable, "reason";`,
+      `Asserts that the next occurrence of a warning does fire; a build
+      `fails if it doesn't. The plural spelling of the same id (expect
+      `unused_variables, "reason";) is met by, and absorbs, every
+      `occurrence for the rest of the file instead of just the next
+      `one.`
     );
   }
   if equals(word, "assert") {
@@ -1831,4 +1849,102 @@ pub fun keyword_doc(str word) str {
     );
   }
   ret "";
+}
+
+// Hover text for a warning id written inside an `allow`/`expect`
+// statement (`unused_import`, `fit_non_exhaustive`, ...) - what that
+// specific warning checks. Wording matches docs/language.md's own
+// Warning IDs section; keep the two in sync. `id` is the resolved
+// WarningId, already recognized whichever spelling (singular or
+// plural) the source wrote it as - the description itself doesn't
+// change based on that, only what `allow`/`expect`'s own hover text
+// says about scope.
+pub fun warning_id_doc(WarningId id) str {
+  fit id {
+    .ReturnLocalPtr -> {
+      ret `Flags a function returning the address of one of its own
+      `locals: that memory is gone once the function returns, so the
+      `pointer is immediately dangling.`
+      ;
+    }
+    .FitNonExhaustive -> {
+      ret `Flags a fit with no catch-all branch that doesn't cover
+      `every value its subject's type can hold (every enum variant,
+      `or both true and false for a flag).`
+      ;
+    }
+    .FitUnreachableBranch -> {
+      ret `Flags a fit branch whose own pattern an earlier branch in
+      `the same fit already covers, so it can never run.`
+      ;
+    }
+    .UnreachableCode -> {
+      ret `Flags a statement written after one that always exits its
+      `enclosing scope (ret/break/continue/panic), so it can never
+      `run.`
+      ;
+    }
+    .AssertConstant -> {
+      ret `Flags an assert whose condition is a compile-time constant,
+      `always true or always false regardless of runtime state.`
+      ;
+    }
+    .UnusedVariable -> {
+      ret `Flags a local or top-level const nothing ever reads. A name
+      `starting with _ is exempt, signaling the value is discarded on
+      `purpose.`
+      ;
+    }
+    .UnusedImport -> { ret `Flags a use statement naming a module nothing in the file
+      `reads from.`; }
+    .UnusedFunction -> {
+      ret `Flags a private (non-pub), non-main function with a body
+      `that nothing in the file calls.`
+      ;
+    }
+    .UnusedCompound -> {
+      ret `Flags a private (non-pub) compound type nothing in the file
+      `references.`
+      ;
+    }
+    .UnusedTypeAlias -> {
+      ret `Flags a private (non-pub) type alias nothing in the file
+      `references.`
+      ;
+    }
+    .MissingReturn -> {
+      ret `Flags a non-void function/method that can reach the end of
+      `its body without returning a value on every path. Always
+      `checked, not gated behind -warn-unused.`
+      ;
+    }
+    .BlockingForkDeadlock -> {
+      ret `Flags a WaitGroup created with a literal wait_group_new(0)
+      `(room for only one completion) that's done()'d from tasks
+      `forked inside a loop - the producer can block before any
+      `receiver drains it. Size the WaitGroup to the task count.`
+      ;
+    }
+    .SharedMutableCaptureRace -> {
+      ret `Flags a mutable compound with no internal Mutex/Channel
+      `field passed by & into a mutating async fun that's forked
+      `multiple times, so several tasks mutate the same value with no
+      `synchronization. Guard it with a Mutex, or give each task its
+      `own copy.`
+      ;
+    }
+    .IntegerLiteralOutOfRange -> {
+      ret `Flags a compile-time integer literal that can't be
+      `represented in its declared arbitrary-width integer type: wider
+      `than the type's own width, or negative into an unsigned uN.`
+      ;
+    }
+    .ChannelCapacityOverflow -> {
+      ret `Flags more blocking sends issued into a bounded channel
+      `than its capacity, with no concurrent receiver, so the producer
+      `blocks forever. Conservative: only fires when the capacity and
+      `send count are both statically known literals.`
+      ;
+    }
+  }
 }

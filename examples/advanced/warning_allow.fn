@@ -1,4 +1,4 @@
-// Demonstrates allowing one intentional warning instance.
+// Demonstrates allowing an intentional class of warnings.
 // 
 // Run:
 // fun -in .\examples\advanced\warning_allow.fn

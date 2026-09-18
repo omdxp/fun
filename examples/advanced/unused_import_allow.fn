@@ -4,7 +4,8 @@
 // fun -warn-unused -in .\examples\advanced\unused_import_allow.fn
 // 
 // Expected:
-// - No warning is emitted because allow consumes the next unused_import warning.
+// - No warning is emitted because allow suppresses the next
+// unused_import warning.
 // - Program still runs normally.
 
 allow unused_import, "placeholder import while sketching the option-based API";

@@ -565,12 +565,36 @@ fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num charac
   for k < ids.len {
     str id = ids.get(k);
     k = k + 1;
-    if !equals(prefix, "") && !starts_with(id, prefix) {
+    if equals(prefix, "") || starts_with(id, prefix) {
+      items.push(_item(id, .Constant, "warning id - next occurrence"));
+    }
+    // The plural spelling (`unused_imports`) is offered alongside the
+    // singular one, not a separately-registered id: it resolves to
+    // the exact same warning, just covering every occurrence in the
+    // rest of the file instead of only the next one. See
+    // `warning_id_or_plural_from_string`.
+    str plural = _warning_id_plural(id);
+    if !equals(prefix, "") && !starts_with(plural, prefix) {
       continue;
     }
-    items.push(_item(id, .Constant, "warning id"));
+    items.push(_item(plural, .Constant, "warning id - whole file"));
   }
   ret true;
+}
+
+// The plural spelling `warning_id_or_plural_from_string` resolves back
+// to `id` - mirrors its own "es" vs "s" preference (a name ending in a
+// sibilant-ish sound takes "es") so completion offers exactly the
+// spelling that resolver accepts, not a guess that happens to differ.
+fun _warning_id_plural(str id) str {
+  num n = len(id);
+  if n > 0 && id[n - 1] == 'e' {
+    ret format("{str}s", id);
+  }
+  if n > 0 && (id[n - 1] == 'h' || id[n - 1] == 's' || id[n - 1] == 'x') {
+    ret format("{str}es", id);
+  }
+  ret format("{str}s", id);
 }
 
 // True when `stripped` is exactly `keyword_len` characters long (the

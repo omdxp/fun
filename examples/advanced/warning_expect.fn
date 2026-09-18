@@ -8,8 +8,8 @@ use std.c.io;
 fun main() {
   flag x = true;
 
-  // This consumes the next fit_non_exhaustive warning.
-  // If the warning stops happening, compilation fails.
+  // This suppresses the next fit_non_exhaustive warning.
+  // If it doesn't happen, compilation fails.
   expect fit_non_exhaustive, "tracked intentional non-exhaustive fit";
 
   fit x {

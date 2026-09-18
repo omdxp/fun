@@ -4,7 +4,8 @@
 // fun -warn-unused -in .\examples\advanced\unused_variable_allow.fn
 // 
 // Expected:
-// - No warning is emitted because allow consumes the next unused_variable warning.
+// - No warning is emitted because allow suppresses the next
+// unused_variable warning.
 // - Program still runs normally.
 
 fun main() {
