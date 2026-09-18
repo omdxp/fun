@@ -21,6 +21,13 @@ pub compound Map<K, V> {
   num len;
   // Allocated slot capacity.
   num cap;
+  // Cursor for `impl Map<K, V> as Iterator<(K, V)>`'s own `next()`. A
+  // `for` loop always drives iteration through a fresh copy of the value
+  // it started from (never the caller's own variable), so this cursor
+  // never observably leaks across two independent loops over "the same"
+  // Map, or a loop nested inside another over the same Map.
+  // Compiler-internal, not meant to be read or written directly.
+  num __iter_pos;
 }
 
 impl Map<K, V> as Sized {
@@ -49,6 +56,7 @@ impl Map<K, V> {
     self.tomb = nil;
     self.len = 0;
     self.cap = 0;
+    self.__iter_pos = 0;
 
     if cap < 8 {
       cap = 8;
@@ -407,39 +415,23 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Returns a forward iterator over the live keys, in unspecified order.
-  // Pair the yielded keys with `get()` or `at()` to visit values.
-  pub iter_keys() MapIter<K, V> {
-    MapIter<K, V> it;
-    it.src = self;
-    it.idx = 0;
-    ret it;
-  }
-
-  // Returns the default iterator, identical to `iter_keys()`.
-  pub iter() MapIter<K, V> {
-    ret self.iter_keys();
-  }
 }
 
-// Forward iterator over a Map's live keys, produced by `Map.iter_keys()`.
-pub compound MapIter<K, V> {
-  // Map being iterated (borrowed, not owned).
-  Map<K, V>* src;
-  // Index of the next slot to examine.
-  num idx;
-}
-
-impl MapIter<K, V> as Iterator<K> {
-  // Returns the next live key, or `None` once every slot has been examined.
-  pub next() Option<K> {
-    for self.idx < self.src.cap {
-      let at = self.idx;
-      self.idx = self.idx + 1;
-      if self.src.used[at] != false && self.src.tomb[at] == false {
-        ret .Some(self.src.key_slots[at]);
+impl Map<K, V> as Iterator<(K, V)> {
+  // Returns the next live (key, value) pair, or `None` once every slot
+  // has been examined (and resets the cursor, so a value manually driven
+  // to exhaustion reads as fresh again - not load-bearing for a `for`
+  // loop, which always starts from its own copy regardless; see
+  // `Vec<T>`'s own `next()` for the same reasoning).
+  pub next() Option<(K, V)> {
+    for self.__iter_pos < self.cap {
+      let at = self.__iter_pos;
+      self.__iter_pos = self.__iter_pos + 1;
+      if self.used[at] != false && self.tomb[at] == false {
+        ret .Some((self.key_slots[at], self.value_slots[at]));
       }
     }
+    self.__iter_pos = 0;
     ret .None;
   }
 }

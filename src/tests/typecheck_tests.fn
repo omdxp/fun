@@ -1371,9 +1371,16 @@ test "printf's own %-specifiers are checked against the arguments passed, flag w
 
 test "a for loop's own two-variable form types a Map's key/value pair, not an always-num index" {
   accepts(
+    `enum Option<T> { Some(T), None }
+    `quirk Iterator<T> { next() Option<T>; }
     `compound Map<K, V> {
     `  K k;
     `  V v;
+    `}
+    `impl Map<K, V> as Iterator<(K, V)> {
+    `  pub next() Option<(K, V)> {
+    `    ret .None;
+    `  }
     `}
     `fun main() num {
     `  Map<str, num> scores;

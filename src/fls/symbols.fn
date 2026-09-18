@@ -4238,13 +4238,15 @@ fun _lookup_in_body(
 // deeper than a bare local), leaving the existing index-is-num
 // assumption alone for those.
 // The full declared-type detail string ("Vec<num> ps", "num[] arr",
-// "Map<str, num> counts") of a for-loop's own iterable expression, for
-// either a bare local (`for x : arr`) or a one-level field chain
-// (`for x : self.arr`) - the two shapes a for-loop's iterable actually
-// takes in practice. Unlike `_expr_type_name`, which deliberately
-// strips generic args for its own `fit`-subject purpose, this keeps
-// them intact: `_for_iter_item_type`/`_for_iter_map_kv` need the
-// iterable's own element/key/value types, not just its bare base name.
+// "Map<str, num> counts") of a for-loop's own iterable expression: a
+// bare local (`for x : arr`), a one-level field chain (`for x :
+// self.arr`), or a method call (`for k : self.map.keys()`, resolved
+// through the callee's own declared return type) - the shapes a
+// for-loop's iterable actually takes in practice. Unlike
+// `_expr_type_name`, which deliberately strips generic args for its
+// own `fit`-subject purpose, this keeps them intact:
+// `_for_iter_item_type`/`_for_iter_map_kv` need the iterable's own
+// element/key/value types, not just its bare base name.
 // `tokens` (real, not `nil`) is what lets a `let`-declared iterable's
 // type resolve through `_lookup_local`'s own `__let_infer__` handling,
 // instead of leaving it unresolved.
@@ -4289,6 +4291,50 @@ fun _for_iter_declared_detail(
       ret d.detail;
     }
     .Expression(fe) -> {
+      // A method-call iterable (`for k : self.map.keys()`): the
+      // callee's own receiver resolves generally, at any field-chain
+      // depth, via `_expr_type_name` (unlike this function's own field-
+      // access case just below, which only steps one level), then the
+      // method's own declared return type (generic args intact, unlike
+      // `_expr_type_name`'s own bare convention) becomes this
+      // iterable's own detail.
+      if equals(fe.op, "()") {
+        if !fe.has_left || fe.left == nil {
+          ret "";
+        }
+        fit fe.left.kind {
+          .Expression(callee) -> {
+            if !equals(callee.op, ".") || !callee.has_left || callee.left == nil ||
+              !callee.has_right || callee.right == nil {
+              ret "";
+            }
+            str recv_type = _expr_type_name(tokens, program, callee.left, file, line);
+            if equals(recv_type, "") {
+              ret "";
+            }
+            str method_name = "";
+            fit callee.right.kind {
+              .Identifier(m) -> { method_name = m; }
+              _ -> {}
+            }
+            if equals(method_name, "") {
+              ret "";
+            }
+            Vec<str> no_args;
+            no_args.init(0);
+            let m = lookup_method(program, recv_type, method_name, no_args);
+            if m.is_none() {
+              ret "";
+            }
+            str rtype = _return_type_text(m.unwrap().detail);
+            if equals(rtype, "") {
+              ret "";
+            }
+            ret format("{str} it", rtype);
+          }
+          _ -> { ret ""; }
+        }
+      }
       if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
         fe.right == nil {
         ret "";

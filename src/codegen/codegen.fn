@@ -9305,7 +9305,20 @@ impl Codegen {
         self.state.write("__auto_type");
       }
       self.state.write(" __fun_for_item = ");
+      // A tuple-literal payload (`ret .Some((k, v))`, Map's own shape)
+      // infers its own member types structurally when nothing else says
+      // otherwise, which loses a pointer-array field's own decay
+      // (`self.key_slots[at]`'s real element type, not `K*` itself) -
+      // set explicitly here from the already-resolved, already-
+      // substituted `Elem`, the same way an ordinary tuple-typed `let`
+      // or return statement already does elsewhere in this file.
+      let prev_has_tt = self.has_expected_tuple_type;
+      let prev_tt = self.expected_tuple_type;
+      self.has_expected_tuple_type = true;
+      self.expected_tuple_type = elem_dt;
       let perr = self.emit_expr(*payload);
+      self.has_expected_tuple_type = prev_has_tt;
+      self.expected_tuple_type = prev_tt;
       if perr.is_some() {
         ret perr;
       }
@@ -9373,10 +9386,125 @@ impl Codegen {
     self.state.write(" ");
     self.state.write(fi.item_name);
     self.state.write(" = ");
+    // Same reasoning as the pair/destructure branch above: a bare
+    // one-name bind can also receive a tuple-literal payload directly
+    // (`for pair : someMap` binding the whole `(K, V)` yielded by
+    // `Map<K, V>`'s own `next()`), which needs the same explicit
+    // expected-type context to infer its member types correctly.
+    let prev_has_tt2 = self.has_expected_tuple_type;
+    let prev_tt2 = self.expected_tuple_type;
+    self.has_expected_tuple_type = elem_dt.is_tuple;
+    self.expected_tuple_type = elem_dt;
     let perr = self.emit_expr(*payload);
+    self.has_expected_tuple_type = prev_has_tt2;
+    self.expected_tuple_type = prev_tt2;
     if perr.is_some() {
       ret perr;
     }
+    self.state.write(";\n");
+    let elem_name = self.resolve_type_name(elem_dt);
+    if elem_name.is_some() {
+      self.record_local_typed(
+        fi.item_name,
+        elem_name.unwrap(),
+        dtype_is_pointer(elem_dt),
+        elem_dt
+      );
+    }
+    ret .None;
+  }
+
+  // `emit_inlined_next_bind`, for a payload that's already a plain C
+  // expression (`opt_tmp.payload.Some._0`) rather than an AST `Node*` to
+  // run through `emit_expr` - used by `emit_called_iterator_next`'s
+  // call-based fallback, where the payload comes from a real `Option`
+  // value already read off a genuine function call, not a cloned-and-
+  // spliced `next()` body.
+  emit_inlined_next_bind_from_expr(
+    ForIterNode fi,
+    DataType elem_dt,
+    str idx_counter_name,
+    str payload_text
+  ) Option<CodegenErrorKind> {
+    flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
+    elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
+    if fi.item_is_destructure || pair_two_name {
+      self.state.write_indent();
+      if self.msvc_mode {
+        let ewt = self.write_type(elem_dt);
+        if ewt.is_none() {
+          self.state.write("int64_t");
+        }
+      } else {
+        self.state.write("__auto_type");
+      }
+      self.state.write(" __fun_for_item = ");
+      self.state.write(payload_text);
+      self.state.write(";\n");
+      if !elem_dt.is_tuple {
+        ret .Some(.UnsupportedNode);
+      }
+      Vec<str> names;
+      if fi.item_is_destructure {
+        names = fi.item_destructure_names;
+      } else {
+        names.init(2);
+        names.push(fi.index_name);
+        names.push(fi.item_name);
+      }
+      num fdi = 0;
+      for name : names {
+        self.state.write_indent();
+        flag wrote_fd_type = false;
+        if fdi < elem_dt.tuple_members.len {
+          if self.msvc_mode {
+            let fdwt = self.write_type(*elem_dt.tuple_members.get(fdi));
+            wrote_fd_type = fdwt.is_some();
+          }
+        }
+        if !wrote_fd_type {
+          self.state.write("__auto_type");
+        }
+        self.state.write(" ");
+        self.state.write(name);
+        self.state.write(" = __fun_for_item");
+        self.state.write(format("._{num};\n", fdi));
+        if fdi < elem_dt.tuple_members.len {
+          let fd_elem = *elem_dt.tuple_members.get(fdi);
+          let fd_resolved = self.resolve_type_name(fd_elem);
+          if fd_resolved.is_some() {
+            let fd_subst = self.resolve_type_subst(fd_elem);
+            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+          }
+        }
+        fdi = fdi + 1;
+      }
+      ret .None;
+    }
+    if fi.has_index_name {
+      self.state.write_indent();
+      self.state.write("int64_t ");
+      self.state.write(fi.index_name);
+      self.state.write(" = ");
+      self.state.write(idx_counter_name);
+      self.state.write("++;\n");
+      DataType idx_dt = dtype_new();
+      idx_dt.type_str = "num";
+      self.record_local_typed(fi.index_name, "num", false, idx_dt);
+    }
+    self.state.write_indent();
+    if self.msvc_mode {
+      let ewt = self.write_type(elem_dt);
+      if ewt.is_none() {
+        self.state.write("int64_t");
+      }
+    } else {
+      self.state.write("__auto_type");
+    }
+    self.state.write(" ");
+    self.state.write(fi.item_name);
+    self.state.write(" = ");
+    self.state.write(payload_text);
     self.state.write(";\n");
     let elem_name = self.resolve_type_name(elem_dt);
     if elem_name.is_some() {
@@ -9600,29 +9728,50 @@ impl Codegen {
     ret .None;
   }
 
-  // `Vec<T>` implements `Iterator<T>` directly on itself, but it's
-  // generic, unlike `Range`/a plain user type: locating its own `next()`
-  // template and resolving `T` needs the same instantiation lookup and
-  // `type_subst_*` context `emit_one_generic_impl_method` already sets up
-  // for an ordinary generic method call - reused here rather than
-  // duplicated, just swapped for `emit_inlined_iterator_next`'s
-  // splice-the-body-inline emission instead of a direct call.
+  // `Vec<T>`/`Map<K, V>`/`Set<T>` all implement `Iterator<Elem>` directly
+  // on themselves, but they're generic, unlike `Range`/a plain user type:
+  // locating the owning type's own `next()` template and resolving `Elem`
+  // needs the same instantiation lookup and `type_subst_*` context
+  // `emit_one_generic_impl_method` already sets up for an ordinary
+  // generic method call - reused here rather than duplicated, just
+  // swapped for `emit_inlined_iterator_next`'s splice-the-body-inline
+  // emission instead of a direct call.
+  // 
+  // `Elem` is read off the matched impl's own `quirk_arg_dtype` (its real
+  // `as Iterator<...>` argument, e.g. symbolic `T` for `Vec<T>` or a
+  // symbolic tuple `(K, V)` for `Map<K, V>`), substituted against the
+  // real instantiation's own args - NOT read positionally off the
+  // owner's own generic args (`arg_dtypes.get(0)`), which only happened
+  // to coincide with Vec's own `Elem` and is flatly wrong for Map, whose
+  // `Elem` is a tuple of BOTH its own type params, not just the first.
   // 
   // Always hoists the iterable into a fresh local copy first, identifier
-  // or not: `Vec<T>`'s own cursor (`__iter_pos`) now lives on the value
-  // itself, so a `for` loop must never mutate the caller's own variable
-  // through it - two independent loops over "the same" `Vec`, or one
-  // nested inside another over the same value, must not corrupt each
-  // other's position. A plain struct copy is cheap (a few fields, no
-  // deep copy of the backing array), and this same rule is exactly what
-  // already covered a non-identifier Vec iterable's own re-evaluation
-  // concern (`squares.keys()`) before this, just now applied uniformly.
-  // `owner_name` is `Vec<T>`'s own resolved, already-mangled instantiation
-  // name (`"Vec__num"`) - the caller resolves it however it has the
-  // iterable's type on hand (structurally, or already mangled-only, see
-  // `emit_for_iter`'s own two shapes for "this is a Vec" below), since
-  // either way leads to the same instantiation lookup here regardless.
-  emit_inlined_vec_iterator(
+  // or not: the owning type's own cursor (`__iter_pos`, or Set's own
+  // delegation through its inner Map's) now lives on the value itself,
+  // so a `for` loop must never mutate the caller's own variable through
+  // it - two independent loops over "the same" value, or one nested
+  // inside another over the same value, must not corrupt each other's
+  // position. A plain struct copy is cheap, and this same rule is
+  // exactly what already covered a non-identifier iterable's own
+  // re-evaluation concern (`squares.keys()`) before this, just now
+  // applied uniformly.
+  // 
+  // Falls back to a real (non-inlined) call to the monomorphized `next()`
+  // when its own body isn't one of the handful of control-flow shapes
+  // `_next_body_inlinable` understands (e.g. `Set<T>`'s own `next()`,
+  // which dispatches through a top-level `fit` the inlining splice
+  // doesn't recurse into) - the same honest scope boundary the plain
+  // (non-generic) user-Iterator path already falls back to, not a
+  // silent miscompile from splicing a `ret` the emitter can't actually
+  // see.
+  // 
+  // `owner_name` is the type's own resolved, already-mangled
+  // instantiation name (`"Vec__num"`, `"Map__str__num"`) - the caller
+  // resolves it however it has the iterable's type on hand (structurally,
+  // or already mangled-only, see `emit_for_iter`'s own two shapes below),
+  // since either way leads to the same instantiation lookup here
+  // regardless.
+  emit_inlined_generic_iterator(
     ForIterNode fi,
     str arr_text,
     str owner_name
@@ -9643,14 +9792,11 @@ impl Codegen {
     let arg_type_names = self.instantiation_arg_type_names.get(inst_i);
     let arg_is_pointer = self.instantiation_arg_is_pointer.get(inst_i);
     let arg_dtypes = self.instantiation_arg_dtypes.get(inst_i);
-    if arg_dtypes.len < 1 {
-      ret .Some(.UnsupportedNode);
-    }
-    DataType elem_dt = *arg_dtypes.get(0);
 
     Node* next_body = nil;
     Vec<str> tmpl_type_params;
     tmpl_type_params.init(0);
+    Option<DataType> quirk_elem_dt = .None;
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -9672,6 +9818,9 @@ impl Codegen {
                 if equals(strip_prefix(fnv.name, prefix), "next") && fnv.has_body {
                   next_body = fnv.body;
                   tmpl_type_params = i.type_params;
+                  if i.has_quirk_arg_dtype {
+                    quirk_elem_dt = .Some(*i.quirk_arg_dtype);
+                  }
                 }
               }
               _ -> {}
@@ -9681,7 +9830,7 @@ impl Codegen {
         _ -> {}
       }
     }
-    if next_body == nil {
+    if next_body == nil || quirk_elem_dt.is_none() {
       ret .Some(.UnsupportedNode);
     }
 
@@ -9713,7 +9862,14 @@ impl Codegen {
     self.type_subst_arg_dtypes = arg_dtypes;
     self.type_subst_arg_is_pointer = arg_is_pointer;
 
-    let ierr = self.emit_inlined_iterator_next(next_body, owner_name, fi, elem_dt, vtmp);
+    DataType elem_dt = self.resolve_type_subst(quirk_elem_dt.unwrap());
+
+    Option<CodegenErrorKind> ierr = .None;
+    if self._next_body_inlinable(next_body) {
+      ierr = self.emit_inlined_iterator_next(next_body, owner_name, fi, elem_dt, vtmp);
+    } else {
+      ierr = self.emit_called_iterator_next(owner_name, fi, elem_dt, vtmp);
+    }
 
     self.type_subst_param_names = prev_params;
     self.type_subst_arg_type_strs = prev_arg_names;
@@ -9724,6 +9880,107 @@ impl Codegen {
     if ierr.is_some() {
       ret ierr;
     }
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
+  }
+
+  // The honest fallback for `emit_inlined_generic_iterator` when the
+  // owning type's own `next()` body isn't one of the control-flow shapes
+  // `_next_body_inlinable` can safely splice (e.g. `Set<T>`'s own
+  // `next()`, which dispatches through a top-level `fit`): emits a real,
+  // non-inlined call to the monomorphized `next()` each pass, the same
+  // call-based shape the plain (non-generic) user-Iterator path already
+  // falls back to for the same reason.
+  emit_called_iterator_next(
+    str owner_name,
+    ForIterNode fi,
+    DataType elem_dt,
+    str arr_text
+  ) Option<CodegenErrorKind> {
+    let emit_err = self.ensure_generic_impl_method_emitted(owner_name, "next", "Iterator");
+    if emit_err.is_some() {
+      ret emit_err;
+    }
+    StringBuilder mb = string_builder_init(24);
+    mb.append(owner_name);
+    mb.append("__Iterator__next");
+    str next_mangled = mb.build();
+
+    DataType opt_dt = dtype_new();
+    opt_dt.type_str = "Option";
+    Vec<DataType*> opt_args;
+    opt_args.init(1);
+    DataType* opt_elem_ptr = malloc(sizeof(DataType));
+    *opt_elem_ptr = elem_dt;
+    opt_args.push(opt_elem_ptr);
+    opt_dt.generic_args = opt_args;
+    let opt_name_opt = self.resolve_type_name(opt_dt);
+    if opt_name_opt.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    str opt_name = opt_name_opt.unwrap();
+
+    self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+    StringBuilder ot_sb = string_builder_init(24);
+    ot_sb.append("__fun_iter_opt");
+    ot_sb.append(format_num(self.for_iter_temp_counter));
+    str opt_tmp = ot_sb.build();
+
+    // Same enumerate-form counter the inline splice path needs (see
+    // `emit_inlined_generic_iterator`'s own comment): a real local
+    // declared once outside the `for (;;)`, since a two-name non-pair
+    // form's index is a running count of yielded elements, not derivable
+    // from anything the called `next()` itself exposes.
+    flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
+    elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
+    str idx_counter_name = "";
+    if fi.has_index_name && !fi.item_is_destructure && !pair_two_name {
+      self.iter_inline_local_counter = self.iter_inline_local_counter + 1;
+      StringBuilder idxc_sb = string_builder_init(24);
+      idxc_sb.append("__fun_iter_idx");
+      idxc_sb.append(format_num(self.iter_inline_local_counter));
+      idx_counter_name = idxc_sb.build();
+      self.state.write_indent();
+      self.state.write("int64_t ");
+      self.state.write(idx_counter_name);
+      self.state.write(" = 0;\n");
+    }
+
+    self.state.write_indent();
+    self.state.write("for (;;) {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    self.state.write_indent();
+    self.state.write(opt_name);
+    self.state.write(" ");
+    self.state.write(opt_tmp);
+    self.state.write(" = ");
+    self.state.write(next_mangled);
+    self.state.write("(&");
+    self.state.write(arr_text);
+    self.state.write(");\n");
+    self.state.write_indent();
+    self.state.write("if (");
+    self.state.write(opt_tmp);
+    self.state.write(".tag == ");
+    self.state.write(opt_name);
+    self.state.write("_None) break;\n");
+
+    StringBuilder payload_sb = string_builder_init(32);
+    payload_sb.append(opt_tmp);
+    payload_sb.append(".payload.Some._0");
+    let bind_err = self.emit_inlined_next_bind_from_expr(fi, elem_dt, idx_counter_name, payload_sb.build());
+    if bind_err.is_some() {
+      ret bind_err;
+    }
+
+    self.loop_defer_marks.push(self.defer_stack.len);
+    let berr = self.emit_body(*fi.body);
+    self.loop_defer_marks.pop();
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
     self.state.write_indent();
     self.state.write("}\n");
     ret .None;
@@ -9836,45 +10093,75 @@ impl Codegen {
       _ -> { ret .Some(.UnsupportedNode); }
     }
 
-    // `Vec<T>` implements `Iterator<T>` directly (see
-    // `emit_inlined_vec_iterator`'s own doc comment) - resolved to its
-    // mangled instantiation name either structurally (`arr_dt.type_str
-    // == "Vec"` with real `generic_args`) or, when a local's own dtype
-    // only carries the already-mangled shape (a monomorphized method's
-    // return type, `"Vec__num"`, empty `generic_args`), directly from
-    // that name already being in its final form.
-    flag is_vec = false;
-    str vec_owner_name = "";
+    // `Vec<T>`/`Map<K, V>`/`Set<T>` all implement `Iterator<Elem>`
+    // directly (see `emit_inlined_generic_iterator`'s own doc comment) -
+    // resolved to the real instantiation's own mangled name either
+    // structurally (`arr_dt.type_str` naming one of them with real
+    // `generic_args`) or, when a local's own dtype only carries the
+    // already-mangled shape (a monomorphized method's return type,
+    // `"Vec__num"`, empty `generic_args`), directly from that name
+    // already being in its final form.
+    flag is_direct_iter_coll = false;
+    str direct_iter_owner_name = "";
+    Vec<str> direct_iter_base_names;
+    direct_iter_base_names.init(3);
+    direct_iter_base_names.push("Vec");
+    direct_iter_base_names.push("Map");
+    direct_iter_base_names.push("Set");
     if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
-      if equals(arr_dt.type_str, "Vec") && arr_dt.generic_args.len == 1 {
-        DataType vec_dt = dtype_new();
-        vec_dt.type_str = "Vec";
-        Vec<DataType*> vec_args;
-        vec_args.init(1);
-        DataType* velem_ptr = malloc(sizeof(DataType));
-        *velem_ptr = self.resolve_type_subst(*arr_dt.generic_args.get(0));
-        vec_args.push(velem_ptr);
-        vec_dt.generic_args = vec_args;
-        let vec_name_opt = self.resolve_type_name(vec_dt);
-        if vec_name_opt.is_some() {
-          vec_owner_name = vec_name_opt.unwrap();
-          is_vec = true;
+      for base : direct_iter_base_names {
+        num want_args = 1;
+        if equals(base, "Map") {
+          want_args = 2;
         }
-      } elif equals(arr_dt.type_str, "Vec") || starts_with(arr_dt.type_str, "Vec__") {
-        vec_owner_name = arr_dt.type_str;
-        is_vec = true;
+        if equals(arr_dt.type_str, base) && arr_dt.generic_args.len == want_args {
+          DataType coll_inst_dt = dtype_new();
+          coll_inst_dt.type_str = base;
+          Vec<DataType*> coll_inst_args;
+          coll_inst_args.init(want_args);
+          num gi = 0;
+          for gi < want_args {
+            DataType* gp = malloc(sizeof(DataType));
+            *gp = self.resolve_type_subst(*arr_dt.generic_args.get(gi));
+            coll_inst_args.push(gp);
+            gi = gi + 1;
+          }
+          coll_inst_dt.generic_args = coll_inst_args;
+          let coll_name_opt2 = self.resolve_type_name(coll_inst_dt);
+          if coll_name_opt2.is_some() {
+            direct_iter_owner_name = coll_name_opt2.unwrap();
+            is_direct_iter_coll = true;
+          }
+          break;
+        }
+        StringBuilder base_pfx_sb = string_builder_init(8);
+        base_pfx_sb.append(base);
+        base_pfx_sb.append("__");
+        str base_pfx = base_pfx_sb.build();
+        if equals(arr_dt.type_str, base) || starts_with(arr_dt.type_str, base_pfx) {
+          direct_iter_owner_name = arr_dt.type_str;
+          is_direct_iter_coll = true;
+          break;
+        }
       }
     }
-    if !is_vec && arr_type_name.is_some() {
+    if !is_direct_iter_coll && arr_type_name.is_some() {
       let found_name = arr_type_name.unwrap();
-      if equals(found_name, "Vec") || starts_with(found_name, "Vec__") {
-        vec_owner_name = found_name;
-        is_vec = true;
+      for base : direct_iter_base_names {
+        StringBuilder base_pfx2_sb = string_builder_init(8);
+        base_pfx2_sb.append(base);
+        base_pfx2_sb.append("__");
+        str base_pfx2 = base_pfx2_sb.build();
+        if equals(found_name, base) || starts_with(found_name, base_pfx2) {
+          direct_iter_owner_name = found_name;
+          is_direct_iter_coll = true;
+          break;
+        }
       }
     }
-    if is_vec {
-      ret self.emit_inlined_vec_iterator(fi, arr_text, vec_owner_name);
+    if is_direct_iter_coll {
+      ret self.emit_inlined_generic_iterator(fi, arr_text, direct_iter_owner_name);
     }
     // A sized array local (`num[] arr`, not decayed to a pointer) has no
     // `.len`/`.data` in C, so its length comes from
@@ -9896,203 +10183,19 @@ impl Codegen {
         }
       }
     }
-    // A structurally known `Set<T>` or `Map<K, V>` iterates through the
-    // `iter()`/`next()`/`Option` protocol instead of a direct index. This
-    // needs the collection's structural generic args, since a
-    // mangled-name-only type can't recover the element type needed to
-    // instantiate `SetIter<T>`/`MapIter<K, V>`/`Option<T>`, and a bare
-    // identifier receiver, since an rvalue receiver can't take `&` to
-    // call `.iter()` on it.
+    // `Set<T>`/`Map<K, V>` are caught above via `is_direct_iter_coll` -
+    // this only remains reachable for a genuinely plain, non-generic
+    // user type with its own concrete `Iterator<T>` quirk impl (`impl
+    // Counter as Iterator<num> { pub next() Option<num> { ... } }`).
     if !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
       let coll_dt = arr_dtype.unwrap();
-      flag is_set = equals(coll_dt.type_str, "Set") && coll_dt.generic_args.len == 1;
-      flag is_map = equals(coll_dt.type_str, "Map") && coll_dt.generic_args.len == 2;
-      if is_set || is_map {
-        DataType elem_key_dt = *coll_dt.generic_args.get(0);
-        DataType* elem_key_ptr = malloc(sizeof(DataType));
-        *elem_key_ptr = elem_key_dt;
-
-        DataType iter_dt = dtype_new();
-        Vec<DataType*> iter_args;
-        iter_args.init(2);
-        iter_args.push(elem_key_ptr);
-        if is_map {
-          iter_dt.type_str = "MapIter";
-          DataType val_dt = *coll_dt.generic_args.get(1);
-          DataType* val_ptr = malloc(sizeof(DataType));
-          *val_ptr = val_dt;
-          iter_args.push(val_ptr);
-        } else {
-          iter_dt.type_str = "SetIter";
-        }
-        iter_dt.generic_args = iter_args;
-
-        DataType opt_dt = dtype_new();
-        opt_dt.type_str = "Option";
-        Vec<DataType*> opt_args;
-        opt_args.init(1);
-        DataType* opt_elem_ptr = malloc(sizeof(DataType));
-        *opt_elem_ptr = elem_key_dt;
-        opt_args.push(opt_elem_ptr);
-        opt_dt.generic_args = opt_args;
-
-        let coll_name_opt = self.resolve_type_name(coll_dt);
-        let iter_name_opt = self.resolve_type_name(iter_dt);
-        let opt_name_opt = self.resolve_type_name(opt_dt);
-        if coll_name_opt.is_none() || iter_name_opt.is_none() || opt_name_opt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
-        str coll_name = coll_name_opt.unwrap();
-        str iter_name = iter_name_opt.unwrap();
-        str opt_name = opt_name_opt.unwrap();
-
-        self.ensure_generic_impl_method_emitted(coll_name, "iter", "");
-        self.ensure_generic_impl_method_emitted(iter_name, "next", "");
-        if is_map && fi.has_index_name {
-          self.ensure_generic_impl_method_emitted(coll_name, "get", "");
-        }
-
-        self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
-        StringBuilder it_tmp_sb = string_builder_init(24);
-        it_tmp_sb.append("__fun_iter_it");
-        it_tmp_sb.append(format_num(self.for_iter_temp_counter));
-        str it_tmp = it_tmp_sb.build();
-        StringBuilder opt_tmp_sb = string_builder_init(24);
-        opt_tmp_sb.append("__fun_iter_opt");
-        opt_tmp_sb.append(format_num(self.for_iter_temp_counter));
-        str opt_tmp = opt_tmp_sb.build();
-
-        self.state.write("{\n");
-        self.state.indent_level = self.state.indent_level + 1;
-        self.state.write_indent();
-        self.state.write(iter_name);
-        self.state.write(" ");
-        self.state.write(it_tmp);
-        self.state.write(" = ");
-        self.state.write(coll_name);
-        self.state.write("__iter(&");
-        self.state.write(arr_text);
-        self.state.write(");\n");
-        self.state.write_indent();
-        self.state.write("for (;;) {\n");
-        self.state.indent_level = self.state.indent_level + 1;
-        self.state.write_indent();
-        self.state.write(opt_name);
-        self.state.write(" ");
-        self.state.write(opt_tmp);
-        self.state.write(" = ");
-        self.state.write(iter_name);
-        // `SetIter<T>` and `MapIter<K, V>` declare `next` under
-        // `impl ... as Iterator<...>`, unlike the plain `iter`/`get`
-        // above. A quirked impl mangles to `owner__QuirkName__method`, so
-        // the plain `owner__method` form doesn't resolve here.
-        // Hardcoding "Iterator" is safe because this branch is scoped to
-        // Set and Map, not a general Iterator-quirk dispatch.
-        self.state.write("__Iterator__next(&");
-        self.state.write(it_tmp);
-        self.state.write(");\n");
-        self.state.write_indent();
-        self.state.write("if (");
-        self.state.write(opt_tmp);
-        self.state.write(".tag == ");
-        self.state.write(opt_name);
-        self.state.write("_None) break;\n");
-        self.state.write_indent();
-        if is_map && fi.has_index_name {
-          if self.msvc_mode {
-            let idx_wt = self.write_type(elem_key_dt);
-            if idx_wt.is_none() {
-              self.state.write("int64_t");
-            }
-          } else {
-            self.state.write("__auto_type");
-          }
-          self.state.write(" ");
-          self.state.write(fi.index_name);
-          self.state.write(" = ");
-          self.state.write(opt_tmp);
-          self.state.write(".payload.Some._0;\n");
-          self.state.write_indent();
-          let val_dt2 = *coll_dt.generic_args.get(1);
-          if self.msvc_mode {
-            let val_wt = self.write_type(val_dt2);
-            if val_wt.is_none() {
-              self.state.write("int64_t");
-            }
-          } else {
-            self.state.write("__auto_type");
-          }
-          self.state.write(" ");
-          self.state.write(fi.item_name);
-          self.state.write(" = ");
-          self.state.write(coll_name);
-          self.state.write("__get(&");
-          self.state.write(arr_text);
-          self.state.write(", ");
-          self.state.write(fi.index_name);
-          self.state.write(");\n");
-          let key_name = self.resolve_type_name(elem_key_dt);
-          if key_name.is_some() {
-            self.record_local_typed(
-              fi.index_name,
-              key_name.unwrap(),
-              dtype_is_pointer(elem_key_dt),
-              elem_key_dt
-            );
-          }
-          let val_name = self.resolve_type_name(val_dt2);
-          if val_name.is_some() {
-            self.record_local_typed(
-              fi.item_name,
-              val_name.unwrap(),
-              dtype_is_pointer(val_dt2),
-              val_dt2
-            );
-          }
-        } else {
-          if self.msvc_mode {
-            let elem_wt = self.write_type(elem_key_dt);
-            if elem_wt.is_none() {
-              self.state.write("int64_t");
-            }
-          } else {
-            self.state.write("__auto_type");
-          }
-          self.state.write(" ");
-          self.state.write(fi.item_name);
-          self.state.write(" = ");
-          self.state.write(opt_tmp);
-          self.state.write(".payload.Some._0;\n");
-          let elem_name = self.resolve_type_name(elem_key_dt);
-          if elem_name.is_some() {
-            self.record_local_typed(
-              fi.item_name,
-              elem_name.unwrap(),
-              dtype_is_pointer(elem_key_dt),
-              elem_key_dt
-            );
-          }
-        }
-        self.loop_defer_marks.push(self.defer_stack.len);
-        let berr = self.emit_body(*fi.body);
-        self.loop_defer_marks.pop();
-        if berr.is_some() {
-          ret berr;
-        }
-        self.state.indent_level = self.state.indent_level - 1;
-        self.state.write_indent();
-        self.state.write("}\n");
-        self.state.indent_level = self.state.indent_level - 1;
-        self.state.write_indent();
-        self.state.write("}\n");
-        ret .None;
-      }
-
       // A plain type with a concrete `Iterator<T>` quirk impl (`impl
       // Counter as Iterator<num> { pub next() Option<num> { ... } }`)
       // iterates by calling `.next()` on itself directly each pass, no
-      // `.iter()` indirection: unlike Set/Map, the value already IS its
-      // own iterator state.
+      // `.iter()` indirection - the value already IS its own iterator
+      // state, the same as Vec/Map/Set above, just reached through this
+      // narrower non-generic path instead of the shared
+      // `emit_inlined_generic_iterator`.
       str user_iter_elem_type = "";
       flag has_user_iter = false;
       Option<ImplNode> user_iter_impl = .None;
