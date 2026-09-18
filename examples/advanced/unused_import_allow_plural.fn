@@ -1,0 +1,20 @@
+// Demonstrates the plural spelling of a warning id: 'allow
+// unused_imports, ...;' (with an 's') covers every unused import for
+// the rest of the file, not just the next one - unlike the singular
+// 'allow unused_import, ...;' in unused_import_allow.fn, which covers
+// only the next.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_import_allow_plural.fn
+// 
+// Expected:
+// - No warning is emitted for either import, even though only one
+// allow statement was written.
+// - Program still runs normally.
+
+allow unused_imports, "both of these are placeholders while sketching the API";
+use std.option;
+use std.result;
+
+fun main() {
+}

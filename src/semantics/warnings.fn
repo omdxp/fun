@@ -75,15 +75,29 @@ compound Analysis {
   // imports, and what those files declare and read is their own
   // business, so only this one is judged.
   str file;
-  // The warnings a program asked to silence, and the ones it requires,
-  // by the name each is written as.
-  Set<str> allowed;
-  // The `expect` statement's own position, by the name it names -
-  // needed so an unmet expectation can be reported right where it
-  // was written, not just somewhere in the file.
-  Map<str, Pos> expected;
+  // The warnings a program asked to silence, by the name each is
+  // written as, with whether that `allow` covers just the next
+  // matching warning or every one for the rest of the file (see
+  // `WarningControlScope`). A `Next`-scoped entry is removed the
+  // moment it silences one warning, so a later occurrence of the same
+  // id reports normally again; a `WholeFile`-scoped entry stays.
+  Map<str, WarningControlScope> allowed;
+  // The `expect` statement's own position and scope, by the name it
+  // names - the position is kept so an unmet expectation can be
+  // reported right where it was written, not just somewhere in the
+  // file. Removed on first match the same way `allowed` is, for a
+  // `Next`-scoped entry only.
+  Map<str, ExpectEntry> expected;
   // Expectations that have been met, so an unmet one can be reported.
   Set<str> met;
+}
+
+// One `expect` statement's own tracked state: where it was written
+// (for an unmet-expectation error) and whether it covers just the next
+// matching warning or every one for the rest of the file.
+compound ExpectEntry {
+  Pos pos;
+  WarningControlScope scope;
 }
 
 fun _analysis_new() Analysis {
@@ -97,7 +111,7 @@ fun _analysis_new() Analysis {
   a.local_types.init(16);
   a.channel_element_types.init(4);
   a.waits_on_unsized_group = false;
-  a.allowed = set_init("", 8);
+  a.allowed.init(8);
   a.expected.init(8);
   a.met = set_init("", 8);
   ret a;
@@ -106,13 +120,28 @@ fun _analysis_new() Analysis {
 impl Analysis {
   // Records a finding, unless the program asked for silence. An
   // expectation counts as met whether or not it silences the message.
+  // A `Next`-scoped allow/expect is removed the moment it matches here,
+  // so only the SINGLE warning it was written for is covered - a later
+  // occurrence of the same id reports normally again. A `WholeFile`-
+  // scoped one (the plural spelling, `allow unused_imports, ...;`)
+  // stays, covering every later occurrence too.
   report(WarningId id, str message, Node* at) {
     str name = warning_id_name(id);
-    if self.expected.has(name) {
+    let exp = self.expected.at(name);
+    if exp.is_some() {
       self.met.add(name);
+      fit exp.unwrap().scope {
+        .Next -> { self.expected.remove(name); }
+        .WholeFile -> {}
+      }
       ret;
     }
-    if self.allowed.has(name) {
+    let alw = self.allowed.at(name);
+    if alw.is_some() {
+      fit alw.unwrap() {
+        .Next -> { self.allowed.remove(name); }
+        .WholeFile -> {}
+      }
       ret;
     }
     Warning w;
@@ -132,8 +161,10 @@ impl Analysis {
   control(WarningCtrlNode ctrl, Pos pos) {
     str name = warning_id_name(ctrl.id);
     fit ctrl.action {
-      .Allow -> { self.allowed.add(name); }
-      .Expect -> { self.expected.put(name, pos); }
+      .Allow -> { self.allowed.put(name, ctrl.scope); }
+      .Expect -> {
+        self.expected.put(name, ExpectEntry{pos = pos, scope = ctrl.scope});
+      }
     }
   }
 
@@ -2013,7 +2044,7 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
       err.pos.filename = "";
       let at = state.expected.at(name);
       if at.is_some() {
-        err.pos = at.unwrap();
+        err.pos = at.unwrap().pos;
         err.has_pos = true;
       }
       _free_analysis_scratch(&state);

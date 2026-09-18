@@ -6137,17 +6137,18 @@ impl Parser {
       .Sval(s) -> { id_name = s; }
       _ -> {}
     }
-    let maybe_id = warning_id_from_string(id_name);
-    if maybe_id.is_none() {
+    let maybe_ref = warning_id_or_plural_from_string(id_name);
+    if maybe_ref.is_none() {
       let msg = format(
-        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow)",
+        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow, or one of their plural forms to cover the whole file)",
         id_name
       );
       defer free(msg);
       self.state.err(msg);
       ret .Some(.InvalidIdentifier);
     }
-    WarningId warning_id = maybe_id.unwrap();
+    let id_ref = maybe_ref.unwrap();
+    WarningId warning_id = id_ref.id;
 
     if !self.has_current_function &&
       !self._warning_control_is_valid_in_module_scope(warning_id) {
@@ -6174,6 +6175,7 @@ impl Parser {
     WarningCtrlNode wc;
     wc.action = action;
     wc.id = warning_id;
+    wc.scope = id_ref.scope;
     wc.reason = reason;
 
     Node node = node_new(.StatementWarningControl(wc));
@@ -11351,7 +11353,22 @@ test "parse_warning_control parses 'allow ..., \"reason\";' at module scope" {
     .StatementWarningControl(wc) -> {
       assert wc.action == .Allow, "expected action Allow";
       assert wc.id == .UnusedVariable, "expected id UnusedVariable";
+      assert wc.scope == .Next, "expected the singular spelling to resolve as Next scope";
       assert equals(wc.reason, "kept for clarity"), "expected the reason string";
+    }
+    _ -> { panic("expected a StatementWarningControl node"); }
+  }
+}
+
+test "parse_warning_control parses the plural spelling as WholeFile scope, same underlying id" {
+  ParseState st = _state_from("allow unused_variables, \"scaffolding\";");
+  Parser p = parser_new(&st);
+  assert p.parse_warning_control(.Allow).is_none(), "expected the plural spelling to parse too";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementWarningControl(wc) -> {
+      assert wc.id == .UnusedVariable, "expected the plural spelling to resolve to the same underlying id as the singular one";
+      assert wc.scope == .WholeFile, "expected the plural spelling to resolve as WholeFile scope";
     }
     _ -> { panic("expected a StatementWarningControl node"); }
   }
@@ -11363,6 +11380,17 @@ test "parse_warning_control rejects a function-only warning id at module scope" 
   Parser p = parser_new(&st);
   let err = p.parse_warning_control(.Allow);
   assert err.is_some(), "expected an error for a function-only warning id at module scope";
+}
+
+test "parse_warning_control rejects a function-only warning id at module scope, plural spelling too" {
+  // The module-scope validity check reads off the resolved id, not the
+  // raw spelling, so the plural form of a function-only id is rejected
+  // exactly like its singular form.
+  ParseState st = _state_from("allow return_local_ptrs, \"reason\";");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_warning_control(.Allow);
+  assert err.is_some(), "expected an error for a function-only warning id's plural spelling at module scope too";
 }
 
 test "parse_warning_control parses 'expect ...' inside a function" {
@@ -11378,6 +11406,7 @@ test "parse_warning_control parses 'expect ...' inside a function" {
     .StatementWarningControl(wc) -> {
       assert wc.action == .Expect, "expected action Expect";
       assert wc.id == .FitNonExhaustive, "expected id FitNonExhaustive";
+      assert wc.scope == .Next, "expected the singular spelling to resolve as Next scope";
     }
     _ -> { panic("expected a StatementWarningControl node"); }
   }

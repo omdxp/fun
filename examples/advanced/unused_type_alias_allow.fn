@@ -4,7 +4,8 @@
 // fun -warn-unused -in .\examples\advanced\unused_type_alias_allow.fn
 // 
 // Expected:
-// - No warning is emitted because allow consumes the next unused_type_alias warning.
+// - No warning is emitted because allow suppresses the next
+// unused_type_alias warning.
 // - Program still runs normally.
 
 allow unused_type_alias, "temporary private alias during refactor";

@@ -514,6 +514,83 @@ test "hovering a stdlib import path segment resolves at every depth" {
   assert !equals(io_hover, "null"), "expected std.c.io to resolve to its own module file";
 }
 
+test "hover resolves a type reached only transitively through std.prelude's own re-export" {
+  // A file that writes only 'use std.prelude;' must still get real
+  // hover for Vec/Option/etc - the same transitively-merged-program
+  // mechanism `definition_workspace_wide`'s own doc comment describes
+  // (fls never sees a narrower, hand-rolled view of imports; it reads
+  // whatever `parse_program_with_imports` merged), just one import hop
+  // deeper than a direct 'use std.vec;' would be.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///prelude_hover.fn";
+  doc.path = "src/tests/fixtures/prelude_hover.fn";
+  doc.text = `use std.prelude;
+  `fun main() num {
+  `  Vec<num> v;
+  `  Option<num> o;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  // Hover on 'Vec' (line 2, col 2).
+  str vec_hover = hover(&reads, doc, 2, 2);
+  assert !equals(vec_hover, "null"), "expected Vec to resolve through std.prelude's own transitive re-export";
+  assert contains(vec_hover, "Vec"), "expected the hover text to actually describe Vec";
+
+  // Hover on 'Option' (line 3, col 2).
+  str opt_hover = hover(&reads, doc, 3, 2);
+  assert !equals(opt_hover, "null"), "expected Option to resolve through std.prelude's own transitive re-export";
+  assert contains(opt_hover, "Option"), "expected the hover text to actually describe Option";
+}
+
+test "hover on a warning id after allow/expect describes that warning, singular or plural spelling alike" {
+  // A warning id is never a declared symbol - like `fork`/`sizeof`,
+  // it's recognized contextually (right after `allow`/`expect`), not
+  // through the lexer's keyword table, so it needs its own hover case
+  // or it falls straight through to NO_HOVER like any other
+  // undeclared name.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///warning_id_hover.fn";
+  doc.path = "warning_id_hover.fn";
+  doc.text = `allow unused_import, "next only";
+  `use std.c.io;
+  `fun main() num {
+  `  allow unused_variables, "whole function";
+  `  num a = 1;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  // Hover on 'unused_import' (line 0, col 6) - singular spelling.
+  str sing_hover = hover(&reads, doc, 0, 6);
+  assert !equals(sing_hover, "null"), "expected the singular warning id to resolve";
+  assert contains(sing_hover, "use statement"), "expected the hover text to actually describe unused_import";
+
+  // Hover on 'unused_variables' (line 3, col 8) - plural spelling,
+  // same underlying warning, same description.
+  str plur_hover = hover(&reads, doc, 3, 8);
+  assert !equals(plur_hover, "null"), "expected the plural warning id to resolve too";
+  assert contains(plur_hover, "local or top-level const"), "expected the hover text to actually describe unused_variable regardless of which spelling named it";
+
+  // A bare identifier with the same name elsewhere (not right after
+  // allow/expect) is NOT treated as a warning id - it falls through to
+  // ordinary name resolution like anything else undeclared.
+  Document plain_doc;
+  plain_doc.uri = "file:///not_a_warning_id.fn";
+  plain_doc.path = "not_a_warning_id.fn";
+  plain_doc.text = `fun main() num {
+  `  num unused_import = 1;
+  `  ret unused_import;
+  `}`;
+  plain_doc.version = 1;
+  str plain_hover = hover(&reads, plain_doc, 1, 6);
+  assert !contains(plain_hover, "use statement"), "expected an ordinary local named the same as a warning id not to be treated as one";
+}
+
 test "compound-init literal offers only the type's own field names" {
   str src = `compound Point {
   `  num x;
@@ -2493,6 +2570,10 @@ test "completion offers a warning id for the first argument of allow/expect, fil
   assert contains(out, `"label":"unused_function"`), "expected a third matching warning id";
   assert contains(out, `"label":"unused_compound"`), "expected a fourth matching warning id";
   assert !contains(out, `"label":"fit_non_exhaustive"`), "expected a non-matching id filtered out";
+  // The plural (whole-file) spelling is offered alongside the singular
+  // one, not just the singular form.
+  assert contains(out, `"label":"unused_variables"`), "expected the plural whole-file spelling offered too";
+  assert contains(out, `"label":"unused_imports"`), "expected the plural whole-file spelling for import too";
 
   // Same for 'expect'.
   doc.text = "expect fit_non_exhaustive";

@@ -56,6 +56,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/c/net.fn**: POSIX socket bindings (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h).
 - **std/sys.fn**: Environment, process control, and randomness helpers.
 - **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
+- **std/prelude.fn**: Bundles the everyday types (`Vec`, `Option`, `Result`, `Map`, `Set`, `Range`) behind one `use std.prelude;` instead of six separate imports.
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
 - **std/runtime_backend.fn**: Shared runtime backend selector helpers (`runtime_backend_*`) with precedence: `FUN_RUNTIME_BACKEND` -> `FUN_RUNTIME_OS` -> host hints (`OS`/`OSTYPE`) -> posix fallback.
 - **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).

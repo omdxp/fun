@@ -1,0 +1,16 @@
+// A single import for the types most files reach for: Vec, Option,
+// Result, Map, Set, Range. `use std.prelude;` pulls in exactly what
+// `use std.vec; use std.option; use std.result; use std.map; use
+// std.set; use std.range;` would, one line instead of six - nothing
+// here becomes ambient, it's still one explicit `use`, just a bundled
+// one. Nothing C-interop-flavored belongs here (`std.c.io`,
+// `std.c.mem`, ...): those are reached for far less consistently, and
+// bundling them would blur what a file's own imports say it depends on.
+
+allow unused_imports, "this file exists to re-export these, not to read them itself";
+use std.vec;
+use std.option;
+use std.result;
+use std.map;
+use std.set;
+use std.range;

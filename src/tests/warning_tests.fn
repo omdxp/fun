@@ -687,3 +687,106 @@ test "an unused top-level const is noticed, a used one is not" {
     "unused constant"
   ), "expected the read top-level const not to be flagged";
 }
+
+test "a singular module-scope allow covers only the next unused-constant warning, a later one still fires" {
+  // `allow <id>, "reason";` (the singular spelling) is removed from
+  // `self.allowed` the moment it silences one warning - a module-scope
+  // allow written once, before two unused consts, covers only the
+  // first (A), leaving the second (B) reported normally.
+  str found = notice(
+    `allow unused_variable, "only A is deliberately unread";
+    `const str A = "a";
+    `const str B = "b";
+    `fun main() num {
+    `  ret 0;
+    `}`,
+    true
+  );
+  assert !contains(found, "unused constant 'A'"), "expected the allow to cover the first unused constant";
+  assert contains(found, "unused constant 'B'"), "expected a singular allow to leave a later occurrence reported, not silenced too";
+}
+
+test "a plural module-scope allow covers every unused-constant warning in the file" {
+  // `allow unused_variables, ...;` (plural) is the whole-file form:
+  // its entry in `self.allowed` is never removed, so it keeps covering
+  // every later occurrence, not just the first.
+  str found = notice(
+    `allow unused_variables, "both of these are deliberately unread";
+    `const str A = "a";
+    `const str B = "b";
+    `fun main() num {
+    `  ret 0;
+    `}`,
+    true
+  );
+  assert !contains(found, "unused constant"), "expected the plural allow to cover every later unused-constant warning in the file";
+}
+
+test "a singular statement-level allow covers only the next unused-variable warning in the function" {
+  str found = notice(
+    `fun main() num {
+    `  allow unused_variable, "only a is deliberately unread";
+    `  num a = 1;
+    `  num b = 2;
+    `  ret 0;
+    `}`,
+    true
+  );
+  assert !contains(found, "unused variable 'a'"), "expected the allow to cover the first unused local";
+  assert contains(found, "unused variable 'b'"), "expected a singular allow to leave a later occurrence reported, not silenced too";
+}
+
+test "a plural statement-level allow covers every unused-variable warning in the function" {
+  str found = notice(
+    `fun main() num {
+    `  allow unused_variables, "both of these are deliberately unread";
+    `  num a = 1;
+    `  num b = 2;
+    `  ret 0;
+    `}`,
+    true
+  );
+  assert !contains(found, "unused_variable"), "expected the plural allow to cover every unused-variable warning in the same function";
+}
+
+test "a singular expect is met by, and absorbs, only the next occurrence of that warning" {
+  str found = notice(
+    `enum S { A, B, C }
+    `fun main() num {
+    `  expect fit_non_exhaustive, "only the first fit is deliberately partial";
+    `  S s1 = .A;
+    `  fit s1 {
+    `    .A -> { ret 1; }
+    `  }
+    `  S s2 = .B;
+    `  fit s2 {
+    `    .B -> { ret 2; }
+    `  }
+    `  ret 0;
+    `}`,
+    false
+  );
+  assert !contains(found, "was not emitted"), "expected the expectation met by the first occurrence, not left unmet";
+  assert contains(found, "fit_non_exhaustive:"), "expected a singular expect to leave a later occurrence reported, not silently absorbed too";
+}
+
+test "a plural expect is met by, and absorbs, every later occurrence of that warning" {
+  str found = notice(
+    `enum S { A, B, C }
+    `fun main() num {
+    `  expect fit_non_exhaustives, "both of these fits are deliberately partial";
+    `  S s1 = .A;
+    `  fit s1 {
+    `    .A -> { ret 1; }
+    `  }
+    `  S s2 = .B;
+    `  fit s2 {
+    `    .B -> { ret 2; }
+    `  }
+    `  ret 0;
+    `}`,
+    false
+  );
+  assert !contains(found, "fit_non_exhaustive:"), "expected both non-exhaustive fits absorbed by the one plural expect";
+  assert !contains(found, "was not emitted"), "expected the expectation met, not left unmet";
+}

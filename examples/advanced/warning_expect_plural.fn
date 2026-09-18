@@ -1,0 +1,24 @@
+// Demonstrates the plural spelling of a warning id: 'expect
+// fit_non_exhaustives, ...;' (with an 's') is met by, and absorbs,
+// every fit_non_exhaustive warning for the rest of the file - unlike
+// the singular 'expect fit_non_exhaustive, ...;' in warning_expect.fn,
+// which is met by, and absorbs, only the next one.
+// 
+// Run:
+// fun -in .\examples\advanced\warning_expect_plural.fn
+
+use std.c.io;
+
+fun main() {
+  flag x = true;
+  flag y = false;
+
+  expect fit_non_exhaustives, "both of these fits are deliberately partial";
+
+  fit x {
+    true -> { printf("x handled\n"); }
+  }
+  fit y {
+    true -> { printf("y handled\n"); }
+  }
+}

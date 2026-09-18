@@ -4,7 +4,7 @@
 // fun -warn-unused -in .\examples\advanced\unused_type_alias_expect.fn
 // 
 // Expected:
-// - No warning is emitted because expect consumes the next unused_type_alias warning.
+// - No warning is emitted because expect suppresses the next unused_type_alias warning.
 // - Compilation fails if the warning stops being emitted.
 
 expect unused_type_alias, "tracked private alias pending external use";

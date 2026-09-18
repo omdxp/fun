@@ -418,3 +418,40 @@ test "to_octal formats a value in octal, zero-padded to width" {
   assert equals(to_octal(0, 2), "00"), "expected zero itself padded";
   assert equals(to_octal(-1, 3), ""), "expected a negative value to be unsupported";
 }
+
+test "std.prelude bundles Vec, Option, Result, Map, Set, and Range through one import" {
+  str src = `use std.prelude;
+  `use std.c.io;
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(0);
+  `  v.push(1);
+  `  v.push(2);
+  `  Option<num> o = .Some(5);
+  `  fit o {
+  `    .Some(x) -> { printf("opt=%lld\n", x); }
+  `    .None -> {}
+  `  }
+  `  Result<num, str> r = .Ok(10);
+  `  fit r {
+  `    .Ok(x) -> { printf("res=%lld\n", x); }
+  `    .Err(e) -> {}
+  `  }
+  `  Map<str, num> m;
+  `  m.init(4);
+  `  m.put("a", 1);
+  `  printf("map=%lld\n", m.get("a"));
+  `  Set<num> s = set_init(0, 4);
+  `  s.add(7);
+  `  printf("set_has=%d\n", s.has(7));
+  `  num total = 0;
+  `  for i : 0..3 {
+  `    total = total + i;
+  `  }
+  `  printf("range=%lld\n", total);
+  `  printf("vec=%lld\n", v.get(0));
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_prelude_bundle", "std.prelude bundles the everyday types");
+  assert equals(out, "opt=5\nres=10\nmap=1\nset_has=1\nrange=3\nvec=1\n"), "expected every prelude-bundled type usable directly through one import";
+}
