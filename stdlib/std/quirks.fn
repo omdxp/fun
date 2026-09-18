@@ -45,6 +45,20 @@ pub quirk Iterator<T> {
   next() Option<T>;
 }
 
+// Any type with a well-defined "next value" and "reached the end"
+// notion, self-referential the same way `Iterator<T>` is:
+// `impl MyType as Steppable<MyType> { ... }` binds the quirk's own T to
+// the implementing type itself, giving `succ()`/`reached()` a concrete
+// return/argument type with no separate `Self` keyword needed. Drives
+// `StepRange<T>` (`std.step_range`), which iterates `[start, end)` over
+// any `T: Steppable<T>` the same way `Range` already does for `num`.
+pub quirk Steppable<T> {
+  // The value one step after this one.
+  succ() T;
+  // True once this value has reached or passed `end`.
+  reached(T end) flag;
+}
+
 // Converts this value into a `T`. Fun has no reflection or derive macros, so
 // each type hand-implements the conversion.
 // 

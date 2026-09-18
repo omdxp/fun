@@ -1,0 +1,33 @@
+// Demonstrates Steppable<T> and StepRange<T>: a range over any
+// user-defined ordered type, not just num. Range (std.range, backing
+// the `a..b` syntax sugar) stays num-only; StepRange<T> is a separate
+// type for everything else, constructed directly.
+// 
+// Run:
+// fun -in .\examples\advanced\step_range.fn
+
+use std.c.io;
+use std.step_range;
+
+compound Day {
+  num n;
+}
+
+impl Day as Steppable<Day> {
+  pub succ() Day {
+    Day d;
+    d.n = self.n + 1;
+    ret d;
+  }
+  pub reached(Day end) flag {
+    ret self.n >= end.n;
+  }
+}
+
+fun main() {
+  Day start = Day{n = 1};
+  Day end = Day{n = 5};
+  for d : StepRange<Day>{start = start, end = end} {
+    printf("day %lld\n", d.n);
+  }
+}

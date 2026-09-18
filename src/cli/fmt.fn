@@ -932,6 +932,32 @@ const num MAX_LINE_WIDTH = 100;
 // The index just past the `}` that closes the block opening at `open`,
 // or `open` itself when the block contains another block or never
 // closes. Used to decide whether a short block can stay on one line.
+// The index of the `}` matching the `{` at `open`, tracking nested
+// brace pairs so a literal/block containing its own nested `{...}`
+// (a nested compound literal, a nested block) doesn't stop the scan
+// early. Returns `open` itself if unmatched (malformed input - the
+// caller treats that as "no meaningful lookahead").
+fun _matching_brace_close(Vec<Token>* tokens, num open) num {
+  num depth = 0;
+  num i = open;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == .Symbol {
+      let c = _cval_of(t);
+      if c == '{' {
+        depth = depth + 1;
+      } elif c == '}' {
+        depth = depth - 1;
+        if depth == 0 {
+          ret i;
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret open;
+}
+
 fun _simple_block_end(Vec<Token>* tokens, num open) num {
   num i = open + 1;
   num semicolons = 0;
@@ -1663,7 +1689,30 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
     flag block_context = _is_block_keyword(s.stmt_first) || equals(prev_text, ")") ||
       type_after_params;
-    flag is_literal_brace = equals(text, "{") && s.has_prev && literal_lead && !block_context;
+    // `block_context` assumes a block-keyword statement's own body is
+    // the very next brace, true for the common case (`for x : someVar
+    // { ... }`, `if cond { ... }`) but wrong when the condition/
+    // iterable expression itself ends in a compound literal (`for x :
+    // Box<num>{v = 1} { ... }`, `if x == Point{x = 1} { ... }`):
+    // `literal_lead` already correctly flags that first brace as a
+    // literal, and `block_context` would otherwise force it to read as
+    // the statement's own block instead. Told apart by lookahead: if
+    // another `{` immediately follows this brace's own matching close,
+    // THIS one is the literal, and that next one - reached in its own
+    // turn, with a `}` right before it, never `literal_lead`-shaped -
+    // becomes the real body without any special-casing needed there.
+    flag literal_lead_before_body = false;
+    if equals(text, "{") && s.has_prev && literal_lead && block_context {
+      num close_idx = _matching_brace_close(&tokens, i);
+      if close_idx > i {
+        num after = _next_significant(&tokens, close_idx + 1);
+        if after >= 0 && equals(token_text(tokens.get(after)), "{") {
+          literal_lead_before_body = true;
+        }
+      }
+    }
+    flag is_literal_brace = equals(text, "{") && s.has_prev && literal_lead &&
+      (!block_context || literal_lead_before_body);
 
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
@@ -2066,4 +2115,46 @@ test "ends the output with a single newline" {
   `}`;
   let out = format_source(src, "t.fn").unwrap();
   assert ends_with(out, "}\n"), "expected exactly one trailing newline";
+}
+
+test "a for loop's own compound-literal iterable is not mistaken for its body block" {
+  // `block_context` (any brace in a block-keyword statement reads as
+  // that statement's own body) is right for the common case, `for x :
+  // someVar { ... }`, but wrong when the iterable itself is a compound
+  // literal: `for x : Box<num>{v = 1} { ... }` has TWO braces, and the
+  // first one - immediately preceded by a generic close, `literal_lead`
+  // already says so - is the literal, not the body.
+  str src = `fun a() num {
+  `  for x : Box<num>{v = 1} {
+  `    ret x;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "for x : Box<num>{v = 1} {"), "expected the literal and the real body brace on the same line, not split apart";
+  assert !contains(out, "v = 1\n"), "expected the literal's own field kept inline, not pushed onto its own line as if it were a block statement";
+}
+
+test "a for loop's own NON-generic compound-literal iterable is not mistaken for its body block either" {
+  str src = `fun a() num {
+  `  for x : Point{x = 1} {
+  `    ret x;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "for x : Point{x = 1} {"), "expected the same fix to cover a plain, non-generic compound literal too";
+}
+
+test "an if condition ending in a compound literal is not mistaken for the if's own body block" {
+  // The same `block_context` gap applies to any block-keyword
+  // statement, not just `for` - covered generically by the same fix.
+  str src = `fun a() num {
+  `  if x == Point{x = 1} {
+  `    ret 1;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "if x == Point{x = 1} {"), "expected the literal and the if's own body brace on the same line";
 }

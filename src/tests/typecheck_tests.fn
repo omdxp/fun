@@ -926,6 +926,51 @@ test "a mixed bound list accepts both a concrete type and a quirk implementor" {
   );
 }
 
+test "a bound naming a generic quirk's own self-referential instantiation accepts a real implementor" {
+  // `T: Steppable<T>` renders its own bound text as the literal,
+  // unsubstituted "Steppable<T>" at the point the bound is declared -
+  // `implements_quirk` only ever keys its registry on a quirk's bare
+  // name ("Steppable"), so this needs the bound's own `<...>` suffix
+  // stripped before the membership lookup, or a real implementor
+  // (Counter here) is wrongly rejected no matter what. Also covers the
+  // simpler, non-self-referential case (`T: To<num>`) the same way,
+  // since the fix strips any bound's generic-arg suffix uniformly.
+  accepts(
+    `quirk Steppable<T> { succ() T; }
+    `compound Counter { num v; }
+    `impl Counter as Steppable<Counter> {
+    `  pub succ() Counter {
+    `    Counter c;
+    `    c.v = self.v + 1;
+    `    ret c;
+    `  }
+    `}
+    `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
+    `fun main() num {
+    `  Counter a;
+    `  a.v = 1;
+    `  let b = bump(a);
+    `  ret b.v;
+    `}`,
+    "expected a real implementor of a self-referential generic quirk bound accepted"
+  );
+}
+
+test "a bound naming a generic quirk's own instantiation still rejects a non-implementor" {
+  assert contains(
+    check(`quirk Steppable<T> { succ() T; }
+    `compound Other { num v; }
+    `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
+    `fun main() num {
+    `  Other o;
+    `  o.v = 1;
+    `  let b = bump(o);
+    `  ret b.v;
+    `}`),
+    "does not accept"
+  ), "expected a non-implementor still rejected, not accidentally accepted by the suffix-stripping fix";
+}
+
 test "a non-generic type alias typechecks through, transparently" {
   accepts(
     `als Meters = num;

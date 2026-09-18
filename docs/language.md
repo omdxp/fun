@@ -876,6 +876,53 @@ other mutating method.
 This style is common in the standard library (for example `std/string.fn`,
 `std/net.fn`, and `std/fs.fn`).
 
+#### Steppable\<T\> and StepRange\<T\>
+
+`Range` (above) is fixed to `num`, backing the `a..b` syntax sugar - that
+stays exactly as it is. For a range over any other ordered type (dates,
+a custom counter, ...), implement `Steppable<T>` and use `StepRange<T>`
+directly; there's no `..` syntax for it, only explicit construction.
+
+```fun
+pub quirk Steppable<T> {
+  succ() T;
+  reached(T end) flag;
+}
+```
+
+`Steppable<T>` is self-referential the same way `Iterator<T>` is:
+`impl MyType as Steppable<MyType>` binds the quirk's own `T` to the
+implementing type itself, so `succ()` returns a real, concrete `MyType`
+with no separate `Self` keyword needed.
+
+```fun
+use std.step_range;
+use std.c.io;
+
+compound Day { num n; }
+
+impl Day as Steppable<Day> {
+  pub succ() Day {
+    Day d;
+    d.n = self.n + 1;
+    ret d;
+  }
+  pub reached(Day end) flag { ret self.n >= end.n; }
+}
+
+fun main() {
+  Day start = Day{n = 1};
+  Day end = Day{n = 5};
+  for d : StepRange<Day>{start = start, end = end} {
+    printf("day %lld\n", d.n); // day 1, day 2, day 3, day 4
+  }
+}
+```
+
+`StepRange<T: Steppable<T>>` implements `Iterator<T>` the same way `Range`
+does, so every binding form and the reentrancy guarantee above apply to
+it unchanged.
+
 ### Fit (pattern matching)
 
 ```fun

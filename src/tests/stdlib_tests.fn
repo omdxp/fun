@@ -455,3 +455,34 @@ test "std.prelude bundles Vec, Option, Result, Map, Set, and Range through one i
   let out = run_source(src, "sl_prelude_bundle", "std.prelude bundles the everyday types");
   assert equals(out, "opt=5\nres=10\nmap=1\nset_has=1\nrange=3\nvec=1\n"), "expected every prelude-bundled type usable directly through one import";
 }
+
+test "std.step_range iterates a user-defined Steppable type through an ordinary for loop" {
+  // The motivating case for Steppable/StepRange<T>: a plain user
+  // compound (standing in for a date, or any other ordered type) with
+  // no special compiler knowledge, iterated the same general way any
+  // Iterator<T> implementor already is - `Range` (num-only, backing
+  // the `a..b` syntax sugar) stays completely separate and untouched.
+  str src = `use std.step_range;
+  `use std.c.io;
+  `compound Day { num n; }
+  `impl Day as Steppable<Day> {
+  `  pub succ() Day {
+  `    Day d;
+  `    d.n = self.n + 1;
+  `    ret d;
+  `  }
+  `  pub reached(Day end) flag { ret self.n >= end.n; }
+  `}
+  `fun main() num {
+  `  Day start;
+  `  start.n = 1;
+  `  Day end;
+  `  end.n = 5;
+  `  for d : StepRange<Day>{start = start, end = end} {
+  `    printf("day %lld\n", d.n);
+  `  }
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_step_range_days", "for-each over a StepRange<Day>");
+  assert equals(out, "day 1\nday 2\nday 3\nday 4\n"), "expected StepRange<Day> to yield every day in [1, 5) through the for loop";
+}
