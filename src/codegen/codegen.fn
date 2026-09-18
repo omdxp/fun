@@ -4702,11 +4702,8 @@ impl Codegen {
       _ -> {}
     }
     if !resolved_operand_type {
-      let operand_chain = self.resolve_field_chain(u.operand);
-      if operand_chain.is_none() {
-        ret .Some(.UnsupportedNode);
-      }
-      operand_enum_name = operand_chain.unwrap().type_name;
+      CodegenErrorKind unsupported = .UnsupportedNode;
+      operand_enum_name = self.resolve_field_chain(u.operand)?!(unsupported).type_name;
     }
 
     self.try_call_counter = self.try_call_counter + 1;
@@ -5043,11 +5040,8 @@ impl Codegen {
             }
           }
           if !have_type_name {
-            let resolved = self.resolve_type_name(*ci.init_dtype);
-            if resolved.is_none() {
-              ret .Some(.UnsupportedNode);
-            }
-            type_name = resolved.unwrap();
+            CodegenErrorKind unsupported = .UnsupportedNode;
+            type_name = self.resolve_type_name(*ci.init_dtype)?!(unsupported);
           }
         } elif !equals(self.expected_compound_type, "") {
           type_name = self.expected_compound_type;
@@ -5128,12 +5122,9 @@ impl Codegen {
             dt.tuple_members.push(member);
           }
         }
-        let mangled = self.resolve_type_name(dt);
-        if mangled.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
+        CodegenErrorKind unsupported2 = .UnsupportedNode;
         self.state.write("(");
-        self.state.write(mangled.unwrap());
+        self.state.write(self.resolve_type_name(dt)?!(unsupported2));
         self.state.write("){");
         flag tl_first = true;
         num tl_idx = 0;
@@ -7016,11 +7007,8 @@ impl Codegen {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(.InvalidNode);
     }
-    let recv_r_opt = self.resolve_field_chain(recv_e.left);
-    if recv_r_opt.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    let recv_r = recv_r_opt.unwrap();
+    CodegenErrorKind unsupported = .UnsupportedNode;
+    let recv_r = self.resolve_field_chain(recv_e.left)?!(unsupported);
     str method_name = "";
     fit recv_e.right.kind {
       .Identifier(name) -> { method_name = name; }
@@ -7371,11 +7359,8 @@ impl Codegen {
             if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
               ret .Some(.UnsupportedNode);
             }
-            let recv_r_opt = self.resolve_field_chain(recv_e.left);
-            if recv_r_opt.is_none() {
-              ret .Some(.UnsupportedNode);
-            }
-            let recv_r = recv_r_opt.unwrap();
+            CodegenErrorKind unsupported = .UnsupportedNode;
+            let recv_r = self.resolve_field_chain(recv_e.left)?!(unsupported);
             str method_name = "";
             fit recv_e.right.kind {
               .Identifier(mname) -> { method_name = mname; }
@@ -7542,11 +7527,8 @@ impl Codegen {
     }
     if right_is_number {
       Node dot_node = node_new(.Expression(e));
-      let chain = self.resolve_field_chain(&dot_node);
-      if chain.is_none() {
-        ret .Some(.UnsupportedNode);
-      }
-      self.state.write(chain.unwrap().text);
+      CodegenErrorKind unsupported = .UnsupportedNode;
+      self.state.write(self.resolve_field_chain(&dot_node)?!(unsupported).text);
       ret .None;
     }
     str field_name = "";
@@ -8752,12 +8734,9 @@ impl Codegen {
               }
             }
           } else {
-            let wt = self.write_type(*v.var_type);
-            if wt.is_none() {
-              ret .Some(.UnsupportedNode);
-            }
             let subst_dt = self.resolve_type_subst(*v.var_type);
-            resolved_name = wt.unwrap();
+            CodegenErrorKind unsupported = .UnsupportedNode;
+            resolved_name = self.write_type(*v.var_type)?!(unsupported);
             resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
             // The array decay's pointer level is always additional to
             // whatever `write_type` wrote for `subst_dt`'s pointer depth,
@@ -9865,11 +9844,8 @@ impl Codegen {
   ) Option<CodegenErrorKind> {
     DataType owner_dt = dtype_new();
     owner_dt.type_str = owner_type;
-    let owner_name_opt = self.resolve_type_name(owner_dt);
-    if owner_name_opt.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    str owner_c_name = owner_name_opt.unwrap();
+    CodegenErrorKind unsupported = .UnsupportedNode;
+    str owner_c_name = self.resolve_type_name(owner_dt)?!(unsupported);
 
     Node* body_clone = node_clone_ptr(next_body);
 
@@ -9893,11 +9869,7 @@ impl Codegen {
     }
     self.apply_inline_next_renames(body_clone, orig_names, fresh_names);
 
-    let self_rename = self._lookup_local_rename(orig_names, fresh_names, "self");
-    if self_rename.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    str self_local = self_rename.unwrap();
+    str self_local = self._lookup_local_rename(orig_names, fresh_names, "self")?!(unsupported);
 
     self.state.write_indent();
     self.state.write(owner_c_name);
@@ -10136,11 +10108,8 @@ impl Codegen {
     *opt_elem_ptr = elem_dt;
     opt_args.push(opt_elem_ptr);
     opt_dt.generic_args = opt_args;
-    let opt_name_opt = self.resolve_type_name(opt_dt);
-    if opt_name_opt.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    str opt_name = opt_name_opt.unwrap();
+    CodegenErrorKind unsupported = .UnsupportedNode;
+    str opt_name = self.resolve_type_name(opt_dt)?!(unsupported);
 
     self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
     StringBuilder ot_sb = string_builder_init(24);
@@ -10226,14 +10195,8 @@ impl Codegen {
       }
       _ -> {}
     }
-    if ci_dtype.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    let ci_name_opt = self.resolve_type_name(ci_dtype.unwrap());
-    if ci_name_opt.is_none() {
-      ret .Some(.UnsupportedNode);
-    }
-    str ci_name = ci_name_opt.unwrap();
+    CodegenErrorKind unsupported = .UnsupportedNode;
+    str ci_name = self.resolve_type_name(ci_dtype?!(unsupported))?!(unsupported);
 
     self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
     StringBuilder ci_tmp_sb = string_builder_init(24);
@@ -10325,11 +10288,8 @@ impl Codegen {
         if !equals(e.op, ".") && !equals(e.op, "()") {
           ret .Some(.UnsupportedNode);
         }
-        let resolved = self.resolve_field_chain(fi.iterable);
-        if resolved.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
-        let r = resolved.unwrap();
+        CodegenErrorKind unsupported = .UnsupportedNode;
+        let r = self.resolve_field_chain(fi.iterable)?!(unsupported);
         arr_text = r.text;
         arr_type_name = .Some(r.type_name);
         arr_dtype = r.dtype;
@@ -10499,12 +10459,10 @@ impl Codegen {
           }
         }
 
-        let next_mangled_opt = self.lookup_impl_method(coll_dt.type_str, "next");
-        if next_mangled_opt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
+        CodegenErrorKind unsupported = .UnsupportedNode;
+        let next_mangled = self.lookup_impl_method(coll_dt.type_str, "next")?!(unsupported);
         self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
-        ret self.emit_called_iterator_next(fi, elem_dt2, arr_text, next_mangled_opt.unwrap());
+        ret self.emit_called_iterator_next(fi, elem_dt2, arr_text, next_mangled);
       }
     }
 
@@ -10874,10 +10832,8 @@ impl Codegen {
             }
             _ -> {}
           }
-          if await_rtype.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
-          let resolved_await_rtype = self.resolve_type_name(*await_rtype.unwrap());
+          CodegenErrorKind unsupported = .UnsupportedNode;
+          let resolved_await_rtype = self.resolve_type_name(*(await_rtype?!(unsupported)));
           if resolved_await_rtype.is_none() {
             ret .Some(.UnsupportedNode);
           }
@@ -10910,15 +10866,9 @@ impl Codegen {
           // GNU statement-expression and MSVC hoisted-temp-and-guard
           // paths. The propagation is evaluated exactly once this way,
           // regardless of how many branches below reference the subject.
-          let operand_chain_p = self.resolve_field_chain(u.operand);
-          if operand_chain_p.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
-          let operand_dt_opt = operand_chain_p.unwrap().dtype;
-          if operand_dt_opt.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
-          let operand_dt = operand_dt_opt.unwrap();
+          CodegenErrorKind unsupported = .UnsupportedNode;
+          let operand_chain_p = self.resolve_field_chain(u.operand)?!(unsupported);
+          let operand_dt = operand_chain_p.dtype?!(unsupported);
           if operand_dt.generic_args.len == 0 {
             ret .Some(.UnsupportedNode);
           }
@@ -10996,11 +10946,10 @@ impl Codegen {
             if generic_fit_inst.is_some() {
               resolved_rtype = self.resolve_type_name(generic_fit_inst.unwrap().rtype);
             } else {
-              let rtype = self.lookup_function_rtype(plain_fn_name);
-              if rtype.is_none() {
-                ret .Some(.UnsupportedNode);
-              }
-              resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+              CodegenErrorKind unsupported = .UnsupportedNode;
+              resolved_rtype = self.resolve_type_name(
+                *(self.lookup_function_rtype(plain_fn_name)?!(unsupported))
+              );
             }
             if resolved_rtype.is_none() {
               ret .Some(.UnsupportedNode);
@@ -11034,11 +10983,8 @@ impl Codegen {
             }
             // The receiver may be a chained field access rather than a
             // bare local, so it resolves via `resolve_field_chain`.
-            let recv_chain = self.resolve_field_chain(recv_e.left);
-            if recv_chain.is_none() {
-              ret .Some(.UnsupportedNode);
-            }
-            let owner_type_name = recv_chain.unwrap().type_name;
+            CodegenErrorKind unsupported = .UnsupportedNode;
+            let owner_type_name = self.resolve_field_chain(recv_e.left)?!(unsupported).type_name;
             str method_name = "";
             fit recv_e.right.kind {
               .Identifier(n) -> { method_name = n; }
@@ -11069,11 +11015,9 @@ impl Codegen {
             if own_rtype_dt.is_some() {
               resolved_rtype = self.resolve_type_name(own_rtype_dt.unwrap());
             } else {
-              let rtype = self.lookup_impl_method_rtype(owner_type_name, method_name);
-              if rtype.is_none() {
-                ret .Some(.UnsupportedNode);
-              }
-              resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+              resolved_rtype = self.resolve_type_name(
+                *(self.lookup_impl_method_rtype(owner_type_name, method_name)?!(unsupported))
+              );
             }
             if resolved_rtype.is_none() {
               ret .Some(.UnsupportedNode);
@@ -11101,11 +11045,8 @@ impl Codegen {
           if !equals(dot_e.op, ".") {
             ret .Some(.UnsupportedNode);
           }
-          let resolved = self.resolve_field_chain(f.exp);
-          if resolved.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
-          let r = resolved.unwrap();
+          CodegenErrorKind unsupported = .UnsupportedNode;
+          let r = self.resolve_field_chain(f.exp)?!(unsupported);
           subj_name = r.text;
           subj_type = .Some(r.type_name);
           subj_is_pointer = r.is_pointer;
@@ -11752,10 +11693,8 @@ impl Codegen {
         // pointer: `Vec<Node*>`'s `push_many(Node* src, ...)` needs
         // `Node** src`, one level for the array and one for the element.
         flag arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
-        let wt = self.write_type(*v.var_type);
-        if wt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
+        CodegenErrorKind unsupported = .UnsupportedNode;
+        let wt = self.write_type(*v.var_type)?!(unsupported);
         let param_dt = self.resolve_type_subst(*v.var_type);
         if arr_as_ptr {
           self.state.write("*");
@@ -11764,7 +11703,7 @@ impl Codegen {
         self.state.write(v.name);
         self.record_local_typed(
           v.name,
-          wt.unwrap(),
+          wt,
           dtype_is_pointer(param_dt) || arr_as_ptr,
           param_dt
         );
@@ -13030,10 +12969,8 @@ impl Codegen {
             self.state.write("__auto_type");
           }
         } else {
-          let wt = self.write_type(*v.var_type);
-          if wt.is_none() {
-            ret .Some(.UnsupportedNode);
-          }
+          CodegenErrorKind unsupported = .UnsupportedNode;
+          let wt = self.write_type(*v.var_type)?!(unsupported);
           if arr_as_ptr {
             self.state.write("*");
           }
@@ -13046,7 +12983,7 @@ impl Codegen {
           let subst_dt = self.resolve_type_subst(*v.var_type);
           self.record_global_typed(
             v.name,
-            wt.unwrap(),
+            wt,
             dtype_is_pointer(subst_dt) || arr_as_ptr,
             subst_dt
           );
