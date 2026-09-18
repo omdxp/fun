@@ -521,6 +521,18 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
       argv_args.push("/Zi");
     }
     argv_args.push(format("/Fe:{str}", exe_path));
+    // Windows defaults to a 1 MB stack reserve, which this compiler's own
+    // recursive-descent parser and codegen can exhaust while self-compiling
+    // its own large, deeply-nested source - not just under `fun test`'s
+    // accumulated sequential calls (already covered separately, in the
+    // generated test runner's own main()), but in a single ordinary `fun
+    // build`/`fun -in` compile too. Reserved for every MSVC-linked
+    // executable here, at the real link step, rather than embedded as a
+    // generated-C pragma: the latter would need adding to every compiled
+    // program's own prelude, which is what a large batch of codegen tests
+    // assert the exact literal text of.
+    argv_args.push("/link");
+    argv_args.push("/STACK:134217728");
   } else {
     argv_args.push(c_path);
     argv_args.push("-o");
@@ -664,7 +676,7 @@ fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_i
     debug_flag = " /Zi";
   }
   if !write_string(bat_path, format(
-    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\"\nexit /b %ERRORLEVEL%\n",
+    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\" /link /STACK:134217728\nexit /b %ERRORLEVEL%\n",
     vcvarsall, c_path, debug_flag, exe_path
   )) {
     writeln_to(Sink.Stderr, "could not write MSVC build wrapper");

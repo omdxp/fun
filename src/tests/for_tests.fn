@@ -81,12 +81,29 @@ test "an index-and-item loop body can call a method" {
   assert contains(out, "for"), "expected the loop to be emitted";
 }
 
-test "for Vec values transpiles via len and data" {
-  // The harness compiles a single source string without resolving imports,
-  // so the Vec shape the loop lowering keys off is declared inline here.
-  str src = `compound Vec<T> {
+test "for Vec values transpiles via inlining Vec's own next()" {
+  // The harness compiles a single source string without resolving
+  // imports, so a self-contained stand-in for Vec<T> is declared inline
+  // here, mirroring its real `impl Vec<T> as Iterator<T>` in
+  // stdlib/std/vec.fn: `emit_for_iter` dispatches on the type name "Vec"
+  // structurally, regardless of whether it came from an import.
+  str src = `enum Option<T> { Some(T), None }
+  `quirk Iterator<T> { next() Option<T>; }
+  `compound Vec<T> {
   `  T* data;
   `  num len;
+  `  num __iter_pos;
+  `}
+  `impl Vec<T> as Iterator<T> {
+  `  pub next() Option<T> {
+  `    if self.__iter_pos >= self.len {
+  `      self.__iter_pos = 0;
+  `      ret Option.None;
+  `    }
+  `    T value = self.data[self.__iter_pos];
+  `    self.__iter_pos = self.__iter_pos + 1;
+  `    ret Option.Some(value);
+  `  }
   `}
   `fun main() {
   `  Vec<str> vals;
@@ -94,9 +111,9 @@ test "for Vec values transpiles via len and data" {
   `    num n = 1;
   `  }
   `}`;
-  let out = emit_c(src, "for Vec values transpiles via len and data");
-  assert contains(out, "for (int64_t __fun_i = 0; __fun_i < vals.len; __fun_i++)"), "expected the loop bound to read len";
-  assert contains(out, "val = vals.data[__fun_i];"), "expected the value binding to read data";
+  let out = emit_c(src, "for Vec values transpiles via inlining Vec's own next()");
+  assert contains(out, "__iter_pos"), "expected the inlined next() body's own cursor field";
+  assert contains(out, "for (;;) {"), "expected the unified next()-inlining loop shape, not a direct index fast path";
 }
 
 test "for condition transpiles to while" {
