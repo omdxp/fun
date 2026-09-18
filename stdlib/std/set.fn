@@ -69,19 +69,11 @@ impl Set<T> {
   pub union(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + other.map.len + 1);
-    let ia = self.map.iter_keys();
-    for true {
-      fit ia.next() {
-        .Some(k) -> { out.add(k); }
-        .None -> { break; }
-      }
+    for k : self.map.keys() {
+      out.add(k);
     }
-    let ib = other.map.iter_keys();
-    for true {
-      fit ib.next() {
-        .Some(k) -> { out.add(k); }
-        .None -> { break; }
-      }
+    for k : other.map.keys() {
+      out.add(k);
     }
     ret out;
   }
@@ -90,15 +82,9 @@ impl Set<T> {
   pub intersection(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
-    let it = self.map.iter_keys();
-    for true {
-      fit it.next() {
-        .Some(k) -> {
-          if other.has(k) {
-            out.add(k);
-          }
-        }
-        .None -> { break; }
+    for k : self.map.keys() {
+      if other.has(k) {
+        out.add(k);
       }
     }
     ret out;
@@ -108,15 +94,9 @@ impl Set<T> {
   pub difference(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
-    let it = self.map.iter_keys();
-    for true {
-      fit it.next() {
-        .Some(k) -> {
-          if other.has(k) == false {
-            out.add(k);
-          }
-        }
-        .None -> { break; }
+    for k : self.map.keys() {
+      if other.has(k) == false {
+        out.add(k);
       }
     }
     ret out;
@@ -124,38 +104,35 @@ impl Set<T> {
 
   // True when every element of this set is also in `other`.
   pub is_subset(Set<T>* other) flag {
-    let it = self.map.iter_keys();
-    for true {
-      fit it.next() {
-        .Some(k) -> {
-          if other.has(k) == false {
-            ret false;
-          }
-        }
-        .None -> { break; }
+    for k : self.map.keys() {
+      if other.has(k) == false {
+        ret false;
       }
     }
     ret true;
   }
-
-  // Forward iterator over the set elements, in unspecified order.
-  pub iter() SetIter<T> {
-    SetIter<T> it;
-    it.inner = self.map.iter_keys();
-    ret it;
-  }
 }
 
-// Forward iterator over a Set's elements, produced by `Set.iter()`.
-pub compound SetIter<T> {
-  // Backing map key iterator.
-  MapIter<T, flag> inner;
-}
-
-impl SetIter<T> as Iterator<T> {
-  // Next element, or `None` once exhausted.
+impl Set<T> as Iterator<T> {
+  // Next element, or `None` once exhausted. Scans the backing map's own
+  // slots directly (the same tombstone-skipping scan `Map<K, V>`'s own
+  // `next()` has) rather than calling `self.map.next()`: a quirk method
+  // whose own body calls another quirk method on a field of another
+  // generic type currently miscompiles in this compiler's generic-impl-
+  // method emission (a real, separate bug - see
+  // project_set_next_nested_quirk_call_bug memory), so this composes
+  // through the field's own cursor and slot arrays instead of through
+  // its quirk method.
   pub next() Option<T> {
-    ret self.inner.next();
+    for self.map.__iter_pos < self.map.cap {
+      let at = self.map.__iter_pos;
+      self.map.__iter_pos = self.map.__iter_pos + 1;
+      if self.map.used[at] != false && self.map.tomb[at] == false {
+        ret .Some(self.map.key_slots[at]);
+      }
+    }
+    self.map.__iter_pos = 0;
+    ret .None;
   }
 }
 
@@ -187,28 +164,22 @@ impl Set<num> as Display {
     out[pos] = '{';
     pos = pos + 1;
     num written = 0;
-    let it = self.iter();
-    for true {
-      fit it.next() {
-        Option.Some(x) -> {
-          if written > 0 {
-            out[pos] = ',';
-            out[pos + 1] = ' ';
-            pos = pos + 2;
-          }
-          str cell = format_num(x);
-          num c = len(cell);
-          num k = 0;
-          for k < c {
-            out[pos + k] = cell[k];
-            k = k + 1;
-          }
-          free(cell);
-          pos = pos + c;
-          written = written + 1;
-        }
-        Option.None -> { break; }
+    for x : self.map.keys() {
+      if written > 0 {
+        out[pos] = ',';
+        out[pos + 1] = ' ';
+        pos = pos + 2;
       }
+      str cell = format_num(x);
+      num c = len(cell);
+      num k = 0;
+      for k < c {
+        out[pos + k] = cell[k];
+        k = k + 1;
+      }
+      free(cell);
+      pos = pos + c;
+      written = written + 1;
     }
     out[pos] = '}';
     out[pos + 1] = '\0';
@@ -220,18 +191,12 @@ impl Set<str> as Display {
   // Render as `{"a", "b"}` (elements are unordered).
   pub to_string() str {
     num budget = 3;
-    SetIter<str> measure = self.iter();
-    for true {
-      fit measure.next() {
-        .Some(x) -> {
-          num m = 0;
-          for x[m] != 0 {
-            m = m + 1;
-          }
-          budget = budget + m + 4;
-        }
-        .None -> { break; }
+    for x : self.map.keys() {
+      num m = 0;
+      for x[m] != 0 {
+        m = m + 1;
       }
+      budget = budget + m + 4;
     }
     str out = malloc(budget);
     if out == nil {
@@ -241,29 +206,23 @@ impl Set<str> as Display {
     out[pos] = '{';
     pos = pos + 1;
     num written = 0;
-    SetIter<str> it = self.iter();
-    for true {
-      fit it.next() {
-        .Some(x) -> {
-          if written > 0 {
-            out[pos] = ',';
-            out[pos + 1] = ' ';
-            pos = pos + 2;
-          }
-          out[pos] = '"';
-          pos = pos + 1;
-          num k = 0;
-          for x[k] != 0 {
-            out[pos + k] = x[k];
-            k = k + 1;
-          }
-          pos = pos + k;
-          out[pos] = '"';
-          pos = pos + 1;
-          written = written + 1;
-        }
-        .None -> { break; }
+    for x : self.map.keys() {
+      if written > 0 {
+        out[pos] = ',';
+        out[pos + 1] = ' ';
+        pos = pos + 2;
       }
+      out[pos] = '"';
+      pos = pos + 1;
+      num k = 0;
+      for x[k] != 0 {
+        out[pos + k] = x[k];
+        k = k + 1;
+      }
+      pos = pos + k;
+      out[pos] = '"';
+      pos = pos + 1;
+      written = written + 1;
     }
     out[pos] = '}';
     out[pos + 1] = '\0';

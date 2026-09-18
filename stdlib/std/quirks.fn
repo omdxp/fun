@@ -26,13 +26,15 @@ pub quirk Clearable {
 }
 
 // A uniform iteration protocol: `next()` yields `Some(item)` until exhausted,
-// then `None` forever. Collections expose an iterator via `iter()`; consume it
-// with a loop:
+// then `None` forever. Every type implementing `Iterator<T>` directly (Vec,
+// Map, Set, Range, and any user-defined type) works with `for` out of the
+// box - `for x : v { use(x); }` dispatches through `next()` structurally,
+// with no `.iter()` indirection needed. Driving it manually without a `for`
+// loop still works the same way any other type's own method would:
 // 
 // ```
-// let it = v.iter();
 // for true {
-//   fit it.next() {
+//   fit v.next() {
 //     Option.Some(x) -> { use(x); }
 //     Option.None -> { break; }
 //   }

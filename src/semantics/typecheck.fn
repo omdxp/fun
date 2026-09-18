@@ -2993,11 +2993,9 @@ impl Checker {
       .Iter(it) -> {
         CheckedType iterable_type = self.infer(it.iterable, env);
         // The real general resolution: does the iterable's own type
-        // directly implement `Iterator<Elem>`? Covers `Range`, and any
-        // user-defined type with its own `impl X as Iterator<T>` -
-        // `.None` for Vec/Set/Map today, which don't implement it
-        // directly yet (a later step), so those still fall through to
-        // the structural/lenient cases below unchanged.
+        // directly implement `Iterator<Elem>`? Covers `Range`, `Vec`,
+        // `Map` (yielding `(K, V)` pairs), `Set`, and any user-defined
+        // type with its own `impl X as Iterator<T>`.
         let elem_opt = self.quirk_arg_of(iterable_type, "Iterator");
         if it.item_is_destructure {
           // `for (a, b) : pairs`: the loop item is a tuple, destructured
@@ -3048,14 +3046,6 @@ impl Checker {
               env.define(name, checked_unknown());
             }
           }
-        } elif it.has_index_name && equals(iterable_type.name, "Map") &&
-          iterable_type.generic_args.len == 2 {
-          // `for key, val :: someMap`: the two-variable form names a
-          // key/value pair for a Map, not an index/item pair the way
-          // it does for a Vec/array - the map's own declared key and
-          // value types, not an always-num index.
-          env.define(it.index_name, iterable_type.generic_args.get(0));
-          env.define(it.item_name, iterable_type.generic_args.get(1));
         } elif it.has_index_name && elem_opt.is_some() {
           let elem = elem_opt.unwrap();
           if elem.is_tuple && elem.tuple_members.len == 2 {

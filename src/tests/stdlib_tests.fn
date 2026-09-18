@@ -51,6 +51,90 @@ test "std.map: put and get monomorphize on both key and value types" {
   assert contains(out, "_key_hash"), "expected a key-hash intrinsic";
 }
 
+test "for-each over a Map yields (key, value) pairs" {
+  str src = `use std.map;
+  `use std.c.io;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("a", 1);
+  `  m.put("b", 2);
+  `  num total = 0;
+  `  for pair : m {
+  `    total = total + pair.1;
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_map_iter_pair", "for-each over Map yields pairs");
+  assert equals(out, "3\n"), "expected the single-name form to bind a (K, V) pair";
+}
+
+test "for-each over a Map with the two-name form binds key and value separately" {
+  str src = `use std.map;
+  `use std.c.io;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("a", 1);
+  `  m.put("b", 2);
+  `  m.put("c", 3);
+  `  num total = 0;
+  `  for k, v :: m {
+  `    if equals(k, "b") {
+  `      total = total + v;
+  `    }
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_map_iter_kv", "for-each over Map with key/value names");
+  assert equals(out, "2\n"), "expected k/v bound separately, not a (K, V) tuple";
+}
+
+test "destructuring for-each over a Map binds (key, value) the same way as the two-name form" {
+  str src = `use std.map;
+  `use std.c.io;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("x", 10);
+  `  num total = 0;
+  `  for (k, v) : m {
+  `    if equals(k, "x") {
+  `      total = total + v;
+  `    }
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_map_iter_destructure", "destructuring for-each over Map");
+  assert equals(out, "10\n"), "expected (k, v) destructured from the Map's own pair Elem";
+}
+
+test "two independent for-each loops over the same Map value don't corrupt each other's cursor" {
+  str src = `use std.map;
+  `use std.c.io;
+  `fun main() num {
+  `  Map<str, num> m;
+  `  m.init(8);
+  `  m.put("a", 1);
+  `  m.put("b", 2);
+  `  num outer_count = 0;
+  `  for a, av :: m {
+  `    num inner_count = 0;
+  `    for b, bv :: m {
+  `      inner_count = inner_count + 1;
+  `    }
+  `    outer_count = outer_count + inner_count;
+  `  }
+  `  printf("%lld\n", outer_count);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_map_iter_reentrant", "nested for-each over the same Map");
+  assert equals(out, "4\n"), "expected the full 2x2 cross product, proving each loop iterates its own copy's cursor";
+}
+
 test "std.option: Some and None resolve against the declared type" {
   str src = `use std.option;
   `fun main() num {
@@ -123,6 +207,45 @@ test "std.set: add and has monomorphize on the element type" {
   `}`;
   let out = emit_c_with_imports(src, "sl_set", "std.set add/has");
   assert contains(out, "Set__str"), "expected the str instantiation";
+}
+
+test "for-each over a Set iterates every element" {
+  str src = `use std.set;
+  `use std.c.io;
+  `fun main() num {
+  `  Set<num> s = set_init(0, 8);
+  `  s.add(1);
+  `  s.add(2);
+  `  s.add(3);
+  `  num total = 0;
+  `  for x : s {
+  `    total = total + x;
+  `  }
+  `  printf("%lld\n", total);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_set_iter", "for-each over Set");
+  assert equals(out, "6\n"), "expected every element visited exactly once";
+}
+
+test "two independent for-each loops over the same Set value don't corrupt each other's cursor" {
+  str src = `use std.set;
+  `use std.c.io;
+  `fun main() num {
+  `  Set<num> s = set_init(0, 8);
+  `  s.add(1);
+  `  s.add(2);
+  `  num pairs = 0;
+  `  for x : s {
+  `    for y : s {
+  `      pairs = pairs + 1;
+  `    }
+  `  }
+  `  printf("%lld\n", pairs);
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_set_iter_reentrant", "nested for-each over the same Set");
+  assert equals(out, "4\n"), "expected the full 2x2 cross product, proving each loop iterates its own copy's cursor";
 }
 
 test "std.channel: send and recv monomorphize on the payload type" {
