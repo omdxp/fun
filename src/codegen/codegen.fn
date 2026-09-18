@@ -9868,7 +9868,15 @@ impl Codegen {
     if self._next_body_inlinable(next_body) {
       ierr = self.emit_inlined_iterator_next(next_body, owner_name, fi, elem_dt, vtmp);
     } else {
-      ierr = self.emit_called_iterator_next(owner_name, fi, elem_dt, vtmp);
+      let ensure_err = self.ensure_generic_impl_method_emitted(owner_name, "next", "Iterator");
+      if ensure_err.is_some() {
+        ierr = ensure_err;
+      } else {
+        StringBuilder next_mb = string_builder_init(24);
+        next_mb.append(owner_name);
+        next_mb.append("__Iterator__next");
+        ierr = self.emit_called_iterator_next(fi, elem_dt, vtmp, next_mb.build());
+      }
     }
 
     self.type_subst_param_names = prev_params;
@@ -9885,28 +9893,26 @@ impl Codegen {
     ret .None;
   }
 
-  // The honest fallback for `emit_inlined_generic_iterator` when the
-  // owning type's own `next()` body isn't one of the control-flow shapes
-  // `_next_body_inlinable` can safely splice (e.g. `Set<T>`'s own
-  // `next()`, which dispatches through a top-level `fit`): emits a real,
-  // non-inlined call to the monomorphized `next()` each pass, the same
-  // call-based shape the plain (non-generic) user-Iterator path already
-  // falls back to for the same reason.
+  // The honest fallback whenever the owning type's own `next()` body
+  // isn't one of the control-flow shapes `_next_body_inlinable` can
+  // safely splice (e.g. `Set<T>`'s own `next()`, which dispatches
+  // through a top-level `fit`, or a plain user type's own equivalent):
+  // emits a real, non-inlined call to the monomorphized `next()` each
+  // pass. Shared by both the generic dispatcher
+  // (`emit_inlined_generic_iterator`, ensuring emission via
+  // `ensure_generic_impl_method_emitted`, which needs a real generic
+  // instantiation entry) and the plain, non-generic dispatcher (ensuring
+  // emission via `ensure_plain_impl_method_prototype_emitted` instead,
+  // since a plain type has no such entry) - each caller resolves and
+  // ensures its own `next_mangled` first, since which "ensure emitted"
+  // mechanism applies depends on which of those two shapes `owner_name`
+  // is, not something this shared emitter can decide on its own.
   emit_called_iterator_next(
-    str owner_name,
     ForIterNode fi,
     DataType elem_dt,
-    str arr_text
+    str arr_text,
+    str next_mangled
   ) Option<CodegenErrorKind> {
-    let emit_err = self.ensure_generic_impl_method_emitted(owner_name, "next", "Iterator");
-    if emit_err.is_some() {
-      ret emit_err;
-    }
-    StringBuilder mb = string_builder_init(24);
-    mb.append(owner_name);
-    mb.append("__Iterator__next");
-    str next_mangled = mb.build();
-
     DataType opt_dt = dtype_new();
     opt_dt.type_str = "Option";
     Vec<DataType*> opt_args;
@@ -10196,25 +10202,15 @@ impl Codegen {
       // state, the same as Vec/Map/Set above, just reached through this
       // narrower non-generic path instead of the shared
       // `emit_inlined_generic_iterator`.
-      str user_iter_elem_type = "";
+      Option<DataType> user_iter_elem_dt = .None;
       flag has_user_iter = false;
       Option<ImplNode> user_iter_impl = .None;
       for n2 : self.all_nodes {
         fit n2.kind {
           .Impl(i2) -> {
             if equals(i2.type_name, coll_dt.type_str) && i2.has_quirk_name &&
-              equals(
-              i2.quirk_name,
-              "Iterator"
-            ) && i2.has_quirk_concrete_instantiation {
-              // `quirk_concrete_instantiation` is the whole quirk
-              // instantiation's mangled name (`Iterator__num`), not the
-              // bare element type: strip the `Iterator__` prefix back
-              // off to recover it.
-              StringBuilder qpfx = string_builder_init(16);
-              qpfx.append(i2.quirk_name);
-              qpfx.append("__");
-              user_iter_elem_type = strip_prefix(i2.quirk_concrete_instantiation, qpfx.build());
+              equals(i2.quirk_name, "Iterator") && i2.has_quirk_arg_dtype {
+              user_iter_elem_dt = .Some(*i2.quirk_arg_dtype);
               has_user_iter = true;
               user_iter_impl = .Some(i2);
             }
@@ -10222,16 +10218,15 @@ impl Codegen {
           _ -> {}
         }
       }
-      if has_user_iter {
-        DataType elem_dt2 = dtype_new();
-        elem_dt2.type_str = user_iter_elem_type;
+      if has_user_iter && user_iter_elem_dt.is_some() {
+        DataType elem_dt2 = user_iter_elem_dt.unwrap();
 
         // Full-body inlining (the general mechanism) when the found
         // `next()`'s own shape is one `_next_body_inlinable` actually
         // understands; otherwise this falls through to the always-correct
-        // call-based dispatch below, a deliberate, honest scope boundary
-        // for this first version - see `_next_body_inlinable`'s own doc
-        // comment.
+        // call-based dispatch (`emit_called_iterator_next`, shared with
+        // the generic dispatcher's own fallback), a deliberate, honest
+        // scope boundary - see `_next_body_inlinable`'s own doc comment.
         if user_iter_impl.is_some() {
           let impl_node = user_iter_impl.unwrap();
           // A quirk-qualified impl's own methods are parsed with their
@@ -10272,78 +10267,7 @@ impl Codegen {
           ret .Some(.UnsupportedNode);
         }
         self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
-        str next_mangled = next_mangled_opt.unwrap();
-
-        DataType opt_dt = dtype_new();
-        opt_dt.type_str = "Option";
-        Vec<DataType*> opt_args;
-        opt_args.init(1);
-        DataType* opt_elem_ptr = malloc(sizeof(DataType));
-        *opt_elem_ptr = elem_dt2;
-        opt_args.push(opt_elem_ptr);
-        opt_dt.generic_args = opt_args;
-        let opt_name_opt = self.resolve_type_name(opt_dt);
-        if opt_name_opt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
-        str opt_name = opt_name_opt.unwrap();
-
-        self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
-        StringBuilder uopt_tmp_sb = string_builder_init(24);
-        uopt_tmp_sb.append("__fun_iter_opt");
-        uopt_tmp_sb.append(format_num(self.for_iter_temp_counter));
-        str uopt_tmp = uopt_tmp_sb.build();
-
-        self.state.write("for (;;) {\n");
-        self.state.indent_level = self.state.indent_level + 1;
-        self.state.write_indent();
-        self.state.write(opt_name);
-        self.state.write(" ");
-        self.state.write(uopt_tmp);
-        self.state.write(" = ");
-        self.state.write(next_mangled);
-        self.state.write("(&");
-        self.state.write(arr_text);
-        self.state.write(");\n");
-        self.state.write_indent();
-        self.state.write("if (");
-        self.state.write(uopt_tmp);
-        self.state.write(".tag == ");
-        self.state.write(opt_name);
-        self.state.write("_None) break;\n");
-        self.state.write_indent();
-        if self.msvc_mode {
-          let uiter_wt = self.write_type(elem_dt2);
-          if uiter_wt.is_none() {
-            self.state.write("int64_t");
-          }
-        } else {
-          self.state.write("__auto_type");
-        }
-        self.state.write(" ");
-        self.state.write(fi.item_name);
-        self.state.write(" = ");
-        self.state.write(uopt_tmp);
-        self.state.write(".payload.Some._0;\n");
-        let elem_name2 = self.resolve_type_name(elem_dt2);
-        if elem_name2.is_some() {
-          self.record_local_typed(
-            fi.item_name,
-            elem_name2.unwrap(),
-            dtype_is_pointer(elem_dt2),
-            elem_dt2
-          );
-        }
-        self.loop_defer_marks.push(self.defer_stack.len);
-        let uberr = self.emit_body(*fi.body);
-        self.loop_defer_marks.pop();
-        if uberr.is_some() {
-          ret uberr;
-        }
-        self.state.indent_level = self.state.indent_level - 1;
-        self.state.write_indent();
-        self.state.write("}\n");
-        ret .None;
+        ret self.emit_called_iterator_next(fi, elem_dt2, arr_text, next_mangled_opt.unwrap());
       }
     }
 
