@@ -10134,8 +10134,12 @@ impl Codegen {
             is_direct_iter_coll = true;
           }
           break;
-        } elif equals(arr_dt.type_str, base) ||
-          starts_with(arr_dt.type_str, format("{str}__", base)) {
+        }
+        StringBuilder base_pfx_sb = string_builder_init(8);
+        base_pfx_sb.append(base);
+        base_pfx_sb.append("__");
+        str base_pfx = base_pfx_sb.build();
+        if equals(arr_dt.type_str, base) || starts_with(arr_dt.type_str, base_pfx) {
           direct_iter_owner_name = arr_dt.type_str;
           is_direct_iter_coll = true;
           break;
@@ -10145,7 +10149,11 @@ impl Codegen {
     if !is_direct_iter_coll && arr_type_name.is_some() {
       let found_name = arr_type_name.unwrap();
       for base : direct_iter_base_names {
-        if equals(found_name, base) || starts_with(found_name, format("{str}__", base)) {
+        StringBuilder base_pfx2_sb = string_builder_init(8);
+        base_pfx2_sb.append(base);
+        base_pfx2_sb.append("__");
+        str base_pfx2 = base_pfx2_sb.build();
+        if equals(found_name, base) || starts_with(found_name, base_pfx2) {
           direct_iter_owner_name = found_name;
           is_direct_iter_coll = true;
           break;
