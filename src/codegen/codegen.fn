@@ -1059,6 +1059,26 @@ impl Codegen {
     new_args.init(0);
     for a : dt.generic_args {
       flag substituted = false;
+      // A tuple-typed argument (`Option<(K, V)>`'s own `(K, V)` arg) has
+      // an empty `type_str` - a tuple's own identity lives in
+      // `tuple_members`, not `generic_args`/`type_str` (see the tuple
+      // branch above) - so the bare-type-param check just below can
+      // never match it, silently leaving it unsubstituted. That produced
+      // a real, load-bearing bug: two different concrete instantiations
+      // (e.g. `Option<(num, flag)>` reached through a fully-substituted
+      // path, and the SAME type reached while a tuple-typed generic arg
+      // was still unsubstituted) both resolving through the SAME
+      // unsubstituted `(K, V)` tuple shape, producing conflicting C
+      // declarations for what should be two independently-correct
+      // instantiations. Recursing into this same function reaches the
+      // tuple branch above, the general fix for this one shape rather
+      // than a narrower reimplementation of it here.
+      if a.is_tuple {
+        DataType* sub_tuple = malloc(sizeof(DataType));
+        *sub_tuple = self.resolve_type_subst(*a);
+        new_args.push(sub_tuple);
+        continue;
+      }
       if a.generic_args.len == 0 {
         for i : 0..self.type_subst_param_names.len {
           if equals(self.type_subst_param_names.get(i), a.type_str) {
