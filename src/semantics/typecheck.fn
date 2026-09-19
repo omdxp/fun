@@ -512,6 +512,29 @@ fun _free_fn_sig(FnSig* sig) {
 
 // Frees a whole `Map<str, FnSig>`: every signature's own scratch
 // (`_free_fn_sig`), then the map itself.
+// Frees a whole `Map<str, Vec<T>>` whose Vecs hold values borrowed from the
+// AST rather than fresh allocations: only the buckets and the map itself.
+fun _free_borrowed_vec_map_str(Map<str, Vec<str>>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    Vec<str> bucket = m.at(name).unwrap();
+    bucket.free();
+  }
+  m.free();
+}
+
+fun _free_variant_payloads_map(Map<str, Vec<CheckedType>>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    Vec<CheckedType> bucket = m.at(name).unwrap();
+    bucket.free();
+    free(name);
+  }
+  m.free();
+}
+
 fun _free_variant_owners_map(Map<str, Vec<str>>* owners) {
   Vec<str> names = owners.keys();
   defer names.free();
@@ -767,6 +790,11 @@ compound Checker {
   // Resolving a bare shorthand (`.Some`) with no declared type to lean
   // on needs to know whether exactly one enum owns that name.
   Map<str, Vec<str>> variant_owners;
+  // Each enum variant's declared payload types, keyed "Enum.Variant", and
+  // each enum's own type parameters, so a shorthand nested in a variant's
+  // argument list can be held to the payload type it lands on.
+  Map<str, Vec<CheckedType>> variant_payloads;
+  Map<str, Vec<str>> enum_type_params;
   // What each declared compound holds, and what each type and quirk
   // declares as methods.
   Map<str, CompoundInfo> compounds;
@@ -798,6 +826,8 @@ fun _checker_new() Checker {
   c.globals.init(16);
   c.enum_names = set_init("", 16);
   c.variant_owners.init(16);
+  c.variant_payloads.init(16);
+  c.enum_type_params.init(16);
   c.compounds.init(16);
   c.methods.init(16);
   c.current_file = "";
@@ -3495,21 +3525,64 @@ impl Checker {
       ret;
     }
     str variant_name = variant.unwrap();
+    flag declared = false;
     let owners = self.variant_owners.at(variant_name);
     if owners.is_some() {
       Vec<str> declared_by = owners.unwrap();
       num oi = 0;
       for oi < declared_by.len {
         if equals(declared_by.get(oi), enum_name) {
-          ret;
+          declared = true;
         }
         oi = oi + 1;
       }
     }
-    self.fail(
-      format("enum '{str}' has no variant named '{str}'", enum_name, variant_name),
-      val
-    );
+    if !declared {
+      self.fail(
+        format("enum '{str}' has no variant named '{str}'", enum_name, variant_name),
+        val
+      );
+      ret;
+    }
+    self.check_shorthand_payloads(val, enum_name, variant_name, want);
+  }
+
+  // A shorthand that carries arguments (`.Some(.Nope)`): each argument is
+  // held to the payload type its position lands on, with the enum's own
+  // type parameters replaced by what `want` instantiated them as.
+  check_shorthand_payloads(Node* val, str enum_name, str variant_name, CheckedType want) {
+    Vec<Node*> written;
+    written.init(2);
+    defer written.free();
+    fit val.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") && e.has_right {
+          _call_args(e.right, &written);
+        }
+      }
+      _ -> {}
+    }
+    if written.len == 0 {
+      ret;
+    }
+    str payload_key = format("{str}.{str}", enum_name, variant_name);
+    defer free(payload_key);
+    let payloads = self.variant_payloads.at(payload_key);
+    let params = self.enum_type_params.at(enum_name);
+    if payloads.is_none() || params.is_none() {
+      ret;
+    }
+    Vec<CheckedType> payload_types = payloads.unwrap();
+    Vec<str> type_params = params.unwrap();
+    num i = 0;
+    for i < written.len && i < payload_types.len {
+      CheckedType slot = substitute(payload_types.get(i), &type_params, &want.generic_args);
+      self.check_shorthand_variant(written.get(i), slot);
+      if self.failed {
+        ret;
+      }
+      i = i + 1;
+    }
   }
 
   check_return(Node* stmt, Node* value, TypeEnv* env) {
@@ -3731,6 +3804,8 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer checker.globals.free();
   defer checker.enum_names.free();
   defer _free_variant_owners_map(&checker.variant_owners);
+  defer _free_variant_payloads_map(&checker.variant_payloads);
+  defer _free_borrowed_vec_map_str(&checker.enum_type_params);
   defer _free_compound_info_map(&checker.compounds);
   defer _free_method_tables(&checker.methods);
   defer checker.active_type_params.free();
@@ -3804,6 +3879,24 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         checker.enum_names.add(e.name);
         if !carries_data {
           checker.plain_enums.add(e.name);
+        }
+        Vec<str> enum_params;
+        enum_params.init(2);
+        if e.has_type_params {
+          for tp : e.type_params {
+            enum_params.push(tp);
+          }
+        }
+        checker.enum_type_params.put(e.name, enum_params);
+        for v : e.variants {
+          Vec<CheckedType> payload_types;
+          payload_types.init(2);
+          if v.has_payload {
+            for pd : v.payload {
+              payload_types.push(checked_from_dtype(pd));
+            }
+          }
+          checker.variant_payloads.put(format("{str}.{str}", e.name, v.name), payload_types);
         }
         for v : e.variants {
           str owner = substr(e.name, 0, len(e.name));

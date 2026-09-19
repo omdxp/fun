@@ -1732,6 +1732,68 @@ test "a bare shorthand for a generic enum's own variants is accepted against tha
   );
 }
 
+test "a bare shorthand nested in .Some's payload is held to the Option's own type argument" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Color { Red, Green }
+    `fun pick() Option<Color> {
+    `  ret .Some(.Nope);
+    `}`,
+    "expected .Nope to be rejected against Option<Color>'s payload"
+  );
+}
+
+test "a bare shorthand nested in .Err's payload is held to the Result's error type" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Color { Red, Green }
+    `fun pick() Result<num, Color> {
+    `  ret .Err(.Nope);
+    `}`,
+    "expected .Nope to be rejected against Result<num, Color>'s error payload"
+  );
+}
+
+test "a bare shorthand nested in .Ok's payload is held to the Result's value type" {
+  rejects(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Color { Red, Green }
+    `fun pick() Result<Color, str> {
+    `  ret .Ok(.Nope);
+    `}`,
+    "expected .Nope to be rejected against Result<Color, str>'s value payload"
+  );
+}
+
+test "a bare shorthand nested in a user enum variant's payload is held to that payload's enum" {
+  rejects(
+    `enum Inner { Deep, Shallow }
+    `enum Failure { Missing, Wrapped(Inner) }
+    `fun pick() Failure {
+    `  ret .Wrapped(.Nope);
+    `}`,
+    "expected .Nope to be rejected against Wrapped's Inner payload"
+  );
+}
+
+test "a bare shorthand nested in a payload naming a real variant is accepted, at every depth" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Color { Red, Green }
+    `enum Inner { Deep, Shallow }
+    `enum Failure { Missing, Wrapped(Inner) }
+    `fun a() Option<Color> { ret .Some(.Red); }
+    `fun b() Result<num, Color> { ret .Err(.Green); }
+    `fun c() Failure { ret .Wrapped(.Deep); }
+    `fun d() Option<Failure> { ret .Some(.Wrapped(.Shallow)); }`,
+    "expected real nested variants to be accepted"
+  );
+}
+
 test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
   accepts(
     `enum Option<T> { None, Some(T) }
