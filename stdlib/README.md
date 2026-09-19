@@ -73,7 +73,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.
 - **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).
 - **std/error.fn**: Error value helpers (construct/check ok/err).
-- **std/result.fn**: Generic `Result<T>` container with `ok<T>`/`err<T>` helpers.
+- **std/result.fn**: Generic `Result<T, E = Error>` container (`Result<T>` means `Result<T, Error>`) with `ok<T>`/`err<T>` helpers.
 - **std/quirks.fn**: Common quirks (`Sized`, `Display`) for generic APIs.
 - **std/serde.fn**: Serialization quirks (`Serialize`, `Deserialize`) and text conversion helpers.
 

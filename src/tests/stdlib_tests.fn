@@ -284,6 +284,32 @@ test "std.vec: sort_by takes a Comparator<T>, named for a parameter or passed as
   assert equals(out, "123\n321\n"), "expected both orders through the Comparator alias";
 }
 
+test "std.result: Result<T> means Result<T, Error>, and a custom error type is still written out" {
+  str src = `use std.result;
+  `use std.error;
+  `use std.c.io;
+  `enum Failure { Missing, Broken }
+  `fun parse(num x) Result<num> {
+  `  if x < 0 { ret err(7, "negative", 0); }
+  `  ret ok(x);
+  `}
+  `fun explicit(num x) Result<num, Error> { ret parse(x); }
+  `fun custom(num x) Result<num, Failure> {
+  `  if x == 0 { ret .Err(.Broken); }
+  `  ret .Ok(x);
+  `}
+  `fun main() num {
+  `  Result<num> a = parse(4);
+  `  Result<num> b = parse(-1);
+  `  Result<num, Error> c = explicit(2);
+  `  Result<num, Failure> d = custom(0);
+  `  printf("%lld %d %lld %d\n", a.unwrap(), b.is_err(), c.unwrap(), d.is_err());
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_result_default", "Result<T> with the default error type");
+  assert equals(out, "4 1 2 1\n"), "expected Result<num> to be Result<num, Error>, interchangeable with the written-out form";
+}
+
 test "for-each over a Vec iterates every element in order" {
   str src = `use std.vec;
   `use std.c.io;

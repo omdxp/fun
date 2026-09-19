@@ -10282,10 +10282,7 @@ impl Codegen {
   // implementing it directly (`base` or the mangled `base__args`), or a plain
   // type with a concrete `Iterator` impl of its own.
   _names_an_iterator_type(str type_str, Vec<str>* direct_iter_base_names) flag {
-    num bi = 0;
-    for bi < direct_iter_base_names.len {
-      str base = direct_iter_base_names.get(bi);
-      bi = bi + 1;
+    for base : direct_iter_base_names {
       if equals(type_str, base) || starts_with(type_str, format("{str}__", base)) {
         ret true;
       }
