@@ -1,4 +1,4 @@
-// Result<T, E>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
+// Result<T, E = Error>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
 // 
 // Result is a data-carrying enum (a sum type), matched with `fit`:
 // 
@@ -16,11 +16,11 @@
 // str text = read_file(path).unwrap_or(""); // value, or a fallback on Err
 // ```
 // 
-// `E` is the error type — most stdlib functions use the shared `Error`
-// compound (kind + code + message + context) and can be built with `ok(v)`,
-// `err(code, message, default)`, `err_kind(kind, message, default)`, or
-// `err_error(e, default)`. A caller with a specific error enum (e.g.
-// `Result<Node, ParseErrorKind>`) constructs it directly via the bare
+// `E` is the error type, defaulting to the shared `Error` compound (kind +
+// code + message + context), so `Result<T>` means `Result<T, Error>`. Build
+// one with `ok(v)`, `err(code, message, default)`, `err_kind(kind, message,
+// default)`, or `err_error(e, default)`. A caller with a specific error enum
+// (e.g. `Result<Node, ParseErrorKind>`) constructs it directly via the bare
 // shorthand (`ret .Err(ParseErrorKind.UnexpectedToken);`) instead, since a
 // generic helper over an unconstrained `E` has nothing to infer it from.
 
@@ -28,7 +28,7 @@ use std.error;
 use std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
-pub enum Result<T, E> {
+pub enum Result<T, E = Error> {
   Ok(T),
   Err(E),
 }

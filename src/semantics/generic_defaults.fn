@@ -98,12 +98,10 @@ fun _check_defaults(str decl, Vec<str>* params, Vec<DataType*>* defaults) str {
 }
 
 fun _declares_defaults(Vec<DataType*>* defaults) flag {
-  num i = 0;
-  for i < defaults.len {
-    if defaults.get(i) != nil {
+  for d : defaults {
+    if d != nil {
       ret true;
     }
-    i = i + 1;
   }
   ret false;
 }
@@ -195,10 +193,8 @@ fun _fill_dtype(DataType* dt, Map<str, _DefaultsEntry>* table, num depth, str* e
 }
 
 fun _fill_dtype_vec(Vec<DataType*>* dts, Map<str, _DefaultsEntry>* table, str* err) {
-  num i = 0;
-  for i < dts.len {
-    _fill_dtype(dts.get(i), table, 0, err);
-    i = i + 1;
+  for dt : dts {
+    _fill_dtype(dt, table, 0, err);
   }
 }
 

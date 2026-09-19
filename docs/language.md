@@ -735,6 +735,9 @@ was written for it, so `Pair<num, str>` keeps its own second argument.
   `Vec<str>`.
 - Filling happens before typechecking, so everything downstream sees the
   arguments as though they had been written out.
+- The standard library uses this itself: `Result<T, E = Error>` in
+  `std.result`, so `Result<num>` means `Result<num, Error>` and a custom
+  error type is still written out (`Result<num, ParseErrorKind>`).
 
 ### Generic quirks
 
