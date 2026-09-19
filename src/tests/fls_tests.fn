@@ -7190,3 +7190,35 @@ test "a '?!(err)' whose error value does not fit the enclosing function's error 
   found.free();
   assert saw, "expected a diagnostic explaining the mismatched '?!' error value";
 }
+
+test "a bare '.Variant' naming no variant of its expected enum is diagnosed in the editor" {
+  str src = `enum Color { Red, Green }
+  `fun pick() Color {
+  `  ret .Nope;
+  `}
+  `pub fun main() num {
+  `  pick();
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///unknown_variant.fn";
+  doc.path = "unknown_variant.fn";
+  doc.text = src;
+  doc.version = 1;
+  Vec<Diagnostic> found = diagnose(&reads, &dcache, doc);
+  flag saw = false;
+  num i = 0;
+  for i < found.len {
+    Diagnostic d = found.get(i);
+    if contains(d.message, "has no variant named 'Nope'") && d.line == 2 {
+      saw = true;
+    }
+    i = i + 1;
+  }
+  found.free();
+  assert saw, "expected a diagnostic on the ret line naming the unknown variant";
+}

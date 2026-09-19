@@ -1052,6 +1052,11 @@ impl Checker {
     }
     CheckedType left = self.infer(e.left, env);
     CheckedType right = self.infer(e.right, env);
+    self.check_shorthand_variant(e.right, left);
+    self.check_shorthand_variant(e.left, right);
+    if self.failed {
+      ret;
+    }
     if !self.plain_enums.has(left.name) || !self.plain_enums.has(right.name) {
       ret;
     }
@@ -1623,6 +1628,15 @@ impl Checker {
       ret built;
     }
     CompoundInfo holder = info.unwrap();
+    for f : init.fields {
+      let field_type = holder.fields.at(f.name);
+      if field_type.is_some() {
+        self.check_shorthand_variant(f.value, field_type.unwrap());
+      }
+    }
+    if self.failed {
+      ret checked_unknown();
+    }
     if !holder.is_generic || built.generic_args.len > 0 {
       ret built;
     }
@@ -1789,6 +1803,10 @@ impl Checker {
     CheckedType err_val = self.infer(u.error_arg, env);
     if equals(self.rtype.name, "Result") {
       CheckedType want_err = self.rtype.generic_args.get(1);
+      self.check_shorthand_variant(u.error_arg, want_err);
+      if self.failed {
+        ret checked_unknown();
+      }
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
@@ -1802,6 +1820,10 @@ impl Checker {
       }
     } elif equals(self.rtype.name, "Option") {
       CheckedType want_err = self.rtype.generic_args.get(0);
+      self.check_shorthand_variant(u.error_arg, want_err);
+      if self.failed {
+        ret checked_unknown();
+      }
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
@@ -2509,6 +2531,10 @@ impl Checker {
         continue;
       }
       CheckedType got = self.infer(args.get(i), env);
+      self.check_shorthand_variant(args.get(i), want);
+      if self.failed {
+        ret;
+      }
       if !self.assignable(want, got) {
         self.fail(
           format(
@@ -2753,6 +2779,10 @@ impl Checker {
       for ci < fsig.params.len {
         let want = checked_from_dtype(fsig.params.get(ci));
         let got = self.infer(args.get(ci), env);
+        self.check_shorthand_variant(args.get(ci), want);
+        if self.failed {
+          ret checked_unknown();
+        }
         if !self.assignable(want, got) {
           self.fail(
             format(
@@ -2970,6 +3000,10 @@ impl Checker {
         if branch.is_tuple_pattern {
           self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
         } else {
+          self.check_shorthand_variant(branch.condition, subject_type);
+          if self.failed {
+            ret;
+          }
           str named = _branch_enum_name(branch.condition);
           if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
             self.fail(
@@ -3204,6 +3238,10 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
+        self.check_shorthand_variant(e.right, field);
+        if self.failed {
+          ret;
+        }
         if !self.assignable(field, value) {
           self.fail(
             format(
@@ -3229,6 +3267,10 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
+        self.check_shorthand_variant(e.right, b.type);
+        if self.failed {
+          ret;
+        }
         if !self.assignable(b.type, value) {
           self.fail(
             format(
@@ -3264,6 +3306,10 @@ impl Checker {
     }
     if v.has_val {
       CheckedType value = self.infer(v.val, env);
+      self.check_shorthand_variant(v.val, declared);
+      if self.failed {
+        ret;
+      }
       // A `let` takes the type of its value rather than checking one.
       if is_unknown(declared) {
         // A bare enum-variant shorthand (`let v = .Same;`) has no
@@ -3431,11 +3477,50 @@ impl Checker {
     }
   }
 
+  // Fails when a bare `.Variant` shorthand (`.Nope`, `.Nope(x)`) is held
+  // to an enum that declares no variant by that name. Only a value that
+  // is literally a bare shorthand is judged, and only against a type the
+  // program declares as an enum: anything else has no variant list to
+  // consult, so it is left to whatever checks it already gets.
+  check_shorthand_variant(Node* val, CheckedType want) {
+    if self.failed {
+      ret;
+    }
+    let variant = _bare_enum_shorthand_variant(val);
+    if variant.is_none() {
+      ret;
+    }
+    str enum_name = self.canonical_type_name(want.name);
+    if equals(enum_name, "") || !self.enum_names.has(enum_name) {
+      ret;
+    }
+    str variant_name = variant.unwrap();
+    let owners = self.variant_owners.at(variant_name);
+    if owners.is_some() {
+      Vec<str> declared_by = owners.unwrap();
+      num oi = 0;
+      for oi < declared_by.len {
+        if equals(declared_by.get(oi), enum_name) {
+          ret;
+        }
+        oi = oi + 1;
+      }
+    }
+    self.fail(
+      format("enum '{str}' has no variant named '{str}'", enum_name, variant_name),
+      val
+    );
+  }
+
   check_return(Node* stmt, Node* value, TypeEnv* env) {
     if value == nil {
       ret;
     }
     CheckedType got = self.infer(value, env);
+    self.check_shorthand_variant(value, self.rtype);
+    if self.failed {
+      ret;
+    }
     if !self.assignable(self.rtype, got) {
       self.fail(
         format(

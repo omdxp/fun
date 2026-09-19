@@ -1615,6 +1615,123 @@ test "postfix '?' on a non-Option expression is rejected" {
   );
 }
 
+test "a bare shorthand naming no variant of the returned enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun pick() Color {
+    `  ret .Nope;
+    `}`,
+    "expected .Nope to be rejected against Color in a ret"
+  );
+}
+
+test "a bare shorthand naming no variant of a declared local's enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun main() num {
+    `  Color c = .Nope;
+    `  ret 0;
+    `}`,
+    "expected .Nope to be rejected against a declared Color local"
+  );
+}
+
+test "a bare shorthand naming no variant of an assigned local's enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun main() num {
+    `  Color c = .Red;
+    `  c = .Nope;
+    `  ret 0;
+    `}`,
+    "expected .Nope to be rejected in an assignment"
+  );
+}
+
+test "a bare shorthand naming no variant of the compared enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun main() num {
+    `  Color c = .Red;
+    `  if c == .Nope { ret 1; }
+    `  ret 0;
+    `}`,
+    "expected .Nope to be rejected in a comparison"
+  );
+}
+
+test "a bare shorthand naming no variant of a parameter's enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun takes(Color c) num { ret 0; }
+    `fun main() num {
+    `  takes(.Nope);
+    `  ret 0;
+    `}`,
+    "expected .Nope to be rejected as a call argument"
+  );
+}
+
+test "a bare shorthand fit pattern naming no variant of the subject's enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `fun main() num {
+    `  Color c = .Red;
+    `  fit c {
+    `    .Nope -> { ret 1; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected .Nope to be rejected as a fit pattern"
+  );
+}
+
+test "a bare shorthand naming no variant of a compound field's enum is rejected" {
+  rejects(
+    `enum Color { Red, Green }
+    `compound Paint { Color c; }
+    `fun main() num {
+    `  Paint p = Paint{ c = .Nope };
+    `  ret 0;
+    `}`,
+    "expected .Nope to be rejected in a compound initializer"
+  );
+}
+
+test "a bare shorthand naming a real variant is accepted in every position it is checked" {
+  accepts(
+    `enum Color { Red, Green }
+    `compound Paint { Color c; }
+    `fun takes(Color c) num { ret 0; }
+    `fun pick() Color {
+    `  ret .Green;
+    `}
+    `fun main() num {
+    `  Color c = .Red;
+    `  c = .Green;
+    `  takes(.Red);
+    `  Paint p = Paint{ c = .Green };
+    `  if c == .Green { ret 1; }
+    `  fit c {
+    `    .Red -> { ret 2; }
+    `    .Green -> { ret 3; }
+    `  }
+    `}`,
+    "expected real variants to be accepted everywhere"
+  );
+}
+
+test "a bare shorthand for a generic enum's own variants is accepted against that enum" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `fun find(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}`,
+    "expected .None/.Some to be accepted against Option<num>"
+  );
+}
+
 test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
   accepts(
     `enum Option<T> { None, Some(T) }
