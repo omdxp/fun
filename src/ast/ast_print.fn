@@ -25,6 +25,20 @@ fun _dtype_str(DataType* dt) str {
   if dt == nil {
     ret "";
   }
+  if dt.is_tuple {
+    StringBuilder b = string_builder_init(16);
+    b.append("(");
+    num i = 0;
+    for i < dt.tuple_members.len {
+      if i > 0 {
+        b.append(", ");
+      }
+      b.append(_dtype_str(dt.tuple_members.get(i)));
+      i = i + 1;
+    }
+    b.append(")");
+    ret b.build();
+  }
   if dt.pointer_depth > 0 {
     ret format("{str} (pointer depth: {num})", dt.type_str, dt.pointer_depth);
   }
@@ -329,6 +343,27 @@ pub fun print_node(Node* node, num depth) {
           _line(depth + 2, format("{str}", v.name));
           vi = vi + 1;
         }
+      }
+    }
+    .TypeAlias(a) -> {
+      _line(depth + 1, format("Name: {str}", a.name));
+      if a.has_type_params && a.type_params.len > 0 {
+        _line(depth + 1, format("Type Parameters ({num}):", a.type_params.len));
+        num pi = 0;
+        for pi < a.type_params.len {
+          _line(depth + 2, format("{str}", a.type_params.get(pi)));
+          pi = pi + 1;
+        }
+      }
+      if a.is_bound_list {
+        _line(depth + 1, format("Alternatives ({num}):", a.bound_alternatives.len));
+        num ai = 0;
+        for ai < a.bound_alternatives.len {
+          _line(depth + 2, format("{str}", a.bound_alternatives.get(ai)));
+          ai = ai + 1;
+        }
+      } else {
+        _line(depth + 1, format("Aliases: {str}", _dtype_str(a.body)));
       }
     }
     .Impl(i) -> {

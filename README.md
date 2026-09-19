@@ -96,6 +96,7 @@ fun -in hello.fn
 Usage:
   fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
   fun -fmt-check-all [-in <file_or_dir>]
+  fun lint [<file_or_dir>] [-summary]
   fun -version
 ```
 
@@ -104,6 +105,7 @@ Key workflows:
 - `fun -in file.fn` compiles and runs a Fun program.
 - `fun -fmt`, `fun -fmt-all`, and `fun -fmt-check-all` enforce formatting across a file or tree.
 - `fun -fmt-diag -no-exec` formats and collects diagnostics in a single pass.
+- `fun lint` reports every warning across a file or tree, with totals by warning and by file.
 - `fun -g` emits debug-friendly Fun-to-C source mapping for native debugger workflows.
 
 ### C Compiler Selection

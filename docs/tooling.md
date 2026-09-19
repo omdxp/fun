@@ -189,6 +189,38 @@ that flag) for the full list.
   pass, avoiding two sequential compiler invocations.
 - Asm block contents are preserved as raw text.
 
+## Linting
+
+`fun lint [<path>]` reports every warning across a file or a whole tree in
+one run, instead of one `fun -in file.fn -warn-unused` per file:
+
+```text
+$ fun lint examples/advanced
+examples/advanced/unused_variable_warning.fn:12:7: warning[unused_variable]: unused variable 'value'
+...
+
+Warnings by kind:
+  unused_function  3
+  unused_variable  2
+Files with warnings:
+  examples/advanced/assert_with_message.fn  2
+  ...
+14 warnings in 13 of 75 files
+```
+
+- `<path>` is a `.fn` file or a directory, scanned recursively the same
+  way `fun -fmt-check-all` scans one (default `.`).
+- Each file is analyzed the way `-warn-unused` does, warnings and unused
+  declarations both, with its own `allow`/`expect` statements honored.
+  Only what the file itself declares is reported, never what it imports.
+  It does not typecheck or build anything: a type error is the compile's
+  job, not the lint's.
+- A file that does not parse is reported as an error and counted as
+  "could not be analyzed", and the run carries on with the rest.
+- `-summary` prints only the totals, without each warning.
+- The exit code is 1 when there is any warning or any file that could
+  not be analyzed, and 0 otherwise, so it can gate a CI job.
+
 ## The Language Server (`fls`)
 
 `fls` is Fun's language server: diagnostics, formatting-aware workflows,
@@ -244,6 +276,7 @@ fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
 fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
+fun lint [<path>] [-summary]   (reports every warning under <path>, a file or directory, default '.')
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Started)
 fun add <name> -git <url> [-path <subfolder>] [-tag <ref> | -branch <ref> | -rev <sha>] [-token-env <VAR>]
