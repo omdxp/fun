@@ -677,6 +677,65 @@ expression like a generic instantiation (`T: User | Vec<num>`), not just a
 bare identifier - a bound list is a union of concrete types, quirks, and
 type expressions, mixed freely.
 
+### Default type parameters
+
+A trailing type parameter can have a default, written `= Type` after its
+name (and after its bound, if it has one). A reference that leaves out
+those trailing arguments gets them filled in:
+
+```fun
+use std.io;
+
+enum Res<T, E = str> {
+  Ok(T),
+  Err(E),
+}
+
+compound Pair<A, B = A> {
+  A a;
+  B b;
+}
+
+fun half(num x) Res<num> {
+  if x % 2 == 1 {
+    ret .Err("odd");
+  }
+  ret .Ok(x / 2);
+}
+
+fun main() {
+  Pair<num> same = Pair<num>{ a = 3, b = 4 };
+  Pair<num, str> mixed = Pair<num, str>{ a = 1, b = "x" };
+  println_fmt("{num} {str}", same.a + same.b, mixed.b);
+}
+```
+
+Here `Res<num>` means `Res<num, str>`, and `Pair<num>` means `Pair<num,
+num>`: a default can name an earlier parameter, which stands for whatever
+was written for it, so `Pair<num, str>` keeps its own second argument.
+
+- Enums, compounds, quirks, aliases, generic functions and a method's own
+  type parameters can all have defaults. An `impl`'s type parameters cannot,
+  since they come from the type it implements, and an impl header must write
+  every type argument of the type it names.
+- Defaults are trailing: once a parameter has one, every later parameter
+  must too (`<T = num, U>` is an error).
+- A default may only name earlier parameters, never its own or a later one,
+  and never the declaration it belongs to. A default that itself uses a type
+  with defaults gets those filled in as well. Defaults that refer back to
+  each other are reported instead of looping.
+- Only a reference that writes at least one argument is filled in. Writing
+  too few for a declaration whose remaining parameters have no default is an
+  error naming how many it needs (`'Wide' expects at least 2 type arguments,
+  found 1`).
+- A generic function's parameter is usually inferred from its arguments, so
+  its default only applies to a parameter nothing else pins down, such as
+  one that appears only in the return type: `fun make<T = num>() Vec<T>`
+  called as `make()` builds a `Vec<num>`, and `make<str>()` builds a
+  `Vec<str>`.
+- Filling happens before typechecking, so everything downstream sees the
+  arguments as though they had been written out.
+
 ### Generic quirks
 
 A quirk can be generic too: `quirk To<T> { to() T; }`, and `impl Point as

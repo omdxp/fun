@@ -2589,12 +2589,12 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
       }
       .Compound(c) -> {
         items.push(
-          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, snippets))
+          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
         );
       }
       .Enum(e) -> {
         items.push(
-          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, snippets))
+          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
         );
       }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
@@ -2869,12 +2869,12 @@ fun _declared(
       }
       .Compound(c) -> {
         items.push(
-          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, snippets))
+          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
         );
       }
       .Enum(e) -> {
         items.push(
-          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, snippets))
+          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
         );
       }
       .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
@@ -3189,24 +3189,38 @@ fun _item(str label, ItemKind kind, str detail) Item {
 // ${2:E}>$0`, one tab stop per declared type parameter. "" (plain
 // label insertion) for a non-generic type, or when the client
 // wouldn't understand a snippet.
-fun _generic_type_snippet(str name, Vec<str>* type_params, flag snippets) str {
+fun _generic_type_snippet(str name, Vec<str>* type_params, Vec<DataType*>* defaults, flag snippets) str {
   if !snippets || type_params.len == 0 {
     ret "";
+  }
+  // A parameter with a default may be left out, so only the required ones
+  // get a placeholder (at least the first, since a reference needs one
+  // argument to count as written).
+  num shown = 0;
+  num i = 0;
+  for i < type_params.len {
+    if i >= defaults.len || defaults.get(i) == nil {
+      shown = i + 1;
+    }
+    i = i + 1;
+  }
+  if shown == 0 {
+    shown = 1;
   }
   StringBuilder b = string_builder_init(48);
   b.append(name);
   b.append("<");
-  num i = 0;
-  for i < type_params.len {
-    if i > 0 {
+  num j = 0;
+  for j < shown {
+    if j > 0 {
       b.append(", ");
     }
     b.append("${");
-    b.append_num(i + 1);
+    b.append_num(j + 1);
     b.append(":");
-    b.append(type_params.get(i));
+    b.append(type_params.get(j));
     b.append("}");
-    i = i + 1;
+    j = j + 1;
   }
   b.append(">$0");
   ret b.build();

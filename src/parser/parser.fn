@@ -605,10 +605,14 @@ impl ParseState {
     ret .None;
   }
 
+  // A parameter may end with `= Type` (`<T, E = Error>`): its default,
+  // pushed to `out_defaults` parallel to `out_params` (nil for a param
+  // with none). Once one param has a default every later one must too.
   pub parse_type_params_with_constraints(
     Vec<str>* out_params,
     Vec<Vec<str>>* out_forced_insts,
-    Vec<Vec<str>>* out_param_constraints
+    Vec<Vec<str>>* out_param_constraints,
+    Vec<DataType*>* out_defaults
   ) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
@@ -642,6 +646,27 @@ impl ParseState {
         }
       }
       out_param_constraints.push(constraints);
+
+      if self.next_token_is_operator("=") {
+        self.token_next(); // consume '='
+        DataType* default_dt = malloc(sizeof(DataType));
+        *default_dt = dtype_new();
+        let derr = self.parse_datatype(default_dt);
+        if derr.is_some() {
+          dtype_free(default_dt);
+          ret derr;
+        }
+        out_defaults.push(default_dt);
+      } else {
+        if _has_earlier_default(out_defaults) {
+          self.err(format(
+            "type parameter '{str}' needs a default because an earlier parameter has one",
+            name
+          ));
+          ret .Some(.InvalidIdentifier);
+        }
+        out_defaults.push(nil);
+      }
 
       if self.next_token_is_operator(",") {
         self.token_next();
@@ -710,7 +735,8 @@ impl ParseState {
   // nothing else to share.
   pub parse_alias_type_params(
     Vec<str>* out_params,
-    Vec<flag>* out_is_spread
+    Vec<flag>* out_is_spread,
+    Vec<DataType*>* out_defaults
   ) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
@@ -742,6 +768,27 @@ impl ParseState {
       }
       out_params.push(name);
       out_is_spread.push(is_spread);
+
+      if self.next_token_is_operator("=") {
+        self.token_next(); // consume '='
+        DataType* default_dt = malloc(sizeof(DataType));
+        *default_dt = dtype_new();
+        let derr = self.parse_datatype(default_dt);
+        if derr.is_some() {
+          dtype_free(default_dt);
+          ret derr;
+        }
+        out_defaults.push(default_dt);
+      } else {
+        if _has_earlier_default(out_defaults) {
+          self.err(format(
+            "type parameter '{str}' needs a default because an earlier parameter has one",
+            name
+          ));
+          ret .Some(.InvalidIdentifier);
+        }
+        out_defaults.push(nil);
+      }
 
       if self.next_token_is_operator(",") {
         self.token_next();
@@ -1124,6 +1171,40 @@ impl ParseState {
   // param) from `impl Vec<num> { ... }` (a concrete monomorphizing impl).
   // Every segment must be a bare identifier, optionally with `:
   // constraint | constraint` bounds, all the way to the closing `>`/`>>`.
+  // True when the `<...>` right ahead has a top-level `=` in it
+  // (`impl Box<T = num>`): the shape of a type parameter with a default,
+  // which an impl's parameter list cannot have.
+  pub impl_angle_list_has_default() flag {
+    let first_opt = self.token_peek_n(0);
+    if first_opt.is_none() {
+      ret false;
+    }
+    let first = first_opt.unwrap();
+    if !(token_is_operator(first, "<") || token_is_symbol(first, '<')) {
+      ret false;
+    }
+    num depth = 1;
+    num off = 1;
+    for depth > 0 {
+      let tok_opt = self.token_peek_n(off);
+      if tok_opt.is_none() {
+        ret false;
+      }
+      let t = tok_opt.unwrap();
+      off = off + 1;
+      if token_is_operator(t, "<") || token_is_symbol(t, '<') {
+        depth = depth + 1;
+      } elif token_is_operator(t, ">") || token_is_symbol(t, '>') {
+        depth = depth - 1;
+      } elif token_is_operator(t, ">>") {
+        depth = depth - 2;
+      } elif depth == 1 && token_is_operator(t, "=") {
+        ret true;
+      }
+    }
+    ret false;
+  }
+
   pub impl_generic_args_are_params() flag {
     num off = 0;
     let first_opt = self.token_peek_n(off);
@@ -4184,10 +4265,13 @@ impl Parser {
     type_param_forced_insts.init(0);
     Vec<Vec<str>> type_param_constraints;
     type_param_constraints.init(0);
+    Vec<DataType*> type_param_defaults;
+    type_param_defaults.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
       &type_param_forced_insts,
-      &type_param_constraints
+      &type_param_constraints,
+      &type_param_defaults
     );
     if tperr.is_some() {
       ret tperr;
@@ -4195,6 +4279,7 @@ impl Parser {
     fit fn_node_ptr.kind {
       .Function(curtp) -> {
         curtp.type_params = type_params;
+        curtp.type_param_defaults = type_param_defaults;
         curtp.has_type_params = type_params.len > 0;
         curtp.type_param_forced_insts = type_param_forced_insts;
         curtp.has_type_param_forced_insts = type_param_forced_insts.len > 0;
@@ -6688,10 +6773,13 @@ impl Parser {
     type_param_forced_insts.init(0);
     Vec<Vec<str>> type_param_constraints;
     type_param_constraints.init(0);
+    Vec<DataType*> type_param_defaults;
+    type_param_defaults.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
       &type_param_forced_insts,
-      &type_param_constraints
+      &type_param_constraints,
+      &type_param_defaults
     );
     if tperr.is_some() {
       ret tperr;
@@ -6772,6 +6860,7 @@ impl Parser {
     cn.name = name;
     cn.fields = fields;
     cn.type_params = type_params;
+    cn.type_param_defaults = type_param_defaults;
     cn.has_type_params = type_params.len > 0;
     cn.type_param_forced_insts = type_param_forced_insts;
     cn.has_type_param_forced_insts = type_param_forced_insts.len > 0;
@@ -6821,10 +6910,13 @@ impl Parser {
     unused_forced_insts.init(0);
     Vec<Vec<str>> unused_param_constraints;
     unused_param_constraints.init(0);
+    Vec<DataType*> type_param_defaults;
+    type_param_defaults.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
       &unused_forced_insts,
-      &unused_param_constraints
+      &unused_param_constraints,
+      &type_param_defaults
     );
     if tperr.is_some() {
       ret tperr;
@@ -6946,6 +7038,7 @@ impl Parser {
     en.name = name;
     en.variants = variants;
     en.type_params = type_params;
+    en.type_param_defaults = type_param_defaults;
     en.has_type_params = type_params.len > 0;
 
     Node node = node_new(.Enum(en));
@@ -6988,7 +7081,13 @@ impl Parser {
     type_params.init(0);
     Vec<flag> type_param_is_spread;
     type_param_is_spread.init(0);
-    let tperr = self.state.parse_alias_type_params(&type_params, &type_param_is_spread);
+    Vec<DataType*> type_param_defaults;
+    type_param_defaults.init(0);
+    let tperr = self.state.parse_alias_type_params(
+      &type_params,
+      &type_param_is_spread,
+      &type_param_defaults
+    );
     if tperr.is_some() {
       ret tperr;
     }
@@ -7025,6 +7124,7 @@ impl Parser {
     TypeAliasNode a = type_alias_node_new();
     a.name = name;
     a.type_params = type_params;
+    a.type_param_defaults = type_param_defaults;
     a.type_param_is_spread = type_param_is_spread;
     a.has_type_params = type_params.len > 0;
 
@@ -7105,10 +7205,13 @@ impl Parser {
     unused_forced_insts.init(0);
     Vec<Vec<str>> unused_param_constraints;
     unused_param_constraints.init(0);
+    Vec<DataType*> type_param_defaults;
+    type_param_defaults.init(0);
     let tperr = self.state.parse_type_params_with_constraints(
       &type_params,
       &unused_forced_insts,
-      &unused_param_constraints
+      &unused_param_constraints,
+      &type_param_defaults
     );
     if tperr.is_some() {
       ret tperr;
@@ -7254,6 +7357,7 @@ impl Parser {
     qn.methods = methods;
     qn.is_generic = is_generic;
     qn.type_params = type_params;
+    qn.type_param_defaults = type_param_defaults;
     qn.has_type_params = type_params.len > 0;
 
     Node node = node_new(.Quirk(qn));
@@ -7306,12 +7410,19 @@ impl Parser {
     DataType* impl_concrete_dt = nil;
     flag has_impl_concrete_dt = false;
 
+    Vec<DataType*> impl_param_defaults;
+    impl_param_defaults.init(0);
     if self.state.next_token_is_angle_open() {
+      if self.state.impl_angle_list_has_default() {
+        self.state.err("an impl's type parameters cannot have defaults: they come from the type it implements");
+        ret .Some(.InvalidDataType);
+      }
       if self.state.impl_generic_args_are_params() {
         let tperr = self.state.parse_type_params_with_constraints(
           &type_params,
           &type_param_forced_insts,
-          &type_param_constraints
+          &type_param_constraints,
+          &impl_param_defaults
         );
         if tperr.is_some() {
           ret tperr;
@@ -7332,12 +7443,18 @@ impl Parser {
       let tperr = self.state.parse_type_params_with_constraints(
         &type_params,
         &type_param_forced_insts,
-        &type_param_constraints
+        &type_param_constraints,
+        &impl_param_defaults
       );
       if tperr.is_some() {
         ret tperr;
       }
     }
+    if _any_default(&impl_param_defaults) {
+      self.state.err("an impl's type parameters cannot have defaults: they come from the type it implements");
+      ret .Some(.InvalidDataType);
+    }
+    impl_param_defaults.free();
     flag has_type_params = type_params.len > 0;
     flag has_type_param_forced_insts = type_param_forced_insts.len > 0;
     flag has_type_param_constraints = type_param_constraints.len > 0;
@@ -7529,10 +7646,13 @@ impl Parser {
     method_type_param_forced_insts.init(0);
     Vec<Vec<str>> method_type_param_constraints;
     method_type_param_constraints.init(0);
+    Vec<DataType*> method_type_param_defaults;
+    method_type_param_defaults.init(0);
     let mtperr = self.state.parse_type_params_with_constraints(
       &method_type_params,
       &method_type_param_forced_insts,
-      &method_type_param_constraints
+      &method_type_param_constraints,
+      &method_type_param_defaults
     );
     if mtperr.is_some() {
       ret mtperr;
@@ -7540,6 +7660,7 @@ impl Parser {
     fit fn_node_ptr.kind {
       .Function(curmtp) -> {
         curmtp.type_params = method_type_params;
+        curmtp.type_param_defaults = method_type_param_defaults;
         curmtp.has_type_params = method_type_params.len > 0;
         curmtp.type_param_forced_insts = method_type_param_forced_insts;
         curmtp.has_type_param_forced_insts = method_type_param_forced_insts.len > 0;
@@ -10493,6 +10614,101 @@ test "parse_function parses generic type parameters with no constraints" {
   }
 }
 
+test "parse_function records a type parameter's default, nil for a parameter without one" {
+  ParseState st = _state_from("fun pick<T, U = num, V = Vec<T>>(T x) T { ret x; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the function with defaults to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.type_params.len == 3, "expected 3 type params";
+      assert f.type_param_defaults.len == 3, "expected one default slot per param";
+      assert f.type_param_defaults.get(0) == nil, "expected no default for T";
+      assert equals(f.type_param_defaults.get(1).type_str, "num"), "expected U to default to num";
+      DataType* third = f.type_param_defaults.get(2);
+      assert equals(third.type_str, "Vec") && third.generic_args.len == 1, "expected V to default to Vec<T>";
+      assert equals(third.generic_args.get(0).type_str, "T"), "expected the default to name the earlier T";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "a type parameter default follows a bound" {
+  ParseState st = _state_from("fun add<T: num | dec = num>(T a) T { ret a; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected a bound followed by a default to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.has_type_param_forced_insts, "expected the bound kept";
+      assert equals(f.type_param_defaults.get(0).type_str, "num"), "expected the default after the bound";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "a type parameter without a default cannot follow one with a default" {
+  ParseState st = _state_from("fun bad<T = num, U>(T x) T { ret x; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_some(), "expected a non-default after a default to be rejected";
+}
+
+test "enum, compound, quirk and alias declarations record their type parameter defaults" {
+  ParseState st = _state_from("enum Res<T, E = str> { Ok(T), Err(E) }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(true).is_none(), "expected the enum to parse";
+  let e = st.nodes.get(st.nodes.len - 1);
+  fit e.kind {
+    .Enum(en) -> {
+      assert en.type_param_defaults.get(0) == nil, "expected no default for T";
+      assert equals(en.type_param_defaults.get(1).type_str, "str"), "expected E to default to str";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+
+  ParseState st2 = _state_from("compound Pair<A, B = A> { A a; B b; }");
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_compound(true).is_none(), "expected the compound to parse";
+  let c = st2.nodes.get(st2.nodes.len - 1);
+  fit c.kind {
+    .Compound(cn) -> {
+      assert equals(cn.type_param_defaults.get(1).type_str, "A"), "expected B to default to A";
+    }
+    _ -> { panic("expected a Compound node"); }
+  }
+
+  ParseState st3 = _state_from("quirk Conv<F, T = str> { conv(F x) T; }");
+  Parser p3 = parser_new(&st3);
+  assert p3.parse_quirk(true).is_none(), "expected the quirk to parse";
+  let q = st3.nodes.get(st3.nodes.len - 1);
+  fit q.kind {
+    .Quirk(qn) -> {
+      assert equals(qn.type_param_defaults.get(1).type_str, "str"), "expected T to default to str";
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+
+  ParseState st4 = _state_from("als Cb<A, R = num> = fun(A) R;");
+  Parser p4 = parser_new(&st4);
+  assert p4.parse_type_alias(true).is_none(), "expected the alias to parse";
+  let a = st4.nodes.get(st4.nodes.len - 1);
+  fit a.kind {
+    .TypeAlias(an) -> {
+      assert an.type_param_defaults.get(0) == nil, "expected no default for A";
+      assert equals(an.type_param_defaults.get(1).type_str, "num"), "expected R to default to num";
+    }
+    _ -> { panic("expected a TypeAlias node"); }
+  }
+}
+
+test "an impl's type parameters cannot have defaults" {
+  ParseState st = _state_from("impl Box<T = num> { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_impl(true).is_some(), "expected a default on an impl's type parameter to be rejected";
+}
+
 test "parse_function parses constrained generic type parameters into forced instantiations" {
   ParseState st = _state_from("fun add<T: num | dec>(T a, T b) T { ret a; }");
   Parser p = parser_new(&st);
@@ -12419,6 +12635,24 @@ fun _mangled_dtype_name_depth(DataType* dt, num depth) str {
 // (`impl VecIter<T> as Iterator<T>`, whose arg is the enclosing impl's own
 // type param) from a concrete one (`impl Point as To<num>`), which is a
 // distinct quirk identity needing its own mangled name to dispatch.
+// True when some entry of `defaults` (a type-param list's defaults so far)
+// is a real default rather than nil.
+fun _has_earlier_default(Vec<DataType*>* defaults) flag {
+  num i = 0;
+  for i < defaults.len {
+    if defaults.get(i) != nil {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
+// Whether any of `defaults` is a real default.
+fun _any_default(Vec<DataType*>* defaults) flag {
+  ret _has_earlier_default(defaults);
+}
+
 fun _dtype_references_any_param(DataType* dt, Vec<str> params) flag {
   if dt.kind == .Unknown && len(dt.type_str) > 0 {
     for p : params {

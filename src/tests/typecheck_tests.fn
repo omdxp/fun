@@ -1794,6 +1794,143 @@ test "a bare shorthand nested in a payload naming a real variant is accepted, at
   );
 }
 
+test "an omitted trailing type argument takes the declaration's default" {
+  accepts(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `fun fail() Res<num> {
+    `  ret .Err("bad");
+    `}
+    `fun main() {
+    `  Res<num> r = fail();
+    `}`,
+    "expected Res<num> to mean Res<num, str>, so .Err(str) fits"
+  );
+  rejects(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `fun takes(Res<num> r) {}
+    `fun main() {
+    `  Res<num, num> other;
+    `  takes(other);
+    `}`,
+    "expected Res<num, num> not to fit a Res<num> parameter, whose error defaults to str"
+  );
+  accepts(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `fun takes(Res<num> r) {}
+    `fun main() {
+    `  Res<num, str> same;
+    `  takes(same);
+    `}`,
+    "expected Res<num, str> to fit a Res<num> parameter"
+  );
+}
+
+test "a default that names an earlier parameter stands for the argument written for it" {
+  accepts(
+    `compound Pair<A, B = A> { A a; B b; }
+    `fun main() {
+    `  Pair<num> p = Pair<num>{ a = 1, b = 2 };
+    `  num total = p.a + p.b;
+    `}`,
+    "expected Pair<num> to mean Pair<num, num>"
+  );
+  rejects(
+    `compound Pair<A, B = A> { A a; B b; }
+    `fun main() {
+    `  Pair<num> p = Pair<num>{ a = 1, b = 2 };
+    `  p.b = "text";
+    `}`,
+    "expected b to be a num in Pair<num>, so a str is rejected"
+  );
+  accepts(
+    `compound Pair<A, B = A> { A a; B b; }
+    `fun main() {
+    `  Pair<num, str> p = Pair<num, str>{ a = 1, b = "x" };
+    `}`,
+    "expected an explicit second argument to override the default"
+  );
+}
+
+test "a default that is itself generic gets its own missing arguments filled" {
+  rejects(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `compound Holder<T, U = Res<T>> { U u; }
+    `fun main() {
+    `  Holder<num> h;
+    `  Res<num, num> other;
+    `  h.u = other;
+    `}`,
+    "expected Holder<num> to hold a Res<num, str>, so a Res<num, num> is rejected"
+  );
+}
+
+test "an alias parameter can have a default" {
+  accepts(
+    `als Cb<A, R = num> = fun(A) R;
+    `fun twice(num x) num { ret x * 2; }
+    `fun apply(Cb<num> f, num x) num { ret f(x); }
+    `fun main() {
+    `  num r = apply(twice, 4);
+    `}`,
+    "expected Cb<num> to mean fun(num) num"
+  );
+}
+
+test "a reference that omits an argument with no default is rejected" {
+  str got = check(
+    `compound Wide<A, B, C = num> { A a; B b; C c; }
+    `fun main() {
+    `  Wide<num> w;
+    `}`
+  );
+  assert contains(got, "'Wide' expects at least 2 type arguments, found 1"), "expected an arity error naming the declaration and the required count";
+}
+
+test "a bare reference with no type arguments is left alone" {
+  accepts(
+    `compound Box<T = num> { T v; }
+    `fun main() {
+    `  Box<num> b;
+    `}`,
+    "expected a declaration with defaults to keep working when written in full"
+  );
+}
+
+test "a default cannot mention a later parameter or its own declaration" {
+  str later = check(
+    `compound Pair<A = B, B = num> { A a; B b; }
+    `fun main() {}`
+  );
+  assert contains(later, "can only refer to earlier parameters, not 'B'"), "expected a later-parameter default to be rejected";
+  str own = check(
+    `compound Tree<T, U = Tree<T>> { T v; }
+    `fun main() {}`
+  );
+  assert contains(own, "cannot mention 'Tree' itself"), "expected a self-referencing default to be rejected";
+}
+
+test "defaults that refer back to each other are rejected instead of looping" {
+  str got = check(
+    `compound A<T, U = B<T>> { T t; }
+    `compound B<T, U = A<T>> { T t; }
+    `fun main() {
+    `  A<num> a;
+    `}`
+  );
+  assert contains(got, "nest too deeply"), "expected a default cycle to be reported";
+}
+
+test "a nonempty impl header must write every type argument" {
+  str got = check(
+    `compound Box<T, U = num> { T v; }
+    `impl Box<str> {
+    `  pub get() str { ret self.v; }
+    `}
+    `fun main() {}`
+  );
+  assert contains(got, "write every type argument of 'Box' in an impl header"), "expected an impl relying on a default to be rejected";
+}
+
 test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
   accepts(
     `enum Option<T> { None, Some(T) }

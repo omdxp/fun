@@ -236,3 +236,68 @@ test "3D tensor let inference transpiles" {
   assert contains(out, "sizeof(m[0])/sizeof(m[0][0])"), "expected the middle bound";
   assert contains(out, "sizeof(m[0][0])/sizeof(m[0][0][0])"), "expected the inner bound";
 }
+
+test "a for loop over a pointer to a collection iterates the value it points to" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `use std.map;
+  `use std.set;
+  `use std.option;
+  `use std.quirks;
+  `compound Counter { num cur; num end; }
+  `impl Counter as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.cur >= self.end { ret .None; }
+  `    num v = self.cur;
+  `    self.cur = self.cur + 1;
+  `    ret .Some(v);
+  `  }
+  `}
+  `compound Holder { Vec<num>* items; }
+  `fun sum_vec(Vec<num>* v) num {
+  `  num total = 0;
+  `  for x : v { total = total + x; }
+  `  ret total;
+  `}
+  `fun count_map(Map<num, num>* m) num {
+  `  num n = 0;
+  `  for kv : m { n = n + 1; }
+  `  ret n;
+  `}
+  `fun sum_set(Set<num>* s) num {
+  `  num total = 0;
+  `  for x : s { total = total + x; }
+  `  ret total;
+  `}
+  `fun run_counter(Counter* c) num {
+  `  num total = 0;
+  `  for x : c { total = total + x; }
+  `  ret total;
+  `}
+  `fun holder_sum(Holder* h) num {
+  `  num total = 0;
+  `  for x : h.items { total = total + x; }
+  `  ret total;
+  `}
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(0);
+  `  v.push(1);
+  `  v.push(2);
+  `  v.push(3);
+  `  Map<num, num> m;
+  `  m.init();
+  `  m.put(1, 10);
+  `  m.put(2, 20);
+  `  Set<num> s = set_init(0, 8);
+  `  s.add(4);
+  `  s.add(5);
+  `  Counter c = Counter{ cur = 0, end = 4 };
+  `  Holder h = Holder{ items = &v };
+  `  printf("%lld %lld %lld %lld %lld\n", sum_vec(&v), count_map(&m), sum_set(&s), run_counter(&c), holder_sum(&h));
+  `  printf("%lld\n", v.len);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_over_pointer", "for over a pointer to a collection");
+  assert equals(out, "6 2 9 6 6\n3\n"), "expected each pointer-typed iterable to iterate what it points to, leaving a Vec's own contents alone";
+}

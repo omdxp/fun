@@ -1,0 +1,61 @@
+// Default type parameters: a trailing parameter can end with `= Type`, and
+// a reference that leaves it out gets the default filled in. A default may
+// name an earlier parameter.
+use std.io;
+use std.vec;
+
+enum Res<T, E = str> {
+  Ok(T),
+  Err(E),
+}
+
+compound Pair<A, B = A> {
+  A a;
+  B b;
+}
+
+als Handler<A, R = num> = fun(A) R;
+
+fun half(num x) Res<num> {
+  if x % 2 == 1 {
+    ret .Err("odd");
+  }
+  ret .Ok(x / 2);
+}
+
+fun twice(num x) num {
+  ret x * 2;
+}
+
+fun apply(Handler<num> f, num x) num {
+  ret f(x);
+}
+
+fun make_vec<T = num>() Vec<T> {
+  Vec<T> v;
+  v.init(0);
+  ret v;
+}
+
+fun main() {
+  fit half(8) {
+    .Ok(v) -> { println_fmt("half(8) = {num}", v); }
+    .Err(e) -> { println_fmt("half(8) failed: {str}", e); }
+  }
+  fit half(7) {
+    .Ok(v) -> { println_fmt("half(7) = {num}", v); }
+    .Err(e) -> { println_fmt("half(7) failed: {str}", e); }
+  }
+
+  Pair<num> same = Pair<num>{a = 3, b = 4};
+  Pair<num, str> mixed = Pair<num, str>{a = 1, b = "x"};
+  println_fmt("{num} {str}", same.a + same.b, mixed.b);
+
+  println_fmt("apply = {num}", apply(twice, 21));
+
+  Vec<num> nums = make_vec();
+  nums.push(5);
+  Vec<str> words = make_vec<str>();
+  words.push("hi");
+  println_fmt("{num} {str}", nums.get(0), words.get(0));
+}

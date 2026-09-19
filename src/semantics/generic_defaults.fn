@@ -1,0 +1,420 @@
+// Default generic type parameters.
+// 
+// A generic enum, compound, quirk or alias may give trailing type
+// parameters a default (`enum Result<T, E = Error>`), and a reference that
+// writes fewer type arguments than the declaration has (`Result<num>`)
+// gets the missing ones filled in from those defaults. A default may name
+// an earlier parameter (`compound Pair<A, B = A>`), which stands for
+// whatever argument was written for it.
+// 
+// This runs over the whole program before typecheck, like alias
+// expansion, and edits the program's own DataType nodes in place, so
+// typecheck and codegen never learn defaults exist: a reference reads as
+// though the filled-in arguments had been written out. A bare reference
+// with no arguments at all is left alone. Generic functions take their
+// defaults at monomorphization instead, since a function's type arguments
+// are usually inferred rather than written.
+
+use ..ast.ast;
+use std.string;
+use std.vec;
+use std.map;
+use std.option;
+
+// One declaration's own parameter names and defaults, borrowed from its
+// AST node (never freed here).
+compound _DefaultsEntry {
+  Vec<str> params;
+  Vec<DataType*> defaults;
+}
+
+// How deeply nested a type may get, counting both what is written and
+// what defaults fill in, before it is assumed to be a loop (`A<T, U =
+// B<T>>` and `B<T, U = A<T>>` never settle).
+const num _MAX_DEFAULT_DEPTH = 40;
+
+fun _mentions(DataType* dt, str name) flag {
+  if dt == nil {
+    ret false;
+  }
+  if equals(dt.type_str, name) {
+    ret true;
+  }
+  for arg : dt.generic_args {
+    if _mentions(arg, name) {
+      ret true;
+    }
+  }
+  for member : dt.tuple_members {
+    if _mentions(member, name) {
+      ret true;
+    }
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    for prm : dt.fn_sig.params {
+      if _mentions(prm, name) {
+        ret true;
+      }
+    }
+    if _mentions(dt.fn_sig.rtype, name) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// The first problem with `decl`'s own defaults, or "" when they are fine:
+// a default may not mention the declaration itself, nor its own or a
+// later parameter.
+fun _check_defaults(str decl, Vec<str>* params, Vec<DataType*>* defaults) str {
+  num i = 0;
+  for i < defaults.len && i < params.len {
+    DataType* d = defaults.get(i);
+    if d != nil {
+      if _mentions(d, decl) {
+        ret format(
+          "the default for type parameter '{str}' of '{str}' cannot mention '{str}' itself",
+          params.get(i),
+          decl,
+          decl
+        );
+      }
+      num j = i;
+      for j < params.len {
+        if _mentions(d, params.get(j)) {
+          ret format(
+            "the default for type parameter '{str}' of '{str}' can only refer to earlier parameters, not '{str}'",
+            params.get(i),
+            decl,
+            params.get(j)
+          );
+        }
+        j = j + 1;
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+fun _declares_defaults(Vec<DataType*>* defaults) flag {
+  num i = 0;
+  for i < defaults.len {
+    if defaults.get(i) != nil {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
+// Registers `decl`'s defaults when it declares any, returning the first
+// problem found ("" when none).
+fun _register(str decl, Vec<str>* params, Vec<DataType*>* defaults, Map<str, _DefaultsEntry>* table) str {
+  if !_declares_defaults(defaults) {
+    ret "";
+  }
+  str problem = _check_defaults(decl, params, defaults);
+  if !equals(problem, "") {
+    ret problem;
+  }
+  _DefaultsEntry entry;
+  entry.params = *params;
+  entry.defaults = *defaults;
+  table.put(decl, entry);
+  ret "";
+}
+
+// Fills the missing trailing arguments of `dt` itself (children first, so
+// a nested reference is complete before its parent is judged). Returns
+// how many arguments were added to `dt` at its own level.
+fun _fill_dtype(DataType* dt, Map<str, _DefaultsEntry>* table, num depth, str* err) num {
+  if dt == nil || !equals(*err, "") {
+    ret 0;
+  }
+  if depth > _MAX_DEFAULT_DEPTH {
+    *err = "type parameter defaults nest too deeply (do they refer back to each other?)";
+    ret 0;
+  }
+  for arg : dt.generic_args {
+    _fill_dtype(arg, table, depth + 1, err);
+  }
+  for member : dt.tuple_members {
+    _fill_dtype(member, table, depth + 1, err);
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    for prm : dt.fn_sig.params {
+      _fill_dtype(prm, table, depth + 1, err);
+    }
+    _fill_dtype(dt.fn_sig.rtype, table, depth + 1, err);
+  }
+
+  let found = table.at(dt.type_str);
+  if found.is_none() {
+    ret 0;
+  }
+  _DefaultsEntry entry = found.unwrap();
+  num written = dt.generic_args.len;
+  if written == 0 || written >= entry.params.len {
+    ret 0;
+  }
+  num i = written;
+  for i < entry.params.len {
+    DataType* dflt = nil;
+    if i < entry.defaults.len {
+      dflt = entry.defaults.get(i);
+    }
+    if dflt == nil {
+      num required = 0;
+      num r = 0;
+      for r < entry.params.len {
+        if r >= entry.defaults.len || entry.defaults.get(r) == nil {
+          required = r + 1;
+        }
+        r = r + 1;
+      }
+      *err = format(
+        "'{str}' expects at least {num} type arguments, found {num}",
+        dt.type_str,
+        required,
+        written
+      );
+      ret 0;
+    }
+    DataType* filled = dtype_clone(dflt);
+    dtype_substitute_params(filled, &entry.params, &dt.generic_args);
+    dt.generic_args.push(filled);
+    i = i + 1;
+  }
+  i = written;
+  for i < dt.generic_args.len {
+    _fill_dtype(dt.generic_args.get(i), table, depth + 1, err);
+    i = i + 1;
+  }
+  ret dt.generic_args.len - written;
+}
+
+fun _fill_dtype_vec(Vec<DataType*>* dts, Map<str, _DefaultsEntry>* table, str* err) {
+  num i = 0;
+  for i < dts.len {
+    _fill_dtype(dts.get(i), table, 0, err);
+    i = i + 1;
+  }
+}
+
+fun _fill_node(Node* node, Map<str, _DefaultsEntry>* table, str* err) {
+  if node == nil || !equals(*err, "") {
+    ret;
+  }
+  fit node.kind {
+    .Expression(e) -> {
+      if e.has_left {
+        _fill_node(e.left, table, err);
+      }
+      if e.has_right {
+        _fill_node(e.right, table, err);
+      }
+      _fill_dtype_vec(&e.generic_args, table, err);
+    }
+    .ExpressionParenthesis(inner) -> { _fill_node(inner, table, err); }
+    .Panic(inner) -> { _fill_node(inner, table, err); }
+    .Bracket(inner) -> { _fill_node(inner, table, err); }
+    .StatementReturn(inner) -> { _fill_node(inner, table, err); }
+    .StatementDefer(inner) -> { _fill_node(inner, table, err); }
+    .StatementElse(inner) -> { _fill_node(inner, table, err); }
+    .StatementFork(inner) -> { _fill_node(inner, table, err); }
+    .Variable(v) -> {
+      _fill_dtype(v.var_type, table, 0, err);
+      if v.has_val {
+        _fill_node(v.val, table, err);
+      }
+    }
+    .Function(f) -> {
+      if f.has_rtype {
+        _fill_dtype(f.rtype, table, 0, err);
+      }
+      _fill_dtype_vec(&f.type_param_defaults, table, err);
+      if f.has_args {
+        for arg : f.args {
+          _fill_node(arg, table, err);
+        }
+      }
+      if f.has_body {
+        _fill_node(f.body, table, err);
+      }
+    }
+    .Body(b) -> {
+      for stmt : b.statements {
+        _fill_node(stmt, table, err);
+      }
+    }
+    .StatementIf(s) -> {
+      _fill_node(s.condition, table, err);
+      _fill_node(s.body, table, err);
+    }
+    .StatementElseIf(s) -> {
+      _fill_node(s.condition, table, err);
+      _fill_node(s.body, table, err);
+    }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(c) -> {
+          if c.has_condition {
+            _fill_node(c.condition, table, err);
+          }
+          _fill_node(c.body, table, err);
+        }
+        .Iter(it) -> {
+          _fill_node(it.iterable, table, err);
+          _fill_node(it.body, table, err);
+        }
+      }
+    }
+    .StatementAssert(a) -> {
+      _fill_node(a.condition, table, err);
+      if a.has_message {
+        _fill_node(a.message, table, err);
+      }
+    }
+    .StatementFit(f) -> {
+      _fill_node(f.exp, table, err);
+      for br : f.branches {
+        if br.has_condition {
+          _fill_node(br.condition, table, err);
+        }
+        _fill_node(br.body, table, err);
+      }
+    }
+    .StatementAsm(a) -> {
+      for op : a.outputs {
+        _fill_node(op.expr, table, err);
+      }
+      for op2 : a.inputs {
+        _fill_node(op2.expr, table, err);
+      }
+    }
+    .Unary(u) -> {
+      _fill_node(u.operand, table, err);
+      if u.has_error_arg {
+        _fill_node(u.error_arg, table, err);
+      }
+    }
+    .Tenary(t) -> {
+      _fill_node(t.cond, table, err);
+      _fill_node(t.then_val, table, err);
+      _fill_node(t.else_val, table, err);
+    }
+    .CompoundInit(ci) -> {
+      if ci.has_dtype {
+        _fill_dtype(ci.init_dtype, table, 0, err);
+      }
+      for f : ci.fields {
+        _fill_node(f.value, table, err);
+      }
+    }
+    .TupleLiteral(tl) -> {
+      for el : tl.elements {
+        _fill_node(el, table, err);
+      }
+    }
+    .Compound(c) -> {
+      for cf : c.fields {
+        _fill_dtype(cf.dtype, table, 0, err);
+      }
+      _fill_dtype_vec(&c.type_param_defaults, table, err);
+    }
+    .Quirk(q) -> {
+      for m : q.methods {
+        _fill_dtype(m.rtype, table, 0, err);
+        for qa : m.args {
+          _fill_dtype(qa.dtype, table, 0, err);
+        }
+      }
+      _fill_dtype_vec(&q.type_param_defaults, table, err);
+    }
+    .Enum(e) -> {
+      for v : e.variants {
+        _fill_dtype_vec(&v.payload, table, err);
+      }
+      _fill_dtype_vec(&e.type_param_defaults, table, err);
+    }
+    .Impl(im) -> {
+      if im.has_concrete_dtype {
+        num added = _fill_dtype(im.concrete_dtype, table, 0, err);
+        if added > 0 && equals(*err, "") {
+          *err = format(
+            "write every type argument of '{str}' in an impl header: an impl cannot rely on a default",
+            im.concrete_dtype.type_str
+          );
+        }
+      }
+      if im.has_quirk_arg_dtype {
+        _fill_dtype(im.quirk_arg_dtype, table, 0, err);
+      }
+      for m2 : im.methods {
+        _fill_node(m2, table, err);
+      }
+    }
+    .TypeAlias(a) -> {
+      if !a.is_bound_list {
+        _fill_dtype(a.body, table, 0, err);
+      }
+      _fill_dtype_vec(&a.type_param_defaults, table, err);
+    }
+    .Test(t) -> { _fill_node(t.body, table, err); }
+    .Fuzz(fz) -> {
+      _fill_node(fz.data_param, table, err);
+      _fill_node(fz.len_param, table, err);
+      _fill_node(fz.body, table, err);
+    }
+    _ -> {}
+  }
+}
+
+// Fills every type reference in `nodes` that writes fewer type arguments
+// than its declaration has and whose missing ones have defaults. Returns
+// an error message for a malformed default or a reference that omits an
+// argument with no default; a program declaring no defaults is untouched.
+pub fun fill_generic_defaults(Vec<Node>* nodes) Option<str> {
+  Map<str, _DefaultsEntry> table;
+  table.init(8);
+  defer table.free();
+  num i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    str problem = "";
+    fit node.kind {
+      .Enum(e) -> {
+        problem = _register(e.name, &e.type_params, &e.type_param_defaults, &table);
+      }
+      .Compound(c) -> {
+        problem = _register(c.name, &c.type_params, &c.type_param_defaults, &table);
+      }
+      .Quirk(q) -> {
+        problem = _register(q.name, &q.type_params, &q.type_param_defaults, &table);
+      }
+      .TypeAlias(a) -> {
+        problem = _register(a.name, &a.type_params, &a.type_param_defaults, &table);
+      }
+      _ -> {}
+    }
+    if !equals(problem, "") {
+      ret .Some(problem);
+    }
+  }
+  if table.len() == 0 {
+    ret .None;
+  }
+
+  str err = "";
+  num j = 0;
+  for j < nodes.len {
+    _fill_node(&nodes.data[j], &table, &err);
+    j = j + 1;
+    if !equals(err, "") {
+      ret .Some(err);
+    }
+  }
+  ret .None;
+}
