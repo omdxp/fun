@@ -2525,8 +2525,27 @@ fun _lint_file(str file, LintOutcome* out) {
   }
 }
 
+// True when `path` sits inside a directory named `fixtures` (or ending in
+// `_fixtures`): test inputs that are deliberately odd, which a scan of a
+// tree leaves out. Compares whole directory names, on either separator.
+fun _in_fixtures_dir(str path) flag {
+  Vec<str> parts = split(replace_char(path, '\\', '/'), '/');
+  defer parts.free();
+  num i = 0;
+  for i + 1 < parts.len {
+    str part = parts.get(i);
+    if equals(part, "fixtures") || ends_with(part, "_fixtures") {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
 // Lints every `.fn` file under `root`, which may name a directory or one
-// file. Errs only when `root` names neither.
+// file, leaving out anything inside a `fixtures` directory when scanning
+// a directory (a file named directly is always linted). Errs only when
+// `root` names neither.
 pub fun lint_paths(str root) Result<LintOutcome, str> {
   str target = root;
   if equals(target, "") {
@@ -2536,7 +2555,15 @@ pub fun lint_paths(str root) Result<LintOutcome, str> {
   files.init(16);
   defer files.free();
   if is_dir(target) {
-    _collect_fun_files(target, &files);
+    Vec<str> found;
+    found.init(16);
+    defer found.free();
+    _collect_fun_files(target, &found);
+    for path : found {
+      if !_in_fixtures_dir(path) {
+        files.push(path);
+      }
+    }
   } elif ends_with(target, ".fn") && exists(target) {
     files.push(target);
   } else {
@@ -2846,4 +2873,39 @@ test "parses the lint subcommand with a path and -summary" {
   assert equals(o.subcommand, "lint"), "expected the lint subcommand";
   assert equals(o.input, "src"), "expected the path as the input";
   assert o.lint_summary, "expected -summary to be set";
+}
+
+test "lint leaves out fixtures directories when scanning, but lints a fixture named directly" {
+  make_dir_all("fun-out/_lint_fx/sub_fixtures");
+  make_dir_all("fun-out/_lint_fx/fixtures");
+  make_dir_all("fun-out/_lint_fx/real");
+  str a = "fun-out/_lint_fx/sub_fixtures/a.fn";
+  str b = "fun-out/_lint_fx/fixtures/b.fn";
+  str c = "fun-out/_lint_fx/real/c.fn";
+  str body = "fun main() num {\n  num unused = 1;\n  ret 0;\n}\n";
+  write_string(a, body);
+  write_string(b, body);
+  write_string(c, body);
+  defer remove_file(a);
+  defer remove_file(b);
+  defer remove_file(c);
+
+  let scanned = lint_paths("fun-out/_lint_fx");
+  assert scanned.is_ok(), "expected the tree to lint";
+  LintOutcome outcome = scanned.unwrap();
+  defer outcome.findings.free();
+  defer outcome.failures.free();
+  assert outcome.files == 1, "expected only the file outside every fixtures directory";
+
+  let direct = lint_paths(b);
+  assert direct.is_ok(), "expected a fixture named directly to lint";
+  LintOutcome named = direct.unwrap();
+  defer named.findings.free();
+  defer named.failures.free();
+  assert named.files == 1 && named.findings.len == 1, "expected the named fixture linted regardless";
+
+  assert _in_fixtures_dir("src/tests/fixtures/x.fn"), "expected a fixtures directory recognized";
+  assert _in_fixtures_dir("src\\parser\\import_resolver_fixtures\\x.fn"), "expected a *_fixtures directory recognized on backslashes";
+  assert !_in_fixtures_dir("src/fixtures_helper.fn"), "expected a file merely named like fixtures kept";
+  assert !_in_fixtures_dir("fixtures"), "expected the last component, a file or leaf, not counted as a directory";
 }
