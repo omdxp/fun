@@ -42,10 +42,19 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           set +e
-          echo "which fun:"; which fun
-          echo "PATH length: ${#PATH}"
-          fun -version; echo "version exit=$?"
-          FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build 2>&1 | head -30; echo "build exit=${PIPESTATUS[0]}"
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          echo "== frontend only, PR source"
+          fun -in src/cli/main.fn -no-exec 2>&1 | head -8; echo "exit=${PIPESTATUS[0]}"
+          echo "== tiny file"
+          fun -in src/lexer/lexer.fn -no-exec 2>&1 | head -4; echo "exit=${PIPESTATUS[0]}"
+          git fetch -q origin main
+          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
+            cp "$f" "/tmp/keep.fn"
+            git show "origin/main:$f" > "$f"
+            echo "== main's $f, rest from PR"
+            fun -in src/cli/main.fn -no-exec 2>&1 | head -3; echo "exit=${PIPESTATUS[0]}"
+            cp /tmp/keep.fn "$f"
+          done
       - name: Build fun and fls
         timeout-minutes: 10
         run: |
