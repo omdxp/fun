@@ -38,6 +38,14 @@ jobs:
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
+      - name: DEBUG windows fun (temporary)
+        if: matrix.os == 'windows-latest'
+        run: |
+          set +e
+          echo "which fun:"; which fun
+          echo "PATH length: ${#PATH}"
+          fun -version; echo "version exit=$?"
+          FUN_CC=cl FUN_STDLIB_DIR="$PWD/stdlib" fun build 2>&1 | head -30; echo "build exit=${PIPESTATUS[0]}"
       - name: Build fun and fls
         timeout-minutes: 10
         run: |
