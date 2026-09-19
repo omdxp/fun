@@ -543,6 +543,16 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
     _ -> {}
   }
 
+  // A variant's type is the enum it belongs to, however it was written
+  // (`Color.Red`, a bare `.Red` shorthand, or `x?!(.Red)`).
+  if d.kind == .Variant && !equals(d.container, "") {
+    let owner = lookup_top_level(&read.program.nodes, d.container);
+    if owner.is_some() {
+      ret _location_result(doc, owner.unwrap());
+    }
+    ret NO_LOCATION;
+  }
+
   // `d.detail` reads as a full "name(args) RetType" signature for a
   // function or method, not a bare "Type name" pair. Hovering the
   // call itself (the closing hop of a chain like `c.own().rpm`, or a
@@ -1013,6 +1023,20 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
         if payload.is_some() {
           ret payload.unwrap();
         }
+      }
+    }
+    // Any other context the outer shorthand itself reads against (a
+    // `?!(...)` error slot, another call's parameter, a comparison or
+    // assignment operand): resolve that enum first, then take this
+    // variant's own payload at `arg_index`.
+    str owner = dot_shorthand_context_type_at(tokens, program, callee_idx - 1, file, line);
+    if !equals(owner, "") {
+      Vec<str> no_args;
+      no_args.init(0);
+      let payload = variant_payload_type(program, owner, callee_name, arg_index, no_args);
+      no_args.free();
+      if payload.is_some() {
+        ret payload.unwrap();
       }
     }
     ret "";
@@ -1664,8 +1688,9 @@ pub fun keyword_doc(str word) str {
       `Option -> Result/Option propagation. If expr (an Option<T>) is
       `.None, returns err from the enclosing function immediately,
       `wrapped in whatever shape it needs: .Err(err) if it returns
-      `Result<_, E>, or .Some(err) if it returns Option<E> (err must
-      `exactly match); otherwise evaluates to the wrapped value.`
+      `Result<_, E>, or .Some(err) if it returns Option<E> (err must fit
+      `that error type; a bare .Variant works); otherwise evaluates to
+      `the wrapped value.`
     );
   }
   if equals(word, "!?") {
