@@ -38,7 +38,8 @@ use std.time;
 
 // What the arguments asked for.
 pub compound Options {
-  // `build`, `test`, `fuzz`, `init`, or "" for a plain compile.
+  // `build`, `test`, `fuzz`, `init`, `add`, `deps`, `lint`, or "" for a
+  // plain compile.
   str subcommand;
   // `-test`/`-fuzz` given directly (alongside `-in`) rather than via a
   // `test`/`fuzz` subcommand. Only meaningful when `subcommand` is "".
@@ -76,6 +77,8 @@ pub compound Options {
   // without rewriting anything.
   flag fmt_check;
   flag fmt_check_all;
+  // `fun lint`'s `-summary`: print only the totals, not each warning.
+  flag lint_summary;
   // Arguments after `--`, passed to the compiled program.
   Vec<str> program_args;
   // Constants injected into the program, from `-D name=value`.
@@ -120,6 +123,7 @@ fun _options_new() Options {
   o.fmt_diag = false;
   o.fmt_check = false;
   o.fmt_check_all = false;
+  o.lint_summary = false;
   o.program_args.init(0);
   o.defines.init(0);
   o.deps_action = "";
@@ -179,7 +183,8 @@ pub fun parse_args(str[] argv) Options {
   if leading.is_some() {
     str head = leading.unwrap();
     if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
-      equals(head, "init") || equals(head, "add") || equals(head, "deps") {
+      equals(head, "init") || equals(head, "add") || equals(head, "deps") ||
+      equals(head, "lint") {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -202,6 +207,7 @@ pub fun parse_args(str[] argv) Options {
   o.fmt_diag = parsed.has("fmt-diag");
   o.fmt_check = parsed.has("fmt-check");
   o.fmt_check_all = parsed.has("fmt-check-all");
+  o.lint_summary = parsed.has("summary");
   o.test_flag = parsed.has("test");
   o.fuzz_flag = parsed.has("fuzz");
   o.fuzz_target = parsed.get_or("fuzz-target", "");
@@ -1007,6 +1013,7 @@ pub fun help_text() str {
   `  fun test [<dir>]         runs every test block found under <dir> (default '.')
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
+  `  fun lint [<path>] [-summary]  reports every warning under <path> (a file or directory, default '.'), then totals; exits 1 if any
   `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
   `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
   `  fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> | -rev <sha>] [-token-env <VAR>]
@@ -1034,6 +1041,7 @@ pub fun help_text() str {
   `  -fmt-diag         Format the input file in place, then still run diagnostics.
   `  -fmt-check        Report the input if it is unformatted, and exit 1.
   `  -fmt-check-all    Report every unformatted file under the input, and exit 1.
+  `  -summary          With lint, print only the totals.
   `  --                Pass every following argument to the compiled program.`;
 }
 
@@ -2441,6 +2449,239 @@ fun _collect_fun_files(str dir, Vec<str>* out) {
   }
 }
 
+// One warning found by `fun lint`, with the file it was found in.
+pub compound LintFinding {
+  str file;
+  str id;
+  str message;
+  flag has_pos;
+  num line;
+  num col;
+}
+
+// Everything `fun lint` learned about a tree: the warnings, the files it
+// could not analyze (with why), and how many files it looked at.
+pub compound LintOutcome {
+  Vec<LintFinding> findings;
+  Vec<str> failures;
+  num files;
+}
+
+fun _lint_outcome_new() LintOutcome {
+  LintOutcome o;
+  o.findings.init(16);
+  o.failures.init(0);
+  o.files = 0;
+  ret o;
+}
+
+// Analyzes one file the way `-warn-unused` does, without typechecking or
+// building it: parse with its imports, expand aliases, then read the
+// warnings off the file's own declarations.
+fun _lint_file(str file, LintOutcome* out) {
+  let parsed = parse_program_with_imports(file);
+  if parsed.is_err() {
+    out.failures.push(format("{str}: error: {str}", file, parsed.unwrap_err()));
+    ret;
+  }
+  let merged = parsed.unwrap();
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    out.failures.push(format("{str}: error: {str}", file, alias_err.unwrap()));
+    ret;
+  }
+  sync_type_alias_usage(&merged.nodes, &merged.entry_nodes);
+  let noticed = analyze(&merged.entry_nodes, &merged.nodes, true, file);
+  if noticed.is_err() {
+    UnmetExpectation ue = noticed.unwrap_err();
+    str where = file;
+    if ue.has_pos {
+      where = format("{str}:{num}:{num}", ue.pos.filename, ue.pos.line, ue.pos.col);
+    }
+    out.failures.push(format("{str}: error: {str}", where, ue.message));
+    ret;
+  }
+  Vec<Warning> warnings = noticed.unwrap();
+  defer warnings.free();
+  num i = 0;
+  for i < warnings.len {
+    Warning w = warnings.get(i);
+    i = i + 1;
+    LintFinding f;
+    f.file = file;
+    f.id = warning_id_name(w.id);
+    f.message = w.message;
+    f.has_pos = w.has_pos;
+    f.line = 0;
+    f.col = 0;
+    if w.has_pos {
+      f.line = w.pos.line;
+      f.col = w.pos.col;
+      if !equals(w.pos.filename, "") {
+        f.file = w.pos.filename;
+      }
+    }
+    out.findings.push(f);
+  }
+}
+
+// Lints every `.fn` file under `root`, which may name a directory or one
+// file. Errs only when `root` names neither.
+pub fun lint_paths(str root) Result<LintOutcome, str> {
+  str target = root;
+  if equals(target, "") {
+    target = ".";
+  }
+  Vec<str> files;
+  files.init(16);
+  defer files.free();
+  if is_dir(target) {
+    _collect_fun_files(target, &files);
+  } elif ends_with(target, ".fn") && exists(target) {
+    files.push(target);
+  } else {
+    ret .Err(format("no such file or directory: {str}", target));
+  }
+  LintOutcome out = _lint_outcome_new();
+  out.files = files.len;
+  num i = 0;
+  for i < files.len {
+    _lint_file(files.get(i), &out);
+    i = i + 1;
+  }
+  ret .Ok(out);
+}
+
+// Adds one to `key`'s count in the parallel `names`/`counts` lists,
+// starting it at one when it is new.
+fun _bump_count(Vec<str>* names, Vec<num>* counts, str key) {
+  num i = 0;
+  for i < names.len {
+    if equals(names.get(i), key) {
+      counts.set(i, counts.get(i) + 1);
+      ret;
+    }
+    i = i + 1;
+  }
+  names.push(key);
+  counts.push(1);
+}
+
+// Orders the parallel lists by count, largest first, keeping ties in the
+// order they were first seen.
+fun _sort_counts_desc(Vec<str>* names, Vec<num>* counts) {
+  num i = 1;
+  for i < names.len {
+    str name = names.get(i);
+    num count = counts.get(i);
+    num j = i - 1;
+    for j >= 0 && counts.get(j) < count {
+      names.set(j + 1, names.get(j));
+      counts.set(j + 1, counts.get(j));
+      j = j - 1;
+    }
+    names.set(j + 1, name);
+    counts.set(j + 1, count);
+    i = i + 1;
+  }
+}
+
+// "1 warning", "2 warnings".
+fun _counted(num n, str one, str many) str {
+  if n == 1 {
+    ret format("{num} {str}", n, one);
+  }
+  ret format("{num} {str}", n, many);
+}
+
+// `fun lint`: reports every warning under `root`, then totals by warning
+// id and by file. Exits 1 when there is anything to report, so it can gate
+// a build the way `-fmt-check-all` does.
+pub fun run_lint(str root, flag summary_only) num {
+  let linted = lint_paths(root);
+  if linted.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", linted.unwrap_err()));
+    ret 1;
+  }
+  LintOutcome outcome = linted.unwrap();
+  defer outcome.findings.free();
+  defer outcome.failures.free();
+
+  if !summary_only {
+    num fi = 0;
+    for fi < outcome.findings.len {
+      LintFinding f = outcome.findings.get(fi);
+      fi = fi + 1;
+      if f.has_pos {
+        println(format("{str}:{num}:{num}: warning[{str}]: {str}", f.file, f.line, f.col, f.id, f.message));
+      } else {
+        println(format("{str}: warning[{str}]: {str}", f.file, f.id, f.message));
+      }
+    }
+  }
+  num ei = 0;
+  for ei < outcome.failures.len {
+    writeln_to(Sink.Stderr, outcome.failures.get(ei));
+    ei = ei + 1;
+  }
+
+  Vec<str> kinds;
+  kinds.init(8);
+  defer kinds.free();
+  Vec<num> kind_counts;
+  kind_counts.init(8);
+  defer kind_counts.free();
+  Vec<str> with_findings;
+  with_findings.init(8);
+  defer with_findings.free();
+  Vec<num> file_counts;
+  file_counts.init(8);
+  defer file_counts.free();
+  num si = 0;
+  for si < outcome.findings.len {
+    LintFinding f = outcome.findings.get(si);
+    si = si + 1;
+    _bump_count(&kinds, &kind_counts, f.id);
+    _bump_count(&with_findings, &file_counts, f.file);
+  }
+  _sort_counts_desc(&kinds, &kind_counts);
+  _sort_counts_desc(&with_findings, &file_counts);
+
+  if outcome.findings.len > 0 {
+    println("");
+    println("Warnings by kind:");
+    num ki = 0;
+    for ki < kinds.len {
+      println(format("  {str}  {num}", kinds.get(ki), kind_counts.get(ki)));
+      ki = ki + 1;
+    }
+    println("Files with warnings:");
+    num wi = 0;
+    for wi < with_findings.len {
+      println(format("  {str}  {num}", with_findings.get(wi), file_counts.get(wi)));
+      wi = wi + 1;
+    }
+    println(format(
+      "{str} in {num} of {str}",
+      _counted(outcome.findings.len, "warning", "warnings"),
+      with_findings.len,
+      _counted(outcome.files, "file", "files")
+    ));
+  } else {
+    println(format("No warnings in {str}", _counted(outcome.files, "file", "files")));
+  }
+  if outcome.failures.len > 0 {
+    println(format(
+      "{str} could not be analyzed",
+      _counted(outcome.failures.len, "file", "files")
+    ));
+  }
+  if outcome.findings.len > 0 || outcome.failures.len > 0 {
+    ret 1;
+  }
+  ret 0;
+}
+
 // The unformatted `.fn` files under `root`, which may name a directory
 // or a file whose directory is scanned instead.
 pub fun collect_unformatted(str root) Vec<str> {
@@ -2512,4 +2753,97 @@ test "an unformatted file is reported by a scan of its directory" {
   defer offenders.free();
   assert offenders.len == 1, "expected the unformatted file to be reported";
   assert ends_with(offenders.get(0), "dirty.fn"), "expected the offender's path";
+}
+
+test "lint reports a warning per finding across a tree and counts the files it looked at" {
+  make_dir_all("fun-out/_lint_scan/sub");
+  str dirty = "fun-out/_lint_scan/dirty.fn";
+  str nested = "fun-out/_lint_scan/sub/nested.fn";
+  str clean = "fun-out/_lint_scan/clean.fn";
+  write_string(dirty, "fun main() num {\n  num unused = 1;\n  ret 0;\n}\n");
+  write_string(nested, "fun main() num {\n  num also_unused = 2;\n  ret 0;\n}\n");
+  write_string(clean, "fun main() num {\n  ret 0;\n}\n");
+  defer remove_file(dirty);
+  defer remove_file(nested);
+  defer remove_file(clean);
+
+  let linted = lint_paths("fun-out/_lint_scan");
+  assert linted.is_ok(), "expected the tree to lint";
+  LintOutcome outcome = linted.unwrap();
+  defer outcome.findings.free();
+  defer outcome.failures.free();
+  assert outcome.files == 3, "expected every .fn file under the root, nested ones included";
+  assert outcome.findings.len == 2, "expected one warning from each of the two files that have one";
+  assert outcome.failures.len == 0, "expected nothing that could not be analyzed";
+  LintFinding first = outcome.findings.get(0);
+  assert equals(first.id, "unused_variable"), "expected the warning's own id";
+  assert first.has_pos && first.line == 2, "expected the warning's own position";
+}
+
+test "lint reports a file that does not parse instead of stopping" {
+  make_dir_all("fun-out/_lint_bad");
+  str broken = "fun-out/_lint_bad/broken.fn";
+  str fine = "fun-out/_lint_bad/fine.fn";
+  write_string(broken, "fun main( {\n");
+  write_string(fine, "fun main() num {\n  num unused = 1;\n  ret 0;\n}\n");
+  defer remove_file(broken);
+  defer remove_file(fine);
+
+  let linted = lint_paths("fun-out/_lint_bad");
+  assert linted.is_ok(), "expected the tree to lint";
+  LintOutcome outcome = linted.unwrap();
+  defer outcome.findings.free();
+  defer outcome.failures.free();
+  assert outcome.failures.len == 1, "expected the broken file to be reported as unanalyzable";
+  assert contains(outcome.failures.get(0), "broken.fn"), "expected the failure to name its file";
+  assert outcome.findings.len == 1, "expected the good file's warning still found";
+}
+
+test "lint of a single file reports just that file, and a missing path is an error" {
+  make_dir_all("fun-out/_lint_one");
+  str only = "fun-out/_lint_one/only.fn";
+  write_string(only, "fun main() num {\n  num unused = 1;\n  ret 0;\n}\n");
+  defer remove_file(only);
+
+  let linted = lint_paths(only);
+  assert linted.is_ok(), "expected a single file to lint";
+  LintOutcome outcome = linted.unwrap();
+  defer outcome.findings.free();
+  defer outcome.failures.free();
+  assert outcome.files == 1, "expected exactly the named file";
+
+  assert lint_paths("fun-out/_lint_one/missing.fn").is_err(), "expected a missing file to be an error";
+}
+
+test "the counts are ordered largest first, ties in first-seen order" {
+  Vec<str> names;
+  names.init(4);
+  defer names.free();
+  Vec<num> counts;
+  counts.init(4);
+  defer counts.free();
+  _bump_count(&names, &counts, "a");
+  _bump_count(&names, &counts, "b");
+  _bump_count(&names, &counts, "b");
+  _bump_count(&names, &counts, "c");
+  _bump_count(&names, &counts, "b");
+  _bump_count(&names, &counts, "c");
+  _sort_counts_desc(&names, &counts);
+  assert equals(names.get(0), "b") && counts.get(0) == 3, "expected the most frequent first";
+  assert equals(names.get(1), "c") && counts.get(1) == 2, "expected the next most frequent second";
+  assert equals(names.get(2), "a") && counts.get(2) == 1, "expected the rarest last";
+}
+
+test "parses the lint subcommand with a path and -summary" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("lint");
+  a.push("src");
+  a.push("-summary");
+  let o = parse_args(_argv(&a));
+  assert !o.has_error, "expected the arguments to parse";
+  assert equals(o.subcommand, "lint"), "expected the lint subcommand";
+  assert equals(o.input, "src"), "expected the path as the input";
+  assert o.lint_summary, "expected -summary to be set";
 }
