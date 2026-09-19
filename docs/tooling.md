@@ -209,7 +209,10 @@ Files with warnings:
 ```
 
 - `<path>` is a `.fn` file or a directory, scanned recursively the same
-  way `fun -fmt-check-all` scans one (default `.`).
+  way `fun -fmt-check-all` scans one (default `.`). Directories named
+  `fixtures` or ending in `_fixtures` are left out of a directory scan,
+  since test inputs are often deliberately odd; a fixture named directly
+  is always linted.
 - Each file is analyzed the way `-warn-unused` does, warnings and unused
   declarations both, with its own `allow`/`expect` statements honored.
   Only what the file itself declares is reported, never what it imports.

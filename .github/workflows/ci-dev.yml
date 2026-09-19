@@ -118,3 +118,10 @@ jobs:
           FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
           FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
       - run: FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun -fmt-check-all
+      # The compiler's own source and the stdlib stay warning-clean. Run
+      # from the freshly built binary: the `fun` setup-fun installed is a
+      # released build that may predate `fun lint`.
+      - name: Lint the compiler and stdlib
+        run: |
+          FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun lint src
+          FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun lint stdlib
