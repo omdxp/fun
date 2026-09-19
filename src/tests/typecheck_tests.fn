@@ -1931,6 +1931,116 @@ test "a nonempty impl header must write every type argument" {
   assert contains(got, "write every type argument of 'Box' in an impl header"), "expected an impl relying on a default to be rejected";
 }
 
+test "a shorthand variant constructor's argument must fit its payload type" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun f() Shape {
+    `  ret .Circle("x");
+    `}`,
+    "expected a str for Circle's num payload to be rejected"
+  );
+}
+
+test "a qualified variant constructor's argument must fit its payload type" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun f() Shape {
+    `  ret Shape.Circle("x");
+    `}`,
+    "expected a str for Shape.Circle's num payload to be rejected"
+  );
+}
+
+test "a variant constructor with too few arguments is rejected" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun f() Shape {
+    `  ret .Rect(1);
+    `}`,
+    "expected Rect(1) to be rejected, it takes two values"
+  );
+}
+
+test "a variant constructor with too many arguments is rejected" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun f() Shape {
+    `  ret Shape.Circle(1, 2);
+    `}`,
+    "expected Circle(1, 2) to be rejected, it takes one value"
+  );
+}
+
+test "a variant constructor with no arguments where a payload is required is rejected" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun f() Shape {
+    `  ret .Circle();
+    `}`,
+    "expected Circle() to be rejected"
+  );
+}
+
+test "a constructor argument is held to the type a generic enum's parameter was instantiated as, defaults included" {
+  rejects(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `fun f() Res<num> {
+    `  ret .Err(1);
+    `}`,
+    "expected Err(1) to be rejected in a Res<num>, whose error defaults to str"
+  );
+}
+
+test "a qualified constructor is held to the enum type it is expected as" {
+  rejects(
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `fun f() Res<num, str> {
+    `  ret Res.Err(1);
+    `}`,
+    "expected Res.Err(1) to be rejected where a Res<num, str> is expected"
+  );
+}
+
+test "a qualified constructor with no expected type is still checked against its payload" {
+  rejects(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `fun main() {
+    `  Shape s = Shape.Circle("x");
+    `}`,
+    "expected Shape.Circle(\"x\") to be rejected as a declared local's value"
+  );
+}
+
+test "a constructor argument's own nested shorthand is checked against the payload's enum" {
+  rejects(
+    `enum Inner { Deep, Shallow }
+    `enum Outer { Wrap(Inner) }
+    `fun f() Outer {
+    `  ret .Wrap(.Nope);
+    `}`,
+    "expected .Nope to be rejected against Wrap's Inner payload"
+  );
+}
+
+test "variant constructors that match their payloads are accepted in every form" {
+  accepts(
+    `enum Shape { Circle(num), Rect(num, num), Empty }
+    `enum Res<T, E = str> { Ok(T), Err(E) }
+    `enum Option<T> { None, Some(T) }
+    `fun a() Shape { ret .Circle(1); }
+    `fun b() Shape { ret Shape.Rect(1, 2); }
+    `fun c() Shape { ret .Empty; }
+    `fun d() Res<num> { ret .Err("bad"); }
+    `fun e() Res<num> { ret Res.Ok(3); }
+    `fun g() Option<str> { ret .Some("x"); }
+    `fun h() Option<num> { ret .Some(1 + 2); }
+    `fun main() {
+    `  Shape s = Shape.Circle(4);
+    `}`,
+    "expected correct constructors to pass"
+  );
+}
+
 test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
   accepts(
     `enum Option<T> { None, Some(T) }

@@ -595,6 +595,30 @@ fun _bare_enum_shorthand_variant(Node* val) Option<str> {
   ret .None;
 }
 
+// The enum and variant names of a callee written `Enum.Variant`, both
+// left empty for any other shape.
+fun _qualified_variant_names(Node* callee, str* enum_name, str* variant_name) {
+  if callee == nil {
+    ret;
+  }
+  fit callee.kind {
+    .Expression(e) -> {
+      if !equals(e.op, ".") || !e.has_left || !e.has_right {
+        ret;
+      }
+      fit e.left.kind {
+        .Identifier(n) -> { *enum_name = n; }
+        _ -> { ret; }
+      }
+      fit e.right.kind {
+        .Identifier(v) -> { *variant_name = v; }
+        _ -> { *enum_name = ""; }
+      }
+    }
+    _ -> {}
+  }
+}
+
 fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   Vec<str> names = fns.keys();
   defer names.free();
@@ -1082,8 +1106,8 @@ impl Checker {
     }
     CheckedType left = self.infer(e.left, env);
     CheckedType right = self.infer(e.right, env);
-    self.check_shorthand_variant(e.right, left);
-    self.check_shorthand_variant(e.left, right);
+    self.check_shorthand_variant(e.right, left, env);
+    self.check_shorthand_variant(e.left, right, env);
     if self.failed {
       ret;
     }
@@ -1661,7 +1685,7 @@ impl Checker {
     for f : init.fields {
       let field_type = holder.fields.at(f.name);
       if field_type.is_some() {
-        self.check_shorthand_variant(f.value, field_type.unwrap());
+        self.check_shorthand_variant(f.value, field_type.unwrap(), env);
       }
     }
     if self.failed {
@@ -1833,7 +1857,7 @@ impl Checker {
     CheckedType err_val = self.infer(u.error_arg, env);
     if equals(self.rtype.name, "Result") {
       CheckedType want_err = self.rtype.generic_args.get(1);
-      self.check_shorthand_variant(u.error_arg, want_err);
+      self.check_shorthand_variant(u.error_arg, want_err, env);
       if self.failed {
         ret checked_unknown();
       }
@@ -1850,7 +1874,7 @@ impl Checker {
       }
     } elif equals(self.rtype.name, "Option") {
       CheckedType want_err = self.rtype.generic_args.get(0);
-      self.check_shorthand_variant(u.error_arg, want_err);
+      self.check_shorthand_variant(u.error_arg, want_err, env);
       if self.failed {
         ret checked_unknown();
       }
@@ -2561,7 +2585,7 @@ impl Checker {
         continue;
       }
       CheckedType got = self.infer(args.get(i), env);
-      self.check_shorthand_variant(args.get(i), want);
+      self.check_shorthand_variant(args.get(i), want, env);
       if self.failed {
         ret;
       }
@@ -2770,6 +2794,10 @@ impl Checker {
       name = _callee_name(e.left);
     }
     if equals(name, "") {
+      self.check_qualified_variant_call(node, e, &args, env);
+      if self.failed {
+        ret checked_unknown();
+      }
       ret self.check_method_call(node, e, &args, env, awaited);
     }
     if _is_builtin_call(name) {
@@ -2809,7 +2837,7 @@ impl Checker {
       for ci < fsig.params.len {
         let want = checked_from_dtype(fsig.params.get(ci));
         let got = self.infer(args.get(ci), env);
-        self.check_shorthand_variant(args.get(ci), want);
+        self.check_shorthand_variant(args.get(ci), want, env);
         if self.failed {
           ret checked_unknown();
         }
@@ -3030,7 +3058,7 @@ impl Checker {
         if branch.is_tuple_pattern {
           self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
         } else {
-          self.check_shorthand_variant(branch.condition, subject_type);
+          self.check_shorthand_variant(branch.condition, subject_type, env);
           if self.failed {
             ret;
           }
@@ -3268,7 +3296,7 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
-        self.check_shorthand_variant(e.right, field);
+        self.check_shorthand_variant(e.right, field, env);
         if self.failed {
           ret;
         }
@@ -3297,7 +3325,7 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
-        self.check_shorthand_variant(e.right, b.type);
+        self.check_shorthand_variant(e.right, b.type, env);
         if self.failed {
           ret;
         }
@@ -3336,7 +3364,7 @@ impl Checker {
     }
     if v.has_val {
       CheckedType value = self.infer(v.val, env);
-      self.check_shorthand_variant(v.val, declared);
+      self.check_shorthand_variant(v.val, declared, env);
       if self.failed {
         ret;
       }
@@ -3512,12 +3540,13 @@ impl Checker {
   // is literally a bare shorthand is judged, and only against a type the
   // program declares as an enum: anything else has no variant list to
   // consult, so it is left to whatever checks it already gets.
-  check_shorthand_variant(Node* val, CheckedType want) {
+  check_shorthand_variant(Node* val, CheckedType want, TypeEnv* env) {
     if self.failed {
       ret;
     }
     let variant = _bare_enum_shorthand_variant(val);
     if variant.is_none() {
+      self.check_qualified_variant_against(val, want, env);
       ret;
     }
     str enum_name = self.canonical_type_name(want.name);
@@ -3544,25 +3573,83 @@ impl Checker {
       );
       ret;
     }
-    self.check_shorthand_payloads(val, enum_name, variant_name, want);
-  }
-
-  // A shorthand that carries arguments (`.Some(.Nope)`): each argument is
-  // held to the payload type its position lands on, with the enum's own
-  // type parameters replaced by what `want` instantiated them as.
-  check_shorthand_payloads(Node* val, str enum_name, str variant_name, CheckedType want) {
     Vec<Node*> written;
     written.init(2);
     defer written.free();
+    flag is_call = false;
     fit val.kind {
       .Expression(e) -> {
-        if equals(e.op, "()") && e.has_right {
-          _call_args(e.right, &written);
+        if equals(e.op, "()") {
+          is_call = true;
+          if e.has_right {
+            _call_args(e.right, &written);
+          }
         }
       }
       _ -> {}
     }
-    if written.len == 0 {
+    if is_call {
+      self.check_variant_args(val, enum_name, variant_name, &written, want, env);
+    }
+  }
+
+  // `Enum.Variant(args)` anywhere a call is written, checked with no
+  // expected type to resolve a generic enum's own parameters from.
+  check_qualified_variant_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env) {
+    if !e.has_left {
+      ret;
+    }
+    str enum_name = "";
+    str variant_name = "";
+    _qualified_variant_names(e.left, &enum_name, &variant_name);
+    if equals(enum_name, "") || env.lookup(enum_name).is_some() {
+      ret;
+    }
+    str canonical = self.canonical_type_name(enum_name);
+    if !self.enum_names.has(canonical) {
+      ret;
+    }
+    self.check_variant_args(node, canonical, variant_name, args, checked_unknown(), env);
+  }
+
+  // A constructor call written with its enum named (`Shape.Circle(x)`),
+  // held to `want` when the position it sits in expects one. A shorthand
+  // (`.Circle(x)`) is checked through `check_shorthand_variant`.
+  check_qualified_variant_against(Node* val, CheckedType want, TypeEnv* env) {
+    if self.failed {
+      ret;
+    }
+    fit val.kind {
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left {
+          ret;
+        }
+        str enum_name = "";
+        str variant_name = "";
+        _qualified_variant_names(e.left, &enum_name, &variant_name);
+        if equals(enum_name, "") || env.lookup(enum_name).is_some() ||
+          !equals(self.canonical_type_name(enum_name), self.canonical_type_name(want.name)) {
+          ret;
+        }
+        Vec<Node*> written;
+        written.init(2);
+        defer written.free();
+        if e.has_right {
+          _call_args(e.right, &written);
+        }
+        self.check_variant_args(val, self.canonical_type_name(enum_name), variant_name, &written, want, env);
+      }
+      _ -> {}
+    }
+  }
+
+  // Holds a variant constructor's arguments to its declared payload: the
+  // count, and each argument's type against the slot it lands on, with the
+  // enum's own type parameters replaced by what `want` instantiated them as
+  // (a parameter `want` does not resolve stands for anything). A shorthand
+  // nested in an argument is held to that slot's own enum.
+  check_variant_args(Node* at, str enum_name, str variant_name, Vec<Node*>* written, CheckedType want, TypeEnv* env) {
+    if self.failed {
       ret;
     }
     str payload_key = format("{str}.{str}", enum_name, variant_name);
@@ -3574,11 +3661,48 @@ impl Checker {
     }
     Vec<CheckedType> payload_types = payloads.unwrap();
     Vec<str> type_params = params.unwrap();
+    if written.len != payload_types.len {
+      str unit = "values";
+      if payload_types.len == 1 {
+        unit = "value";
+      }
+      self.fail(
+        format(
+        "variant '{str}' of '{str}' takes {num} {str}, found {num}",
+        variant_name,
+        enum_name,
+        payload_types.len,
+        unit,
+        written.len
+        ),
+        at
+      );
+      ret;
+    }
     num i = 0;
-    for i < written.len && i < payload_types.len {
+    for i < written.len {
       CheckedType slot = substitute(payload_types.get(i), &type_params, &want.generic_args);
-      self.check_shorthand_variant(written.get(i), slot);
+      CheckedType got = self.infer(written.get(i), env);
       if self.failed {
+        ret;
+      }
+      self.check_shorthand_variant(written.get(i), slot, env);
+      self.check_qualified_variant_against(written.get(i), slot, env);
+      if self.failed {
+        ret;
+      }
+      if !self.assignable(slot, got) {
+        self.fail(
+          format(
+          "argument {num} of variant '{str}' of '{str}' expects {str}, found {str}",
+          i + 1,
+          variant_name,
+          enum_name,
+          type_name(slot),
+          type_name(got)
+          ),
+          written.get(i)
+        );
         ret;
       }
       i = i + 1;
@@ -3590,7 +3714,7 @@ impl Checker {
       ret;
     }
     CheckedType got = self.infer(value, env);
-    self.check_shorthand_variant(value, self.rtype);
+    self.check_shorthand_variant(value, self.rtype, env);
     if self.failed {
       ret;
     }
