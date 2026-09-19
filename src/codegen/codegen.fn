@@ -10472,6 +10472,7 @@ impl Codegen {
         // call-based dispatch (`emit_called_iterator_next`, shared with
         // the generic dispatcher's own fallback), a deliberate, honest
         // scope boundary - see `_next_body_inlinable`'s own doc comment.
+        Node* plain_inline_body = nil;
         if user_iter_impl.is_some() {
           let impl_node = user_iter_impl.unwrap();
           // A quirk-qualified impl's own methods are parsed with their
@@ -10493,23 +10494,56 @@ impl Codegen {
             }
           }
           if next_body_probe != nil && self._next_body_inlinable(next_body_probe) {
-            let inline_err = self.emit_inlined_iterator_next(
-              next_body_probe,
-              coll_dt.type_str,
-              fi,
-              elem_dt2,
-              arr_text
-            );
-            if inline_err.is_some() {
-              ret inline_err;
-            }
-            ret .None;
+            plain_inline_body = next_body_probe;
           }
         }
 
-        let next_mangled = self.lookup_impl_method(coll_dt.type_str, "next")?!(.UnsupportedNode);
-        self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
-        ret self.emit_called_iterator_next(fi, elem_dt2, arr_text, next_mangled);
+        // The loop drives a fresh copy of the value, never the caller's own
+        // variable, the same as every generic direct implementor: two loops
+        // over one value, or one nested in another, must not share a cursor.
+        self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+        StringBuilder cursor_sb = string_builder_init(24);
+        cursor_sb.append("__fun_iter_src");
+        cursor_sb.append(format_num(self.for_iter_temp_counter));
+        str cursor = cursor_sb.build();
+        self.state.write("{\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        self.state.write_indent();
+        self.state.write(coll_dt.type_str);
+        self.state.write(" ");
+        self.state.write(cursor);
+        self.state.write(" = ");
+        self.state.write(arr_text);
+        self.state.write(";\n");
+        DataType cursor_dt = dtype_new();
+        cursor_dt.type_str = coll_dt.type_str;
+        self.record_local_typed(cursor, coll_dt.type_str, false, cursor_dt);
+
+        Option<CodegenErrorKind> plain_err = .None;
+        if plain_inline_body != nil {
+          plain_err = self.emit_inlined_iterator_next(
+            plain_inline_body,
+            coll_dt.type_str,
+            fi,
+            elem_dt2,
+            cursor
+          );
+        } else {
+          let next_mangled = self.lookup_impl_method(coll_dt.type_str, "next");
+          if next_mangled.is_none() {
+            plain_err = .Some(.UnsupportedNode);
+          } else {
+            self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
+            plain_err = self.emit_called_iterator_next(fi, elem_dt2, cursor, next_mangled.unwrap());
+          }
+        }
+        self.state.indent_level = self.state.indent_level - 1;
+        if plain_err.is_some() {
+          ret plain_err;
+        }
+        self.state.write_indent();
+        self.state.write("}\n");
+        ret .None;
       }
     }
 
