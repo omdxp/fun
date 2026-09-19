@@ -37,7 +37,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: omdxp/msvc-dev-cmd@v1
       - name: Build fun and fls
         timeout-minutes: 10
         run: |
