@@ -1518,6 +1518,13 @@ pub compound Parser {
   // Postfix continuations (`(`, `[`, `.`) still continue the primary.
   flag stop_at_binary_op;
 
+  // True while parsing the operand of a value-like prefix operator (`*p`,
+  // `-x`, `!x`, `~x`, `&x`): a postfix propagation binds inside that
+  // operand as tightly as `.`/`()`/`[]` do, so `*get(p)?` is `*(get(p)?)`.
+  // `await`, `fork` and a channel receive leave it false, keeping their
+  // own "apply, then propagate" grouping: `await f()?` is `(await f())?`.
+  flag propagation_binds_in_operand;
+
   // True while parsing a value expression that must stop at a top-level
   // comma rather than treating it as the comma operator, e.g. a
   // compound-literal field's value (`Point{ x = 1, y = 2 }`); without
@@ -1548,6 +1555,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.in_fit_condition = false;
   p.in_fit_statement = false;
   p.stop_at_binary_op = false;
+  p.propagation_binds_in_operand = false;
   p.stop_at_comma = false;
   p.pending_call_generic_args.init(0);
   p.has_pending_call_generic_args = false;
@@ -2311,6 +2319,7 @@ impl Parser {
           // aren't binary-only, so they still continue the primary. See
           // `Parser.stop_at_binary_op`'s doc comment.
           if self.stop_at_binary_op && is_binary_only_operator(t) &&
+            !(self.propagation_binds_in_operand && is_postfix_propagation_operator(t)) &&
             self.node_peek_expressionable().is_some() {
             ret .None;
           }
@@ -2756,9 +2765,12 @@ impl Parser {
     // would silently change what gets assigned. The same bounding is used
     // for prefix channel receive (`<-ch + 1` -> `(<-ch) + 1`).
     let prev_stop_binary = self.stop_at_binary_op;
+    let prev_binds = self.propagation_binds_in_operand;
     self.stop_at_binary_op = true;
+    self.propagation_binds_in_operand = true;
     let err = self.parse_expressionable();
     self.stop_at_binary_op = prev_stop_binary;
+    self.propagation_binds_in_operand = prev_binds;
     if err.is_some() {
       ret err;
     }
@@ -2812,9 +2824,12 @@ impl Parser {
     // top-level comma into the operand. `is_binary_only_operator` covers
     // both, so a single `stop_at_binary_op` bound handles it.
     let prev_stop_binary = self.stop_at_binary_op;
+    let prev_binds = self.propagation_binds_in_operand;
     self.stop_at_binary_op = true;
+    self.propagation_binds_in_operand = true;
     let err = self.parse_expressionable();
     self.stop_at_binary_op = prev_stop_binary;
+    self.propagation_binds_in_operand = prev_binds;
     if err.is_some() {
       ret err;
     }
@@ -3044,9 +3059,12 @@ impl Parser {
         self.state.token_next(); // consume '<-'
         num before = self.state.nodes.len;
         let prev_stop = self.stop_at_binary_op;
+        let prev_binds = self.propagation_binds_in_operand;
         self.stop_at_binary_op = true;
+        self.propagation_binds_in_operand = false;
         let cherr = self.parse_expressionable();
         self.stop_at_binary_op = prev_stop;
+        self.propagation_binds_in_operand = prev_binds;
         if cherr.is_some() {
           ret cherr;
         }
@@ -5416,9 +5434,12 @@ impl Parser {
 
     num before = self.state.nodes.len;
     let prev_stop = self.stop_at_binary_op;
+    let prev_binds = self.propagation_binds_in_operand;
     self.stop_at_binary_op = true;
+    self.propagation_binds_in_operand = false;
     let eerr = self.parse_expressionable();
     self.stop_at_binary_op = prev_stop;
+    self.propagation_binds_in_operand = prev_binds;
     if eerr.is_some() {
       ret eerr;
     }
@@ -5478,9 +5499,12 @@ impl Parser {
 
     num before = self.state.nodes.len;
     let prev_stop = self.stop_at_binary_op;
+    let prev_binds = self.propagation_binds_in_operand;
     self.stop_at_binary_op = true;
+    self.propagation_binds_in_operand = false;
     let eerr = self.parse_expressionable();
     self.stop_at_binary_op = prev_stop;
+    self.propagation_binds_in_operand = prev_binds;
     if eerr.is_some() {
       ret eerr;
     }
@@ -9364,6 +9388,65 @@ test "parse_expressionable_root parses postfix '?!(err)' and '!?' propagation" {
       assert equals(u2.op, "!?"), "expected op '!?'";
       assert u2.is_left_operanded_unary, "expected a postfix (left-operanded) unary";
       assert !u2.has_error_arg, "expected '!?' to carry no error-value argument";
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "a postfix propagation binds tighter than a prefix operator, for all four spellings" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+
+  // `*a?` is `*(a?)`, and likewise for `!`, `?!(...)` and `!?` under `*`,
+  // `-` and prefix `!`.
+  Vec<str> sources;
+  sources.init(0);
+  sources.push("*a?");
+  sources.push("*a!");
+  sources.push("*a?!(1)");
+  sources.push("*a!?");
+  sources.push("-a?");
+  sources.push("!a?");
+  Vec<str> inner_ops;
+  inner_ops.init(0);
+  inner_ops.push("?");
+  inner_ops.push("!");
+  inner_ops.push("?!");
+  inner_ops.push("!?");
+  inner_ops.push("?");
+  inner_ops.push("?");
+  num i = 0;
+  for i < sources.len {
+    ParseState st = _state_with_declared(sources.get(i), names);
+    Parser p = parser_new(&st);
+    assert p.parse_expressionable_root().is_none(), "expected a prefix operator over a postfix propagation to parse";
+    let top = st.nodes.get(st.nodes.len - 1);
+    fit top.kind {
+      .Unary(outer) -> {
+        assert !outer.is_left_operanded_unary, "expected the outer node to be the prefix operator";
+        fit outer.operand.kind {
+          .Unary(inner) -> {
+            assert inner.is_left_operanded_unary, "expected the operand to be the postfix propagation";
+            assert equals(inner.op, inner_ops.get(i)), "expected the propagation operator inside the prefix operator";
+          }
+          _ -> { panic("expected the prefix operator's operand to be the propagation"); }
+        }
+      }
+      _ -> { panic("expected a Unary node"); }
+    }
+    i = i + 1;
+  }
+
+  // A parenthesized prefix still wraps first: `(*a)?` propagates the
+  // dereferenced value.
+  ParseState st2 = _state_with_declared("(*a)?", names);
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_expressionable_root().is_none(), "expected '(*a)?' to parse";
+  let top2 = st2.nodes.get(st2.nodes.len - 1);
+  fit top2.kind {
+    .Unary(u2) -> {
+      assert equals(u2.op, "?"), "expected the outer node to be the propagation";
     }
     _ -> { panic("expected a Unary node"); }
   }
