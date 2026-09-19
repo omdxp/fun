@@ -3572,6 +3572,7 @@ impl Codegen {
                 own_arg_type_names.init(0);
                 Vec<flag> own_arg_is_pointer;
                 own_arg_is_pointer.init(0);
+                num own_idx = 0;
                 for tp : fnv.type_params {
                   flag found = false;
                   str found_name = "";
@@ -3601,11 +3602,33 @@ impl Codegen {
                       arg_i = arg_i + 1;
                     }
                   }
+                  // The declaration's own default, for a param no argument
+                  // pins down. It may name earlier own params, whose
+                  // resolved names stand in as plain types.
+                  if !found && own_idx < fnv.type_param_defaults.len &&
+                    fnv.type_param_defaults.get(own_idx) != nil {
+                    DataType* default_dt = dtype_clone(fnv.type_param_defaults.get(own_idx));
+                    Vec<DataType*> earlier;
+                    earlier.init(0);
+                    for en : own_arg_type_names {
+                      DataType* edt = malloc(sizeof(DataType));
+                      *edt = dtype_new();
+                      edt.type_str = en;
+                      earlier.push(edt);
+                    }
+                    dtype_substitute_params(default_dt, &fnv.type_params, &earlier);
+                    let default_name = self.resolve_type_name(*default_dt);
+                    if default_name.is_some() {
+                      found_name = default_name.unwrap();
+                      found = true;
+                    }
+                  }
                   if !found {
                     ret .None;
                   }
                   own_arg_type_names.push(found_name);
                   own_arg_is_pointer.push(false);
+                  own_idx = own_idx + 1;
                 }
 
                 StringBuilder nb = string_builder_init(24);
@@ -13952,6 +13975,21 @@ impl Codegen {
                 if explicit_name.is_some() {
                   found_name = explicit_name.unwrap();
                   found_dtype = .Some(*explicit_dt);
+                  found = true;
+                }
+              }
+              // The declaration's own default for this param, for one
+              // nothing above could pin down (`fun make<T, U = num>()`
+              // called as `make<str>()`, or with no type arguments at
+              // all). It may name earlier params, already resolved here.
+              if !found && tp_idx < f.type_param_defaults.len &&
+                f.type_param_defaults.get(tp_idx) != nil {
+                DataType* default_dt = dtype_clone(f.type_param_defaults.get(tp_idx));
+                dtype_substitute_params(default_dt, &f.type_params, &arg_dtypes);
+                let default_name = self.resolve_type_name(*default_dt);
+                if default_name.is_some() {
+                  found_name = default_name.unwrap();
+                  found_dtype = .Some(*default_dt);
                   found = true;
                 }
               }

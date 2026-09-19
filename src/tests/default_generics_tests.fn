@@ -1,0 +1,133 @@
+// Default generic type parameters, end to end: each test compiles and runs
+// a program, so it proves the omitted arguments really were filled in and
+// not merely accepted.
+
+use harness;
+use std.string;
+
+test "an enum's omitted trailing type argument takes its default at runtime" {
+  str src = `use std.c.io;
+  `enum Res<T, E = num> { Ok(T), Err(E) }
+  `fun half(num x) Res<num> {
+  `  if x % 2 == 1 { ret .Err(-1); }
+  `  ret .Ok(x / 2);
+  `}
+  `fun show(Res<num> r) {
+  `  fit r {
+  `    .Ok(v) -> { printf("ok %lld\n", v); }
+  `    .Err(e) -> { printf("err %lld\n", e); }
+  `  }
+  `}
+  `fun main() num {
+  `  show(half(8));
+  `  show(half(7));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_enum", "enum default");
+  assert equals(out, "ok 4\nerr -1\n"), "expected Res<num> to mean Res<num, num>";
+}
+
+test "a compound default that names an earlier parameter, and an explicit override" {
+  str src = `use std.c.io;
+  `compound Pair<A, B = A> { A a; B b; }
+  `fun main() num {
+  `  Pair<num> same = Pair<num>{ a = 3, b = 4 };
+  `  Pair<num, str> mixed = Pair<num, str>{ a = 1, b = "x" };
+  `  printf("%lld %s\n", same.a + same.b, mixed.b);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_compound", "compound default");
+  assert equals(out, "7 x\n"), "expected Pair<num> to mean Pair<num, num>, and Pair<num, str> to keep its second argument";
+}
+
+test "an alias default fills its own omitted parameter before expanding" {
+  str src = `use std.c.io;
+  `als Cb<A, R = num> = fun(A) R;
+  `fun twice(num x) num { ret x * 2; }
+  `fun apply(Cb<num> f, num x) num { ret f(x); }
+  `fun main() num {
+  `  printf("%lld\n", apply(twice, 21));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_alias", "alias default");
+  assert equals(out, "42\n"), "expected Cb<num> to mean fun(num) num";
+}
+
+test "a default that is itself generic is filled in too" {
+  str src = `use std.c.io;
+  `enum Res<T, E = num> { Ok(T), Err(E) }
+  `compound Holder<T, U = Res<T>> { U u; }
+  `fun main() num {
+  `  Holder<num> h;
+  `  h.u = .Err(9);
+  `  fit h.u {
+  `    .Ok(v) -> { printf("ok\n"); }
+  `    .Err(e) -> { printf("err %lld\n", e); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_nested", "nested default");
+  assert equals(out, "err 9\n"), "expected Holder<num> to hold a Res<num, num>";
+}
+
+test "a generic function's default is used when nothing else pins the parameter down" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `fun zero<T = num>() T {
+  `  T v = 0;
+  `  ret v;
+  `}
+  `fun make_vec<T = num>() Vec<T> {
+  `  Vec<T> v;
+  `  v.init(0);
+  `  ret v;
+  `}
+  `fun main() num {
+  `  num a = zero();
+  `  Vec<num> nums = make_vec();
+  `  nums.push(5);
+  `  Vec<str> words = make_vec<str>();
+  `  words.push("hi");
+  `  printf("%lld %lld %s\n", a, nums.get(0), words.get(0));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_function", "function default");
+  assert equals(out, "0 5 hi\n"), "expected make_vec() to default to Vec<num> and make_vec<str>() to override it";
+}
+
+test "a function default may name an earlier type parameter" {
+  str src = `use std.c.io;
+  `fun echo<T, U = T>(T x) U {
+  `  U out = x;
+  `  ret out;
+  `}
+  `fun main() num {
+  `  num n = echo(7);
+  `  printf("%lld\n", n);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_function_earlier", "function default naming an earlier parameter");
+  assert equals(out, "7\n"), "expected U to default to T's inferred num";
+}
+
+test "a generic method's own type parameter can have a default" {
+  str src = `use std.c.io;
+  `compound Box { num v; }
+  `impl Box {
+  `  pub conv<U>(U x) U { ret x; }
+  `  pub seven<U = num>() U {
+  `    U z = 7;
+  `    ret z;
+  `  }
+  `}
+  `fun main() num {
+  `  Box b;
+  `  b.v = 1;
+  `  num a = b.conv(3);
+  `  num d = b.seven();
+  `  printf("%lld %lld\n", a, d);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_method", "method default");
+  assert equals(out, "3 7\n"), "expected the method's own U to default to num";
+}

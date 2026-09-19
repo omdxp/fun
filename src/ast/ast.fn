@@ -461,6 +461,11 @@ pub compound FunctionNode {
   // type_param_forced_insts' combined Cartesian product.
   Vec<Vec<str>> type_param_constraints;
   flag has_type_param_constraints;
+  // Each type param's own default type (`E = Error`), index-aligned with
+  // type_params; nil for a param with none. Defaults are trailing: once
+  // one param has a default, every later one does too. A default may name
+  // earlier params (`B = A`), never itself or a later one.
+  Vec<DataType*> type_param_defaults;
   Vec<Node*> args;
   flag has_args;
   flag is_async;
@@ -481,6 +486,7 @@ pub fun function_node_new() FunctionNode {
   f.has_type_param_forced_insts = false;
   f.type_param_constraints.init(0);
   f.has_type_param_constraints = false;
+  f.type_param_defaults.init(0);
   f.args.init(0);
   f.has_args = false;
   f.is_async = false;
@@ -628,6 +634,11 @@ pub compound CompoundNode {
   // type_params; see FunctionNode's own field of the same name.
   Vec<Vec<str>> type_param_constraints;
   flag has_type_param_constraints;
+  // Each type param's own default type (`E = Error`), index-aligned with
+  // type_params; nil for a param with none. Defaults are trailing: once
+  // one param has a default, every later one does too. A default may name
+  // earlier params (`B = A`), never itself or a later one.
+  Vec<DataType*> type_param_defaults;
 }
 
 pub fun compound_node_new() CompoundNode {
@@ -640,6 +651,7 @@ pub fun compound_node_new() CompoundNode {
   c.has_type_param_forced_insts = false;
   c.type_param_constraints.init(0);
   c.has_type_param_constraints = false;
+  c.type_param_defaults.init(0);
   ret c;
 }
 
@@ -692,6 +704,11 @@ pub compound TypeAliasNode {
   // substituting in as one tuple-struct parameter.
   Vec<flag> type_param_is_spread;
   flag has_type_params;
+  // Each type param's own default type (`E = Error`), index-aligned with
+  // type_params; nil for a param with none. Defaults are trailing: once
+  // one param has a default, every later one does too. A default may name
+  // earlier params (`B = A`), never itself or a later one.
+  Vec<DataType*> type_param_defaults;
   DataType* body;
   Vec<str> bound_alternatives;
   flag is_bound_list;
@@ -708,6 +725,7 @@ pub fun type_alias_node_new() TypeAliasNode {
   a.type_params.init(0);
   a.type_param_is_spread.init(0);
   a.has_type_params = false;
+  a.type_param_defaults.init(0);
   a.body = nil;
   a.bound_alternatives.init(0);
   a.is_bound_list = false;
@@ -726,6 +744,11 @@ pub compound QuirkNode {
   flag is_generic;
   Vec<str> type_params;
   flag has_type_params;
+  // Each type param's own default type (`E = Error`), index-aligned with
+  // type_params; nil for a param with none. Defaults are trailing: once
+  // one param has a default, every later one does too. A default may name
+  // earlier params (`B = A`), never itself or a later one.
+  Vec<DataType*> type_param_defaults;
 }
 
 pub fun quirk_node_new() QuirkNode {
@@ -735,6 +758,7 @@ pub fun quirk_node_new() QuirkNode {
   q.is_generic = false;
   q.type_params.init(0);
   q.has_type_params = false;
+  q.type_param_defaults.init(0);
   ret q;
 }
 
@@ -775,6 +799,11 @@ pub compound EnumDeclNode {
   // instantiation like generic compounds.
   Vec<str> type_params;
   flag has_type_params;
+  // Each type param's own default type (`E = Error`), index-aligned with
+  // type_params; nil for a param with none. Defaults are trailing: once
+  // one param has a default, every later one does too. A default may name
+  // earlier params (`B = A`), never itself or a later one.
+  Vec<DataType*> type_param_defaults;
 }
 
 pub fun enum_decl_node_new() EnumDeclNode {
@@ -783,6 +812,7 @@ pub fun enum_decl_node_new() EnumDeclNode {
   e.variants.init(0);
   e.type_params.init(0);
   e.has_type_params = false;
+  e.type_param_defaults.init(0);
   ret e;
 }
 
@@ -1291,6 +1321,7 @@ fun _free_node_contents(Node* n) {
         dtype_free(f.rtype);
       }
       f.type_params.free();
+      _free_dtype_vec(&f.type_param_defaults);
       _free_str_str_vec(&f.type_param_forced_insts);
       if f.has_args {
         _free_node_vec(&f.args);
@@ -1358,15 +1389,18 @@ fun _free_node_contents(Node* n) {
     .Compound(c) -> {
       _free_compound_fields(&c.fields);
       c.type_params.free();
+      _free_dtype_vec(&c.type_param_defaults);
       _free_str_str_vec(&c.type_param_forced_insts);
     }
     .Quirk(q) -> {
       _free_quirk_methods(&q.methods);
       q.type_params.free();
+      _free_dtype_vec(&q.type_param_defaults);
     }
     .Enum(e) -> {
       _free_enum_variants(&e.variants);
       e.type_params.free();
+      _free_dtype_vec(&e.type_param_defaults);
     }
     .Impl(im) -> {
       im.type_params.free();
@@ -1381,6 +1415,7 @@ fun _free_node_contents(Node* n) {
     }
     .TypeAlias(a) -> {
       a.type_params.free();
+      _free_dtype_vec(&a.type_param_defaults);
       a.type_param_is_spread.free();
       if a.is_bound_list {
         a.bound_alternatives.free();
@@ -1525,6 +1560,55 @@ pub fun dtype_clone(DataType* dt) DataType* {
     c.fn_sig = fs;
   }
   ret c;
+}
+
+// Replaces every bare occurrence of one of `params` inside `dt` (recursing
+// through its generic arguments, tuple members and function signature)
+// with a fresh clone of the matching entry of `args`, keeping any pointer
+// depth written around it. What a default like `B = A` needs once `A` is
+// known. `dt` is edited in place, so it must be a clone the caller owns.
+pub fun dtype_substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* args) {
+  if dt == nil {
+    ret;
+  }
+  num i = 0;
+  for i < dt.generic_args.len {
+    dtype_substitute_params(dt.generic_args.get(i), params, args);
+    i = i + 1;
+  }
+  num ti = 0;
+  for ti < dt.tuple_members.len {
+    dtype_substitute_params(dt.tuple_members.get(ti), params, args);
+    ti = ti + 1;
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    num pi = 0;
+    for pi < dt.fn_sig.params.len {
+      dtype_substitute_params(dt.fn_sig.params.get(pi), params, args);
+      pi = pi + 1;
+    }
+    dtype_substitute_params(dt.fn_sig.rtype, params, args);
+  }
+  if dt.generic_args.len > 0 || dt.is_tuple || dt.has_fn_sig {
+    ret;
+  }
+  num j = 0;
+  for j < params.len && j < args.len {
+    if equals(params.get(j), dt.type_str) {
+      DataType* sub = dtype_clone(args.get(j));
+      sub.pointer_depth = sub.pointer_depth + dt.pointer_depth;
+      Vec<DataType*> old_generic = dt.generic_args;
+      Vec<DataType*> old_tuple = dt.tuple_members;
+      Vec<Node*> old_brackets = dt.array_brackets;
+      *dt = *sub;
+      free(sub);
+      _free_dtype_vec(&old_generic);
+      _free_dtype_vec(&old_tuple);
+      _free_node_vec(&old_brackets);
+      ret;
+    }
+    j = j + 1;
+  }
 }
 
 fun _clone_if_stmt(IfStmtNode s) IfStmtNode {
@@ -1676,6 +1760,7 @@ pub fun node_clone(Node n) Node {
         cf.rtype = dtype_clone(f.rtype);
       }
       cf.type_params = _clone_str_vec(&f.type_params);
+      cf.type_param_defaults = _clone_dtype_vec(&f.type_param_defaults);
       cf.type_param_forced_insts = _clone_str_str_vec(&f.type_param_forced_insts);
       if f.has_args {
         cf.args = _clone_node_vec(&f.args);
@@ -1769,6 +1854,7 @@ pub fun node_clone(Node n) Node {
       CompoundNode cc = cn;
       cc.fields = _clone_compound_fields(&cn.fields);
       cc.type_params = _clone_str_vec(&cn.type_params);
+      cc.type_param_defaults = _clone_dtype_vec(&cn.type_param_defaults);
       cc.type_param_forced_insts = _clone_str_str_vec(&cn.type_param_forced_insts);
       c.kind = .Compound(cc);
     }
@@ -1776,12 +1862,14 @@ pub fun node_clone(Node n) Node {
       QuirkNode cq = q;
       cq.methods = _clone_quirk_methods(&q.methods);
       cq.type_params = _clone_str_vec(&q.type_params);
+      cq.type_param_defaults = _clone_dtype_vec(&q.type_param_defaults);
       c.kind = .Quirk(cq);
     }
     .Enum(e) -> {
       EnumDeclNode ce = e;
       ce.variants = _clone_enum_variants(&e.variants);
       ce.type_params = _clone_str_vec(&e.type_params);
+      ce.type_param_defaults = _clone_dtype_vec(&e.type_param_defaults);
       c.kind = .Enum(ce);
     }
     .Impl(im) -> {
@@ -1800,6 +1888,7 @@ pub fun node_clone(Node n) Node {
     .TypeAlias(a) -> {
       TypeAliasNode ca = a;
       ca.type_params = _clone_str_vec(&a.type_params);
+      ca.type_param_defaults = _clone_dtype_vec(&a.type_param_defaults);
       ca.type_param_is_spread = _clone_flag_vec(&a.type_param_is_spread);
       if a.is_bound_list {
         ca.bound_alternatives = _clone_str_vec(&a.bound_alternatives);

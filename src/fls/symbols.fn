@@ -284,7 +284,8 @@ fun _append_type_params(
   StringBuilder* b,
   flag has_type_params,
   Vec<str>* type_params,
-  Vec<Vec<str>>* type_param_constraints
+  Vec<Vec<str>>* type_param_constraints,
+  Vec<DataType*>* type_param_defaults
 ) {
   if !has_type_params || type_params.len == 0 {
     ret;
@@ -310,6 +311,13 @@ fun _append_type_params(
         }
       }
     }
+    if type_param_defaults != nil && t < type_param_defaults.len &&
+      type_param_defaults.get(t) != nil {
+      str default_text = render_type(type_param_defaults.get(t));
+      b.append(" = ");
+      b.append(default_text);
+      free(default_text);
+    }
     t = t + 1;
   }
   b.append(">");
@@ -324,7 +332,7 @@ pub fun render_function_named(FunctionNode f, str name, flag include_fun) str {
     b.append("fun ");
   }
   b.append(name);
-  _append_type_params(&b, f.has_type_params, &f.type_params, &f.type_param_constraints);
+  _append_type_params(&b, f.has_type_params, &f.type_params, &f.type_param_constraints, &f.type_param_defaults);
   b.append("(");
   num i = 0;
   for i < f.args.len {
@@ -742,7 +750,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("compound ");
           b.append(c.name);
-          _append_type_params(&b, c.has_type_params, &c.type_params, &c.type_param_constraints);
+          _append_type_params(&b, c.has_type_params, &c.type_params, &c.type_param_constraints, &c.type_param_defaults);
           ret .Some(_declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -751,7 +759,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("enum ");
           b.append(e.name);
-          _append_type_params(&b, e.has_type_params, &e.type_params, nil);
+          _append_type_params(&b, e.has_type_params, &e.type_params, nil, &e.type_param_defaults);
           ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -760,7 +768,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("quirk ");
           b.append(q.name);
-          _append_type_params(&b, q.has_type_params, &q.type_params, nil);
+          _append_type_params(&b, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
           ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
         }
       }
@@ -796,7 +804,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           StringBuilder b = string_builder_init(32);
           b.append("als ");
           b.append(a.name);
-          _append_type_params(&b, a.has_type_params, &a.type_params, nil);
+          _append_type_params(&b, a.has_type_params, &a.type_params, nil, &a.type_param_defaults);
           b.append(" = ");
           if a.is_bound_list {
             num bi = 0;
@@ -863,7 +871,9 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> conc
           }
           str signature = b.build();
           if c.has_type_params {
-            signature = specialize_signature(signature, c.type_params, concrete_args);
+            Vec<str> filled_args = fill_default_args(&c.type_params, &c.type_param_defaults, concrete_args);
+            signature = specialize_signature(signature, c.type_params, filled_args);
+            free_filled_args(filled_args, concrete_args.len);
           }
           Declaration d = _declaration(field, .Field, signature, field_pos);
           d.container = type_name;
@@ -1129,6 +1139,84 @@ fun _render_quirk_method(QuirkMethodSig m) str {
   }
   free(rendered);
   ret b.build();
+}
+
+// `concrete_args` completed with the trailing defaults a declaration gave
+// `type_params` (`Res<num>` against `enum Res<T, E = str>` becomes `num,
+// str`), each rendered as text with an earlier parameter standing for
+// whatever was written for it. A reference that writes nothing at all, or
+// every argument, comes back as it was, and so does one a default cannot
+// complete. The added entries are fresh strings, so a caller that wants
+// them freed drops everything past `concrete_args.len`.
+pub fun fill_default_args(Vec<str>* type_params, Vec<DataType*>* defaults, Vec<str> concrete_args) Vec<str> {
+  if concrete_args.len == 0 || concrete_args.len >= type_params.len {
+    ret concrete_args;
+  }
+  Vec<str> out;
+  out.init(type_params.len);
+  num i = 0;
+  for i < concrete_args.len {
+    out.push(concrete_args.get(i));
+    i = i + 1;
+  }
+  Vec<DataType*> as_types;
+  as_types.init(type_params.len);
+  num w = 0;
+  for w < concrete_args.len {
+    DataType* written = malloc(sizeof(DataType));
+    *written = dtype_new();
+    written.type_str = concrete_args.get(w);
+    as_types.push(written);
+    w = w + 1;
+  }
+  flag complete = true;
+  num k = concrete_args.len;
+  for k < type_params.len {
+    if k >= defaults.len || defaults.get(k) == nil {
+      complete = false;
+      break;
+    }
+    DataType* filled = dtype_clone(defaults.get(k));
+    dtype_substitute_params(filled, type_params, &as_types);
+    str text = render_type(filled);
+    dtype_free(filled);
+    out.push(text);
+    DataType* added = malloc(sizeof(DataType));
+    *added = dtype_new();
+    added.type_str = text;
+    as_types.push(added);
+    k = k + 1;
+  }
+  num freed = 0;
+  for freed < as_types.len {
+    free(as_types.get(freed));
+    freed = freed + 1;
+  }
+  as_types.free();
+  if !complete {
+    num extra = concrete_args.len;
+    for extra < out.len {
+      free(out.get(extra));
+      extra = extra + 1;
+    }
+    out.free();
+    ret concrete_args;
+  }
+  ret out;
+}
+
+// Drops what `fill_default_args` added past `original_len` (the strings it
+// made, then the list itself), leaving `original_len`'s own entries alone.
+pub fun free_filled_args(Vec<str> filled, num original_len) {
+  if filled.len == original_len {
+    ret;
+  }
+  num i = original_len;
+  for i < filled.len {
+    free(filled.get(i));
+    i = i + 1;
+  }
+  filled.free();
 }
 
 // `signature`, with each of `type_params`'s own name replaced by its
@@ -5075,7 +5163,9 @@ pub fun enum_variant_declaration(
           // value's own declared type. A length mismatch (no concrete
           // args known) leaves it as declared, template params and
           // all, matching every existing caller's own behavior.
-          str detail = specialize_signature(b.build(), e.type_params, concrete_args);
+          Vec<str> filled_args = fill_default_args(&e.type_params, &e.type_param_defaults, concrete_args);
+          str detail = specialize_signature(b.build(), e.type_params, filled_args);
+          free_filled_args(filled_args, concrete_args.len);
           detail = format("{str} = {num}", detail, _variant_ordinal(e, v - 1));
           Declaration d = _declaration(variant_name, .Variant, detail, variant_pos);
           d.container = enum_name;
@@ -5275,7 +5365,9 @@ pub fun variant_payload_type(
           // enum_variant_declaration already does for the whole
           // variant's own rendered signature. A length mismatch (no
           // concrete args known) leaves it as declared.
-          str substituted = specialize_signature(declared, e.type_params, concrete_args);
+          Vec<str> filled_args = fill_default_args(&e.type_params, &e.type_param_defaults, concrete_args);
+          str substituted = specialize_signature(declared, e.type_params, filled_args);
+          free_filled_args(filled_args, concrete_args.len);
           if substituted != declared {
             free(declared);
           }
@@ -5556,7 +5648,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder cb = string_builder_init(32);
         cb.append("compound ");
         cb.append(c.name);
-        _append_type_params(&cb, c.has_type_params, &c.type_params, &c.type_param_constraints);
+        _append_type_params(&cb, c.has_type_params, &c.type_params, &c.type_param_constraints, &c.type_param_defaults);
         out.push(_declaration_vis(c.name, .Compound, cb.build(), n.pos, n.flags.is_public));
         num f = 0;
         for f < c.fields.len {
@@ -5581,7 +5673,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder eb = string_builder_init(32);
         eb.append("enum ");
         eb.append(e.name);
-        _append_type_params(&eb, e.has_type_params, &e.type_params, nil);
+        _append_type_params(&eb, e.has_type_params, &e.type_params, nil, &e.type_param_defaults);
         out.push(_declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public));
         num v = 0;
         for v < e.variants.len {
@@ -5612,14 +5704,14 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder qb = string_builder_init(32);
         qb.append("quirk ");
         qb.append(q.name);
-        _append_type_params(&qb, q.has_type_params, &q.type_params, nil);
+        _append_type_params(&qb, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
         out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
       }
       .TypeAlias(a) -> {
         StringBuilder ab = string_builder_init(32);
         ab.append("als ");
         ab.append(a.name);
-        _append_type_params(&ab, a.has_type_params, &a.type_params, nil);
+        _append_type_params(&ab, a.has_type_params, &a.type_params, nil, &a.type_param_defaults);
         ab.append(" = ");
         if a.is_bound_list {
           num bi = 0;

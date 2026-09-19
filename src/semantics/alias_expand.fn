@@ -15,6 +15,7 @@
 
 use ..ast.ast;
 use ..parser.datatype_defs;
+use generic_defaults;
 use std.string;
 use std.io;
 use std.vec;
@@ -553,6 +554,13 @@ fun _expand_combo_into(Vec<str>* combo, Map<str, _ResolvedAlias>* resolved, flag
 // themselves; both are real compile errors, not something to silently
 // paper over.
 pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
+  // Omitted trailing type arguments are filled from their declarations'
+  // defaults first, so an alias body and every reference below already
+  // reads as fully written out.
+  let defaults_err = fill_generic_defaults(nodes);
+  if defaults_err.is_some() {
+    ret defaults_err;
+  }
   Map<str, TypeAliasNode> raw_aliases;
   raw_aliases.init(8);
   num i = 0;
