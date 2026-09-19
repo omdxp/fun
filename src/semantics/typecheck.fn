@@ -595,6 +595,167 @@ fun _bare_enum_shorthand_variant(Node* val) Option<str> {
   ret .None;
 }
 
+// True for a function the generated C always declares, through the headers
+// every program includes (stdlib.h, string.h, stdio.h, ctype.h). A Fun
+// function defined under one of these names is emitted to C verbatim and
+// clashes with the library's own declaration. Names from headers only
+// included on demand (math.h, time.h) are left out: a program that never
+// pulls them in can use the name, and one that does gets the clash reported
+// as a duplicate declaration.
+fun _is_libc_function_name(str name) flag {
+  fit name {
+    "abort", "abs", "atexit", "atof", "atoi", "atol", "atoll", "bsearch", "calloc", "div", "exit",
+    "free", "getenv", "labs", "ldiv", "llabs", "lldiv", "malloc", "qsort", "rand", "realloc",
+    "srand", "strtod", "strtof", "strtol", "strtold", "strtoll", "strtoul", "strtoull", "system",
+    "mblen", "quick_exit", "aligned_alloc", "setenv", "unsetenv", "putenv", "realpath",
+    "memchr", "memcmp", "memcpy", "memmove", "memset", "strcat", "strchr", "strcmp", "strcoll",
+    "strcpy", "strcspn", "strerror", "strlen", "strncat", "strncmp", "strncpy", "strpbrk",
+    "strrchr", "strspn", "strstr", "strtok", "strdup", "strndup", "strnlen", "strcasecmp",
+    "strncasecmp", "index", "rindex",
+    "clearerr", "fclose", "feof", "ferror", "fflush", "fgetc", "fgetpos", "fgets", "fopen",
+    "fprintf", "fputc", "fputs", "fread", "freopen", "fscanf", "fseek", "fsetpos", "ftell",
+    "fwrite", "getc", "getchar", "gets", "perror", "printf", "putc", "putchar", "puts", "remove",
+    "rename", "rewind", "scanf", "setbuf", "setvbuf", "snprintf", "sprintf", "sscanf", "tmpfile",
+    "tmpnam", "ungetc", "vfprintf", "vprintf", "vsnprintf", "vsprintf", "fileno", "fdopen",
+    "popen", "pclose", "getline", "dprintf",
+    "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph", "islower", "isprint",
+    "ispunct", "isspace", "isupper", "isxdigit", "tolower", "toupper", "isascii", "toascii" -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// True for a node declared in one of the standard library's `std/c/` files,
+// which mirror C's own names on purpose (`FILE`, `size_t`) and so are exempt
+// from the C name collision check.
+fun _in_c_mirror_file(Node* node) flag {
+  if !node.has_pos {
+    ret false;
+  }
+  ret contains(node.pos.filename, "std/c/") || contains(node.pos.filename, "std\\c\\");
+}
+
+// Fails when `name` cannot be a declared name in the generated C (a C
+// reserved word, or a macro or type the always-included headers declare),
+// naming what kind of thing it was declared as. `at` is where to report it.
+fun _check_c_name(Checker* c, str name, str what, Node* at) {
+  if c.failed || equals(name, "") {
+    ret;
+  }
+  str reason = c_name_collision(name);
+  if equals(reason, "") {
+    ret;
+  }
+  c.fail(
+    format(
+    "'{str}' is {str} and cannot be used as {str} name here - the generated C would fail to compile",
+    name,
+    reason,
+    what
+    ),
+    at
+  );
+}
+
+// Walks a body for the names a statement declares that the parser has no
+// single choke point for: a `fit` arm's bindings, a `for` loop's item, index
+// and destructured names, and a `let` destructure's names.
+fun _check_c_names_in_body(Checker* c, Node* stmt) {
+  if stmt == nil || c.failed {
+    ret;
+  }
+  fit stmt.kind {
+    .Body(b) -> {
+      for inner : b.statements {
+        _check_c_names_in_body(c, inner);
+      }
+    }
+    .Variable(v) -> {
+      for dn : v.destructure_names {
+        _check_c_name(c, dn, "a variable", stmt);
+      }
+      if v.has_val {
+        _check_c_names_in_body(c, v.val);
+      }
+    }
+    .StatementIf(ifn) -> { _check_c_names_in_body(c, ifn.body); }
+    .StatementElseIf(ein) -> { _check_c_names_in_body(c, ein.body); }
+    .StatementElse(inner) -> { _check_c_names_in_body(c, inner); }
+    .StatementDefer(inner) -> { _check_c_names_in_body(c, inner); }
+    .StatementFork(inner) -> { _check_c_names_in_body(c, inner); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(cn) -> { _check_c_names_in_body(c, cn.body); }
+        .Iter(it) -> {
+          _check_c_name(c, it.item_name, "a loop variable", stmt);
+          if it.has_index_name {
+            _check_c_name(c, it.index_name, "a loop index", stmt);
+          }
+          for dn : it.item_destructure_names {
+            _check_c_name(c, dn, "a loop variable", stmt);
+          }
+          _check_c_names_in_body(c, it.body);
+        }
+      }
+    }
+    .StatementFit(f) -> {
+      for br : f.branches {
+        Node* at = stmt;
+        if br.has_condition {
+          at = br.condition;
+        }
+        for bn : br.bindings {
+          _check_c_name(c, bn, "a fit binding", at);
+        }
+        _check_c_names_in_body(c, br.body);
+      }
+    }
+    _ -> {}
+  }
+}
+
+// Every declared name whose spelling the generated C cannot accept: type
+// names, fields, and the body-level bindings above. Function, parameter,
+// `let` and global names are already rejected by the parser.
+fun _check_c_names(Checker* c, Vec<Node>* nodes) {
+  num i = 0;
+  for i < nodes.len {
+    Node* node = &nodes.data[i];
+    i = i + 1;
+    if c.failed || _in_c_mirror_file(node) {
+      continue;
+    }
+    fit node.kind {
+      .Compound(cn) -> {
+        _check_c_name(c, cn.name, "a compound", node);
+        for cf : cn.fields {
+          _check_c_name(c, cf.name, "a field", node);
+        }
+      }
+      .Enum(e) -> { _check_c_name(c, e.name, "an enum", node); }
+      .Quirk(q) -> { _check_c_name(c, q.name, "a quirk", node); }
+      .Function(f) -> {
+        for tp : f.type_params {
+          _check_c_name(c, tp, "a type parameter", node);
+        }
+        if f.has_body {
+          _check_c_names_in_body(c, f.body);
+        }
+      }
+      .Impl(im) -> {
+        for m : im.methods {
+          if m != nil {
+            _check_c_names_in_body(c, m);
+          }
+        }
+      }
+      .Test(t) -> { _check_c_names_in_body(c, t.body); }
+      _ -> {}
+    }
+  }
+}
+
 // The enum and variant names of a callee written `Enum.Variant`, both
 // left empty for any other shape.
 fun _qualified_variant_names(Node* callee, str* enum_name, str* variant_name) {
@@ -3941,6 +4102,16 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
     fit node.kind {
       .Function(f) -> {
         if f.has_name {
+          if f.has_body && !f.has_type_params && _is_libc_function_name(f.name) {
+            checker.fail(
+              format(
+              "'{str}' is a C library function the generated C already declares, so a function cannot be defined under this name (rename it)",
+              f.name
+              ),
+              node
+            );
+            ret .Err(checker.error);
+          }
           if _check_duplicate_top_level(&checker, f.name, "a function", node) {
             ret .Err(checker.error);
           }
@@ -4086,6 +4257,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
     }
   }
 
+  _check_c_names(&checker, nodes);
+  if checker.failed {
+    ret .Err(checker.error);
+  }
   i = 0;
   for i < nodes.len {
     Node* node = &nodes.data[i];

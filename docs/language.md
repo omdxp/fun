@@ -1244,15 +1244,29 @@ fun main() {
   signatures; C provides the implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from
   `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
-- **C's own reserved words** (`do`, `int`, `for`, `void`, ...) can't
-  name a plain top-level function, a function parameter, or a `let`/
-  `const`/global variable - none of these are reserved in Fun itself,
-  but each is emitted to C verbatim, so a collision would fail C
-  compilation rather than Fun's own. Caught at parse time with a clear
-  error instead. A generic function's own name is exempt: it always
-  monomorphizes with its concrete type arguments (`double<T>` becomes
-  `double__num`, `double__dec`, ...), so it never actually reaches C
-  bare - `fun double<T: num | dec>(T x) T { ret x + x; }` is fine.
+- **Names the generated C cannot accept** are rejected with a clear error
+  instead of a C compiler failure far from the cause. None of these are
+  special in Fun itself, but every declared name is emitted to C, so:
+  - C's reserved words (`do`, `int`, `for`, `while`, `void`, ...) can't
+    name a function, parameter, `let`/`const`/global variable, compound,
+    enum, quirk, field, type parameter, `fit` binding, or a `for` loop's
+    item, index or destructured names.
+  - Neither can a macro or type the always-included C headers declare:
+    `NULL`, `EOF`, `bool`, `stdin`/`stdout`/`stderr`, `FILE`, `size_t`,
+    `INT_MAX` and the other limit macros, `int64_t` and its relatives.
+    Reading one from C stays fine (see C macros above); it is declaring a
+    Fun name with that spelling that is rejected. Function-like macros such
+    as `va_arg` are not affected.
+  - A function with a body can't be named after a function the generated C
+    already declares through `stdlib.h`, `string.h`, `stdio.h` or `ctype.h`
+    (`div`, `abs`, `strlen`, `printf`, `toupper`, ...). Names from headers
+    only included on demand, such as `math.h`, are reported as duplicate
+    declarations when the program pulls them in.
+  - A generic function's own name is exempt: it always monomorphizes with
+    its concrete type arguments (`double<T>` becomes `double__num`,
+    `double__dec`, ...), so it never reaches C bare -
+    `fun double<T: num | dec>(T x) T { ret x + x; }` is fine. The
+    `std.c.*` files, which mirror C's own names on purpose, are exempt too.
 
 See Platforms & Compilers for C compiler selection and per-platform
 behavior.

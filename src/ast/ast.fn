@@ -1562,6 +1562,57 @@ pub fun dtype_clone(DataType* dt) DataType* {
   ret c;
 }
 
+// True for one of C's own reserved words (C89 through C11): a Fun name
+// spelled the same way transpiles verbatim into an illegal C declaration.
+pub fun is_c_keyword(str name) flag {
+  fit name {
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "int", "long", "register", "return", "short",
+    "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+    "volatile", "while", "inline", "restrict", "_Bool", "_Complex", "_Imaginary", "_Alignas",
+    "_Alignof", "_Atomic", "_Generic", "_Noreturn", "_Static_assert", "_Thread_local" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True for an object-like macro or a type the headers every generated program
+// includes (stdio.h, stdlib.h, stdint.h, stdbool.h, stdarg.h, limits.h)
+// declare: `NULL`, `EOF`, `bool`, `FILE`, `size_t`, `INT_MAX` and the like. A
+// Fun name spelled the same way is rewritten by the preprocessor or clashes
+// with the typedef, so the C compiler rejects it far from the real cause.
+// Function-like macros (`va_arg`, `va_start`) are left out: the preprocessor
+// only expands them before a `(`, so a plain variable of that name is fine.
+pub fun is_c_header_name(str name) flag {
+  fit name {
+    "NULL", "EOF", "BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "SEEK_SET", "SEEK_CUR", "SEEK_END",
+    "TMP_MAX", "L_tmpnam", "stdin", "stdout", "stderr", "FILE", "fpos_t", "size_t", "va_list",
+    "bool", "true", "false", "EXIT_SUCCESS",
+    "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX", "div_t", "ldiv_t", "lldiv_t", "wchar_t",
+    "CHAR_BIT", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "MB_LEN_MAX",
+    "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MIN", "INT_MAX", "UINT_MAX", "LONG_MIN",
+    "LONG_MAX", "ULONG_MAX", "LLONG_MIN", "LLONG_MAX", "ULLONG_MAX", "SIZE_MAX", "INT8_MAX",
+    "INT16_MAX", "INT32_MAX", "INT64_MAX", "UINT8_MAX", "UINT16_MAX", "UINT32_MAX",
+    "UINT64_MAX", "INT8_MIN", "INT16_MIN", "INT32_MIN", "INT64_MIN", "INTPTR_MAX", "INTPTR_MIN",
+    "UINTPTR_MAX", "INTMAX_MAX", "INTMAX_MIN", "UINTMAX_MAX", "int8_t", "int16_t", "int32_t",
+    "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "intptr_t", "uintptr_t",
+    "intmax_t", "uintmax_t" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// Why `name` cannot be used as a declared name in the generated C, or ""
+// when it can: "a reserved word in C" or "declared by the C standard
+// headers".
+pub fun c_name_collision(str name) str {
+  if is_c_keyword(name) {
+    ret "a reserved word in C";
+  }
+  if is_c_header_name(name) {
+    ret "declared by the C standard headers";
+  }
+  ret "";
+}
+
 // Replaces every bare occurrence of one of `params` inside `dt` (recursing
 // through its generic arguments, tuple members and function signature)
 // with a fresh clone of the matching entry of `args`, keeping any pointer
