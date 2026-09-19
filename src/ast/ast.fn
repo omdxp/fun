@@ -1586,16 +1586,16 @@ pub fun is_c_header_name(str name) flag {
   fit name {
     "NULL", "EOF", "BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "SEEK_SET", "SEEK_CUR", "SEEK_END",
     "TMP_MAX", "L_tmpnam", "stdin", "stdout", "stderr", "FILE", "fpos_t", "size_t", "va_list",
-    "bool", "true", "false", "EXIT_SUCCESS",
-    "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX", "div_t", "ldiv_t", "lldiv_t", "wchar_t",
-    "CHAR_BIT", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX", "MB_LEN_MAX",
-    "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MIN", "INT_MAX", "UINT_MAX", "LONG_MIN",
-    "LONG_MAX", "ULONG_MAX", "LLONG_MIN", "LLONG_MAX", "ULLONG_MAX", "SIZE_MAX", "INT8_MAX",
-    "INT16_MAX", "INT32_MAX", "INT64_MAX", "UINT8_MAX", "UINT16_MAX", "UINT32_MAX",
-    "UINT64_MAX", "INT8_MIN", "INT16_MIN", "INT32_MIN", "INT64_MIN", "INTPTR_MAX", "INTPTR_MIN",
-    "UINTPTR_MAX", "INTMAX_MAX", "INTMAX_MIN", "UINTMAX_MAX", "int8_t", "int16_t", "int32_t",
-    "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "intptr_t", "uintptr_t",
-    "intmax_t", "uintmax_t" -> { ret true; }
+    "bool", "true", "false" -> { ret true; }
+    "EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX", "div_t", "ldiv_t", "lldiv_t",
+    "wchar_t", "CHAR_BIT", "SCHAR_MIN", "SCHAR_MAX", "UCHAR_MAX", "CHAR_MIN", "CHAR_MAX",
+    "MB_LEN_MAX", "SHRT_MIN", "SHRT_MAX", "USHRT_MAX", "INT_MIN", "INT_MAX" -> { ret true; }
+    "UINT_MAX", "LONG_MIN", "LONG_MAX", "ULONG_MAX", "LLONG_MIN", "LLONG_MAX", "ULLONG_MAX",
+    "SIZE_MAX", "INT8_MAX", "INT16_MAX", "INT32_MAX", "INT64_MAX", "UINT8_MAX", "UINT16_MAX",
+    "UINT32_MAX", "UINT64_MAX", "INT8_MIN", "INT16_MIN", "INT32_MIN", "INT64_MIN" -> { ret true; }
+    "INTPTR_MAX", "INTPTR_MIN", "UINTPTR_MAX", "INTMAX_MAX", "INTMAX_MIN", "UINTMAX_MAX",
+    "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "intptr_t", "uintptr_t", "intmax_t", "uintmax_t" -> { ret true; }
     _ -> { ret false; }
   }
 }
