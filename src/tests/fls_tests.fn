@@ -7390,3 +7390,36 @@ test "a nested variant shorthand completes through a defaulted payload type" {
   assert !contains(out, `"label":"Full"`), "expected no variants of the wrapping enum";
   assert contains(hover(&reads, doc, 3, 16), "Deep = 0"), "expected the nested variant to resolve against the default";
 }
+
+test "a variant constructor whose argument does not fit its payload is diagnosed in the editor" {
+  str src = `enum Shape { Circle(num), Empty }
+  `fun pick() Shape {
+  `  ret .Circle("x");
+  `}
+  `pub fun main() num {
+  `  pick();
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///payload_diag.fn";
+  doc.path = "payload_diag.fn";
+  doc.text = src;
+  doc.version = 1;
+  Vec<Diagnostic> found = diagnose(&reads, &dcache, doc);
+  flag saw = false;
+  num i = 0;
+  for i < found.len {
+    Diagnostic d = found.get(i);
+    if contains(d.message, "argument 1 of variant 'Circle' of 'Shape' expects num, found str") &&
+      d.line == 2 {
+      saw = true;
+    }
+    i = i + 1;
+  }
+  found.free();
+  assert saw, "expected a diagnostic on the ret line naming the mismatched payload argument";
+}
