@@ -911,6 +911,24 @@ pub fun dot_shorthand_context_type_at(
   ret "";
 }
 
+// The type a `?!(err)` argument must have: `E` of an enclosing
+// `Result<_, E>`, or `E` of an enclosing `Option<E>` (the error-channel
+// convention). "" when the enclosing function returns neither.
+fun _error_slot_type(Vec<Node>* program, str file, num line) str {
+  let rdt = enclosing_return_dtype(program, file, line);
+  if rdt.is_none() {
+    ret "";
+  }
+  DataType* dt = rdt.unwrap();
+  if equals(dt.type_str, "Result") && dt.generic_args.len > 1 {
+    ret dt.generic_args.get(1).type_str;
+  }
+  if equals(dt.type_str, "Option") && dt.generic_args.len > 0 {
+    ret dt.generic_args.get(0).type_str;
+  }
+  ret "";
+}
+
 // The declared type of whichever parameter the argument starting at
 // `dot_idx` occupies, in the call whose own opening `(` is found by
 // walking backward from it depth-tracked (so a nested call inside an
@@ -946,6 +964,12 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     ret "";
   }
   Token callee = callee_tok.unwrap();
+  // `x?!(.Variant)`: the argument is an error value, so it reads against
+  // the enclosing function's own error slot rather than any callee's
+  // parameter list.
+  if token_is_operator(callee, "?!") {
+    ret _error_slot_type(program, file, line);
+  }
   if callee.type != .Identifier {
     ret "";
   }

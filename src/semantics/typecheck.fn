@@ -1772,9 +1772,10 @@ impl Checker {
   // whatever shape the enclosing function needs - `.Err(err)` if it
   // returns `Result<_, E>`, or `.Some(err)` if it returns `Option<E>`
   // (the error-channel convention codegen.fn itself uses throughout).
-  // Evaluates to `T` on `.Some`. `err` must exactly match the enclosing
-  // function's own error slot, no conversion - the same discipline `!`
-  // already has for its own error type.
+  // Evaluates to `T` on `.Some`. `err` must be assignable to the enclosing
+  // function's own error slot, no conversion; a bare `.Variant` shorthand
+  // has no type of its own and is accepted like any other unknown-typed
+  // expression.
   infer_option_to_result_propagation(Node* node, UnaryNode u, TypeEnv* env) CheckedType {
     CheckedType operand = self.infer(u.operand, env);
     if !equals(operand.name, "Option") {
@@ -1787,28 +1788,26 @@ impl Checker {
     }
     CheckedType err_val = self.infer(u.error_arg, env);
     if equals(self.rtype.name, "Result") {
-      str want_e = type_name(self.rtype.generic_args.get(1));
-      str got_e = type_name(err_val);
-      if !equals(got_e, want_e) {
+      CheckedType want_err = self.rtype.generic_args.get(1);
+      if !self.assignable(want_err, err_val) {
         self.fail(
           format(
           "'?!' propagates {str}, but the enclosing function returns Result<_, {str}>",
-          got_e,
-          want_e
+          type_name(err_val),
+          type_name(want_err)
           ),
           node
         );
         ret checked_unknown();
       }
     } elif equals(self.rtype.name, "Option") {
-      str want_e = type_name(self.rtype.generic_args.get(0));
-      str got_e = type_name(err_val);
-      if !equals(got_e, want_e) {
+      CheckedType want_err = self.rtype.generic_args.get(0);
+      if !self.assignable(want_err, err_val) {
         self.fail(
           format(
           "'?!' propagates {str}, but the enclosing function returns Option<{str}>",
-          got_e,
-          want_e
+          type_name(err_val),
+          type_name(want_err)
           ),
           node
         );

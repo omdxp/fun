@@ -1357,6 +1357,12 @@ fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str cu
         }
       }
     }
+    if token_is_operator(op, "(") {
+      num callee_idx = _prev_real_index(tokens, op_idx);
+      if callee_idx >= 0 && token_is_operator(tokens.get(callee_idx), "?!") {
+        ret _enclosing_error_slot_type_from_tokens(tokens, dot_idx);
+      }
+    }
     if token_is_operator(op, "(") || token_is_operator(op, ",") {
       ret _call_arg_type_from_tokens(tokens, dot_idx, current_file, cache);
     }
@@ -1556,6 +1562,92 @@ fun _enclosing_function_return_type_from_tokens(Vec<Token>* tokens, num dot_idx)
       continue;
     }
     j = j - 1;
+  }
+  ret "";
+}
+
+// The error-slot type of whichever `fun`/method most tightly encloses
+// `dot_idx`, token-only: `E` of a declared `Result<_, E>`, or `E` of a
+// declared `Option<E>`. "" when the enclosing function declares neither.
+fun _enclosing_error_slot_type_from_tokens(Vec<Token>* tokens, num dot_idx) str {
+  num depth = 0;
+  num j = dot_idx - 1;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '{') {
+      if depth > 0 {
+        depth = depth - 1;
+      } else {
+        str slot = _function_header_error_slot(tokens, j);
+        if !equals(slot, "") {
+          ret slot;
+        }
+      }
+    }
+    j = j - 1;
+  }
+  ret "";
+}
+
+// The error-slot type declared in the return type just before the `{`
+// at `brace_idx`, when it really opens a function's own body and that
+// return type is `Result<_, E>` or `Option<E>`. "" otherwise.
+fun _function_header_error_slot(Vec<Token>* tokens, num brace_idx) str {
+  num close = _prev_real_index(tokens, brace_idx);
+  if close < 0 || !token_is_operator(tokens.get(close), ">") {
+    ret "";
+  }
+  num depth = 1;
+  num open = _prev_real_index(tokens, close);
+  for open >= 0 && depth > 0 {
+    if token_is_operator(tokens.get(open), ">") {
+      depth = depth + 1;
+    } elif token_is_operator(tokens.get(open), "<") {
+      depth = depth - 1;
+      if depth == 0 {
+        break;
+      }
+    }
+    open = _prev_real_index(tokens, open);
+  }
+  if depth != 0 || open < 0 {
+    ret "";
+  }
+  num base = _prev_real_index(tokens, open);
+  if base < 0 || tokens.get(base).type != .Identifier {
+    ret "";
+  }
+  num before = _prev_real_index(tokens, base);
+  if before < 0 || !token_is_symbol(tokens.get(before), ')') {
+    ret "";
+  }
+  str base_name = token_word(tokens.get(base));
+  num want = -1;
+  if equals(base_name, "Result") {
+    want = 1;
+  } elif equals(base_name, "Option") {
+    want = 0;
+  }
+  if want < 0 {
+    ret "";
+  }
+  num arg = 0;
+  num angle = 0;
+  num k = open + 1;
+  for k < close {
+    Token tk = tokens.get(k);
+    if token_is_operator(tk, "<") {
+      angle = angle + 1;
+    } elif token_is_operator(tk, ">") {
+      angle = angle - 1;
+    } elif token_is_operator(tk, ",") && angle == 0 {
+      arg = arg + 1;
+    } elif tk.type == .Identifier && angle == 0 && arg == want {
+      ret token_word(tk);
+    }
+    k = k + 1;
   }
   ret "";
 }

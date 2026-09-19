@@ -1359,6 +1359,38 @@ test "postfix '?' hoists a temp and guard under MSVC codegen instead of a GNU st
   assert !contains(out_c, "({ __auto_type __fun_try_"), "expected no GNU statement expression under MSVC mode";
 }
 
+test "'?!(err)' accepts a bare enum-variant shorthand as its error value, into both an Option and a Result" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
+  `enum Failure { Missing, Broken }
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun as_res(num x) Result<num, Failure> {
+  `  num v = half(x)?!(.Broken);
+  `  ret .Ok(v + 100);
+  `}
+  `fun as_opt(num x) Option<Failure> {
+  `  num v = half(x)?!(.Missing);
+  `  ret .None;
+  `}
+  `fun main() num {
+  `  Result<num, Failure> a = as_res(8);
+  `  Result<num, Failure> b = as_res(7);
+  `  Option<Failure> c = as_opt(7);
+  `  printf("%lld %d %d\n", a.unwrap(), b.unwrap_err() == .Broken, c.unwrap() == .Missing);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_opt_variant_shorthand",
+    "'?!(err)' takes a bare .Variant shorthand as its error value"
+  );
+  assert contains(out, "104 1 1"), "expected the bare shorthand to construct the right variant into both an enclosing Result and Option";
+}
+
 test "'?!(err)' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
   str src = `use std.c.io;
   `use std.option;
