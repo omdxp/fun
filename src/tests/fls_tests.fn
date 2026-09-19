@@ -7310,3 +7310,83 @@ test "a bare '.Variant' naming no variant of its expected enum is diagnosed in t
   found.free();
   assert saw, "expected a diagnostic on the ret line naming the unknown variant";
 }
+
+test "hover on a method of a type written without its defaulted argument matches the written-out form" {
+  str src = `compound Pair<A, B = A> { A a; B b; }
+  `impl Pair<A, B> {
+  `  pub sum() A { ret self.a; }
+  `}
+  `fun main() {
+  `  Pair<num> p = Pair<num>{ a = 1, b = 2 };
+  `  Pair<num, num> q = Pair<num, num>{ a = 1, b = 2 };
+  `  num s = p.sum();
+  `  num t = q.sum();
+  `  num b = p.b;
+  `  _ = s;
+  `  _ = t;
+  `  _ = b;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///default_method_hover.fn";
+  doc.path = "default_method_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str defaulted = hover(&reads, doc, 7, 13);
+  assert contains(defaulted, "sum(Pair<num, num>* self) num"), "expected the method specialized with the default filled in";
+  str written = hover(&reads, doc, 8, 13);
+  assert contains(written, "sum(Pair<num, num>* self) num"), "expected the written-out form to read the same";
+  assert contains(hover(&reads, doc, 9, 12), "num b"), "expected a field typed by a defaulted parameter to read as its filled-in type";
+}
+
+test "hover on a variant and its bindings reads with the default filled in, in ret and fit" {
+  str src = `enum Res<T, E = str> { Ok(T), Err(E) }
+  `fun halve(num x) Res<num> {
+  `  ret .Err("odd");
+  `}
+  `fun halve2(num x) Res<num, str> {
+  `  ret .Err("odd");
+  `}
+  `fun main() {
+  `  let r = halve(4);
+  `  fit r {
+  `    .Ok(v) -> { _ = v; }
+  `    .Err(e) -> { _ = e; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///default_variant_hover.fn";
+  doc.path = "default_variant_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 2, 9), "Err(str)"), "expected a ret's variant to read the default, not the bare E";
+  assert contains(hover(&reads, doc, 5, 9), "Err(str)"), "expected the written-out form to read the same";
+  assert contains(hover(&reads, doc, 8, 6), "Res<num> r"), "expected a let inferred from a call to show the type as written";
+  assert contains(hover(&reads, doc, 10, 8), "num v"), "expected the Ok binding typed by the written argument";
+  assert contains(hover(&reads, doc, 11, 9), "str e"), "expected the Err binding typed by the default";
+}
+
+test "a nested variant shorthand completes through a defaulted payload type" {
+  str src = `enum Inner { Deep, Shallow }
+  `enum Wrap<T, U = Inner> { Full(U), Empty }
+  `fun pick() Wrap<num> {
+  `  ret .Full(.Deep);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///default_nested.fn";
+  doc.path = "default_nested.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 3, 15, false);
+  assert contains(out, `"label":"Shallow","kind":20`), "expected the defaulted payload's own variants";
+  assert !contains(out, `"label":"Full"`), "expected no variants of the wrapping enum";
+  assert contains(hover(&reads, doc, 3, 16), "Deep = 0"), "expected the nested variant to resolve against the default";
+}

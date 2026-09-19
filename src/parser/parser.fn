@@ -1171,6 +1171,40 @@ impl ParseState {
   // param) from `impl Vec<num> { ... }` (a concrete monomorphizing impl).
   // Every segment must be a bare identifier, optionally with `:
   // constraint | constraint` bounds, all the way to the closing `>`/`>>`.
+  // True when the `<...>` right ahead has a top-level `=` in it
+  // (`impl Box<T = num>`): the shape of a type parameter with a default,
+  // which an impl's parameter list cannot have.
+  pub impl_angle_list_has_default() flag {
+    let first_opt = self.token_peek_n(0);
+    if first_opt.is_none() {
+      ret false;
+    }
+    let first = first_opt.unwrap();
+    if !(token_is_operator(first, "<") || token_is_symbol(first, '<')) {
+      ret false;
+    }
+    num depth = 1;
+    num off = 1;
+    for depth > 0 {
+      let tok_opt = self.token_peek_n(off);
+      if tok_opt.is_none() {
+        ret false;
+      }
+      let t = tok_opt.unwrap();
+      off = off + 1;
+      if token_is_operator(t, "<") || token_is_symbol(t, '<') {
+        depth = depth + 1;
+      } elif token_is_operator(t, ">") || token_is_symbol(t, '>') {
+        depth = depth - 1;
+      } elif token_is_operator(t, ">>") {
+        depth = depth - 2;
+      } elif depth == 1 && token_is_operator(t, "=") {
+        ret true;
+      }
+    }
+    ret false;
+  }
+
   pub impl_generic_args_are_params() flag {
     num off = 0;
     let first_opt = self.token_peek_n(off);
@@ -7379,6 +7413,10 @@ impl Parser {
     Vec<DataType*> impl_param_defaults;
     impl_param_defaults.init(0);
     if self.state.next_token_is_angle_open() {
+      if self.state.impl_angle_list_has_default() {
+        self.state.err("an impl's type parameters cannot have defaults: they come from the type it implements");
+        ret .Some(.InvalidDataType);
+      }
       if self.state.impl_generic_args_are_params() {
         let tperr = self.state.parse_type_params_with_constraints(
           &type_params,

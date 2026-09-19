@@ -10277,6 +10277,33 @@ impl Codegen {
     ret out;
   }
 
+  // True when `type_str` names a type a `for` loop can drive through its own
+  // `Iterator<T>` impl: an instantiation of one of the generic types
+  // implementing it directly (`base` or the mangled `base__args`), or a plain
+  // type with a concrete `Iterator` impl of its own.
+  _names_an_iterator_type(str type_str, Vec<str>* direct_iter_base_names) flag {
+    num bi = 0;
+    for bi < direct_iter_base_names.len {
+      str base = direct_iter_base_names.get(bi);
+      bi = bi + 1;
+      if equals(type_str, base) || starts_with(type_str, format("{str}__", base)) {
+        ret true;
+      }
+    }
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if equals(i.type_name, type_str) && i.has_quirk_name &&
+            equals(i.quirk_name, "Iterator") {
+            ret true;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
     // The iterable is either a plain identifier, checked structurally via
     // `lookup_local_dtype` or by name, or a chained field access resolved
@@ -10326,6 +10353,18 @@ impl Codegen {
     str direct_iter_owner_name = "";
     Vec<str> direct_iter_base_names = self._generic_direct_iterator_base_names();
     defer direct_iter_base_names.free();
+    // A pointer to an iterable (`for x : items` where `items` is a `Vec<T>*`
+    // parameter or field) iterates the value it points to: the loop copies
+    // that value into its own cursor, which a pointer cannot initialize.
+    if arr_dtype.is_some() {
+      DataType ptr_dt = arr_dtype.unwrap();
+      if ptr_dt.pointer_depth == 1 && !ptr_dt.is_array && ptr_dt.array_depth == 0 &&
+        self._names_an_iterator_type(ptr_dt.type_str, &direct_iter_base_names) {
+        ptr_dt.pointer_depth = 0;
+        arr_dtype = .Some(ptr_dt);
+        arr_text = format("(*{str})", arr_text);
+      }
+    }
     if arr_dtype.is_some() {
       let arr_dt = arr_dtype.unwrap();
       for base : direct_iter_base_names {

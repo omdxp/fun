@@ -131,3 +131,163 @@ test "a generic method's own type parameter can have a default" {
   str out = run_source(src, "dg_method", "method default");
   assert equals(out, "3 7\n"), "expected the method's own U to default to num";
 }
+
+test "a generic function can take a defaulted type built from its own type parameter" {
+  str src = `use std.c.io;
+  `use std.vec;
+  `enum Res<T, E = str> { Ok(T), Err(E) }
+  `fun unwrap_or<T>(Res<T> r, T d) T {
+  `  fit r {
+  `    .Ok(v) -> { ret v; }
+  `    .Err(e) -> { ret d; }
+  `  }
+  `}
+  `fun main() num {
+  `  Res<num> a = .Ok(5);
+  `  Res<num> b = .Err("x");
+  `  Vec<Res<num>> v;
+  `  v.init(0);
+  `  v.push(a);
+  `  v.push(b);
+  `  printf("%lld %lld %lld\n", unwrap_or(a, 9), unwrap_or(b, 9), v.len);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_generic_fn", "generic function over a defaulted type");
+  assert equals(out, "5 9 2\n"), "expected Res<T> to fill its default for each instantiation, also inside Vec";
+}
+
+test "an impl on a defaulted compound or enum serves a receiver written without the default" {
+  str src = `use std.c.io;
+  `compound Pair<A, B = A> { A a; B b; }
+  `impl Pair<A, B> {
+  `  pub sum() A { ret self.a + self.b; }
+  `}
+  `enum Res<T, E = str> { Ok(T), Err(E) }
+  `impl Res<T, E> {
+  `  pub is_ok() flag {
+  `    fit self {
+  `      .Ok(v) -> { ret true; }
+  `      _ -> { ret false; }
+  `    }
+  `  }
+  `}
+  `fun main() num {
+  `  Pair<num> p = Pair<num>{ a = 3, b = 4 };
+  `  Res<num> good = .Ok(1);
+  `  Res<num> bad = .Err("x");
+  `  printf("%lld %d %d\n", p.sum(), good.is_ok(), bad.is_ok());
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_impl", "impl on a defaulted type");
+  assert equals(out, "7 1 0\n"), "expected the impl's methods to run on the default-filled types";
+}
+
+test "a quirk parameter can have a default, whether the impl writes it or not" {
+  str src = `use std.c.io;
+  `quirk Conv<F, T = str> { conv(F x) T; }
+  `compound A { num v; }
+  `compound B { num v; }
+  `impl A as Conv<num> {
+  `  pub conv(num x) str { ret "short"; }
+  `}
+  `impl B as Conv<num, str> {
+  `  pub conv(num x) str { ret "long"; }
+  `}
+  `fun run<T: Conv<num>>(T x) str { ret x.conv(1); }
+  `fun main() num {
+  `  A a;
+  `  a.v = 1;
+  `  B b;
+  `  b.v = 1;
+  `  printf("%s %s %s %s\n", a.conv(1), b.conv(1), run(a), run(b));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_quirk", "quirk default");
+  assert equals(out, "short long short long\n"), "expected Conv<num> and Conv<num, str> to be the same quirk, and usable as a bound";
+}
+
+test "a defaulted compound implements a quirk and satisfies a quirk bound" {
+  str src = `use std.c.io;
+  `quirk Show { show() str; }
+  `compound Pair<A, B = A> { A a; B b; }
+  `impl Pair<A, B> as Show {
+  `  pub show() str { ret "pair"; }
+  `}
+  `fun describe<T: Show>(T x) str { ret x.show(); }
+  `fun main() num {
+  `  Pair<num> p = Pair<num>{ a = 1, b = 2 };
+  `  printf("%s\n", describe(p));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_quirk_impl", "quirk implemented by a defaulted compound");
+  assert equals(out, "pair\n"), "expected Pair<num> to satisfy Show";
+}
+
+test "a defaulted compound can implement Iterator and drive a for loop" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.quirks;
+  `compound Counter<A, B = A> { A cur; B end; }
+  `impl Counter<A, B> as Iterator<A> {
+  `  pub next() Option<A> {
+  `    if self.cur >= self.end { ret .None; }
+  `    A v = self.cur;
+  `    self.cur = self.cur + 1;
+  `    ret .Some(v);
+  `  }
+  `}
+  `fun main() num {
+  `  Counter<num> c = Counter<num>{ cur = 0, end = 3 };
+  `  for x : c {
+  `    printf("%lld\n", x);
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_iterator", "iterator on a defaulted compound");
+  assert equals(out, "0\n1\n2\n"), "expected the loop to run over Counter<num, num>";
+}
+
+test "a bound and a default combine, and an alias can name a defaulted type" {
+  str src = `use std.c.io;
+  `compound Box<T: num | dec = num> { T v; }
+  `enum Res<T, E = str> { Ok(T), Err(E) }
+  `als IntRes = Res<num>;
+  `fun bad() IntRes { ret .Err("bad"); }
+  `fun main() num {
+  `  Box<num> n = Box<num>{ v = 2 };
+  `  Box<dec> d = Box<dec>{ v = 1.5 };
+  `  fit bad() {
+  `    .Ok(v) -> { printf("ok\n"); }
+  `    .Err(e) -> { printf("%lld %s\n", n.v, e); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_bound_alias", "bound with default, alias to a defaulted type");
+  assert equals(out, "2 bad\n"), "expected the bounded default and the alias to both resolve";
+}
+
+test "defaults written inside other generic types are filled at every depth" {
+  str src = `use std.c.io;
+  `use std.option;
+  `enum Res<T, E = str> { Ok(T), Err(E) }
+  `compound Pair<A, B = A> { A a; B b; }
+  `compound H<T, U = Pair<T>> { U u; }
+  `fun main() num {
+  `  Option<Res<num>> o = .Some(.Ok(4));
+  `  H<num> h;
+  `  h.u.a = 1;
+  `  h.u.b = 2;
+  `  fit o {
+  `    .Some(r) -> {
+  `      fit r {
+  `        .Ok(v) -> { printf("%lld %lld\n", v, h.u.a + h.u.b); }
+  `        .Err(e) -> { printf("err\n"); }
+  `      }
+  `    }
+  `    .None -> { printf("none\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "dg_depth", "defaults at depth");
+  assert equals(out, "4 3\n"), "expected Option<Res<num>> and H<num> to fill their defaults";
+}
