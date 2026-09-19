@@ -260,6 +260,30 @@ test "std.channel: send and recv monomorphize on the payload type" {
   assert contains(out, "Channel__num__send"), "expected the monomorphized send";
 }
 
+test "std.vec: sort_by takes a Comparator<T>, named for a parameter or passed as a function" {
+  str src = `use std.vec;
+  `use std.c.io;
+  `fun ascending(num a, num b) num { ret a - b; }
+  `fun descending(num a, num b) num { ret b - a; }
+  `fun sort_with(Vec<num>* v, Comparator<num> order) {
+  `  v.sort_by(order);
+  `}
+  `fun main() num {
+  `  Vec<num> v;
+  `  v.init(4);
+  `  v.push(3);
+  `  v.push(1);
+  `  v.push(2);
+  `  v.sort_by(ascending);
+  `  printf("%lld%lld%lld\n", v.get(0), v.get(1), v.get(2));
+  `  sort_with(&v, descending);
+  `  printf("%lld%lld%lld\n", v.get(0), v.get(1), v.get(2));
+  `  ret 0;
+  `}`;
+  let out = run_source(src, "sl_vec_comparator", "sort_by with a Comparator<T>");
+  assert equals(out, "123\n321\n"), "expected both orders through the Comparator alias";
+}
+
 test "for-each over a Vec iterates every element in order" {
   str src = `use std.vec;
   `use std.c.io;

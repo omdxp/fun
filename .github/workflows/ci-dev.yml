@@ -29,7 +29,7 @@ jobs:
       FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
       FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up fun
         uses: omdxp/setup-fun@v1
         with:
@@ -104,7 +104,7 @@ jobs:
     env:
       FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up fun
         uses: omdxp/setup-fun@v1
         with:

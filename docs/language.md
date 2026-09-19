@@ -855,7 +855,10 @@ compound field, and a generic method's own type parameter (`Vec<T>`'s `T`
 in `sort_by(cmp)`) is substituted with the receiver's real type first. A
 mismatch is a compile error, caught before it can reach the C compiler.
 `Vec<T>.sort_by(cmp)` is the standard library's own use of this, for
-custom comparators.
+custom comparators. Its parameter is typed `Comparator<T>`, an alias `std.vec`
+exports for `fun(T, T) num` (negative when `a` sorts before `b`, positive
+when after, 0 when equal), so a function of your own can take a comparator
+the same way: `fun sort_with(Vec<num>* v, Comparator<num> order)`.
 
 ### `missing_return`
 
