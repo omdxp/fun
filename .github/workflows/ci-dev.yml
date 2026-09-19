@@ -43,17 +43,20 @@ jobs:
         run: |
           set +e
           export FUN_STDLIB_DIR="$PWD/stdlib"
-          echo "== frontend only, PR source"
-          fun -in src/cli/main.fn -no-exec 2>&1 | head -8; echo "exit=${PIPESTATUS[0]}"
-          echo "== tiny file"
-          fun -in src/lexer/lexer.fn -no-exec 2>&1 | head -4; echo "exit=${PIPESTATUS[0]}"
           git fetch -q origin main
+          mkdir -p /tmp/keep
           for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
-            cp "$f" "/tmp/keep.fn"
+            cp "$f" "/tmp/keep/$(basename $f)"
             git show "origin/main:$f" > "$f"
-            echo "== main's $f, rest from PR"
-            fun -in src/cli/main.fn -no-exec 2>&1 | head -3; echo "exit=${PIPESTATUS[0]}"
-            cp /tmp/keep.fn "$f"
+          done
+          echo "ALL THREE from main, frontend only"
+          fun -in src/cli/main.fn -no-exec 2>&1 | head -5; echo "exit=${PIPESTATUS[0]}"
+          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
+            cp "/tmp/keep/$(basename $f)" "$f"
+          done
+          echo "PR versions of individual files, standalone frontend"
+          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
+            fun -in "$f" -no-exec 2>&1 | head -3; echo "$f exit=${PIPESTATUS[0]}"
           done
       - name: Build fun and fls
         timeout-minutes: 10
