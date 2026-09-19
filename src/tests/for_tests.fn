@@ -301,3 +301,60 @@ test "a for loop over a pointer to a collection iterates the value it points to"
   str out = run_source(src, "for_over_pointer", "for over a pointer to a collection");
   assert equals(out, "6 2 9 6 6\n3\n"), "expected each pointer-typed iterable to iterate what it points to, leaving a Vec's own contents alone";
 }
+
+test "a for loop over a plain iterator type iterates a copy, leaving the variable and other loops alone" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.quirks;
+  `compound Counter { num cur; num end; }
+  `impl Counter as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.cur >= self.end { ret .None; }
+  `    num v = self.cur;
+  `    self.cur = self.cur + 1;
+  `    ret .Some(v);
+  `  }
+  `}
+  `compound Stepper { num cur; num end; }
+  `impl Stepper as Iterator<num> {
+  `  pub next() Option<num> {
+  `    if self.cur >= self.end {
+  `      ret .None;
+  `    } elif self.cur % 2 == 0 {
+  `      num v = self.cur;
+  `      self.cur = self.cur + 1;
+  `      ret .Some(v * 10);
+  `    } else {
+  `      num v = self.cur;
+  `      self.cur = self.cur + 1;
+  `      ret .Some(v);
+  `    }
+  `  }
+  `}
+  `fun sum_through(Counter* c) num {
+  `  num total = 0;
+  `  for x : c { total = total + x; }
+  `  ret total;
+  `}
+  `fun main() num {
+  `  Counter c = Counter{ cur = 0, end = 4 };
+  `  num first = 0;
+  `  for x : c { first = first + x; }
+  `  num second = 0;
+  `  for y : c { second = second + y; }
+  `  num nested = 0;
+  `  for a : c {
+  `    for b : c { nested = nested + 1; }
+  `  }
+  `  Stepper s = Stepper{ cur = 0, end = 4 };
+  `  num stepped = 0;
+  `  for z : s { stepped = stepped + z; }
+  `  num again = 0;
+  `  for z2 : s { again = again + z2; }
+  `  printf("%lld %lld %lld %lld\n", first, second, nested, c.cur);
+  `  printf("%lld %lld %lld %lld\n", stepped, again, s.cur, sum_through(&c));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "for_plain_iterator_copy", "for over a plain iterator copies it");
+  assert equals(out, "6 6 16 0\n24 24 0 6\n"), "expected every loop to see the full sequence and both variables to keep their own cursor, for both an inlined and a call-based next()";
+}
