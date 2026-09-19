@@ -512,6 +512,29 @@ fun _free_fn_sig(FnSig* sig) {
 
 // Frees a whole `Map<str, FnSig>`: every signature's own scratch
 // (`_free_fn_sig`), then the map itself.
+// Frees a whole `Map<str, Vec<T>>` whose Vecs hold values borrowed from the
+// AST rather than fresh allocations: only the buckets and the map itself.
+fun _free_borrowed_vec_map_str(Map<str, Vec<str>>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    Vec<str> bucket = m.at(name).unwrap();
+    bucket.free();
+  }
+  m.free();
+}
+
+fun _free_variant_payloads_map(Map<str, Vec<CheckedType>>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    Vec<CheckedType> bucket = m.at(name).unwrap();
+    bucket.free();
+    free(name);
+  }
+  m.free();
+}
+
 fun _free_variant_owners_map(Map<str, Vec<str>>* owners) {
   Vec<str> names = owners.keys();
   defer names.free();
@@ -767,6 +790,11 @@ compound Checker {
   // Resolving a bare shorthand (`.Some`) with no declared type to lean
   // on needs to know whether exactly one enum owns that name.
   Map<str, Vec<str>> variant_owners;
+  // Each enum variant's declared payload types, keyed "Enum.Variant", and
+  // each enum's own type parameters, so a shorthand nested in a variant's
+  // argument list can be held to the payload type it lands on.
+  Map<str, Vec<CheckedType>> variant_payloads;
+  Map<str, Vec<str>> enum_type_params;
   // What each declared compound holds, and what each type and quirk
   // declares as methods.
   Map<str, CompoundInfo> compounds;
@@ -798,6 +826,8 @@ fun _checker_new() Checker {
   c.globals.init(16);
   c.enum_names = set_init("", 16);
   c.variant_owners.init(16);
+  c.variant_payloads.init(16);
+  c.enum_type_params.init(16);
   c.compounds.init(16);
   c.methods.init(16);
   c.current_file = "";
@@ -1052,6 +1082,11 @@ impl Checker {
     }
     CheckedType left = self.infer(e.left, env);
     CheckedType right = self.infer(e.right, env);
+    self.check_shorthand_variant(e.right, left);
+    self.check_shorthand_variant(e.left, right);
+    if self.failed {
+      ret;
+    }
     if !self.plain_enums.has(left.name) || !self.plain_enums.has(right.name) {
       ret;
     }
@@ -1623,6 +1658,15 @@ impl Checker {
       ret built;
     }
     CompoundInfo holder = info.unwrap();
+    for f : init.fields {
+      let field_type = holder.fields.at(f.name);
+      if field_type.is_some() {
+        self.check_shorthand_variant(f.value, field_type.unwrap());
+      }
+    }
+    if self.failed {
+      ret checked_unknown();
+    }
     if !holder.is_generic || built.generic_args.len > 0 {
       ret built;
     }
@@ -1789,6 +1833,10 @@ impl Checker {
     CheckedType err_val = self.infer(u.error_arg, env);
     if equals(self.rtype.name, "Result") {
       CheckedType want_err = self.rtype.generic_args.get(1);
+      self.check_shorthand_variant(u.error_arg, want_err);
+      if self.failed {
+        ret checked_unknown();
+      }
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
@@ -1802,6 +1850,10 @@ impl Checker {
       }
     } elif equals(self.rtype.name, "Option") {
       CheckedType want_err = self.rtype.generic_args.get(0);
+      self.check_shorthand_variant(u.error_arg, want_err);
+      if self.failed {
+        ret checked_unknown();
+      }
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
@@ -2509,6 +2561,10 @@ impl Checker {
         continue;
       }
       CheckedType got = self.infer(args.get(i), env);
+      self.check_shorthand_variant(args.get(i), want);
+      if self.failed {
+        ret;
+      }
       if !self.assignable(want, got) {
         self.fail(
           format(
@@ -2753,6 +2809,10 @@ impl Checker {
       for ci < fsig.params.len {
         let want = checked_from_dtype(fsig.params.get(ci));
         let got = self.infer(args.get(ci), env);
+        self.check_shorthand_variant(args.get(ci), want);
+        if self.failed {
+          ret checked_unknown();
+        }
         if !self.assignable(want, got) {
           self.fail(
             format(
@@ -2970,6 +3030,10 @@ impl Checker {
         if branch.is_tuple_pattern {
           self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
         } else {
+          self.check_shorthand_variant(branch.condition, subject_type);
+          if self.failed {
+            ret;
+          }
           str named = _branch_enum_name(branch.condition);
           if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
             self.fail(
@@ -3204,6 +3268,10 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
+        self.check_shorthand_variant(e.right, field);
+        if self.failed {
+          ret;
+        }
         if !self.assignable(field, value) {
           self.fail(
             format(
@@ -3229,6 +3297,10 @@ impl Checker {
           ret;
         }
         CheckedType value = self.infer(e.right, env);
+        self.check_shorthand_variant(e.right, b.type);
+        if self.failed {
+          ret;
+        }
         if !self.assignable(b.type, value) {
           self.fail(
             format(
@@ -3264,6 +3336,10 @@ impl Checker {
     }
     if v.has_val {
       CheckedType value = self.infer(v.val, env);
+      self.check_shorthand_variant(v.val, declared);
+      if self.failed {
+        ret;
+      }
       // A `let` takes the type of its value rather than checking one.
       if is_unknown(declared) {
         // A bare enum-variant shorthand (`let v = .Same;`) has no
@@ -3431,11 +3507,93 @@ impl Checker {
     }
   }
 
+  // Fails when a bare `.Variant` shorthand (`.Nope`, `.Nope(x)`) is held
+  // to an enum that declares no variant by that name. Only a value that
+  // is literally a bare shorthand is judged, and only against a type the
+  // program declares as an enum: anything else has no variant list to
+  // consult, so it is left to whatever checks it already gets.
+  check_shorthand_variant(Node* val, CheckedType want) {
+    if self.failed {
+      ret;
+    }
+    let variant = _bare_enum_shorthand_variant(val);
+    if variant.is_none() {
+      ret;
+    }
+    str enum_name = self.canonical_type_name(want.name);
+    if equals(enum_name, "") || !self.enum_names.has(enum_name) {
+      ret;
+    }
+    str variant_name = variant.unwrap();
+    flag declared = false;
+    let owners = self.variant_owners.at(variant_name);
+    if owners.is_some() {
+      Vec<str> declared_by = owners.unwrap();
+      num oi = 0;
+      for oi < declared_by.len {
+        if equals(declared_by.get(oi), enum_name) {
+          declared = true;
+        }
+        oi = oi + 1;
+      }
+    }
+    if !declared {
+      self.fail(
+        format("enum '{str}' has no variant named '{str}'", enum_name, variant_name),
+        val
+      );
+      ret;
+    }
+    self.check_shorthand_payloads(val, enum_name, variant_name, want);
+  }
+
+  // A shorthand that carries arguments (`.Some(.Nope)`): each argument is
+  // held to the payload type its position lands on, with the enum's own
+  // type parameters replaced by what `want` instantiated them as.
+  check_shorthand_payloads(Node* val, str enum_name, str variant_name, CheckedType want) {
+    Vec<Node*> written;
+    written.init(2);
+    defer written.free();
+    fit val.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") && e.has_right {
+          _call_args(e.right, &written);
+        }
+      }
+      _ -> {}
+    }
+    if written.len == 0 {
+      ret;
+    }
+    str payload_key = format("{str}.{str}", enum_name, variant_name);
+    defer free(payload_key);
+    let payloads = self.variant_payloads.at(payload_key);
+    let params = self.enum_type_params.at(enum_name);
+    if payloads.is_none() || params.is_none() {
+      ret;
+    }
+    Vec<CheckedType> payload_types = payloads.unwrap();
+    Vec<str> type_params = params.unwrap();
+    num i = 0;
+    for i < written.len && i < payload_types.len {
+      CheckedType slot = substitute(payload_types.get(i), &type_params, &want.generic_args);
+      self.check_shorthand_variant(written.get(i), slot);
+      if self.failed {
+        ret;
+      }
+      i = i + 1;
+    }
+  }
+
   check_return(Node* stmt, Node* value, TypeEnv* env) {
     if value == nil {
       ret;
     }
     CheckedType got = self.infer(value, env);
+    self.check_shorthand_variant(value, self.rtype);
+    if self.failed {
+      ret;
+    }
     if !self.assignable(self.rtype, got) {
       self.fail(
         format(
@@ -3646,6 +3804,8 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer checker.globals.free();
   defer checker.enum_names.free();
   defer _free_variant_owners_map(&checker.variant_owners);
+  defer _free_variant_payloads_map(&checker.variant_payloads);
+  defer _free_borrowed_vec_map_str(&checker.enum_type_params);
   defer _free_compound_info_map(&checker.compounds);
   defer _free_method_tables(&checker.methods);
   defer checker.active_type_params.free();
@@ -3719,6 +3879,24 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         checker.enum_names.add(e.name);
         if !carries_data {
           checker.plain_enums.add(e.name);
+        }
+        Vec<str> enum_params;
+        enum_params.init(2);
+        if e.has_type_params {
+          for tp : e.type_params {
+            enum_params.push(tp);
+          }
+        }
+        checker.enum_type_params.put(e.name, enum_params);
+        for v : e.variants {
+          Vec<CheckedType> payload_types;
+          payload_types.init(2);
+          if v.has_payload {
+            for pd : v.payload {
+              payload_types.push(checked_from_dtype(pd));
+            }
+          }
+          checker.variant_payloads.put(format("{str}.{str}", e.name, v.name), payload_types);
         }
         for v : e.variants {
           str owner = substr(e.name, 0, len(e.name));
