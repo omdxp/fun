@@ -1646,6 +1646,39 @@ test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Some
   );
 }
 
+test "'?!(err)' accepts a bare enum-variant shorthand as its error value" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `enum Failure { Missing, Broken }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun as_opt() Option<Failure> {
+    `  num v = half(4)?!(.Missing);
+    `  ret .None;
+    `}`,
+    "expected a bare .Missing shorthand as '?!'s error value to be accepted into an enclosing Option<Failure>"
+  );
+}
+
+test "'?!(err)' accepts a bare enum-variant shorthand into an enclosing Result" {
+  accepts(
+    `enum Option<T> { None, Some(T) }
+    `enum Result<T, E> { Ok(T), Err(E) }
+    `enum Failure { Missing, Broken }
+    `fun half(num x) Option<num> {
+    `  if x < 0 { ret .None; }
+    `  ret .Some(x);
+    `}
+    `fun as_res() Result<num, Failure> {
+    `  num v = half(4)?!(.Missing);
+    `  ret .Ok(v);
+    `}`,
+    "expected a bare .Missing shorthand as '?!'s error value to be accepted into an enclosing Result<num, Failure>"
+  );
+}
+
 test "'?!(err)' rejects an err value that does not match the enclosing function's own error slot" {
   rejects(
     `enum Option<T> { None, Some(T) }

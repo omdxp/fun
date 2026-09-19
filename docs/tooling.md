@@ -296,8 +296,10 @@ quick orientation.
   containers (`ok`/`err`/`err_kind`/`err_error` are fixed to `E = Error`;
   a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`).
   The postfix `expr?`/`expr!` operators unwrap either one and propagate
-  `.None`/`.Err(e)` up automatically; see [Option/Result Propagation](
-  language.md#optionresult-propagation).
+  `.None`/`.Err(e)` up automatically, and `expr?!(err)`/`expr!?` bridge
+  between the two (an `Option` into a `Result`, or the reverse); see
+  [Option/Result Propagation](#language?anchor=language-option/result-propagation) and
+  [Cross-type propagation](#language?anchor=language-cross-type-propagation-/).
 - `std.collections`: collection quirks (`len`/`is_empty`).
 - `std.string`: string helpers.
 - `std.channel`/`std.task`/`std.sync`: the concurrency primitives covered

@@ -444,8 +444,21 @@ fun safe_parse(num x) Option<num> {
   in whatever shape it needs - `.Err(err)` if it returns `Result<_, E>`,
   or `.Some(err)` if it returns `Option<E>` (the error-channel
   convention where `.Some` carries the error and `.None` means success).
-  `err` must exactly match that slot's own type, the same
+  `err` must be assignable to that slot's own type, the same
   no-conversion discipline `!` already has.
+- `err` can be a bare enum-variant shorthand: it reads against the
+  enclosing function's own error type, the same way `ret .Variant` reads
+  against its return type.
+
+  ```fun
+  enum LookupError { NotFound, Broken(num) }
+
+  fun combine(num x) Result<num, LookupError> {
+    num a = find(x)?!(.NotFound);      // .None -> .Err(.NotFound)
+    num b = find(a)?!(.Broken(a));     // a payload variant works too
+    ret .Ok(a + b);
+  }
+  ```
 - `expr!?` unwraps a `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(_)`
   returns `.None` from the enclosing function immediately, discarding
   the error entirely. The enclosing function must return `Option<...>`;
@@ -463,6 +476,24 @@ fun safe_parse(num x) Option<num> {
   argument, a chained access, a `fit` subject), and both operators are
   their own single tokens - `expr?!(err)`/`expr!?` never collide with
   anything else, the way a space-free `!=` folds ahead of `?`/`!`.
+- Either operator can be a `fit` subject, matching on the unwrapped
+  value with no intermediate `let`:
+
+  ```fun
+  fun label(num x) Result<str, LookupError> {
+    fit find(x)?!(.NotFound) {
+      0 -> { ret .Ok("zero"); }
+      _ -> { ret .Ok("nonzero"); }
+    }
+  }
+
+  fun label_opt(num x) Option<str> {
+    fit parse(x)!? {
+      0 -> { ret .Some("zero"); }
+      _ -> { ret .Some("nonzero"); }
+    }
+  }
+  ```
 
 ## Compounds & Quirks
 

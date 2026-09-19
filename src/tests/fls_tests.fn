@@ -5485,6 +5485,89 @@ test "a bare '.Variant' shorthand completes correctly when the fit's own subject
   assert contains(out2, `"label":"Blue","kind":20`), "expected Color's own variants through the '!?'-propagated bare local, token-only";
 }
 
+test "a bare '.Variant' shorthand inside '?!(...)' completes to only the enclosing function's own error type's variants, parsed" {
+  str src = `use std.option;
+  `use std.result;
+  `enum Failure { Missing, Broken }
+  `enum Other { Alpha, Beta }
+  `fun half(num x) Option<num> {
+  `  if x < 0 { ret .None; }
+  `  ret .Some(x);
+  `}
+  `fun as_opt() Option<Failure> {
+  `  num v = half(4)?!(.Missing);
+  `  ret .None;
+  `}
+  `fun as_res() Result<num, Failure> {
+  `  num w = half(4)?!(.Broken);
+  `  ret .Ok(w);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///qbshort.fn";
+  doc.path = "qbshort.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str opt_out = completion(&reads, doc, 9, 21, false);
+  assert contains(opt_out, `"label":"Missing","kind":20`), "expected Failure's variants inside '?!(...)' into an Option<Failure>";
+  assert contains(opt_out, `"label":"Broken","kind":20`), "expected every Failure variant";
+  assert !contains(opt_out, `"label":"Alpha"`), "expected no unrelated enum's variants";
+
+  str res_out = completion(&reads, doc, 13, 21, false);
+  assert contains(res_out, `"label":"Missing","kind":20`), "expected Failure's variants inside '?!(...)' into a Result<_, Failure>";
+  assert !contains(res_out, `"label":"Alpha"`), "expected no unrelated enum's variants";
+
+  str hov = hover(&reads, doc, 9, 22);
+  assert contains(hov, "Missing"), "expected hovering the bare variant to resolve against the error type";
+}
+
+test "a bare '.Variant' shorthand inside '?!(...)' completes to only the enclosing function's own error type's variants, while the document does not parse" {
+  str src = `use std.option;
+  `use std.result;
+  `enum Failure { Missing, Broken }
+  `enum Other { Alpha, Beta }
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_res() Result<num, Failure> {
+  `  num w = half(4)?!(.
+  `  ret .Ok(w);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///qbshortunparsed.fn";
+  doc.path = "qbshortunparsed.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 8, 21, false);
+  assert contains(out, `"label":"Missing","kind":20`), "expected Failure's variants, token-only, for a Result<_, Failure> enclosing function";
+  assert !contains(out, `"label":"Alpha"`), "expected no unrelated enum's variants";
+
+  str src2 = `use std.option;
+  `enum Failure { Missing, Broken }
+  `enum Other { Alpha, Beta }
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_opt() Option<Failure> {
+  `  num v = half(4)?!(.
+  `  ret .None;
+  `}`;
+  Document doc2;
+  doc2.uri = "file:///qbshortunparsed2.fn";
+  doc2.path = "qbshortunparsed2.fn";
+  doc2.text = src2;
+  doc2.version = 1;
+
+  str out2 = completion(&reads, doc2, 7, 21, false);
+  assert contains(out2, `"label":"Broken","kind":20`), "expected Failure's variants, token-only, for an Option<Failure> enclosing function";
+  assert !contains(out2, `"label":"Alpha"`), "expected no unrelated enum's variants";
+}
+
 test "a bare '.Variant' shorthand renders a payload-carrying variant's own types, in a fit arm and a ret, parsed or not" {
   str src = `enum Shape {
   `  Circle(num),
@@ -6971,4 +7054,139 @@ test "completion offers 'use'/'flag' as keyword suggestions, not the removed 'im
   assert contains(comp, `"label":"flag"`), "expected 'flag' offered";
   assert !contains(comp, `"label":"imp"`), "expected the removed 'imp' spelling not to be offered anymore";
   assert !contains(comp, `"label":"bin"`), "expected the removed 'bin' spelling not to be offered anymore";
+}
+
+test "a nested bare '.Variant(...)' inside '?!(...)' resolves its own payload's enum, in hover, definition, and completion, parsed or not" {
+  str src = `use std.option;
+  `use std.result;
+  `enum Inner { Deep, Shallow }
+  `enum Failure { Missing, Broken, Wrapped(Inner) }
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_res() Result<num, Failure> {
+  `  num w = half(4)?!(.Missing);
+  `  num z = half(4)?!(.Wrapped(.Deep));
+  `  ret .Ok(w + z);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///qbnested.fn";
+  doc.path = "qbnested.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hov = hover(&reads, doc, 9, 31);
+  assert contains(hov, "Deep = 0"), "expected the nested variant to resolve against the outer variant's own payload type";
+  str def = definition(&reads, doc, 9, 31);
+  assert contains(def, `"line":2`), "expected go-to-definition to land on Inner's own Deep variant";
+
+  str out = completion(&reads, doc, 9, 30, false);
+  assert contains(out, `"label":"Deep","kind":20`), "expected the payload enum's variants";
+  assert !contains(out, `"label":"Missing"`), "expected no variants of the outer error enum";
+
+  str un = `use std.option;
+  `use std.result;
+  `enum Inner { Deep, Shallow }
+  `enum Failure { Missing, Wrapped(Inner) }
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_res() Result<num, Failure> {
+  `  num z = half(4)?!(.Wrapped(.
+  `  ret .Ok(z);
+  `}`;
+  Document udoc;
+  udoc.uri = "file:///qbnestedunparsed.fn";
+  udoc.path = "qbnestedunparsed.fn";
+  udoc.text = un;
+  udoc.version = 1;
+  str uout = completion(&reads, udoc, 8, 30, false);
+  assert contains(uout, `"label":"Shallow","kind":20`), "expected the payload enum's variants while the document does not parse";
+  assert !contains(uout, `"label":"Missing"`), "expected no variants of the outer error enum";
+}
+
+test "a bare '.Variant' inside '?!(...)' works with references, highlights, type definition, and semantic tokens" {
+  str src = `use std.option;
+  `use std.result;
+  `enum Failure { Missing, Broken }
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_res() Result<num, Failure> {
+  `  num w = half(4)?!(.Missing);
+  `  ret .Ok(w);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened("file:///qbfeatures.fn", src, 1);
+  let doc = docs.at("file:///qbfeatures.fn").unwrap();
+
+  str refs = references(&reads, &docs, doc, 2, 16);
+  assert count(refs, `"uri"`) == 2, "expected the declaration and the '?!(.Missing)' use";
+  str highlights = document_highlights(&reads, doc, 7, 22);
+  assert count(highlights, `"range"`) == 2, "expected both occurrences highlighted from the use";
+  str type_def = type_definition(&reads, doc, 7, 22);
+  assert contains(type_def, `"line":2`), "expected type definition of a variant to land on its enum";
+  str tokens = semantic_tokens(&reads, doc);
+  assert contains(tokens, ",0,1,7,8,0"), "expected the bare variant classified as an enumMember right after its dot";
+}
+
+test "type definition of a variant lands on its enum, shorthand or qualified" {
+  str src = `enum Failure { Missing, Broken }
+  `fun c() Failure {
+  `  ret .Missing;
+  `}
+  `fun d() Failure {
+  `  ret Failure.Broken;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///variant_typedef.fn";
+  doc.path = "variant_typedef.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(type_definition(&reads, doc, 2, 8), `"line":0`), "expected a bare shorthand variant to resolve to its enum";
+  assert contains(type_definition(&reads, doc, 5, 18), `"line":0`), "expected a qualified variant to resolve to its enum";
+}
+
+test "a '?!(err)' whose error value does not fit the enclosing function's error slot is diagnosed" {
+  str src = `use std.option;
+  `use std.result;
+  `fun half(num x) Option<num> {
+  `  ret .Some(x);
+  `}
+  `fun as_res() Result<num, str> {
+  `  num w = half(4)?!(1);
+  `  ret .Ok(w);
+  `}
+  `pub fun main() num {
+  `  as_res();
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///qbdiag.fn";
+  doc.path = "qbdiag.fn";
+  doc.text = src;
+  doc.version = 1;
+  Vec<Diagnostic> found = diagnose(&reads, &dcache, doc);
+  flag saw = false;
+  num i = 0;
+  for i < found.len {
+    if contains(found.get(i).message, "'?!' propagates") {
+      saw = true;
+    }
+    i = i + 1;
+  }
+  found.free();
+  assert saw, "expected a diagnostic explaining the mismatched '?!' error value";
 }

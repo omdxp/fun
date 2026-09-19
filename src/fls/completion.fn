@@ -1108,6 +1108,64 @@ fun _variant_detail_from_tokens(Vec<Token>* tokens, num name_idx, str variant_na
   ret b.build();
 }
 
+// The type name of `enum_name`'s variant `variant_name`'s own payload
+// at position `idx`, token-only: the first identifier of that payload
+// slot (a bare enum or compound name, which is all a nested bare
+// `.Variant` can read against). "" when the enum, the variant, or the
+// slot is not found.
+fun _variant_payload_type_from_tokens(Vec<Token>* tokens, str enum_name, str variant_name, num idx) str {
+  num i = 0;
+  for i + 1 < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .Keyword || !equals(token_word(t), "enum") {
+      continue;
+    }
+    if tokens.get(i).type != .Identifier ||
+      !equals(token_word(tokens.get(i)), enum_name) {
+      continue;
+    }
+    num j = i + 1;
+    for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+      j = j + 1;
+    }
+    num depth = 1;
+    j = j + 1;
+    for j < tokens.len && depth > 0 {
+      Token bt = tokens.get(j);
+      if token_is_symbol(bt, '{') {
+        depth = depth + 1;
+      } elif token_is_symbol(bt, '}') {
+        depth = depth - 1;
+      } elif depth == 1 && bt.type == .Identifier && equals(token_word(bt), variant_name) {
+        num open = _next_real_index(tokens, j);
+        if open < 0 || !token_is_operator(tokens.get(open), "(") {
+          ret "";
+        }
+        num arg = 0;
+        num pd = 1;
+        num k = _next_real_index(tokens, open);
+        for k >= 0 && k < tokens.len && pd > 0 {
+          Token pt = tokens.get(k);
+          if token_is_operator(pt, "(") {
+            pd = pd + 1;
+          } elif token_is_symbol(pt, ')') {
+            pd = pd - 1;
+          } elif token_is_operator(pt, ",") && pd == 1 {
+            arg = arg + 1;
+          } elif pt.type == .Identifier && pd == 1 && arg == idx {
+            ret token_word(pt);
+          }
+          k = _next_real_index(tokens, k);
+        }
+        ret "";
+      }
+      j = j + 1;
+    }
+  }
+  ret "";
+}
+
 // What `type_name` declares, read the same token-only way, for every
 // `compound`/`enum`/`quirk`/`impl` block naming it: a compound's own
 // fields, an enum's own variants, a quirk's or impl's own method
@@ -1357,6 +1415,12 @@ fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str cu
         }
       }
     }
+    if token_is_operator(op, "(") {
+      num callee_idx = _prev_real_index(tokens, op_idx);
+      if callee_idx >= 0 && token_is_operator(tokens.get(callee_idx), "?!") {
+        ret _enclosing_error_slot_type_from_tokens(tokens, dot_idx);
+      }
+    }
     if token_is_operator(op, "(") || token_is_operator(op, ",") {
       ret _call_arg_type_from_tokens(tokens, dot_idx, current_file, cache);
     }
@@ -1393,9 +1457,6 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
     ret "";
   }
   num before_callee = _prev_real_index(tokens, callee_idx);
-  if before_callee >= 0 && token_is_operator(tokens.get(before_callee), ".") {
-    ret "";
-  }
   str callee_name = token_word(tokens.get(callee_idx));
 
   num arg_index = 0;
@@ -1411,6 +1472,25 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
       arg_index = arg_index + 1;
     }
     k = k + 1;
+  }
+
+  if before_callee >= 0 && token_is_operator(tokens.get(before_callee), ".") {
+    // A nested bare `.Variant(...)` constructor call (`?!(.Wrapped(.`):
+    // its own enum is whatever the outer shorthand reads against, and
+    // the argument's type is that variant's own payload at this
+    // position. A real method call (`recv.method(.`) needs the receiver
+    // resolved first, which this token-only path does not reach.
+    num outer_before = _prev_real_index(tokens, before_callee);
+    if outer_before >= 0 &&
+      (tokens.get(outer_before).type == .Identifier ||
+      token_is_symbol(tokens.get(outer_before), ')') || token_is_symbol(tokens.get(outer_before), ']')) {
+      ret "";
+    }
+    str owner = _dot_shorthand_enum_type_from_tokens(tokens, before_callee, current_file, cache);
+    if equals(owner, "") {
+      ret "";
+    }
+    ret _variant_payload_type_from_tokens(tokens, owner, callee_name, arg_index);
   }
 
   str local = _param_type_from_tokens(tokens, callee_name, arg_index);
@@ -1556,6 +1636,92 @@ fun _enclosing_function_return_type_from_tokens(Vec<Token>* tokens, num dot_idx)
       continue;
     }
     j = j - 1;
+  }
+  ret "";
+}
+
+// The error-slot type of whichever `fun`/method most tightly encloses
+// `dot_idx`, token-only: `E` of a declared `Result<_, E>`, or `E` of a
+// declared `Option<E>`. "" when the enclosing function declares neither.
+fun _enclosing_error_slot_type_from_tokens(Vec<Token>* tokens, num dot_idx) str {
+  num depth = 0;
+  num j = dot_idx - 1;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '{') {
+      if depth > 0 {
+        depth = depth - 1;
+      } else {
+        str slot = _function_header_error_slot(tokens, j);
+        if !equals(slot, "") {
+          ret slot;
+        }
+      }
+    }
+    j = j - 1;
+  }
+  ret "";
+}
+
+// The error-slot type declared in the return type just before the `{`
+// at `brace_idx`, when it really opens a function's own body and that
+// return type is `Result<_, E>` or `Option<E>`. "" otherwise.
+fun _function_header_error_slot(Vec<Token>* tokens, num brace_idx) str {
+  num close = _prev_real_index(tokens, brace_idx);
+  if close < 0 || !token_is_operator(tokens.get(close), ">") {
+    ret "";
+  }
+  num depth = 1;
+  num open = _prev_real_index(tokens, close);
+  for open >= 0 && depth > 0 {
+    if token_is_operator(tokens.get(open), ">") {
+      depth = depth + 1;
+    } elif token_is_operator(tokens.get(open), "<") {
+      depth = depth - 1;
+      if depth == 0 {
+        break;
+      }
+    }
+    open = _prev_real_index(tokens, open);
+  }
+  if depth != 0 || open < 0 {
+    ret "";
+  }
+  num base = _prev_real_index(tokens, open);
+  if base < 0 || tokens.get(base).type != .Identifier {
+    ret "";
+  }
+  num before = _prev_real_index(tokens, base);
+  if before < 0 || !token_is_symbol(tokens.get(before), ')') {
+    ret "";
+  }
+  str base_name = token_word(tokens.get(base));
+  num want = -1;
+  if equals(base_name, "Result") {
+    want = 1;
+  } elif equals(base_name, "Option") {
+    want = 0;
+  }
+  if want < 0 {
+    ret "";
+  }
+  num arg = 0;
+  num angle = 0;
+  num k = open + 1;
+  for k < close {
+    Token tk = tokens.get(k);
+    if token_is_operator(tk, "<") {
+      angle = angle + 1;
+    } elif token_is_operator(tk, ">") {
+      angle = angle - 1;
+    } elif token_is_operator(tk, ",") && angle == 0 {
+      arg = arg + 1;
+    } elif tk.type == .Identifier && angle == 0 && arg == want {
+      ret token_word(tk);
+    }
+    k = k + 1;
   }
   ret "";
 }
