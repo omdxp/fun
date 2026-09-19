@@ -1391,6 +1391,35 @@ test "'?!(err)' accepts a bare enum-variant shorthand as its error value, into b
   assert contains(out, "104 1 1"), "expected the bare shorthand to construct the right variant into both an enclosing Result and Option";
 }
 
+test "a postfix propagation binds tighter than a prefix '*', '-' and '!', so the propagated value is what gets dereferenced" {
+  str src = `use std.c.io;
+  `use std.option;
+  `use std.result;
+  `enum Failure { Missing }
+  `fun get(num* p) Option<num*> { ret .Some(p); }
+  `fun none(num* p) Option<num*> { ret .None; }
+  `fun rget(num* p) Result<num*, Failure> { ret .Ok(p); }
+  `fun numo(num x) Option<num> { ret .Some(x); }
+  `fun deref_q(num* p) Option<num> { num v = *get(p)?; ret .Some(v); }
+  `fun deref_short(num* p) Option<num> { num v = *none(p)?; ret .Some(v); }
+  `fun deref_b(num* p) Result<num, Failure> { num v = *rget(p)!; ret .Ok(v); }
+  `fun deref_qb(num* p) Result<num, Failure> { num v = *none(p)?!(.Missing); ret .Ok(v); }
+  `fun neg(num x) Option<num> { num v = -numo(x)?; ret .Some(v); }
+  `fun paren(Option<num>* op) Option<num> { num v = (*op)?; ret .Some(v + 1); }
+  `fun main() num {
+  `  num x = 7;
+  `  Option<num> o = numo(9);
+  `  printf("%lld %d %lld %d %lld %lld\n", deref_q(&x).unwrap(), deref_short(&x).is_none(), deref_b(&x).unwrap(), deref_qb(&x).is_err(), neg(5).unwrap(), paren(&o).unwrap());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_under_prefix_operator",
+    "a postfix propagation binds inside a prefix operator's operand"
+  );
+  assert contains(out, "7 1 7 1 -5 10"), "expected *get(p)? to dereference the propagated pointer, and (*op)? to still propagate the dereferenced value";
+}
+
 test "'?!(err)' hoists a temp and guard under MSVC codegen instead of a GNU statement expression" {
   str src = `use std.c.io;
   `use std.option;

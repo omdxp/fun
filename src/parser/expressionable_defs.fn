@@ -182,6 +182,20 @@ pub fun is_binary_only_operator(Token t) flag {
   ret true;
 }
 
+// True for a postfix propagation token: `?`, `!`, `?!`, `!?`.
+pub fun is_postfix_propagation_operator(Token t) flag {
+  if t.type != .Operator {
+    ret false;
+  }
+  fit t.data {
+    .Sval(s) -> {
+      ret equals(s, "?") || equals(s, "!") || equals(s, "?!") || equals(s, "!?");
+    }
+    _ -> {}
+  }
+  ret false;
+}
+
 test "op_precedence_for ranks multiplication tighter than addition" {
   let mul = op_precedence_for("*");
   let add = op_precedence_for("+");

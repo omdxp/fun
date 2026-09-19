@@ -393,6 +393,12 @@ fun combine_result(num x) Result<num, str> {
 - Both work anywhere an expression is legal, not just statement-final: a
   `let` initializer, a call argument, a chained access (`half(x)?.field`),
   nested inside another expression.
+- A postfix propagation binds as tightly as a call, `.` or `[]`, so a
+  prefix `*`, `-`, `!`, `~` or `&` applies to the propagated value:
+  `*get(p)?` is `*(get(p)?)`. To propagate the dereferenced value
+  instead, parenthesize: `(*opt_ptr)?`. `await` and a channel receive go
+  the other way, propagating what they produce: `await f()?` is
+  `(await f())?`.
 - `foo()!=x` still lexes as the `!=` comparison operator (a space-free
   `!` immediately before `=` always folds), so it never means "propagate,
   then compare"; write `foo()! == x` if propagation was intended.
