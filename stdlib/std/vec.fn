@@ -5,6 +5,11 @@ use std.c.string;
 use std.quirks;
 use std.option;
 
+// A comparison function for two values of one type, following the `strcmp`
+// convention: negative when `a` sorts before `b`, positive when after, 0
+// when equal.
+pub als Comparator<T> = fun(T, T) num;
+
 // Dynamic vector.
 pub compound Vec<T> {
   // Backing storage.
@@ -312,9 +317,7 @@ impl Vec<T> {
   }
 
   // Sorts elements in place with a stable insertion sort, for any element type.
-  // `cmp` follows the `strcmp` convention: negative when `a` sorts before `b`,
-  // positive when after, 0 when equal.
-  pub sort_by(fun(T, T) num cmp) {
+  pub sort_by(Comparator<T> cmp) {
     num i = 1;
     for i < self.len {
       T key = self.data[i];
