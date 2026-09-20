@@ -38,26 +38,6 @@ jobs:
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
-      - name: DEBUG windows fun (temporary)
-        if: matrix.os == 'windows-latest'
-        run: |
-          set +e
-          export FUN_STDLIB_DIR="$PWD/stdlib"
-          git fetch -q origin main
-          mkdir -p /tmp/keep
-          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
-            cp "$f" "/tmp/keep/$(basename $f)"
-            git show "origin/main:$f" > "$f"
-          done
-          echo "ALL THREE from main, frontend only"
-          fun -in src/cli/main.fn -no-exec 2>&1 | head -5; echo "exit=${PIPESTATUS[0]}"
-          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
-            cp "/tmp/keep/$(basename $f)" "$f"
-          done
-          echo "PR versions of individual files, standalone frontend"
-          for f in src/ast/ast.fn src/parser/parser.fn src/semantics/typecheck.fn; do
-            fun -in "$f" -no-exec 2>&1 | head -3; echo "$f exit=${PIPESTATUS[0]}"
-          done
       - name: Build fun and fls
         timeout-minutes: 10
         run: |
