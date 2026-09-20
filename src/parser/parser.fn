@@ -1509,22 +1509,20 @@ impl ParseState {
 // hard-to-trace ones (an unrelated-looking parse failure several
 // hundred lines into the generated file, an unmatched brace, ...).
 fun _is_c_reserved_keyword(str name) flag {
-  fit name {
-    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
-    "enum", "extern", "float", "for", "goto", "if", "int", "long", "register", "return", "short",
-    "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
-    "volatile", "while", "inline", "restrict", "_Bool", "_Complex", "_Imaginary", "_Alignas",
-    "_Alignof", "_Atomic", "_Generic", "_Noreturn", "_Static_assert", "_Thread_local" -> { ret true; }
-    _ -> { ret false; }
-  }
+  ret is_c_keyword(name);
 }
 
 // A binding-name diagnostic for a name colliding with a C reserved
 // word (see `_is_c_reserved_keyword`).
 fun report_c_reserved_name(ParseState* state, str name) {
+  str reason = "a reserved word in C";
+  if !is_c_keyword(name) {
+    reason = "declared by the C standard headers";
+  }
   str msg = format(
-    "'{str}' is a reserved word in C and cannot be used as a name here - the generated C would fail to compile",
-    name
+    "'{str}' is {str} and cannot be used as a name here - the generated C would fail to compile",
+    name,
+    reason
   );
   state.err(msg);
   free(msg);
@@ -3467,7 +3465,7 @@ impl Parser {
     // reached through its own struct - `foo.for` is fine in C even
     // though `for` alone never would be - so this check only applies
     // here, not to field parsing, which never calls `parse_variable`).
-    if _is_c_reserved_keyword(name) {
+    if !equals(c_name_collision(name), "") {
       report_c_reserved_name(self.state, name);
       ret .Some(.InvalidIdentifier);
     }
@@ -4229,7 +4227,7 @@ impl Parser {
     // `double<T>` becoming `double__num`/`double__dec` and so on,
     // never a bare `double`) - so only the plain, non-generic shape
     // risks colliding with one of C's own reserved words.
-    if !self.state.next_token_is_operator("<") && _is_c_reserved_keyword(fname) {
+    if !self.state.next_token_is_operator("<") && !equals(c_name_collision(fname), "") {
       report_c_reserved_name(self.state, fname);
       ret .Some(.InvalidIdentifier);
     }
@@ -12506,6 +12504,24 @@ test "parse_function rejects a function named after a C reserved word" {
   let err = p.parse_function(false, false);
   assert err.is_some(), "expected an error for a function named after a C reserved word";
   assert contains(st.error_message, "'do' is a reserved word in C"), "expected the diagnostic to name the C keyword collision specifically";
+}
+
+test "a function or variable named after a macro or type the C headers declare is rejected, naming why" {
+  ParseState st = _state_from("fun NULL() num { ret 1; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  assert p.parse_function(false, false).is_some(), "expected a function named NULL to be rejected";
+  assert contains(st.error_message, "'NULL' is declared by the C standard headers"), "expected the diagnostic to name the header collision";
+
+  ParseState st2 = _state_from("fun f() num { num stdin = 1; ret stdin; }");
+  st2.emit_stderr = false;
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_function(false, false).is_some(), "expected a variable named stdin to be rejected";
+  assert contains(st2.error_message, "'stdin' is declared by the C standard headers"), "expected the diagnostic to name the header collision";
+
+  ParseState st3 = _state_from("fun f() num { num va_arg = 1; ret va_arg; }");
+  Parser p3 = parser_new(&st3);
+  assert p3.parse_function(false, false).is_none(), "expected a function-like macro name to stay usable as a variable";
 }
 
 test "parse_variable rejects a parameter named after a C reserved word" {

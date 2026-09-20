@@ -2041,6 +2041,76 @@ test "variant constructors that match their payloads are accepted in every form"
   );
 }
 
+test "a name the generated C cannot accept is rejected wherever it is declared" {
+  str field = check(`compound S { num do; }`);
+  assert contains(field, "'do' is a reserved word in C and cannot be used as a field name"), "expected a keyword field to be rejected";
+  str comp = check(`compound int { num v; }`);
+  assert contains(comp, "'int' is a reserved word in C and cannot be used as a compound name"), "expected a keyword compound name to be rejected";
+  str en = check(`enum while { A, B }`);
+  assert contains(en, "cannot be used as an enum name"), "expected a keyword enum name to be rejected";
+  str bind = check(
+    `enum O { S(num), N }
+    `fun f(O o) num {
+    `  fit o {
+    `    .S(do) -> { ret do; }
+    `    .N -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(bind, "cannot be used as a fit binding name"), "expected a keyword fit binding to be rejected";
+  str looped = check(
+    `fun f(num[] v) num {
+    `  for do : v { ret do; }
+    `  ret 0;
+    `}`
+  );
+  assert contains(looped, "cannot be used as a loop variable name"), "expected a keyword loop variable to be rejected";
+  str tparam = check(`fun id<int>(int x) int { ret x; }`);
+  assert contains(tparam, "cannot be used as a type parameter name"), "expected a keyword type parameter to be rejected";
+}
+
+test "a macro or type the always-included C headers declare is rejected as a name" {
+  rejects(`fun main() { num NULL = 1; }`, "expected NULL to be rejected as a variable name");
+  rejects(`fun main() { num EOF = 1; }`, "expected EOF to be rejected as a variable name");
+  rejects(`fun main() { num bool = 1; }`, "expected bool to be rejected as a variable name");
+  rejects(`fun main() { num INT_MAX = 1; }`, "expected INT_MAX to be rejected as a variable name");
+  rejects(`fun NULL() num { ret 1; }`, "expected NULL to be rejected as a function name");
+  rejects(`compound FILE { num v; }`, "expected FILE to be rejected as a compound name");
+  rejects(`compound size_t { num v; }`, "expected size_t to be rejected as a compound name");
+}
+
+test "a name that only resembles a C keyword or header name is accepted, including function-like macros" {
+  accepts(
+    `compound Box { num doer; num Int; num size; }
+    `enum Mode { Do, While }
+    `fun f(num[] v) num {
+    `  num va_arg = 1;
+    `  for item : v { va_arg = va_arg + item; }
+    `  ret va_arg;
+    `}`,
+    "expected near-misses and a function-like macro name to be fine"
+  );
+}
+
+test "a function cannot be defined under the name of a C library function the generated C always declares" {
+  str got = check(
+    `fun div(num a, num b) num { ret a / b; }
+    `fun main() {}`
+  );
+  assert contains(got, "'div' is a C library function"), "expected div to be rejected with the collision named";
+  rejects(`fun strlen(str s) num { ret 0; }`, "expected strlen (string.h) to be rejected");
+  rejects(`fun printf(str s) {}`, "expected printf (stdio.h) to be rejected");
+  rejects(`fun abs(num x) num { ret x; }`, "expected abs (stdlib.h) to be rejected");
+  rejects(`fun toupper(chr c) chr { ret c; }`, "expected toupper (ctype.h) to be rejected");
+}
+
+test "a similar name, a generic function, or a name from a header included only on demand is accepted" {
+  accepts(`fun divide(num a, num b) num { ret a / b; }`, "expected divide to be fine");
+  accepts(`fun abs<T>(T x) T { ret x; }`, "expected a generic function, mangled per instantiation, to be fine");
+  accepts(`fun log(num x) num { ret x; }`, "expected a math.h name to be fine when math.h is not pulled in");
+  accepts(`fun main() {}`, "expected an ordinary program to be fine");
+}
+
 test "'?!(err)' unwraps an Option to its wrapped value, propagating err as .Err(err) into an enclosing Result" {
   accepts(
     `enum Option<T> { None, Some(T) }
