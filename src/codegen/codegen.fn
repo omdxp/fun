@@ -15127,6 +15127,22 @@ impl Codegen {
     // the program uses `fork`, `async`, or channels. `await` and `fork`
     // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
     // M:N scheduler builds on top of those.
+    // 
+    // Its own 8 MB stack (below) is a deliberately different, smaller
+    // number than the 128 MB `emit_test_runner`/`emit_main_thread_wrapper`
+    // give their own single worker thread, not an oversight: those two
+    // run many sequential calls (every test in the suite, or an
+    // arbitrarily deep real program) on ONE persistent thread, so their
+    // reserve has to cover the worst-case ACCUMULATED high-water mark
+    // across the whole run (see `emit_test_runner`'s own comment - on
+    // Windows a thread's committed stack pages are never decommitted, so
+    // an early deep call permanently raises the floor for every later one
+    // on the same thread). A `fork`/`await` worker is different in kind,
+    // not just size: `fork`'s own pool is elastic (workers spin up under
+    // contention and retire when idle, see `emit_scheduler_runtime`), so
+    // no single one of its threads accumulates a run's worth of history
+    // the way the test runner's own one persistent thread does, and 8 MB
+    // has been enough for real `fork`/`await` bodies in practice.
     self.state.write(`#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN

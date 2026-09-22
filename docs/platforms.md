@@ -42,6 +42,20 @@ given terminal session; subsequent compiles in the same session skip it.
 If you do need to override the compiler (e.g., to use Clang explicitly),
 `FUN_CC` still works as described above.
 
+### Stack size
+
+Every compiled program's `main()` runs on a worker thread given an
+explicit 128 MB stack, uniformly on every platform, rather than on
+whatever the OS hands the process's own initial thread. This is deliberate,
+not incidental: Windows bakes the main thread's own stack reserve into the
+EXE's PE header at link time, with no way to grow it after the process has
+already started, unlike POSIX, which lets any thread you spawn yourself be
+given an explicit size at the moment you create it. Running the real
+program body on a worker thread instead sidesteps that platform difference
+entirely, and gives deep recursion the same headroom on every target.
+`fork`/`await`'s own worker threads use a separate, smaller stack; see
+[Concurrency](#concurrency).
+
 ## Runtime Backend Selection
 
 `std.runtime_backend` selects the runtime backend with this precedence:

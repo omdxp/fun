@@ -46,6 +46,12 @@ nothing; results flow back through channels.
   and the pool has room to grow (default cap 4096, override with
   `FUN_SCHED_MAX_WORKERS`). Idle workers above the base pool retire after
   10 seconds of nothing to do.
+- **Worker stack size**: each `fork`/`await` worker thread gets an 8 MB
+  stack, uniformly on every platform. That's deliberately smaller than
+  the 128 MB `main()` itself runs with (see [Stack size](#platforms?anchor=platforms-stack-size), in Platforms & Compilers): a pool worker is
+  short-lived and, being elastic, never accumulates a whole program's
+  worth of call history the way `main`'s own single persistent thread
+  can.
 
 ```fun
 use std.channel;
