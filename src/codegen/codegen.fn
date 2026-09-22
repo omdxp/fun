@@ -15209,6 +15209,17 @@ impl Codegen {
     // above, to a wrapper that runs it lazily (once, via `InitOnceExecuteOnce`,
     // so concurrent first callers from separate `fork` workers can't race)
     // before delegating to the real Winsock `socket()`.
+    //
+    // `__fun_win_close` tries `closesocket` before `_close`, not the other
+    // way around: a Winsock `SOCKET` is never a valid CRT file descriptor,
+    // and the Microsoft CRT's `_close` treats an fd it doesn't recognize
+    // as a programming error, invoking the invalid-parameter handler,
+    // which aborts the whole process by default rather than just
+    // returning -1 the way POSIX's `close` would. `closesocket` has no
+    // such hazard: it isn't part of the CRT, so a handle it doesn't own
+    // just fails normally. Every close from `std.net` is a socket, so
+    // trying `closesocket` first means the common case never risks
+    // touching `_close` at all.
     self.state.write(`#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
@@ -15221,7 +15232,7 @@ impl Codegen {
     `#endif
     `#ifndef __fun_win_close_defined
     `#define __fun_win_close_defined
-    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `static inline long long __fun_win_close(long long fd) { if (closesocket((SOCKET)(uintptr_t)fd) == 0) return 0LL; return _close((int)fd) == 0 ? 0LL : -1LL; }
     `#endif
     `#ifndef close
     `#define close __fun_win_close
@@ -20117,7 +20128,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `#ifndef __fun_win_close_defined
     `#define __fun_win_close_defined
-    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
+    `static inline long long __fun_win_close(long long fd) { if (closesocket((SOCKET)(uintptr_t)fd) == 0) return 0LL; return _close((int)fd) == 0 ? 0LL : -1LL; }
     `#endif
     `#ifndef close
     `#define close __fun_win_close
