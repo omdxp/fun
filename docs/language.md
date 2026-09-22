@@ -188,7 +188,7 @@ fun main() {
   the existing `for i, item :: xs` two-name form already covers index
   tracking).
 - A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
-  as an ordinary type alias's own body - see [Type Aliases](#type-aliases)
+  as an ordinary type alias's own body - see [Type Aliases](#language?anchor=language-type-aliases)
   for the `als Args = (num, str);` pattern this enables with generic
   aliases.
 - **`fit`** matches a tuple subject structurally: `(0, y) -> ...` matches
@@ -816,7 +816,7 @@ fun main() {
   variable: `Drawable d = &square;` then `d.area()`. This is still a
   value type, not a pointer - `Drawable*` follows the same explicit-
   pointer-at-the-use-site rule as any other alias.
-- An alias's own body can be a [tuple](#tuples) (`als Args = (num,
+- An alias's own body can be a [tuple](#language?anchor=language-tuples) (`als Args = (num,
   str);`), and it's then an ordinary generic type parameter like any
   other: `als Callback<A, R> = fun(A) R;` plus `Callback<Args, str>`
   expands to `fun((num, str)) str` - no special-casing needed anywhere
