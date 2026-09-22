@@ -1,5 +1,5 @@
 // Semantic tokens.
-// 
+//
 // A more precise layer over a client's own regex/TextMate
 // highlighting: what a token actually is (a function's own
 // declaration name, a type reference, a keyword styled like the
@@ -267,7 +267,7 @@ fun _keyword_token_type(Token t) num {
 
 // An identifier's own type, read from its immediate neighbors and
 // from what was already collected about the whole program:
-// 
+//
 // - a function's declaration name (after `fun`), an enum variant's
 // own declaration site (`variant_decl`) or a qualified/bare-dot
 // reference to one (`Enum.Circle`, `.Circle`, preceded by `.` and

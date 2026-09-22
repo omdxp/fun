@@ -1,5 +1,5 @@
 // Diagnostics.
-// 
+//
 // What a client shows in the margin is what the compiler would say
 // about the same text: the errors that stop it compiling, and the
 // warnings about what it probably did not mean. The text comes from

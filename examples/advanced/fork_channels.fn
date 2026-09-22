@@ -1,14 +1,14 @@
 // Virtual threads (`fork`) + channel operators (`<-`).
-// 
+//
 // `fork f(args)` spawns a lightweight virtual thread — a fire-and-forget task
 // multiplexed (M:N) onto a small pool of OS worker threads by the runtime
 // scheduler. Many cheap `fork`s run on a few real threads; `main` automatically
 // drains all spawned tasks before it returns.
-// 
+//
 // Channels carry values between virtual threads:
 // ch <- v    sends v into ch        (sugar for ch.send(v))
 // <-ch       receives from ch       (sugar for ch.recv())
-// 
+//
 // The fork target is an `async fun`. Here three workers each square their input
 // and send it back; main sums the results in arrival order.
 

@@ -1,6 +1,6 @@
 // Postfix `?`/`!`: sugar over `std.option`/`std.result` that replaces the
 // repeated check-then-unwrap shape with one operator.
-// 
+//
 // `expr?` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`; `.None`
 // returns `.None` from the enclosing function immediately. `expr!` does
 // the same for `Result<T, E>`: `.Ok(v)` evaluates to `v`; `.Err(e)`

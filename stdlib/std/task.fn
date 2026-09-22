@@ -1,10 +1,10 @@
 // Virtual threads (lightweight tasks) built on the `fork` scheduler.
-// 
+//
 // `fork f(args)` spawns a fire-and-forget virtual thread, multiplexed onto a
 // small pool of OS worker threads; `main` drains all spawned tasks before it
 // returns. Use `std.thread` instead when you need real 1:1 OS threads with
 // manual join.
-// 
+//
 // `fork` has no native join handle, so waiting for a batch of tasks to
 // finish uses a `WaitGroup`: a completion barrier backed by a buffered
 // channel that tracks a known number of task completions.
@@ -14,7 +14,7 @@ use std.sync;
 
 // A completion barrier for a known number of virtual tasks. Each task calls
 // `done()` when it finishes; `wait()` blocks until every expected task has.
-// 
+//
 // Internally backed by a buffered channel sized to the expected count, so a task
 // may call `done()` before anyone is waiting without blocking — the signals queue
 // up and `wait()` drains them.

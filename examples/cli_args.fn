@@ -1,5 +1,5 @@
 // Demonstrates reading CLI arguments.
-// 
+//
 // Run:
 // fun -in examples/cli_args.fn -- one two three
 

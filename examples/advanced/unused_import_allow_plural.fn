@@ -3,10 +3,10 @@
 // the rest of the file, not just the next one - unlike the singular
 // 'allow unused_import, ...;' in unused_import_allow.fn, which covers
 // only the next.
-// 
+//
 // Run:
 // fun -warn-unused -in .\examples\advanced\unused_import_allow_plural.fn
-// 
+//
 // Expected:
 // - No warning is emitted for either import, even though only one
 // allow statement was written.

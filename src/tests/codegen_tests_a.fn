@@ -1,7 +1,7 @@
 // Compiler test corpus, batch A. Ported from the `tests/` codegen suite so
 // the same expectations run against this compiler. Each case states its
 // input as source text and checks the emitted C.
-// 
+//
 // The harness transpiles a source string on its own without resolving
 // imports, so a case whose expectation depends on an imported module's body
 // (a stdlib generic type, an extern prototype) is noted rather than ported.

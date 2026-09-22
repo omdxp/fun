@@ -1,5 +1,5 @@
 // Type aliases: a reusable name for a type expression.
-// 
+//
 // `als Name<T1, T2> = <type>;` names a type expression, expanded wherever
 // referenced before typecheck ever runs: the compiler never sees the
 // alias name at all, only its fully-resolved body. Works for an ordinary

@@ -1,6 +1,6 @@
 // Command-line driver: turns arguments into a compile, and optionally
 // builds and runs the result.
-// 
+//
 // Compiling a program happens in two steps. The first lowers Fun to C,
 // which this module owns. The second hands that C to a host compiler,
 // chosen by `FUN_CC` or by platform default, and runs the executable it
@@ -265,6 +265,23 @@ pub fun parse_args(str[] argv) Options {
       o.program_args.push(arg);
     }
     i = i + 1;
+  }
+
+  // `-fmt`/`-fmt-all`/`-fmt-diag`/`-fmt-check` and the `lint` subcommand
+  // only ever check/format `o.input`, the single file the loop above
+  // captured first; none of them execute a program, so there's no
+  // legitimate `-- <program args>` use here. Without this check, a second
+  // bare file falls silently into `o.program_args` above and is never
+  // looked at, so e.g. `fun -fmt-check a.fn b.fn` would report success
+  // after only ever checking `a.fn`.
+  if (o.fmt || o.fmt_all || o.fmt_diag || o.fmt_check || equals(o.subcommand, "lint")) &&
+    o.program_args.len > 0 {
+    o.has_error = true;
+    o.error_text = format(
+      "only a single input file is supported here; got an extra argument: {str}",
+      o.program_args.get(0)
+    );
+    ret o;
   }
   ret o;
 }

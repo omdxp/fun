@@ -1,5 +1,5 @@
 // Open documents.
-// 
+//
 // A client edits text the compiler never reads from disk, so the server
 // keeps what it was told. An edit arrives either as the whole document
 // or as a range to replace, which means turning line and column

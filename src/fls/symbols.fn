@@ -1,5 +1,5 @@
 // Symbols.
-// 
+//
 // What a name at a position in a document refers to, and where it was
 // declared. A name is looked for from the inside out: a parameter or
 // local of the function it sits in, then a field of the type it is
@@ -5165,7 +5165,7 @@ pub fun for_body(ForKind fk) Node* {
 // and `.StatementFit` (many branches, plus each one's own payload
 // bindings) need their own handling and are deliberately not folded
 // in here.
-// 
+//
 // This is the one place that enumerates "which statement kinds carry
 // a nested body" for every fls walker that needs to recurse into a
 // function's own body looking for something (a local's own

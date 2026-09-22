@@ -1,5 +1,5 @@
 // Selection ranges.
-// 
+//
 // One expanding chain per requested position: the token under the
 // cursor, then each `(...)`/`[...]`/`{...}` pair still open at that
 // position, innermost first, tracked with a single bracket-depth

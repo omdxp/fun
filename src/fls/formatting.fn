@@ -1,5 +1,5 @@
 // Formatting.
-// 
+//
 // A client asks for a document to be formatted and expects edits back,
 // not text. The whole document is replaced by one edit: the formatter
 // works on a file at a time, and an edit spanning everything is what

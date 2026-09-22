@@ -4550,7 +4550,7 @@ impl Parser {
       // `emit_for_iter`/`check_for` handle a bare `.CompoundInit`
       // iterable (hoisted into a temp by codegen, same as any other
       // rvalue iterable) instead.
-      // 
+      //
       // `Range` is an ordinary stdlib type, not a compiler builtin - a
       // file using `a..b` range-for needs its own `use std.range;`, the
       // same as any other file needs `use std.option;` before using

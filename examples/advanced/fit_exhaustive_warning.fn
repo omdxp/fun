@@ -1,8 +1,8 @@
 // Demonstrates the transpiler warning for non-exhaustive `fit` on `flag`.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\fit_exhaustive_warning.fn
-// 
+//
 // Expected:
 // - A warning like:
 // "fit statement is not exhausted for flag condition (missing false branch)"

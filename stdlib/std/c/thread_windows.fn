@@ -1,5 +1,5 @@
 // Windows-oriented pthread compatibility signature module.
-// 
+//
 // Re-exports pthread-shaped signatures for Windows-facing backends. Codegen
 // maps these symbols to Win32-backed compatibility functions on Windows, or
 // plain pthread.h declarations on non-Windows hosts.

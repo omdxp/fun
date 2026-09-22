@@ -1,5 +1,5 @@
 // C standard I/O bindings (stdio.h)
-// 
+//
 // This module declares common stdio types and functions so Fun programs can
 // call into the platform C library. These are declarations only —
 // implementations come from your system libc — and error reporting follows

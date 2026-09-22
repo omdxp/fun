@@ -1,5 +1,5 @@
 // AST node types.
-// 
+//
 // `DataType` and `Node` share this file because they're mutually
 // recursive (array-size expressions need `Node`, declarations need
 // `DataType`) and imports can't be circular. `NodeKind` is a flat
@@ -685,7 +685,7 @@ pub fun quirk_method_sig_new() QuirkMethodSig {
 // expression, expanded wherever referenced before typecheck ever runs (see
 // the alias-expansion pass) - typecheck and codegen never see an alias
 // reference, only its already-expanded body.
-// 
+//
 // Two distinct body shapes, told apart by `is_bound_list`: an ordinary
 // alias (`als Meters = num;`, `als Callback<A, R> = fun(A) R;`) names one
 // type expression in `body`; a bound-list alias (`als Numeric = num |
@@ -1147,7 +1147,7 @@ fun is_array_operator(str op) flag {
 }
 
 // ===== Freeing a tree =====
-// 
+//
 // Only safe on a tree with no aliasing into anything else still alive:
 // a document's own `entry_nodes` (an independent parse touching no
 // shared import cache) and a `ParseState`'s own scratch `nodes`
@@ -1155,7 +1155,7 @@ fun is_array_operator(str op) flag {
 // merged cross-file program (`ProgramMergeResult.nodes`), whose nodes
 // are reached through a shared `ImportCache` and may still be
 // referenced by another document's own merge.
-// 
+//
 // Frees every `Node*`/`DataType*` this tree owns and every `Vec<T>`'s
 // own backing storage, but never a `str` field's own character data:
 // the parser commonly hands a node a token's own already-owned string
@@ -1470,7 +1470,7 @@ pub fun free_node_tree(Vec<Node>* nodes) {
 }
 
 // ===== Cloning a tree =====
-// 
+//
 // A deep, independently-owned copy of a node: every `Node*`/`DataType*`
 // it owns is itself cloned (a fresh `malloc`, never the original
 // pointer), and every `Vec<T>` gets its own fresh backing array. `str`
@@ -1480,7 +1480,7 @@ pub fun free_node_tree(Vec<Node>* nodes) {
 // `_free_node_contents`'s own note on why), so the clone and the
 // original can freely share every string between them regardless of
 // which one (or both) eventually gets freed.
-// 
+//
 // This is what makes a document's own transitively-merged program
 // safe to free at all: `_parse_and_merge_source` clones every node it
 // pulls from `ImportCache` before handing it to a document's own

@@ -1,5 +1,5 @@
 // Thread runtime shim contract.
-// 
+//
 // The backend-facing contract for thread lifecycle operations. Backend
 // selection is sourced from std.runtime_backend; return codes come from the
 // selected backend implementation.
@@ -10,7 +10,7 @@ use std.thread_backend_posix;
 use std.thread_backend_windows;
 
 // Return the active thread runtime backend id.
-// 
+//
 // Backend ids:
 // - 1: POSIX
 // - 2: Windows

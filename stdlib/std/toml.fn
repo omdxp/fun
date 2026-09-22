@@ -1,10 +1,10 @@
 // Typed TOML values (flat `key = value` documents).
-// 
+//
 // `TomlValue` is a data-carrying enum modelling a TOML scalar: a string, integer,
 // float, or boolean. `parse_document` reads `key = value` lines into a `TomlDoc`
 // (a `Map<str, TomlValue>`), auto-detecting each value's type, and `get` returns the
 // typed value.
-// 
+//
 // ```
 // let doc = parse_document("name = \"fun\"\nversion = 1\nstable = true\n");
 // let v = doc.get("version").unwrap_or(TomlValue.Str(""));

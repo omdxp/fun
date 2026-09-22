@@ -1,5 +1,5 @@
 // Thread helpers using pthread-shaped APIs.
-// 
+//
 // On POSIX, these map to native pthread APIs. On Windows, backend
 // compatibility layers provide equivalent behavior. Unless noted otherwise,
 // these return 0 on success (including as a no-op when already in the

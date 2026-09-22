@@ -6,7 +6,7 @@ use std.error;
 
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
 // `sign()`. Match it with `fit`:
-// 
+//
 // ```
 // fit sign_of(x) {
 //   Sign.Negative -> { ... }

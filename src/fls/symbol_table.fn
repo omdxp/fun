@@ -1,11 +1,11 @@
 // Workspace symbol table.
-// 
+//
 // workspace_symbols and definition_workspace_wide both used to re-walk
 // every document in the workspace, from scratch, on every request. This
 // keeps one Declaration per top-level name across the whole workspace,
 // built once and kept current by version, so a query is a couple of Map
 // lookups instead of a linear scan over every document's own AST.
-// 
+//
 // Pull-based, mirroring AnalysisCache's own of(): nothing rebuilds on
 // didChange. A document's stale entry is only noticed and refreshed the
 // next time (if ever) a workspace-wide request asks for it, since the

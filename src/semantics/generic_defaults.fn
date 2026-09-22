@@ -1,12 +1,12 @@
 // Default generic type parameters.
-// 
+//
 // A generic enum, compound, quirk or alias may give trailing type
 // parameters a default (`enum Result<T, E = Error>`), and a reference that
 // writes fewer type arguments than the declaration has (`Result<num>`)
 // gets the missing ones filled in from those defaults. A default may name
 // an earlier parameter (`compound Pair<A, B = A>`), which stands for
 // whatever argument was written for it.
-// 
+//
 // This runs over the whole program before typecheck, like alias
 // expansion, and edits the program's own DataType nodes in place, so
 // typecheck and codegen never learn defaults exist: a reference reads as

@@ -1,8 +1,8 @@
 // Demonstrates fun's new type checking errors.
-// 
+//
 // Run:
 // fun -in .\examples\error_cases\type_mismatch.fn
-// 
+//
 // Expected:
 // - A [TypeError] explaining the mismatch.
 

@@ -1,5 +1,5 @@
 // Synchronization helpers built on POSIX pthread APIs.
-// 
+//
 // `mutex_new`/`condvar_new` initialize eagerly, on the thread that calls
 // them, before the result is ever shared with another thread in the
 // normal create-then-share pattern: checking "initialized yet?" and

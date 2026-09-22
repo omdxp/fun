@@ -2,7 +2,7 @@
 // user-defined ordered type, not just num. Range (std.range, backing
 // the `a..b` syntax sugar) stays num-only; StepRange<T> is a separate
 // type for everything else, constructed directly.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\step_range.fn
 

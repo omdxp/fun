@@ -1,5 +1,5 @@
 // Windows thread backend implementation.
-// 
+//
 // Defines the Windows backend contract used by std.thread_runtime. Talks
 // directly to pthread-shaped primitives from std.c.thread_windows. Unless
 // noted otherwise, these return 0 on success (including as a no-op when

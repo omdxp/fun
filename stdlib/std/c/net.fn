@@ -1,7 +1,12 @@
-// POSIX sockets (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h)
-// 
-// These are declarations only; implementations come from system libc.
-// This module targets POSIX-style sockets.
+// BSD-style sockets: POSIX (sys/socket.h, netinet/in.h, arpa/inet.h,
+// unistd.h) on Linux/macOS, Winsock2 on Windows.
+//
+// These are declarations only; implementations come from the system libc
+// on POSIX. On Windows the compiler's prelude redirects `socket` to a
+// wrapper that runs `WSAStartup` once before delegating to the real
+// Winsock `socket()`, and `close` to one that tries `_close` then
+// `closesocket`; every other name here (`bind`, `listen`, `accept`,
+// `recv`, `send`, `htons`, ...) matches Winsock2's own naming directly.
 
 // Socket API
 // Creates a socket descriptor, returning the fd or -1 (C semantics).
@@ -14,6 +19,9 @@ pub fun listen(num sockfd, num backlog) num;
 // Accepts a connection from a listening socket (`addr`/`addrlen` may be
 // null). Returns the client fd or -1 (C semantics).
 pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
+// Connects a socket to a remote address. Returns 0 on success, -1 on error
+// (C semantics).
+pub fun connect(num sockfd, raw* addr, num addrlen) num;
 // Receives up to `len` bytes from a socket into `buf`. Returns bytes read or
 // -1 (C semantics).
 pub fun recv(num sockfd, raw* buf, num len, num flags) num;

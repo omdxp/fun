@@ -1,5 +1,5 @@
 // References and rename.
-// 
+//
 // Both start from the same list: every place a name is written. That
 // list is built by matching the word itself across the documents a
 // client has open, which is what the outgoing server does too. It finds

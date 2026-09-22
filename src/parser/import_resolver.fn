@@ -299,7 +299,7 @@ fun _import_nodes_only(Vec<Node> nodes) Vec<Node> {
 // again. The source it was parsed from is what says whether it is still
 // current, which costs a string comparison rather than a stat call and
 // is exact rather than a guess about clocks.
-// 
+//
 // The names the program declares are part of the key too: the merge pass
 // parses with them in scope, so the same text can parse differently once
 // another file gains or loses a public compound.
@@ -683,7 +683,7 @@ async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
 // (into `out`, keyed by name): a lightweight first pass so
 // `is_known_compound_symbol` can recognize a compound from another file
 // before that file's own real parse starts.
-// 
+//
 // Runs the walk through a small, fixed pool of `preload_worker_count`
 // virtual threads pulling from a shared queue (see `PreloadShared`'s own
 // doc comment for why the pool is bounded rather than one task per

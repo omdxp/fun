@@ -1,5 +1,5 @@
 // Import hover and go to definition.
-// 
+//
 // Hovering (or jumping to) a segment of a `use` statement's own
 // dotted path answers the same question as any other declaration:
 // where does this lead. A segment resolving to a real file shows that

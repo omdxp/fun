@@ -1,5 +1,5 @@
 // Code actions.
-// 
+//
 // Quick fixes offered for a diagnostic already reported: removing an
 // unused import outright, filling in a fit's missing arm or a quirk
 // impl's missing method, inserting a missing `await` or marking a

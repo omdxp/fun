@@ -1,6 +1,6 @@
 // Compiler test corpus, batch B. Ported from the `tests/` suite so the same
 // expectations run against this compiler.
-// 
+//
 // The harness compiles a source string on its own without resolving imports,
 // so corpus tests whose fixtures call into stdlib modules (std.channel,
 // std.map, std.net helpers, std.mock_time) have no counterpart here. The
@@ -1865,7 +1865,7 @@ test "a propagation nested inside another propagation's own call argument hoists
   // Regression, two distinct bugs stacked on top of each other, both
   // found reproducing a real Windows CI failure via
   // emit_c_with_imports_forcing_msvc (no real MSVC access needed):
-  // 
+  //
   // (1) emit_propagation resolved its own operand's type via the
   // general resolve_field_chain, which (for a call operand) also
   // renders the call's full text into a scratch buffer purely to
@@ -1878,7 +1878,7 @@ test "a propagation nested inside another propagation's own call argument hoists
   // _resolve_call_rtype, the exact same type resolution with the
   // unneeded text render skipped, and using it whenever the operand is
   // directly a call.
-  // 
+  //
   // (2) With the double-evaluation gone, the inner propagation's own
   // hoisted temp-and-guard still spliced *outside* the enclosing
   // function entirely. emit_propagation routes a nested propagation's

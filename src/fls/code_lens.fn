@@ -1,5 +1,5 @@
 // Code lenses.
-// 
+//
 // One "N references" lens per top-level function this document
 // declares, its own count reusing references.fn's workspace-wide
 // occurrence scan rather than re-implementing name matching. Clicking

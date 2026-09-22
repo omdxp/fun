@@ -1,8 +1,8 @@
 // Document symbols.
-// 
+//
 // What a file declares, in the order it declares it, so a client can
 // show an outline and jump around by name.
-// 
+//
 // `textDocument/documentSymbol` is sent as the protocol's own nested
 // `DocumentSymbol` tree (a field/variant/quirk-method-signature under
 // its own compound/enum/quirk, an impl's own method under whichever
@@ -289,7 +289,7 @@ fun _is_subsequence(str needle, str haystack) flag {
 // whichever compound or enum it targets. Only the file's own top-level
 // declarations are listed: what it imports belongs to the outline of
 // the file that declares it.
-// 
+//
 // Two passes, since an impl targeting a compound or enum can (and
 // commonly does) appear anywhere relative to that declaration's own
 // position in the file: the first collects every compound/enum/quirk/

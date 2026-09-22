@@ -1,8 +1,8 @@
 // Demonstrates the transpiler warning for a redundant `fit` catch-all branch.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\fit_unreachable_branch_warning.fn
-// 
+//
 // Expected:
 // - A warning like:
 // "fit catch-all '_' branch is unreachable because earlier branches already cover all flag values"

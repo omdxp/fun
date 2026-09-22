@@ -1,7 +1,7 @@
 // Concurrent test runner: discovers and runs `test "name" { ... }` blocks
 // found in a compiled program, dispatching each one onto its own virtual
 // task (`fork`) and collecting results over a channel.
-// 
+//
 // In test-compile mode (`fun test file.fn`), the compiler auto-imports this
 // module and calls `run_discovered_tests` itself, passing three
 // compiler-generated bridge functions: a test count, an index-to-name

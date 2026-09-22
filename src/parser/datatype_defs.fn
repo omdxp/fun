@@ -133,7 +133,7 @@ pub fun render_datatype_bound(DataType* dt) str {
 }
 
 // Best-effort semantic typing for common C typedef names.
-// 
+//
 // These identifiers are emitted verbatim in C (`type_str`), but are tagged
 // with a Fun base type so the typechecker can treat them as numeric where
 // appropriate. `.None` when the name is not recognized.

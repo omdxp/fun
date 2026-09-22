@@ -358,4 +358,5 @@ quick orientation.
 - `std.mock_time`: `Clock`/`SystemClock`/`MockClock`, see Testing above.
 - `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/
   `clear_env`, `sys_exit`, `sys_abort`, `sys_system`).
-- `std.net`: URL parsing and pure Fun POSIX TCP/HTTP helpers.
+- `std.net`: URL parsing and pure Fun TCP/HTTP helpers, cross-platform
+  (POSIX sockets and Winsock2).

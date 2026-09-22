@@ -1,5 +1,5 @@
 // Type checking.
-// 
+//
 // The checker walks each function body with the types of everything in
 // scope, infers the type of every expression it meets, and reports the
 // first place where a value cannot stand for the type expected of it.
@@ -2564,7 +2564,7 @@ impl Checker {
   // Judges `alias.name(...)`, where `alias` names an imported file
   // rather than a value. True when it was one, whether or not anything
   // was reported: either way it is not a method call.
-  // 
+  //
   // Only a name that resolves to nothing else is read this way, so a
   // receiver whose type the checker does not model is left to the method
   // path rather than being mistaken for an alias.

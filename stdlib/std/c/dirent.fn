@@ -1,5 +1,5 @@
 // Directory iteration/creation/kind-check helpers.
-// 
+//
 // Unlike the rest of `std.c.*`, these aren't thin bindings to a single libc
 // function: POSIX and Win32 directory APIs differ too much to bind directly.
 // The compiler emits a small wrapper for each of these into every program's

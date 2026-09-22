@@ -1,5 +1,5 @@
 // Result<T, Error>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
-// 
+//
 // Construct it with `ok(v)` / `err(code, message, default)`, then match it with
 // `fit` (to read the value or the error) or use a combinator like `unwrap_or`.
 

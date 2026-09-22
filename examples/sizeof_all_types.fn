@@ -1,7 +1,7 @@
 use std.c.io;
 
 // sizeof(Type) returns a `num` (C: int) with the size in bytes.
-// 
+//
 // NOTE:
 // - `sizeof(void)` is not valid C.
 // - `raw` maps to C `void`, so `sizeof(raw)` is also invalid.

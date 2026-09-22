@@ -2,7 +2,7 @@
 // real, first-class type - usable as a variable type, a function parameter or
 // return type, and a generic argument, with no separate compound declaration
 // needed.
-// 
+//
 // A tuple literal `(1, "hi")` needs at least two comma-separated elements: a
 // single parenthesized value stays an ordinary grouped expression. Read an
 // element back positionally with `.0`, `.1`, ... and chain directly into a

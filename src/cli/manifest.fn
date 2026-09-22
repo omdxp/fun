@@ -1,9 +1,9 @@
 // Reads the `fun.toml` project manifest.
-// 
+//
 // A package may build a library, one or more binaries, or both. Targets
 // can be declared explicitly, or left out entirely and discovered from
 // the conventional `src/lib.fn` and `src/main.fn` paths.
-// 
+//
 // Only the subset of TOML the manifest needs is parsed: top-level
 // tables, arrays of tables, and quoted string values. Fun resolves
 // local imports by path, never through the manifest - `[[deps]]` is the
