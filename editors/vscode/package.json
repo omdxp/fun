@@ -200,10 +200,11 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "package": "npm run compile && vsce package --allow-missing-repository --skip-license --allow-star-activation"
+    "check-types": "tsc -p ./ --noEmit",
+    "vscode:prepublish": "npm run check-types && node esbuild.js --production",
+    "compile": "npm run check-types && node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package --allow-missing-repository --skip-license --allow-star-activation"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.0"
@@ -211,8 +212,9 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.74.0",
-    "typescript": "^5.3.3",
-    "@vscode/vsce": "^3.9.2"
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.3.3"
   },
   "overrides": {
     "cheerio": "1.0.0"
