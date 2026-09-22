@@ -4,3 +4,9 @@
 **/*.map
 out/**
 !out/extension.js
+node_modules/**
+src/**
+esbuild.js
+tsconfig.json
+package-lock.json
+.gitignore
