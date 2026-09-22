@@ -92,12 +92,12 @@ pub fun build_http_get(Url* url) str {
   ret url.build_http_get();
 }
 
-// Returns the POSIX AF_INET constant (best-effort default).
+// Returns the AF_INET constant; the same value on POSIX and Winsock2.
 pub fun af_inet() num {
   ret 2;
 }
 
-// Returns the POSIX SOCK_STREAM constant (best-effort default).
+// Returns the SOCK_STREAM constant; the same value on POSIX and Winsock2.
 pub fun sock_stream() num {
   ret 1;
 }
@@ -112,22 +112,23 @@ pub compound SockAddrInPacked {
   num word1;
 }
 
-fun _pack_sockaddr_in_linux(num port) SockAddrInPacked {
+// `addr` is a 32-bit IPv4 address already in network byte order (e.g. from
+// `htonl`/`inet_addr`); pass `htonl(0)` for INADDR_ANY (listen on every
+// interface).
+fun _pack_sockaddr_in_linux(num port, num addr) SockAddrInPacked {
   SockAddrInPacked a;
   let fam = af_inet();
   let prt = htons(port);
-  let addr = htonl(0);
   a.word0 = fam + (prt * 65536) + (addr * 4294967296);
   a.word1 = 0;
   ret a;
 }
 
-fun _pack_sockaddr_in_bsd(num port) SockAddrInPacked {
+fun _pack_sockaddr_in_bsd(num port, num addr) SockAddrInPacked {
   SockAddrInPacked a;
   num len = 16;
   let fam = af_inet();
   let prt = htons(port);
-  let addr = htonl(0);
   a.word0 = len + (fam * 256) + (prt * 65536) + (addr * 4294967296);
   a.word1 = 0;
   ret a;
@@ -140,10 +141,10 @@ pub fun tcp_listen(num port) num {
     ret -1;
   }
 
-  let addr = _pack_sockaddr_in_linux(port);
+  let addr = _pack_sockaddr_in_linux(port, htonl(0));
   raw* addr_ptr = &addr;
   if bind(fd, addr_ptr, 16) != 0 {
-    addr = _pack_sockaddr_in_bsd(port);
+    addr = _pack_sockaddr_in_bsd(port, htonl(0));
     addr_ptr = &addr;
     if bind(fd, addr_ptr, 16) != 0 {
       close(fd);
@@ -178,6 +179,44 @@ pub fun try_tcp_accept(num server_fd) Result<num, Error> {
   let fd = tcp_accept(server_fd);
   if fd < 0 {
     ret err_kind(.Io, "tcp_accept failed", -1);
+  }
+  ret .Ok(fd);
+}
+
+// Opens a TCP connection to `host` (a dotted-decimal IPv4 address, e.g.
+// "127.0.0.1"; no DNS resolution) on `port`; returns the connected fd, or
+// -1 on failure.
+pub fun tcp_connect(str host, num port) num {
+  let fd = socket(af_inet(), sock_stream(), 0);
+  if fd < 0 {
+    ret -1;
+  }
+
+  let ip = inet_addr(host);
+  if ip == -1 {
+    close(fd);
+    ret -1;
+  }
+
+  let addr = _pack_sockaddr_in_linux(port, ip);
+  raw* addr_ptr = &addr;
+  if connect(fd, addr_ptr, 16) != 0 {
+    addr = _pack_sockaddr_in_bsd(port, ip);
+    addr_ptr = &addr;
+    if connect(fd, addr_ptr, 16) != 0 {
+      close(fd);
+      ret -1;
+    }
+  }
+
+  ret fd;
+}
+
+// Opens a TCP connection, with Result.
+pub fun try_tcp_connect(str host, num port) Result<num, Error> {
+  let fd = tcp_connect(host, port);
+  if fd < 0 {
+    ret err_kind(.Io, "tcp_connect failed", -1);
   }
   ret .Ok(fd);
 }
@@ -449,4 +488,35 @@ pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
     ret err_kind(.Io, "http_serve_forever failed", rc);
   }
   ret .Ok(rc);
+}
+
+// A real client+server round-trip over loopback: proves `tcp_listen`,
+// `tcp_connect`, `tcp_accept`, and `tcp_read`/`tcp_write` actually move
+// bytes, not just build request text. On loopback a `connect` can complete
+// against the listen backlog before `accept` is ever called, so this needs
+// no second thread.
+test "tcp_listen/tcp_connect/tcp_accept round-trip real bytes over loopback" {
+  num port = 58391;
+  let server = tcp_listen(port);
+  assert server >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server);
+
+  let client = tcp_connect("127.0.0.1", port);
+  assert client >= 0, "expected tcp_connect to succeed";
+  defer tcp_close(client);
+
+  let accepted = tcp_accept(server);
+  assert accepted >= 0, "expected tcp_accept to succeed";
+  defer tcp_close(accepted);
+
+  str msg = "ping";
+  let wrote = tcp_write(client, msg, len(msg));
+  assert wrote == len(msg), "expected the full message to be written";
+
+  str buf = malloc(16);
+  defer free(buf);
+  let n = tcp_read(accepted, buf, 15);
+  assert n == len(msg), "expected to read back as many bytes as were sent";
+  buf[n] = '\0';
+  assert equals(buf, msg), "expected the server to read exactly what the client sent";
 }

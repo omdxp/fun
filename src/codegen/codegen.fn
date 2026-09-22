@@ -15203,7 +15203,12 @@ impl Codegen {
     ``);
     // `std.c.net`'s socket bindings need these headers, in both their
     // Windows and POSIX forms, and are emitted unconditionally like every
-    // other prelude header.
+    // other prelude header. Winsock additionally needs `WSAStartup` called
+    // before any socket call, unlike POSIX sockets, which need no such
+    // step; `socket` is macro-redirected the same way `close` already is
+    // above, to a wrapper that runs it lazily (once, via `InitOnceExecuteOnce`,
+    // so concurrent first callers from separate `fork` workers can't race)
+    // before delegating to the real Winsock `socket()`.
     self.state.write(`#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
@@ -15220,6 +15225,15 @@ impl Codegen {
     `#endif
     `#ifndef close
     `#define close __fun_win_close
+    `#endif
+    `#ifndef __fun_win_socket_defined
+    `#define __fun_win_socket_defined
+    `static INIT_ONCE __fun_win_wsa_once = INIT_ONCE_STATIC_INIT;
+    `static BOOL CALLBACK __fun_win_wsa_init_cb(PINIT_ONCE ip, PVOID p, PVOID* c) { (void)ip; (void)p; (void)c; WSADATA __fun_wsa; WSAStartup(MAKEWORD(2, 2), &__fun_wsa); return TRUE; }
+    `static inline long long __fun_win_socket(long long domain, long long type, long long protocol) { InitOnceExecuteOnce(&__fun_win_wsa_once, __fun_win_wsa_init_cb, NULL, NULL); return (long long)socket((int)domain, (int)type, (int)protocol); }
+    `#endif
+    `#ifndef socket
+    `#define socket __fun_win_socket
     `#endif
     `#else
     `#include <sys/socket.h>
@@ -20107,6 +20121,15 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `#ifndef close
     `#define close __fun_win_close
+    `#endif
+    `#ifndef __fun_win_socket_defined
+    `#define __fun_win_socket_defined
+    `static INIT_ONCE __fun_win_wsa_once = INIT_ONCE_STATIC_INIT;
+    `static BOOL CALLBACK __fun_win_wsa_init_cb(PINIT_ONCE ip, PVOID p, PVOID* c) { (void)ip; (void)p; (void)c; WSADATA __fun_wsa; WSAStartup(MAKEWORD(2, 2), &__fun_wsa); return TRUE; }
+    `static inline long long __fun_win_socket(long long domain, long long type, long long protocol) { InitOnceExecuteOnce(&__fun_win_wsa_once, __fun_win_wsa_init_cb, NULL, NULL); return (long long)socket((int)domain, (int)type, (int)protocol); }
+    `#endif
+    `#ifndef socket
+    `#define socket __fun_win_socket
     `#endif
     `#else
     `#include <sys/socket.h>

@@ -1,12 +1,60 @@
-// Minimal HTTP server example (POSIX sockets).
+// Minimal HTTP server example: a real client+server round-trip over
+// loopback. A `connect` can complete against the listen backlog before
+// `accept` is ever called, so this needs no second thread.
 
 use std.c.io;
+use std.c.mem;
 use std.net;
 
 fun main() {
   num port = 8080;
   str body = "Hello from Fun\n";
-  printf("Listening on http://127.0.0.1:%lld\n", port);
-  // Blocks forever, serving the same response.
-  http_serve_forever(port, body);
+
+  let server = tcp_listen(port);
+  if server < 0 {
+    printf("listen failed\n");
+    ret;
+  }
+
+  let client = tcp_connect("127.0.0.1", port);
+  if client < 0 {
+    printf("connect failed\n");
+    tcp_close(server);
+    ret;
+  }
+
+  let accepted = tcp_accept(server);
+  if accepted < 0 {
+    printf("accept failed\n");
+    tcp_close(client);
+    tcp_close(server);
+    ret;
+  }
+
+  str req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  tcp_write(client, req, len(req));
+
+  str req_buf = malloc(1024);
+  if req_buf != nil {
+    tcp_read(accepted, req_buf, 1023);
+    free(req_buf);
+  }
+
+  str hdr = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
+  tcp_write(accepted, hdr, len(hdr));
+  tcp_write(accepted, body, len(body));
+
+  str resp_buf = malloc(1024);
+  if resp_buf != nil {
+    let n = tcp_read(client, resp_buf, 1023);
+    if n > 0 {
+      resp_buf[n] = '\0';
+      printf("client received:\n%s", resp_buf);
+    }
+    free(resp_buf);
+  }
+
+  tcp_close(accepted);
+  tcp_close(client);
+  tcp_close(server);
 }
