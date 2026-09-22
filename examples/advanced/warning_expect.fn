@@ -1,5 +1,5 @@
 // Demonstrates expecting a warning and failing if it disappears.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\warning_expect.fn
 

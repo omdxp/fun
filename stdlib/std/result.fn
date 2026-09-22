@@ -1,7 +1,7 @@
 // Result<T, E = Error>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
-// 
+//
 // Result is a data-carrying enum (a sum type), matched with `fit`:
-// 
+//
 // ```
 // Result<str, Error> r = read_file("config.toml");
 // fit r {
@@ -9,13 +9,13 @@
 //   Result.Err(e) -> { log_error(e); }
 // }
 // ```
-// 
+//
 // Or use the combinators for the common cases:
-// 
+//
 // ```
 // str text = read_file(path).unwrap_or(""); // value, or a fallback on Err
 // ```
-// 
+//
 // `E` is the error type, defaulting to the shared `Error` compound (kind +
 // code + message + context), so `Result<T>` means `Result<T, Error>`. Build
 // one with `ok(v)`, `err(code, message, default)`, `err_kind(kind, message,
@@ -126,7 +126,7 @@ pub fun ok<T, E>(T value) Result<T, E> {
 // trailing value isn't stored; it's only a generic-type witness so `T` is
 // inferred from the call site, e.g. `err(1, "msg", fallback)` resolves
 // `Result<T, Error>`.
-// 
+//
 // Prefer `err_kind()` when the failure has an unambiguous category (`Io`,
 // `Parse`, `NotFound`, `Invalid`, `OutOfMemory`, `Unexpected`) so callers
 // inspecting `result.unwrap_err().kind` see that category instead of `System`.

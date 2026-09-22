@@ -1,5 +1,5 @@
 // Resolves, fetches, and locks `[deps]` entries from `fun.toml`.
-// 
+//
 // Every fetch shells out to the system `git` (via `std.process.run`),
 // the only thing in this codebase with real, already-correct TLS/SSH
 // handling - there is no HTTP/TLS client anywhere in the stdlib. A
@@ -8,7 +8,7 @@
 // a plain relative import already works. `fun.lock` pins the exact
 // resolved commit for every entry; a `tag`/`branch` only re-resolves on
 // an explicit `fun deps update`, never implicitly - see `resolve_all`.
-// 
+//
 // `resolve_all` also walks transitively: a fetched dependency that has
 // its own `fun.toml` with its own `[deps]` gets those resolved too, all
 // flattened into the one project-level `fun.lock` and the one flat

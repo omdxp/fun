@@ -1,6 +1,6 @@
 // Advanced data-carrying enums: variants carrying compounds and generic instances,
 // matched with `fit` destructuring, plus shorthand `.Variant(...)` construction.
-// 
+//
 // A tagged-union enum may carry any type in a variant payload — primitives, a
 // compound by value, or a monomorphized generic instance. Pattern matching binds
 // each matched variant's payload into locals; payload-free variants coexist.

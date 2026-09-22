@@ -1,5 +1,5 @@
 // Option<T>: a value that may be present (`Some`) or absent (`None`).
-// 
+//
 // Option is a sum type — construct it with `some(v)` or the `None` variant, then
 // either match it with `fit` or reach for a combinator like `unwrap_or`.
 

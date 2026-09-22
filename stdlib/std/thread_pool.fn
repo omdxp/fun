@@ -1,5 +1,5 @@
 // Thread pool helpers built on std.thread.
-// 
+//
 // Manages groups of worker thread handles. Worker entrypoints use
 // pthread-style function pointers (`raw*`).
 

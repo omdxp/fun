@@ -1,12 +1,12 @@
 // Type-alias expansion.
-// 
+//
 // An `als Name<T1, T2> = <type>;` (or `als Name = a | b;`) declaration
 // names a reusable type expression, transparently expanded wherever
 // referenced before typecheck ever runs - neither typecheck nor codegen
 // needs to know aliases exist, matching the same "single point of
 // expansion, everything downstream free" approach this compiler already
 // uses for keyword canonicalization.
-// 
+//
 // This mutates the program's own DataType nodes in place, so a caller
 // that must keep an alias reference visible for display (fls hover,
 // completion, go-to-definition) needs to run this against a disposable
@@ -715,7 +715,7 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
 
 // Propagates each `TypeAlias` declaration's own `was_used` flag from one
 // node list to another, matched by name.
-// 
+//
 // A caller that runs `expand_type_aliases` against one tree but reports
 // `unused_type_alias` against a different one (the CLI's own
 // `entry_nodes`, kept as a separate parse from `nodes` so warnings stay

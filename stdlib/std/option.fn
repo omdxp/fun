@@ -1,7 +1,7 @@
 // Option<T>: a value that may be present (`Some`) or absent (`None`).
-// 
+//
 // Option is a data-carrying enum (a sum type), so you pattern-match it with `fit`:
-// 
+//
 // ```
 // Option<num> o = some(42);
 // fit o {
@@ -9,15 +9,15 @@
 //   Option.None -> { print("nothing"); }
 // }
 // ```
-// 
+//
 // Or use the combinator methods for the common cases:
-// 
+//
 // ```
 // num n = find_user(id).unwrap_or(0); // value, or a fallback when None
 // ```
-// 
+//
 // Construct with `some(v)` (infers T from v) or the variant directly:
-// 
+//
 // ```
 // Option<num> a = some(42);
 // Option<num> b = Option.None; // or the shorthand `.None`

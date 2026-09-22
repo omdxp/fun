@@ -1,8 +1,8 @@
 // Demonstrates the transpiler warning for unreachable statements after `ret`.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\unreachable_code_warning.fn
-// 
+//
 // Expected:
 // - A warning like:
 // "statement is unreachable because the previous statement always exits the current scope"

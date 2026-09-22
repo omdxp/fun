@@ -1,5 +1,5 @@
 // Token types produced by the lexer.
-// 
+//
 // A `Number` token distinguishes integer vs decimal by which `TokenData`
 // variant it carries (`Num` vs `Dec`).
 

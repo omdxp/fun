@@ -1,9 +1,9 @@
 // Inlay hints.
-// 
+//
 // Two kinds, both inline "ghost" text a reader never typed: a
 // `let`-inferred local's own resolved type right after its name, and
 // a call argument's own parameter name right before it.
-// 
+//
 // `let`'s declared type never actually resolves in the parsed tree:
 // the parser leaves it as a permanent __let_infer__ sentinel, and
 // only codegen (embedding its own on-the-fly inference) ever turns

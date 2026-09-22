@@ -1,6 +1,6 @@
 // Iterating collections with `for item : collection`, plus the Option-returning
 // `at()` accessors and `Display` rendering.
-// 
+//
 // Any value whose type implements the `Iterator` quirk (or exposes `iter()`) can be
 // driven by a `for` loop. The compiler desugars it to the iterator's `next()`/`Option`
 // protocol, so Vec, Set, and Map (over its keys) all just work.

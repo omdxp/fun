@@ -1,11 +1,11 @@
 // A `Clock` abstraction for writing deterministic, instant time-dependent
 // tests, with no real sleeping required.
-// 
+//
 // A function that needs the current time to be testable should accept a
 // `Clock` parameter instead of calling `std.time`'s `now()` directly.
 // Production code passes a `SystemClock`; tests pass a `MockClock` they
 // fully control.
-// 
+//
 // ```
 // test "a token expires after its ttl" {
 //   MockClock clk = mock_clock_at(0);
@@ -15,7 +15,7 @@
 //   assert is_expired(&clk, issued, 60), "should be expired now";
 // }
 // ```
-// 
+//
 // Each `MockClock` is an ordinary local value a test owns, so concurrently
 // running tests never share or race over fake time.
 

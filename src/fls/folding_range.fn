@@ -1,5 +1,5 @@
 // Folding ranges.
-// 
+//
 // One range per `{`...`}` block whose braces sit on different lines,
 // depth-tracked directly off the token stream. No parse needed, the
 // same way every other purely lexical fls feature works.

@@ -1,7 +1,7 @@
 // Postfix `?!`/`!?`: the cross-type mirrors of `?`/`!` (see
 // propagation_basic.fn), bridging Option<->Result instead of
 // propagating a matching signal.
-// 
+//
 // `expr?!(err)` unwraps an `Option<T>`: `.Some(v)` evaluates to `v`;
 // `.None` returns `err` from the enclosing function immediately,
 // wrapped in whatever shape it needs - `.Err(err)` for `Result<_, E>`,

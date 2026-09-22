@@ -1,5 +1,5 @@
 // POSIX thread backend implementation.
-// 
+//
 // Defines the POSIX backend contract used by std.thread_runtime. Functions
 // are thin forwards to std.thread helpers.
 

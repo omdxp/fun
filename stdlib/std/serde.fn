@@ -3,12 +3,12 @@
 // serializable means here — there's no separate `Serialize`/`Deserialize`
 // quirk, and the same primitive generalizes to other target types (e.g.
 // `std.json` targets `JsonValue`).
-// 
+//
 // ```
 // To<str> s = &doc;
 // str text = to_string(s);
 // ```
-// 
+//
 // For structured, typed (de)serialization of your own compounds, see
 // `std.quirks`'s `To<JsonValue>`/`From<JsonValue>`. Fun has no reflection or
 // derive macros, so each type hand-implements the conversion.

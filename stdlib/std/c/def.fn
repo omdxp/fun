@@ -1,34 +1,34 @@
 // C standard definitions (stddef.h)
-// 
+//
 // This module is signature-only.
-// 
+//
 // In Fun, most things from `stddef.h` are provided by C as typedefs/macros, so
 // you typically *use the names directly* after importing this module.
-// 
+//
 // Import:
 // - `use std.c.def;`
-// 
+//
 // Common typedef names (all treated as numeric-compatible in Fun, except
 // `max_align_t` which is an opaque named type)
 // - `size_t`: unsigned integer type used for sizes/lengths.
 // - `ptrdiff_t`: signed integer type used for pointer differences.
 // - `wchar_t`: wide character integer type.
 // - `max_align_t`: an alignment type (usually a struct) available on C11+.
-// 
+//
 // Optional / platform-specific typedefs
 // - `rsize_t`: bounds-checked library size type (Annex K), numeric-compatible
 // if provided by the platform.
-// 
+//
 // Variadic arguments
 // - `va_list`
 // - Opaque type used with `<stdarg.h>` macros.
-// 
+//
 // Common macros
 // - `NULL`
 // - Null pointer constant. In Fun code, prefer the `nil` literal for null
 // pointer assignment and comparisons; `NULL` is also accepted (treated as the
 // literal `0`) for parity with C sources (best-effort).
-// 
+//
 // Notes
 // - Function-like macros such as `offsetof(type, member)` require a C type
 // name rather than a runtime value, so they can't be expressed as Fun

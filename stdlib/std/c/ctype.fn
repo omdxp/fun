@@ -1,5 +1,5 @@
 // Character classification and conversion (ctype.h)
-// 
+//
 // C functions take an `int` (typically an unsigned char promoted); modeled as num.
 // Returns are C-style: nonzero means true, 0 means false.
 

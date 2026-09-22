@@ -1,5 +1,5 @@
 // C strings and memory utilities (string.h)
-// 
+//
 // `str` models a C `char*` in these bindings.
 // Most operations assume NUL-terminated strings and valid pointers.
 

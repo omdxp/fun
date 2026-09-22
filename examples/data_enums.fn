@@ -1,5 +1,5 @@
 // Data-carrying enums (Rust-style sum types / tagged unions) with pattern matching.
-// 
+//
 // A variant may carry a positional payload — `Circle(num)`, `Rect(num, num)`.
 // An enum is a tagged union as soon as any variant carries data; payload-free
 // variants (`Empty`) still participate. Construct with `Enum.Variant(args)` and

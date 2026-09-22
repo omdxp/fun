@@ -1,5 +1,5 @@
 // Call hierarchy.
-// 
+//
 // prepareCallHierarchy finds the top-level function at a position;
 // incomingCalls answers "who calls this" by reusing the same
 // workspace-wide occurrence scan references.fn/code_lens.fn already

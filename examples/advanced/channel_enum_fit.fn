@@ -1,15 +1,15 @@
 // Channels carrying a data-carrying enum, matched with `fit`.
-// 
+//
 // This is a small request/response protocol between `main` and three virtual
 // threads (`fork`). The message type is a TAGGED-UNION enum — each variant
 // carries a different payload — and both the worker and `main` use `fit` to
 // destructure whichever variant arrives off the channel.
-// 
+//
 // `fork f(args)`  spawns f (an `async fun`) on the M:N scheduler
 // `ch <- v`       sends v into ch        (sugar for ch.send(v))
 // `<- ch`         receives from ch       (sugar for ch.recv())
 // `fit <- ch {`   receives, then matches the variant in one step
-// 
+//
 // A `Channel<Job>` / `Channel<Reply>` works exactly like any other generic
 // channel — the element type just happens to be a sum type.
 

@@ -1,5 +1,5 @@
 // Language server.
-// 
+//
 // The server reads one message at a time from its client, answers what
 // it understands, and keeps going until the client asks it to stop. A
 // request it does not recognize is answered with an error rather than

@@ -1,5 +1,5 @@
 // Common quirks (traits) implemented across stdlib types.
-// 
+//
 // ```
 // fun len_of(Sized s) num { ret s.len(); }
 // ```
@@ -31,7 +31,7 @@ pub quirk Clearable {
 // box - `for x : v { use(x); }` dispatches through `next()` structurally,
 // with no `.iter()` indirection needed. Driving it manually without a `for`
 // loop still works the same way any other type's own method would:
-// 
+//
 // ```
 // for true {
 //   fit v.next() {
@@ -61,7 +61,7 @@ pub quirk Steppable<T> {
 
 // Converts this value into a `T`. Fun has no reflection or derive macros, so
 // each type hand-implements the conversion.
-// 
+//
 // ```
 // impl Point as To<JsonValue> {
 //   pub to() JsonValue {
@@ -74,7 +74,7 @@ pub quirk Steppable<T> {
 // let doc = p.to();               // direct method call
 // JsonValue doc2 = to_json_value(&p); // quirk-typed parameter (see std.json)
 // ```
-// 
+//
 // Dispatches both via a direct method call (`value.to()`) and through a
 // concrete instantiation used as a quirk-typed parameter or variable
 // (`fun f(To<JsonValue> v) { ret v.to(); }`, then `f(&point)` for any type
@@ -86,7 +86,7 @@ pub quirk To<T> {
 
 // Rebuilds this value from a `T` (e.g. `impl Config as From<JsonValue>`),
 // reading state from the source value:
-// 
+//
 // ```
 // impl Config as From<JsonValue> {
 //   pub from(JsonValue v) {
@@ -106,7 +106,7 @@ pub quirk From<T> {
 // element that itself holds a pointer (a `str` key, a nested `Vec`)
 // still aliases whatever it originally pointed to, exactly as an
 // ordinary value copy of that element would.
-// 
+//
 // ```
 // impl Vec<T> as Clonable<Vec<T>> {
 //   pub clone() Vec<T> { ... }

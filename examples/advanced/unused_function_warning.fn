@@ -1,8 +1,8 @@
 // Demonstrates the optional unused_function warning.
-// 
+//
 // Run:
 // fun -warn-unused -in .\examples\advanced\unused_function_warning.fn
-// 
+//
 // Expected:
 // - A warning like:
 // "unused function 'helper'"

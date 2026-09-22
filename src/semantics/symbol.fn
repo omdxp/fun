@@ -1,5 +1,5 @@
 // Symbol table entries.
-// 
+//
 // A symbol's kind and payload are combined into a single `SymbolKind`
 // data-carrying enum, so there's no separate tag field that could disagree
 // with the payload.

@@ -1,5 +1,5 @@
 // Time and date bindings (time.h)
-// 
+//
 // Values follow C `time.h` semantics and platform libc behavior. Some
 // functions return pointers to static storage (C semantics).
 

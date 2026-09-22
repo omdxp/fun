@@ -1,10 +1,10 @@
 // Typed JSON values.
-// 
+//
 // `JsonValue` is a data-carrying enum (sum type) modelling any JSON value: a null,
 // boolean, number, string, array, or object. Parse text into one with `parse`, inspect
 // it with the `as_*` accessors (each returns an `Option`), and render it back with
 // `stringify` / `to_string`.
-// 
+//
 // ```
 // fit parse("{\"name\": \"fun\", \"version\": 1}") {
 //   Result.Ok(doc) -> {
@@ -571,7 +571,7 @@ impl JsonValue as To<str> {
 // Convert your own compounds to/from a structured `JsonValue` with the generic
 // `std.quirks.To<T>`/`From<T>` quirks. Fun has no reflection/derive, so
 // implement these by hand — the explicit equivalent of a derived serializer:
-// 
+//
 // ```
 // impl Point as To<JsonValue> {
 //   pub to() JsonValue {
@@ -591,7 +591,7 @@ impl JsonValue as To<str> {
 //   }
 // }
 // ```
-// 
+//
 // Dispatch directly (`p.to()`, `back.from(doc)`) or through the free-function
 // wrappers below, which accept any `To<JsonValue>` implementer via a quirk-typed
 // parameter.

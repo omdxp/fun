@@ -1,5 +1,5 @@
 // POSIX process bindings (unistd.h / sys/wait.h / spawn.h).
-// 
+//
 // These are declarations only; implementations come from the system libc.
 // Spawning goes through `posix_spawn` rather than raw `fork`+`exec` since it
 // avoids copy-on-write address-space duplication and is safe to call from a

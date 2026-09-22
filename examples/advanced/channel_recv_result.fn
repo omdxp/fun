@@ -1,6 +1,6 @@
 // Ergonomic channel receive with RecvResult: `fit` on the outcome instead of
 // decoding a raw status code + out-pointer.
-// 
+//
 // The core recv API returns a `channel_rc_*` status and writes the value through an
 // out-pointer (`recv_into(&out) -> num`). `recv_result()` layers over that and hands
 // back a `RecvResult<T>` you can pattern-match — each outcome the status codes encode

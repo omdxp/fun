@@ -1,5 +1,5 @@
 // Source formatting.
-// 
+//
 // Formatting works from the token stream rather than the parse tree, so
 // comments and blank lines survive: the lexer keeps both, and the
 // emitter decides spacing, indentation, and where lines break.
@@ -144,8 +144,10 @@ fun _cval_of(Token t) chr {
 }
 
 // The lexer keeps only a comment's body, so the marker is written back
-// with exactly one space after it. Inside a fenced block the body is
-// kept as written, since the indentation there is part of the code.
+// with exactly one space after it, unless the body is empty: a blank
+// `//` line gets no trailing space, matching every other line's own
+// no-trailing-whitespace rule. Inside a fenced block the body is kept as
+// written, since the indentation there is part of the code.
 fun _comment_line(str body, flag in_fence) str {
   StringBuilder b = string_builder_init(len(body) + 4);
   if in_fence {
@@ -153,8 +155,12 @@ fun _comment_line(str body, flag in_fence) str {
     b.append(body);
     ret b.build();
   }
-  b.append("// ");
-  b.append(trim(body));
+  let trimmed = trim(body);
+  b.append("//");
+  if !equals(trimmed, "") {
+    b.append(" ");
+    b.append(trimmed);
+  }
   ret b.build();
 }
 

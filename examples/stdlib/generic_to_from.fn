@@ -1,10 +1,10 @@
 // Generic conversion quirks: `To<T>` / `From<T>` (std.quirks).
-// 
+//
 // A type implements `To<JsonValue>` to convert itself into a JsonValue and
 // `From<JsonValue>` to rebuild itself from one. Fun has no reflection/derive,
 // so each conversion is hand-written — the explicit equivalent of a derived
 // Into/From.
-// 
+//
 // An impl dispatches both via a direct method call (`c.to()` / `back.from(doc)`)
 // and through a quirk-typed parameter/variable (`std.json`'s
 // `to_json_value`/`to_json_string` take a `To<JsonValue>` parameter, so any

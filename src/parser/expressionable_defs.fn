@@ -1,7 +1,7 @@
 // Operator precedence/associativity table the expression parser depends
 // on: a pure, self-contained lookup table, kept in its own module rather
 // than inside parser.fn.
-// 
+//
 // Precedence rank: lower binds tighter (0 = postfix/call/member access,
 // the tightest; 13 = comma, the loosest). Each group's index is what
 // `left_has_priority` compares.

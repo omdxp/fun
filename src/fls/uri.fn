@@ -1,5 +1,5 @@
 // File URIs.
-// 
+//
 // A client names a document by URI; the compiler works in paths. The two
 // differ in more than a prefix: a URI escapes anything outside a small
 // unreserved set, and a Windows path arrives with its drive letter after

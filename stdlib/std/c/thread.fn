@@ -1,5 +1,5 @@
 // POSIX thread bindings (pthread.h)
-// 
+//
 // These are declarations only; implementations come from your system libc.
 // This module targets POSIX pthread APIs. Function-pointer parameters are
 // modeled as raw*. Unless noted otherwise, these return 0 on success and a

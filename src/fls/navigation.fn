@@ -1,5 +1,5 @@
 // Hover and go to definition.
-// 
+//
 // Both answer the same question first: what does the name under the
 // cursor refer to? Hover then spells that declaration back to the
 // reader, and go to definition says where it was written.

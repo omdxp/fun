@@ -1,5 +1,5 @@
 // Deadlock-watchdog runtime hooks (bindings to compiler-emitted C).
-// 
+//
 // The compiler emits real implementations when the program uses `fork`,
 // feeding the scheduler's blocked-task counter so a watchdog thread can
 // detect a global stall, and no-op stubs otherwise. Only exercised when

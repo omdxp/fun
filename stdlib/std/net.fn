@@ -4,6 +4,7 @@ use std.string;
 use std.vec;
 use std.c.mem;
 use std.c.net;
+use std.c.io;
 use std.channel;
 use std.thread_runtime;
 use std.result;
@@ -498,24 +499,29 @@ pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
 test "tcp_listen/tcp_connect/tcp_accept round-trip real bytes over loopback" {
   num port = 58391;
   let server = tcp_listen(port);
+  printf("net test: tcp_listen -> %lld\n", server);
   assert server >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server);
 
   let client = tcp_connect("127.0.0.1", port);
+  printf("net test: tcp_connect -> %lld\n", client);
   assert client >= 0, "expected tcp_connect to succeed";
   defer tcp_close(client);
 
   let accepted = tcp_accept(server);
+  printf("net test: tcp_accept -> %lld\n", accepted);
   assert accepted >= 0, "expected tcp_accept to succeed";
   defer tcp_close(accepted);
 
   str msg = "ping";
   let wrote = tcp_write(client, msg, len(msg));
+  printf("net test: tcp_write -> %lld\n", wrote);
   assert wrote == len(msg), "expected the full message to be written";
 
   str buf = malloc(16);
   defer free(buf);
   let n = tcp_read(accepted, buf, 15);
+  printf("net test: tcp_read -> %lld\n", n);
   assert n == len(msg), "expected to read back as many bytes as were sent";
   buf[n] = '\0';
   assert equals(buf, msg), "expected the server to read exactly what the client sent";

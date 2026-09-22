@@ -1,5 +1,5 @@
 // Structured logging.
-// 
+//
 // A `Logger` filters by severity, renders records as human-readable text or
 // as one JSON object per line, and routes output to any `std.io.Sink`
 // (stdout, stderr, a file, or a rotating file). Records may carry typed

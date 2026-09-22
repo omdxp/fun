@@ -1,11 +1,11 @@
 // Reading a document once.
-// 
+//
 // Every question a client asks about a document is answered from the
 // same two things: its tokens, and the program its imports resolve to.
 // Reading those is what costs, and the text does not change between the
 // questions asked about one revision, so it is read once per revision
 // and kept.
-// 
+//
 // The revision a client sends is what says whether what is kept is
 // still current. An edit raises it, and the next question re-reads.
 

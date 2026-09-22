@@ -1,5 +1,5 @@
 // Completion.
-// 
+//
 // What a reader could reasonably type next. After a dot that is the
 // fields and methods of whatever the receiver is; anywhere else it is
 // the reserved words, what the program declares, and what is in scope

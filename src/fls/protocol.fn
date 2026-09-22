@@ -1,5 +1,5 @@
 // Language server transport.
-// 
+//
 // A client and the server exchange JSON over standard input and output,
 // each message preceded by headers giving its length in bytes. Reading
 // one means reading headers up to a blank line, then exactly that many

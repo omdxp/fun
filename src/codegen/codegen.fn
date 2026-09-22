@@ -3516,7 +3516,7 @@ impl Codegen {
   // statement's position, with no separate prototype step. Returns the
   // combined mangled name plus the substituted return type, or `.None`
   // when inference fails.
-  // 
+  //
   // A plain impl contributes no substitution of its own, so the combined
   // one reduces to the method's own params.
   maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
@@ -4600,7 +4600,7 @@ impl Codegen {
   // buffer, and every type the prototype names is already declared
   // ahead of that position). `type_names` is the prototype's own
   // return type plus every parameter type, in any order.
-  // 
+  //
   // `.broad` tells a caller whether the position is safe to remember
   // as "already declared" for every future call site, not just this
   // one: both branches inside the safety check below land somewhere a
@@ -4695,7 +4695,7 @@ impl Codegen {
     // the tag constants and struct type this operand's value actually
     // has, the same resolution `resolve_type_subst`/`resolve_type_name`
     // already give a chain's own ending type elsewhere in this file.
-    // 
+    //
     // A call operand specifically goes through `_resolve_call_rtype`
     // directly instead of the general `resolve_field_chain`: the
     // latter's own call-branch also renders the call's full text (for
@@ -9950,7 +9950,7 @@ impl Codegen {
   // generic method call - reused here rather than duplicated, just
   // swapped for `emit_inlined_iterator_next`'s splice-the-body-inline
   // emission instead of a direct call.
-  // 
+  //
   // `Elem` is read off the matched impl's own `quirk_arg_dtype` (its real
   // `as Iterator<...>` argument, e.g. symbolic `T` for `Vec<T>` or a
   // symbolic tuple `(K, V)` for `Map<K, V>`), substituted against the
@@ -9958,7 +9958,7 @@ impl Codegen {
   // owner's own generic args (`arg_dtypes.get(0)`), which only happened
   // to coincide with Vec's own `Elem` and is flatly wrong for Map, whose
   // `Elem` is a tuple of BOTH its own type params, not just the first.
-  // 
+  //
   // Always hoists the iterable into a fresh local copy first, identifier
   // or not: the owning type's own cursor (`__iter_pos`, or Set's own
   // delegation through its inner Map's) now lives on the value itself,
@@ -9969,7 +9969,7 @@ impl Codegen {
   // exactly what already covered a non-identifier iterable's own
   // re-evaluation concern (`squares.keys()`) before this, just now
   // applied uniformly.
-  // 
+  //
   // Falls back to a real (non-inlined) call to the monomorphized `next()`
   // when its own body isn't one of the handful of control-flow shapes
   // `_next_body_inlinable` understands (e.g. `Set<T>`'s own `next()`,
@@ -9978,7 +9978,7 @@ impl Codegen {
   // (non-generic) user-Iterator path already falls back to, not a
   // silent miscompile from splicing a `ret` the emitter can't actually
   // see.
-  // 
+  //
   // `owner_name` is the type's own resolved, already-mangled
   // instantiation name (`"Vec__num"`, `"Map__str__num"`) - the caller
   // resolves it however it has the iterable's type on hand (structurally,
@@ -14481,7 +14481,7 @@ impl Codegen {
   // impl. One vtable struct is emitted per quirk name (`Shape_vtable`)
   // rather than a signature-hash struct shared across identically-shaped
   // quirks, which would be a size optimization only.
-  // 
+  //
   // Three pieces, in order:
   // 1. The first time this quirk name is seen: the vtable struct, one
   // function-pointer field per method each taking `void* self` first, and
@@ -15127,7 +15127,7 @@ impl Codegen {
     // the program uses `fork`, `async`, or channels. `await` and `fork`
     // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
     // M:N scheduler builds on top of those.
-    // 
+    //
     // Its own 8 MB stack (below) is a deliberately different, smaller
     // number than the 128 MB `emit_test_runner`/`emit_main_thread_wrapper`
     // give their own single worker thread, not an oversight: those two
@@ -15819,7 +15819,7 @@ impl Codegen {
   // declaration (zero args, a single `str[] name`, or that shape written
   // out) - see `emit_function_named`'s own `is_main` handling - so calling
   // it with real `argc`/`argv` is always correct here.
-  // 
+  //
   // Reentrancy/stack-growth is otherwise platform-asymmetric: POSIX has no
   // way to grow the *main* thread's own stack after the process has
   // already started, so a worker thread with an explicit size is the only
@@ -21336,7 +21336,7 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   // position into the much shorter scratch buffer, which would corrupt
   // the length arithmetic and crash. `hoist_insert_pos` is therefore
   // suspended across the state swap, like `type_subst_param_names`.
-  // 
+  //
   // `main`'s `Opt<num>` return type exercises a second concern: `main`
   // is forced to `int`, so `ret wrap(5);` can't write the real value and
   // is evaluated only for side effects into a throwaway buffer. `wrap`

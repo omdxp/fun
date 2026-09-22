@@ -1,5 +1,5 @@
 // Generic constraints on free functions and compounds.
-// 
+//
 // A type parameter can be bounded to a union of allowed types with `<T: a | b>`.
 // The compiler monomorphizes each concrete instantiation (zero runtime cost) AND
 // type-checks, at every call/instantiation site, that the concrete type argument

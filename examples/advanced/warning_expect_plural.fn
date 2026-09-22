@@ -3,7 +3,7 @@
 // every fit_non_exhaustive warning for the rest of the file - unlike
 // the singular 'expect fit_non_exhaustive, ...;' in warning_expect.fn,
 // which is met by, and absorbs, only the next one.
-// 
+//
 // Run:
 // fun -in .\examples\advanced\warning_expect_plural.fn
 

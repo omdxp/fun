@@ -1,5 +1,5 @@
 // Warnings.
-// 
+//
 // The analysis walks a program looking for shapes that compile but are
 // almost certainly not what was meant. Each finding carries the warning
 // it belongs to, so a program can silence one with `allow` or require

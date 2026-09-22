@@ -1,5 +1,5 @@
 // Private compound fields via a leading underscore.
-// 
+//
 // A field whose name begins with `_` is module-private: it can only be read or
 // written from code in the same module as the compound's declaration. No keyword
 // is needed — the leading underscore is the marker. Within the type's own impl

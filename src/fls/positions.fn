@@ -1,5 +1,5 @@
 // Positions.
-// 
+//
 // A client points at a place in a document with a line and a character,
 // both counted from zero; the lexer counts lines and columns from one,
 // and a token's end column is the column just past it. Everything that

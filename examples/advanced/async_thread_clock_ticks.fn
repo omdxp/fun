@@ -1,5 +1,5 @@
 // Async + thread + channel clock-tick style example.
-// 
+//
 // The worker thread uses recv_timeout as a pacing mechanism:
 // if no stop signal arrives within interval_ms, it emits the next tick.
 
