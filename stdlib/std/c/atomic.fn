@@ -1,0 +1,28 @@
+// Atomic 64-bit integer operations (sequential consistency only).
+//
+// These aren't thin bindings to a single libc/compiler function the way
+// most of `std.c.*` is: GCC and Clang expose `__atomic_*` as compiler
+// builtins recognized purely by their unprefixed call syntax, and
+// declaring an extern prototype for one is a hard compile error
+// ("cannot redeclare builtin function"), so they can't be bound
+// directly. The compiler emits a small `__fun_atomic_*`-named wrapper
+// for each of these into every program's prelude instead, calling the
+// real builtin (POSIX) or the matching `_Interlocked*` intrinsic
+// (Windows) from inside its own body, where no declaration is needed
+// either way; these declarations just describe that wrapper's signature.
+
+// Atomically reads `*ptr`.
+pub fun __fun_atomic_load(num* ptr) num;
+
+// Atomically writes `val` to `*ptr`.
+pub fun __fun_atomic_store(num* ptr, num val);
+
+// Atomically adds `val` to `*ptr`, returning the value from before the add.
+pub fun __fun_atomic_fetch_add(num* ptr, num val) num;
+
+// Atomically sets `*ptr` to `val`, returning the value from before the exchange.
+pub fun __fun_atomic_exchange(num* ptr, num val) num;
+
+// If `*ptr` equals `expected`, atomically sets it to `desired` and returns
+// 1; otherwise leaves `*ptr` unchanged and returns 0.
+pub fun __fun_atomic_cas(num* ptr, num expected, num desired) num;

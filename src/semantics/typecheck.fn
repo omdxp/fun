@@ -996,6 +996,13 @@ compound Checker {
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
   Vec<str> active_type_params;
+  // Parallel to `active_type_params` by index: each entry's own declared
+  // bound (empty when unconstrained), so a bound check on a reference to
+  // one of these names - still an unresolved type parameter, not yet a
+  // concrete type - can check entailment (every alternative it's already
+  // known to allow also appears in the bound being checked) instead of
+  // requiring the bare name to match an alternative by spelling.
+  Vec<Vec<str>> active_type_param_bounds;
   flag failed;
   TypeError error;
 }
@@ -1003,6 +1010,7 @@ compound Checker {
 fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
+  c.active_type_param_bounds.init(4);
   c.fns.init(32);
   c.declared_at.init(32);
   c.quirks = set_init("", 16);
@@ -1769,6 +1777,24 @@ fun _data_type_for(str want_name) DataTypeType {
   ret .Chr;
 }
 
+// Flattens a bound's per-combination alternatives at one type-parameter
+// position into a single list: each combination names one concrete type
+// per parameter, so what a parameter may stand for is that position
+// across every combination. The caller owns the returned `Vec`.
+fun _flat_allowed_for_param(Vec<Vec<str>> combos, num p) Vec<str> {
+  Vec<str> allowed;
+  allowed.init(combos.len);
+  num b = 0;
+  for b < combos.len {
+    Vec<str> combination = combos.get(b);
+    b = b + 1;
+    if p < combination.len {
+      allowed.push(combination.get(p));
+    }
+  }
+  ret allowed;
+}
+
 impl Checker {
   // The type a literal, name, or operator expression produces. Anything
   // the checker does not model infers as unknown.
@@ -2484,6 +2510,17 @@ impl Checker {
           listed = true;
         }
       }
+      // `supplied_name` might not name a concrete type or quirk at all,
+      // but a type parameter still active in the declaration being
+      // checked (e.g. `T` inside the very generic function/impl that
+      // declared it) - not yet substituted for a concrete type. In that
+      // case, check entailment: if every alternative `T`'s own bound
+      // already allows also appears in this bound, `T` is guaranteed to
+      // satisfy it no matter what concrete type it's eventually
+      // instantiated with, without needing it resolved here first.
+      if !listed {
+        listed = self.active_type_param_bound_entails(supplied_name, &holder.bounds, at_param);
+      }
       if !listed {
         self.fail(
           format("'{str}' does not accept {str} for '{str}'", t.name, supplied_name, param),
@@ -2492,6 +2529,51 @@ impl Checker {
         ret;
       }
     }
+  }
+
+  // Whether `name` is a type parameter active in the declaration being
+  // checked whose own declared bound only allows alternatives `target`
+  // (at position `at_param`) also allows. `false` for a `name` that
+  // isn't an active type parameter, or one with no bound of its own
+  // (unconstrained still means "could be anything," not "known to
+  // satisfy this").
+  active_type_param_bound_entails(str name, Vec<Vec<str>>* target, num at_param) flag {
+    num idx = -1;
+    num i = 0;
+    for i < self.active_type_params.len {
+      if equals(self.active_type_params.get(i), name) {
+        idx = i;
+      }
+      i = i + 1;
+    }
+    if idx < 0 || idx >= self.active_type_param_bounds.len {
+      ret false;
+    }
+    Vec<str> own_allowed = self.active_type_param_bounds.get(idx);
+    if own_allowed.len == 0 {
+      ret false;
+    }
+    num o = 0;
+    for o < own_allowed.len {
+      str own_alt = own_allowed.get(o);
+      flag found = false;
+      num b = 0;
+      for b < target.len {
+        Vec<str> combination = target.get(b);
+        b = b + 1;
+        if at_param >= combination.len {
+          continue;
+        }
+        if equals(combination.get(at_param), own_alt) {
+          found = true;
+        }
+      }
+      if !found {
+        ret false;
+      }
+      o = o + 1;
+    }
+    ret true;
   }
 
   // Checks the types a call supplies for the callee's type parameters
@@ -4026,6 +4108,23 @@ impl Checker {
     }
     self.active_type_params = params;
 
+    Vec<Vec<str>> previous_param_bounds = self.active_type_param_bounds;
+    Vec<Vec<str>> param_bounds;
+    param_bounds.init(4);
+    if f.has_type_params {
+      num tpi = 0;
+      for tpi < f.type_params.len {
+        Vec<str> flat;
+        flat.init(0);
+        if f.has_type_param_forced_insts {
+          flat = _flat_allowed_for_param(f.type_param_forced_insts, tpi);
+        }
+        param_bounds.push(flat);
+        tpi = tpi + 1;
+      }
+    }
+    self.active_type_param_bounds = param_bounds;
+
     CheckedType previous = self.rtype;
     flag previous_async = self.in_async;
     self.in_async = f.is_async;
@@ -4038,6 +4137,13 @@ impl Checker {
     self.in_async = previous_async;
     self.active_type_params.free();
     self.active_type_params = previous_params;
+    num fbi = 0;
+    for fbi < self.active_type_param_bounds.len {
+      self.active_type_param_bounds.data[fbi].free();
+      fbi = fbi + 1;
+    }
+    self.active_type_param_bounds.free();
+    self.active_type_param_bounds = previous_param_bounds;
     env.pop();
     env.pop();
   }
