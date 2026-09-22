@@ -497,31 +497,40 @@ pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
 // against the listen backlog before `accept` is ever called, so this needs
 // no second thread.
 test "tcp_listen/tcp_connect/tcp_accept round-trip real bytes over loopback" {
+  // Diagnostic breadcrumbs go to stderr, not stdout: stdout is fully
+  // buffered (not line-buffered) once it's a pipe rather than a real
+  // terminal, which is exactly how the test runner captures a child
+  // process's output, so a hard crash before the buffer naturally flushes
+  // loses everything written to stdout. stderr is unbuffered by the C
+  // standard, so it survives.
+  let err_stream = stderr_stream();
+  fprintf(err_stream, "net test: about to call tcp_listen\n");
+
   num port = 58391;
   let server = tcp_listen(port);
-  printf("net test: tcp_listen -> %lld\n", server);
+  fprintf(err_stream, "net test: tcp_listen -> %lld\n", server);
   assert server >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server);
 
   let client = tcp_connect("127.0.0.1", port);
-  printf("net test: tcp_connect -> %lld\n", client);
+  fprintf(err_stream, "net test: tcp_connect -> %lld\n", client);
   assert client >= 0, "expected tcp_connect to succeed";
   defer tcp_close(client);
 
   let accepted = tcp_accept(server);
-  printf("net test: tcp_accept -> %lld\n", accepted);
+  fprintf(err_stream, "net test: tcp_accept -> %lld\n", accepted);
   assert accepted >= 0, "expected tcp_accept to succeed";
   defer tcp_close(accepted);
 
   str msg = "ping";
   let wrote = tcp_write(client, msg, len(msg));
-  printf("net test: tcp_write -> %lld\n", wrote);
+  fprintf(err_stream, "net test: tcp_write -> %lld\n", wrote);
   assert wrote == len(msg), "expected the full message to be written";
 
   str buf = malloc(16);
   defer free(buf);
   let n = tcp_read(accepted, buf, 15);
-  printf("net test: tcp_read -> %lld\n", n);
+  fprintf(err_stream, "net test: tcp_read -> %lld\n", n);
   assert n == len(msg), "expected to read back as many bytes as were sent";
   buf[n] = '\0';
   assert equals(buf, msg), "expected the server to read exactly what the client sent";
