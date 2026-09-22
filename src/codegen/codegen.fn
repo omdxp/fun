@@ -740,7 +740,7 @@ fun node_is_std_c_binding(Node n) flag {
 // binding declared in `std/c/*`, such as `std/log.fn`'s `log` against
 // libc's `log(double)`. Such a function is emitted under a
 // `__fun_shadow__` prefix so the C declaration stays usable.
-fun collect_c_shadow_names(Vec<Node> nodes) Vec<str> {
+fun collect_c_shadow_names(Vec<Node> nodes, flag test_mode, flag fuzz_mode) Vec<str> {
   Vec<str> binding_names;
   binding_names.init(0);
   defer binding_names.free();
@@ -760,8 +760,20 @@ fun collect_c_shadow_names(Vec<Node> nodes) Vec<str> {
   for n2 : nodes {
     fit n2.kind {
       .Function(f2) -> {
-        // `main` keeps its name: C requires the real entry point.
-        if !f2.has_body || equals(f2.name, "main") || node_is_std_c_binding(n2) {
+        if !f2.has_body || node_is_std_c_binding(n2) {
+          continue;
+        }
+        // An ordinary compile renames `main` too, the same as any other
+        // C-shadowed name: the real C entry point becomes a small worker-
+        // thread wrapper instead (see `emit_main_thread_wrapper`), so the
+        // program's own `main` no longer needs to keep the literal name.
+        // Test and fuzz mode already supply their own entry point and
+        // skip the program's `main` entirely (`skip_main` below), so
+        // there is nothing here for them to rename.
+        if equals(f2.name, "main") {
+          if !test_mode && !fuzz_mode && !out.contains(f2.name) {
+            out.push(f2.name);
+          }
           continue;
         }
         if binding_names.contains(f2.name) && !out.contains(f2.name) {
@@ -12254,7 +12266,7 @@ impl Codegen {
         // and discarded once `rt` is in hand. `hoist_insert_pos` is
         // suspended for the swap, so a nested hoisted emission splices
         // into the real buffer.
-        flag is_main = equals(emit_name, "main");
+        flag is_main = equals(f.name, "main");
         // A function returning a function pointer (`fun name() fun(T)
         // R`) writes a nested C declarator, `R (*name(args))(T)`, built
         // separately below from `f.rtype.fn_sig` - this initial write is
@@ -12554,6 +12566,17 @@ impl Codegen {
           !equals(rt.unwrap(), "void") {
           self.state.write_indent();
           self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
+        }
+        // Falling off the end of a C function with no `return` is only
+        // well-defined for a function literally spelled `main` (C99
+        // 5.1.2.2.3, implicitly `return 0;`); `main`'s own C definition is
+        // emitted under a different name (`effective_function_name`), so
+        // that rule no longer covers it, and it needs the same explicit
+        // `return 0;` here instead - the success case `main_discards_return`
+        // already gives an explicit `ret;`/non-`num` `ret <expr>;` for.
+        if is_main && !fn_body_ends_in_return {
+          self.state.write_indent();
+          self.state.write("return 0;\n");
         }
         self.state.indent_level = self.state.indent_level - 1;
         self.state.write("}\n");
@@ -15468,7 +15491,7 @@ impl Codegen {
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.
     self.uses_fork = uses_fork_in(nodes);
-    self.c_shadow_names = collect_c_shadow_names(nodes);
+    self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
     self.write_prelude();
     self.register_function_signatures(nodes);
     self.register_top_level_consts(nodes);
@@ -15686,6 +15709,7 @@ impl Codegen {
     // impl method before every plain function, breaking the case where a
     // function is textually earlier, an impl method calls it, and both
     // were excluded from the forward-declare pass above.
+    flag saw_real_main = false;
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
@@ -15713,6 +15737,9 @@ impl Codegen {
           // user-defined one would collide with it at link time.
           flag skip_main = equals(f.name, "main") && (self.test_mode || self.fuzz_mode);
           if !f.has_type_params && !skip_main {
+            if equals(f.name, "main") {
+              saw_real_main = true;
+            }
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function(n);
             if ferr.is_some() {
@@ -15746,6 +15773,82 @@ impl Codegen {
     if self.fuzz_mode {
       ret self.emit_fuzz_harness(nodes);
     }
+    if saw_real_main {
+      ret self.emit_main_thread_wrapper();
+    }
+    ret .None;
+  }
+
+  // The real C `int main(int argc, char** argv)`, for an ordinary
+  // (non-test, non-fuzz) compile: the program's own `main` was renamed to
+  // a C-shadowed name (`collect_c_shadow_names`) instead of keeping the
+  // literal name, so this wrapper can be the actual entry point, and runs
+  // the real body on a worker thread given an explicit large stack before
+  // returning its result. `main`'s own C signature is already always
+  // `int NAME(int argc, char** argv)` regardless of the Fun-level
+  // declaration (zero args, a single `str[] name`, or that shape written
+  // out) - see `emit_function_named`'s own `is_main` handling - so calling
+  // it with real `argc`/`argv` is always correct here.
+  // 
+  // Reentrancy/stack-growth is otherwise platform-asymmetric: POSIX has no
+  // way to grow the *main* thread's own stack after the process has
+  // already started, so a worker thread with an explicit size is the only
+  // way to get more room there at all, matching `emit_test_runner`'s own
+  // POSIX branch exactly. Windows CAN set the main thread's own reserve,
+  // but only via a linker-time PE header field (the `/STACK:` flag
+  // `compile_c_to_exe` already passes) - which only takes effect once the
+  // CURRENTLY RUNNING compiler binary already contains that flag, a real
+  // gap for a self-hosted compiler's own bootstrap (a compiler binary
+  // built before the flag existed keeps building undersized binaries
+  // forever, however new its own SOURCE gets, since the flag is read
+  // right back out of ITS OWN un-upgraded behavior - confirmed directly:
+  // every officially released Windows binary through v0.58.1 still
+  // reserves only the MSVC default 1 MB, despite the flag's own fix
+  // predating v0.57.0). `CreateThread`'s own `dwStackSize` has no such
+  // problem: it is read from the CURRENTLY EXECUTING code's own call,
+  // with no link-time artifact and no propagation lag, so it is used here
+  // uniformly instead of relying on the linker flag at all. `windows.h`/
+  // `pthread.h` are already unconditionally included earlier in the
+  // preamble (the private `__fun_thread_start` primitive), so this needs
+  // no header of its own.
+  emit_main_thread_wrapper() Option<CodegenErrorKind> {
+    str real_name = self.effective_function_name("main");
+    self.state.write(format(
+      `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
+      `static void* __fun_main_run(void* __fun_main_p) {
+      `  __fun_main_run_args* __fun_main_a = (__fun_main_run_args*)__fun_main_p;
+      `  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
+      `  return 0;
+      `}
+      `#ifdef _WIN32
+      `static DWORD WINAPI __fun_main_run_win(LPVOID __fun_main_p) {
+      `  __fun_main_run(__fun_main_p);
+      `  return 0;
+      `}
+      `#endif
+      `int main(int argc, char** argv) {
+      `  __fun_main_run_args __fun_main_a;
+      `  __fun_main_a.argc = argc;
+      `  __fun_main_a.argv = argv;
+      `  __fun_main_a.result = 0;
+      `#ifdef _WIN32
+      `  HANDLE __fun_main_thread = CreateThread(NULL, 134217728, __fun_main_run_win, &__fun_main_a, 0, NULL);
+      `  WaitForSingleObject(__fun_main_thread, INFINITE);
+      `  CloseHandle(__fun_main_thread);
+      `#else
+      `  pthread_attr_t __fun_main_attr;
+      `  pthread_attr_init(&__fun_main_attr);
+      `  pthread_attr_setstacksize(&__fun_main_attr, 134217728);
+      `  pthread_t __fun_main_thread;
+      `  pthread_create(&__fun_main_thread, &__fun_main_attr, __fun_main_run, &__fun_main_a);
+      `  pthread_attr_destroy(&__fun_main_attr);
+      `  pthread_join(__fun_main_thread, (void**)0);
+      `#endif
+      `  return __fun_main_a.result;
+      `}
+      ``,
+      real_name
+    ));
     ret .None;
   }
 
@@ -20170,222 +20273,14 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
-  assert equals(
-    st.out.build(),
-    `#include <stdio.h>
-    `#include <stdbool.h>
-    `#include <stdint.h>
-    `#include <stdarg.h>
-    `#include <stdlib.h>
-    `#include <string.h>
-    `#include <ctype.h>
-    `#include <limits.h>
-    `static FILE* stdout_stream(void){ return stdout; }
-    `static FILE* stderr_stream(void){ return stderr; }
-    `static FILE* stdin_stream(void){ return stdin; }
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `static int setenv(const char* name, const char* value, int overwrite) {
-    `  if (!overwrite && getenv(name) != NULL) { return 0; }
-    `  return _putenv_s(name, value);
-    `}
-    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
-    `static void __fun_sleep_seconds(double seconds) {
-    `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000.0));
-    `}
-    `#ifndef __MINGW32__
-    `#ifndef __fun_clock_gettime_defined
-    `#define __fun_clock_gettime_defined
-    `static long long clock_gettime(long long clk_id, void* tp) {
-    `  (void)clk_id;
-    `  if (!tp) return -1;
-    `  long long* __fun_cgt_out = (long long*)tp;
-    `  FILETIME __fun_cgt_ft;
-    `  GetSystemTimeAsFileTime(&__fun_cgt_ft);
-    `  unsigned long long __fun_cgt_t = ((unsigned long long)__fun_cgt_ft.dwHighDateTime << 32) | __fun_cgt_ft.dwLowDateTime;
-    `  __fun_cgt_t -= 116444736000000000ULL;
-    `  __fun_cgt_out[0] = (long long)(__fun_cgt_t / 10000000ULL);
-    `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
-    `  return 0;
-    `}
-    `#endif
-    `#endif
-    `#else
-    `#include <time.h>
-    `static void __fun_sleep_seconds(double seconds) {
-    `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
-    `  nanosleep(&__fun_sleep_ts, NULL);
-    `}
-    `#endif
-    `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
-    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
-    `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `#include <direct.h>
-    `#include <sys/stat.h>
-    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
-    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
-    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
-    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
-    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
-    `#else
-    `#include <dirent.h>
-    `#include <sys/stat.h>
-    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
-    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
-    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
-    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
-    `#endif
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `#ifdef __MINGW32__
-    `#include <pthread.h>
-    `#endif
-    `#ifndef __MINGW32__
-    `#include <time.h>
-    `#include <errno.h>
-    `typedef HANDLE pthread_t;
-    `typedef struct { int __fun_dummy; } pthread_attr_t;
-    `typedef CRITICAL_SECTION pthread_mutex_t;
-    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
-    `typedef CONDITION_VARIABLE pthread_cond_t;
-    `typedef struct { int __fun_dummy; } pthread_condattr_t;
-    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
-    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
-    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
-    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
-    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
-    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
-    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
-    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
-    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
-    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
-    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
-    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
-    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
-    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
-    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
-    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
-    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
-    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
-    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
-    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
-    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
-    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
-    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
-    `#endif
-    `typedef HANDLE __fun_thread_t;
-    `typedef void* (*__fun_thread_entry_t)(void*);
-    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
-    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
-    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
-    `#else
-    `#include <pthread.h>
-    `typedef pthread_t __fun_thread_t;
-    `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
-    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
-    `#endif
-    `#if defined(_WIN32)
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#include <winsock2.h>
-    `#include <ws2tcpip.h>
-    `#include <io.h>
-    `#ifdef _MSC_VER
-    `#pragma comment(lib, "Ws2_32.lib")
-    `#endif
-    `#ifndef __fun_win_close_defined
-    `#define __fun_win_close_defined
-    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
-    `#endif
-    `#ifndef close
-    `#define close __fun_win_close
-    `#endif
-    `#else
-    `#include <sys/socket.h>
-    `#include <netinet/in.h>
-    `#include <arpa/inet.h>
-    `#include <unistd.h>
-    `#endif
-    `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
-    `static __fun_wd_state __fun_g_wd;
-    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
-    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
-    `}
-    `static void* __fun_wd_thread(void* unused){ (void)unused;
-    `  long long last_seq=-1; long long stall_ms=0;
-    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
-    `  for(;;){
-    `#ifdef _WIN32
-    `    Sleep((DWORD)step);
-    `#else
-    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
-    `#endif
-    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
-    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
-    `    last_seq=seq;
-    `    if(stall_ms>=__fun_g_wd.threshold_ms){
-    `      __fun_wd_warn((long long)blk, 0, stall_ms);
-    `      if(__fun_g_wd.abort_on_fire) abort();
-    `      stall_ms=0;
-    `    }
-    `  }
-    `}
-    `void __fun_wd_enter_wait(void){
-    `  if(!__fun_g_wd.started){
-    `    __fun_g_wd.started=1;
-    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
-    `    long long wm=(w && w[0])?atoll(w):0;
-    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
-    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
-    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
-    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
-    `  }
-    `  if(!__fun_g_wd.armed) return;
-    `  __fun_g_wd.blocked++;
-    `}
-    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-    `typedef struct Box__num {
-    `  int64_t value;
-    `} Box__num;
-    `
-    `    int64_t Box__num__get(Box__num* self);
-    `int64_t Box__num__get(Box__num* self) {
-    `    return self->value;
-    `}
-    `int main(int argc, char** argv) {
-    `    Box__num b;
-    `    Box__num__get(&b);
-    `}
-    ``
-  ), "expected the struct typedef AND the monomorphized method's DEFINITION (lazily triggered by the call inside main's own body) BEFORE 'main', not nested inside its braces. Its bare PROTOTYPE now splices to the same file-scope position, visible from every call site in the whole function rather than just the block that happened to trigger it first. Also expects `main`'s own C signature forced to the real entry-point shape (`int main(int argc, char** argv)`), not its naive Fun-level `num`-returning, no-arg signature";
+  str out = st.out.build();
+  num typedef_pos = index_of_str(out, "typedef struct Box__num {");
+  num proto_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self);");
+  num def_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self) {\n    return self->value;\n}");
+  num main_pos = index_of_str(out, "int __fun_shadow__main(int argc, char** argv) {");
+  assert typedef_pos >= 0 && proto_pos >= 0 && def_pos >= 0 && main_pos >= 0, "expected every piece present in the output";
+  assert typedef_pos < main_pos && proto_pos < main_pos && def_pos < main_pos, "expected the struct typedef, the monomorphized method's own prototype, and its DEFINITION (lazily triggered by the call inside main's own body) all BEFORE 'main', not nested inside its braces";
+  assert !contains(out, "Box__num b;\n    Box__num__get(Box__num* self)"), "expected the definition spliced to file scope, not nested inside main's own braces";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
@@ -21387,216 +21282,10 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
-  assert equals(
-    st.out.build(),
-    `#include <stdio.h>
-    `#include <stdbool.h>
-    `#include <stdint.h>
-    `#include <stdarg.h>
-    `#include <stdlib.h>
-    `#include <string.h>
-    `#include <ctype.h>
-    `#include <limits.h>
-    `static FILE* stdout_stream(void){ return stdout; }
-    `static FILE* stderr_stream(void){ return stderr; }
-    `static FILE* stdin_stream(void){ return stdin; }
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `static int setenv(const char* name, const char* value, int overwrite) {
-    `  if (!overwrite && getenv(name) != NULL) { return 0; }
-    `  return _putenv_s(name, value);
-    `}
-    `static int unsetenv(const char* name) { return _putenv_s(name, ""); }
-    `static void __fun_sleep_seconds(double seconds) {
-    `  if (seconds < 0) seconds = 0;
-    `  Sleep((DWORD)(seconds * 1000.0));
-    `}
-    `#ifndef __MINGW32__
-    `#ifndef __fun_clock_gettime_defined
-    `#define __fun_clock_gettime_defined
-    `static long long clock_gettime(long long clk_id, void* tp) {
-    `  (void)clk_id;
-    `  if (!tp) return -1;
-    `  long long* __fun_cgt_out = (long long*)tp;
-    `  FILETIME __fun_cgt_ft;
-    `  GetSystemTimeAsFileTime(&__fun_cgt_ft);
-    `  unsigned long long __fun_cgt_t = ((unsigned long long)__fun_cgt_ft.dwHighDateTime << 32) | __fun_cgt_ft.dwLowDateTime;
-    `  __fun_cgt_t -= 116444736000000000ULL;
-    `  __fun_cgt_out[0] = (long long)(__fun_cgt_t / 10000000ULL);
-    `  __fun_cgt_out[1] = (long long)((__fun_cgt_t % 10000000ULL) * 100);
-    `  return 0;
-    `}
-    `#endif
-    `#endif
-    `#else
-    `#include <time.h>
-    `static void __fun_sleep_seconds(double seconds) {
-    `  if (seconds < 0) seconds = 0;
-    `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
-    `  nanosleep(&__fun_sleep_ts, NULL);
-    `}
-    `#endif
-    `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
-    `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
-    `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { if (tags && tags[__fun_fv_i] != 's') { free(data[__fun_fv_i]); } } free(data); }
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `#include <direct.h>
-    `#include <sys/stat.h>
-    `typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;
-    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), "%s\\*", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }
-    `static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }
-    `static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; if (path[0] != '\0' && path[1] == ':' && path[2] == '\0') return 1; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }
-    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }
-    `#else
-    `#include <dirent.h>
-    `#include <sys/stat.h>
-    `static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }
-    `static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }
-    `static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }
-    `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
-    `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
-    `#endif
-    `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
-    `#include <windows.h>
-    `#ifdef __MINGW32__
-    `#include <pthread.h>
-    `#endif
-    `#ifndef __MINGW32__
-    `#include <time.h>
-    `#include <errno.h>
-    `typedef HANDLE pthread_t;
-    `typedef struct { int __fun_dummy; } pthread_attr_t;
-    `typedef CRITICAL_SECTION pthread_mutex_t;
-    `typedef struct { int __fun_dummy; } pthread_mutexattr_t;
-    `typedef CONDITION_VARIABLE pthread_cond_t;
-    `typedef struct { int __fun_dummy; } pthread_condattr_t;
-    `typedef struct __fun_win_timespec { time_t tv_sec; long tv_nsec; } __fun_win_timespec;
-    `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
-    `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
-    `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
-    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
-    `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
-    `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
-    `static pthread_t pthread_self(void) { return GetCurrentThread(); }
-    `static long long pthread_equal(pthread_t t1, pthread_t t2) { DWORD i1 = GetThreadId(t1), i2 = GetThreadId(t2); return (i1 && i2) ? (i1 == i2 ? 1 : 0) : (t1 == t2 ? 1 : 0); }
-    `static long long pthread_attr_init(pthread_attr_t* a) { (void)a; return 0; }
-    `static long long pthread_attr_setstacksize(pthread_attr_t* a, long long s) { (void)a; (void)s; return 0; }
-    `static long long pthread_attr_destroy(pthread_attr_t* a) { (void)a; return 0; }
-    `static long long pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* a) { (void)a; if (!m) return 22; InitializeCriticalSection(m); return 0; }
-    `static long long pthread_mutex_destroy(pthread_mutex_t* m) { if (!m) return 22; DeleteCriticalSection(m); return 0; }
-    `static long long pthread_mutex_lock(pthread_mutex_t* m) { if (!m) return 22; EnterCriticalSection(m); return 0; }
-    `static long long pthread_mutex_trylock(pthread_mutex_t* m) { if (!m) return (long long)EINVAL; return TryEnterCriticalSection(m) ? 0 : (long long)EBUSY; }
-    `static long long pthread_mutex_unlock(pthread_mutex_t* m) { if (!m) return 22; LeaveCriticalSection(m); return 0; }
-    `static long long pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* a) { (void)a; if (!c) return 22; InitializeConditionVariable(c); return 0; }
-    `static long long pthread_cond_destroy(pthread_cond_t* c) { (void)c; return 0; }
-    `static long long pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) { if (!c || !m) return 22; return SleepConditionVariableCS(c, m, INFINITE) ? 0 : (long long)GetLastError(); }
-    `static long long pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m, void* abstime) { if (!c || !m || !abstime) return (long long)EINVAL; const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime; __fun_win_timespec now; __fun_win_clock_gettime(&now); long long sd = (long long)ts->tv_sec - (long long)now.tv_sec; long long nd = (long long)ts->tv_nsec - (long long)now.tv_nsec; if (nd < 0) { sd--; nd += 1000000000LL; } if (sd < 0) return (long long)ETIMEDOUT; unsigned long long ms = (unsigned long long)sd * 1000ULL + (unsigned long long)(nd / 1000000LL); if (nd % 1000000LL) ms++; if (!ms) ms = 1; if (ms > 0xFFFFFFFEULL) ms = 0xFFFFFFFEULL; BOOL ok = SleepConditionVariableCS(c, m, (DWORD)ms); if (ok) return 0; return GetLastError() == ERROR_TIMEOUT ? (long long)ETIMEDOUT : (long long)GetLastError(); }
-    `static long long pthread_cond_signal(pthread_cond_t* c) { if (!c) return 22; WakeConditionVariable(c); return 0; }
-    `static long long pthread_cond_broadcast(pthread_cond_t* c) { if (!c) return 22; WakeAllConditionVariable(c); return 0; }
-    `#endif
-    `typedef HANDLE __fun_thread_t;
-    `typedef void* (*__fun_thread_entry_t)(void*);
-    `typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;
-    `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
-    `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
-    `#else
-    `#include <pthread.h>
-    `typedef pthread_t __fun_thread_t;
-    `typedef void* (*__fun_thread_entry_t)(void*);
-    `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
-    `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
-    `#endif
-    `#if defined(_WIN32)
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#include <winsock2.h>
-    `#include <ws2tcpip.h>
-    `#include <io.h>
-    `#ifdef _MSC_VER
-    `#pragma comment(lib, "Ws2_32.lib")
-    `#endif
-    `#ifndef __fun_win_close_defined
-    `#define __fun_win_close_defined
-    `static inline long long __fun_win_close(long long fd) { if (_close((int)fd) == 0) return 0LL; return closesocket((SOCKET)(uintptr_t)fd) == 0 ? 0LL : -1LL; }
-    `#endif
-    `#ifndef close
-    `#define close __fun_win_close
-    `#endif
-    `#else
-    `#include <sys/socket.h>
-    `#include <netinet/in.h>
-    `#include <arpa/inet.h>
-    `#include <unistd.h>
-    `#endif
-    `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
-    `static __fun_wd_state __fun_g_wd;
-    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
-    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
-    `}
-    `static void* __fun_wd_thread(void* unused){ (void)unused;
-    `  long long last_seq=-1; long long stall_ms=0;
-    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
-    `  for(;;){
-    `#ifdef _WIN32
-    `    Sleep((DWORD)step);
-    `#else
-    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
-    `#endif
-    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
-    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
-    `    last_seq=seq;
-    `    if(stall_ms>=__fun_g_wd.threshold_ms){
-    `      __fun_wd_warn((long long)blk, 0, stall_ms);
-    `      if(__fun_g_wd.abort_on_fire) abort();
-    `      stall_ms=0;
-    `    }
-    `  }
-    `}
-    `void __fun_wd_enter_wait(void){
-    `  if(!__fun_g_wd.started){
-    `    __fun_g_wd.started=1;
-    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
-    `    long long wm=(w && w[0])?atoll(w):0;
-    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
-    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
-    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
-    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
-    `  }
-    `  if(!__fun_g_wd.armed) return;
-    `  __fun_g_wd.blocked++;
-    `}
-    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-    `int64_t identity__num(int64_t value) {
-    `    return value;
-    `}
-    `int main(int argc, char** argv) {
-    `    return identity__num(5);
-    `}
-    ``
-  ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself -- and 'main' forced to its real C entry-point signature";
+  str out = st.out.build();
+  assert contains(out, "int64_t identity__num(int64_t value) {\n    return value;\n}"), "expected the monomorphized 'identity__num', not the unsubstituted template";
+  assert !contains(out, "int64_t identity(int64_t value)"), "expected the unsubstituted 'identity' template itself to never be emitted";
+  assert contains(out, "int __fun_shadow__main(int argc, char** argv) {\n    return identity__num(5);\n}"), "expected 'main' forced to its real C entry-point signature, under its shadowed name";
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
@@ -21752,7 +21441,7 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
-  assert contains(st.out.build(), "int main(int argc, char** argv) {\n    return 0;\n}"), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
+  assert contains(st.out.build(), "int __fun_shadow__main(int argc, char** argv) {\n    return 0;\n}"), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
   assert !contains(st.out.build(), "wrap__num"), "expected 'wrap', reachable ONLY through main's own discarded return, to never be monomorphized at all -- nothing else in this program calls it";
 }
 
