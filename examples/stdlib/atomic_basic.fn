@@ -1,0 +1,53 @@
+// Basic Atomic<T> usage: load/store/swap/compare_exchange for both
+// bound alternatives, plus fetch_add/fetch_sub for Atomic<num>.
+
+use std.c.io;
+use std.atomic;
+
+fun main() {
+  Atomic<num> counter = atomic_new(10);
+  let before_add = counter.fetch_add(5);
+  let after_add = counter.load();
+
+  let before_sub = counter.fetch_sub(3);
+  let after_sub = counter.load();
+
+  let swapped_out = counter.swap(100);
+  let after_swap = counter.load();
+
+  let cas_ok = counter.compare_exchange(100, 200);
+  let cas_fail = counter.compare_exchange(999, 300);
+  let after_cas = counter.load();
+
+  printf(
+    "num: before_add=%lld after_add=%lld before_sub=%lld after_sub=%lld swapped_out=%lld after_swap=%lld cas_ok=%d cas_fail=%d after_cas=%lld\n",
+    before_add,
+    after_add,
+    before_sub,
+    after_sub,
+    swapped_out,
+    after_swap,
+    cas_ok,
+    cas_fail,
+    after_cas
+  );
+
+  Atomic<flag> ready = atomic_new(false);
+  let was_ready = ready.load();
+  ready.store(true);
+  let is_ready = ready.load();
+  let flag_swapped_out = ready.swap(false);
+  let flag_cas_ok = ready.compare_exchange(false, true);
+  let flag_cas_fail = ready.compare_exchange(false, false);
+  let final_ready = ready.load();
+
+  printf(
+    "flag: was_ready=%d is_ready=%d flag_swapped_out=%d flag_cas_ok=%d flag_cas_fail=%d final_ready=%d\n",
+    was_ready,
+    is_ready,
+    flag_swapped_out,
+    flag_cas_ok,
+    flag_cas_fail,
+    final_ready
+  );
+}

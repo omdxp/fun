@@ -15201,6 +15201,27 @@ impl Codegen {
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `#endif
     ``);
+    // `std.c.atomic`'s operations need a real implementation on every
+    // platform - GCC/Clang's `__atomic_*` builtins can't be forward-
+    // declared at all (a hard compile error, "cannot redeclare builtin
+    // function"), and MSVC has no equivalent builtin name, so both sides
+    // get a small wrapper here instead of a `std.c.*` binding calling
+    // straight through the way most of this module works.
+    self.state.write(`#ifdef _WIN32
+    `#include <intrin.h>
+    `static inline long long __fun_atomic_load(long long* ptr) { return _InterlockedExchangeAdd64(ptr, 0); }
+    `static inline void __fun_atomic_store(long long* ptr, long long val) { _InterlockedExchange64(ptr, val); }
+    `static inline long long __fun_atomic_fetch_add(long long* ptr, long long val) { return _InterlockedExchangeAdd64(ptr, val); }
+    `static inline long long __fun_atomic_exchange(long long* ptr, long long val) { return _InterlockedExchange64(ptr, val); }
+    `static inline long long __fun_atomic_cas(long long* ptr, long long expected, long long desired) { long long __fun_ac_orig = _InterlockedCompareExchange64(ptr, desired, expected); return __fun_ac_orig == expected ? 1 : 0; }
+    `#else
+    `static inline long long __fun_atomic_load(long long* ptr) { return __atomic_load_n(ptr, __ATOMIC_SEQ_CST); }
+    `static inline void __fun_atomic_store(long long* ptr, long long val) { __atomic_store_n(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_fetch_add(long long* ptr, long long val) { return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_exchange(long long* ptr, long long val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_cas(long long* ptr, long long expected, long long desired) { long long __fun_ac_exp = expected; long long __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
+    `#endif
+    ``);
     // `std.c.net`'s socket bindings need these headers, in both their
     // Windows and POSIX forms, and are emitted unconditionally like every
     // other prelude header. Winsock additionally needs `WSAStartup` called
@@ -20115,6 +20136,20 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `typedef void* (*__fun_thread_entry_t)(void*);
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `#endif
+    `#ifdef _WIN32
+    `#include <intrin.h>
+    `static inline long long __fun_atomic_load(long long* ptr) { return _InterlockedExchangeAdd64(ptr, 0); }
+    `static inline void __fun_atomic_store(long long* ptr, long long val) { _InterlockedExchange64(ptr, val); }
+    `static inline long long __fun_atomic_fetch_add(long long* ptr, long long val) { return _InterlockedExchangeAdd64(ptr, val); }
+    `static inline long long __fun_atomic_exchange(long long* ptr, long long val) { return _InterlockedExchange64(ptr, val); }
+    `static inline long long __fun_atomic_cas(long long* ptr, long long expected, long long desired) { long long __fun_ac_orig = _InterlockedCompareExchange64(ptr, desired, expected); return __fun_ac_orig == expected ? 1 : 0; }
+    `#else
+    `static inline long long __fun_atomic_load(long long* ptr) { return __atomic_load_n(ptr, __ATOMIC_SEQ_CST); }
+    `static inline void __fun_atomic_store(long long* ptr, long long val) { __atomic_store_n(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_fetch_add(long long* ptr, long long val) { return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_exchange(long long* ptr, long long val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
+    `static inline long long __fun_atomic_cas(long long* ptr, long long expected, long long desired) { long long __fun_ac_exp = expected; long long __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
     `#endif
     `#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN

@@ -1,0 +1,121 @@
+// A lock-free atomic value, for shared state across `Thread`/
+// `ThreadPool`/`fork` workers that doesn't need `Mutex`'s full exclusion,
+// just a single value that's safe to read, write, and modify from more
+// than one thread at once. Every operation is sequentially consistent;
+// there's no relaxed/acquire/release mode here, matching the "just make
+// it correct and simple" scope of a first `Atomic` primitive.
+//
+// `T` is bound to `num | flag`: real hardware compare-and-swap only
+// exists for fixed widths, and both of those fit in the single 64-bit
+// word `__fun_atomic_*` (see std.c.atomic) operates on. `T`'s own bytes
+// are copied in and out of that word via `memcpy`, not reinterpreted by
+// name, so this works uniformly for either width without per-type code.
+
+use std.c.atomic;
+use std.c.string;
+
+pub compound Atomic<T: num | flag> {
+  num __bits;
+}
+
+// Creates an atomic value holding `initial`. A bare `Atomic<T> a;` starts
+// at an undefined value, the same as any other uninitialized local -
+// always go through this (or call `store` before the first `load`).
+pub fun atomic_new<T: num | flag>(T initial) Atomic<T> {
+  Atomic<T> a;
+  a.store(initial);
+  ret a;
+}
+
+impl Atomic<T> {
+  // Reads the current value.
+  pub load() T {
+    num bits = __fun_atomic_load(&self.__bits);
+    T out;
+    memcpy(&out, &bits, sizeof(T));
+    ret out;
+  }
+
+  // Sets the value.
+  pub store(T val) {
+    num bits = 0;
+    memcpy(&bits, &val, sizeof(T));
+    __fun_atomic_store(&self.__bits, bits);
+  }
+
+  // Sets the value, returning the value from before the exchange.
+  pub swap(T val) T {
+    num bits = 0;
+    memcpy(&bits, &val, sizeof(T));
+    let old_bits = __fun_atomic_exchange(&self.__bits, bits);
+    T out;
+    memcpy(&out, &old_bits, sizeof(T));
+    ret out;
+  }
+
+  // If the current value equals `expected`, sets it to `desired` and
+  // returns true. Otherwise leaves it unchanged and returns false.
+  pub compare_exchange(T expected, T desired) flag {
+    num expected_bits = 0;
+    memcpy(&expected_bits, &expected, sizeof(T));
+    num desired_bits = 0;
+    memcpy(&desired_bits, &desired, sizeof(T));
+    ret __fun_atomic_cas(&self.__bits, expected_bits, desired_bits) != 0;
+  }
+}
+
+impl Atomic<num> {
+  // Adds `delta`, returning the value from before the add. Only defined
+  // for `Atomic<num>`: addition has no meaning for `Atomic<flag>`.
+  pub fetch_add(num delta) num {
+    ret __fun_atomic_fetch_add(&self.__bits, delta);
+  }
+
+  // Subtracts `delta`, returning the value from before the subtract. Only
+  // defined for `Atomic<num>`, for the same reason as `fetch_add`.
+  pub fetch_sub(num delta) num {
+    ret __fun_atomic_fetch_add(&self.__bits, -delta);
+  }
+}
+
+test "Atomic<num> load/store/swap/compare_exchange/fetch_add/fetch_sub" {
+  Atomic<num> a = atomic_new(10);
+  assert a.load() == 10, "expected the constructor's initial value";
+
+  a.store(20);
+  assert a.load() == 20, "expected store to take effect";
+
+  let old = a.swap(30);
+  assert old == 20, "expected swap to return the value from before it";
+  assert a.load() == 30, "expected swap to take effect";
+
+  assert a.compare_exchange(30, 40), "expected a matching compare_exchange to succeed";
+  assert a.load() == 40, "expected the successful compare_exchange to take effect";
+  assert !a.compare_exchange(999, 50), "expected a non-matching compare_exchange to fail";
+  assert a.load() == 40, "expected the failed compare_exchange to leave the value unchanged";
+
+  let before_add = a.fetch_add(10);
+  assert before_add == 40, "expected fetch_add to return the value from before it";
+  assert a.load() == 50, "expected fetch_add to take effect";
+
+  let before_sub = a.fetch_sub(5);
+  assert before_sub == 50, "expected fetch_sub to return the value from before it";
+  assert a.load() == 45, "expected fetch_sub to take effect";
+}
+
+test "Atomic<flag> load/store/swap/compare_exchange" {
+  Atomic<flag> a = atomic_new(false);
+  assert !a.load(), "expected the constructor's initial value";
+
+  a.store(true);
+  assert a.load(), "expected store to take effect";
+
+  let old = a.swap(false);
+  assert old, "expected swap to return the value from before it";
+  assert !a.load(), "expected swap to take effect";
+
+  assert a.compare_exchange(false, true), "expected a matching compare_exchange to succeed";
+  assert a.load(), "expected the successful compare_exchange to take effect";
+  assert !a.compare_exchange(false, false), "expected a non-matching compare_exchange to fail";
+  assert a.load(), "expected the failed compare_exchange to leave the value unchanged";
+}
