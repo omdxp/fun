@@ -8559,6 +8559,8 @@ impl Codegen {
             let defer_wt = self.write_type(defer_rdt);
             if defer_wt.is_none() {
               self.state.write("int64_t");
+            } elif dtype_is_array_as_pointer(defer_rdt) {
+              self.state.write("*");
             }
           } else {
             self.state.write("__auto_type");
