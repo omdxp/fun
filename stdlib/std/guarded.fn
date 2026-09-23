@@ -2,9 +2,7 @@
 // doesn't fit `Atomic<T>`'s `num | flag` bound (std.atomic): real
 // lock-free compare-and-swap only exists for fixed hardware word widths,
 // so an arbitrary compound (a `User`, a `Vec<T>`, ...) has no portable
-// lock-free path and falls back to locking instead, the same tradeoff
-// every language with real atomics makes (Rust's `Mutex<T>` alongside
-// `AtomicI64`/`AtomicBool`, for the same reason). `T` lives embedded
+// lock-free path and falls back to locking instead. `T` lives embedded
 // directly in this compound's own memory, no separate heap allocation.
 
 use std.sync;

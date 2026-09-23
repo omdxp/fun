@@ -180,10 +180,7 @@ privatelib = { git = "git@github.com:org/private-repo.git", tag = "latest", toke
 - `path` points at a subfolder inside the repo that itself acts as the
   dependency root, so a library doesn't need to live at the repo's own
   root, and the repo owner doesn't need to cooperate or declare
-  anything special for that subfolder to work. This is a real gap in
-  Go modules (one module per repo, or per-directory `go.mod` files the
-  owner must add) and in D/dub (`subPackages` the owner must declare in
-  `dub.json`) that this design avoids entirely: any subfolder of any
+  anything special for that subfolder to work: any subfolder of any
   repo just works, decided entirely by the consumer's own manifest.
 - Exactly one of `tag`, `branch`, or `rev` pins what's fetched. Omitting
   all three defaults to the highest semver-sorted tag, or the remote's
@@ -201,8 +198,8 @@ the way `git clone` already works for you: an SSH key in your agent for
 for CI. There is no separate "registry" to authenticate against.
 
 `fun build`/`test`/`fuzz` resolve and fetch any `[deps]` entry not
-already cached automatically, the same as `cargo build`/`go build`, no
-separate install step. Fetched checkouts are cached once per machine
+already cached automatically, no separate install step. Fetched
+checkouts are cached once per machine
 under `$FUN_DEPS_CACHE` (default `$HOME/.local/share/fun/deps`), keyed
 by repo and resolved commit, shared across every project that pins the
 same commit.
@@ -231,10 +228,9 @@ graph, silently, no error - the fix for any transitive conflict is
 adding your own `[deps]` entry for that name to pick a version yourself.
 
 `fun build` prints one line per dependency actually fetched or updated
-(nothing at all when everything's already cached, matching a warm
-`cargo build`/`go build`), including which dependency pulled in a
-transitive one, so a slow first build is never silent about what it's
-doing.
+(nothing at all when everything's already cached), including which
+dependency pulled in a transitive one, so a slow first build is never
+silent about what it's doing.
 
 ### `fun.lock`
 
@@ -258,8 +254,8 @@ fun deps update            # re-resolve every tag/branch entry
 fun deps update somejson   # re-resolve just one
 ```
 
-Commit `fun.lock` for a binary project, the same way you'd commit
-`Cargo.lock`; a library may leave that choice to whatever consumes it.
+Commit `fun.lock` for a binary project, the same way you'd commit any
+other lockfile; a library may leave that choice to whatever consumes it.
 
 ### Security
 
@@ -278,7 +274,7 @@ Commit `fun.lock` for a binary project, the same way you'd commit
 - A fetched dependency is source text, parsed and compiled the same as
   any other `use`. There is no build-script/install-hook concept at
   all, so a dependency never runs arbitrary code as a side effect of
-  being fetched, unlike npm lifecycle scripts or Cargo's `build.rs`.
+  being fetched.
 - A git-based system has no central review or yank mechanism the way a
   hosted registry can. `fun.lock`'s pinned `resolved_rev` is the actual
   defense against a dependency's content silently changing out from

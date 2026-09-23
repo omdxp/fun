@@ -287,9 +287,9 @@ test "debug info off emits no #line directives at all" {
 }
 
 test "debug info on anchors each statement back to its own source line" {
-  // User-reported: breakpoints and step-by-step debugging did nothing in
-  // the self-hosted compiler, unlike the original Zig one. The Zig
-  // transpiler emitted a `#line N "file"` directive before each C
+  // User-reported: breakpoints and step-by-step debugging did nothing
+  // in the self-hosted compiler, unlike an earlier version of it. The
+  // earlier codegen emitted a `#line N "file"` directive before each C
   // statement so a native debugger's DWARF info points at the real .fn
   // source; codegen.fn never had any such mechanism, so -g compiled fine
   // but produced a binary with no source mapping for the debugger to
@@ -323,7 +323,7 @@ test "debug info on anchors an if statement's own header line too" {
 }
 
 test "debug info pins every line of an async function's synthesized trampoline back to its own declaration" {
-  // The original Zig transpiler's own emit_async_function_support
+  // An earlier version of this codegen's own emit_async_function_support
   // equivalent re-pinned every hand-written C line of an async
   // function's entry/spawn/await trampoline back to the function's own
   // declaration line, rather than let the C preprocessor's line count
