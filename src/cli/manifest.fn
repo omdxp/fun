@@ -47,8 +47,8 @@ pub enum DepRef {
 // repo the dependency's own source root lives at ("" means the repo
 // root itself) - this is what lets a dependency live in an arbitrary
 // subfolder of someone else's repo with no cooperation needed from the
-// repo owner, unlike a Go module (needs its own go.mod) or a dub
-// subPackage (the owner's own dub.json must declare it).
+// repo owner, unlike ecosystems that require the owner to declare each
+// subpackage in its own manifest file.
 pub compound Dependency {
   str name;
   str git;

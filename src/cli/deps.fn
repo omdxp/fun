@@ -440,8 +440,8 @@ fun _index_of_name(Vec<ResolvedDep>* v, str name) num {
 // not already in the shared cache. `force_update` (from `fun deps
 // update`) skips the lockfile-reuse check for every `tag`/`branch`
 // entry at every level of the graph, re-resolving to whatever is
-// current; a `rev`-pinned entry is never re-resolved either way,
-// matching `cargo update`'s own respect for an explicit pin.
+// current; a `rev`-pinned entry is never re-resolved either way, since
+// an explicit pin means the caller wants exactly that revision.
 pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<ResolvedDep>, str> {
   let locked = read_lock(root);
   defer locked.free();
