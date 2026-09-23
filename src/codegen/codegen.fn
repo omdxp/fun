@@ -15059,7 +15059,12 @@ impl Codegen {
   // nodes never survive flattening, so there is no way to see which
   // `std.c.*` modules a program used, and an unused header is harmless.
   pub write_prelude() {
-    self.state.write(`#include <stdio.h>
+    self.state.write(`#ifndef _WIN32
+    `#ifndef _DEFAULT_SOURCE
+    `#define _DEFAULT_SOURCE
+    `#endif
+    `#endif
+    `#include <stdio.h>
     `#include <stdbool.h>
     `#include <stdint.h>
     `#include <stdarg.h>
@@ -15534,6 +15539,7 @@ impl Codegen {
     `#include <arpa/inet.h>
     `#include <unistd.h>
     `#include <sys/time.h>
+    `#include <netdb.h>
     `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
     `  struct timeval __fun_sst_tv;
     `  __fun_sst_tv.tv_sec = ms / 1000;
@@ -15547,6 +15553,26 @@ impl Codegen {
     `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
     `}
     `#endif
+    `static char* __fun_resolve_host(const char* host) {
+    `  struct addrinfo hints;
+    `  struct addrinfo* res = NULL;
+    `  memset(&hints, 0, sizeof(hints));
+    `  hints.ai_family = AF_INET;
+    `  hints.ai_socktype = SOCK_STREAM;
+    `  if (getaddrinfo(host, NULL, &hints, &res) != 0 || res == NULL) {
+    `    return NULL;
+    `  }
+    `  struct sockaddr_in* addr = (struct sockaddr_in*)res->ai_addr;
+    `  char* out = (char*)malloc(INET_ADDRSTRLEN);
+    `  if (out != NULL) {
+    `    if (inet_ntop(AF_INET, &addr->sin_addr, out, INET_ADDRSTRLEN) == NULL) {
+    `      free(out);
+    `      out = NULL;
+    `    }
+    `  }
+    `  freeaddrinfo(res);
+    `  return out;
+    `}
     ``);
     // A non-fork program can still deadlock on a channel wait, and
     // `std/channel.fn` calls `__fun_wd_enter_wait`/`__fun_wd_leave_wait`
@@ -20273,6 +20299,11 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
+    `#ifndef _WIN32
+    `#ifndef _DEFAULT_SOURCE
+    `#define _DEFAULT_SOURCE
+    `#endif
+    `#endif
     `#include <stdio.h>
     `#include <stdbool.h>
     `#include <stdint.h>
@@ -20468,6 +20499,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <arpa/inet.h>
     `#include <unistd.h>
     `#include <sys/time.h>
+    `#include <netdb.h>
     `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
     `  struct timeval __fun_sst_tv;
     `  __fun_sst_tv.tv_sec = ms / 1000;
@@ -20481,6 +20513,26 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
     `}
     `#endif
+    `static char* __fun_resolve_host(const char* host) {
+    `  struct addrinfo hints;
+    `  struct addrinfo* res = NULL;
+    `  memset(&hints, 0, sizeof(hints));
+    `  hints.ai_family = AF_INET;
+    `  hints.ai_socktype = SOCK_STREAM;
+    `  if (getaddrinfo(host, NULL, &hints, &res) != 0 || res == NULL) {
+    `    return NULL;
+    `  }
+    `  struct sockaddr_in* addr = (struct sockaddr_in*)res->ai_addr;
+    `  char* out = (char*)malloc(INET_ADDRSTRLEN);
+    `  if (out != NULL) {
+    `    if (inet_ntop(AF_INET, &addr->sin_addr, out, INET_ADDRSTRLEN) == NULL) {
+    `      free(out);
+    `      out = NULL;
+    `    }
+    `  }
+    `  freeaddrinfo(res);
+    `  return out;
+    `}
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;
     `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){

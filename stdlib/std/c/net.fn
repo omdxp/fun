@@ -62,3 +62,11 @@ pub fun __fun_socket_set_timeout(num fd, num ms) num;
 // Windows doesn't block an immediate rebind the way POSIX does anyway.
 // Returns 0 on success, -1 on failure (always 0 on Windows).
 pub fun __fun_socket_set_reuseaddr(num fd) num;
+
+// Resolves `host` (a hostname or an already-numeric IPv4 address) to its
+// numeric dotted-quad form via a real DNS lookup, or a null pointer on
+// failure. A shim over `getaddrinfo`/`inet_ntop` rather than a direct
+// binding: the former's own C signature (an output `struct addrinfo**`,
+// a hints struct) isn't something a caller should have to build by hand
+// for the single common case of "give me one IPv4 address back".
+pub fun __fun_resolve_host(str host) str;

@@ -199,7 +199,19 @@ pub fun tcp_connect(str host, num port) num {
     ret -1;
   }
 
-  let ip = inet_addr(host);
+  // `inet_addr` only ever parses a literal numeric dotted-quad ("1.2.3.4"),
+  // it does no DNS lookup at all - a real hostname ("example.com") always
+  // failed here silently before `__fun_resolve_host` existed. Tried
+  // first since it's a real network call and `inet_addr` is a pure,
+  // free parse; `host` itself works either way, `__fun_resolve_host`
+  // accepts an already-numeric address too.
+  str resolved = __fun_resolve_host(host);
+  if resolved == nil {
+    close(fd);
+    ret -1;
+  }
+  let ip = inet_addr(resolved);
+  free(resolved);
   if ip == -1 {
     close(fd);
     ret -1;
