@@ -1,0 +1,309 @@
+// Cryptography: hashing, HMAC, secure random, AEAD symmetric encryption,
+// and Ed25519 signing. Ports and adapters - `Hasher`/`AeadCipher`/`Signer`/
+// `Verifier` are quirks (the port), each concrete algorithm (`Sha256`,
+// `Aes256Gcm`, `Ed25519PrivateKey`) its own compound implementing one
+// (the adapter), so code written against the quirk works with whichever
+// algorithm a caller picks, dispatched dynamically the same way any
+// other quirk already does in this language.
+//
+// Backed by real, vetted native crypto (OpenSSL's libcrypto on POSIX,
+// Windows' own CNG/BCrypt), never hand-rolled: correctness bugs and
+// missing side-channel hardening in a from-scratch cipher/hash
+// implementation are a real security risk, not just a correctness one,
+// and both platforms already ship a properly audited implementation of
+// everything here.
+//
+// Every genuinely binary value (a key, nonce, digest, ciphertext,
+// signature) crosses this API as lowercase hex, never raw bytes: `str`
+// in this language is NUL-terminated (`len` walks it looking for a `\0`
+// byte, the same as C), so a raw byte buffer - always effectively
+// random, a `\0` byte among them is a near-certainty past a handful of
+// bytes - would silently truncate. Plaintext/AAD stay plain `str`, the
+// same convention the rest of the language already uses for a caller's
+// own text.
+
+use std.c.crypto;
+use std.string;
+use std.result;
+use std.error;
+
+// A running hash: feed it data incrementally, read the digest once at
+// the end. `sha256_new()`/`sha512_new()` build one; the one-shot
+// `sha256(data)`/`sha512(data)` functions below are the common case.
+pub quirk Hasher {
+  // Feeds more data into the running hash. Callable any number of times.
+  update(str data);
+  // Finalizes the hash, returned as a lowercase hex digest. Single-use:
+  // build a fresh hasher for another hash.
+  finalize() str;
+}
+
+// SHA-256, streamed.
+pub compound Sha256 {
+  raw* handle;
+}
+
+// Starts a new SHA-256 hash.
+pub fun sha256_new() Sha256 {
+  Sha256 h;
+  h.handle = __fun_hash_new(0);
+  ret h;
+}
+
+impl Sha256 as Hasher {
+  pub update(str data) {
+    __fun_hash_update(self.handle, data, len(data));
+  }
+
+  pub finalize() str {
+    str out = __fun_hash_finalize(self.handle);
+    self.handle = nil;
+    ret out;
+  }
+}
+
+// SHA-256 of `data`, as a lowercase hex digest.
+pub fun sha256(str data) str {
+  let h = sha256_new();
+  h.update(data);
+  ret h.finalize();
+}
+
+// SHA-512, streamed.
+pub compound Sha512 {
+  raw* handle;
+}
+
+// Starts a new SHA-512 hash.
+pub fun sha512_new() Sha512 {
+  Sha512 h;
+  h.handle = __fun_hash_new(1);
+  ret h;
+}
+
+impl Sha512 as Hasher {
+  pub update(str data) {
+    __fun_hash_update(self.handle, data, len(data));
+  }
+
+  pub finalize() str {
+    str out = __fun_hash_finalize(self.handle);
+    self.handle = nil;
+    ret out;
+  }
+}
+
+// SHA-512 of `data`, as a lowercase hex digest.
+pub fun sha512(str data) str {
+  let h = sha512_new();
+  h.update(data);
+  ret h.finalize();
+}
+
+// HMAC-SHA256 of `data` under `key`, as a lowercase hex digest. A
+// one-shot binding rather than a `Hasher`-shaped streaming type: both
+// native APIs already take the whole message in one call, so a
+// streaming wrapper would add ceremony without a real capability behind it.
+pub fun hmac_sha256(str key, str data) str {
+  ret __fun_hmac_sha256(key, len(key), data, len(data));
+}
+
+// `n` cryptographically secure random bytes from the platform's own
+// CSPRNG (OpenSSL's RAND_bytes on POSIX, BCryptGenRandom on Windows),
+// as a lowercase hex string (`2*n` characters) - e.g. `random_bytes(32)`
+// for a fresh Aes256Gcm key, `random_bytes(12)` for a fresh nonce.
+pub fun random_bytes(num n) str {
+  ret __fun_random_bytes(n);
+}
+
+// Authenticated symmetric encryption: `encrypt` binds `aad` (additional
+// authenticated data, sent in the clear but tamper-checked, e.g. a
+// message's own header) and returns hex-encoded ciphertext with its
+// authentication tag appended; `decrypt` verifies the tag before
+// returning anything, so a `Result` (not a bare `str`) is the honest
+// shape - a corrupted or forged ciphertext genuinely has no plaintext
+// to return. `plaintext`/`aad` are plain text (the caller's own data);
+// `key`/`nonce`/`ciphertext` are hex, algorithm-specific lengths
+// (`Aes256Gcm`: a 32-byte key as 64 hex chars, a 12-byte nonce as 24) -
+// `random_bytes` is the usual way to generate a fresh one of either.
+pub quirk AeadCipher {
+  encrypt(str plaintext, str key, str nonce, str aad) Result<str, Error>;
+  decrypt(str ciphertext, str key, str nonce, str aad) Result<str, Error>;
+}
+
+// AES-256 in GCM mode. A 32-byte key (64 hex chars), a 12-byte nonce (24
+// hex chars) - the standard, recommended size; a shorter or longer nonce
+// works in the underlying library too, but 12 bytes avoids an extra
+// internal hashing step and matches every other AES-GCM API's own default.
+pub compound Aes256Gcm {
+}
+
+impl Aes256Gcm as AeadCipher {
+  pub encrypt(str plaintext, str key, str nonce, str aad) Result<str, Error> {
+    if len(key) != 64 {
+      ret err_kind(.Invalid, "Aes256Gcm: key must be 64 hex chars (32 bytes)", "");
+    }
+    if len(nonce) != 24 {
+      ret err_kind(.Invalid, "Aes256Gcm: nonce must be 24 hex chars (12 bytes)", "");
+    }
+    let out = __fun_aes256gcm_encrypt(plaintext, len(plaintext), key, nonce, aad, len(aad));
+    if out == nil {
+      ret err_kind(.Unexpected, "Aes256Gcm: encryption failed", "");
+    }
+    ret .Ok(out);
+  }
+
+  pub decrypt(str ciphertext, str key, str nonce, str aad) Result<str, Error> {
+    if len(key) != 64 {
+      ret err_kind(.Invalid, "Aes256Gcm: key must be 64 hex chars (32 bytes)", "");
+    }
+    if len(nonce) != 24 {
+      ret err_kind(.Invalid, "Aes256Gcm: nonce must be 24 hex chars (12 bytes)", "");
+    }
+    if len(ciphertext) < 32 {
+      ret err_kind(.Invalid, "Aes256Gcm: ciphertext shorter than its own tag", "");
+    }
+    let out = __fun_aes256gcm_decrypt(ciphertext, len(ciphertext), key, nonce, aad, len(aad));
+    if out == nil {
+      ret err_kind(.Unexpected, "Aes256Gcm: decryption failed (wrong key, or the ciphertext/aad was tampered with)", "");
+    }
+    ret .Ok(out);
+  }
+}
+
+// Signs and verifies with Ed25519 - deterministic (no per-signature nonce
+// to get wrong, unlike ECDSA/RSA-PSS), fast, and the current recommended
+// default asymmetric signature scheme. Key and signature bytes are hex,
+// same reason as everywhere else in this module.
+pub quirk Signer {
+  sign(str message) str;
+}
+pub quirk Verifier {
+  verify(str message, str signature) flag;
+}
+
+pub compound Ed25519PrivateKey {
+  str hex;
+}
+pub compound Ed25519PublicKey {
+  str hex;
+}
+
+// Generates a fresh Ed25519 key pair. Windows CNG/BCrypt has no Ed25519
+// support on any Windows version this compiler targets (unlike
+// everything else in this module, it isn't a portability gap that can
+// be shimmed around), so this is `Result`-shaped rather than a bare
+// tuple - an honest `Err` there, not silently wrong key material.
+pub fun ed25519_generate() Result<(Ed25519PrivateKey, Ed25519PublicKey), Error> {
+  str priv_hex = __fun_ed25519_generate_private();
+  if priv_hex == nil {
+    Ed25519PrivateKey empty_sk;
+    empty_sk.hex = "";
+    Ed25519PublicKey empty_pk;
+    empty_pk.hex = "";
+    ret err_kind(.Unexpected, "ed25519_generate: not supported on this platform", (empty_sk, empty_pk));
+  }
+  str pub_hex = __fun_ed25519_public_from_private(priv_hex);
+  Ed25519PrivateKey sk;
+  sk.hex = priv_hex;
+  Ed25519PublicKey pk;
+  pk.hex = pub_hex;
+  ret .Ok((sk, pk));
+}
+
+impl Ed25519PrivateKey as Signer {
+  pub sign(str message) str {
+    ret __fun_ed25519_sign(self.hex, message, len(message));
+  }
+}
+
+impl Ed25519PublicKey as Verifier {
+  pub verify(str message, str signature) flag {
+    ret __fun_ed25519_verify(self.hex, message, len(message), signature) == 1;
+  }
+}
+
+test "sha256/sha512 match known test vectors, and streaming agrees with the one-shot form" {
+  assert equals(
+    sha256("hello world"),
+    "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+  ), "expected the real SHA-256 of 'hello world'";
+  assert equals(
+    sha256(""),
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ), "expected the real SHA-256 of the empty string";
+  assert equals(
+    sha512("abc"),
+    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+  ), "expected the real SHA-512 of 'abc'";
+
+  let h = sha256_new();
+  h.update("hello ");
+  h.update("world");
+  assert equals(h.finalize(), sha256("hello world")), "expected streamed updates to agree with the one-shot hash";
+}
+
+test "hmac_sha256 is deterministic and key-sensitive" {
+  str mac1 = hmac_sha256("key-a", "same message");
+  str mac2 = hmac_sha256("key-a", "same message");
+  assert equals(mac1, mac2), "expected the same key+message to produce the same MAC every time";
+
+  str mac3 = hmac_sha256("key-b", "same message");
+  assert !equals(mac1, mac3), "expected a different key to produce a different MAC";
+
+  str mac4 = hmac_sha256("key-a", "different message");
+  assert !equals(mac1, mac4), "expected a different message to produce a different MAC";
+}
+
+test "random_bytes returns the right length and doesn't repeat" {
+  str r1 = random_bytes(16);
+  str r2 = random_bytes(16);
+  assert len(r1) == 32, "expected 16 bytes as 32 hex chars";
+  assert len(r2) == 32, "expected 16 bytes as 32 hex chars";
+  assert !equals(r1, r2), "expected two draws to differ (astronomically unlikely to collide)";
+}
+
+test "Aes256Gcm round-trips, and rejects a tampered AAD or wrong key" {
+  str key = random_bytes(32);
+  str nonce = random_bytes(12);
+  Aes256Gcm cipher;
+
+  let enc = cipher.encrypt("attack at dawn", key, nonce, "header-v1");
+  assert enc.is_ok(), "expected encryption to succeed";
+  str ct = enc.unwrap();
+
+  let decrypted = cipher.decrypt(ct, key, nonce, "header-v1");
+  assert decrypted.is_ok(), "expected decryption with the right key/nonce/aad to succeed";
+  assert equals(decrypted.unwrap(), "attack at dawn"), "expected the real plaintext back";
+
+  let dec_bad_aad = cipher.decrypt(ct, key, nonce, "header-v2");
+  assert dec_bad_aad.is_err(), "expected a tampered AAD to fail verification, not silently decrypt";
+
+  str wrong_key = random_bytes(32);
+  let dec_bad_key = cipher.decrypt(ct, wrong_key, nonce, "header-v1");
+  assert dec_bad_key.is_err(), "expected the wrong key to fail verification";
+
+  let bad_key_len = cipher.encrypt("x", "too-short", nonce, "");
+  assert bad_key_len.is_err(), "expected a wrong-length key to be a clean Err, not a crash";
+}
+
+test "Ed25519 signs and verifies, and rejects a wrong message or wrong key" {
+  let kp = ed25519_generate();
+  if kp.is_err() {
+    // Not supported on this platform (see ed25519_generate's own doc) -
+    // nothing more to check here.
+    ret;
+  }
+  let pair = kp.unwrap();
+  Ed25519PrivateKey sk = pair.0;
+  Ed25519PublicKey pk = pair.1;
+
+  str sig = sk.sign("sign this message");
+  assert pk.verify("sign this message", sig), "expected the real signature to verify";
+  assert !pk.verify("a different message", sig), "expected a different message to fail verification";
+
+  let kp2 = ed25519_generate();
+  assert kp2.is_ok(), "expected a second key pair to generate fine too";
+  Ed25519PublicKey other_pk = kp2.unwrap().1;
+  assert !other_pk.verify("sign this message", sig), "expected a different key's public half to fail verification";
+}

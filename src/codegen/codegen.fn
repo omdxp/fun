@@ -15700,6 +15700,433 @@ impl Codegen {
       `#endif
       ``);
     }
+    // `__fun_hash_*`/`__fun_hmac_sha256`/`__fun_random_bytes`/
+    // `__fun_aes256gcm_*`/`__fun_ed25519_*` (see `std.c.crypto`):
+    // OpenSSL's EVP/RAND/HMAC API on POSIX, Windows' own CNG/BCrypt on
+    // Windows. Ed25519 has no Windows CNG/BCrypt support at all on any
+    // Windows version this compiler targets (unlike everything else
+    // here, not something a shim can work around) - its two Windows
+    // functions return `NULL`, and `std.crypto`'s own `ed25519_generate`
+    // turns that into a real `Err` rather than silently wrong key material.
+    if program_uses_std_c_header(self.all_nodes, "crypto.fn") {
+      self.state.write(`
+      `static char __fun_hex_chars[] = "0123456789abcdef";
+      `
+      `static char* __fun_bytes_to_hex(const unsigned char* buf, size_t n) {
+      `  char* out = (char*)malloc(n * 2 + 1);
+      `  if (out == NULL) return NULL;
+      `  for (size_t i = 0; i < n; i++) {
+      `    out[i * 2] = __fun_hex_chars[(buf[i] >> 4) & 0xF];
+      `    out[i * 2 + 1] = __fun_hex_chars[buf[i] & 0xF];
+      `  }
+      `  out[n * 2] = '\0';
+      `  return out;
+      `}
+      `
+      `static int __fun_hex_nibble(char c) {
+      `  if (c >= '0' && c <= '9') return c - '0';
+      `  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      `  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      `  return -1;
+      `}
+      `
+      `static unsigned char* __fun_hex_to_bytes(const char* hex, size_t hex_len, size_t* out_len) {
+      `  if (hex_len % 2 != 0) return NULL;
+      `  size_t n = hex_len / 2;
+      `  unsigned char* out = (unsigned char*)malloc(n > 0 ? n : 1);
+      `  if (out == NULL) return NULL;
+      `  for (size_t i = 0; i < n; i++) {
+      `    int hi = __fun_hex_nibble(hex[i * 2]);
+      `    int lo = __fun_hex_nibble(hex[i * 2 + 1]);
+      `    if (hi < 0 || lo < 0) { free(out); return NULL; }
+      `    out[i] = (unsigned char)((hi << 4) | lo);
+      `  }
+      `  *out_len = n;
+      `  return out;
+      `}
+      `#if defined(_WIN32)
+      `#ifndef WIN32_LEAN_AND_MEAN
+      `#define WIN32_LEAN_AND_MEAN
+      `#endif
+      `#include <windows.h>
+      `#include <bcrypt.h>
+      `#pragma comment(lib, "bcrypt.lib")
+      `
+      `static void* __fun_hash_new(long long algo) {
+      `  BCRYPT_ALG_HANDLE alg = NULL;
+      `  if (BCryptOpenAlgorithmProvider(&alg, algo == 1 ? BCRYPT_SHA512_ALGORITHM : BCRYPT_SHA256_ALGORITHM, NULL, 0) != 0) return NULL;
+      `  BCRYPT_HASH_HANDLE hash = NULL;
+      `  if (BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0) != 0) { BCryptCloseAlgorithmProvider(alg, 0); return NULL; }
+      `  BCRYPT_ALG_HANDLE* out = (BCRYPT_ALG_HANDLE*)malloc(sizeof(BCRYPT_ALG_HANDLE) * 2);
+      `  if (out == NULL) { BCryptDestroyHash(hash); BCryptCloseAlgorithmProvider(alg, 0); return NULL; }
+      `  out[0] = alg;
+      `  out[1] = (BCRYPT_ALG_HANDLE)hash;
+      `  return out;
+      `}
+      `
+      `static void __fun_hash_update(void* handle, const char* data, long long len) {
+      `  if (handle == NULL) return;
+      `  BCRYPT_ALG_HANDLE* pair = (BCRYPT_ALG_HANDLE*)handle;
+      `  BCryptHashData((BCRYPT_HASH_HANDLE)pair[1], (PUCHAR)data, (ULONG)len, 0);
+      `}
+      `
+      `static char* __fun_hash_finalize(void* handle) {
+      `  if (handle == NULL) return NULL;
+      `  BCRYPT_ALG_HANDLE* pair = (BCRYPT_ALG_HANDLE*)handle;
+      `  BCRYPT_HASH_HANDLE hash = (BCRYPT_HASH_HANDLE)pair[1];
+      `  unsigned char buf[64];
+      `  DWORD out_size = 0, result = 0;
+      `  BCryptGetProperty(hash, BCRYPT_HASH_LENGTH, (PUCHAR)&out_size, sizeof(out_size), &result, 0);
+      `  BCryptFinishHash(hash, buf, out_size, 0);
+      `  BCryptDestroyHash(hash);
+      `  BCryptCloseAlgorithmProvider(pair[0], 0);
+      `  free(pair);
+      `  return __fun_bytes_to_hex(buf, out_size);
+      `}
+      `
+      `static char* __fun_hmac_sha256(const char* key, long long key_len, const char* data, long long data_len) {
+      `  BCRYPT_ALG_HANDLE alg = NULL;
+      `  if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0) return NULL;
+      `  BCRYPT_HASH_HANDLE hash = NULL;
+      `  char* result = NULL;
+      `  if (BCryptCreateHash(alg, &hash, NULL, 0, (PUCHAR)key, (ULONG)key_len, 0) == 0) {
+      `    BCryptHashData(hash, (PUCHAR)data, (ULONG)data_len, 0);
+      `    unsigned char buf[32];
+      `    if (BCryptFinishHash(hash, buf, sizeof(buf), 0) == 0) {
+      `      result = __fun_bytes_to_hex(buf, sizeof(buf));
+      `    }
+      `    BCryptDestroyHash(hash);
+      `  }
+      `  BCryptCloseAlgorithmProvider(alg, 0);
+      `  return result;
+      `}
+      `
+      `static char* __fun_random_bytes(long long n) {
+      `  if (n <= 0) { char* e = (char*)malloc(1); if (e) e[0] = '\0'; return e; }
+      `  unsigned char* buf = (unsigned char*)malloc((size_t)n);
+      `  if (buf == NULL) return NULL;
+      `  char* result = NULL;
+      `  if (BCryptGenRandom(NULL, buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0) {
+      `    result = __fun_bytes_to_hex(buf, (size_t)n);
+      `  }
+      `  free(buf);
+      `  return result;
+      `}
+      `
+      `static char* __fun_aes256gcm_encrypt(const char* plaintext, long long pt_len, const char* key_hex, const char* nonce_hex, const char* aad, long long aad_len) {
+      `  size_t key_len = 0, nonce_len = 0;
+      `  unsigned char* key = __fun_hex_to_bytes(key_hex, strlen(key_hex), &key_len);
+      `  unsigned char* nonce = __fun_hex_to_bytes(nonce_hex, strlen(nonce_hex), &nonce_len);
+      `  char* result = NULL;
+      `  if (key != NULL && nonce != NULL && key_len == 32 && nonce_len == 12) {
+      `    BCRYPT_ALG_HANDLE alg = NULL;
+      `    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, NULL, 0) == 0) {
+      `      if (BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0) == 0) {
+      `        BCRYPT_KEY_HANDLE hkey = NULL;
+      `        if (BCryptGenerateSymmetricKey(alg, &hkey, NULL, 0, key, (ULONG)key_len, 0) == 0) {
+      `          unsigned char tag[16];
+      `          unsigned char* ct = (unsigned char*)malloc(pt_len > 0 ? (size_t)pt_len : 1);
+      `          if (ct != NULL) {
+      `            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+      `            BCRYPT_INIT_AUTH_MODE_INFO(info);
+      `            info.pbNonce = nonce;
+      `            info.cbNonce = (ULONG)nonce_len;
+      `            info.pbAuthData = aad_len > 0 ? (PUCHAR)aad : NULL;
+      `            info.cbAuthData = (ULONG)aad_len;
+      `            info.pbTag = tag;
+      `            info.cbTag = sizeof(tag);
+      `            ULONG out_len = 0;
+      `            if (BCryptEncrypt(hkey, (PUCHAR)plaintext, (ULONG)pt_len, &info, NULL, 0, ct, (ULONG)pt_len, &out_len, 0) == 0) {
+      `              unsigned char* combined = (unsigned char*)malloc((size_t)out_len + sizeof(tag));
+      `              if (combined != NULL) {
+      `                memcpy(combined, ct, out_len);
+      `                memcpy(combined + out_len, tag, sizeof(tag));
+      `                result = __fun_bytes_to_hex(combined, (size_t)out_len + sizeof(tag));
+      `                free(combined);
+      `              }
+      `            }
+      `            free(ct);
+      `          }
+      `          BCryptDestroyKey(hkey);
+      `        }
+      `      }
+      `      BCryptCloseAlgorithmProvider(alg, 0);
+      `    }
+      `  }
+      `  if (key) free(key);
+      `  if (nonce) free(nonce);
+      `  return result;
+      `}
+      `
+      `static char* __fun_aes256gcm_decrypt(const char* ciphertext_hex, long long ct_hex_len, const char* key_hex, const char* nonce_hex, const char* aad, long long aad_len) {
+      `  size_t key_len = 0, nonce_len = 0, ct_total_len = 0;
+      `  unsigned char* key = __fun_hex_to_bytes(key_hex, strlen(key_hex), &key_len);
+      `  unsigned char* nonce = __fun_hex_to_bytes(nonce_hex, strlen(nonce_hex), &nonce_len);
+      `  unsigned char* ct_and_tag = __fun_hex_to_bytes(ciphertext_hex, (size_t)ct_hex_len, &ct_total_len);
+      `  char* result = NULL;
+      `  if (key != NULL && nonce != NULL && ct_and_tag != NULL && key_len == 32 && nonce_len == 12 && ct_total_len >= 16) {
+      `    size_t ct_len = ct_total_len - 16;
+      `    unsigned char* tag = ct_and_tag + ct_len;
+      `    BCRYPT_ALG_HANDLE alg = NULL;
+      `    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, NULL, 0) == 0) {
+      `      if (BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0) == 0) {
+      `        BCRYPT_KEY_HANDLE hkey = NULL;
+      `        if (BCryptGenerateSymmetricKey(alg, &hkey, NULL, 0, key, (ULONG)key_len, 0) == 0) {
+      `          unsigned char* pt = (unsigned char*)malloc(ct_len > 0 ? ct_len : 1);
+      `          if (pt != NULL) {
+      `            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+      `            BCRYPT_INIT_AUTH_MODE_INFO(info);
+      `            info.pbNonce = nonce;
+      `            info.cbNonce = (ULONG)nonce_len;
+      `            info.pbAuthData = aad_len > 0 ? (PUCHAR)aad : NULL;
+      `            info.cbAuthData = (ULONG)aad_len;
+      `            info.pbTag = tag;
+      `            info.cbTag = 16;
+      `            ULONG out_len = 0;
+      `            if (BCryptDecrypt(hkey, ct_and_tag, (ULONG)ct_len, &info, NULL, 0, pt, (ULONG)ct_len, &out_len, 0) == 0) {
+      `              char* out = (char*)malloc((size_t)out_len + 1);
+      `              if (out != NULL) {
+      `                memcpy(out, pt, out_len);
+      `                out[out_len] = '\0';
+      `                result = out;
+      `              }
+      `            }
+      `            free(pt);
+      `          }
+      `          BCryptDestroyKey(hkey);
+      `        }
+      `      }
+      `      BCryptCloseAlgorithmProvider(alg, 0);
+      `    }
+      `  }
+      `  if (key) free(key);
+      `  if (nonce) free(nonce);
+      `  if (ct_and_tag) free(ct_and_tag);
+      `  return result;
+      `}
+      `
+      `static char* __fun_ed25519_generate_private(void) { return NULL; }
+      `static char* __fun_ed25519_public_from_private(const char* priv_hex) { (void)priv_hex; return NULL; }
+      `static char* __fun_ed25519_sign(const char* priv_hex, const char* message, long long msg_len) { (void)priv_hex; (void)message; (void)msg_len; return NULL; }
+      `static long long __fun_ed25519_verify(const char* pub_hex, const char* message, long long msg_len, const char* signature_hex) { (void)pub_hex; (void)message; (void)msg_len; (void)signature_hex; return 0; }
+      `#else
+      `static void* __fun_hash_new(long long algo) {
+      `  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+      `  if (ctx == NULL) return NULL;
+      `  const EVP_MD* md = (algo == 1) ? EVP_sha512() : EVP_sha256();
+      `  if (EVP_DigestInit_ex(ctx, md, NULL) != 1) { EVP_MD_CTX_free(ctx); return NULL; }
+      `  return ctx;
+      `}
+      `
+      `static void __fun_hash_update(void* handle, const char* data, long long len) {
+      `  if (handle == NULL) return;
+      `  EVP_DigestUpdate((EVP_MD_CTX*)handle, data, (size_t)len);
+      `}
+      `
+      `static char* __fun_hash_finalize(void* handle) {
+      `  if (handle == NULL) return NULL;
+      `  EVP_MD_CTX* ctx = (EVP_MD_CTX*)handle;
+      `  unsigned char buf[EVP_MAX_MD_SIZE];
+      `  unsigned int out_len = 0;
+      `  EVP_DigestFinal_ex(ctx, buf, &out_len);
+      `  EVP_MD_CTX_free(ctx);
+      `  return __fun_bytes_to_hex(buf, out_len);
+      `}
+      `
+      `static char* __fun_hmac_sha256(const char* key, long long key_len, const char* data, long long data_len) {
+      `  unsigned char out[EVP_MAX_MD_SIZE];
+      `  unsigned int out_len = 0;
+      `  if (HMAC(EVP_sha256(), key, (int)key_len, (const unsigned char*)data, (size_t)data_len, out, &out_len) == NULL) {
+      `    return NULL;
+      `  }
+      `  return __fun_bytes_to_hex(out, out_len);
+      `}
+      `
+      `static char* __fun_random_bytes(long long n) {
+      `  if (n <= 0) { char* e = (char*)malloc(1); if (e) e[0] = '\0'; return e; }
+      `  unsigned char* buf = (unsigned char*)malloc((size_t)n);
+      `  if (buf == NULL) return NULL;
+      `  char* result = NULL;
+      `  if (RAND_bytes(buf, (int)n) == 1) {
+      `    result = __fun_bytes_to_hex(buf, (size_t)n);
+      `  }
+      `  free(buf);
+      `  return result;
+      `}
+      `
+      `static char* __fun_aes256gcm_encrypt(const char* plaintext, long long pt_len, const char* key_hex, const char* nonce_hex, const char* aad, long long aad_len) {
+      `  size_t key_len = 0, nonce_len = 0;
+      `  unsigned char* key = __fun_hex_to_bytes(key_hex, strlen(key_hex), &key_len);
+      `  unsigned char* nonce = __fun_hex_to_bytes(nonce_hex, strlen(nonce_hex), &nonce_len);
+      `  char* result = NULL;
+      `  if (key != NULL && nonce != NULL && key_len == 32 && nonce_len == 12) {
+      `    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+      `    if (ctx != NULL) {
+      `      unsigned char* ct = (unsigned char*)malloc(pt_len > 0 ? (size_t)pt_len : 1);
+      `      if (ct != NULL) {
+      `        int len = 0, ct_len = 0, ok = 1;
+      `        if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) ok = 0;
+      `        if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len, NULL) != 1) ok = 0;
+      `        if (ok && EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) ok = 0;
+      `        if (ok && aad_len > 0 && EVP_EncryptUpdate(ctx, NULL, &len, (const unsigned char*)aad, (int)aad_len) != 1) ok = 0;
+      `        if (ok && pt_len > 0) {
+      `          if (EVP_EncryptUpdate(ctx, ct, &len, (const unsigned char*)plaintext, (int)pt_len) != 1) ok = 0;
+      `          else ct_len = len;
+      `        }
+      `        if (ok && EVP_EncryptFinal_ex(ctx, ct + ct_len, &len) != 1) ok = 0;
+      `        if (ok) {
+      `          ct_len += len;
+      `          unsigned char tag[16];
+      `          if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) == 1) {
+      `            unsigned char* combined = (unsigned char*)malloc((size_t)ct_len + 16);
+      `            if (combined != NULL) {
+      `              memcpy(combined, ct, (size_t)ct_len);
+      `              memcpy(combined + ct_len, tag, 16);
+      `              result = __fun_bytes_to_hex(combined, (size_t)ct_len + 16);
+      `              free(combined);
+      `            }
+      `          }
+      `        }
+      `        free(ct);
+      `      }
+      `      EVP_CIPHER_CTX_free(ctx);
+      `    }
+      `  }
+      `  if (key) free(key);
+      `  if (nonce) free(nonce);
+      `  return result;
+      `}
+      `
+      `static char* __fun_aes256gcm_decrypt(const char* ciphertext_hex, long long ct_hex_len, const char* key_hex, const char* nonce_hex, const char* aad, long long aad_len) {
+      `  size_t key_len = 0, nonce_len = 0, ct_total_len = 0;
+      `  unsigned char* key = __fun_hex_to_bytes(key_hex, strlen(key_hex), &key_len);
+      `  unsigned char* nonce = __fun_hex_to_bytes(nonce_hex, strlen(nonce_hex), &nonce_len);
+      `  unsigned char* ct_and_tag = __fun_hex_to_bytes(ciphertext_hex, (size_t)ct_hex_len, &ct_total_len);
+      `  char* result = NULL;
+      `  if (key != NULL && nonce != NULL && ct_and_tag != NULL && key_len == 32 && nonce_len == 12 && ct_total_len >= 16) {
+      `    size_t ct_len = ct_total_len - 16;
+      `    unsigned char* tag = ct_and_tag + ct_len;
+      `    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+      `    if (ctx != NULL) {
+      `      unsigned char* pt = (unsigned char*)malloc(ct_len > 0 ? ct_len : 1);
+      `      if (pt != NULL) {
+      `        int len = 0, pt_len = 0, ok = 1;
+      `        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) ok = 0;
+      `        if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len, NULL) != 1) ok = 0;
+      `        if (ok && EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) ok = 0;
+      `        if (ok && aad_len > 0 && EVP_DecryptUpdate(ctx, NULL, &len, (const unsigned char*)aad, (int)aad_len) != 1) ok = 0;
+      `        if (ok && ct_len > 0) {
+      `          if (EVP_DecryptUpdate(ctx, pt, &len, ct_and_tag, (int)ct_len) != 1) ok = 0;
+      `          else pt_len = len;
+      `        }
+      `        if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void*)tag) != 1) ok = 0;
+      `        if (ok && EVP_DecryptFinal_ex(ctx, pt + pt_len, &len) != 1) ok = 0;
+      `        if (ok) {
+      `          pt_len += len;
+      `          char* out = (char*)malloc((size_t)pt_len + 1);
+      `          if (out != NULL) {
+      `            memcpy(out, pt, (size_t)pt_len);
+      `            out[pt_len] = '\0';
+      `            result = out;
+      `          }
+      `        }
+      `        free(pt);
+      `      }
+      `      EVP_CIPHER_CTX_free(ctx);
+      `    }
+      `  }
+      `  if (key) free(key);
+      `  if (nonce) free(nonce);
+      `  if (ct_and_tag) free(ct_and_tag);
+      `  return result;
+      `}
+      `
+      `static char* __fun_ed25519_generate_private(void) {
+      `  EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+      `  if (pctx == NULL) return NULL;
+      `  char* result = NULL;
+      `  if (EVP_PKEY_keygen_init(pctx) == 1) {
+      `    EVP_PKEY* pkey = NULL;
+      `    if (EVP_PKEY_keygen(pctx, &pkey) == 1) {
+      `      unsigned char priv[32];
+      `      size_t priv_len = sizeof(priv);
+      `      if (EVP_PKEY_get_raw_private_key(pkey, priv, &priv_len) == 1) {
+      `        result = __fun_bytes_to_hex(priv, priv_len);
+      `      }
+      `      EVP_PKEY_free(pkey);
+      `    }
+      `  }
+      `  EVP_PKEY_CTX_free(pctx);
+      `  return result;
+      `}
+      `
+      `static char* __fun_ed25519_public_from_private(const char* priv_hex) {
+      `  size_t priv_len = 0;
+      `  unsigned char* priv = __fun_hex_to_bytes(priv_hex, strlen(priv_hex), &priv_len);
+      `  if (priv == NULL || priv_len != 32) { if (priv) free(priv); return NULL; }
+      `  EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, priv, priv_len);
+      `  free(priv);
+      `  if (pkey == NULL) return NULL;
+      `  unsigned char pub[32];
+      `  size_t pub_len = sizeof(pub);
+      `  char* result = NULL;
+      `  if (EVP_PKEY_get_raw_public_key(pkey, pub, &pub_len) == 1) {
+      `    result = __fun_bytes_to_hex(pub, pub_len);
+      `  }
+      `  EVP_PKEY_free(pkey);
+      `  return result;
+      `}
+      `
+      `static char* __fun_ed25519_sign(const char* priv_hex, const char* message, long long msg_len) {
+      `  size_t priv_len = 0;
+      `  unsigned char* priv = __fun_hex_to_bytes(priv_hex, strlen(priv_hex), &priv_len);
+      `  if (priv == NULL || priv_len != 32) { if (priv) free(priv); return NULL; }
+      `  EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, priv, priv_len);
+      `  free(priv);
+      `  if (pkey == NULL) return NULL;
+      `  char* result = NULL;
+      `  EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+      `  if (mdctx != NULL) {
+      `    if (EVP_DigestSignInit(mdctx, NULL, NULL, NULL, pkey) == 1) {
+      `      unsigned char sig[64];
+      `      size_t sig_len = sizeof(sig);
+      `      if (EVP_DigestSign(mdctx, sig, &sig_len, (const unsigned char*)message, (size_t)msg_len) == 1) {
+      `        result = __fun_bytes_to_hex(sig, sig_len);
+      `      }
+      `    }
+      `    EVP_MD_CTX_free(mdctx);
+      `  }
+      `  EVP_PKEY_free(pkey);
+      `  return result;
+      `}
+      `
+      `static long long __fun_ed25519_verify(const char* pub_hex, const char* message, long long msg_len, const char* signature_hex) {
+      `  size_t pub_len = 0, sig_len = 0;
+      `  unsigned char* pub = __fun_hex_to_bytes(pub_hex, strlen(pub_hex), &pub_len);
+      `  unsigned char* sig = __fun_hex_to_bytes(signature_hex, strlen(signature_hex), &sig_len);
+      `  long long result = 0;
+      `  if (pub != NULL && sig != NULL && pub_len == 32) {
+      `    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, pub, pub_len);
+      `    if (pkey != NULL) {
+      `      EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+      `      if (mdctx != NULL) {
+      `        if (EVP_DigestVerifyInit(mdctx, NULL, NULL, NULL, pkey) == 1) {
+      `          if (EVP_DigestVerify(mdctx, sig, sig_len, (const unsigned char*)message, (size_t)msg_len) == 1) {
+      `            result = 1;
+      `          }
+      `        }
+      `        EVP_MD_CTX_free(mdctx);
+      `      }
+      `      EVP_PKEY_free(pkey);
+      `    }
+      `  }
+      `  if (pub) free(pub);
+      `  if (sig) free(sig);
+      `  return result;
+      `}
+      `#endif
+      ``);
+    }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
     // bodyless stream bindings resolve portably.
