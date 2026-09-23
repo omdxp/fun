@@ -531,6 +531,30 @@ pub fun compile_to_c_mode(
   ret .Ok(true);
 }
 
+// The first of Homebrew's usual keg-only OpenSSL install prefixes (3.x
+// preferred, falling back to whatever `openssl` alone resolved to) that
+// actually exists on this machine, checked by looking for its own
+// `include/openssl/ssl.h`; "" when none of them do (a non-Homebrew
+// install, or Linux with the headers already on the default path).
+fun _find_openssl_prefix() str {
+  Vec<str> candidates;
+  candidates.init(4);
+  candidates.push("/opt/homebrew/opt/openssl@3");
+  candidates.push("/opt/homebrew/opt/openssl");
+  candidates.push("/usr/local/opt/openssl@3");
+  candidates.push("/usr/local/opt/openssl");
+  defer candidates.free();
+  num i = 0;
+  for i < candidates.len {
+    str prefix = candidates.get(i);
+    if exists(format("{str}/include/openssl/ssl.h", prefix)) {
+      ret prefix;
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
 // Appends the arguments a compile of `c_path` into `exe_path` needs,
 // after `cc`'s own name is already in `argv_args`. MSVC spells its
 // arguments differently and links the C runtime itself, so the thread
@@ -576,6 +600,33 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
       argv_args.push("-lm");
     } else {
       argv_args.push("-lws2_32");
+    }
+    // TLS/crypto (std.c.tls/std.c.crypto) need OpenSSL, but not every
+    // program should have to link against it - codegen only emits the
+    // OpenSSL headers, and this marker comment, when the program
+    // actually imports one of those bindings (see write_prelude).
+    // Windows' own SChannel/BCrypt backing needs no extra linking here:
+    // it auto-links via #pragma comment(lib, ...) in the generated C
+    // itself, the same way Ws2_32.lib already does.
+    // The search string itself is built from pieces, not one literal:
+    // self-hosting compiles this very check, and a contiguous literal
+    // here would show up verbatim in the compiler's OWN generated C
+    // too, falsely matching itself on every self-build.
+    str openssl_marker = format("__fun_link: -l{str} -l{str}", "ssl", "crypto");
+    if !runtime_backend_is_windows() && contains(read_to_string(c_path), openssl_marker) {
+      // OpenSSL lives in the default include/lib search path on most
+      // Linux distros once libssl-dev is installed, but Homebrew's own
+      // build is deliberately keg-only (Apple Silicon and Intel prefixes
+      // both checked) to avoid shadowing macOS's system LibreSSL, so it
+      // needs its own explicit -I/-L. Harmless everywhere else: a prefix
+      // that doesn't exist here is simply skipped.
+      str openssl_prefix = _find_openssl_prefix();
+      if !equals(openssl_prefix, "") {
+        argv_args.push(format("-I{str}/include", openssl_prefix));
+        argv_args.push(format("-L{str}/lib", openssl_prefix));
+      }
+      argv_args.push("-lssl");
+      argv_args.push("-lcrypto");
     }
   }
 }

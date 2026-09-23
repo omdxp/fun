@@ -1,0 +1,49 @@
+// Hashing, HMAC, secure random, AES-256-GCM, and Ed25519: OpenSSL's
+// libcrypto on POSIX, Windows' own CNG/BCrypt on Windows. Two entirely
+// different native APIs, so like `std.c.tls` these are compiler-emitted
+// shims, not direct libc bindings - see `write_prelude` in
+// `src/codegen/codegen.fn` for both implementations. Every genuinely
+// binary value crosses this boundary as lowercase hex, never raw bytes
+// (see `std.crypto`'s own file-level note on why).
+
+// Starts a streaming hash. `algo`: 0 for SHA-256, 1 for SHA-512. Returns
+// an opaque handle, or `nil` on failure.
+pub fun __fun_hash_new(num algo) raw*;
+
+// Feeds `len` bytes of `data` into the hash `handle` is tracking.
+pub fun __fun_hash_update(raw* handle, str data, num len);
+
+// Finalizes `handle` and frees it, returning the digest as lowercase hex.
+pub fun __fun_hash_finalize(raw* handle) str;
+
+// HMAC-SHA256 of `data_len` bytes of `data` under `key_len` bytes of
+// `key`, as a lowercase hex digest.
+pub fun __fun_hmac_sha256(str key, num key_len, str data, num data_len) str;
+
+// `n` cryptographically secure random bytes, as a lowercase hex string.
+pub fun __fun_random_bytes(num n) str;
+
+// AES-256-GCM encrypt: `pt_len` bytes of `plaintext`, `key`/`nonce` as
+// hex (64/24 hex chars), `aad_len` bytes of `aad`. Returns hex-encoded
+// ciphertext with its 16-byte tag appended, or `nil` on failure.
+pub fun __fun_aes256gcm_encrypt(str plaintext, num pt_len, str key, str nonce, str aad, num aad_len) str;
+
+// AES-256-GCM decrypt: `ciphertext`/`key`/`nonce` as hex, `aad_len`
+// bytes of `aad`. Returns the plaintext, or `nil` when the tag doesn't
+// verify (wrong key, or the ciphertext/aad was tampered with).
+pub fun __fun_aes256gcm_decrypt(str ciphertext, num ct_hex_len, str key, str nonce, str aad, num aad_len) str;
+
+// Generates a fresh Ed25519 private key, as hex.
+pub fun __fun_ed25519_generate_private() str;
+
+// The public key matching `priv_hex` (an Ed25519 private key, as hex).
+pub fun __fun_ed25519_public_from_private(str priv_hex) str;
+
+// Signs `msg_len` bytes of `message` with `priv_hex` (an Ed25519 private
+// key, as hex), returning the signature as hex.
+pub fun __fun_ed25519_sign(str priv_hex, str message, num msg_len) str;
+
+// Verifies `signature_hex` against `msg_len` bytes of `message` under
+// `pub_hex` (an Ed25519 public key, as hex). Returns 1 when valid, 0
+// otherwise (C boolean semantics).
+pub fun __fun_ed25519_verify(str pub_hex, str message, num msg_len, str signature_hex) num;
