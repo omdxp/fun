@@ -15524,6 +15524,10 @@ impl Codegen {
     `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
     `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
     `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  (void)fd;
+    `  return 0LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
@@ -15537,6 +15541,10 @@ impl Codegen {
     `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
     `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
     `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  int __fun_ssr_one = 1;
+    `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
     `}
     `#endif
     ``);
@@ -20450,6 +20458,10 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
     `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
     `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  (void)fd;
+    `  return 0LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
@@ -20463,6 +20475,10 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
     `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
     `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  int __fun_ssr_one = 1;
+    `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
     `}
     `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;

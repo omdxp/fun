@@ -140,6 +140,13 @@ pub fun tcp_listen(num port) num {
   if fd < 0 {
     ret -1;
   }
+  // Without this, a socket that just closed still holds the port in
+  // TIME_WAIT, and an immediate re-listen on the same port (a test
+  // suite that reuses a fixed port run after run, say) fails with
+  // "address already in use" for no real reason - the old socket is
+  // gone, nothing is actually listening. Best-effort: if the platform
+  // shim can't set it, the bind below still gets a real chance.
+  __fun_socket_set_reuseaddr(fd);
 
   let addr = _pack_sockaddr_in_linux(port, htonl(0));
   raw* addr_ptr = &addr;
