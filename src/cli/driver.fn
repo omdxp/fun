@@ -770,10 +770,33 @@ pub fun resolve_c_compiler() str {
   ret c_compiler();
 }
 
+// Strips cl.exe filename echo lines from captured output, keeping only lines
+// that contain ':' (diagnostics are always "file(line): category ...").
+fun _strip_cl_filename_echo(str text) str {
+  if equals(text, "") {
+    ret text;
+  }
+  Vec<str> lines = split_lines(text);
+  defer lines.free();
+  StringBuilder b = string_builder_init(len(text));
+  num i = 0;
+  for i < lines.len {
+    str line = trim(lines.get(i));
+    if !equals(line, "") && index_of_char(line, ':') >= 0 {
+      b.append(line);
+      b.append("\n");
+    }
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 // Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
 // arguments inserted right after `cc` itself and before the source
 // file (a user override is trusted to know what it's asking for,
 // so this streams the compiler's own output live rather than capturing it).
+// For MSVC, output is captured and filename-echo lines are filtered out
+// before printing, so only real diagnostics appear.
 fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
   Vec<str> argv_args;
   argv_args.init(0);
@@ -797,9 +820,26 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
   _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
 
   str[] argv = argv_from(&argv_args);
-  let code = spawn_inherited(argv);
+  if !compiler_is_msvc(cc) {
+    let code = spawn_inherited(argv);
+    free_argv(argv);
+    ret code;
+  }
+  let result = run(argv);
   free_argv(argv);
-  ret code;
+  if result.is_err() {
+    writeln_to(Sink.Stderr, "could not spawn cl.exe");
+    ret 1;
+  }
+  ProcessResult r = result.unwrap();
+  str filtered = _strip_cl_filename_echo(r.stdout_text);
+  if !equals(filtered, "") {
+    writeln_to(Sink.Stderr, filtered);
+  }
+  if !equals(r.stderr_text, "") {
+    writeln_to(Sink.Stderr, r.stderr_text);
+  }
+  ret r.exit_code;
 }
 
 // Builds `c_path` into `exe_path`. Returns the compiler's exit code.
