@@ -63,6 +63,10 @@ fun _is_postfix_position(Vec<Token>* tokens, Token t) flag {
 compound _ActiveGenericScope {
   Vec<str> names;
   Vec<str> bounds;
+  // Parallel to `names`: where each parameter's own name token sits, so
+  // go-to-definition can jump there, the same way hovering it shows its
+  // bound.
+  Vec<Pos> positions;
   num body_depth;
 }
 
@@ -92,6 +96,7 @@ fun _parse_type_param_names(Vec<Token>* tokens, num open_idx, num* close_idx) _A
   _ActiveGenericScope scope;
   scope.names.init(4);
   scope.bounds.init(4);
+  scope.positions.init(4);
   scope.body_depth = -1;
 
   num depth = 1;
@@ -147,6 +152,7 @@ fun _parse_type_param_names(Vec<Token>* tokens, num open_idx, num* close_idx) _A
     if depth == 1 {
       if at_param_start && t.type == .Identifier {
         scope.names.push(token_word(t));
+        scope.positions.push(t.pos);
         at_param_start = false;
         i = i + 1;
         continue;
@@ -223,9 +229,13 @@ fun _parse_type_param_names(Vec<Token>* tokens, num open_idx, num* close_idx) _A
   ret scope;
 }
 
-// Frees `s`'s own owned content (its name/bound lists), not `s` itself.
+// Frees `s`'s own owned content (its name/bound/position lists), not `s`
+// itself. `positions` needs no deep free: each `Pos.filename` is the
+// same shared path string every token borrows, not its own allocation
+// (see `free_token_contents`'s own comment on this).
 fun _active_generic_scope_free(_ActiveGenericScope* s) {
   s.names.free();
+  s.positions.free();
   num i = 0;
   for i < s.bounds.len {
     free(s.bounds.data[i]);
@@ -234,14 +244,22 @@ fun _active_generic_scope_free(_ActiveGenericScope* s) {
   s.bounds.free();
 }
 
+// A bare type-parameter name's own declared bound (plain source text,
+// "" when unconstrained) and where its own name token sits, for hover
+// and go-to-definition respectively.
+compound TypeParamHit {
+  str bound;
+  Pos pos;
+}
+
 // Whether `tokens[target_idx]` is itself a type-parameter name declared
 // by some `compound`/`impl`/`fun` still open at that position - still a
 // type parameter, not yet substituted for a concrete type - and if so,
-// its own declared bound as plain source text, or "" when unconstrained.
-// `.None` when it isn't a type-parameter reference at all. The
-// innermost enclosing scope is checked first, so a method's own type
-// parameter shadows its enclosing impl's identically-named one.
-fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
+// its own declared bound and where its own name was written. `.None`
+// when it isn't a type-parameter reference at all. The innermost
+// enclosing scope is checked first, so a method's own type parameter
+// shadows its enclosing impl's identically-named one.
+fun active_type_param_hit(Vec<Token>* tokens, num target_idx) Option<TypeParamHit> {
   if target_idx < 0 || target_idx >= tokens.len {
     ret .None;
   }
@@ -320,8 +338,11 @@ fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
   // identically-named one on its enclosing impl. The matched bound is
   // copied now, via `substr` (a real heap copy, not the same pointer
   // `_active_generic_scope_free` is about to free below) rather than
-  // returning a pointer into memory this function itself frees.
-  Option<str> found = .None;
+  // returning a pointer into memory this function itself frees. `pos`
+  // needs no such copy: `Pos.filename` is a shared borrowed string (see
+  // `_active_generic_scope_free`'s own comment), and the rest of `Pos`
+  // is plain numbers, both fine to copy by value as-is.
+  Option<TypeParamHit> found = .None;
   num s = stack.len;
   for s > 0 {
     s = s - 1;
@@ -333,7 +354,10 @@ fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
     for n < scope.names.len {
       if found.is_none() && equals(scope.names.get(n), target_word) {
         str bound = scope.bounds.get(n);
-        found = .Some(substr(bound, 0, len(bound)));
+        TypeParamHit hit;
+        hit.bound = substr(bound, 0, len(bound));
+        hit.pos = scope.positions.get(n);
+        found = .Some(hit);
       }
       n = n + 1;
     }
@@ -533,12 +557,12 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // the same reason it never resolves via `resolve_at` above - so
     // this is checked last, only once every other identifier shape has
     // already come up empty.
-    let type_param = active_type_param_bound(&tokens, index_of_token(&tokens, t));
+    let type_param = active_type_param_hit(&tokens, index_of_token(&tokens, t));
     if type_param.is_some() {
-      str bound = type_param.unwrap();
+      TypeParamHit hit = type_param.unwrap();
       str detail = format("Type parameter `{str}`", token_word(t));
-      if !equals(bound, "") {
-        detail = format("{str}, bound to `{str}`", detail, bound);
+      if !equals(hit.bound, "") {
+        detail = format("{str}, bound to `{str}`", detail, hit.bound);
       }
       ret _hover_result(detail, span_of(t, doc.text));
     }
@@ -682,6 +706,22 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
       if !equals(alias_target, "") {
         ret _file_start_location_result(alias_target);
       }
+    }
+    // A bare generic type-parameter name (`T`): mirrors hover's own
+    // last-resort fallback above, jumping to where its own name was
+    // written in the enclosing `compound`/`impl`/`fun`/method's `<...>`
+    // list, the only "declaration" a type parameter has.
+    let type_param = active_type_param_hit(&tokens, index_of_token(&tokens, t));
+    if type_param.is_some() {
+      TypeParamHit hit = type_param.unwrap();
+      Declaration d;
+      d.name = token_word(t);
+      d.kind = .Parameter;
+      d.detail = "";
+      d.pos = hit.pos;
+      d.container = "";
+      d.is_public = true;
+      ret _location_result(doc, d);
     }
     ret NO_LOCATION;
   }
