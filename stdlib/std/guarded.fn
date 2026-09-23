@@ -1,0 +1,96 @@
+// A value of any type protected by a `Mutex`, for shared state that
+// doesn't fit `Atomic<T>`'s `num | flag` bound (std.atomic): real
+// lock-free compare-and-swap only exists for fixed hardware word widths,
+// so an arbitrary compound (a `User`, a `Vec<T>`, ...) has no portable
+// lock-free path and falls back to locking instead, the same tradeoff
+// every language with real atomics makes (Rust's `Mutex<T>` alongside
+// `AtomicI64`/`AtomicBool`, for the same reason). `T` lives embedded
+// directly in this compound's own memory, no separate heap allocation.
+
+use std.sync;
+use std.string;
+
+pub compound Guarded<T> {
+  Mutex __lock;
+  T __value;
+}
+
+// Creates a guarded value holding `initial`. A bare `Guarded<T> g;` also
+// works (the lock auto-initializes on first `lock`/`get`/`set`, the same
+// way a bare `Mutex` does), but its protected value starts undefined
+// until the first `set` - prefer this when a real starting value matters.
+pub fun guarded_new<T>(T initial) Guarded<T> {
+  Guarded<T> g;
+  g.__lock = mutex_new();
+  g.__value = initial;
+  ret g;
+}
+
+impl Guarded<T> {
+  // Locks and returns a pointer to the protected value, auto-
+  // initializing the lock on first use. The caller must call `unlock`
+  // when done; nothing here enforces that automatically, the same as
+  // using `Mutex` directly.
+  pub lock() T* {
+    self.__lock.lock();
+    ret &self.__value;
+  }
+
+  // Unlocks. No-op if called before the lock was ever taken.
+  pub unlock() {
+    self.__lock.unlock();
+  }
+
+  // Reads a copy of the value under the lock.
+  pub get() T {
+    self.__lock.lock();
+    T v = self.__value;
+    self.__lock.unlock();
+    ret v;
+  }
+
+  // Writes a new value under the lock.
+  pub set(T val) {
+    self.__lock.lock();
+    self.__value = val;
+    self.__lock.unlock();
+  }
+}
+
+test "Guarded<num> get/set/lock/unlock" {
+  Guarded<num> g = guarded_new(10);
+  assert g.get() == 10, "expected the constructor's initial value";
+
+  g.set(20);
+  assert g.get() == 20, "expected set to take effect";
+
+  num* p = g.lock();
+  p[0] = 30;
+  g.unlock();
+  assert g.get() == 30, "expected a direct write through lock's pointer to take effect";
+}
+
+compound GuardedTestUser {
+  str name;
+  num age;
+}
+
+test "Guarded<T> works for an arbitrary multi-field compound, not just num-sized T" {
+  GuardedTestUser initial;
+  initial.name = "Ada";
+  initial.age = 30;
+  Guarded<GuardedTestUser> g = guarded_new(initial);
+
+  let read_back = g.get();
+  assert equals(read_back.name, "Ada"), "expected the struct's own field to survive get";
+  assert read_back.age == 30, "expected the struct's other field to survive get";
+
+  GuardedTestUser updated;
+  updated.name = "Grace";
+  updated.age = 40;
+  g.set(updated);
+
+  let read_back2 = g.get();
+  assert equals(read_back2.name, "Grace"), "expected set to replace the whole struct";
+  assert read_back2.age == 40, "expected set to replace the whole struct";
+}
