@@ -481,6 +481,28 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(sizeof_doc, span_of(t, doc.text));
         }
       }
+      // `.tag_value()` is a builtin method available on any enum
+      // receiver (plain or tagged-union) with no `impl` of its own to
+      // resolve to - checked here for the same reason as `fork`, one
+      // scope up: nothing named `tag_value` reached this way (right
+      // after a `.` on an enum-typed receiver) could ever be a real
+      // declared symbol unless it genuinely is this builtin.
+      if equals(token_word(t), "tag_value") && read.parsed && _preceded_by_dot(&tokens, t) {
+        // `chain_receiver_type` resolves the type of whatever sits right
+        // before `t` in a dotted chain - passing `t` itself (not its
+        // receiver token) is exactly the convention `_resolve_chained_tuple_hover`
+        // already uses one level up.
+        str tv_recv_type = chain_receiver_type(&tokens, t, &read.program.nodes, doc.path, line + 1);
+        if _is_known_enum(&read.program.nodes, tv_recv_type) {
+          ret _hover_result(
+            _doc(
+            "tag_value() num",
+            "Any enum's own underlying C discriminant, read back as `num` - a plain enum already IS that value; a tagged-union enum keeps it on its own `.tag` field instead. Built in, no `impl` needed."
+            ),
+            span_of(t, doc.text)
+          );
+        }
+      }
       // A warning id right after `allow`/`expect` (`allow
       // unused_import, "...";`) is recognized the same contextual way
       // `fork` is: never a lexer keyword, and never a real declared
@@ -1109,6 +1131,29 @@ fun _receiver_of(Vec<Token>* tokens, Token t) str {
 // its name, but nothing meaningful before that dot, and must fall
 // through to `_is_dot_shorthand`'s own branch instead, not be
 // swallowed here into a receiver search that finds nothing.
+// True when `name` names an enum the program declares, plain or
+// tagged-union - the receiver-type check for `.tag_value()`'s builtin
+// hover, mirroring `enum_variant_declaration`'s own `.Enum(e)` walk.
+fun _is_known_enum(Vec<Node>* program, str name) flag {
+  if equals(name, "") {
+    ret false;
+  }
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if equals(e.name, name) {
+          ret true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret false;
+}
+
 fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
   num index = index_of_token(tokens, t);
   if index <= 0 {

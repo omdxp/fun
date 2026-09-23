@@ -16,6 +16,7 @@ use std.string;
 use std.option;
 use std.io;
 use std.range;
+use std.ctype;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -7186,6 +7187,25 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits `.tag_value()`'s builtin body: any enum's own underlying C
+  // discriminant, read back as `num`. A plain enum already IS that value
+  // (C represents it as a bare int); a tagged-union enum keeps it on its
+  // own `.tag` field instead, `->tag` through a pointer receiver -
+  // mirroring `emit_fit_enum_branch`'s identical `.tag`/`->tag` choice.
+  emit_enum_tag_value(ChainResolution recv_r) Option<CodegenErrorKind> {
+    self.state.write("((int64_t)(");
+    self.state.write(recv_r.text);
+    if self.enum_is_tagged_union_named(recv_r.type_name) {
+      if recv_r.is_pointer {
+        self.state.write("->tag");
+      } else {
+        self.state.write(".tag");
+      }
+    }
+    self.state.write("))");
+    ret .None;
+  }
+
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(.InvalidNode);
@@ -7195,6 +7215,16 @@ impl Codegen {
     fit recv_e.right.kind {
       .Identifier(name) -> { method_name = name; }
       _ -> { ret .Some(.UnsupportedNode); }
+    }
+
+    if equals(method_name, "tag_value") && self.enum_names.contains(recv_r.type_name) {
+      Vec<Node*> tv_args;
+      tv_args.init(0);
+      defer tv_args.free();
+      self.flatten_call_args(args_node, &tv_args);
+      if tv_args.len == 0 {
+        ret self.emit_enum_tag_value(recv_r);
+      }
     }
 
     if self.quirk_names.contains(recv_r.type_name) {

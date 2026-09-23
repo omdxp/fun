@@ -2752,7 +2752,23 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippe
       // also completes after an instance of the enum, which is not
       // real Fun syntax but a harmless suggestion next to nothing at
       // all.
-      .Enum(e) -> { _enum_variant_items(e, type_name, items); }
+      .Enum(e) -> {
+        _enum_variant_items(e, type_name, items);
+        // `.tag_value()` is a builtin available on any enum instance,
+        // plain or tagged-union, with no `impl` of its own ever
+        // declaring it - added here the same way `_enum_variant_items`
+        // adds variants that likewise come straight from the
+        // declaration, not from a real method lookup.
+        if equals(e.name, type_name) {
+          str tv_detail = "tag_value() num";
+          items.push(_snippet_item(
+            "tag_value",
+            .Method,
+            tv_detail,
+            _call_snippet("tag_value", tv_detail, true, snippets)
+          ));
+        }
+      }
       .Impl(block) -> {
         if !equals(block.type_name, type_name) {
           continue;

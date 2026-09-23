@@ -352,6 +352,24 @@ fun main() {
   lowering.
 - The same `fit_non_exhaustive` check applies: cover every variant or add
   a `_` catch-all.
+- Any variant, payload-carrying or not, may declare its own explicit
+  discriminant (`Ok = 200, NotFound = 404, Unknown(num) = -1`) - useful
+  when the numbers mean something (a wire status code) rather than being
+  arbitrary. A variant with no explicit value keeps the next ordinal
+  after the previous one, same as a plain enum. Read any enum's own
+  discriminant back with `.tag_value() num`, a builtin available on every
+  enum (plain or tagged-union) with no `impl` of its own needed:
+
+  ```fun
+  enum HttpStatus { Ok = 200, NotFound = 404, Unknown(num) = -1 }
+
+  fun code(HttpStatus s) num {
+    fit s {
+      .Unknown(c) -> { ret c; }
+      _ -> { ret s.tag_value(); }
+    }
+  }
+  ```
 
 ### Option/Result Propagation
 
