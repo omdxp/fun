@@ -255,7 +255,8 @@ fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
   for i <= target_idx && i < tokens.len {
     Token t = tokens.get(i);
 
-    if token_is_keyword(t, "compound") || token_is_keyword(t, "impl") || token_is_keyword(t, "fun") {
+    if token_is_keyword(t, "compound") || token_is_keyword(t, "impl") ||
+      token_is_keyword(t, "fun") {
       num j = i + 1;
       if j < tokens.len && tokens.get(j).type == .Identifier {
         j = j + 1;
@@ -270,7 +271,8 @@ fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
           _active_generic_scope_free(&scope);
         }
       }
-    } elif t.type == .Identifier && stack.len > 0 && stack.data[stack.len - 1].body_depth == depth {
+    } elif t.type == .Identifier && stack.len > 0 &&
+      stack.data[stack.len - 1].body_depth == depth {
       // A method's own generic parameter list (`pub convert<T: ...>(...)`)
       // has no `fun` keyword the branch above would catch, so it's
       // detected here instead: any identifier sitting directly at an
@@ -285,7 +287,8 @@ fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
       if j < tokens.len && token_is_operator(tokens.get(j), "<") {
         num close_idx = -1;
         _ActiveGenericScope scope = _parse_type_param_names(tokens, j, &close_idx);
-        if close_idx > 0 && close_idx + 1 < tokens.len && token_is_operator(tokens.get(close_idx + 1), "(") {
+        if close_idx > 0 && close_idx + 1 < tokens.len &&
+          token_is_operator(tokens.get(close_idx + 1), "(") {
           stack.push(scope);
           i = close_idx;
         } else {

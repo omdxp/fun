@@ -7424,7 +7424,7 @@ test "hover on an inner generic method's own type parameter shadows an identical
 
   // The method's return type T - should read the method's own (inner)
   // bound, not the enclosing compound's (num | flag).
-  str inner_ret = hover(&reads, doc, 4, 29);
+  str inner_ret = hover(&reads, doc, 4, 33);
   assert contains(inner_ret, "str | dec"), "expected the inner type parameter to shadow the outer one of the same name";
   assert !contains(inner_ret, "num | flag"), "expected the outer bound not to leak through the shadowing inner one";
 }
