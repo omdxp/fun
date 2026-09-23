@@ -54,6 +54,301 @@ fun _is_postfix_position(Vec<Token>* tokens, Token t) flag {
   ret false;
 }
 
+// One generic declaration's own type-parameter names, still open while
+// scanning toward some target position, and (parallel by index) each
+// one's own bound rendered as plain source text ("num | flag", or ""
+// when unconstrained). `body_depth` is the curly-brace depth its own
+// body opened at (-1 until that `{` is actually reached), so the scope
+// is known to close again once that depth is left.
+compound _ActiveGenericScope {
+  Vec<str> names;
+  Vec<str> bounds;
+  num body_depth;
+}
+
+// The number of leading angle characters `s` is made entirely of, or 0
+// if it isn't a pure run of `c` (e.g. `>=` isn't a closer at all). A
+// lexed `>>`/`>>>` (or `<<`) is one token but opens/closes that many
+// angle-bracket levels at once - the same ambiguity the real parser's
+// own `split_angle_closer_token_if_needed`/`split_angle_opener_token_
+// if_needed` resolve by mutating the stream during active parsing;
+// scanning the raw lexer output here needs the same count without that.
+fun _angle_run_length(str s, chr c) num {
+  num i = 0;
+  for i < len(s) {
+    if s[i] != c {
+      ret 0;
+    }
+    i = i + 1;
+  }
+  ret len(s);
+}
+
+// Parses a `<...>` type-parameter list starting at `open_idx` (the `<`
+// token itself), collecting each parameter's bare name and its own
+// bound as plain source text. Sets `close_idx` to the index of the
+// token that closes the outermost level.
+fun _parse_type_param_names(Vec<Token>* tokens, num open_idx, num* close_idx) _ActiveGenericScope {
+  _ActiveGenericScope scope;
+  scope.names.init(4);
+  scope.bounds.init(4);
+  scope.body_depth = -1;
+
+  num depth = 1;
+  num i = open_idx + 1;
+  flag at_param_start = true;
+  flag in_bound = false;
+  StringBuilder current_bound = string_builder_init(16);
+
+  for i < tokens.len {
+    Token t = tokens.get(i);
+
+    if t.type == .Operator {
+      str w = token_word(t);
+      let open_run = _angle_run_length(w, '<');
+      if open_run > 0 {
+        depth = depth + open_run;
+        if in_bound {
+          if current_bound.len() > 0 {
+            current_bound.append(" ");
+          }
+          current_bound.append(w);
+        }
+        i = i + 1;
+        continue;
+      }
+      let close_run = _angle_run_length(w, '>');
+      if close_run > 0 {
+        num remaining = close_run;
+        for remaining > 0 && depth > 1 {
+          depth = depth - 1;
+          remaining = remaining - 1;
+          if in_bound {
+            if current_bound.len() > 0 {
+              current_bound.append(" ");
+            }
+            current_bound.append(">");
+          }
+        }
+        if remaining > 0 {
+          if in_bound {
+            scope.bounds.push(current_bound.build());
+          } elif !at_param_start {
+            scope.bounds.push(substr("", 0, 0));
+          }
+          close_idx[0] = i;
+          ret scope;
+        }
+        i = i + 1;
+        continue;
+      }
+    }
+
+    if depth == 1 {
+      if at_param_start && t.type == .Identifier {
+        scope.names.push(token_word(t));
+        at_param_start = false;
+        i = i + 1;
+        continue;
+      }
+      if token_is_operator(t, ":") {
+        in_bound = true;
+        current_bound = string_builder_init(16);
+        i = i + 1;
+        continue;
+      }
+      if token_is_operator(t, ",") {
+        if in_bound {
+          scope.bounds.push(current_bound.build());
+          in_bound = false;
+        } else {
+          scope.bounds.push(substr("", 0, 0));
+        }
+        at_param_start = true;
+        i = i + 1;
+        continue;
+      }
+      if token_is_operator(t, "=") {
+        // A default type isn't part of the bound; end bound collection
+        // for this parameter the same way ',' does, without closing the
+        // whole list, then skip the default's own tokens up to the next
+        // top-level ',' or this list's own closer.
+        if in_bound {
+          scope.bounds.push(current_bound.build());
+          in_bound = false;
+        } elif !at_param_start {
+          scope.bounds.push(substr("", 0, 0));
+        }
+        i = i + 1;
+        num skip_depth = 1;
+        for i < tokens.len {
+          Token st = tokens.get(i);
+          if st.type == .Operator {
+            str sw = token_word(st);
+            let skip_open = _angle_run_length(sw, '<');
+            if skip_open > 0 {
+              skip_depth = skip_depth + skip_open;
+              i = i + 1;
+              continue;
+            }
+            let skip_close = _angle_run_length(sw, '>');
+            if skip_close > 0 {
+              if skip_close >= skip_depth {
+                break;
+              }
+              skip_depth = skip_depth - skip_close;
+              i = i + 1;
+              continue;
+            }
+          }
+          if skip_depth == 1 && token_is_operator(st, ",") {
+            break;
+          }
+          i = i + 1;
+        }
+        continue;
+      }
+    }
+
+    if in_bound {
+      if current_bound.len() > 0 {
+        current_bound.append(" ");
+      }
+      current_bound.append(token_word(t));
+    }
+    i = i + 1;
+  }
+
+  close_idx[0] = -1;
+  ret scope;
+}
+
+// Frees `s`'s own owned content (its name/bound lists), not `s` itself.
+fun _active_generic_scope_free(_ActiveGenericScope* s) {
+  s.names.free();
+  num i = 0;
+  for i < s.bounds.len {
+    free(s.bounds.data[i]);
+    i = i + 1;
+  }
+  s.bounds.free();
+}
+
+// Whether `tokens[target_idx]` is itself a type-parameter name declared
+// by some `compound`/`impl`/`fun` still open at that position - still a
+// type parameter, not yet substituted for a concrete type - and if so,
+// its own declared bound as plain source text, or "" when unconstrained.
+// `.None` when it isn't a type-parameter reference at all. The
+// innermost enclosing scope is checked first, so a method's own type
+// parameter shadows its enclosing impl's identically-named one.
+fun active_type_param_bound(Vec<Token>* tokens, num target_idx) Option<str> {
+  if target_idx < 0 || target_idx >= tokens.len {
+    ret .None;
+  }
+  str target_word = token_word(tokens.get(target_idx));
+
+  Vec<_ActiveGenericScope> stack;
+  stack.init(4);
+  num depth = 0;
+  num i = 0;
+
+  for i <= target_idx && i < tokens.len {
+    Token t = tokens.get(i);
+
+    if token_is_keyword(t, "compound") || token_is_keyword(t, "impl") ||
+      token_is_keyword(t, "fun") {
+      num j = i + 1;
+      if j < tokens.len && tokens.get(j).type == .Identifier {
+        j = j + 1;
+      }
+      if j < tokens.len && token_is_operator(tokens.get(j), "<") {
+        num close_idx = -1;
+        _ActiveGenericScope scope = _parse_type_param_names(tokens, j, &close_idx);
+        if close_idx > 0 {
+          stack.push(scope);
+          i = close_idx;
+        } else {
+          _active_generic_scope_free(&scope);
+        }
+      }
+    } elif t.type == .Identifier && stack.len > 0 &&
+      stack.data[stack.len - 1].body_depth == depth {
+      // A method's own generic parameter list (`pub convert<T: ...>(...)`)
+      // has no `fun` keyword the branch above would catch, so it's
+      // detected here instead: any identifier sitting directly at an
+      // open impl/compound's own top level (not nested inside a method
+      // body already), immediately followed by `<...>(`, the same shape
+      // `fun name<...>(` has minus the keyword. The trailing `(` is what
+      // tells this apart from an ordinary generic-typed field
+      // (`Vec<num> items;`, followed by a field name, not `(`). `(` is
+      // itself an Operator token here, not a Symbol - parens lex the
+      // same way `<`/`>`/`:` do, unlike `{`/`}`.
+      num j = i + 1;
+      if j < tokens.len && token_is_operator(tokens.get(j), "<") {
+        num close_idx = -1;
+        _ActiveGenericScope scope = _parse_type_param_names(tokens, j, &close_idx);
+        if close_idx > 0 && close_idx + 1 < tokens.len &&
+          token_is_operator(tokens.get(close_idx + 1), "(") {
+          stack.push(scope);
+          i = close_idx;
+        } else {
+          _active_generic_scope_free(&scope);
+        }
+      }
+    } elif token_is_symbol(t, '{') {
+      depth = depth + 1;
+      if stack.len > 0 {
+        num last = stack.len - 1;
+        if stack.data[last].body_depth < 0 {
+          stack.data[last].body_depth = depth;
+        }
+      }
+    } elif token_is_symbol(t, '}') {
+      if stack.len > 0 && stack.data[stack.len - 1].body_depth == depth {
+        _active_generic_scope_free(&stack.data[stack.len - 1]);
+        stack.pop();
+      }
+      if depth > 0 {
+        depth = depth - 1;
+      }
+    }
+
+    i = i + 1;
+  }
+
+  // Innermost scope first, so a method's own type parameter shadows an
+  // identically-named one on its enclosing impl. The matched bound is
+  // copied now, via `substr` (a real heap copy, not the same pointer
+  // `_active_generic_scope_free` is about to free below) rather than
+  // returning a pointer into memory this function itself frees.
+  Option<str> found = .None;
+  num s = stack.len;
+  for s > 0 {
+    s = s - 1;
+    if found.is_some() {
+      continue;
+    }
+    _ActiveGenericScope scope = stack.get(s);
+    num n = 0;
+    for n < scope.names.len {
+      if found.is_none() && equals(scope.names.get(n), target_word) {
+        str bound = scope.bounds.get(n);
+        found = .Some(substr(bound, 0, len(bound)));
+      }
+      n = n + 1;
+    }
+  }
+
+  num f = 0;
+  for f < stack.len {
+    _active_generic_scope_free(&stack.data[f]);
+    f = f + 1;
+  }
+  stack.free();
+
+  ret found;
+}
+
 pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   Analyzed read = cache.of(doc);
   if !read.lexed {
@@ -232,6 +527,20 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       if !equals(alias_target, "") {
         ret _import_hover_result(alias_target, span_of(t, doc.text));
       }
+    }
+    // A bare generic type-parameter name (`T`) is never a real declared
+    // symbol either - it stands for whatever an instantiation supplies,
+    // the same reason it never resolves via `resolve_at` above - so
+    // this is checked last, only once every other identifier shape has
+    // already come up empty.
+    let type_param = active_type_param_bound(&tokens, index_of_token(&tokens, t));
+    if type_param.is_some() {
+      str bound = type_param.unwrap();
+      str detail = format("Type parameter `{str}`", token_word(t));
+      if !equals(bound, "") {
+        detail = format("{str}, bound to `{str}`", detail, bound);
+      }
+      ret _hover_result(detail, span_of(t, doc.text));
     }
     ret NO_HOVER;
   }

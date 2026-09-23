@@ -7341,6 +7341,94 @@ test "hover on a method of a type written without its defaulted argument matches
   assert contains(hover(&reads, doc, 9, 12), "num b"), "expected a field typed by a defaulted parameter to read as its filled-in type";
 }
 
+test "hover on a bare generic type-parameter name shows it's a type parameter, with its bound" {
+  str src = `compound Atomic<T: num | flag> {
+  `  num bits;
+  `}
+  `impl Atomic<T> {
+  `  pub load() T {
+  `    T out;
+  `    ret out;
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///type_param_hover.fn";
+  doc.path = "type_param_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // "T" in "compound Atomic<T: num | flag> {".
+  str decl = hover(&reads, doc, 0, 16);
+  assert contains(decl, "Type parameter"), "expected the compound's own type-parameter declaration to hover as one";
+  assert contains(decl, "num | flag"), "expected the declared bound to show";
+
+  // "T" in "impl Atomic<T> {" - unconstrained here (the bound isn't
+  // repeated on the impl block itself in this source).
+  str impl_t = hover(&reads, doc, 3, 12);
+  assert contains(impl_t, "Type parameter"), "expected the impl's own type parameter to hover as one too";
+
+  // "T" as a method's own return type.
+  str ret_t = hover(&reads, doc, 4, 13);
+  assert contains(ret_t, "Type parameter"), "expected a return-type reference to the type parameter to hover as one";
+
+  // "T" as a local variable's declared type - this exact case used to
+  // crash the server outright (freeing a non-heap-allocated bound
+  // string), not just fail to hover; regression coverage for that, not
+  // just the missing-hover gap.
+  str local_t = hover(&reads, doc, 5, 4);
+  assert contains(local_t, "Type parameter"), "expected a local's declared type to hover as the type parameter too";
+}
+
+test "hover on a bounded generic function's own type parameter shows the bound at every reference" {
+  str src = `fun identity<T: num | str>(T x) T {
+  `  ret x;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fn_type_param_hover.fn";
+  doc.path = "fn_type_param_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str decl = hover(&reads, doc, 0, 13);
+  assert contains(decl, "num | str"), "expected the declaration site to show the bound";
+  str param_type = hover(&reads, doc, 0, 27);
+  assert contains(param_type, "num | str"), "expected the parameter's own type reference to show the bound too";
+  str ret_type = hover(&reads, doc, 0, 32);
+  assert contains(ret_type, "num | str"), "expected the return-type reference to show the bound too";
+}
+
+test "hover on an inner generic method's own type parameter shadows an identically-named outer one" {
+  str src = `compound Outer<T: num | flag> {
+  `  T value;
+  `}
+  `impl Outer<T> {
+  `  pub convert<T: str | dec>(T x) T {
+  `    ret x;
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shadow_type_param_hover.fn";
+  doc.path = "shadow_type_param_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // The method's own <T: str | dec> declaration.
+  str inner_decl = hover(&reads, doc, 4, 14);
+  assert contains(inner_decl, "str | dec"), "expected the method's own type parameter's bound";
+
+  // The method's return type T - should read the method's own (inner)
+  // bound, not the enclosing compound's (num | flag).
+  str inner_ret = hover(&reads, doc, 4, 33);
+  assert contains(inner_ret, "str | dec"), "expected the inner type parameter to shadow the outer one of the same name";
+  assert !contains(inner_ret, "num | flag"), "expected the outer bound not to leak through the shadowing inner one";
+}
+
 test "hover on a variant and its bindings reads with the default filled in, in ret and fit" {
   str src = `enum Res<T, E = str> { Ok(T), Err(E) }
   `fun halve(num x) Res<num> {
