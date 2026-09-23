@@ -16,6 +16,7 @@ use std.string;
 use std.option;
 use std.io;
 use std.range;
+use std.ctype;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -1189,6 +1190,25 @@ impl Codegen {
     if rdt.is_tuple {
       ret self.ensure_tuple_instantiated(rdt);
     }
+    // A bare function type's `type_str` is only ever the parser's
+    // `"fun(...)"` placeholder text (`parse_fn_type_datatype` sets it
+    // deliberately, since ordinary emission reads `fn_sig` directly and
+    // never looks at `type_str`). A real, fully concrete function type
+    // (used directly as a generic argument, `Option<HttpHandler>`, or
+    // reached through a generic method's own substituted return type)
+    // gets its own real mangled typedef name here.
+    // `mangled_fn_type_name` itself returns `.None` when the signature
+    // is still abstract (an unsubstituted generic parameter like
+    // `Comparator<T>`'s own `T`, read while merely scanning `Vec<T>`'s
+    // declaration) - falling through to the placeholder text below is
+    // harmless there, since nothing real reads it before an actual
+    // instantiation resolves it properly.
+    if rdt.has_fn_sig && rdt.fn_sig != nil {
+      let fn_type_name = self.mangled_fn_type_name(rdt);
+      if fn_type_name.is_some() {
+        ret fn_type_name;
+      }
+    }
     if rdt.generic_args.len == 0 {
       ret .Some(rdt.type_str);
     }
@@ -1203,6 +1223,122 @@ impl Codegen {
     // A concrete instantiation of a generic quirk used directly as a
     // type: neither a compound nor an enum template recognizes it.
     ret self.ensure_quirk_instantiated(rdt);
+  }
+
+  // True for a still-abstract, single-uppercase-letter generic type
+  // parameter (`T`, `K`, `V`, `A`, `R`, `E`, ... - every generic template
+  // in this codebase names its own type params this way) that has no
+  // matching substitution applied yet. There is no registry of every
+  // declared type name still reliably populated at every point this
+  // needs to be checked (a plain compound/enum only gets registered when
+  // FIRST emitted, which can be later than this check), so this is a
+  // pragmatic proxy: a real type named a single uppercase letter would
+  // be indistinguishable from an unsubstituted parameter here, but
+  // nothing in this codebase does that, and the fallback on a false
+  // positive is only the same placeholder text this call site always
+  // used to return anyway, not a new failure mode.
+  _dtype_is_bare_generic_param(DataType dt) flag {
+    if dt.has_fn_sig || dt.is_tuple || dt.generic_args.len > 0 {
+      ret false;
+    }
+    ret len(dt.type_str) == 1 && is_upper(dt.type_str[0]);
+  }
+
+  // Synthesizes (and, on first use, emits) the C function-pointer typedef
+  // backing a bare function type used as a generic argument, mangled
+  // `__Fn__<ret>[_ptrN]__<param1>[_ptrN]...`. Once emitted it's an
+  // ordinary typedef'd pointer type like any other - ensuing usage sites
+  // (a substituted `T value;` field, say) need no function-type-specific
+  // handling at all.
+  mangled_fn_type_name(DataType dt) Option<str> {
+    let sig = dt.fn_sig;
+    // Not every function type seen here is real yet: `Comparator<T>`
+    // read off `Vec<T>.sort_by`'s own parameter mid-template-registration
+    // (before any concrete call site exists) still has its bare, unsubstituted
+    // `T` sitting in `sig.params` - there's no real function type to name
+    // yet, and synthesizing a typedef from the literal text "T" would
+    // itself be invalid C. `.None` here lets every caller fall back to
+    // the harmless placeholder text, the same as before this function
+    // existed, for that abstract case.
+    let r_rdt = self.resolve_type_subst(*sig.rtype);
+    if self._dtype_is_bare_generic_param(r_rdt) {
+      ret .None;
+    }
+    for p0 : sig.params {
+      if self._dtype_is_bare_generic_param(self.resolve_type_subst(*p0)) {
+        ret .None;
+      }
+    }
+
+    StringBuilder name_sb = string_builder_init(24);
+    name_sb.append("__Fn");
+    let rname = self.resolve_type_name(*sig.rtype)?;
+    name_sb.append("__");
+    name_sb.append(rname);
+    flag r_ptr = dtype_is_pointer(r_rdt);
+    num r_pdepth = r_rdt.pointer_depth;
+    if r_ptr && r_pdepth == 0 {
+      r_pdepth = 1;
+    }
+    if r_ptr {
+      name_sb.append("_ptr");
+      name_sb.append(format_num(r_pdepth));
+    }
+    for p : sig.params {
+      let pname = self.resolve_type_name(*p)?;
+      name_sb.append("__");
+      name_sb.append(pname);
+      let p_rdt = self.resolve_type_subst(*p);
+      flag p_ptr = dtype_is_pointer(p_rdt);
+      num p_pdepth = p_rdt.pointer_depth;
+      if p_ptr && p_pdepth == 0 {
+        p_pdepth = 1;
+      }
+      if p_ptr {
+        name_sb.append("_ptr");
+        name_sb.append(format_num(p_pdepth));
+      }
+    }
+    str mangled_name = name_sb.build();
+
+    num fei = 0;
+    for fei < self.emitted_generic_instantiations.len {
+      if equals(self.emitted_generic_instantiations.get(fei), mangled_name) {
+        ret .Some(mangled_name);
+      }
+      fei = fei + 1;
+    }
+    self.emitted_generic_instantiations.push(mangled_name);
+
+    CodegenState fn_scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    self.state = &fn_scratch;
+    self.state.write("typedef ");
+    let rt = self.write_type(*sig.rtype);
+    if rt.is_none() {
+      self.state = saved_state;
+      ret .None;
+    }
+    self.state.write(" (*");
+    self.state.write(mangled_name);
+    self.state.write(")(");
+    flag first = true;
+    for p2 : sig.params {
+      if !first {
+        self.state.write(", ");
+      }
+      first = false;
+      let pt = self.write_type(*p2);
+      if pt.is_none() {
+        self.state = saved_state;
+        ret .None;
+      }
+    }
+    self.state.write(");\n");
+    self.state = saved_state;
+    self.emit_hoisted(fn_scratch.out.build());
+
+    ret .Some(mangled_name);
   }
 
   // Synthesizes (and, on first use, emits) the C struct backing a tuple
@@ -1481,13 +1617,18 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 || arg.is_tuple {
+      if arg.generic_args.len > 0 || arg.is_tuple || arg.has_fn_sig {
         // Resolved (and, on first use, emitted) first, so it's already
         // hoisted before the outer type's mangled name is built. A
         // tuple argument (`Vec<(num, str)>`) has no `generic_args` of
         // its own (its members live in `tuple_members` instead), so
         // `arg.type_str` alone (empty for a tuple) would otherwise
-        // silently mangle to nothing here.
+        // silently mangle to nothing here. A bare function-type argument
+        // (`Option<HttpHandler>`) is the same shape of gap - its
+        // `type_str` is only ever the parser's `"fun(...)"` placeholder
+        // text, never a real name; `resolve_type_name` synthesizes a
+        // real one for a concrete function type, or falls back to that
+        // same placeholder harmlessly if it's still abstract.
         arg_name = self.resolve_type_name(*arg)?;
       }
       name_sb.append("__");
@@ -1773,11 +1914,12 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 || arg.is_tuple {
+      if arg.generic_args.len > 0 || arg.is_tuple || arg.has_fn_sig {
         // A nested generic argument resolves first, recursing to
         // arbitrary depth. A tuple argument's own members live in
         // `tuple_members`, not `generic_args`, so it needs the same
-        // early-resolve treatment here too.
+        // early-resolve treatment here too. Same for a bare function-type
+        // argument - see the identical branch in `ensure_compound_instantiated`.
         let nested_name = self.resolve_type_name(*arg);
         if nested_name.is_none() {
           ret .None;
@@ -1958,9 +2100,19 @@ impl Codegen {
     Vec<flag> q_arg_is_pointer;
     q_arg_is_pointer.init(0);
     for qarg : dt.generic_args {
+      str qarg_name = qarg.type_str;
+      if qarg.generic_args.len > 0 || qarg.is_tuple || qarg.has_fn_sig {
+        // Same recurring gap as `ensure_compound_instantiated`/
+        // `ensure_enum_instantiated`: a nested-generic, tuple, or bare
+        // function-type argument's `type_str` alone isn't a real name.
+        let q_nested_name = self.resolve_type_name(*qarg);
+        if q_nested_name.is_some() {
+          qarg_name = q_nested_name.unwrap();
+        }
+      }
       qname_sb.append("__");
-      qname_sb.append(qarg.type_str);
-      q_arg_type_names.push(qarg.type_str);
+      qname_sb.append(qarg_name);
+      q_arg_type_names.push(qarg_name);
       q_arg_is_pointer.push(dtype_is_pointer(*qarg));
     }
     str q_mangled = qname_sb.build();
@@ -7035,6 +7187,25 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits `.tag_value()`'s builtin body: any enum's own underlying C
+  // discriminant, read back as `num`. A plain enum already IS that value
+  // (C represents it as a bare int); a tagged-union enum keeps it on its
+  // own `.tag` field instead, `->tag` through a pointer receiver -
+  // mirroring `emit_fit_enum_branch`'s identical `.tag`/`->tag` choice.
+  emit_enum_tag_value(ChainResolution recv_r) Option<CodegenErrorKind> {
+    self.state.write("((int64_t)(");
+    self.state.write(recv_r.text);
+    if self.enum_is_tagged_union_named(recv_r.type_name) {
+      if recv_r.is_pointer {
+        self.state.write("->tag");
+      } else {
+        self.state.write(".tag");
+      }
+    }
+    self.state.write("))");
+    ret .None;
+  }
+
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(.InvalidNode);
@@ -7044,6 +7215,16 @@ impl Codegen {
     fit recv_e.right.kind {
       .Identifier(name) -> { method_name = name; }
       _ -> { ret .Some(.UnsupportedNode); }
+    }
+
+    if equals(method_name, "tag_value") && self.enum_names.contains(recv_r.type_name) {
+      Vec<Node*> tv_args;
+      tv_args.init(0);
+      defer tv_args.free();
+      self.flatten_call_args(args_node, &tv_args);
+      if tv_args.len == 0 {
+        ret self.emit_enum_tag_value(recv_r);
+      }
     }
 
     if self.quirk_names.contains(recv_r.type_name) {
@@ -10732,25 +10913,38 @@ impl Codegen {
     str subj_name,
     flag subj_is_pointer,
     str enum_name,
-    str variant_name,
+    Vec<str> variant_names,
     FitBranch br,
     flag wrote_branch
   ) Option<CodegenErrorKind> {
+    // Bindings only ever come from the arm's own first pattern, which
+    // still names exactly one variant even when other, binding-free
+    // patterns are OR-ed onto the same arm (a comma-separated arm's
+    // later patterns are always plain, see the parser's own
+    // `_parse_fit_arm`); `variant_names.get(0)` is always that one.
+    str variant_name = variant_names.get(0);
     if wrote_branch {
       self.state.write(" else if (");
     } else {
       self.state.write("if (");
     }
-    self.state.write(subj_name);
-    if subj_is_pointer {
-      self.state.write("->");
-    } else {
-      self.state.write(".");
+    num vi = 0;
+    for vi < variant_names.len {
+      if vi > 0 {
+        self.state.write(" || ");
+      }
+      self.state.write(subj_name);
+      if subj_is_pointer {
+        self.state.write("->");
+      } else {
+        self.state.write(".");
+      }
+      self.state.write("tag == ");
+      self.state.write(enum_name);
+      self.state.write("_");
+      self.state.write(variant_names.get(vi));
+      vi = vi + 1;
     }
-    self.state.write("tag == ");
-    self.state.write(enum_name);
-    self.state.write("_");
-    self.state.write(variant_name);
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
     if br.has_bindings {
@@ -10819,7 +11013,7 @@ impl Codegen {
     str subj_name,
     flag subj_is_pointer,
     str enum_name,
-    str variant_name,
+    Vec<str> variant_names,
     FitBranch br,
     flag wrote_branch
   ) Option<CodegenErrorKind> {
@@ -10828,17 +11022,24 @@ impl Codegen {
     } else {
       self.state.write("if (");
     }
-    if subj_is_pointer {
-      self.state.write("(*");
-      self.state.write(subj_name);
-      self.state.write(")");
-    } else {
-      self.state.write(subj_name);
+    num pvi = 0;
+    for pvi < variant_names.len {
+      if pvi > 0 {
+        self.state.write(" || ");
+      }
+      if subj_is_pointer {
+        self.state.write("(*");
+        self.state.write(subj_name);
+        self.state.write(")");
+      } else {
+        self.state.write(subj_name);
+      }
+      self.state.write(" == ");
+      self.state.write(enum_name);
+      self.state.write("_");
+      self.state.write(variant_names.get(pvi));
+      pvi = pvi + 1;
     }
-    self.state.write(" == ");
-    self.state.write(enum_name);
-    self.state.write("_");
-    self.state.write(variant_name);
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
     let berr = self.emit_body(*br.body);
@@ -11223,6 +11424,44 @@ impl Codegen {
               }
             }
             if have_enum_name && has_variant {
+              // Any comma-separated alternative patterns after the first
+              // (`.Red, .Yellow -> ...`) must name a variant of this same
+              // enum; each is resolved the same way the first pattern
+              // just was, plain `.Identifier` shorthand only (the parser
+              // only ever populates `or_conditions` for a non-destructuring
+              // first pattern).
+              Vec<str> variant_names;
+              variant_names.init(1);
+              defer variant_names.free();
+              variant_names.push(variant_name);
+              flag or_ok = true;
+              for or_cond : br.or_conditions {
+                str or_variant = "";
+                flag have_or_variant = false;
+                fit or_cond.kind {
+                  .Expression(or_dot_e) -> {
+                    if equals(or_dot_e.op, ".") && or_dot_e.has_right {
+                      fit or_dot_e.right.kind {
+                        .Identifier(ovn) -> {
+                          or_variant = ovn;
+                          have_or_variant = true;
+                        }
+                        _ -> {}
+                      }
+                    }
+                  }
+                  _ -> {}
+                }
+                if !have_or_variant ||
+                  !self.enum_has_variant(effective_enum_name, or_variant) {
+                  or_ok = false;
+                  break;
+                }
+                variant_names.push(or_variant);
+              }
+              if !or_ok {
+                ret .Some(.UnsupportedNode);
+              }
               // A plain (payload-less) enum has no `.tag` field, so it
               // needs a different comparison from a tagged union's
               // `.tag == ...`.
@@ -11231,7 +11470,7 @@ impl Codegen {
                   subj_name,
                   subj_is_pointer,
                   effective_enum_name,
-                  variant_name,
+                  variant_names,
                   br,
                   wrote_branch
                 );
@@ -11246,7 +11485,7 @@ impl Codegen {
                   subj_name,
                   subj_is_pointer,
                   effective_enum_name,
-                  variant_name,
+                  variant_names,
                   br,
                   wrote_branch
                 );
@@ -12836,6 +13075,16 @@ impl Codegen {
       self.state.write(e.name);
       self.state.write("_");
       self.state.write(v.name);
+      // An explicit discriminant (`Variant = 3;`) applies here the same
+      // way the plain (payload-free) enum branch above already honors
+      // it - a variant's own tag ordinal is independent of whether it
+      // happens to carry a payload, that's a separate union member
+      // entirely, so there's no reason this should only work for a
+      // fully payload-free enum the way it used to.
+      if v.has_value {
+        self.state.write(" = ");
+        self.state.write(format_num(v.value));
+      }
       self.state.write(",\n");
     }
     self.state.write("} ");
@@ -15269,11 +15518,34 @@ impl Codegen {
     `#ifndef socket
     `#define socket __fun_win_socket
     `#endif
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  DWORD __fun_sst_tv = (DWORD)ms;
+    `  int __fun_sst_rc1 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  (void)fd;
+    `  return 0LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
     `#include <arpa/inet.h>
     `#include <unistd.h>
+    `#include <sys/time.h>
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  struct timeval __fun_sst_tv;
+    `  __fun_sst_tv.tv_sec = ms / 1000;
+    `  __fun_sst_tv.tv_usec = (ms % 1000) * 1000;
+    `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  int __fun_ssr_one = 1;
+    `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
+    `}
     `#endif
     ``);
     // A non-fork program can still deadlock on a channel wait, and
@@ -16829,6 +17101,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   some_branch.bindings = some_bindings;
   some_branch.has_bindings = true;
   some_branch.is_tuple_pattern = false;
+  some_branch.or_conditions.init(0);
 
   FitStmtNode fitn = fit_stmt_node_new();
   fitn.exp = fit_subj;
@@ -20179,11 +20452,34 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#ifndef socket
     `#define socket __fun_win_socket
     `#endif
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  DWORD __fun_sst_tv = (DWORD)ms;
+    `  int __fun_sst_rc1 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  (void)fd;
+    `  return 0LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
     `#include <arpa/inet.h>
     `#include <unistd.h>
+    `#include <sys/time.h>
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  struct timeval __fun_sst_tv;
+    `  __fun_sst_tv.tv_sec = ms / 1000;
+    `  __fun_sst_tv.tv_usec = (ms % 1000) * 1000;
+    `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
+    `static inline long long __fun_socket_set_reuseaddr(long long fd) {
+    `  int __fun_ssr_one = 1;
+    `  return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &__fun_ssr_one, sizeof(__fun_ssr_one)) == 0 ? 0LL : -1LL;
+    `}
     `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;

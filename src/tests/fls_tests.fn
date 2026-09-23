@@ -411,6 +411,46 @@ test "hover documents sizeof, never a real declared symbol" {
   assert contains(hovered, "compile time"), "expected the doc explaining it's compile-time";
 }
 
+test "hover documents tag_value() on an enum receiver, never a real declared symbol" {
+  // Same contextual-only shape as sizeof/fork - `.tag_value()` has no
+  // `impl` anywhere for a real declaration to resolve to, plain or
+  // tagged-union alike, so both receiver shapes need their own check.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tag_value_hover.fn";
+  doc.path = "tag_value_hover.fn";
+  doc.text = `enum Color { Red, Green, Blue }
+  `enum Status { Ok, Unknown(num) }
+  `fun main() num {
+  `  Color c = .Red;
+  `  Status s = .Ok;
+  `  num a = c.tag_value();
+  `  num b = s.tag_value();
+  `  ret a + b;
+  `}`;
+  doc.version = 1;
+
+  str hovered_plain = hover(&reads, doc, 5, 12);
+  assert contains(hovered_plain, "tag_value() num"), "expected the tag_value() num skeleton for a plain enum receiver";
+  str hovered_tagged = hover(&reads, doc, 6, 12);
+  assert contains(hovered_tagged, "tag_value() num"), "expected the tag_value() num skeleton for a tagged-union receiver";
+
+  // A plain local named `tag_value` (not a `.tag_value()` method call at
+  // all) must resolve as itself, not accidentally swallowed by this
+  // builtin check.
+  Document doc2;
+  doc2.uri = "file:///tag_value_local.fn";
+  doc2.path = "tag_value_local.fn";
+  doc2.text = `fun main() num {
+  `  num tag_value = 3;
+  `  ret tag_value;
+  `}`;
+  doc2.version = 1;
+  str hovered_local = hover(&reads, doc2, 2, 6);
+  assert !contains(hovered_local, "Any enum's own"), "expected an ordinary local, not the builtin doc";
+}
+
 test "PACKAGE_NAME and PACKAGE_VERSION resolve as ordinary declared constants, from this workspace's own fun.toml" {
   // Neither is written anywhere in source: fun build injects both as
   // synthetic AST nodes ahead of the program's own declarations before

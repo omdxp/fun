@@ -1352,6 +1352,40 @@ test "a self-recursive CONSTRAINED generic function calling itself with the abst
   assert contains(out, "sum_down__num((n - 1))"), "expected the recursive call to reuse it";
 }
 
+// A bare function type used AS a generic argument (`Option<Handler>`) is a
+// different shape from a generic function-type alias used as a parameter
+// type (the test just below): `resolve_type_name` used to fall through to
+// `type_str`, which for a function type is only ever the parser's
+// `"fun(...)"` placeholder text, colliding every distinct function type
+// into the same invalid mangled name.
+test "a bare function type used as a generic argument gets a real mangled typedef, not a placeholder" {
+  str src = `use std.c.io;
+  `enum Option<T> { Some(T), None }
+  `als Handler = fun(num) num;
+  `fun dbl(num x) num { ret x * 2; }
+  `fun mk() Option<Handler> { ret .Some(dbl); }
+  `fun main() num {
+  `  fit mk() {
+  `    .Some(f) -> { printf("%lld\n", f(4)); }
+  `    .None -> {}
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(
+    src,
+    "a bare function type used as a generic argument gets a real mangled typedef, not a placeholder"
+  );
+  assert !contains(out, "fun(..."), "expected no leftover 'fun(...)' placeholder in the mangled name";
+  assert contains(
+    out,
+    "typedef int64_t (*__Fn__num__num)(int64_t);"
+  ), "expected a real function-pointer typedef";
+  assert contains(
+    out,
+    "Option____Fn__num__num"
+  ), "expected the outer Option instantiation to mangle against the real typedef name";
+}
+
 test "a generic function-type alias emits the real callback signature, not the alias name" {
   str src = `use std.c.io;
   `als Callback<A, R> = fun(A) R;

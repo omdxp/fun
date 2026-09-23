@@ -2407,6 +2407,17 @@ impl Checker {
       .Expression(callee) -> {
         if equals(callee.op, ".") {
           method = _callee_name(callee.right);
+          // `.tag_value()` is a builtin available on any enum receiver,
+          // plain or tagged-union, with no `impl` required - the
+          // discriminant every enum already carries in C, read back as
+          // `num`. Checked before the ordinary `impl`-method lookup so
+          // it works even when nothing was ever written for it.
+          if equals(method, "tag_value") && args.len == 0 {
+            let recv_t = self.infer(callee.left, env);
+            if self.enum_names.has(self.canonical_type_name(recv_t.name)) {
+              ret checked_of(.Num);
+            }
+          }
           resolved = self.resolve_method_call_with_receiver(callee, env);
         }
       }

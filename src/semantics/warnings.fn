@@ -1126,6 +1126,22 @@ impl Analysis {
       if !equals(named, "") {
         over = named;
       }
+      // A comma-separated arm (`.Red, .Yellow -> ...`) covers every
+      // named alternative, not just its first pattern.
+      for or_cond : branch.or_conditions {
+        str or_variant = _pattern_variant(or_cond);
+        if equals(or_variant, "") {
+          continue;
+        }
+        if covered.has(or_variant) {
+          self.report(
+            .FitUnreachableBranch,
+            format("branch '{str}' is already covered by an earlier one", or_variant),
+            stmt
+          );
+        }
+        covered.add(or_variant);
+      }
     }
     if f.has_default_branch {
       if truths == 2 {

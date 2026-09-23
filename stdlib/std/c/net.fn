@@ -44,3 +44,21 @@ pub fun ntohl(num netlong) num;
 // Address parsing
 // Parses an IPv4 address string, returning it in network byte order (C semantics).
 pub fun inet_addr(str cp) num;
+
+// Sets both the receive and send timeout on `fd` to `ms` milliseconds (0
+// disables the timeout, the socket's own default). A compiler-emitted
+// shim, not a direct libc binding: the real socket option's value shape
+// differs by platform (a `struct timeval` on POSIX, a plain millisecond
+// count on Windows) even though the option itself is conceptually the
+// same on both, the same reason `std.c.atomic`'s operations are shims
+// rather than plain bindings. Returns 0 on success, -1 on failure.
+pub fun __fun_socket_set_timeout(num fd, num ms) num;
+
+// Marks a listening socket's address reusable, so a fresh bind to the
+// same port doesn't wait out the previous socket's own TIME_WAIT state.
+// POSIX only: on Windows SO_REUSEADDR has different, more permissive
+// semantics (it can let a bind succeed against a port another socket is
+// still actively using), so this shim is a deliberate no-op there -
+// Windows doesn't block an immediate rebind the way POSIX does anyway.
+// Returns 0 on success, -1 on failure (always 0 on Windows).
+pub fun __fun_socket_set_reuseaddr(num fd) num;

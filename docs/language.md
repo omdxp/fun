@@ -352,6 +352,24 @@ fun main() {
   lowering.
 - The same `fit_non_exhaustive` check applies: cover every variant or add
   a `_` catch-all.
+- Any variant, payload-carrying or not, may declare its own explicit
+  discriminant (`Ok = 200, NotFound = 404, Unknown(num) = -1`) - useful
+  when the numbers mean something (a wire status code) rather than being
+  arbitrary. A variant with no explicit value keeps the next ordinal
+  after the previous one, same as a plain enum. Read any enum's own
+  discriminant back with `.tag_value() num`, a builtin available on every
+  enum (plain or tagged-union) with no `impl` of its own needed:
+
+  ```fun
+  enum HttpStatus { Ok = 200, NotFound = 404, Unknown(num) = -1 }
+
+  fun code(HttpStatus s) num {
+    fit s {
+      .Unknown(c) -> { ret c; }
+      _ -> { ret s.tag_value(); }
+    }
+  }
+  ```
 
 ### Option/Result Propagation
 
@@ -1098,9 +1116,27 @@ See Enums above for `fit` over data-carrying (tagged-union) enums.
 
 `fit` matches one subject at a time; it has no multi-value/tuple form. A
 comma inside one arm's condition (`0, 1 -> { ... }`) is not that - it's
-an OR of several patterns against the same single subject. To match on
-several values together, build a short combined key first and `fit` on
-that:
+an OR of several patterns against the same single subject, and works the
+same way for an enum's dot-shorthand (`.Red, .Blue -> { ... }`):
+
+```fun
+fun warm(Color c) flag {
+  fit c {
+    .Red, .Green -> { ret true; }
+    .Blue -> { ret false; }
+  }
+}
+```
+
+Each named alternative counts as its own arm for `fit_non_exhaustive`
+purposes, so a comma-separated arm covering every remaining variant is
+still exhaustive with no `_` needed. The comma form is restricted to
+plain (non-destructuring) patterns - an alternative that binds a payload
+(`.Circle(r), .Rect(w, h) -> { ... }`) isn't allowed, since the arm body
+would need consistent bindings across every alternative.
+
+To match on several values together, build a short combined key first and
+`fit` on that:
 
 ```fun
 str key = format("{chr}{chr}{chr}", a, b, c);

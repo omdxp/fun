@@ -739,6 +739,20 @@ test "plain (payload-free) enum still lowers to a C enum" {
   assert !contains(out, "Color_tag"), "expected no tagged-union discriminant";
 }
 
+// A tagged-union enum's own `_tag` enum used to silently drop an explicit
+// discriminant (`Variant = N`), always numbering variants by ordinal
+// instead - only the payload-free branch above honored it. A variant's
+// own tag ordinal is independent of whether it happens to carry a
+// payload, so this needs to work here too.
+test "tagged-union enum honors an explicit discriminant on the _tag enum" {
+  str src = `use std.c.io;
+  `enum Status { Ok = 200, NotFound = 404, Unknown(num) }
+  `fun main() num { Status s = Status.Ok; ret 0; }`;
+  let out = emit_c(src, "tagged-union enum honors an explicit discriminant on the _tag enum");
+  assert contains(out, "Status_Ok = 200"), "expected the first explicit discriminant";
+  assert contains(out, "Status_NotFound = 404"), "expected the second explicit discriminant";
+}
+
 test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
   str src = `use std.c.io;
   `quirk Speaker { speak() str; }
