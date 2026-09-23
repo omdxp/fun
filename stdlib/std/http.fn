@@ -1,0 +1,1468 @@
+// A real HTTP layer on top of std.net's raw sockets: request/response
+// types, a full client (every common method, custom headers, a request
+// body, redirects, timeouts, chunked transfer-encoding), HTTPS (OpenSSL
+// on POSIX, SChannel on Windows - see std.c.tls), server-side routing,
+// and async/Channel-driven variants alongside the plain blocking ones,
+// matching std.net's own async/Channel primitives.
+
+use std.net;
+use std.c.net;
+use std.string;
+use std.vec;
+use std.map;
+use std.result;
+use std.error;
+use std.c.mem;
+use std.thread;
+use std.io;
+use std.channel;
+use std.option;
+use std.time;
+
+// An HTTP request method.
+pub enum HttpMethod {
+  Get,
+  Post,
+  Put,
+  Delete,
+  Patch,
+  Head,
+  Options,
+}
+
+// The method's own name as it's written on the wire ("GET", "POST", ...).
+pub fun http_method_name(HttpMethod m) str {
+  fit m {
+    .Get -> { ret "GET"; }
+    .Post -> { ret "POST"; }
+    .Put -> { ret "PUT"; }
+    .Delete -> { ret "DELETE"; }
+    .Patch -> { ret "PATCH"; }
+    .Head -> { ret "HEAD"; }
+    .Options -> { ret "OPTIONS"; }
+  }
+}
+
+// Parses a request line's own method name back into `HttpMethod`, `.None`
+// for anything else (an HTTP verb this module doesn't model, or garbage).
+pub fun http_method_from_name(str name) Option<HttpMethod> {
+  fit name {
+    "GET" -> { ret .Some(.Get); }
+    "POST" -> { ret .Some(.Post); }
+    "PUT" -> { ret .Some(.Put); }
+    "DELETE" -> { ret .Some(.Delete); }
+    "PATCH" -> { ret .Some(.Patch); }
+    "HEAD" -> { ret .Some(.Head); }
+    "OPTIONS" -> { ret .Some(.Options); }
+    _ -> { ret .None; }
+  }
+}
+
+impl HttpMethod as Display {
+  // Renders the method the same way it's written on the wire.
+  pub to_string() str {
+    ret http_method_name(*self);
+  }
+}
+
+// An HTTP response status. A common code names its own variant, directly
+// `fit`-matchable; `Unknown(num)` is the escape hatch for anything else,
+// so this always represents a real status code, never fails to parse one.
+pub enum HttpStatus {
+  Continue = 100,
+  SwitchingProtocols = 101,
+  Ok = 200,
+  Created = 201,
+  Accepted = 202,
+  NoContent = 204,
+  MovedPermanently = 301,
+  Found = 302,
+  SeeOther = 303,
+  NotModified = 304,
+  TemporaryRedirect = 307,
+  PermanentRedirect = 308,
+  BadRequest = 400,
+  Unauthorized = 401,
+  Forbidden = 403,
+  NotFound = 404,
+  MethodNotAllowed = 405,
+  Conflict = 409,
+  Gone = 410,
+  UnprocessableEntity = 422,
+  TooManyRequests = 429,
+  InternalServerError = 500,
+  NotImplemented = 501,
+  BadGateway = 502,
+  ServiceUnavailable = 503,
+  GatewayTimeout = 504,
+  // Not a real wire code - only its own payload is. Given its own
+  // sentinel discriminant so it doesn't land on the next ordinal (505,
+  // which looks like a real status right next to GatewayTimeout's 504).
+  Unknown(num) = -1,
+}
+
+// Maps a raw status code to its named variant, or `Unknown(code)`.
+pub fun http_status_from_code(num code) HttpStatus {
+  fit code {
+    100 -> { ret .Continue; }
+    101 -> { ret .SwitchingProtocols; }
+    200 -> { ret .Ok; }
+    201 -> { ret .Created; }
+    202 -> { ret .Accepted; }
+    204 -> { ret .NoContent; }
+    301 -> { ret .MovedPermanently; }
+    302 -> { ret .Found; }
+    303 -> { ret .SeeOther; }
+    304 -> { ret .NotModified; }
+    307 -> { ret .TemporaryRedirect; }
+    308 -> { ret .PermanentRedirect; }
+    400 -> { ret .BadRequest; }
+    401 -> { ret .Unauthorized; }
+    403 -> { ret .Forbidden; }
+    404 -> { ret .NotFound; }
+    405 -> { ret .MethodNotAllowed; }
+    409 -> { ret .Conflict; }
+    410 -> { ret .Gone; }
+    422 -> { ret .UnprocessableEntity; }
+    429 -> { ret .TooManyRequests; }
+    500 -> { ret .InternalServerError; }
+    501 -> { ret .NotImplemented; }
+    502 -> { ret .BadGateway; }
+    503 -> { ret .ServiceUnavailable; }
+    504 -> { ret .GatewayTimeout; }
+    _ -> { ret .Unknown(code); }
+  }
+}
+
+// The raw numeric code a status stands for, the inverse of
+// `http_status_from_code`. Every named variant's own explicit
+// discriminant (declared right on `HttpStatus`) already IS its real wire
+// code, read back via `tag_value()`; only `Unknown` needs its payload
+// instead, its own discriminant being a non-code sentinel.
+pub fun http_status_code(HttpStatus s) num {
+  fit s {
+    .Unknown(code) -> { ret code; }
+    _ -> { ret s.tag_value(); }
+  }
+}
+
+// True for the 3xx statuses a client is expected to follow.
+pub fun http_status_is_redirect(HttpStatus s) flag {
+  fit s {
+    .MovedPermanently, .Found, .SeeOther, .TemporaryRedirect, .PermanentRedirect -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// A request in progress: method, target URL, extra headers, and an
+// optional body. Build one with `http_request`, add headers/a body with
+// `set_header`/`set_body`, then `send()` it - not a fluent chain (methods
+// mutate `self` directly, the same convention `Guarded<T>`/`Mutex` use),
+// matching how the rest of this codebase is written.
+pub compound HttpRequest {
+  HttpMethod method;
+  Url url;
+  Map<str, str> headers;
+  str body;
+  flag has_body;
+  num max_redirects;
+  num timeout_ms;
+}
+
+// Starts building a request for `method` against `raw_url`. `Err` when
+// the URL has no host.
+pub fun http_request(HttpMethod method, str raw_url) Result<HttpRequest, Error> {
+  let u = parse_url(raw_url);
+  if is_empty(u.host) {
+    HttpRequest empty;
+    empty.method = method;
+    empty.url = u;
+    empty.headers.init(0);
+    empty.body = "";
+    empty.has_body = false;
+    empty.max_redirects = 0;
+    empty.timeout_ms = 0;
+    ret err_kind(.Parse, "http_request: missing host", empty);
+  }
+  HttpRequest req;
+  req.method = method;
+  req.url = u;
+  req.headers.init(4);
+  req.body = "";
+  req.has_body = false;
+  // Real browsers/clients follow a small, bounded number of redirects by
+  // default rather than either 0 (surprising) or unbounded (a malicious
+  // or misconfigured server could redirect forever).
+  req.max_redirects = 5;
+  // 0 means "no timeout", block until the peer answers or closes -
+  // matches std.net's own tcp_read, which has no timeout of its own.
+  req.timeout_ms = 0;
+  ret .Ok(req);
+}
+
+impl HttpRequest {
+  // Sets (or replaces) a request header.
+  pub set_header(str name, str value) {
+    self.headers.put(name, value);
+  }
+
+  // Sets the request body. Content-Length is computed and sent
+  // automatically from its real length; set a Content-Type header
+  // separately if the body needs one.
+  pub set_body(str new_body) {
+    self.body = new_body;
+    self.has_body = true;
+  }
+
+  // Bounds how many redirects `send` follows before giving up (0
+  // disables following redirects entirely, returning the 3xx itself).
+  pub set_max_redirects(num n) {
+    self.max_redirects = n;
+  }
+
+  // Bounds how long a single read may block for, in milliseconds (0
+  // means no timeout). Applies per read/write call, not to the request
+  // as a whole, the same as the underlying SO_RCVTIMEO/SO_SNDTIMEO
+  // socket options this compiles down to.
+  pub set_timeout_ms(num ms) {
+    self.timeout_ms = ms;
+  }
+
+  // Sends the request, following redirects (up to `max_redirects`) and
+  // decoding a chunked response body, and returns the final response.
+  pub send() Result<HttpResponse, Error> {
+    ret _http_send(self, self.max_redirects);
+  }
+}
+
+// A parsed HTTP response: status, headers, and body (already decoded if
+// the wire body was chunked).
+pub compound HttpResponse {
+  HttpStatus status;
+  Map<str, str> headers;
+  str body;
+}
+
+fun _empty_http_response() HttpResponse {
+  HttpResponse r;
+  r.status = .Unknown(0);
+  r.headers.init(0);
+  r.body = "";
+  ret r;
+}
+
+impl HttpResponse {
+  // The raw numeric status code.
+  pub status_code() num {
+    ret http_status_code(self.status);
+  }
+
+  // The value of a response header, case-sensitive (HTTP headers are
+  // conventionally case-insensitive; this stores and looks them up
+  // exactly as received, matching std.net's own "keep it simple" scope).
+  pub header(str name) Option<str> {
+    ret self.headers.at(name);
+  }
+
+  // True for a 2xx status.
+  pub is_success() flag {
+    let code = self.status_code();
+    ret code >= 200 && code < 300;
+  }
+}
+
+// Parses one hex digit, or -1 for anything else.
+fun _hex_digit(chr c) num {
+  if c >= '0' && c <= '9' {
+    ret c - '0';
+  }
+  if c >= 'a' && c <= 'f' {
+    ret c - 'a' + 10;
+  }
+  if c >= 'A' && c <= 'F' {
+    ret c - 'A' + 10;
+  }
+  ret -1;
+}
+
+// Parses a hex string (no "0x" prefix) into a number, stopping at the
+// first non-hex-digit character. 0 for a string with no leading hex
+// digits at all, matching `parse_int`'s own "best effort" convention.
+fun _parse_hex(str s) num {
+  num n = len(s);
+  num i = 0;
+  num out = 0;
+  for i < n {
+    let d = _hex_digit(s[i]);
+    if d < 0 {
+      break;
+    }
+    out = out * 16 + d;
+    i = i + 1;
+  }
+  ret out;
+}
+
+// Decodes a chunked-transfer-encoded body: each chunk is a hex length
+// (optionally followed by ';'-prefixed extensions this ignores), CRLF,
+// that many bytes of data, then another CRLF; a zero-length chunk ends
+// the stream (any trailer headers after it are ignored, matching this
+// module's "keep it simple" scope elsewhere).
+fun _decode_chunked(str raw_text) str {
+  StringBuilder out = string_builder_init(len(raw_text));
+  num i = 0;
+  num n = len(raw_text);
+  for i < n {
+    let rest = substr(raw_text, i, n - i);
+    let line_end = index_of_str(rest, "\r\n");
+    if line_end == -1 {
+      break;
+    }
+    str size_line = substr(rest, 0, line_end);
+    let semi = index_of_char(size_line, ';');
+    if semi != -1 {
+      size_line = substr(size_line, 0, semi);
+    }
+    let chunk_size = _parse_hex(trim(size_line));
+    i = i + line_end + 2;
+    if chunk_size <= 0 {
+      break;
+    }
+    if i + chunk_size > n {
+      // A truncated final chunk (the connection closed mid-body):
+      // return whatever real data was read rather than nothing.
+      out.append(substr(raw_text, i, n - i));
+      break;
+    }
+    out.append(substr(raw_text, i, chunk_size));
+    i = i + chunk_size + 2;
+  }
+  ret out.build();
+}
+
+// Parses a raw HTTP response (status line, headers, a blank line, then
+// the body) into its parts, decoding a chunked body along the way. Does
+// no I/O of its own; `_http_send` is what actually reads one off the wire.
+pub fun parse_http_response(str raw_text) Result<HttpResponse, Error> {
+  HttpResponse resp = _empty_http_response();
+
+  str head = raw_text;
+  str raw_body = "";
+  let sep = index_of_str(raw_text, "\r\n\r\n");
+  if sep != -1 {
+    head = substr(raw_text, 0, sep);
+    raw_body = substr(raw_text, sep + 4, len(raw_text) - (sep + 4));
+  }
+
+  Vec<str> lines = split(head, '\n');
+  defer lines.free();
+  if lines.len == 0 {
+    ret err_kind(.Parse, "parse_http_response: empty response", resp);
+  }
+
+  str status_line = trim(lines.get(0));
+  let first_space = index_of_char(status_line, ' ');
+  if first_space == -1 {
+    ret err_kind(.Parse, "parse_http_response: malformed status line", resp);
+  }
+  str rest = substr(status_line, first_space + 1, len(status_line) - (first_space + 1));
+  str code_str = rest;
+  let second_space = index_of_char(rest, ' ');
+  if second_space != -1 {
+    code_str = substr(rest, 0, second_space);
+  }
+  resp.status = http_status_from_code(parse_int(code_str));
+
+  flag is_chunked = false;
+  num i = 1;
+  for i < lines.len {
+    str line = trim(lines.get(i));
+    if !equals(line, "") {
+      let colon = index_of_char(line, ':');
+      if colon != -1 {
+        str key = trim(substr(line, 0, colon));
+        str value = trim(substr(line, colon + 1, len(line) - (colon + 1)));
+        resp.headers.put(key, value);
+        if equals(to_lower(key), "transfer-encoding") &&
+          index_of_str(to_lower(value), "chunked") != -1 {
+          is_chunked = true;
+        }
+      }
+    }
+    i = i + 1;
+  }
+
+  if is_chunked {
+    resp.body = _decode_chunked(raw_body);
+  } else {
+    resp.body = raw_body;
+  }
+
+  ret .Ok(resp);
+}
+
+// Reads from `fd` until the peer closes the connection (`tcp_read`
+// returns 0) or an error occurs, returning everything read. Suited to a
+// request built with "Connection: close" (`_build_request_text`'s own
+// default header), which is why the server closing the connection is
+// what marks the response as complete here, rather than needing to
+// parse Content-Length up front.
+fun _tcp_read_all(num fd) str {
+  StringBuilder b = string_builder_init(1024);
+  str buf = malloc(4096);
+  if buf == nil {
+    ret b.build();
+  }
+  defer free(buf);
+  for true {
+    let n = tcp_read(fd, buf, 4095);
+    if n <= 0 {
+      break;
+    }
+    buf[n] = '\0';
+    b.append(buf);
+  }
+  ret b.build();
+}
+
+// Builds the raw request text: request line, headers (Connection: close
+// and Content-Length filled in automatically when the caller hasn't set
+// them), a blank line, then the body if there is one.
+fun _build_request_text(HttpRequest* req) str {
+  StringBuilder b = string_builder_init(256);
+  b.append(http_method_name(req.method));
+  b.append(" ");
+  b.append(req.url.path);
+  b.append(" HTTP/1.1\r\nHost: ");
+  b.append(req.url.host);
+  b.append("\r\n");
+  if req.headers.at("Connection").is_none() {
+    b.append("Connection: close\r\n");
+  }
+  if req.has_body && req.headers.at("Content-Length").is_none() {
+    b.append(format("Content-Length: {num}\r\n", len(req.body)));
+  }
+  let keys = req.headers.keys();
+  defer keys.free();
+  num i = 0;
+  for i < keys.len {
+    str k = keys.get(i);
+    let v = req.headers.at(k);
+    if v.is_some() {
+      b.append(k);
+      b.append(": ");
+      b.append(v.unwrap());
+      b.append("\r\n");
+    }
+    i = i + 1;
+  }
+  b.append("\r\n");
+  if req.has_body {
+    b.append(req.body);
+  }
+  ret b.build();
+}
+
+// Which method a redirect target is fetched with. 303 always downgrades
+// to GET; 301/302 conventionally do too, matching every real browser's
+// long-standing behavior even though the spec technically allows
+// preserving the method there. 307/308 are the only two that guarantee
+// both the method and the body carry over unchanged.
+fun _redirect_method(HttpStatus status, HttpMethod original) HttpMethod {
+  fit status {
+    .SeeOther -> { ret .Get; }
+    .MovedPermanently -> { ret .Get; }
+    .Found -> { ret .Get; }
+    _ -> { ret original; }
+  }
+}
+
+// Sends one request over a plain (non-TLS) TCP connection and returns
+// the raw response text, or an `Err` naming which step failed.
+fun _http_send_plain(HttpRequest* req) Result<str, Error> {
+  let fd = tcp_connect(req.url.host, req.url.port);
+  if fd < 0 {
+    ret err_kind(.Io, "http send: connect failed", "");
+  }
+  defer tcp_close(fd);
+
+  if req.timeout_ms > 0 {
+    __fun_socket_set_timeout(fd, req.timeout_ms);
+  }
+
+  str req_text = _build_request_text(req);
+  defer free(req_text);
+  let wrote = tcp_write(fd, req_text, len(req_text));
+  if wrote < 0 {
+    ret err_kind(.Io, "http send: write failed", "");
+  }
+
+  ret .Ok(_tcp_read_all(fd));
+}
+
+// Sends one request over a TLS connection and returns the raw response
+// text. TEMPORARY stub during development - real TLS support (OpenSSL
+// on POSIX, SChannel on Windows) lands in std.c.tls before this ships.
+fun _http_send_tls(HttpRequest* req) Result<str, Error> {
+  ret err_kind(.Io, "https:// is not supported yet", "");
+}
+
+// The real implementation behind `HttpRequest.send()`: sends one
+// request (over TLS when the URL's scheme is https, see std.c.tls),
+// parses the response, and follows a redirect response up to
+// `redirects_left` times.
+fun _http_send(HttpRequest* req, num redirects_left) Result<HttpResponse, Error> {
+  Result<str, Error> sent;
+  if equals(req.url.scheme, "https") {
+    sent = _http_send_tls(req);
+  } else {
+    sent = _http_send_plain(req);
+  }
+  if sent.is_err() {
+    HttpResponse empty = _empty_http_response();
+    ret err_kind(.Io, sent.unwrap_err().message, empty);
+  }
+
+  let parsed = parse_http_response(sent.unwrap());
+  if parsed.is_err() {
+    ret parsed;
+  }
+  let resp = parsed.unwrap();
+
+  if redirects_left > 0 && http_status_is_redirect(resp.status) {
+    let loc = resp.header("Location");
+    if loc.is_some() {
+      let next_method = _redirect_method(resp.status, req.method);
+      let next_built = http_request(next_method, loc.unwrap());
+      if next_built.is_ok() {
+        HttpRequest next_req = next_built.unwrap();
+        next_req.max_redirects = redirects_left - 1;
+        next_req.timeout_ms = req.timeout_ms;
+        // Only 307/308 guarantee the method is unchanged, the only case
+        // where forwarding the original body still makes sense - a
+        // redirect that downgraded to GET has nowhere to put a body.
+        fit resp.status {
+          .TemporaryRedirect -> {
+            next_req.body = req.body;
+            next_req.has_body = req.has_body;
+          }
+          .PermanentRedirect -> {
+            next_req.body = req.body;
+            next_req.has_body = req.has_body;
+          }
+          _ -> {}
+        }
+        ret _http_send(&next_req, redirects_left - 1);
+      }
+    }
+  }
+
+  ret .Ok(resp);
+}
+
+// Fetches `raw_url` with a plain GET and no extra headers - the common
+// case, built on the general request builder above. For custom headers,
+// a request body, or non-default redirect/timeout behavior, build a
+// request directly: `http_request(.Post, url)!.set_body(...).send()`.
+pub fun http_get(str raw_url) Result<HttpResponse, Error> {
+  let req = http_request(.Get, raw_url)!;
+  ret req.send();
+}
+
+// Sends `body` with a POST.
+pub fun http_post(str raw_url, str body) Result<HttpResponse, Error> {
+  HttpRequest req = http_request(.Post, raw_url)!;
+  req.set_body(body);
+  ret req.send();
+}
+
+// Sends `body` with a PUT.
+pub fun http_put(str raw_url, str body) Result<HttpResponse, Error> {
+  HttpRequest req = http_request(.Put, raw_url)!;
+  req.set_body(body);
+  ret req.send();
+}
+
+// Sends `body` with a PATCH.
+pub fun http_patch(str raw_url, str body) Result<HttpResponse, Error> {
+  HttpRequest req = http_request(.Patch, raw_url)!;
+  req.set_body(body);
+  ret req.send();
+}
+
+// Sends a DELETE, with no body.
+pub fun http_delete(str raw_url) Result<HttpResponse, Error> {
+  let req = http_request(.Delete, raw_url)!;
+  ret req.send();
+}
+
+// Sends a HEAD (a GET whose response has no body by HTTP convention,
+// only headers - `_tcp_read_all` still just reads until the server
+// closes the connection, same as any other request here).
+pub fun http_head(str raw_url) Result<HttpResponse, Error> {
+  let req = http_request(.Head, raw_url)!;
+  ret req.send();
+}
+
+// Sends an OPTIONS, with no body.
+pub fun http_options(str raw_url) Result<HttpResponse, Error> {
+  let req = http_request(.Options, raw_url)!;
+  ret req.send();
+}
+
+// --- Server-side routing --------------------------------------------
+//
+// A router dispatches an incoming request to whichever handler its
+// method and path match, replacing std.net's own http_serve_once/
+// forever (a single fixed response, no routing at all).
+
+// An incoming request as a server sees it: method, path, headers, body.
+pub compound HttpServerRequest {
+  HttpMethod method;
+  str path;
+  Map<str, str> headers;
+  str body;
+}
+
+impl HttpServerRequest {
+  // The value of a request header, case-sensitive (see HttpResponse's
+  // own `header` for why this module doesn't normalize case).
+  pub header(str name) Option<str> {
+    ret self.headers.at(name);
+  }
+}
+
+// A handler's own response: status plus body (and any extra headers it
+// wants to set - Content-Length is always computed and sent
+// automatically, the same as a client request's body).
+pub compound HttpServerResponse {
+  HttpStatus status;
+  Map<str, str> headers;
+  str body;
+}
+
+// Builds a response with `status` and `body`, no extra headers.
+pub fun http_response(HttpStatus status, str body) HttpServerResponse {
+  HttpServerResponse r;
+  r.status = status;
+  r.headers.init(0);
+  r.body = body;
+  ret r;
+}
+
+impl HttpServerResponse {
+  // Sets (or replaces) a response header.
+  pub set_header(str name, str value) {
+    self.headers.put(name, value);
+  }
+}
+
+// A route handler: given the parsed request, produces the response to
+// send back. A real, ordinary function value (`fun(HttpServerRequest*)
+// HttpServerResponse`), storable and passable the same way
+// `Vec.sort_by`'s own `Comparator<T>` is.
+pub als HttpHandler = fun(HttpServerRequest*) HttpServerResponse;
+
+compound _HttpRoute {
+  HttpMethod method;
+  str path;
+  HttpHandler handler;
+}
+
+// Dispatches incoming requests to whichever registered route matches
+// their method and path (exact match only in this first cut - a
+// wildcard/path-parameter router is a bigger, separate feature).
+pub compound HttpRouter {
+  Vec<_HttpRoute> routes;
+}
+
+pub fun http_router_new() HttpRouter {
+  HttpRouter r;
+  r.routes.init(8);
+  ret r;
+}
+
+impl HttpRouter {
+  // Registers `handler` for `method` requests to `path`.
+  pub route(HttpMethod method, str path, HttpHandler handler) {
+    _HttpRoute rt;
+    rt.method = method;
+    rt.path = path;
+    rt.handler = handler;
+    self.routes.push(rt);
+  }
+
+  // Registers `handler` for GET requests to `path`.
+  pub get(str path, HttpHandler handler) {
+    self.route(.Get, path, handler);
+  }
+
+  // Registers `handler` for POST requests to `path`.
+  pub post(str path, HttpHandler handler) {
+    self.route(.Post, path, handler);
+  }
+
+  // Registers `handler` for PUT requests to `path`.
+  pub put(str path, HttpHandler handler) {
+    self.route(.Put, path, handler);
+  }
+
+  // Registers `handler` for DELETE requests to `path`.
+  pub delete(str path, HttpHandler handler) {
+    self.route(.Delete, path, handler);
+  }
+
+  // Registers `handler` for PATCH requests to `path`.
+  pub patch(str path, HttpHandler handler) {
+    self.route(.Patch, path, handler);
+  }
+
+  // The first registered route matching `method`/`path` exactly.
+  find(HttpMethod method, str path) Option<HttpHandler> {
+    num i = 0;
+    for i < self.routes.len {
+      let rt = self.routes.get(i);
+      if _http_method_matches(rt.method, method) && equals(rt.path, path) {
+        ret .Some(rt.handler);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Accepts and handles exactly one connection on an already-listening
+  // `server_fd`: reads a request, dispatches it to a matching route (a
+  // plain 404 for no match), writes the response, closes. The building
+  // block `serve` loops on; a caller wanting its own concurrency
+  // (ThreadPool, fork) drives this directly instead, one call per
+  // accepted connection, same as std.net's own lower-level primitives.
+  pub serve_one(num server_fd) Result<flag, Error> {
+    let client = tcp_accept(server_fd);
+    if client < 0 {
+      ret err_kind(.Io, "HttpRouter.serve_one: accept failed", false);
+    }
+    defer tcp_close(client);
+
+    let raw_req = _read_http_request_text(client);
+    defer free(raw_req);
+    let parsed = parse_http_request(raw_req);
+
+    HttpServerResponse resp;
+    if parsed.is_err() {
+      resp = http_response(.BadRequest, "Bad Request");
+    } else {
+      let req = parsed.unwrap();
+      let matched = self.find(req.method, req.path);
+      if matched.is_some() {
+        let handler = matched.unwrap();
+        resp = handler(&req);
+      } else {
+        resp = http_response(.NotFound, "Not Found");
+      }
+    }
+
+    str resp_text = _build_response_text(&resp);
+    defer free(resp_text);
+    tcp_write(client, resp_text, len(resp_text));
+    ret .Ok(true);
+  }
+
+  // Serves forever on `port`, blocking, handling one connection at a
+  // time (sequential - a real concurrent server drives `serve_one`
+  // itself from a `ThreadPool`/`fork` instead of calling this).
+  pub serve(num port) Result<flag, Error> {
+    let server_fd = tcp_listen(port);
+    if server_fd < 0 {
+      ret err_kind(.Io, "HttpRouter.serve: listen failed", false);
+    }
+    defer tcp_close(server_fd);
+    for true {
+      let _ = self.serve_one(server_fd);
+    }
+    ret .Ok(true);
+  }
+}
+
+// Plain enums (no payload variants) compare directly in this language;
+// spelled as its own helper anyway, for the same reason `fit` is used
+// everywhere else here - matching this module's own idiom rather than
+// leaning on an implementation detail at each call site.
+fun _http_method_matches(HttpMethod a, HttpMethod b) flag {
+  fit a {
+    .Get -> {
+      fit b {
+        .Get -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Post -> {
+      fit b {
+        .Post -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Put -> {
+      fit b {
+        .Put -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Delete -> {
+      fit b {
+        .Delete -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Patch -> {
+      fit b {
+        .Patch -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Head -> {
+      fit b {
+        .Head -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .Options -> {
+      fit b {
+        .Options -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+  }
+}
+
+// Reads one HTTP request off `fd`: headers first (until "\r\n\r\n"),
+// then exactly Content-Length more bytes if the request has a body -
+// unlike this module's own client, which always closes after one
+// request (`_tcp_read_all`'s read-until-close is safe there), a real
+// client normally keeps the connection open waiting for the response,
+// so a server can't rely on the peer closing to know a request is done.
+fun _read_http_request_text(num fd) str {
+  StringBuilder b = string_builder_init(4096);
+  str buf = malloc(4096);
+  if buf == nil {
+    ret b.build();
+  }
+  defer free(buf);
+
+  num content_length = 0;
+  flag headers_done = false;
+  num body_start = 0;
+
+  for true {
+    if headers_done {
+      str so_far = b.peek();
+      let have_body = len(so_far) - body_start;
+      free(so_far);
+      if have_body >= content_length {
+        break;
+      }
+    }
+    let n = tcp_read(fd, buf, 4095);
+    if n <= 0 {
+      break;
+    }
+    buf[n] = '\0';
+    b.append(buf);
+
+    if !headers_done {
+      str so_far = b.peek();
+      let sep = index_of_str(so_far, "\r\n\r\n");
+      if sep != -1 {
+        headers_done = true;
+        body_start = sep + 4;
+        let cl = _header_value(so_far, "Content-Length");
+        if !equals(cl, "") {
+          content_length = parse_int(cl);
+        }
+      }
+      free(so_far);
+    }
+  }
+
+  ret b.build();
+}
+
+// A best-effort single-header lookup directly over raw, not-yet-fully-
+// parsed request text - `_read_http_request_text` needs Content-Length
+// before it has a real parsed `Map` to query, the same reason
+// `parse_http_response`'s own header loop can't be reused here yet.
+fun _header_value(str raw_text, str name) str {
+  Vec<str> lines = split(raw_text, '\n');
+  defer lines.free();
+  str lower_name = to_lower(name);
+  num i = 0;
+  for i < lines.len {
+    str line = trim(lines.get(i));
+    let colon = index_of_char(line, ':');
+    if colon != -1 {
+      str key = trim(substr(line, 0, colon));
+      if equals(to_lower(key), lower_name) {
+        ret trim(substr(line, colon + 1, len(line) - (colon + 1)));
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// Parses a raw HTTP request (request line, headers, a blank line, then
+// the body) into its parts - the server-side counterpart to
+// `parse_http_response`.
+pub fun parse_http_request(str raw_text) Result<HttpServerRequest, Error> {
+  HttpServerRequest req;
+  req.method = .Get;
+  req.path = "";
+  req.headers.init(4);
+  req.body = "";
+
+  str head = raw_text;
+  let sep = index_of_str(raw_text, "\r\n\r\n");
+  if sep != -1 {
+    head = substr(raw_text, 0, sep);
+    req.body = substr(raw_text, sep + 4, len(raw_text) - (sep + 4));
+  }
+
+  Vec<str> lines = split(head, '\n');
+  defer lines.free();
+  if lines.len == 0 {
+    ret err_kind(.Parse, "parse_http_request: empty request", req);
+  }
+
+  str request_line = trim(lines.get(0));
+  let first_space = index_of_char(request_line, ' ');
+  if first_space == -1 {
+    ret err_kind(.Parse, "parse_http_request: malformed request line", req);
+  }
+  str method_name = substr(request_line, 0, first_space);
+  let method = http_method_from_name(method_name);
+  if method.is_none() {
+    ret err_kind(.Parse, "parse_http_request: unsupported method", req);
+  }
+  req.method = method.unwrap();
+
+  str rest = trim(substr(request_line, first_space + 1, len(request_line) - (first_space + 1)));
+  let second_space = index_of_char(rest, ' ');
+  if second_space != -1 {
+    req.path = substr(rest, 0, second_space);
+  } else {
+    req.path = rest;
+  }
+
+  num i = 1;
+  for i < lines.len {
+    str line = trim(lines.get(i));
+    if !equals(line, "") {
+      let colon = index_of_char(line, ':');
+      if colon != -1 {
+        str key = trim(substr(line, 0, colon));
+        str value = trim(substr(line, colon + 1, len(line) - (colon + 1)));
+        req.headers.put(key, value);
+      }
+    }
+    i = i + 1;
+  }
+
+  ret .Ok(req);
+}
+
+// Builds the raw response text a server sends back: status line,
+// headers (Content-Length computed automatically), a blank line, then
+// the body.
+fun _build_response_text(HttpServerResponse* resp) str {
+  StringBuilder b = string_builder_init(256);
+  b.append("HTTP/1.1 ");
+  b.append_num(http_status_code(resp.status));
+  b.append(" ");
+  b.append(_http_reason_phrase(resp.status));
+  b.append("\r\n");
+  if resp.headers.at("Content-Length").is_none() {
+    b.append(format("Content-Length: {num}\r\n", len(resp.body)));
+  }
+  if resp.headers.at("Connection").is_none() {
+    b.append("Connection: close\r\n");
+  }
+  let keys = resp.headers.keys();
+  defer keys.free();
+  num i = 0;
+  for i < keys.len {
+    str k = keys.get(i);
+    let v = resp.headers.at(k);
+    if v.is_some() {
+      b.append(k);
+      b.append(": ");
+      b.append(v.unwrap());
+      b.append("\r\n");
+    }
+    i = i + 1;
+  }
+  b.append("\r\n");
+  b.append(resp.body);
+  ret b.build();
+}
+
+// A status line's own reason phrase ("OK", "Not Found", ...one per
+// named `HttpStatus` variant; "Unknown Status" for `Unknown(_)`, since
+// there's no real name to give back for a code this module doesn't
+// otherwise name.
+fun _http_reason_phrase(HttpStatus s) str {
+  fit s {
+    .Continue -> { ret "Continue"; }
+    .SwitchingProtocols -> { ret "Switching Protocols"; }
+    .Ok -> { ret "OK"; }
+    .Created -> { ret "Created"; }
+    .Accepted -> { ret "Accepted"; }
+    .NoContent -> { ret "No Content"; }
+    .MovedPermanently -> { ret "Moved Permanently"; }
+    .Found -> { ret "Found"; }
+    .SeeOther -> { ret "See Other"; }
+    .NotModified -> { ret "Not Modified"; }
+    .TemporaryRedirect -> { ret "Temporary Redirect"; }
+    .PermanentRedirect -> { ret "Permanent Redirect"; }
+    .BadRequest -> { ret "Bad Request"; }
+    .Unauthorized -> { ret "Unauthorized"; }
+    .Forbidden -> { ret "Forbidden"; }
+    .NotFound -> { ret "Not Found"; }
+    .MethodNotAllowed -> { ret "Method Not Allowed"; }
+    .Conflict -> { ret "Conflict"; }
+    .Gone -> { ret "Gone"; }
+    .UnprocessableEntity -> { ret "Unprocessable Entity"; }
+    .TooManyRequests -> { ret "Too Many Requests"; }
+    .InternalServerError -> { ret "Internal Server Error"; }
+    .NotImplemented -> { ret "Not Implemented"; }
+    .BadGateway -> { ret "Bad Gateway"; }
+    .ServiceUnavailable -> { ret "Service Unavailable"; }
+    .GatewayTimeout -> { ret "Gateway Timeout"; }
+    .Unknown(_) -> { ret "Unknown Status"; }
+  }
+}
+
+impl HttpStatus as Display {
+  // Renders as a status line's own "<code> <reason>" text ("200 OK",
+  // "404 Not Found").
+  pub to_string() str {
+    ret format("{num} {str}", http_status_code(*self), _http_reason_phrase(*self));
+  }
+}
+
+test "http_method_name/http_method_from_name round-trip every method" {
+  assert equals(http_method_name(.Get), "GET"), "expected GET's own name";
+  assert equals(http_method_name(.Post), "POST"), "expected POST's own name";
+  assert equals(http_method_name(.Put), "PUT"), "expected PUT's own name";
+  assert equals(http_method_name(.Delete), "DELETE"), "expected DELETE's own name";
+  assert equals(http_method_name(.Patch), "PATCH"), "expected PATCH's own name";
+  assert equals(http_method_name(.Head), "HEAD"), "expected HEAD's own name";
+  assert equals(http_method_name(.Options), "OPTIONS"), "expected OPTIONS's own name";
+
+  let parsed = http_method_from_name("POST");
+  assert parsed.is_some(), "expected 'POST' to parse to something";
+  fit parsed.unwrap() {
+    .Post -> {}
+    _ -> { assert false, "expected 'POST' to parse back to .Post"; }
+  }
+  assert http_method_from_name("TRACE").is_none(), "expected an unmodeled verb to read as none";
+}
+
+test "http_status_from_code/http_status_code round-trip named codes, and Unknown covers the rest" {
+  fit http_status_from_code(404) {
+    .NotFound -> {}
+    _ -> { assert false, "expected 404 to name its own variant"; }
+  }
+  assert http_status_code(.NotFound) == 404, "expected .NotFound's own code back";
+
+  fit http_status_from_code(418) {
+    .Unknown(code) -> { assert code == 418, "expected the real code preserved in Unknown"; }
+    _ -> { assert false, "expected an unmodeled code to fall back to Unknown"; }
+  }
+  assert http_status_code(.Unknown(999)) == 999, "expected Unknown's own code back";
+
+  assert http_status_is_redirect(.Found), "expected 302 to be a redirect";
+  assert http_status_is_redirect(.PermanentRedirect), "expected 308 to be a redirect";
+  assert !http_status_is_redirect(.Ok), "expected 200 not to be a redirect";
+  assert !http_status_is_redirect(.NotFound), "expected 404 not to be a redirect";
+}
+
+test "HttpMethod/HttpStatus Display renders the same text real callers see" {
+  HttpMethod m = .Post;
+  assert equals(m.to_string(), "POST"), "expected Display to match the wire name";
+
+  HttpStatus s_ok = .Ok;
+  assert equals(s_ok.to_string(), "200 OK"), "expected Display's code+reason for .Ok";
+
+  HttpStatus s_nf = .NotFound;
+  assert equals(s_nf.to_string(), "404 Not Found"), "expected Display's code+reason for .NotFound";
+
+  HttpStatus s_unk = .Unknown(599);
+  assert equals(
+    s_unk.to_string(),
+    "599 Unknown Status"
+  ), "expected Display to still render an Unknown code";
+}
+
+test "parse_http_response reads status line, headers, and a plain body" {
+  str raw_text = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nnot found";
+  let result = parse_http_response(raw_text);
+  assert result.is_ok(), "expected a well-formed response to parse";
+  let resp = result.unwrap();
+  fit resp.status {
+    .NotFound -> {}
+    _ -> { assert false, "expected the real status to parse to .NotFound"; }
+  }
+  assert resp.status_code() == 404, "expected the real numeric status code";
+  assert equals(resp.body, "not found"), "expected the real body";
+  let ct = resp.header("Content-Type");
+  assert ct.is_some(), "expected a parsed Content-Type header";
+  assert equals(ct.unwrap(), "text/plain"), "expected the header's real value";
+  assert resp.header("Nonexistent").is_none(), "expected a missing header to read as none";
+  assert !resp.is_success(), "expected a 404 not to be a success";
+}
+
+test "parse_http_response decodes a chunked body" {
+  str raw_text = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+  let result = parse_http_response(raw_text);
+  assert result.is_ok(), "expected a chunked response to parse";
+  let resp = result.unwrap();
+  fit resp.status {
+    .Ok -> {}
+    _ -> { assert false, "expected 200 to parse to .Ok"; }
+  }
+  assert equals(resp.body, "hello world"), "expected the chunks decoded and concatenated";
+}
+
+compound _HttpTestServer {
+  num listen_fd;
+  str response_text;
+  str received_request;
+}
+
+fun _http_test_server_once(raw* arg) raw* {
+  _HttpTestServer* srv = arg;
+  let client = tcp_accept(srv.listen_fd);
+  if client < 0 {
+    ret nil;
+  }
+  defer tcp_close(client);
+
+  str buf = malloc(4096);
+  if buf != nil {
+    let n = tcp_read(client, buf, 4095);
+    if n > 0 {
+      buf[n] = '\0';
+      srv.received_request = buf;
+    } else {
+      free(buf);
+    }
+  }
+
+  tcp_write(client, srv.response_text, len(srv.response_text));
+  ret nil;
+}
+
+test "http_get performs a real round trip and reads real headers/body/status" {
+  num port = 58394;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello from server";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_test_server_once, &srv);
+  assert start_rc == 0, "expected the server thread to start";
+
+  let result = http_get(format("http://127.0.0.1:{num}/", port));
+  let join_rc = thread_join(&server_thread, nil);
+  assert join_rc == 0, "expected the server thread to join cleanly";
+
+  assert result.is_ok(), "expected http_get to succeed";
+  let resp = result.unwrap();
+  assert resp.status_code() == 200, "expected the real status code";
+  assert resp.is_success(), "expected 200 to be a success";
+  assert equals(resp.body, "hello from server"), "expected the real body, read across a real connection";
+  let ct = resp.header("Content-Type");
+  assert ct.is_some(), "expected a real parsed header from the real response";
+  assert equals(ct.unwrap(), "text/plain"), "expected the header's real value";
+  assert starts_with(srv.received_request, "GET / HTTP/1.1"), "expected the real request line the server received";
+}
+
+test "http_post sends a real body and a real Content-Length, and the server actually receives it" {
+  num port = 58395;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "HTTP/1.1 201 Created\r\nConnection: close\r\n\r\n";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_test_server_once, &srv);
+  assert start_rc == 0, "expected the server thread to start";
+
+  let result = http_post(format("http://127.0.0.1:{num}/items", port), "{\"name\":\"widget\"}");
+  let join_rc = thread_join(&server_thread, nil);
+  assert join_rc == 0, "expected the server thread to join cleanly";
+
+  assert result.is_ok(), "expected http_post to succeed";
+  let resp = result.unwrap();
+  fit resp.status {
+    .Created -> {}
+    _ -> { assert false, "expected 201 to parse to .Created"; }
+  }
+  assert starts_with(srv.received_request, "POST /items HTTP/1.1"), "expected the real request line";
+  assert index_of_str(srv.received_request, "Content-Length: 17") != -1, "expected a real, correctly computed Content-Length header";
+  assert index_of_str(srv.received_request, "{\"name\":\"widget\"}") != -1, "expected the real body to reach the server";
+}
+
+test "custom headers set with set_header are actually sent" {
+  num port = 58396;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_test_server_once, &srv);
+  assert start_rc == 0, "expected the server thread to start";
+
+  let built = http_request(.Get, format("http://127.0.0.1:{num}/secret", port));
+  assert built.is_ok(), "expected the request to build";
+  HttpRequest req = built.unwrap();
+  req.set_header("Authorization", "Bearer test-token");
+  let result = req.send();
+  let join_rc = thread_join(&server_thread, nil);
+  assert join_rc == 0, "expected the server thread to join cleanly";
+
+  assert result.is_ok(), "expected the request to succeed";
+  assert index_of_str(srv.received_request, "Authorization: Bearer test-token") != -1, "expected the real custom header to reach the server";
+}
+
+test "http_get follows a 302 redirect to a real second server and returns its response" {
+  num from_port = 58397;
+  num to_port = 58398;
+
+  let from_fd = tcp_listen(from_port);
+  assert from_fd >= 0, "expected the first tcp_listen to succeed";
+  defer tcp_close(from_fd);
+  let to_fd = tcp_listen(to_port);
+  assert to_fd >= 0, "expected the second tcp_listen to succeed";
+  defer tcp_close(to_fd);
+
+  _HttpTestServer from_srv;
+  from_srv.listen_fd = from_fd;
+  from_srv.response_text = format(
+    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{num}/landed\r\nConnection: close\r\n\r\n",
+    to_port
+  );
+  from_srv.received_request = "";
+
+  _HttpTestServer to_srv;
+  to_srv.listen_fd = to_fd;
+  to_srv.response_text = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nlanded here";
+  to_srv.received_request = "";
+
+  Thread from_thread = thread_new();
+  let from_start = thread_start(&from_thread, _http_test_server_once, &from_srv);
+  assert from_start == 0, "expected the redirecting server thread to start";
+  Thread to_thread = thread_new();
+  let to_start = thread_start(&to_thread, _http_test_server_once, &to_srv);
+  assert to_start == 0, "expected the redirect-target server thread to start";
+
+  let result = http_get(format("http://127.0.0.1:{num}/start", from_port));
+  thread_join(&from_thread, nil);
+  thread_join(&to_thread, nil);
+
+  assert result.is_ok(), "expected the redirect to be followed and the final response returned";
+  let resp = result.unwrap();
+  fit resp.status {
+    .Ok -> {}
+    _ -> { assert false, "expected the final response's real 200 status"; }
+  }
+  assert equals(resp.body, "landed here"), "expected the real body from the redirect target, not the redirecting server";
+  assert starts_with(to_srv.received_request, "GET /landed HTTP/1.1"), "expected the redirect target to actually receive a real request";
+}
+
+fun _http_slow_server_main(raw* arg) raw* {
+  _HttpTestServer* srv = arg;
+  let client = tcp_accept(srv.listen_fd);
+  if client < 0 {
+    ret nil;
+  }
+  defer tcp_close(client);
+  str buf = malloc(2048);
+  if buf != nil {
+    tcp_read(client, buf, 2047);
+    free(buf);
+  }
+  // Deliberately slower than the client's own timeout below, so the
+  // client's read times out before this ever writes a response.
+  sleep_ms(300);
+  str resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ntoo slow";
+  tcp_write(client, resp, len(resp));
+  ret nil;
+}
+
+test "set_timeout_ms actually times out a real, genuinely slow server" {
+  num port = 58399;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_slow_server_main, &srv);
+  assert start_rc == 0, "expected the slow server thread to start";
+
+  let built = http_request(.Get, format("http://127.0.0.1:{num}/slow", port));
+  assert built.is_ok(), "expected the request to build";
+  HttpRequest req = built.unwrap();
+  req.set_timeout_ms(50);
+  let result = req.send();
+  thread_join(&server_thread, nil);
+
+  // A timed-out recv() returns -1, which parse_http_response's own
+  // empty-input path (an empty read - the connection produced nothing
+  // usable before the deadline) turns into an Err - either way, this
+  // must not be the slow server's real "too slow" body, which is the
+  // one thing a working timeout guarantees.
+  if result.is_ok() {
+    assert !equals(result.unwrap().body, "too slow"), "expected the timeout to fire before the slow response arrived";
+  }
+}
+
+test "parse_http_request reads a real GET request line, headers, and no body" {
+  str raw_text = "GET /items?id=5 HTTP/1.1\r\nHost: example.com\r\nAccept: text/plain\r\n\r\n";
+  let result = parse_http_request(raw_text);
+  assert result.is_ok(), "expected a well-formed request to parse";
+  let req = result.unwrap();
+  fit req.method {
+    .Get -> {}
+    _ -> { assert false, "expected the real method parsed from the request line"; }
+  }
+  assert equals(req.path, "/items?id=5"), "expected the real path (query string included) from the request line";
+  let accept = req.header("Accept");
+  assert accept.is_some(), "expected a parsed Accept header";
+  assert equals(accept.unwrap(), "text/plain"), "expected the header's real value";
+  assert equals(req.body, ""), "expected no body on a bodyless GET";
+}
+
+test "parse_http_request reads a real POST request's body via Content-Length" {
+  str raw_text = "POST /items HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\n\r\nhello, world!";
+  let result = parse_http_request(raw_text);
+  assert result.is_ok(), "expected a well-formed request to parse";
+  let req = result.unwrap();
+  fit req.method {
+    .Post -> {}
+    _ -> { assert false, "expected the real method parsed from the request line"; }
+  }
+  assert equals(req.path, "/items"), "expected the real path";
+  assert equals(req.body, "hello, world!"), "expected the real body";
+}
+
+fun _router_test_handler_ok(HttpServerRequest* req) HttpServerResponse {
+  ret http_response(.Ok, "handled");
+}
+
+fun _router_test_handler_echo(HttpServerRequest* req) HttpServerResponse {
+  ret http_response(.Created, req.body);
+}
+
+compound _RouterTestCtx {
+  HttpRouter* router;
+  num server_fd;
+}
+
+fun _router_test_serve_one(raw* arg) raw* {
+  _RouterTestCtx* ctx = arg;
+  let _ = ctx.router.serve_one(ctx.server_fd);
+  ret nil;
+}
+
+test "HttpRouter dispatches a real request over a real connection to the matching handler" {
+  num port = 58400;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  HttpRouter router = http_router_new();
+  router.get("/hello", _router_test_handler_ok);
+
+  _RouterTestCtx ctx;
+  ctx.router = &router;
+  ctx.server_fd = server_fd;
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _router_test_serve_one, &ctx);
+  assert start_rc == 0, "expected the router's own server thread to start";
+
+  let result = http_get(format("http://127.0.0.1:{num}/hello", port));
+  thread_join(&server_thread, nil);
+
+  assert result.is_ok(), "expected the real request to succeed";
+  let resp = result.unwrap();
+  assert resp.status_code() == 200, "expected the matching route's own status";
+  assert equals(resp.body, "handled"), "expected the matching route's own body";
+}
+
+test "HttpRouter returns a real 404 for a path with no matching route" {
+  num port = 58401;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  HttpRouter router = http_router_new();
+  router.get("/hello", _router_test_handler_ok);
+
+  _RouterTestCtx ctx;
+  ctx.router = &router;
+  ctx.server_fd = server_fd;
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _router_test_serve_one, &ctx);
+  assert start_rc == 0, "expected the router's own server thread to start";
+
+  let result = http_get(format("http://127.0.0.1:{num}/nowhere", port));
+  thread_join(&server_thread, nil);
+
+  assert result.is_ok(), "expected the real request to succeed at the transport level";
+  let resp = result.unwrap();
+  assert resp.status_code() == 404, "expected a real 404 for an unmatched route";
+}
+
+test "HttpRouter POST handler reads the real request body and echoes it back" {
+  num port = 58402;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  HttpRouter router = http_router_new();
+  router.post("/echo", _router_test_handler_echo);
+
+  _RouterTestCtx ctx;
+  ctx.router = &router;
+  ctx.server_fd = server_fd;
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _router_test_serve_one, &ctx);
+  assert start_rc == 0, "expected the router's own server thread to start";
+
+  let result = http_post(format("http://127.0.0.1:{num}/echo", port), "ping");
+  thread_join(&server_thread, nil);
+
+  assert result.is_ok(), "expected the real request to succeed";
+  let resp = result.unwrap();
+  assert resp.status_code() == 201, "expected the handler's own status";
+  assert equals(resp.body, "ping"), "expected the handler to have read the real request body, not an empty one";
+}

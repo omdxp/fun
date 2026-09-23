@@ -1,0 +1,61 @@
+// Basic std.http usage: a real client+server round trip over loopback,
+// using std.net's primitives to stand up the server side and http_get
+// to fetch from it as a real HTTP client would.
+
+use std.c.io;
+use std.net;
+use std.http;
+use std.thread;
+
+compound TestServer {
+  num listen_fd;
+}
+
+fun serve_once(raw* arg) raw* {
+  TestServer* srv = arg;
+  let client = tcp_accept(srv.listen_fd);
+  if client < 0 {
+    ret nil;
+  }
+  defer tcp_close(client);
+
+  str buf = malloc(1024);
+  if buf != nil {
+    tcp_read(client, buf, 1023);
+    free(buf);
+  }
+
+  str resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nHello from Fun\n";
+  tcp_write(client, resp, len(resp));
+  ret nil;
+}
+
+fun main() {
+  num port = 8081;
+  let server_fd = tcp_listen(port);
+  if server_fd < 0 {
+    printf("listen failed\n");
+    ret;
+  }
+  defer tcp_close(server_fd);
+
+  TestServer srv;
+  srv.listen_fd = server_fd;
+  Thread server_thread = thread_new();
+  thread_start(&server_thread, serve_once, &srv);
+
+  let result = http_get(format("http://127.0.0.1:{num}/", port));
+  thread_join(&server_thread, nil);
+
+  if result.is_err() {
+    printf("http_get failed\n");
+    ret;
+  }
+  let resp = result.unwrap();
+  printf(
+    "status=%s content-type=%s body=%s",
+    resp.status.to_string(),
+    resp.header("Content-Type").unwrap_or(""),
+    resp.body
+  );
+}
