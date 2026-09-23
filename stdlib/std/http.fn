@@ -15,6 +15,7 @@ use std.result;
 use std.error;
 use std.c.mem;
 use std.thread;
+use std.thread_runtime;
 use std.io;
 use std.channel;
 use std.option;
@@ -201,6 +202,23 @@ pub fun http_request(HttpMethod method, str raw_url) Result<HttpRequest, Error> 
   ret .Ok(req);
 }
 
+// Carries one `send_async` call's request in and its result back out,
+// mutated in place by `_http_send_worker` on the offloaded thread - the
+// same convention `std.net`'s own `TcpRoundtripOffloadJob` already uses.
+compound HttpSendJob {
+  HttpRequest* req;
+  Result<HttpResponse, Error> result;
+}
+
+fun _http_send_worker(raw* arg) raw* {
+  if arg == nil {
+    ret nil;
+  }
+  HttpSendJob* job = arg;
+  job.result = _http_send(job.req, job.req.max_redirects);
+  ret nil;
+}
+
 impl HttpRequest {
   // Sets (or replaces) a request header.
   pub set_header(str name, str value) {
@@ -233,6 +251,28 @@ impl HttpRequest {
   // decoding a chunked response body, and returns the final response.
   pub send() Result<HttpResponse, Error> {
     ret _http_send(self, self.max_redirects);
+  }
+
+  // `send`, offloaded to a runtime thread so the caller's own async task
+  // isn't blocked on the connect/handshake/read - matching
+  // `std.net`'s own `tcp_roundtrip_offload_async` exactly: a job struct
+  // carries the request in and the result back out, mutated in place by
+  // the worker, read once the join completes.
+  pub async send_async() Result<HttpResponse, Error> {
+    HttpSendJob job;
+    job.req = self;
+    job.result = .Ok(_empty_http_response());
+
+    let task = runtime_async_spawn(_http_send_worker, &job);
+    if task.last_start_rc() != 0 {
+      ret err_kind(.Io, "http send_async: failed to start the worker thread", _empty_http_response());
+    }
+
+    let join_rc = await task.join_async(nil);
+    if join_rc != 0 {
+      ret err_kind(.Io, "http send_async: the worker thread failed to join", _empty_http_response());
+    }
+    ret job.result;
   }
 }
 
@@ -730,6 +770,24 @@ pub fun http_router_new() HttpRouter {
   ret r;
 }
 
+// Carries one `handle_client_async` call's router/client fd in and its
+// result back out, mutated in place by `_http_handle_client_worker` on
+// the offloaded thread - the same convention `HttpSendJob` already uses.
+compound HttpHandleClientJob {
+  HttpRouter* router;
+  num client;
+  Result<flag, Error> result;
+}
+
+fun _http_handle_client_worker(raw* arg) raw* {
+  if arg == nil {
+    ret nil;
+  }
+  HttpHandleClientJob* job = arg;
+  job.result = job.router._handle_one_client(job.client);
+  ret nil;
+}
+
 impl HttpRouter {
   // Registers `handler` for `method` requests to `path`.
   pub route(HttpMethod method, str path, HttpHandler handler) {
@@ -778,17 +836,12 @@ impl HttpRouter {
     ret .None;
   }
 
-  // Accepts and handles exactly one connection on an already-listening
-  // `server_fd`: reads a request, dispatches it to a matching route (a
-  // plain 404 for no match), writes the response, closes. The building
-  // block `serve` loops on; a caller wanting its own concurrency
-  // (ThreadPool, fork) drives this directly instead, one call per
-  // accepted connection, same as std.net's own lower-level primitives.
-  pub serve_one(num server_fd) Result<flag, Error> {
-    let client = tcp_accept(server_fd);
-    if client < 0 {
-      ret err_kind(.Io, "HttpRouter.serve_one: accept failed", false);
-    }
+  // Reads a request off an already-accepted `client`, dispatches it to a
+  // matching route (a plain 404 for no match), writes the response, and
+  // closes `client` - the piece both `serve_one` (accept, then this) and
+  // `handle_client_async` (this, offloaded, for a caller driving its own
+  // accept loop) build on.
+  _handle_one_client(num client) Result<flag, Error> {
     defer tcp_close(client);
 
     let raw_req = _read_http_request_text(client);
@@ -813,6 +866,46 @@ impl HttpRouter {
     defer free(resp_text);
     tcp_write(client, resp_text, len(resp_text));
     ret .Ok(true);
+  }
+
+  // Accepts and handles exactly one connection on an already-listening
+  // `server_fd`: reads a request, dispatches it to a matching route (a
+  // plain 404 for no match), writes the response, closes. The building
+  // block `serve` loops on; a caller wanting its own concurrency
+  // (ThreadPool, fork, or `handle_client_async` below) drives this
+  // directly instead, one call per accepted connection, same as
+  // std.net's own lower-level primitives.
+  pub serve_one(num server_fd) Result<flag, Error> {
+    let client = tcp_accept(server_fd);
+    if client < 0 {
+      ret err_kind(.Io, "HttpRouter.serve_one: accept failed", false);
+    }
+    ret self._handle_one_client(client);
+  }
+
+  // `_handle_one_client`, offloaded to a runtime thread - for a caller
+  // running its own accept loop (a Channel of accepted client fds feeding
+  // a pool of worker tasks, say) that wants each connection handled
+  // concurrently rather than one at a time, without reaching for a
+  // ThreadPool/fork directly. Matching `HttpRequest.send_async`'s own
+  // job-struct-mutated-in-place-then-joined shape.
+  pub async handle_client_async(num client) Result<flag, Error> {
+    HttpHandleClientJob job;
+    job.router = self;
+    job.client = client;
+    job.result = .Ok(true);
+
+    let task = runtime_async_spawn(_http_handle_client_worker, &job);
+    if task.last_start_rc() != 0 {
+      tcp_close(client);
+      ret err_kind(.Io, "HttpRouter.handle_client_async: failed to start the worker thread", false);
+    }
+
+    let join_rc = await task.join_async(nil);
+    if join_rc != 0 {
+      ret err_kind(.Io, "HttpRouter.handle_client_async: the worker thread failed to join", false);
+    }
+    ret job.result;
   }
 
   // Serves forever on `port`, blocking, handling one connection at a
@@ -1466,6 +1559,34 @@ fun _router_test_serve_one(raw* arg) raw* {
   ret nil;
 }
 
+compound _RouterClientCtx {
+  num port;
+  str response_status_line;
+}
+
+// Connects to `127.0.0.1:port`, sends a real GET request, and reads back
+// just the response's own status line - the client side of
+// `handle_client_async`'s own test, which drives the server side
+// (accept + dispatch) directly rather than through `serve_one`.
+fun _router_test_client_once(raw* arg) raw* {
+  _RouterClientCtx* ctx = arg;
+  ctx.response_status_line = "";
+  let fd = tcp_connect("127.0.0.1", ctx.port);
+  if fd < 0 {
+    ret nil;
+  }
+  defer tcp_close(fd);
+  str req_text = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  tcp_write(fd, req_text, len(req_text));
+  str raw_resp = _tcp_read_all(fd);
+  defer free(raw_resp);
+  let nl = index_of_char(raw_resp, '\r');
+  if nl >= 0 {
+    ctx.response_status_line = substr(raw_resp, 0, nl);
+  }
+  ret nil;
+}
+
 test "HttpRouter dispatches a real request over a real connection to the matching handler" {
   num port = 58400;
   let server_fd = tcp_listen(port);
@@ -1538,4 +1659,57 @@ test "HttpRouter POST handler reads the real request body and echoes it back" {
   let resp = result.unwrap();
   assert resp.status_code() == 201, "expected the handler's own status";
   assert equals(resp.body, "ping"), "expected the handler to have read the real request body, not an empty one";
+}
+
+test "HttpRequest.send_async performs a real round trip, off the calling thread" {
+  num port = 58404;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello async";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_test_server_once, &srv);
+  assert start_rc == 0, "expected the server thread to start";
+
+  let built = http_request(.Get, format("http://127.0.0.1:{num}/", port));
+  assert built.is_ok(), "expected the request to build";
+  HttpRequest req = built.unwrap();
+  let result = req.send_async();
+  let join_rc = thread_join(&server_thread, nil);
+  assert join_rc == 0, "expected the server thread to join cleanly";
+
+  assert result.is_ok(), "expected send_async to succeed";
+  let resp = result.unwrap();
+  assert resp.status_code() == 200, "expected the real status code";
+  assert equals(resp.body, "hello async"), "expected the real body, read across a real connection";
+}
+
+test "HttpRouter.handle_client_async dispatches a real request, off the calling thread" {
+  num port = 58405;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  HttpRouter router = http_router_new();
+  router.get("/", _router_test_handler_ok);
+
+  _RouterClientCtx cctx;
+  cctx.port = port;
+  Thread client_thread = thread_new();
+  let start_rc = thread_start(&client_thread, _router_test_client_once, &cctx);
+  assert start_rc == 0, "expected the client thread to start";
+
+  let client = tcp_accept(server_fd);
+  assert client >= 0, "expected a real connection to accept";
+  let result = router.handle_client_async(client);
+  let join_rc = thread_join(&client_thread, nil);
+  assert join_rc == 0, "expected the client thread to join cleanly";
+
+  assert result.is_ok(), "expected handle_client_async to succeed";
+  assert equals(cctx.response_status_line, "HTTP/1.1 200 OK"), "expected the real status line the client actually read";
 }
