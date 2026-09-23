@@ -12836,6 +12836,16 @@ impl Codegen {
       self.state.write(e.name);
       self.state.write("_");
       self.state.write(v.name);
+      // An explicit discriminant (`Variant = 3;`) applies here the same
+      // way the plain (payload-free) enum branch above already honors
+      // it - a variant's own tag ordinal is independent of whether it
+      // happens to carry a payload, that's a separate union member
+      // entirely, so there's no reason this should only work for a
+      // fully payload-free enum the way it used to.
+      if v.has_value {
+        self.state.write(" = ");
+        self.state.write(format_num(v.value));
+      }
       self.state.write(",\n");
     }
     self.state.write("} ");
