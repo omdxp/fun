@@ -1,0 +1,32 @@
+// Client-side TLS: OpenSSL on POSIX, SChannel on Windows. Neither native
+// API is remotely alike (an opaque `SSL*` object model vs a
+// CredHandle/CtxtHandle negotiation loop), so unlike most of `std.c.*`
+// these are compiler-emitted shims, not direct libc bindings - one
+// uniform Fun-level surface hiding two entirely different native
+// implementations, matching `std.c.net`'s `__fun_win_socket` shim in
+// spirit but scaled up to a real multi-step protocol. See
+// `src/codegen/codegen.fn`'s `write_prelude` for both implementations;
+// emitted only when a program actually imports this file, since not
+// every program should need OpenSSL/SChannel linked in.
+
+// Performs a full TLS client handshake over an already-connected TCP
+// socket `fd`, verifying the peer's certificate against the system's
+// default trust store and its hostname against `hostname` (SNI is also
+// sent). Returns an opaque session handle, or `nil` on any failure
+// (connect, verification, and negotiation failures are all reported the
+// same way - the caller only needs to know the connection isn't usable).
+pub fun __fun_tls_connect(num fd, str hostname) raw*;
+
+// Reads up to `max_len` bytes of decrypted application data from
+// `session` into `buf`. Returns the byte count, 0 on a clean TLS close,
+// -1 on error (C semantics, matching `recv`).
+pub fun __fun_tls_read(raw* session, str buf, num max_len) num;
+
+// Writes `len` bytes of `data` to `session`, encrypting it. Returns the
+// byte count written, -1 on error (C semantics, matching `send`).
+pub fun __fun_tls_write(raw* session, str data, num len) num;
+
+// Shuts down and frees `session`. Does not close the underlying socket
+// `fd` passed to `__fun_tls_connect` - the caller owns that separately,
+// matching how `tcp_connect`/`tcp_close` are already separate calls.
+pub fun __fun_tls_close(raw* session);

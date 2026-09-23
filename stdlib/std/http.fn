@@ -7,6 +7,7 @@
 
 use std.net;
 use std.c.net;
+use std.c.tls;
 use std.string;
 use std.vec;
 use std.map;
@@ -500,11 +501,58 @@ fun _http_send_plain(HttpRequest* req) Result<str, Error> {
   ret .Ok(_tcp_read_all(fd));
 }
 
+// Reads decrypted application data from `session` until the peer closes
+// the connection, the same "read until EOF" contract `_tcp_read_all`
+// gives a plain connection - correct here for the same reason: every
+// request this module sends asks for `Connection: close`.
+fun _tls_read_all(raw* session) str {
+  StringBuilder b = string_builder_init(1024);
+  str buf = malloc(4096);
+  if buf == nil {
+    ret b.build();
+  }
+  defer free(buf);
+  for true {
+    let n = __fun_tls_read(session, buf, 4095);
+    if n <= 0 {
+      break;
+    }
+    buf[n] = '\0';
+    b.append(buf);
+  }
+  ret b.build();
+}
+
 // Sends one request over a TLS connection and returns the raw response
-// text. TEMPORARY stub during development - real TLS support (OpenSSL
-// on POSIX, SChannel on Windows) lands in std.c.tls before this ships.
+// text, or an `Err` naming which step failed (connect, handshake, or
+// write) - the handshake itself already verifies the peer's certificate
+// and hostname (see `__fun_tls_connect`), so a failure here is never
+// silently insecure, only refused.
 fun _http_send_tls(HttpRequest* req) Result<str, Error> {
-  ret err_kind(.Io, "https:// is not supported yet", "");
+  let fd = tcp_connect(req.url.host, req.url.port);
+  if fd < 0 {
+    ret err_kind(.Io, "http send: connect failed", "");
+  }
+  defer tcp_close(fd);
+
+  if req.timeout_ms > 0 {
+    __fun_socket_set_timeout(fd, req.timeout_ms);
+  }
+
+  let session = __fun_tls_connect(fd, req.url.host);
+  if session == nil {
+    ret err_kind(.Io, "http send: TLS handshake failed", "");
+  }
+  defer __fun_tls_close(session);
+
+  str req_text = _build_request_text(req);
+  defer free(req_text);
+  let wrote = __fun_tls_write(session, req_text, len(req_text));
+  if wrote < 0 {
+    ret err_kind(.Io, "http send: write failed", "");
+  }
+
+  ret .Ok(_tls_read_all(session));
 }
 
 // The real implementation behind `HttpRequest.send()`: sends one
@@ -1189,6 +1237,31 @@ test "http_get performs a real round trip and reads real headers/body/status" {
   assert ct.is_some(), "expected a real parsed header from the real response";
   assert equals(ct.unwrap(), "text/plain"), "expected the header's real value";
   assert starts_with(srv.received_request, "GET / HTTP/1.1"), "expected the real request line the server received";
+}
+
+test "__fun_tls_connect fails cleanly, no crash or hang, against a peer that never speaks TLS" {
+  num port = 58403;
+  let server_fd = tcp_listen(port);
+  assert server_fd >= 0, "expected tcp_listen to succeed";
+  defer tcp_close(server_fd);
+
+  _HttpTestServer srv;
+  srv.listen_fd = server_fd;
+  srv.response_text = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nnot a TLS server";
+  srv.received_request = "";
+
+  Thread server_thread = thread_new();
+  let start_rc = thread_start(&server_thread, _http_test_server_once, &srv);
+  assert start_rc == 0, "expected the server thread to start";
+
+  let fd = tcp_connect("127.0.0.1", port);
+  assert fd >= 0, "expected tcp_connect to succeed";
+  let session = __fun_tls_connect(fd, "127.0.0.1");
+  let join_rc = thread_join(&server_thread, nil);
+  assert join_rc == 0, "expected the server thread to join cleanly";
+
+  assert session == nil, "expected the handshake to fail against a plain HTTP peer, not hang or crash";
+  tcp_close(fd);
 }
 
 test "http_post sends a real body and a real Content-Length, and the server actually receives it" {

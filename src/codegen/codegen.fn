@@ -15276,6 +15276,430 @@ impl Codegen {
       `#endif
       ``);
     }
+    // TLS and crypto need real native support (OpenSSL on POSIX, the
+    // platform's own SChannel/CNG on Windows), not something every
+    // program should have to link against - emitted only when the
+    // program actually imports std.c.tls/std.c.crypto, matching the
+    // same pattern as math.fn/time.fn/process.fn above. The `-lssl
+    // -lcrypto` marker comment is read back out of the generated C by
+    // `_append_compile_args` (src/cli/driver.fn) on POSIX, which has no
+    // linker flags list of its own to append to directly; Windows needs
+    // no such step at all, since its own SChannel/BCrypt backing
+    // auto-links via `#pragma comment(lib, ...)` below, the same way
+    // Ws2_32.lib already does.
+    if program_uses_std_c_header(self.all_nodes, "tls.fn") ||
+      program_uses_std_c_header(self.all_nodes, "crypto.fn") {
+      self.state.write(`
+      `#if defined(_WIN32)
+      `#pragma comment(lib, "secur32.lib")
+      `#pragma comment(lib, "bcrypt.lib")
+      `#pragma comment(lib, "crypt32.lib")
+      `#else
+      ``);
+      // Built from pieces, not one literal: self-hosting means codegen.fn
+      // itself compiles this very function, and a single contiguous
+      // string literal here would show up verbatim in THAT compile's own
+      // C output too, falsely tripping the marker check below on the
+      // compiler's own self-build. `format` assembles it only at real
+      // runtime, when write_prelude actually executes for a program
+      // that imports std.c.tls/std.c.crypto - never as one compile-time
+      // literal in codegen.fn's own generated C.
+      self.state.write(format("/* __fun_link: -l{str} -l{str} */\n", "ssl", "crypto"));
+      self.state.write(`#include <openssl/ssl.h>
+      `#include <openssl/err.h>
+      `#include <openssl/evp.h>
+      `#include <openssl/rand.h>
+      `#include <openssl/hmac.h>
+      `#include <pthread.h>
+      `#endif
+      ``);
+    }
+    // `__fun_tls_connect`/`read`/`write`/`close` (see `std.c.tls`): a
+    // full client TLS handshake and record layer, OpenSSL on POSIX,
+    // SChannel on Windows - the two APIs share nothing (an opaque `SSL*`
+    // object model vs a CredHandle/CtxtHandle negotiation loop), so
+    // unlike `__fun_socket_set_timeout` this is a real multi-step
+    // protocol implementation per platform, not a one-line shim.
+    if program_uses_std_c_header(self.all_nodes, "tls.fn") {
+      self.state.write(`
+      `#if defined(_WIN32)
+      `#ifndef WIN32_LEAN_AND_MEAN
+      `#define WIN32_LEAN_AND_MEAN
+      `#endif
+      `#include <windows.h>
+      `#define SECURITY_WIN32
+      `#include <security.h>
+      `#include <schannel.h>
+      `#include <winsock2.h>
+      `#include <ws2tcpip.h>
+      `#pragma comment(lib, "secur32.lib")
+      `
+      `typedef struct {
+      `  CredHandle cred;
+      `  CtxtHandle ctxt;
+      `  SOCKET sock;
+      `  char* extra_buf;
+      `  long long extra_len;
+      `  char* plain_buf;
+      `  long long plain_len;
+      `} __fun_tls_session_t;
+      `
+      `static void* __fun_tls_connect(long long fd, const char* hostname) {
+      `  SOCKET sock = (SOCKET)(uintptr_t)fd;
+      `  SCHANNEL_CRED cred_data;
+      `  memset(&cred_data, 0, sizeof(cred_data));
+      `  cred_data.dwVersion = SCHANNEL_CRED_VERSION;
+      `  cred_data.dwFlags = SCH_CRED_AUTO_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS;
+      `
+      `  CredHandle cred;
+      `  TimeStamp ts_expiry;
+      `  SECURITY_STATUS status = AcquireCredentialsHandleA(
+      `    NULL, (SEC_CHAR*)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL,
+      `    &cred_data, NULL, NULL, &cred, &ts_expiry);
+      `  if (status != SEC_E_OK) return NULL;
+      `
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)malloc(sizeof(__fun_tls_session_t));
+      `  if (sess == NULL) { FreeCredentialsHandle(&cred); return NULL; }
+      `  memset(sess, 0, sizeof(*sess));
+      `  sess->cred = cred;
+      `  sess->sock = sock;
+      `
+      `  CtxtHandle ctxt;
+      `  DWORD ctx_req = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT |
+      `    ISC_REQ_CONFIDENTIALITY | ISC_REQ_EXTENDED_ERROR |
+      `    ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
+      `  DWORD ctx_attr = 0;
+      `
+      `  SecBuffer out_buf0;
+      `  out_buf0.pvBuffer = NULL;
+      `  out_buf0.BufferType = SECBUFFER_TOKEN;
+      `  out_buf0.cbBuffer = 0;
+      `  SecBufferDesc out_desc0;
+      `  out_desc0.ulVersion = SECBUFFER_VERSION;
+      `  out_desc0.cBuffers = 1;
+      `  out_desc0.pBuffers = &out_buf0;
+      `
+      `  status = InitializeSecurityContextA(
+      `    &cred, NULL, (SEC_CHAR*)hostname, ctx_req, 0, 0, NULL, 0,
+      `    &ctxt, &out_desc0, &ctx_attr, &ts_expiry);
+      `  if (status != SEC_I_CONTINUE_NEEDED) {
+      `    FreeCredentialsHandle(&cred);
+      `    free(sess);
+      `    return NULL;
+      `  }
+      `  if (out_buf0.cbBuffer > 0 && out_buf0.pvBuffer != NULL) {
+      `    send(sock, (const char*)out_buf0.pvBuffer, out_buf0.cbBuffer, 0);
+      `    FreeContextBuffer(out_buf0.pvBuffer);
+      `  }
+      `
+      `  char in_data[18432];
+      `  long long in_len = 0;
+      `  for (;;) {
+      `    long long got = recv(sock, in_data + in_len, (int)(sizeof(in_data) - in_len), 0);
+      `    if (got <= 0) {
+      `      FreeCredentialsHandle(&cred);
+      `      DeleteSecurityContext(&ctxt);
+      `      free(sess);
+      `      return NULL;
+      `    }
+      `    in_len += got;
+      `
+      `    SecBuffer in_bufs[2];
+      `    in_bufs[0].pvBuffer = in_data;
+      `    in_bufs[0].cbBuffer = (DWORD)in_len;
+      `    in_bufs[0].BufferType = SECBUFFER_TOKEN;
+      `    in_bufs[1].pvBuffer = NULL;
+      `    in_bufs[1].cbBuffer = 0;
+      `    in_bufs[1].BufferType = SECBUFFER_EMPTY;
+      `    SecBufferDesc in_desc;
+      `    in_desc.ulVersion = SECBUFFER_VERSION;
+      `    in_desc.cBuffers = 2;
+      `    in_desc.pBuffers = in_bufs;
+      `
+      `    SecBuffer out_bufs[1];
+      `    out_bufs[0].pvBuffer = NULL;
+      `    out_bufs[0].cbBuffer = 0;
+      `    out_bufs[0].BufferType = SECBUFFER_TOKEN;
+      `    SecBufferDesc out_desc;
+      `    out_desc.ulVersion = SECBUFFER_VERSION;
+      `    out_desc.cBuffers = 1;
+      `    out_desc.pBuffers = out_bufs;
+      `
+      `    status = InitializeSecurityContextA(
+      `      &cred, &ctxt, (SEC_CHAR*)hostname, ctx_req, 0, 0, &in_desc, 0,
+      `      NULL, &out_desc, &ctx_attr, &ts_expiry);
+      `
+      `    if (out_bufs[0].cbBuffer > 0 && out_bufs[0].pvBuffer != NULL) {
+      `      send(sock, (const char*)out_bufs[0].pvBuffer, out_bufs[0].cbBuffer, 0);
+      `      FreeContextBuffer(out_bufs[0].pvBuffer);
+      `    }
+      `
+      `    if (status == SEC_E_OK) {
+      `      for (int i = 0; i < 2; i++) {
+      `        if (in_bufs[i].BufferType == SECBUFFER_EXTRA && in_bufs[i].cbBuffer > 0) {
+      `          sess->extra_len = in_bufs[i].cbBuffer;
+      `          sess->extra_buf = (char*)malloc(sess->extra_len);
+      `          if (sess->extra_buf != NULL) {
+      `            memcpy(sess->extra_buf, in_data + (in_len - in_bufs[i].cbBuffer), sess->extra_len);
+      `          }
+      `        }
+      `      }
+      `      sess->ctxt = ctxt;
+      `      return sess;
+      `    }
+      `    if (status == SEC_I_CONTINUE_NEEDED) {
+      `      DWORD extra = 0;
+      `      for (int i = 0; i < 2; i++) {
+      `        if (in_bufs[i].BufferType == SECBUFFER_EXTRA) extra = in_bufs[i].cbBuffer;
+      `      }
+      `      if (extra > 0) {
+      `        memmove(in_data, in_data + (in_len - extra), extra);
+      `        in_len = extra;
+      `      } else {
+      `        in_len = 0;
+      `      }
+      `      continue;
+      `    }
+      `    FreeCredentialsHandle(&cred);
+      `    DeleteSecurityContext(&ctxt);
+      `    free(sess);
+      `    return NULL;
+      `  }
+      `}
+      `
+      `static long long __fun_tls_read(void* session, char* buf, long long max_len) {
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  if (sess == NULL) return -1;
+      `
+      `  if (sess->plain_len > 0) {
+      `    long long take = sess->plain_len < max_len ? sess->plain_len : max_len;
+      `    memcpy(buf, sess->plain_buf, take);
+      `    if (take < sess->plain_len) {
+      `      memmove(sess->plain_buf, sess->plain_buf + take, sess->plain_len - take);
+      `    }
+      `    sess->plain_len -= take;
+      `    return take;
+      `  }
+      `
+      `  char net_buf[18432];
+      `  long long net_len = 0;
+      `  if (sess->extra_len > 0) {
+      `    memcpy(net_buf, sess->extra_buf, sess->extra_len);
+      `    net_len = sess->extra_len;
+      `    free(sess->extra_buf);
+      `    sess->extra_buf = NULL;
+      `    sess->extra_len = 0;
+      `  }
+      `
+      `  for (;;) {
+      `    if (net_len < (long long)sizeof(net_buf)) {
+      `      long long got = recv(sess->sock, net_buf + net_len, (int)(sizeof(net_buf) - net_len), 0);
+      `      if (got < 0) return -1;
+      `      if (got == 0 && net_len == 0) return 0;
+      `      net_len += got;
+      `    }
+      `
+      `    SecBuffer bufs[4];
+      `    bufs[0].pvBuffer = net_buf;
+      `    bufs[0].cbBuffer = (DWORD)net_len;
+      `    bufs[0].BufferType = SECBUFFER_DATA;
+      `    bufs[1].BufferType = SECBUFFER_EMPTY;
+      `    bufs[2].BufferType = SECBUFFER_EMPTY;
+      `    bufs[3].BufferType = SECBUFFER_EMPTY;
+      `    SecBufferDesc desc;
+      `    desc.ulVersion = SECBUFFER_VERSION;
+      `    desc.cBuffers = 4;
+      `    desc.pBuffers = bufs;
+      `
+      `    SECURITY_STATUS status = DecryptMessage(&sess->ctxt, &desc, 0, NULL);
+      `    if (status == SEC_E_INCOMPLETE_MESSAGE) {
+      `      continue;
+      `    }
+      `    if (status != SEC_E_OK && status != SEC_I_RENEGOTIATE && status != SEC_I_CONTEXT_EXPIRED) {
+      `      return -1;
+      `    }
+      `
+      `    long long copied = 0;
+      `    DWORD extra = 0;
+      `    for (int i = 0; i < 4; i++) {
+      `      if (bufs[i].BufferType == SECBUFFER_DATA && bufs[i].pvBuffer != NULL && bufs[i].cbBuffer > 0) {
+      `        long long take = (long long)bufs[i].cbBuffer < max_len ? (long long)bufs[i].cbBuffer : max_len;
+      `        memcpy(buf, bufs[i].pvBuffer, take);
+      `        copied = take;
+      `        if (take < (long long)bufs[i].cbBuffer) {
+      `          long long remain = (long long)bufs[i].cbBuffer - take;
+      `          sess->plain_buf = (char*)malloc(remain);
+      `          if (sess->plain_buf != NULL) {
+      `            memcpy(sess->plain_buf, (char*)bufs[i].pvBuffer + take, remain);
+      `            sess->plain_len = remain;
+      `          }
+      `        }
+      `      }
+      `      if (bufs[i].BufferType == SECBUFFER_EXTRA) {
+      `        extra = bufs[i].cbBuffer;
+      `      }
+      `    }
+      `    if (extra > 0) {
+      `      char* extra_tmp = (char*)malloc(extra);
+      `      if (extra_tmp != NULL) {
+      `        memcpy(extra_tmp, net_buf + (net_len - extra), extra);
+      `        sess->extra_buf = extra_tmp;
+      `        sess->extra_len = extra;
+      `      }
+      `    }
+      `    return copied;
+      `  }
+      `}
+      `
+      `static long long __fun_tls_write(void* session, const char* data, long long len) {
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  if (sess == NULL) return -1;
+      `
+      `  SecPkgContext_StreamSizes sizes;
+      `  if (QueryContextAttributesA(&sess->ctxt, SECPKG_ATTR_STREAM_SIZES, &sizes) != SEC_E_OK) {
+      `    return -1;
+      `  }
+      `
+      `  long long sent_total = 0;
+      `  while (sent_total < len) {
+      `    long long chunk = len - sent_total;
+      `    long long cap = (long long)sizes.cbMaximumMessage;
+      `    if (chunk > cap) chunk = cap;
+      `
+      `    long long msg_len = sizes.cbHeader + chunk + sizes.cbTrailer;
+      `    char* msg = (char*)malloc(msg_len);
+      `    if (msg == NULL) return sent_total > 0 ? sent_total : -1;
+      `    memcpy(msg + sizes.cbHeader, data + sent_total, chunk);
+      `
+      `    SecBuffer bufs[4];
+      `    bufs[0].pvBuffer = msg;
+      `    bufs[0].cbBuffer = sizes.cbHeader;
+      `    bufs[0].BufferType = SECBUFFER_STREAM_HEADER;
+      `    bufs[1].pvBuffer = msg + sizes.cbHeader;
+      `    bufs[1].cbBuffer = (DWORD)chunk;
+      `    bufs[1].BufferType = SECBUFFER_DATA;
+      `    bufs[2].pvBuffer = msg + sizes.cbHeader + chunk;
+      `    bufs[2].cbBuffer = sizes.cbTrailer;
+      `    bufs[2].BufferType = SECBUFFER_STREAM_TRAILER;
+      `    bufs[3].BufferType = SECBUFFER_EMPTY;
+      `    SecBufferDesc desc;
+      `    desc.ulVersion = SECBUFFER_VERSION;
+      `    desc.cBuffers = 4;
+      `    desc.pBuffers = bufs;
+      `
+      `    if (EncryptMessage(&sess->ctxt, 0, &desc, 0) != SEC_E_OK) {
+      `      free(msg);
+      `      return sent_total > 0 ? sent_total : -1;
+      `    }
+      `    long long total_wire = bufs[0].cbBuffer + bufs[1].cbBuffer + bufs[2].cbBuffer;
+      `    long long wrote = 0;
+      `    while (wrote < total_wire) {
+      `      long long w = send(sess->sock, msg + wrote, (int)(total_wire - wrote), 0);
+      `      if (w <= 0) { free(msg); return sent_total > 0 ? sent_total : -1; }
+      `      wrote += w;
+      `    }
+      `    free(msg);
+      `    sent_total += chunk;
+      `  }
+      `  return sent_total;
+      `}
+      `
+      `static void __fun_tls_close(void* session) {
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  if (sess == NULL) return;
+      `  DWORD shutdown_type = SCHANNEL_SHUTDOWN;
+      `  SecBuffer shutdown_buf;
+      `  shutdown_buf.pvBuffer = &shutdown_type;
+      `  shutdown_buf.cbBuffer = sizeof(shutdown_type);
+      `  shutdown_buf.BufferType = SECBUFFER_TOKEN;
+      `  SecBufferDesc shutdown_desc;
+      `  shutdown_desc.ulVersion = SECBUFFER_VERSION;
+      `  shutdown_desc.cBuffers = 1;
+      `  shutdown_desc.pBuffers = &shutdown_buf;
+      `  ApplyControlToken(&sess->ctxt, &shutdown_desc);
+      `
+      `  DWORD ctx_req = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT |
+      `    ISC_REQ_CONFIDENTIALITY | ISC_REQ_EXTENDED_ERROR |
+      `    ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
+      `  DWORD ctx_attr = 0;
+      `  TimeStamp ts_expiry;
+      `  SecBuffer out_buf;
+      `  out_buf.pvBuffer = NULL;
+      `  out_buf.cbBuffer = 0;
+      `  out_buf.BufferType = SECBUFFER_TOKEN;
+      `  SecBufferDesc out_desc;
+      `  out_desc.ulVersion = SECBUFFER_VERSION;
+      `  out_desc.cBuffers = 1;
+      `  out_desc.pBuffers = &out_buf;
+      `  if (InitializeSecurityContextA(&sess->cred, &sess->ctxt, NULL, ctx_req, 0, 0, NULL, 0,
+      `      &sess->ctxt, &out_desc, &ctx_attr, &ts_expiry) == SEC_E_OK) {
+      `    if (out_buf.cbBuffer > 0 && out_buf.pvBuffer != NULL) {
+      `      send(sess->sock, (const char*)out_buf.pvBuffer, out_buf.cbBuffer, 0);
+      `      FreeContextBuffer(out_buf.pvBuffer);
+      `    }
+      `  }
+      `
+      `  DeleteSecurityContext(&sess->ctxt);
+      `  FreeCredentialsHandle(&sess->cred);
+      `  if (sess->extra_buf != NULL) free(sess->extra_buf);
+      `  if (sess->plain_buf != NULL) free(sess->plain_buf);
+      `  free(sess);
+      `}
+      `#else
+      `typedef struct { SSL_CTX* ctx; SSL* ssl; } __fun_tls_session_t;
+      `static SSL_CTX* __fun_tls_ctx = NULL;
+      `static pthread_once_t __fun_tls_ctx_once = PTHREAD_ONCE_INIT;
+      `static void __fun_tls_ctx_init(void) {
+      `  __fun_tls_ctx = SSL_CTX_new(TLS_client_method());
+      `  if (__fun_tls_ctx != NULL) {
+      `    SSL_CTX_set_verify(__fun_tls_ctx, SSL_VERIFY_PEER, NULL);
+      `    SSL_CTX_set_default_verify_paths(__fun_tls_ctx);
+      `    SSL_CTX_set_min_proto_version(__fun_tls_ctx, TLS1_2_VERSION);
+      `  }
+      `}
+      `static void* __fun_tls_connect(long long fd, const char* hostname) {
+      `  pthread_once(&__fun_tls_ctx_once, __fun_tls_ctx_init);
+      `  if (__fun_tls_ctx == NULL) return NULL;
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)malloc(sizeof(__fun_tls_session_t));
+      `  if (sess == NULL) return NULL;
+      `  sess->ctx = __fun_tls_ctx;
+      `  sess->ssl = SSL_new(__fun_tls_ctx);
+      `  if (sess->ssl == NULL) { free(sess); return NULL; }
+      `  SSL_set_fd(sess->ssl, (int)fd);
+      `  SSL_set_tlsext_host_name(sess->ssl, hostname);
+      `  SSL_set1_host(sess->ssl, hostname);
+      `  if (SSL_connect(sess->ssl) != 1) {
+      `    SSL_free(sess->ssl);
+      `    free(sess);
+      `    return NULL;
+      `  }
+      `  return sess;
+      `}
+      `static long long __fun_tls_read(void* session, char* buf, long long max_len) {
+      `  if (session == NULL) return -1;
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  int n = SSL_read(sess->ssl, buf, (int)max_len);
+      `  if (n > 0) return (long long)n;
+      `  int err = SSL_get_error(sess->ssl, n);
+      `  if (err == SSL_ERROR_ZERO_RETURN) return 0;
+      `  return -1;
+      `}
+      `static long long __fun_tls_write(void* session, const char* data, long long len) {
+      `  if (session == NULL) return -1;
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  int n = SSL_write(sess->ssl, data, (int)len);
+      `  return n > 0 ? (long long)n : -1;
+      `}
+      `static void __fun_tls_close(void* session) {
+      `  if (session == NULL) return;
+      `  __fun_tls_session_t* sess = (__fun_tls_session_t*)session;
+      `  SSL_shutdown(sess->ssl);
+      `  SSL_free(sess->ssl);
+      `  free(sess);
+      `}
+      `#endif
+      ``);
+    }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
     // bodyless stream bindings resolve portably.
