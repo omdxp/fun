@@ -1,0 +1,27 @@
+// Basic Guarded<T> usage: a Mutex-protected value, for T that doesn't
+// fit Atomic<T>'s num | flag bound.
+
+use std.c.io;
+use std.guarded;
+
+compound Account {
+  str owner;
+  num balance;
+}
+
+fun main() {
+  Account initial;
+  initial.owner = "Ada";
+  initial.balance = 100;
+  Guarded<Account> account = guarded_new(initial);
+
+  let before = account.get();
+  printf("before: owner=%s balance=%lld\n", before.owner, before.balance);
+
+  Account* p = account.lock();
+  p.balance = p.balance + 50;
+  account.unlock();
+
+  let after = account.get();
+  printf("after: owner=%s balance=%lld\n", after.owner, after.balance);
+}
