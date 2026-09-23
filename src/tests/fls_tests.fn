@@ -7429,6 +7429,65 @@ test "hover on an inner generic method's own type parameter shadows an identical
   assert !contains(inner_ret, "num | flag"), "expected the outer bound not to leak through the shadowing inner one";
 }
 
+test "go to definition on a bare generic type-parameter name jumps to where its own name was written" {
+  str src = `compound Atomic<T: num | flag> {
+  `  num bits;
+  `}
+  `impl Atomic<T> {
+  `  pub load() T {
+  `    T out;
+  `    ret out;
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///type_param_def.fn";
+  doc.path = "type_param_def.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // The compound's own declaration jumps to itself.
+  str decl = definition(&reads, doc, 0, 16);
+  assert contains(decl, `"line":0`), "expected the compound's own <T> to jump to itself";
+  assert contains(decl, `"character":16`), "expected the compound's own <T> to jump to itself";
+
+  // The impl's own T (a separate declaration from the compound's,
+  // unconstrained here) jumps to the impl's own <T>, not the compound's.
+  str impl_ref = definition(&reads, doc, 3, 12);
+  assert contains(impl_ref, `"line":3`), "expected the impl's own T reference to jump to the impl's own <T>";
+
+  // A local variable's declared type jumps to the impl's <T>.
+  str local_ref = definition(&reads, doc, 5, 4);
+  assert contains(local_ref, `"line":3`), "expected a local's declared type to jump to the enclosing impl's <T>";
+  assert contains(local_ref, `"character":12`), "expected the jump target's column to land exactly on the impl's own T";
+}
+
+test "go to definition on a shadowed inner generic method's type parameter jumps to its own declaration, not the outer one" {
+  str src = `compound Outer<T: num | flag> {
+  `  T value;
+  `}
+  `impl Outer<T> {
+  `  pub convert<T: str | dec>(T x) T {
+  `    ret x;
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shadow_type_param_def.fn";
+  doc.path = "shadow_type_param_def.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // The method's own return type T (line 4) should jump to the method's
+  // own <T: str | dec> declaration (also line 4), not the compound's
+  // <T: num | flag> on line 0.
+  str ret_def = definition(&reads, doc, 4, 33);
+  assert contains(ret_def, `"line":4`), "expected the shadowed return type to jump to the inner method's own type parameter";
+  assert !contains(ret_def, `"line":0`), "expected the outer compound's declaration not to leak through the shadowing inner one";
+}
+
 test "hover on a variant and its bindings reads with the default filled in, in ret and fit" {
   str src = `enum Res<T, E = str> { Ok(T), Err(E) }
   `fun halve(num x) Res<num> {
