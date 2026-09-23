@@ -10732,25 +10732,38 @@ impl Codegen {
     str subj_name,
     flag subj_is_pointer,
     str enum_name,
-    str variant_name,
+    Vec<str> variant_names,
     FitBranch br,
     flag wrote_branch
   ) Option<CodegenErrorKind> {
+    // Bindings only ever come from the arm's own first pattern, which
+    // still names exactly one variant even when other, binding-free
+    // patterns are OR-ed onto the same arm (a comma-separated arm's
+    // later patterns are always plain, see the parser's own
+    // `_parse_fit_arm`); `variant_names.get(0)` is always that one.
+    str variant_name = variant_names.get(0);
     if wrote_branch {
       self.state.write(" else if (");
     } else {
       self.state.write("if (");
     }
-    self.state.write(subj_name);
-    if subj_is_pointer {
-      self.state.write("->");
-    } else {
-      self.state.write(".");
+    num vi = 0;
+    for vi < variant_names.len {
+      if vi > 0 {
+        self.state.write(" || ");
+      }
+      self.state.write(subj_name);
+      if subj_is_pointer {
+        self.state.write("->");
+      } else {
+        self.state.write(".");
+      }
+      self.state.write("tag == ");
+      self.state.write(enum_name);
+      self.state.write("_");
+      self.state.write(variant_names.get(vi));
+      vi = vi + 1;
     }
-    self.state.write("tag == ");
-    self.state.write(enum_name);
-    self.state.write("_");
-    self.state.write(variant_name);
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
     if br.has_bindings {
@@ -10819,7 +10832,7 @@ impl Codegen {
     str subj_name,
     flag subj_is_pointer,
     str enum_name,
-    str variant_name,
+    Vec<str> variant_names,
     FitBranch br,
     flag wrote_branch
   ) Option<CodegenErrorKind> {
@@ -10828,17 +10841,24 @@ impl Codegen {
     } else {
       self.state.write("if (");
     }
-    if subj_is_pointer {
-      self.state.write("(*");
-      self.state.write(subj_name);
-      self.state.write(")");
-    } else {
-      self.state.write(subj_name);
+    num pvi = 0;
+    for pvi < variant_names.len {
+      if pvi > 0 {
+        self.state.write(" || ");
+      }
+      if subj_is_pointer {
+        self.state.write("(*");
+        self.state.write(subj_name);
+        self.state.write(")");
+      } else {
+        self.state.write(subj_name);
+      }
+      self.state.write(" == ");
+      self.state.write(enum_name);
+      self.state.write("_");
+      self.state.write(variant_names.get(pvi));
+      pvi = pvi + 1;
     }
-    self.state.write(" == ");
-    self.state.write(enum_name);
-    self.state.write("_");
-    self.state.write(variant_name);
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
     let berr = self.emit_body(*br.body);
@@ -11223,6 +11243,44 @@ impl Codegen {
               }
             }
             if have_enum_name && has_variant {
+              // Any comma-separated alternative patterns after the first
+              // (`.Red, .Yellow -> ...`) must name a variant of this same
+              // enum; each is resolved the same way the first pattern
+              // just was, plain `.Identifier` shorthand only (the parser
+              // only ever populates `or_conditions` for a non-destructuring
+              // first pattern).
+              Vec<str> variant_names;
+              variant_names.init(1);
+              defer variant_names.free();
+              variant_names.push(variant_name);
+              flag or_ok = true;
+              for or_cond : br.or_conditions {
+                str or_variant = "";
+                flag have_or_variant = false;
+                fit or_cond.kind {
+                  .Expression(or_dot_e) -> {
+                    if equals(or_dot_e.op, ".") && or_dot_e.has_right {
+                      fit or_dot_e.right.kind {
+                        .Identifier(ovn) -> {
+                          or_variant = ovn;
+                          have_or_variant = true;
+                        }
+                        _ -> {}
+                      }
+                    }
+                  }
+                  _ -> {}
+                }
+                if !have_or_variant ||
+                  !self.enum_has_variant(effective_enum_name, or_variant) {
+                  or_ok = false;
+                  break;
+                }
+                variant_names.push(or_variant);
+              }
+              if !or_ok {
+                ret .Some(.UnsupportedNode);
+              }
               // A plain (payload-less) enum has no `.tag` field, so it
               // needs a different comparison from a tagged union's
               // `.tag == ...`.
@@ -11231,7 +11289,7 @@ impl Codegen {
                   subj_name,
                   subj_is_pointer,
                   effective_enum_name,
-                  variant_name,
+                  variant_names,
                   br,
                   wrote_branch
                 );
@@ -11246,7 +11304,7 @@ impl Codegen {
                   subj_name,
                   subj_is_pointer,
                   effective_enum_name,
-                  variant_name,
+                  variant_names,
                   br,
                   wrote_branch
                 );
@@ -16854,6 +16912,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   some_branch.bindings = some_bindings;
   some_branch.has_bindings = true;
   some_branch.is_tuple_pattern = false;
+  some_branch.or_conditions.init(0);
 
   FitStmtNode fitn = fit_stmt_node_new();
   fitn.exp = fit_subj;

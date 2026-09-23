@@ -578,6 +578,15 @@ pub compound FitBranch {
   // `condition`'s own `.TupleLiteral` elements rather than duplicated
   // here, so freeing/cloning `condition` already owns them.
   flag is_tuple_pattern;
+  // Additional patterns sharing this same arm's body (`.A, .B, .C ->
+  // ...`), matched the same way `condition` is - the arm matches if the
+  // subject equals any of them. Restricted to plain, binding-free
+  // patterns (a bare shorthand, a literal, a name): a payload-carrying
+  // or tuple pattern needs binding names that would have to agree
+  // across every alternative, real complexity a first cut doesn't need
+  // to take on, and every real use of this is a plain-variant grouping
+  // anyway. Empty for an arm with just the one `condition`.
+  Vec<Node*> or_conditions;
 }
 
 pub fun fit_branch_new() FitBranch {
@@ -588,6 +597,7 @@ pub fun fit_branch_new() FitBranch {
   b.bindings.init(0);
   b.has_bindings = false;
   b.is_tuple_pattern = false;
+  b.or_conditions.init(0);
   ret b;
 }
 
@@ -1227,6 +1237,10 @@ fun _free_fit_branches(Vec<FitBranch>* branches) {
     if b.has_condition {
       node_free(b.condition);
     }
+    for oc : b.or_conditions {
+      node_free(oc);
+    }
+    b.or_conditions.free();
     node_free(b.body);
     b.bindings.free();
     i = i + 1;
@@ -1681,6 +1695,12 @@ fun _clone_fit_branches(Vec<FitBranch>* branches) Vec<FitBranch> {
     }
     c.body = node_clone_ptr(b.body);
     c.bindings = _clone_str_vec(&b.bindings);
+    Vec<Node*> or_clone;
+    or_clone.init(b.or_conditions.len);
+    for oc : b.or_conditions {
+      or_clone.push(node_clone_ptr(oc));
+    }
+    c.or_conditions = or_clone;
     out.push(c);
     i = i + 1;
   }

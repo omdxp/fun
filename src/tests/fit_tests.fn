@@ -165,3 +165,42 @@ test "fit enum dot shorthand resolves against the condition's type" {
   assert contains(out, "c == Color_Red"), "expected the first shorthand branch to resolve";
   assert contains(out, "c == Color_Blue"), "expected the last shorthand branch to resolve";
 }
+
+// The exhaustiveness analysis for a comma-separated arm (every named
+// alternative counts as covered, not just the first) is checked in
+// warning_tests.fn.
+test "fit plain enum comma-separated arm ORs every alternative's comparison" {
+  str src = `use std.c.io;
+  `enum Color { Red, Green, Blue }
+  `fun main() num {
+  `  Color c = .Red;
+  `  fit c {
+  `    .Red, .Blue -> { ret 1; }
+  `    .Green -> { ret 2; }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fit plain enum comma-separated arm ORs every alternative's comparison");
+  assert contains(
+    out,
+    "c == Color_Red || c == Color_Blue"
+  ), "expected both alternatives OR-joined into one comparison";
+}
+
+test "fit tagged-union enum comma-separated arm ORs every alternative's tag comparison" {
+  str src = `use std.c.io;
+  `enum Status { Ok, NotFound, Unknown(num) }
+  `fun main() num {
+  `  Status s = .Ok;
+  `  fit s {
+  `    .Ok, .NotFound -> { ret 1; }
+  `    .Unknown(code) -> { ret code; }
+  `  }
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "fit tagged-union enum comma-separated arm ORs every alternative's tag comparison");
+  assert contains(
+    out,
+    "s.tag == Status_Ok || s.tag == Status_NotFound"
+  ), "expected both alternatives OR-joined into one tag comparison";
+}

@@ -5127,6 +5127,78 @@ impl Parser {
     ret .None;
   }
 
+  // Parses one plain pattern into `*out_condition`: a payload-less
+  // `.Variant` shorthand (the general parser doesn't recognize this as
+  // a complete expression on its own, so it needs the same dot-then-
+  // single-token handling `_parse_fit_arm`'s own first pattern always
+  // used), or an ordinary expression pattern otherwise. Shared by a fit
+  // arm's own first pattern and, for a comma-separated arm
+  // (`.A, .B -> ...`), every pattern after it - both need exactly this,
+  // neither the destructuring nor the tuple-pattern shapes, which only
+  // make sense as an arm's one and only pattern.
+  _parse_fit_simple_pattern(Node* out_condition) Option<ParseErrorKind> {
+    flag is_dot_shorthand = false;
+    Pos op_pos;
+    fit self.state.token_peek_next() {
+      .Some(t) -> {
+        op_pos = t.pos;
+        if t.type == .Operator {
+          str op = "";
+          fit t.data {
+            .Sval(s) -> { op = s; }
+            _ -> {}
+          }
+          is_dot_shorthand = equals(op, ".");
+        }
+      }
+      .None -> {}
+    }
+
+    if is_dot_shorthand {
+      self.state.token_next(); // consume '.'
+      let ierr = self.parse_single_token_to_node();
+      if ierr.is_some() {
+        ret ierr;
+      }
+      let maybe_right = self.state.node_pop();
+      if maybe_right.is_none() {
+        self.state.err("expected identifier after '.' in fit pattern");
+        ret .Some(.InvalidExpression);
+      }
+      Node node_right = maybe_right.unwrap();
+      node_right.flags.inside_expression = true;
+
+      Node blank_left = node_new(.Blank);
+      blank_left.pos = op_pos;
+      blank_left.has_pos = true;
+      blank_left.flags.inside_expression = true;
+
+      self.make_expression_node(&blank_left, &node_right, ".", op_pos);
+      fit self.state.node_pop() {
+        .Some(built) -> {
+          *out_condition = built;
+          self.parse_reorder_expression(out_condition);
+        }
+        .None -> {
+          self.state.err("expected fit branch condition expression");
+          ret .Some(.InvalidExpression);
+        }
+      }
+    } else {
+      let cerr = self.parse_expressionable_root();
+      if cerr.is_some() {
+        ret cerr;
+      }
+      let maybe_cond = self.state.node_pop();
+      if maybe_cond.is_none() {
+        self.state.err("expected fit branch condition expression");
+        ret .Some(.InvalidExpression);
+      }
+      *out_condition = maybe_cond.unwrap();
+    }
+    ret .None;
+  }
+
   // Parses one `pattern -> { body }` fit arm, pushing the finished branch
   // onto `out_branches`. `_` (the wildcard default) has no condition and
   // must be the last arm, signaled back through `out_has_default` so the
@@ -5176,65 +5248,12 @@ impl Parser {
         bindings = tuple_pattern_bindings;
         is_tuple_pattern = true;
       } else {
-        flag is_dot_shorthand = false;
-        Pos op_pos;
-        fit self.state.token_peek_next() {
-          .Some(t) -> {
-            op_pos = t.pos;
-            if t.type == .Operator {
-              str op = "";
-              fit t.data {
-                .Sval(s) -> { op = s; }
-                _ -> {}
-              }
-              is_dot_shorthand = equals(op, ".");
-            }
-          }
-          .None -> {}
+        Node simple_condition = node_new(.Blank);
+        let serr = self._parse_fit_simple_pattern(&simple_condition);
+        if serr.is_some() {
+          ret serr;
         }
-
-        if is_dot_shorthand {
-          self.state.token_next(); // consume '.'
-          let ierr = self.parse_single_token_to_node();
-          if ierr.is_some() {
-            ret ierr;
-          }
-          let maybe_right = self.state.node_pop();
-          if maybe_right.is_none() {
-            self.state.err("expected identifier after '.' in fit pattern");
-            ret .Some(.InvalidExpression);
-          }
-          Node node_right = maybe_right.unwrap();
-          node_right.flags.inside_expression = true;
-
-          Node blank_left = node_new(.Blank);
-          blank_left.pos = op_pos;
-          blank_left.has_pos = true;
-          blank_left.flags.inside_expression = true;
-
-          self.make_expression_node(&blank_left, &node_right, ".", op_pos);
-          fit self.state.node_pop() {
-            .Some(built) -> {
-              arm_condition = built;
-              self.parse_reorder_expression(&arm_condition);
-            }
-            .None -> {
-              self.state.err("expected fit branch condition expression");
-              ret .Some(.InvalidExpression);
-            }
-          }
-        } else {
-          let cerr = self.parse_expressionable_root();
-          if cerr.is_some() {
-            ret cerr;
-          }
-          let maybe_cond = self.state.node_pop();
-          if maybe_cond.is_none() {
-            self.state.err("expected fit branch condition expression");
-            ret .Some(.InvalidExpression);
-          }
-          arm_condition = maybe_cond.unwrap();
-        }
+        arm_condition = simple_condition;
       }
     }
 
@@ -5274,6 +5293,25 @@ impl Parser {
     if has_bindings {
       branch.bindings = bindings;
       branch.has_bindings = true;
+    }
+
+    // A comma-separated arm (`.A, .B, .C -> ...`), one body matched by
+    // several patterns: only once the first pattern turned out to be a
+    // plain one (not a destructuring or tuple pattern, and so with no
+    // bindings of its own to keep consistent across alternatives) -
+    // those only make sense as an arm's one and only pattern.
+    if !destructure_matched && !is_tuple_pattern && !is_wildcard {
+      for self.state.next_token_is_operator(",") {
+        self.state.token_next(); // consume ','
+        Node or_condition = node_new(.Blank);
+        let oerr = self._parse_fit_simple_pattern(&or_condition);
+        if oerr.is_some() {
+          ret oerr;
+        }
+        Node* or_ptr = malloc(sizeof(Node));
+        *or_ptr = or_condition;
+        branch.or_conditions.push(or_ptr);
+      }
     }
 
     let arerr = self.state.expect_op("->");

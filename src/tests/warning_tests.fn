@@ -400,6 +400,21 @@ test "a fit missing several variants names every one of them, not just the first
   assert count(found, "fit_non_exhaustive") == 1, "expected every missing variant folded into a single warning";
 }
 
+test "a fit comma-separated arm counts every alternative as covered" {
+  str src = `enum Color { Red, Green, Blue }
+  `fun warm(Color c) flag {
+  `  fit c {
+  `    .Red, .Green -> { ret true; }
+  `    .Blue -> { ret false; }
+  `  }
+  `  ret false;
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected the comma-separated arm's second alternative to count as handled";
+}
+
 test "a fit over num or a pointer with no catch-all is noticed" {
   // Neither has a closed value set the way flag/enum do, so a catch-all
   // is the only way to be exhaustive.

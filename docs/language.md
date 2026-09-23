@@ -1098,9 +1098,27 @@ See Enums above for `fit` over data-carrying (tagged-union) enums.
 
 `fit` matches one subject at a time; it has no multi-value/tuple form. A
 comma inside one arm's condition (`0, 1 -> { ... }`) is not that - it's
-an OR of several patterns against the same single subject. To match on
-several values together, build a short combined key first and `fit` on
-that:
+an OR of several patterns against the same single subject, and works the
+same way for an enum's dot-shorthand (`.Red, .Blue -> { ... }`):
+
+```fun
+fun warm(Color c) flag {
+  fit c {
+    .Red, .Green -> { ret true; }
+    .Blue -> { ret false; }
+  }
+}
+```
+
+Each named alternative counts as its own arm for `fit_non_exhaustive`
+purposes, so a comma-separated arm covering every remaining variant is
+still exhaustive with no `_` needed. The comma form is restricted to
+plain (non-destructuring) patterns - an alternative that binds a payload
+(`.Circle(r), .Rect(w, h) -> { ... }`) isn't allowed, since the arm body
+would need consistent bindings across every alternative.
+
+To match on several values together, build a short combined key first and
+`fit` on that:
 
 ```fun
 str key = format("{chr}{chr}{chr}", a, b, c);
