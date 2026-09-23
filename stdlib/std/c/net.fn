@@ -44,3 +44,12 @@ pub fun ntohl(num netlong) num;
 // Address parsing
 // Parses an IPv4 address string, returning it in network byte order (C semantics).
 pub fun inet_addr(str cp) num;
+
+// Sets both the receive and send timeout on `fd` to `ms` milliseconds (0
+// disables the timeout, the socket's own default). A compiler-emitted
+// shim, not a direct libc binding: the real socket option's value shape
+// differs by platform (a `struct timeval` on POSIX, a plain millisecond
+// count on Windows) even though the option itself is conceptually the
+// same on both, the same reason `std.c.atomic`'s operations are shims
+// rather than plain bindings. Returns 0 on success, -1 on failure.
+pub fun __fun_socket_set_timeout(num fd, num ms) num;

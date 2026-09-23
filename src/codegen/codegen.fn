@@ -15269,11 +15269,26 @@ impl Codegen {
     `#ifndef socket
     `#define socket __fun_win_socket
     `#endif
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  DWORD __fun_sst_tv = (DWORD)ms;
+    `  int __fun_sst_rc1 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
     `#include <arpa/inet.h>
     `#include <unistd.h>
+    `#include <sys/time.h>
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  struct timeval __fun_sst_tv;
+    `  __fun_sst_tv.tv_sec = ms / 1000;
+    `  __fun_sst_tv.tv_usec = (ms % 1000) * 1000;
+    `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
     `#endif
     ``);
     // A non-fork program can still deadlock on a channel wait, and
@@ -20179,11 +20194,26 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#ifndef socket
     `#define socket __fun_win_socket
     `#endif
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  DWORD __fun_sst_tv = (DWORD)ms;
+    `  int __fun_sst_rc1 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
     `#else
     `#include <sys/socket.h>
     `#include <netinet/in.h>
     `#include <arpa/inet.h>
     `#include <unistd.h>
+    `#include <sys/time.h>
+    `static inline long long __fun_socket_set_timeout(long long fd, long long ms) {
+    `  struct timeval __fun_sst_tv;
+    `  __fun_sst_tv.tv_sec = ms / 1000;
+    `  __fun_sst_tv.tv_usec = (ms % 1000) * 1000;
+    `  int __fun_sst_rc1 = setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  int __fun_sst_rc2 = setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &__fun_sst_tv, sizeof(__fun_sst_tv));
+    `  return (__fun_sst_rc1 == 0 && __fun_sst_rc2 == 0) ? 0LL : -1LL;
+    `}
     `#endif
     `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
     `static __fun_wd_state __fun_g_wd;
