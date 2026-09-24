@@ -5183,7 +5183,7 @@ impl Codegen {
             ret .None;
           }
           .Dec(d) -> {
-            self.state.write(format_dec(d, 6));
+            self.state.write(format_dec_exact(d));
             ret .None;
           }
           _ -> { ret .Some(.InvalidNode); }

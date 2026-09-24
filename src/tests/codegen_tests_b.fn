@@ -2420,7 +2420,21 @@ test "a generic call with a negated argument still specializes on the operand's 
   `}`;
   let out = emit_c(src, "negated generic argument");
   assert contains(out, "twice__num((-4))"), "expected the negated integer literal to pick the num version";
-  assert contains(out, "twice__dec((-2.500000))"), "expected the negated decimal literal to pick the dec version";
+  assert contains(out, "twice__dec((-2.5))"), "expected the negated decimal literal to pick the dec version";
   assert contains(out, "twice__num((-n))"), "expected a negated variable to pick its own type";
   assert !contains(out, "twice((-"), "expected no call to the unspecialized template";
+}
+
+test "decimal literals keep their full precision in the generated C" {
+  str src = `fun main() {
+  `  dec pi = 3.141592653589793;
+  `  dec tiny = 0.000000001;
+  `  dec big = 123456789.123456789;
+  `  dec whole = 3.0;
+  `}`;
+  let out = emit_c(src, "decimal literal precision");
+  assert contains(out, "double pi = 3.141592653589793;"), "expected pi without truncation to six places";
+  assert contains(out, "double tiny = 1e-09;"), "expected a tiny value not to collapse to zero";
+  assert contains(out, "double big = 123456789.12345679;"), "expected the digits a double needs";
+  assert contains(out, "double whole = 3.0;"), "expected a whole decimal to stay a decimal in C";
 }
