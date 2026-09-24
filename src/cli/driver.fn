@@ -843,6 +843,34 @@ fun _strip_cl_filename_echo(str text) str {
   ret b.build();
 }
 
+// Runs the C compiler, retrying a couple of times on a failure with
+// completely empty output: a real compile error always prints
+// diagnostics, so empty stderr alongside a nonzero exit means the
+// compiler process itself never got to run - the signature of Windows
+// briefly denying access to a file that was only just written
+// (antivirus/indexer scanning it), which a high file-creation rate (many
+// test files compiling at once under `fun test`'s own parallel runner,
+// see run_test_suite) makes more likely to actually show up than it used
+// to. A real compile error fails identically on every attempt, so this
+// can't mask one - it only costs a couple of wasted retries before
+// failing for real if it turns out not to be transient.
+fun _run_cc_retrying(str[] argv) Result<ProcessResult, Error> {
+  num attempt = 0;
+  for attempt < 3 {
+    let result = run(argv);
+    if result.is_err() {
+      ret result;
+    }
+    ProcessResult r = result.unwrap();
+    if r.exit_code == 0 || !equals(r.stderr_text, "") {
+      ret .Ok(r);
+    }
+    attempt = attempt + 1;
+    sleep_ms(200);
+  }
+  ret run(argv);
+}
+
 // Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
 // arguments inserted right after `cc` itself and before the source
 // file (a user override is trusted to know what it's asking for,
@@ -877,7 +905,7 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
     free_argv(argv);
     ret code;
   }
-  let result = run(argv);
+  let result = _run_cc_retrying(argv);
   free_argv(argv);
   if result.is_err() {
     writeln_to(Sink.Stderr, "could not spawn cl.exe");
@@ -933,7 +961,7 @@ pub fun compile_c_to_exe(str c_path, str exe_path, flag debug_info) num {
     _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
 
     str[] argv = argv_from(&argv_args);
-    let result = run(argv);
+    let result = _run_cc_retrying(argv);
     free_argv(argv);
     if result.is_err() {
       // Not installed; try the next candidate.
@@ -1030,7 +1058,7 @@ pub fun compile_c_to_fuzz_exe(str c_path, str exe_path, flag debug_info) num {
     argv_args.push("-lm");
 
     str[] argv = argv_from(&argv_args);
-    let result = run(argv);
+    let result = _run_cc_retrying(argv);
     free_argv(argv);
     if result.is_err() {
       // Couldn't even spawn this candidate (most likely not installed);
