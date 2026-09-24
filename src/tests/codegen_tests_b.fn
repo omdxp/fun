@@ -2409,3 +2409,18 @@ test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
   assert line_idx < va_idx && va_idx - line_idx < 80,
   "expected the #line directive to sit directly before the hoisted vararg temp, not only somewhere earlier in the file";
 }
+
+test "a generic call with a negated argument still specializes on the operand's type" {
+  str src = `fun twice<T: num | dec>(T x) T { ret x + x; }
+  `fun main() {
+  `  num a = twice(-4);
+  `  dec b = twice(-2.5);
+  `  num n = 3;
+  `  num c = twice(-n);
+  `}`;
+  let out = emit_c(src, "negated generic argument");
+  assert contains(out, "twice__num((-4))"), "expected the negated integer literal to pick the num version";
+  assert contains(out, "twice__dec((-2.500000))"), "expected the negated decimal literal to pick the dec version";
+  assert contains(out, "twice__num((-n))"), "expected a negated variable to pick its own type";
+  assert !contains(out, "twice((-"), "expected no call to the unspecialized template";
+}

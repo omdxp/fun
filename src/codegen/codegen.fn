@@ -13769,6 +13769,14 @@ impl Codegen {
         }
       }
       .Unary(u) -> {
+        // Negating, keeping or complementing a value leaves its type alone
+        // (`twice(-4)` is still a `num`), and `!` gives a flag.
+        if equals(u.op, "!") {
+          ret .Some("flag");
+        }
+        if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "~") {
+          ret self.infer_arg_type_name(u.operand);
+        }
         // A pointer dereference `*ptr` infers the pointee's type by
         // resolving `ptr` via the field chain and dropping one pointer level.
         if equals(u.op, "*") && u.has_indirection && u.indirection_depth == 1 {
@@ -13901,6 +13909,16 @@ impl Codegen {
         ret .None;
       }
       .Unary(u) -> {
+        // A negated, kept or complemented value has its operand's type, and
+        // `!` gives a flag (see `infer_arg_type_name`).
+        if equals(u.op, "!") {
+          DataType flag_dt = dtype_new();
+          flag_dt.type_str = "flag";
+          ret .Some(flag_dt);
+        }
+        if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "~") {
+          ret self.infer_arg_dtype(u.operand);
+        }
         // `&x` takes a pointer to the inner value: add one pointer level so
         // a generic call like `print_list(&l)` can read `l`'s generic_args
         // and infer T from them.
