@@ -6112,8 +6112,10 @@ impl Parser {
   // wired into `parse_statement`'s dispatch. The body reuses ordinary
   // statement parsing under a synthetic nameless function context, so
   // statements that check `has_current_function` behave the same inside a
-  // test body as in a real function.
-  pub parse_test_declaration() Option<ParseErrorKind> {
+  // test body as in a real function. `is_sequential` comes from a leading
+  // `sequential` keyword the caller already consumed (see
+  // `parse_top_level_declaration`).
+  pub parse_test_declaration(flag is_sequential) Option<ParseErrorKind> {
     let test_tok = self.state.token_next(); // consume 'test'
 
     let name_tok = self.state.token_next();
@@ -6153,6 +6155,7 @@ impl Parser {
     TestDeclNode td;
     td.name = name;
     td.body = body;
+    td.is_sequential = is_sequential;
 
     Node node = node_new(.Test(td));
     fit test_tok {
@@ -7887,7 +7890,17 @@ impl Parser {
       }
 
       if equals(kw, "test") {
-        ret self.parse_test_declaration();
+        ret self.parse_test_declaration(false);
+      }
+
+      if equals(kw, "sequential") {
+        self.state.token_next(); // consume 'sequential'
+        let test_tok2 = self.state.token_peek_next();
+        if test_tok2.is_none() || !token_is_keyword(test_tok2.unwrap(), "test") {
+          self.state.err("expected 'test' after 'sequential'");
+          ret .Some(.InvalidKeyword);
+        }
+        ret self.parse_test_declaration(true);
       }
 
       if equals(kw, "fuzz") {
@@ -11854,7 +11867,7 @@ test "parse_statement dispatches 'allow' and 'expect'" {
 test "parse_test_declaration parses a named test body" {
   ParseState st = _state_from("test \"adds two numbers\" { assert 1 + 1 == 2; }");
   Parser p = parser_new(&st);
-  assert p.parse_test_declaration().is_none(), "expected the test declaration to parse";
+  assert p.parse_test_declaration(false).is_none(), "expected the test declaration to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Test(td) -> {
@@ -11872,8 +11885,41 @@ test "parse_test_declaration requires a string name" {
   ParseState st = _state_from("test foo { }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
-  let err = p.parse_test_declaration();
+  let err = p.parse_test_declaration(false);
   assert err.is_some(), "expected an error for a non-string test name";
+}
+
+test "sequential test parses and sets is_sequential" {
+  ParseState st = _state_from("sequential test \"mutates a shared env var\" { assert true; }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected the sequential test declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Test(td) -> {
+      assert td.is_sequential, "expected is_sequential to be set";
+      assert equals(td.name, "mutates a shared env var"), "expected the test's own name";
+    }
+    _ -> { panic("expected a Test node"); }
+  }
+}
+
+test "a plain 'test' block defaults is_sequential to false" {
+  ParseState st = _state_from("test \"ordinary\" { assert true; }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected the test declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Test(td) -> { assert !td.is_sequential, "expected is_sequential to default to false"; }
+    _ -> { panic("expected a Test node"); }
+  }
+}
+
+test "'sequential' without a following 'test' is rejected" {
+  ParseState st = _state_from("sequential fun foo() { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_top_level_declaration();
+  assert err.is_some(), "expected an error when 'sequential' isn't followed by 'test'";
 }
 
 test "parse_top_level_declaration dispatches 'test'" {

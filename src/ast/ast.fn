@@ -890,10 +890,16 @@ pub fun impl_node_new() ImplNode {
   ret i;
 }
 
-// A `test "name" { body }` declaration (see .Test).
+// A `test "name" { body }` declaration (see .Test). `sequential test
+// "name" { body }` sets `is_sequential`: the compiled binary's own test
+// runner (see `emit_test_runner`) keeps that test off the parallel worker
+// pool and runs it alone instead, for a test that can't tolerate a sibling
+// test running at the same time (shared global state - an env var, a
+// fixed file path, a working directory change).
 pub compound TestDeclNode {
   str name;
   Node* body;
+  flag is_sequential;
 }
 
 // A `fuzz "name" (raw* data, num len) { body }` declaration (see

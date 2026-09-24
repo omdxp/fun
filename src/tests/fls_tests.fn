@@ -2583,7 +2583,7 @@ test "completion offers the synthetic 'deps' entry point alongside 'std'" {
   assert contains(out, `"label":"deps","kind":19`), "expected the synthetic deps entry point";
 }
 
-test "hover on a 'deps.<name>' segment resolves to the locked dependency's own root" {
+sequential test "hover on a 'deps.<name>' segment resolves to the locked dependency's own root" {
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
@@ -2621,7 +2621,7 @@ test "hover on a 'deps.<name>' segment resolves to the locked dependency's own r
   assert !equals(name_hover, "null"), format("expected 'mylib' to resolve to the locked dependency's own root, got: {str}", name_hover);
 }
 
-test "hover on a 'deps.<name>.<module>' segment shows the fetched module's own doc comment" {
+sequential test "hover on a 'deps.<name>.<module>' segment shows the fetched module's own doc comment" {
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
@@ -2638,7 +2638,7 @@ test "hover on a 'deps.<name>.<module>' segment shows the fetched module's own d
   assert !equals(module_hover, "null"), format("expected 'some' to resolve to the dependency's own fetched module, got: {str}", module_hover);
 }
 
-test "go-to-definition on a 'deps.<name>.<module>' segment jumps to the fetched module file" {
+sequential test "go-to-definition on a 'deps.<name>.<module>' segment jumps to the fetched module file" {
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
@@ -2667,7 +2667,7 @@ test "completion lists a project's own resolved dependency names for 'use deps.'
   assert contains(out, `"label":"mylib","kind":19`), "expected the locked dependency's own name offered";
 }
 
-test "completion lists a dependency's own modules for 'use deps.<name>.'" {
+sequential test "completion lists a dependency's own modules for 'use deps.<name>.'" {
   assert set_env("FUN_DEPS_CACHE", "src/parser/import_resolver_fixtures/deps_project/depscache"), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 

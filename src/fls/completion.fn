@@ -3152,6 +3152,9 @@ fun _skeleton(str word) str {
   if equals(word, "test") {
     ret "test \"${1:what it does}\" {\n  $0\n}";
   }
+  if equals(word, "sequential") {
+    ret "sequential test \"${1:what it does}\" {\n  $0\n}";
+  }
   if equals(word, "fuzz") {
     ret "fuzz \"${1:never crashes}\" (raw* ${2:data}, num ${3:len}) {\n  $0\n}";
   }

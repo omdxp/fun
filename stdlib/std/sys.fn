@@ -1,6 +1,7 @@
 // System utilities (process, environment, and randomness).
 
 use std.c.mem;
+use std.c.sys;
 use std.result;
 use std.error;
 
@@ -66,4 +67,11 @@ pub fun rand_seed(num seed) {
 // Returns the next pseudo-random integer in 0..RAND_MAX.
 pub fun rand_next() num {
   ret rand();
+}
+
+// Number of logical CPUs available to this process (always at least 1). A
+// reasonable default for sizing a worker pool (`ThreadPool`, `fun test`'s
+// parallel runner, or any caller-written one).
+pub fun cpu_count() num {
+  ret __fun_cpu_count();
 }

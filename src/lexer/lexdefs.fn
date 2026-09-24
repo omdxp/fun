@@ -17,7 +17,7 @@ pub fun is_keyword(str s) flag {
     "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "flag", "chr", "if",
     "elif",
     "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue",
-    "allow", "expect", "assert", "panic", "test", "fuzz" -> { ret true; }
+    "allow", "expect", "assert", "panic", "test", "fuzz", "sequential" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -27,7 +27,7 @@ pub fun is_keyword(str s) flag {
 // changed together.
 pub fun keywords() Vec<str> {
   Vec<str> out;
-  out.init(41);
+  out.init(42);
   out.push("use");
   out.push("pub");
   out.push("fun");
@@ -69,6 +69,7 @@ pub fun keywords() Vec<str> {
   out.push("panic");
   out.push("test");
   out.push("fuzz");
+  out.push("sequential");
   ret out;
 }
 
