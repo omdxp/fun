@@ -1,0 +1,694 @@
+// Code coverage data and its report formats.
+//
+// A report is built from two inputs: the list of every counted line in the
+// measured files (so a line no test reached still shows as uncovered), and
+// the raw hit counts each test binary writes when it exits, one
+// `path<TAB>line<TAB>count` row per line it reached. Counts from any number
+// of binaries add together. The report then renders as plain text, lcov,
+// Cobertura XML, JSON or a self-contained HTML page, the formats CI systems
+// and editors already read.
+
+use std.string;
+use std.vec;
+use std.map;
+use std.fs;
+use std.path;
+
+// The hit count of every counted line in one file.
+pub compound CoverFile {
+  str path;
+  // Line number to how many times it ran. A line that is counted but never
+  // ran is present with 0.
+  Map<num, num> counts;
+}
+
+pub compound CoverReport {
+  Vec<CoverFile> files;
+  Map<str, num> index;
+}
+
+pub fun cover_report_new() CoverReport {
+  CoverReport r;
+  r.files.init(16);
+  r.index.init(16);
+  ret r;
+}
+
+impl CoverReport {
+  // The slot for `path`, created on first use.
+  _file_slot(str path) num {
+    let known = self.index.at(path);
+    if known.is_some() {
+      ret known.unwrap();
+    }
+    CoverFile f;
+    f.path = substr(path, 0, len(path));
+    f.counts.init(64);
+    self.files.push(f);
+    num slot = self.files.len - 1;
+    self.index.put(f.path, slot);
+    ret slot;
+  }
+
+  // Marks `line` of `path` as a counted line, leaving any hits it already
+  // has alone.
+  pub declare(str path, num line) {
+    num slot = self._file_slot(path);
+    CoverFile* f = &self.files.data[slot];
+    if f.counts.at(line).is_none() {
+      f.counts.put(line, 0);
+    }
+  }
+
+  // Adds `count` hits to `line` of `path`.
+  pub hit(str path, num line, num count) {
+    num slot = self._file_slot(path);
+    CoverFile* f = &self.files.data[slot];
+    let known = f.counts.at(line);
+    if known.is_some() {
+      f.counts.put(line, known.unwrap() + count);
+    } else {
+      f.counts.put(line, count);
+    }
+  }
+
+  // Adds the rows of a raw counts dump (`path<TAB>line<TAB>count` per line,
+  // a count of 0 meaning the line exists but never ran). Rows that do not
+  // parse are skipped. With `only_known`, rows for a file that has no
+  // counted lines in this report yet are skipped too, which is how a run
+  // limited to part of the project ignores the rest.
+  pub add_counts(str text, flag only_known) {
+    Vec<str> rows = split(text, '\n');
+    defer rows.free();
+    for row : rows {
+      Vec<str> cols = split(row, '\t');
+      if cols.len == 3 {
+        num line = parse_int(cols.get(1));
+        num count = parse_int(cols.get(2));
+        flag known = self.index.at(cols.get(0)).is_some();
+        if line > 0 && count >= 0 && (known || !only_known) {
+          self.hit(cols.get(0), line, count);
+        }
+      }
+      cols.free();
+    }
+  }
+
+  // Every file path, sorted, so output never depends on the order the data
+  // arrived in.
+  pub paths() Vec<str> {
+    Vec<str> out;
+    out.init(self.files.len);
+    for f : self.files {
+      out.push(f.path);
+    }
+    out.sort();
+    ret out;
+  }
+
+  // The counted lines of `path`, ascending.
+  pub lines_of(str path) Vec<num> {
+    let slot = self.index.at(path);
+    if slot.is_none() {
+      Vec<num> none;
+      none.init(1);
+      ret none;
+    }
+    CoverFile* f = &self.files.data[slot.unwrap()];
+    Vec<num> keys = f.counts.keys();
+    keys.sort();
+    ret keys;
+  }
+
+  pub hits_of(str path, num line) num {
+    let slot = self.index.at(path);
+    if slot.is_none() {
+      ret 0;
+    }
+    CoverFile* f = &self.files.data[slot.unwrap()];
+    ret f.counts.get_or(line, 0);
+  }
+
+  // How many counted lines `path` has.
+  pub statements_in(str path) num {
+    let slot = self.index.at(path);
+    if slot.is_none() {
+      ret 0;
+    }
+    CoverFile* f = &self.files.data[slot.unwrap()];
+    ret f.counts.len;
+  }
+
+  // How many of `path`'s counted lines ran at least once.
+  pub covered_in(str path) num {
+    Vec<num> lines = self.lines_of(path);
+    defer lines.free();
+    num covered = 0;
+    for line : lines {
+      if self.hits_of(path, line) > 0 {
+        covered = covered + 1;
+      }
+    }
+    ret covered;
+  }
+
+  pub statements() num {
+    num total = 0;
+    for f : self.files {
+      total = total + f.counts.len;
+    }
+    ret total;
+  }
+
+  pub covered() num {
+    Vec<str> all = self.paths();
+    defer all.free();
+    num total = 0;
+    for p : all {
+      total = total + self.covered_in(p);
+    }
+    ret total;
+  }
+}
+
+// True when `path` falls under one of `prefixes`: a directory name (`examples`,
+// `tests/fixtures`) matches everything below it, a file path matches itself.
+pub fun cover_path_excluded(str path, Vec<str>* prefixes) flag {
+  for entry : prefixes {
+    str want = entry;
+    if equals(want, "") {
+      continue;
+    }
+    if ends_with(want, "/") {
+      want = substr(want, 0, len(want) - 1);
+    }
+    if equals(path, want) || starts_with(path, format("{str}/", want)) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// A copy of `r` without the files under `prefixes` (see `cover_path_excluded`).
+pub fun cover_without(CoverReport* r, Vec<str>* prefixes) CoverReport {
+  CoverReport out = cover_report_new();
+  Vec<str> all = r.paths();
+  defer all.free();
+  for p : all {
+    if cover_path_excluded(p, prefixes) {
+      continue;
+    }
+    Vec<num> lines = r.lines_of(p);
+    for line : lines {
+      out.declare(p, line);
+      out.hit(p, line, r.hits_of(p, line));
+    }
+    lines.free();
+  }
+  ret out;
+}
+
+// `covered` out of `total` as a percentage with one decimal, in whole-number
+// arithmetic so the text is the same on every platform. No statements at all
+// reads as 0.0.
+pub fun percent_text(num covered, num total) str {
+  if total <= 0 {
+    ret "0.0";
+  }
+  num tenths = (covered * 1000 + total / 2) / total;
+  ret format("{num}.{num}", tenths / 10, tenths % 10);
+}
+
+// The same, as tenths of a percent, for a threshold check.
+pub fun percent_tenths(num covered, num total) num {
+  if total <= 0 {
+    ret 0;
+  }
+  ret (covered * 1000 + total / 2) / total;
+}
+
+// The one-line summary CI systems scrape (GitLab's `coverage:` regex reads
+// the percentage from it).
+pub fun cover_summary_line(CoverReport* r) str {
+  num total = r.statements();
+  num covered = r.covered();
+  if total == 0 {
+    ret "coverage: [no statements]";
+  }
+  ret format("coverage: {str}% of statements", percent_text(covered, total));
+}
+
+// A per-file table followed by the total.
+pub fun cover_to_text(CoverReport* r) str {
+  Vec<str> all = r.paths();
+  defer all.free();
+  StringBuilder sb = string_builder_init(1024);
+  num width = 4;
+  for p : all {
+    if len(p) > width {
+      width = len(p);
+    }
+  }
+  for p : all {
+    num total = r.statements_in(p);
+    num covered = r.covered_in(p);
+    sb.append(p);
+    sb.append(repeat(" ", width - len(p) + 2));
+    str pct = percent_text(covered, total);
+    sb.append(repeat(" ", 5 - len(pct)));
+    sb.append(pct);
+    sb.append(format("%  ({num}/{num})\n", covered, total));
+  }
+  sb.append(cover_summary_line(r));
+  sb.append(format(" ({num}/{num})\n", r.covered(), r.statements()));
+  ret sb.build();
+}
+
+// lcov's tracefile format: what Codecov, Coveralls, SonarQube and the
+// `genhtml` tool read, and most editor coverage extensions too.
+pub fun cover_to_lcov(CoverReport* r) str {
+  Vec<str> all = r.paths();
+  defer all.free();
+  StringBuilder sb = string_builder_init(1024);
+  for p : all {
+    sb.append("TN:\n");
+    sb.append(format("SF:{str}\n", p));
+    Vec<num> lines = r.lines_of(p);
+    for line : lines {
+      sb.append(format("DA:{num},{num}\n", line, r.hits_of(p, line)));
+    }
+    lines.free();
+    sb.append(format("LF:{num}\n", r.statements_in(p)));
+    sb.append(format("LH:{num}\n", r.covered_in(p)));
+    sb.append("end_of_record\n");
+  }
+  ret sb.build();
+}
+
+// A rate as Cobertura writes it: a fraction with four decimals.
+fun _rate_text(num covered, num total) str {
+  if total <= 0 {
+    ret "0";
+  }
+  num scaled = (covered * 10000 + total / 2) / total;
+  str frac = format("{num}", scaled % 10000);
+  ret format("{num}.{str}{str}", scaled / 10000, repeat("0", 4 - len(frac)), frac);
+}
+
+pub fun xml_escape(str s) str {
+  StringBuilder sb = string_builder_init(len(s) + 8);
+  num i = 0;
+  for i < len(s) {
+    chr c = s[i];
+    if c == '&' {
+      sb.append("&amp;");
+    } elif c == '<' {
+      sb.append("&lt;");
+    } elif c == '>' {
+      sb.append("&gt;");
+    } elif c == '"' {
+      sb.append("&quot;");
+    } else {
+      sb.append_char(c);
+    }
+    i = i + 1;
+  }
+  ret sb.build();
+}
+
+// Cobertura XML: what GitLab reads to colour a merge request's changed lines
+// and Jenkins, Azure DevOps and others read for their coverage views.
+pub fun cover_to_cobertura(CoverReport* r) str {
+  Vec<str> all = r.paths();
+  defer all.free();
+  StringBuilder sb = string_builder_init(2048);
+  num total = r.statements();
+  num covered = r.covered();
+  sb.append("<?xml version=\"1.0\" ?>\n");
+  sb.append(
+    format(
+    "<coverage line-rate=\"{str}\" branch-rate=\"0\" lines-covered=\"{num}\" lines-valid=\"{num}\" branches-covered=\"0\" branches-valid=\"0\" complexity=\"0\" version=\"1.9\" timestamp=\"0\">\n",
+    _rate_text(covered, total),
+    covered,
+    total
+    )
+  );
+  sb.append("  <sources>\n    <source>.</source>\n  </sources>\n  <packages>\n");
+  // One package per directory, files in path order within it.
+  Vec<str> dirs;
+  dirs.init(8);
+  defer dirs.free();
+  for p : all {
+    str d = dirname(p);
+    flag seen = false;
+    for known : dirs {
+      if equals(known, d) {
+        seen = true;
+      }
+    }
+    if !seen {
+      dirs.push(d);
+    }
+  }
+  for d : dirs {
+    num pkg_total = 0;
+    num pkg_covered = 0;
+    for p : all {
+      if equals(dirname(p), d) {
+        pkg_total = pkg_total + r.statements_in(p);
+        pkg_covered = pkg_covered + r.covered_in(p);
+      }
+    }
+    sb.append(
+      format(
+      "    <package name=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n      <classes>\n",
+      xml_escape(d),
+      _rate_text(pkg_covered, pkg_total)
+      )
+    );
+    for p : all {
+      if !equals(dirname(p), d) {
+        continue;
+      }
+      sb.append(
+        format(
+        "        <class name=\"{str}\" filename=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n          <methods/>\n          <lines>\n",
+        xml_escape(basename(p)),
+        xml_escape(p),
+        _rate_text(r.covered_in(p), r.statements_in(p))
+        )
+      );
+      Vec<num> lines = r.lines_of(p);
+      for line : lines {
+        sb.append(format("            <line number=\"{num}\" hits=\"{num}\" branch=\"false\"/>\n", line, r.hits_of(p, line)));
+      }
+      lines.free();
+      sb.append("          </lines>\n        </class>\n");
+    }
+    sb.append("      </classes>\n    </package>\n");
+  }
+  sb.append("  </packages>\n</coverage>\n");
+  ret sb.build();
+}
+
+pub fun json_escape(str s) str {
+  StringBuilder sb = string_builder_init(len(s) + 8);
+  num i = 0;
+  for i < len(s) {
+    chr c = s[i];
+    if c == '"' {
+      sb.append("\\\"");
+    } elif c == '\\' {
+      sb.append("\\\\");
+    } elif c == '\n' {
+      sb.append("\\n");
+    } elif c == '\t' {
+      sb.append("\\t");
+    } else {
+      sb.append_char(c);
+    }
+    i = i + 1;
+  }
+  ret sb.build();
+}
+
+// A JSON document of the whole report, the form editors read: each file's
+// counted lines with their hit counts.
+pub fun cover_to_json(CoverReport* r) str {
+  Vec<str> all = r.paths();
+  defer all.free();
+  StringBuilder sb = string_builder_init(2048);
+  num total = r.statements();
+  num covered = r.covered();
+  sb.append("{\"format\":\"fun-coverage\",\"version\":1,\"total\":");
+  sb.append(_json_counts(total, covered));
+  sb.append(",\"files\":[");
+  flag first_file = true;
+  for p : all {
+    if !first_file {
+      sb.append(",");
+    }
+    first_file = false;
+    sb.append("{\"path\":\"");
+    sb.append(json_escape(p));
+    sb.append("\",");
+    // The counts object without its opening brace, so it reads as more
+    // members of the file object.
+    str counts = _json_counts(r.statements_in(p), r.covered_in(p));
+    sb.append(substr(counts, 1, len(counts) - 2));
+    sb.append(",\"lines\":[");
+    Vec<num> lines = r.lines_of(p);
+    flag first_line = true;
+    for line : lines {
+      if !first_line {
+        sb.append(",");
+      }
+      first_line = false;
+      sb.append(format("[{num},{num}]", line, r.hits_of(p, line)));
+    }
+    lines.free();
+    sb.append("]}");
+  }
+  sb.append("]}\n");
+  ret sb.build();
+}
+
+// `{"statements":N,"covered":M,"percent":P}`.
+fun _json_counts(num total, num covered) str {
+  StringBuilder sb = string_builder_init(64);
+  sb.append("{\"statements\":");
+  sb.append_num(total);
+  sb.append(",\"covered\":");
+  sb.append_num(covered);
+  sb.append(",\"percent\":");
+  sb.append(percent_text(covered, total));
+  sb.append("}");
+  ret sb.build();
+}
+
+fun _html_escape(str s) str {
+  StringBuilder sb = string_builder_init(len(s) + 8);
+  num i = 0;
+  for i < len(s) {
+    chr c = s[i];
+    if c == '&' {
+      sb.append("&amp;");
+    } elif c == '<' {
+      sb.append("&lt;");
+    } elif c == '>' {
+      sb.append("&gt;");
+    } else {
+      sb.append_char(c);
+    }
+    i = i + 1;
+  }
+  ret sb.build();
+}
+
+// A self-contained HTML page: a summary table, then each file's source with
+// counted lines shaded by whether they ran. Source is read from `path`
+// relative to the current directory, and a file that can no longer be read
+// shows its counted lines only.
+pub fun cover_to_html(CoverReport* r) str {
+  Vec<str> all = r.paths();
+  defer all.free();
+  StringBuilder sb = string_builder_init(4096);
+  num total = r.statements();
+  num covered = r.covered();
+  sb.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Coverage report</title>\n<style>\n");
+  sb.append(":root{--bg:#ffffff;--fg:#1c2128;--muted:#5b6673;--line:#d7dde4;--hit:#dcf3e2;--miss:#fbdcdc;--gutter:#f3f5f7}\n");
+  sb.append("@media (prefers-color-scheme:dark){:root{--bg:#15191e;--fg:#dde3ea;--muted:#8b96a3;--line:#2b333c;--hit:#173a25;--miss:#4a1f22;--gutter:#1c2128}}\n");
+  sb.append("body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;margin:24px auto;max-width:1100px;padding:0 16px}\n");
+  sb.append("table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}\n");
+  sb.append("pre{background:var(--gutter);border:1px solid var(--line);margin:0 0 28px;overflow-x:auto;padding:0}\n");
+  sb.append("pre span{display:block;padding:0 10px;white-space:pre}.hit{background:var(--hit)}.miss{background:var(--miss)}.ln{color:var(--muted);display:inline-block;margin-right:14px;text-align:right;width:4ch}\n");
+  sb.append("</style>\n</head>\n<body>\n");
+  sb.append(format("<h1>Coverage {str}%</h1>\n<p>{num} of {num} statements covered.</p>\n", percent_text(covered, total), covered, total));
+  sb.append("<table>\n<tr><th>File</th><th class=\"n\">Covered</th><th class=\"n\">Statements</th><th class=\"n\">%</th></tr>\n");
+  num fi = 0;
+  for p : all {
+    sb.append(
+      format(
+      "<tr><td><a href=\"#f{num}\">{str}</a></td><td class=\"n\">{num}</td><td class=\"n\">{num}</td><td class=\"n\">{str}</td></tr>\n",
+      fi,
+      _html_escape(p),
+      r.covered_in(p),
+      r.statements_in(p),
+      percent_text(r.covered_in(p), r.statements_in(p))
+      )
+    );
+    fi = fi + 1;
+  }
+  sb.append("</table>\n");
+  fi = 0;
+  for p : all {
+    sb.append(format("<h2 id=\"f{num}\">{str}</h2>\n<pre>", fi, _html_escape(p)));
+    fi = fi + 1;
+    if exists(p) {
+      str src = read_to_string(p);
+      Vec<str> rows = split(src, '\n');
+      num ln = 1;
+      for row : rows {
+        str cls = "";
+        if r.statements_in(p) > 0 {
+          let known = r.index.at(p);
+          CoverFile* f = &r.files.data[known.unwrap()];
+          let h = f.counts.at(ln);
+          if h.is_some() {
+            if h.unwrap() > 0 {
+              cls = " class=\"hit\"";
+            } else {
+              cls = " class=\"miss\"";
+            }
+          }
+        }
+        sb.append(format("<span{str}><span class=\"ln\">{num}</span>{str}</span>", cls, ln, _html_escape(row)));
+        ln = ln + 1;
+      }
+      rows.free();
+    }
+    sb.append("</pre>\n");
+  }
+  sb.append("</body>\n</html>\n");
+  ret sb.build();
+}
+
+fun _sample_report() CoverReport {
+  CoverReport r = cover_report_new();
+  r.declare("src/a.fn", 1);
+  r.declare("src/a.fn", 2);
+  r.declare("src/a.fn", 3);
+  r.declare("lib/b.fn", 10);
+  r.hit("src/a.fn", 1, 4);
+  r.hit("src/a.fn", 3, 1);
+  ret r;
+}
+
+test "percent_text rounds to one decimal and treats no statements as zero" {
+  assert equals(percent_text(1, 3), "33.3"), "expected one third to read 33.3";
+  assert equals(percent_text(2, 3), "66.7"), "expected two thirds to round up to 66.7";
+  assert equals(percent_text(8, 8), "100.0"), "expected everything covered to read 100.0";
+  assert equals(percent_text(0, 0), "0.0"), "expected no statements to read 0.0";
+  assert percent_tenths(1, 2) == 500, "expected half to be 500 tenths";
+}
+
+test "a report counts declared lines, and hits only raise the covered ones" {
+  CoverReport r = _sample_report();
+  assert r.statements() == 4, "expected every declared line to count";
+  assert r.covered() == 2, "expected only the lines with hits to be covered";
+  assert r.statements_in("src/a.fn") == 3, "expected the file's own line count";
+  assert r.covered_in("src/a.fn") == 2, "expected the file's own covered count";
+  assert r.hits_of("src/a.fn", 1) == 4, "expected the recorded hit count";
+  assert r.hits_of("src/a.fn", 2) == 0, "expected an unreached line to read 0";
+  assert r.hits_of("nope.fn", 1) == 0, "expected an unknown file to read 0";
+}
+
+test "hits and raw counts from several test binaries add together" {
+  CoverReport r = _sample_report();
+  r.add_counts("src/a.fn\t1\t6\nsrc/a.fn\t2\t2\nnot a row\nlib/b.fn\t10\t1\n", false);
+  r.add_counts("src/a.fn\t1\t1\n", false);
+  assert r.hits_of("src/a.fn", 1) == 11, "expected 4 + 6 + 1 hits";
+  assert r.hits_of("src/a.fn", 2) == 2, "expected the previously unreached line to be covered";
+  assert r.covered() == 4, "expected every line covered after merging";
+  assert r.statements() == 4, "expected a malformed row to add nothing";
+}
+
+test "paths come back sorted regardless of arrival order" {
+  CoverReport r = _sample_report();
+  Vec<str> all = r.paths();
+  assert equals(all.get(0), "lib/b.fn"), "expected lib/b.fn first";
+  assert equals(all.get(1), "src/a.fn"), "expected src/a.fn second";
+  all.free();
+}
+
+test "the summary line is the one CI scrapers read" {
+  CoverReport r = _sample_report();
+  assert equals(cover_summary_line(&r), "coverage: 50.0% of statements"), "expected two of four lines covered";
+  CoverReport empty = cover_report_new();
+  assert equals(cover_summary_line(&empty), "coverage: [no statements]"), "expected an empty report to say so";
+}
+
+test "the text report has one row per file and a total" {
+  CoverReport r = _sample_report();
+  str text = cover_to_text(&r);
+  assert contains(text, "lib/b.fn"), "expected the first file";
+  assert contains(text, "66.7%  (2/3)"), "expected the second file's percentage and counts";
+  assert contains(text, "0.0%  (0/1)"), "expected the uncovered file's percentage";
+  assert contains(text, "coverage: 50.0% of statements (2/4)"), "expected the total line";
+  free(text);
+}
+
+test "the lcov report has one record per file with DA, LF and LH lines" {
+  CoverReport r = _sample_report();
+  str lcov = cover_to_lcov(&r);
+  str want = "TN:\nSF:lib/b.fn\nDA:10,0\nLF:1\nLH:0\nend_of_record\nTN:\nSF:src/a.fn\nDA:1,4\nDA:2,0\nDA:3,1\nLF:3\nLH:2\nend_of_record\n";
+  assert equals(lcov, want), "expected the exact lcov tracefile";
+  free(lcov);
+}
+
+test "the cobertura report groups files into packages with line hits" {
+  CoverReport r = _sample_report();
+  str xml = cover_to_cobertura(&r);
+  assert contains(xml, "<?xml version=\"1.0\" ?>"), "expected an XML declaration";
+  assert contains(xml, "line-rate=\"0.5000\" branch-rate=\"0\" lines-covered=\"2\" lines-valid=\"4\""), "expected the overall rates";
+  assert contains(xml, "<package name=\"src\" line-rate=\"0.6667\""), "expected a package per directory";
+  assert contains(xml, "<class name=\"a.fn\" filename=\"src/a.fn\" line-rate=\"0.6667\""), "expected a class per file";
+  assert contains(xml, "<line number=\"1\" hits=\"4\" branch=\"false\"/>"), "expected a covered line";
+  assert contains(xml, "<line number=\"2\" hits=\"0\" branch=\"false\"/>"), "expected an uncovered line";
+  free(xml);
+}
+
+test "the json report carries totals and each file's lines with hits" {
+  CoverReport r = _sample_report();
+  str json = cover_to_json(&r);
+  assert contains(json, "\"format\":\"fun-coverage\",\"version\":1,\"total\":{\"statements\":4,\"covered\":2,\"percent\":50.0}"), "expected the totals";
+  assert contains(json, "{\"path\":\"src/a.fn\",\"statements\":3,\"covered\":2,\"percent\":66.7,\"lines\":[[1,4],[2,0],[3,1]]}"), "expected the file entry with its lines";
+  free(json);
+}
+
+test "escaping keeps hostile paths and source from breaking the output" {
+  assert equals(xml_escape("a<b>&\"c"), "a&lt;b&gt;&amp;&quot;c"), "expected XML metacharacters escaped";
+  assert equals(json_escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd"), "expected JSON metacharacters escaped";
+}
+
+test "the html report lists every file and shades counted lines" {
+  CoverReport r = cover_report_new();
+  r.declare("src/cli/coverage.fn", 1);
+  r.hit("src/cli/coverage.fn", 1, 2);
+  r.declare("src/cli/coverage.fn", 2);
+  str html = cover_to_html(&r);
+  assert contains(html, "<!DOCTYPE html>"), "expected a full page";
+  assert contains(html, "<h1>Coverage 50.0%</h1>"), "expected the headline percentage";
+  assert contains(html, "<a href=\"#f0\">src/cli/coverage.fn</a>"), "expected a summary row linking to the file";
+  assert contains(html, "class=\"hit\""), "expected a covered line to be shaded";
+  assert contains(html, "class=\"miss\""), "expected an uncovered line to be shaded";
+  free(html);
+}
+
+test "a dump row of zero declares a line without covering it, and only_known skips other files" {
+  CoverReport r = cover_report_new();
+  r.add_counts("src/a.fn\t1\t0\nsrc/a.fn\t2\t3\n", false);
+  assert r.statements() == 2, "expected both rows to count as lines";
+  assert r.covered() == 1, "expected only the row with hits to be covered";
+  r.add_counts("src/a.fn\t9\t1\nother.fn\t1\t1\n", true);
+  assert r.statements() == 3, "expected a new line in a known file to be added";
+  assert r.hits_of("other.fn", 1) == 0, "expected a row for an unknown file to be skipped";
+  assert r.index.at("other.fn").is_none(), "expected no file to be created for it";
+}
+
+test "excluding a directory or a file drops it from the report" {
+  CoverReport r = cover_report_new();
+  r.declare("src/a.fn", 1);
+  r.declare("examples/x.fn", 1);
+  r.declare("examples/deep/y.fn", 1);
+  r.declare("examplesX/z.fn", 1);
+  Vec<str> drop;
+  drop.init(2);
+  drop.push("examples/");
+  drop.push("src/a.fn");
+  CoverReport kept = cover_without(&r, &drop);
+  assert kept.statements() == 1, "expected only examplesX to remain";
+  assert kept.index.at("examplesX/z.fn").is_some(), "expected a directory prefix to match whole names only";
+  assert cover_path_excluded("examples/deep/y.fn", &drop), "expected a nested file under the directory to be excluded";
+  drop.free();
+}
