@@ -3821,7 +3821,9 @@ fun _scratch_project(str name) str {
   ret dir;
 }
 
-test "a suite run over a directory passes, and reports coverage in the format asked for" {
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "a suite run over a directory passes, and reports coverage in the format asked for" {
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -3842,7 +3844,9 @@ test "a suite run over a directory passes, and reports coverage in the format as
   remove_file("fun-out/driver_suite_cover.info");
 }
 
-test "a coverage minimum turns a passing run into a failure, and -g builds too" {
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "a coverage minimum turns a passing run into a failure, and -g builds too" {
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -3890,7 +3894,9 @@ test "an empty directory has no tests to run" {
   assert run_test_suite(dir, false, false, false, &defines, &cover) == 0, "expected no tests to be a success";
 }
 
-test "running one file's tests returns their result, and can stop at the C file" {
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "running one file's tests returns their result, and can stop at the C file" {
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
