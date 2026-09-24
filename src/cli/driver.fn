@@ -3807,3 +3807,171 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
   assert !_in_fixtures_dir("src/fixtures_helper.fn"), "expected a file merely named like fixtures kept";
   assert !_in_fixtures_dir("fixtures"), "expected the last component, a file or leaf, not counted as a directory";
 }
+
+// A directory of `.fn` files made for one test, emptied of anything left from
+// an earlier run. Lives under fun-out, which a scan of the project skips.
+fun _scratch_project(str name) str {
+  str dir = format("fun-out/driver_test_{str}", name);
+  make_dir_all(dir);
+  Vec<str> old = list_dir(dir).unwrap();
+  for entry : old {
+    remove_file(path_join(dir, entry));
+  }
+  old.free();
+  ret dir;
+}
+
+test "a suite run over a directory passes, and reports coverage in the format asked for" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  cover.enabled = true;
+  cover.formats.push("lcov");
+  cover.paths.push("fun-out/driver_suite_cover.info");
+  cover.formats.push("text");
+  cover.paths.push("-");
+  num code = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert code == 0, "expected the sample's passing test to give a zero exit";
+  str lcov = read_to_string("fun-out/driver_suite_cover.info");
+  assert contains(lcov, "SF:src/cli/coverage_samples/sample.fn"), "expected the measured file in the report";
+  assert contains(lcov, "DA:4,1") && contains(lcov, "DA:7,0"), "expected the reached and unreached lines with their counts";
+  remove_file("fun-out/driver_suite_cover.info");
+}
+
+test "a coverage minimum turns a passing run into a failure, and -g builds too" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  cover.enabled = true;
+  cover.has_min = true;
+  cover.min_tenths = 1000;
+  num under = run_test_suite("src/cli/coverage_samples", true, false, false, &defines, &cover);
+  assert under == 1, "expected a run below the minimum to fail";
+  cover.min_tenths = 100;
+  num met = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert met == 0, "expected a run at or above the minimum to pass";
+  cover.exclude.push("src/cli/coverage_samples");
+  num excluded = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert excluded == 1, "expected an empty report to fall below a nonzero minimum";
+}
+
+test "a suite with a failing test, or a file that does not compile, exits nonzero" {
+  str dir = _scratch_project("failing");
+  write_string(path_join(dir, "fails.fn"), "test \"always fails\" {\n  assert false, \"boom\";\n}\n");
+  write_string(path_join(dir, "broken.fn"), "fun broken( {\ntest \"never\" { assert true, \"x\"; }\n");
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  num code = run_test_suite(dir, false, false, false, &defines, &cover);
+  assert code == 1, "expected any failing file to give a nonzero exit";
+}
+
+test "an empty directory has no tests to run" {
+  str dir = _scratch_project("empty");
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  assert run_test_suite(dir, false, false, false, &defines, &cover) == 0, "expected no tests to be a success";
+}
+
+test "running one file's tests returns their result, and can stop at the C file" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected the sample's tests to pass";
+  args.push("pick returns 1 for a positive number");
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a single named test to run";
+  args.pop();
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, true, "fun-out/driver_one_file.c", false, false, true, &defines, &cover) == 0, "expected no_exec to stop after writing the C";
+  assert exists("fun-out/driver_one_file.c"), "expected the C file to be kept";
+  remove_file("fun-out/driver_one_file.c");
+  cover.enabled = true;
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a covered single-file run to pass";
+  str dir = _scratch_project("onefile");
+  write_string(path_join(dir, "bad.fn"), "fun bad( {\n");
+  assert run_tests(path_join(dir, "bad.fn"), &args, false, false, "", false, false, false, &defines, &cover) == 1, "expected a file that does not compile to fail";
+}
+
+test "lint reports findings and gives a nonzero exit for them" {
+  str dir = _scratch_project("lint");
+  write_string(path_join(dir, "a.fn"), "fun main() {\n  num unused = 1;\n}\n");
+  assert run_lint(dir, false) == 1, "expected an unused variable to be a finding";
+  assert run_lint(dir, true) == 1, "expected the summary form to fail the same way";
+  str clean = _scratch_project("lint_clean");
+  write_string(path_join(clean, "ok.fn"), "fun main() {\n}\n");
+  assert run_lint(clean, false) == 0, "expected a clean directory to pass";
+  assert run_lint("fun-out/driver_no_such_path", false) == 1, "expected a missing path to be an error";
+}
+
+test "format_file_and_imports rewrites an unformatted file and its imports" {
+  str dir = _scratch_project("format");
+  str helper = path_join(dir, "helper.fn");
+  str main_path = path_join(dir, "main.fn");
+  write_string(helper, "pub fun helper()   num {  ret   1;}\n");
+  write_string(main_path, "use helper;\nfun main() {   num x=helper( );}\n");
+  let first = format_file_and_imports(main_path);
+  assert first.is_ok() && first.unwrap() == 2, "expected both files to be rewritten";
+  let second = format_file_and_imports(main_path);
+  assert second.is_ok() && second.unwrap() == 0, "expected a second pass to change nothing";
+  assert contains(read_to_string(helper), "pub fun helper() num {"), "expected the import to have been formatted";
+  assert format_file_and_imports(path_join(dir, "missing.fn")).is_err(), "expected a missing file to be an error";
+}
+
+test "fuzz targets are read from a file by name" {
+  str dir = _scratch_project("fuzz");
+  str path = path_join(dir, "targets.fn");
+  write_string(path, "fuzz \"first target\" (raw* data, num len) {\n}\nfuzz \"second\" (raw* data, num len) {\n}\n");
+  Vec<str> found = _collect_fuzz_targets(path);
+  assert found.len == 2 && equals(found.get(0), "first target") &&
+    equals(found.get(1), "second"), "expected both names in order";
+  found.free();
+  Vec<str> none = _collect_fuzz_targets(path_join(dir, "missing.fn"));
+  assert none.len == 0, "expected a missing file to have no targets";
+  none.free();
+}
+
+sequential test "the fuzz budget and fuzz compiler follow their environment variables" {
+  clear_env("FUN_FUZZ_DEFAULT_SECONDS");
+  assert _fuzz_budget_seconds() == default_fuzz_seconds, "expected the default budget";
+  set_env("FUN_FUZZ_DEFAULT_SECONDS", "7");
+  assert _fuzz_budget_seconds() == 7, "expected the override";
+  set_env("FUN_FUZZ_DEFAULT_SECONDS", "0");
+  assert _fuzz_budget_seconds() == default_fuzz_seconds, "expected a non-positive override to be ignored";
+  clear_env("FUN_FUZZ_DEFAULT_SECONDS");
+  clear_env("FUN_FUZZ_CC");
+  Vec<str> many = _fuzz_cc_candidates();
+  assert many.len > 3 && equals(many.get(0), "clang"), "expected the search list to start with clang";
+  many.free();
+  set_env("FUN_FUZZ_CC", "my-clang");
+  Vec<str> one = _fuzz_cc_candidates();
+  assert one.len == 1 && equals(one.get(0), "my-clang"), "expected an override to be the only candidate";
+  one.free();
+  clear_env("FUN_FUZZ_CC");
+  Vec<str> defaults = _default_cc_candidates();
+  assert defaults.len == 3 && equals(defaults.get(0), "clang") &&
+    equals(defaults.get(1), "gcc"), "expected clang then gcc";
+  defaults.free();
+}
