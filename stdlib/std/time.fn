@@ -283,3 +283,68 @@ pub fun now_human_cstr() str {
   let t = now();
   ret format_human_cstr(t.epoch);
 }
+
+test "UTC formatting of a fixed epoch is exact" {
+  str buf = malloc(64);
+  num n = format_utc(1700000000, buf, 64, "%Y-%m-%d %H:%M:%S");
+  assert n == 19 && equals(buf, "2023-11-14 22:13:20"), "expected the known date and time";
+  Timestamp t;
+  t.epoch = 0;
+  assert t.to_string_utc(buf, 64) == 19 && equals(buf, "1970-01-01 00:00:00"), "expected the epoch itself";
+  assert t.format_utc(buf, 64, "%Y") == 4 && equals(buf, "1970"), "expected a custom format";
+  free(buf);
+}
+
+test "local formatting writes something of the right shape" {
+  str buf = malloc(64);
+  Timestamp t;
+  t.epoch = 1700000000;
+  assert t.to_string(buf, 64) == 19, "expected a date and time of 19 characters";
+  assert format_local(1700000000, buf, 64, "%Y") == 4 && starts_with(buf, "202"), "expected the year 2023 or so in any zone";
+  assert t.format_local(buf, 64, "%d") == 2, "expected a two-digit day";
+  free(buf);
+}
+
+test "adding and diffing seconds" {
+  assert add_seconds(100, 50) == 150 && add_seconds(100, -30) == 70, "expected epoch arithmetic";
+  assert diff_seconds(160, 100) == 60.0, "expected a positive difference";
+  assert diff_seconds(100, 160) == -60.0, "expected a negative difference";
+}
+
+test "the try_ formatters fail when the buffer is too small" {
+  str buf = malloc(8);
+  assert try_format_utc(1700000000, buf, 64, "%Y").is_ok(), "expected a fitting buffer to succeed";
+  assert try_format_utc(1700000000, buf, 2, "%Y-%m-%d").is_err(), "expected a buffer too small for the text to fail";
+  assert try_format_local(1700000000, buf, 8, "%Y").is_ok(), "expected the local form to succeed";
+  assert try_format_local(1700000000, buf, 1, "%Y-%m-%d").is_err(), "expected the local form to fail in one byte";
+  free(buf);
+}
+
+test "the clock reads a plausible time and sleeping moves it forward" {
+  Timestamp a = now();
+  assert a.epoch > 1600000000 && now_epoch() >= a.epoch, "expected the current time to be after 2020 and not go backwards";
+  sleep_ms(5);
+  sleep_seconds(0);
+  assert now_epoch() >= a.epoch, "expected time not to run backwards across a sleep";
+}
+
+test "now_string and its UTC form fill a buffer, falling back to the epoch when it is too small" {
+  str buf = malloc(64);
+  assert now_string(buf, 64) == 19, "expected a formatted local time";
+  assert now_string_utc(buf, 64) == 19, "expected a formatted UTC time";
+  assert try_now_string(buf, 64).is_ok() && try_now_string_utc(buf, 64).is_ok(), "expected the try_ forms to succeed";
+  str small = malloc(4);
+  assert now_string(small, 4) >= 10, "expected the epoch fallback to report the digits it needed";
+  assert now_string_utc(small, 4) >= 10, "expected the UTC fallback to do the same";
+  free(small);
+  free(buf);
+}
+
+test "human-readable times come from ctime" {
+  str buf = malloc(64);
+  assert format_human(1700000000, buf, 64) > 10 && contains(buf, "2023"), "expected a ctime string for the fixed epoch";
+  assert contains(format_human_cstr(1700000000), "Nov"), "expected the month in the C string form";
+  assert now_human(buf, 64) > 10, "expected the current human time";
+  assert len(now_human_cstr()) > 10, "expected the current human time as a C string";
+  free(buf);
+}
