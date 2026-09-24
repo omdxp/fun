@@ -644,8 +644,22 @@ test "lines are read whole, with a limit on their length" {
   remove_file(path);
 }
 
+// Removes the entries `_tree_cleanup` knows the directory test creates, deepest
+// first, so it can run again from nothing.
+fun _tree_cleanup(str root) {
+  remove(format("{str}/a/b/c/three.txt", root));
+  remove(format("{str}/a/b/two.fn", root));
+  remove(format("{str}/a/one.fn", root));
+  remove(format("{str}/a/b/c", root));
+  remove(format("{str}/a/b", root));
+  remove(format("{str}/a", root));
+  remove(format("{str}/d", root));
+}
+
 test "directories can be made, listed and walked" {
-  str root = _scratch("tree");
+  str root = "fun-out/fs_test_tree";
+  _tree_cleanup(root);
+  _scratch("tree");
   assert is_dir(root) && !is_dir("fun-out/fs_test_missing_dir"), "expected the scratch directory to exist";
   assert make_dir_all(format("{str}/a/b/c", root)).is_ok(), "expected nested directories to be made";
   assert make_dir_all(format("{str}/a/b/c", root)).is_ok(), "expected making an existing directory to be fine";
@@ -668,4 +682,5 @@ test "directories can be made, listed and walked" {
   assert nothing.len == 0, "expected walking a missing directory to find nothing";
   nothing.free();
   assert make_dir_all(format("{str}/a/one.fn/x", root)).is_err(), "expected a path through a file to fail";
+  _tree_cleanup(root);
 }
