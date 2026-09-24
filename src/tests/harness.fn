@@ -461,10 +461,15 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   }
   let built = run(argv_from(&build));
   assert built.is_ok(), format("{str}: could not run the C compiler", label);
-  assert built.unwrap().exit_code == 0, format(
-    "{str}: the C compiler rejected the program: {str}",
+  ProcessResult built_result = built.unwrap();
+  // `cl.exe` writes its diagnostics to stdout, so both streams are needed
+  // for the message to say anything on Windows.
+  assert built_result.exit_code == 0, format(
+    "{str}: the C compiler rejected the program (exit code {num}): {str}{str}",
     label,
-    built.unwrap().stderr_text
+    built_result.exit_code,
+    built_result.stdout_text,
+    built_result.stderr_text
   );
 
   // On Windows, supply the .exe suffix explicitly; posix_spawnp also needs backslashes.
