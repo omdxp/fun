@@ -139,6 +139,24 @@ jobs:
           name: coverage-report
           path: coverage/
           if-no-files-found: ignore
+      # The VS Code extension's Test Explorer and coverage integration: type
+      # check, then its unit tests and a smoke test that runs the integration
+      # against the `fun` this job just built.
+      - name: Set up Node for the VS Code extension
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Test the VS Code extension
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run check-types
+          FUN_SMOKE_EXE="${{ github.workspace }}/fun-out/bin/fun" npm test
       - name: Validate examples/
         timeout-minutes: 20
         run: |

@@ -10,3 +10,4 @@ esbuild.js
 tsconfig.json
 package-lock.json
 .gitignore
+out-test/**

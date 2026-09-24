@@ -368,6 +368,24 @@ The official VS Code extension is published on the Visual Studio
 Marketplace. Vim, Neovim, Emacs, and JetBrains setup notes are available
 in `editors/README.md` in the repository.
 
+### Tests and coverage in the editor
+
+In VS Code every `test` block appears in the Testing view with VS Code's own
+gutter run, debug and coverage buttons. Running with coverage shades your
+source green (ran) and red (never ran) and shows a percentage per file and in
+total. Only lines that hold a statement are shaded, so blank lines, comments and
+closing braces are left alone.
+
+Other editors get the same information from the reports `fun test` writes: run
+`fun test -cover -cover-report lcov` (or `cobertura`, `json`, `html`) and open
+the file with that editor's coverage viewer. lcov (`lcov.info`) is the widest
+supported format: the *Coverage Gutters* extension for VS Code,
+`nvim-coverage` for Neovim and `cov` for Emacs read it directly, and Cobertura
+XML is what most CI systems show.
+`fun test -cover-report html` writes a single page anyone can open in a
+browser. Running individual tests from a gutter button is only in the VS Code
+extension so far.
+
 GitHub Linguist has no native Fun grammar yet, so `.fn` files render as
 plain text in the GitHub UI.
 

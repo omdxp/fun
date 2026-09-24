@@ -21,6 +21,9 @@
     }
   },
   "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.fn"
+  ],
   "contributes": {
     "commands": [
       {
@@ -201,6 +204,7 @@
   },
   "scripts": {
     "check-types": "tsc -p ./ --noEmit",
+    "test": "esbuild src/testing-core.test.ts src/testing.smoke.test.ts --bundle --platform=node --external:vscode --outdir=out-test --log-level=warning && node --test out-test/",
     "vscode:prepublish": "npm run check-types && node esbuild.js --production",
     "compile": "npm run check-types && node esbuild.js",
     "watch": "node esbuild.js --watch",
@@ -211,7 +215,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "@types/vscode": "^1.74.0",
+    "@types/vscode": "^1.91.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
     "typescript": "^5.3.3"

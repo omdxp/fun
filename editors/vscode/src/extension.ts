@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { registerFunTesting } from "./testing";
 
 import {
   CloseAction,
@@ -640,9 +641,8 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     const lenses: vscode.CodeLens[] = [];
-    // Matches `test "name" {` (optionally `sequential test`), allowing an escaped `\"` inside the name the
-    // same way the lexer does for any other string literal.
-    const testLineRe = /^\s*(?:sequential\s+)?test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
+    // Tests are not lensed here: the Testing integration (src/testing.ts)
+    // puts VS Code's own run, debug and coverage buttons beside each `test`.
     // Matches `fuzz "name" (raw* data, num len) {` -- same name-escaping
     // rule as `test`; the params themselves aren't matched here (any
     // explicitly-typed two-param list is accepted at the `(`, and their
@@ -666,24 +666,6 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
           }),
         );
         sawMain = true; // only one main per file
-        continue;
-      }
-      const testMatch = testLineRe.exec(text);
-      if (testMatch) {
-        const testName = testMatch[1].replace(/\\(.)/g, "$1");
-        const range = new vscode.Range(i, 0, i, 0);
-        lenses.push(
-          new vscode.CodeLens(range, {
-            title: "▶ Run Test",
-            command: "fun.runTest",
-            arguments: [document.uri, testName],
-          }),
-          new vscode.CodeLens(range, {
-            title: "⚙ Debug Test",
-            command: "fun.debugTest",
-            arguments: [document.uri, testName],
-          }),
-        );
         continue;
       }
       const fuzzMatch = fuzzLineRe.exec(text);
@@ -1047,6 +1029,14 @@ export function activate(context: vscode.ExtensionContext) {
       { language: "fun", scheme: "file" },
       codeLensProvider,
     ),
+  );
+
+  // Test Explorer: every `test` block gets VS Code's own gutter run, debug and
+  // coverage buttons, and the Testing view lists them by folder, file and test.
+  registerFunTesting(
+    context,
+    { resolveExe: resolveFunCompilerExe, buildEnv: buildFunEnv },
+    output,
   );
 
   // Register the DAP tracker for both lldb and cppdbg sessions.
