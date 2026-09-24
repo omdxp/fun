@@ -290,7 +290,7 @@ fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggre
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun lint [<path>] [-summary]   (reports every warning under <path>, a file or directory, default '.')
-fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
+fun build                (reads ./fun.toml, installs optimized binaries under fun-out/bin/)
 fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Started)
 fun add <name> -git <url> [-path <subfolder>] [-tag <ref> | -branch <ref> | -rev <sha>] [-token-env <VAR>]
                          (adds or updates a [deps] entry in fun.toml, see Get Started)
@@ -315,7 +315,7 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
 | `FUN_STDLIB_DIR` | `<exe>/../share/fun`, then a nearby `stdlib/` search, then a system path | Where the compiler looks for the standard library. |
 | `FUN_DEPS_CACHE` | `$HOME/.local/share/fun/deps` | Where fetched `[deps]` checkouts are cached, keyed by repo and resolved commit; shared across every project on the machine. |
 | `FUN_CC` | `cc` (`cl` on Windows) | Overrides the host C compiler used to build the generated C. |
-| `FUN_CC_ARGS` | (none) | Extra space-separated flags appended to every C compiler invocation. |
+| `FUN_CC_ARGS` | (none) | Extra space-separated flags appended to every C compiler invocation. `fun build` adds `-O2` (`/O2` for MSVC) itself unless `-g` is given or these flags already set an optimization level, so `FUN_CC_ARGS=-O0` gives an unoptimized build. `fun -in` and `fun test` compile unoptimized. |
 | `FUN_FUZZ_CC` | `clang` (searched on `PATH` and common package-manager install paths) | Overrides the compiler used for `-fsanitize=fuzzer` builds under `fun fuzz`. |
 | `FUN_FUZZ_DEFAULT_SECONDS` | `30` | Per-target wall-clock budget for `fun fuzz [dir]`'s directory-wide form. |
 | `FUN_FUZZ_NO_ASAN` | off | Drops AddressSanitizer from fuzz builds (keeps just `-fsanitize=fuzzer`), for sandboxes where ASan's startup hangs. |
@@ -324,6 +324,7 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
 | `FUN_SCHED_MAX_WORKERS` | `4096` | Caps how many OS worker threads the virtual-thread scheduler may grow to under load. |
 | `FUN_TEST_JOBS` | `8` (`4` on Windows) | How many test files `fun test [dir]` compiles and runs at once. `1` runs them strictly one at a time. Lower by default on Windows, where `cl.exe`'s heavier spawn cost makes both layers of parallelism running at once more likely to exhaust a resource-limited machine. |
 | `FUN_TEST_INTRA_JOBS` | CPU count (`2` on Windows, under `fun test [dir]`) | Caps how many worker threads a single compiled test binary's own pool uses. Unset by default (full CPU count) for a directly-invoked `fun test file.fn`; `fun test [dir]` itself sets it to `2` on Windows for the same reason `FUN_TEST_JOBS` is lower there, unless already set. |
+| `FUN_TEST_TIMING` | off | When set, `fun test [dir]` also prints, per file, how long lowering to C, the C compiler and the test run each took, and a per-phase total at the end. |
 | `FUN_RUNTIME_BACKEND` | auto-detected | Forces the concurrency runtime backend (`posix`/`windows`, or `1`/`2`), mainly for cross-backend testing. |
 | `FUN_RUNTIME_OS` | auto-detected | Forces the OS family (`posix`/`unix`/`windows`) the runtime backend detection resolves to. |
 
