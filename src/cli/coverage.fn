@@ -227,6 +227,38 @@ pub fun percent_tenths(num covered, num total) num {
   ret (covered * 1000 + total / 2) / total;
 }
 
+// A percentage such as `80` or `87.5` as tenths of a percent, or -1 when it
+// is not one.
+pub fun parse_percent_tenths(str text) num {
+  Vec<str> parts = split(text, '.');
+  defer parts.free();
+  if parts.len < 1 || parts.len > 2 || len(parts.get(0)) == 0 {
+    ret -1;
+  }
+  num whole = 0;
+  num i = 0;
+  str w = parts.get(0);
+  for i < len(w) {
+    if w[i] < '0' || w[i] > '9' {
+      ret -1;
+    }
+    whole = whole * 10 + (w[i] - '0');
+    i = i + 1;
+  }
+  num tenth = 0;
+  if parts.len == 2 {
+    str f = parts.get(1);
+    if len(f) != 1 || f[0] < '0' || f[0] > '9' {
+      ret -1;
+    }
+    tenth = f[0] - '0';
+  }
+  if whole > 100 || (whole == 100 && tenth > 0) {
+    ret -1;
+  }
+  ret whole * 10 + tenth;
+}
+
 // The one-line summary CI systems scrape (GitLab's `coverage:` regex reads
 // the percentage from it).
 pub fun cover_summary_line(CoverReport* r) str {

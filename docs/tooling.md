@@ -138,6 +138,16 @@ fun test file.fn -cover                  # just that file's own tests
 - `-cover-exclude <path,...>` leaves files or directories out of the report
   (`-cover-exclude examples,scripts`).
 
+The minimum and the exclusions can live in `fun.toml`, so a bare
+`fun test -cover` enforces them everywhere (on the command line, `-cover-min`
+wins over the file, and `-cover-exclude` adds to it):
+
+```toml
+[coverage]
+min = 80                       # or 87.5
+exclude = ["examples", "scripts"]
+```
+
 A GitHub Actions job that uploads to Codecov:
 
 ```yaml

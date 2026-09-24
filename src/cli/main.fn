@@ -82,6 +82,7 @@ fun main(str[] args) num {
     ret run_lint(opts.input, opts.lint_summary);
   }
   if equals(opts.subcommand, "test") {
+    apply_manifest_coverage(&opts.cover);
     // No path, or a path that names a directory rather than a `.fn`
     // file, runs every `test` block found under that root instead of a
     // single file. `fun test some_file.fn` keeps compiling and running
@@ -117,6 +118,7 @@ fun main(str[] args) num {
   // `-test`/`-fuzz` given directly alongside `-in`, rather than through
   // the `test`/`fuzz` subcommand spellings above.
   if opts.test_flag {
+    apply_manifest_coverage(&opts.cover);
     ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover);
   }
   if opts.fuzz_flag {

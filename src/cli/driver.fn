@@ -197,38 +197,6 @@ fun _cover_format_known(str format_name) flag {
   }
 }
 
-// A percentage such as `80` or `87.5` as tenths of a percent, or -1 when it
-// is not one.
-fun _parse_percent_tenths(str text) num {
-  Vec<str> parts = split(text, '.');
-  defer parts.free();
-  if parts.len < 1 || parts.len > 2 || len(parts.get(0)) == 0 {
-    ret -1;
-  }
-  num whole = 0;
-  num i = 0;
-  str w = parts.get(0);
-  for i < len(w) {
-    if w[i] < '0' || w[i] > '9' {
-      ret -1;
-    }
-    whole = whole * 10 + (w[i] - '0');
-    i = i + 1;
-  }
-  num tenth = 0;
-  if parts.len == 2 {
-    str f = parts.get(1);
-    if len(f) != 1 || f[0] < '0' || f[0] > '9' {
-      ret -1;
-    }
-    tenth = f[0] - '0';
-  }
-  if whole > 100 || (whole == 100 && tenth > 0) {
-    ret -1;
-  }
-  ret whole * 10 + tenth;
-}
-
 // Reads `-cover`, `-cover-report <format[=path],...>` and `-cover-min <pct>`
 // into `o.cover`. Asking for a report or a minimum implies `-cover`.
 fun _parse_cover_options(CliArgs* parsed, Options* o) {
@@ -273,7 +241,7 @@ fun _parse_cover_options(CliArgs* parsed, Options* o) {
   }
   str min_text = parsed.get_or("cover-min", "");
   if !equals(min_text, "") {
-    num tenths = _parse_percent_tenths(min_text);
+    num tenths = parse_percent_tenths(min_text);
     if tenths < 0 {
       o.has_error = true;
       o.error_text = format("-cover-min expects a percentage from 0 to 100, found `{str}`", min_text);
@@ -1671,13 +1639,13 @@ test "a plain run has coverage off, and bad coverage flags are rejected" {
 }
 
 test "percentages read as tenths of a percent" {
-  assert _parse_percent_tenths("80") == 800, "expected a whole number";
-  assert _parse_percent_tenths("87.5") == 875, "expected one decimal";
-  assert _parse_percent_tenths("100") == 1000, "expected 100";
-  assert _parse_percent_tenths("100.1") == -1, "expected over 100 rejected";
-  assert _parse_percent_tenths("8x") == -1, "expected a non-number rejected";
-  assert _parse_percent_tenths("87.55") == -1, "expected two decimals rejected";
-  assert _parse_percent_tenths("") == -1, "expected empty rejected";
+  assert parse_percent_tenths("80") == 800, "expected a whole number";
+  assert parse_percent_tenths("87.5") == 875, "expected one decimal";
+  assert parse_percent_tenths("100") == 1000, "expected 100";
+  assert parse_percent_tenths("100.1") == -1, "expected over 100 rejected";
+  assert parse_percent_tenths("8x") == -1, "expected a non-number rejected";
+  assert parse_percent_tenths("87.55") == -1, "expected two decimals rejected";
+  assert parse_percent_tenths("") == -1, "expected empty rejected";
 }
 
 test "coverage lines are the statements outside tests, and a test's own range is recorded" {
@@ -2209,6 +2177,28 @@ pub fun resolved_defines(Vec<Define>* extra) Vec<Define> {
     ei = ei + 1;
   }
   ret out;
+}
+
+// Fills `cover` from `[coverage]` in ./fun.toml wherever the command line
+// said nothing: the minimum when none was given, and the excluded paths in
+// addition to any that were. A missing or unreadable manifest changes
+// nothing.
+pub fun apply_manifest_coverage(CoverOptions* cover) {
+  if !cover.enabled || !exists("fun.toml") {
+    ret;
+  }
+  let parsed = parse_manifest(read_to_string("fun.toml"));
+  if parsed.is_err() {
+    ret;
+  }
+  Manifest m = parsed.unwrap();
+  if !cover.has_min && m.has_cover_min {
+    cover.has_min = true;
+    cover.min_tenths = m.cover_min_tenths;
+  }
+  for path : m.cover_exclude {
+    cover.exclude.push(path);
+  }
 }
 
 // The directory absolute paths are shown relative to in a coverage report,
