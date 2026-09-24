@@ -16300,12 +16300,14 @@ impl Codegen {
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, stack_bytes); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `#endif
     ``);
     // `std.c.atomic`'s operations need a real implementation on every
@@ -16327,6 +16329,33 @@ impl Codegen {
     `static inline int64_t __fun_atomic_fetch_add(int64_t* ptr, int64_t val) { return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_exchange(int64_t* ptr, int64_t val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_cas(int64_t* ptr, int64_t expected, int64_t desired) { int64_t __fun_ac_exp = expected; int64_t __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
+    `#endif
+    ``);
+    // `std.c.sys`'s `__fun_cpu_count` binding (behind `std.sys.cpu_count`),
+    // always emitted like the atomic wrappers above rather than gated on
+    // program contents, since worker-pool sizing (`fun test`'s parallel
+    // runner, and any caller-written pool) is a reasonable thing for any
+    // program to want, not just ones already pulling in the `fork`
+    // scheduler. `emit_scheduler_runtime` reuses this same symbol instead
+    // of defining its own, rather than every gated feature that wants a
+    // CPU count carrying a private copy.
+    self.state.write(`#ifdef _WIN32
+    `static int __fun_cpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); int n = (int)si.dwNumberOfProcessors; return n > 0 ? n : 1; }
+    `#else
+    `#include <unistd.h>
+    `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
+    `#endif
+    ``);
+    // `std.c.sys`'s `__fun_process_id` binding (behind `std.sys.process_id`),
+    // always emitted for the same reason as `__fun_cpu_count` above - a
+    // process-unique value is a reasonable general thing to want (e.g. a
+    // caller building a scratch file name that must never collide with
+    // another concurrently-running copy of the same program), not
+    // specific to any one gated feature.
+    self.state.write(`#ifdef _WIN32
+    `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
+    `#else
+    `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
     ``);
     // `std.c.net`'s socket bindings need these headers, in both their
@@ -16506,7 +16535,6 @@ impl Codegen {
     `}
     `static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
     `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
-    `static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
     `#ifndef __MINGW32__
     `#ifndef __fun_clock_gettime_defined
     `#define __fun_clock_gettime_defined
@@ -16543,7 +16571,6 @@ impl Codegen {
     `}
     `static void __fun_sched_cv_signal(__fun_sched_cv* c){pthread_cond_signal(c);}
     `static void __fun_sched_cv_broadcast(__fun_sched_cv* c){pthread_cond_broadcast(c);}
-    `static int __fun_cpu_count(void){long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0?(int)n:1;}
     `#endif
     `#define __FUN_SCHED_QCAP 4096
     `// An idle worker beyond the CPU-sized base pool retires after this long
@@ -17072,12 +17099,16 @@ impl Codegen {
     Vec<str> names;
     names.init(0);
     defer names.free();
+    Vec<flag> is_sequential;
+    is_sequential.init(0);
+    defer is_sequential.free();
 
     num index = 0;
     for n : nodes {
       fit n.kind {
         .Test(t) -> {
           names.push(t.name);
+          is_sequential.push(t.is_sequential);
           // A test body starts from the same clean slate a function
           // body does.
           self.local_names.init(0);
@@ -17160,6 +17191,36 @@ impl Codegen {
     self.state.write("    return \"\";\n");
     self.state.write("}\n\n");
 
+    // Marks the tests a leading `sequential` keyword (see
+    // `TestDeclNode.is_sequential`) opted out of the parallel worker pool
+    // below, for a test that can't tolerate a sibling test running at the
+    // same time.
+    self.state.write("static int __fun_test_is_sequential(int64_t i) {\n");
+    self.state.write("    switch (i) {\n");
+    num si = 0;
+    for si < is_sequential.len {
+      if is_sequential.get(si) {
+        self.state.write(format("        case {str}: return 1;\n", format_num(si)));
+      }
+      si = si + 1;
+    }
+    self.state.write("    }\n");
+    self.state.write("    return 0;\n");
+    self.state.write("}\n\n");
+
+    // Backs the "Slowest tests" report at the end of a whole-file run
+    // (see __fun_test_main_worker). `clock()` needs `<time.h>`, not
+    // otherwise guaranteed included by this point.
+    self.state.write("#include <time.h>\n");
+    self.state.write("typedef struct { int64_t idx; double ms; } __fun_test_timing;\n");
+    self.state.write("static int __fun_test_timing_cmp(const void* a, const void* b) {\n");
+    self.state.write("    double da = ((const __fun_test_timing*)a)->ms;\n");
+    self.state.write("    double db = ((const __fun_test_timing*)b)->ms;\n");
+    self.state.write("    if (da < db) { return 1; }\n");
+    self.state.write("    if (da > db) { return -1; }\n");
+    self.state.write("    return 0;\n");
+    self.state.write("}\n\n");
+
     // The real work runs in `__fun_test_main_worker`, not `main` itself:
     // on POSIX, `main` hands it off to a worker thread given an explicit
     // large stack (see the `#include <pthread.h>` comment above for why -
@@ -17168,6 +17229,53 @@ impl Codegen {
     // through a small struct since a pthread start function takes a
     // single `void*`.
     self.state.write("typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n");
+
+    // Shared state for the parallel worker pool below: `next` is the
+    // shared cursor every worker claims-and-increments under `mu`, which
+    // also guards `ran`/`passed` and stdout so two workers finishing at
+    // once can't interleave mid-line or double-count. Workers run the
+    // full `0..total` range and skip (without counting) any index
+    // `__fun_test_is_sequential` marks, since the caller already ran
+    // those, one at a time, before starting the pool. `elapsed_ms` is a
+    // caller-owned `total`-length array every worker writes its own
+    // claimed indices into (never the same slot twice, so no lock needed
+    // for it specifically) - see the "Slowest tests" report below.
+    self.state.write("typedef struct {\n");
+    self.state.write("    int64_t total;\n");
+    self.state.write("    int64_t next;\n");
+    self.state.write("    int64_t ran;\n");
+    self.state.write("    int64_t passed;\n");
+    self.state.write("    double* elapsed_ms;\n");
+    self.state.write("    pthread_mutex_t mu;\n");
+    self.state.write("} __fun_test_par_ctx;\n\n");
+    self.state.write("static void* __fun_test_par_worker(void* __fun_test_pargp) {\n");
+    self.state.write("    __fun_test_par_ctx* ctx = (__fun_test_par_ctx*)__fun_test_pargp;\n");
+    self.state.write("    for (;;) {\n");
+    self.state.write("        pthread_mutex_lock(&ctx->mu);\n");
+    self.state.write("        int64_t i = ctx->next;\n");
+    self.state.write("        if (i >= ctx->total) { pthread_mutex_unlock(&ctx->mu); break; }\n");
+    self.state.write("        ctx->next = i + 1;\n");
+    self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
+    self.state.write("        if (__fun_test_is_sequential(i)) { continue; }\n");
+    self.state.write("        char* name = __fun_test_name(i);\n");
+    self.state.write("        int ok;\n");
+    self.state.write("        clock_t __fun_t0 = clock();\n");
+    self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
+    self.state.write("            __fun_test_dispatch(i);\n");
+    self.state.write("            ok = 1;\n");
+    self.state.write("        } else {\n");
+    self.state.write("            ok = 0;\n");
+    self.state.write("        }\n");
+    self.state.write("        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write("        pthread_mutex_lock(&ctx->mu);\n");
+    self.state.write("        ctx->ran++;\n");
+    self.state.write("        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n");
+    self.state.write("        else { printf(\"test: %s ... FAIL\\n\", name); }\n");
+    self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
+    self.state.write("    }\n");
+    self.state.write("    return 0;\n");
+    self.state.write("}\n\n");
+
     self.state.write("static void* __fun_test_main_worker(void* __fun_test_argp) {\n");
     self.state.write("    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n");
     self.state.write("    int argc = __fun_test_a->argc;\n");
@@ -17176,23 +17284,109 @@ impl Codegen {
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
-    self.state.write("    for (int64_t i = 0; i < total; i++) {\n");
-    self.state.write("        char* name = __fun_test_name(i);\n");
-    self.state.write("        if (filter && strcmp(filter, name) != 0) { continue; }\n");
-    self.state.write("        ran++;\n");
-    self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
-    self.state.write("            __fun_test_dispatch(i);\n");
-    self.state.write("            passed++;\n");
-    self.state.write("            printf(\"test: %s ... PASS\\n\", name);\n");
-    self.state.write("        } else {\n");
-    self.state.write("            printf(\"test: %s ... FAIL\\n\", name);\n");
+    self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
+    self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
+    self.state.write("    if (filter) {\n");
+    // A single named test runs alone regardless of `sequential`: with at
+    // most one test selected, there's no sibling to isolate from, and
+    // keeping this its own simple loop (matching the whole-suite runner's
+    // pre-parallelism shape) avoids spinning up a worker pool for one test.
+    self.state.write("        for (int64_t i = 0; i < total; i++) {\n");
+    self.state.write("            char* name = __fun_test_name(i);\n");
+    self.state.write("            if (strcmp(filter, name) != 0) { continue; }\n");
+    self.state.write("            ran++;\n");
+    self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
+    self.state.write("                __fun_test_dispatch(i);\n");
+    self.state.write("                passed++;\n");
+    self.state.write("                printf(\"test: %s ... PASS\\n\", name);\n");
+    self.state.write("            } else {\n");
+    self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
+    self.state.write("            }\n");
     self.state.write("        }\n");
+    self.state.write("        if (ran == 0) {\n");
+    self.state.write("            printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
+    self.state.write("            __fun_test_a->result = 1;\n");
+    self.state.write("            free(elapsed_ms);\n");
+    self.state.write("            return 0;\n");
+    self.state.write("        }\n");
+    self.state.write("    } else {\n");
+    // Whole-suite run: the sequential group first, one at a time on this
+    // thread, then everything else across a worker pool sized to the CPU
+    // count (`__fun_cpu_count`, always available - see std.c.sys).
+    self.state.write("        for (int64_t i = 0; i < total; i++) {\n");
+    self.state.write("            if (!__fun_test_is_sequential(i)) { continue; }\n");
+    self.state.write("            char* name = __fun_test_name(i);\n");
+    self.state.write("            ran++;\n");
+    self.state.write("            clock_t __fun_t0 = clock();\n");
+    self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
+    self.state.write("                __fun_test_dispatch(i);\n");
+    self.state.write("                passed++;\n");
+    self.state.write("                printf(\"test: %s ... PASS\\n\", name);\n");
+    self.state.write("            } else {\n");
+    self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
+    self.state.write("            }\n");
+    self.state.write("            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write("        }\n");
+    self.state.write("        __fun_test_par_ctx ctx;\n");
+    self.state.write("        ctx.total = total;\n");
+    self.state.write("        ctx.next = 0;\n");
+    self.state.write("        ctx.ran = 0;\n");
+    self.state.write("        ctx.passed = 0;\n");
+    self.state.write("        ctx.elapsed_ms = elapsed_ms;\n");
+    self.state.write("        pthread_mutex_init(&ctx.mu, NULL);\n");
+    // `FUN_TEST_INTRA_JOBS`, checked before the real CPU count: an escape
+    // hatch for a caller who knows this file is running alongside other
+    // concurrent `fun test` processes (e.g. `fun test <dir>`'s own
+    // per-file worker pool, see run_test_suite) and wants to cap how many
+    // threads this one file's own pool adds on top of that, rather than
+    // every concurrently-running file sizing its own pool to the full CPU
+    // count independently. Unset by default - a directly-invoked `fun
+    // test file.fn` gets the full pool.
+    self.state.write("        int nworkers;\n");
+    self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
+    self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+    self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
+    self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
+    self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
+    self.state.write("        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n");
+    self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
+    // `__fun_thread_start_sized`, not the plain 8 MB `__fun_thread_start`:
+    // a test body isn't a `fork`/`await` worker, it's exactly the kind of
+    // call this file's own main-thread wrapper already reserves 128 MB
+    // for (see that reasoning above), and used to run on that same
+    // generously-sized thread before this pool existed. A deep test body
+    // now landing on an 8 MB worker instead would stack-overflow.
+    self.state.write("            __fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728);\n");
+    self.state.write("        }\n");
+    self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
+    self.state.write("            __fun_thread_join(threads[wi]);\n");
+    self.state.write("        }\n");
+    self.state.write("        free(threads);\n");
+    self.state.write("        pthread_mutex_destroy(&ctx.mu);\n");
+    self.state.write("        ran += ctx.ran;\n");
+    self.state.write("        passed += ctx.passed;\n");
     self.state.write("    }\n");
-    self.state.write("    if (filter && ran == 0) {\n");
-    self.state.write("        printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
-    self.state.write("        __fun_test_a->result = 1;\n");
-    self.state.write("        return 0;\n");
+    // A whole-file run reports its slowest handful of tests, timed with
+    // `clock()` (portable, needs no platform-specific wrapper) - the
+    // parallel pool's own effective speedup is capped by however
+    // unevenly the work is actually distributed (a handful of expensive
+    // tests dominate, the rest are near-instant), and this is what makes
+    // that visible instead of requiring a manual binary search over
+    // FUN_TEST_INTRA_JOBS to find out.
+    self.state.write("    if (!filter && total > 0) {\n");
+    self.state.write("        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n");
+    self.state.write("        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n");
+    self.state.write("        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n");
+    self.state.write("        int64_t __fun_slow_n = total < 5 ? total : 5;\n");
+    self.state.write("        if (__fun_slow_n > 0 && __fun_tt[0].ms >= 1.0) {\n");
+    self.state.write("            printf(\"\\nSlowest tests:\\n\");\n");
+    self.state.write("            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n");
+    self.state.write("                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n");
+    self.state.write("            }\n");
+    self.state.write("        }\n");
+    self.state.write("        free(__fun_tt);\n");
     self.state.write("    }\n");
+    self.state.write("    free(elapsed_ms);\n");
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");
@@ -21287,12 +21481,14 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
     `typedef void* (*__fun_thread_entry_t)(void*);
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, 8 * 1024 * 1024); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, stack_bytes); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `#endif
     `#ifdef _WIN32
     `#include <intrin.h>
@@ -21307,6 +21503,17 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static inline int64_t __fun_atomic_fetch_add(int64_t* ptr, int64_t val) { return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_exchange(int64_t* ptr, int64_t val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_cas(int64_t* ptr, int64_t expected, int64_t desired) { int64_t __fun_ac_exp = expected; int64_t __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
+    `#endif
+    `#ifdef _WIN32
+    `static int __fun_cpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); int n = (int)si.dwNumberOfProcessors; return n > 0 ? n : 1; }
+    `#else
+    `#include <unistd.h>
+    `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
+    `#endif
+    `#ifdef _WIN32
+    `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
+    `#else
+    `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
     `#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN

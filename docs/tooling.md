@@ -25,12 +25,18 @@ fun main() {
   or emits `test` blocks at all, so a test referencing something broken
   doesn't stop the normal program from compiling.
 - **Running tests**: `fun test <path>` (shorthand for `fun -in <path>
-  -test`) compiles `test` blocks into a runner and runs it. Every
-  discovered test runs concurrently (each dispatched onto its own
-  virtual task, via the same `fork`/`channel` primitives ordinary Fun
-  code uses), printing `test: <name> ... PASS`/`FAIL` as each one
-  completes (in completion order, not declaration order) and a `N/N
-  tests passed` summary at the end.
+  -test`) compiles `test` blocks into a runner and runs it. Every plain
+  `test` runs across a pool of worker threads sized to the CPU count,
+  pulled from a shared queue rather than a fixed split, printing `test:
+  <name> ... PASS`/`FAIL` as each one completes (in completion order, not
+  declaration order) and a `N/N tests passed` summary at the end. Prefix
+  a test with `sequential` (`sequential test "description" { ... }`) to
+  opt it out of that pool - it then runs alone, before any other test in
+  the file starts, for the rare case that can't tolerate a sibling
+  running at the same time (a shared env var, a fixed file path, the
+  process's working directory). An ordinary `test` is expected to be
+  thread-safe on its own: independent state only, no shared mutable
+  globals.
 - **Filtering to one test**: `fun test <path> --"exact name"` (space
   omitted here only so this line reads as one code span; write it with a
   space in a real shell) runs just the matching test(s) instead of the
@@ -38,9 +44,13 @@ fun main() {
   hood, needing no separate flag.
 - **Running every test in a project**: `fun test` (no path) or `fun test
   <dir>` discovers every `.fn` file under that root declaring a `test`
-  block, compiles and runs each one in its own pass, and prints an
+  block and runs them across a pool of worker processes (default 8,
+  override with the `FUN_TEST_JOBS` environment variable - `=1` for
+  strictly one file at a time) pulling from a shared queue, printing an
   aggregate `== <file> ==` header per file plus a final `N/N test files
-  passed` summary. `fun test <file.fn>` keeps compiling and running just
+  passed` summary. Every file still gets its own compile pass and its own
+  process, so one file's failure or crash can't take the rest of the run
+  down with it. `fun test <file.fn>` keeps compiling and running just
   that one file, unchanged.
 - **Failure semantics**: a failing `assert` inside a test is caught and
   reported as `FAIL`, it does NOT abort the run, so every other test
@@ -312,6 +322,8 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
 | `FUN_DEADLOCK_WATCHDOG_MS` | unarmed | Milliseconds a virtual thread may block before the concurrency runtime's watchdog warns about a likely deadlock. |
 | `FUN_DEADLOCK_ABORT` | warn only | When set to `1`, the deadlock watchdog aborts the process instead of just warning. |
 | `FUN_SCHED_MAX_WORKERS` | `4096` | Caps how many OS worker threads the virtual-thread scheduler may grow to under load. |
+| `FUN_TEST_JOBS` | `8` (`4` on Windows) | How many test files `fun test [dir]` compiles and runs at once. `1` runs them strictly one at a time. Lower by default on Windows, where `cl.exe`'s heavier spawn cost makes both layers of parallelism running at once more likely to exhaust a resource-limited machine. |
+| `FUN_TEST_INTRA_JOBS` | CPU count (`2` on Windows, under `fun test [dir]`) | Caps how many worker threads a single compiled test binary's own pool uses. Unset by default (full CPU count) for a directly-invoked `fun test file.fn`; `fun test [dir]` itself sets it to `2` on Windows for the same reason `FUN_TEST_JOBS` is lower there, unless already set. |
 | `FUN_RUNTIME_BACKEND` | auto-detected | Forces the concurrency runtime backend (`posix`/`windows`, or `1`/`2`), mainly for cross-backend testing. |
 | `FUN_RUNTIME_OS` | auto-detected | Forces the OS family (`posix`/`unix`/`windows`) the runtime backend detection resolves to. |
 

@@ -2356,7 +2356,15 @@ test "-g debug info tags a propagation's own MSVC-hoisted temp-and-guard, not ju
     "msvc_propagation_debug_info",
     "propagation's own MSVC-hoisted temp-and-guard carries the enclosing statement's line"
   );
-  assert contains(out, "#line 11 \"src/tests/fixtures/msvc_propagation_debug_info.fn\"\n    Option__num __fun_try_1 = get_val(n);"),
+  // The staged fixture's own path (not asserted verbatim: harness.fn
+  // tags it with a process id and a counter so concurrently-running
+  // tests never collide on the same file - see `_fixture_base`), so
+  // only the line number and the name prefix are checked here.
+  num line_idx = index_of_str(out, "#line 11 \"src/tests/fixtures/msvc_propagation_debug_info");
+  assert line_idx >= 0, "expected the enclosing statement's own line to be emitted";
+  num temp_idx = index_of_str(out, "Option__num __fun_try_1 = get_val(n);");
+  assert temp_idx >= 0, "expected the propagation's own hoisted temp";
+  assert line_idx < temp_idx && temp_idx - line_idx < 80,
   "expected the enclosing statement's own line directly before the propagation's own hoisted temp, not a stale directive left over from whatever was emitted just before it";
 }
 
@@ -2392,7 +2400,9 @@ test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
     "msvc_vararg_debug_info",
     "printf-style call's own MSVC-hoisted vararg temps carry the enclosing statement's line"
   );
-  num line_idx = index_of_str(out, "#line 17 \"src/tests/fixtures/msvc_vararg_debug_info.fn\"");
+  // The staged fixture's own path isn't asserted verbatim here either,
+  // for the same reason as the propagation test above.
+  num line_idx = index_of_str(out, "#line 17 \"src/tests/fixtures/msvc_vararg_debug_info");
   assert line_idx >= 0, "expected the enclosing println_fmt statement's own line to be emitted";
   num va_idx = index_of_str(out, "Point __fun_va_");
   assert va_idx >= 0, "expected the Display-typed argument to be hoisted into a vararg temp";

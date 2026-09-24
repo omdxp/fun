@@ -1224,7 +1224,11 @@ test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib 
   assert ends_with(resolved, "std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
 }
 
-test "resolve_import_path resolves a 'deps.' import against the dependency's own root from fun.lock" {
+// All three cases share `FUN_DEPS_CACHE`, a process-wide env var, so
+// they're one test rather than three siblings that could otherwise run
+// concurrently and race on it (see run_test_suite/emit_test_runner's own
+// parallel test runner).
+test "resolve_import_path resolves 'deps.' imports against the locked dependency's own cache directory" {
   str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
   str cache = path_join(fixture_root, "depscache");
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
@@ -1232,27 +1236,13 @@ test "resolve_import_path resolves a 'deps.' import against the dependency's own
 
   let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib.some");
   assert equals(resolved, path_join(cache, "example_com_mylib/abc123/some.fn")), "expected the import resolved against the locked dependency's own cache directory";
-}
 
-test "resolve_import_path resolves a bare 'deps.<name>' import to the dependency's root directory" {
-  str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
-  str cache = path_join(fixture_root, "depscache");
-  assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
-  defer clear_env("FUN_DEPS_CACHE");
+  let bare_resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib");
+  assert equals(bare_resolved, path_join(cache, "example_com_mylib/abc123")), "expected a bare dependency name to resolve to its own root";
 
-  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib");
-  assert equals(resolved, path_join(cache, "example_com_mylib/abc123")), "expected a bare dependency name to resolve to its own root";
-}
-
-test "resolve_import_path resolves an unknown 'deps.' name to a never-existing path rather than crashing" {
-  str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
-  str cache = path_join(fixture_root, "depscache");
-  assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
-  defer clear_env("FUN_DEPS_CACHE");
-
-  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.nosuchlib.some");
-  assert contains(resolved, "nosuchlib"), "expected the failure to name the missing dependency rather than resolve to something unrelated";
-  assert !exists(resolved), "expected an unresolved dependency name to never coincide with a real file";
+  let unknown_resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.nosuchlib.some");
+  assert contains(unknown_resolved, "nosuchlib"), "expected the failure to name the missing dependency rather than resolve to something unrelated";
+  assert !exists(unknown_resolved), "expected an unresolved dependency name to never coincide with a real file";
 }
 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {

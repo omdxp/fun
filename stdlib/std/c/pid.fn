@@ -1,0 +1,15 @@
+// This process's own id (`getpid()`/`GetCurrentProcessId()`, a compiler-
+// emitted prelude wrapper - see codegen.fn's write_prelude). A bare
+// declaration, matching every other `std.c.*` module: codegen recognizes
+// any bodyless node declared under `std/c/*.fn` and skips generating a
+// competing forward-declared prototype for it, so the compiler's own
+// prelude definition (not this file) stays the sole source of truth.
+//
+// Not exposed through `std.sys`/a higher-level wrapper: nothing else in
+// the standard library needs a process id yet, and Fun emits every public
+// function of an imported module whether or not anything actually calls
+// it, so a binding added to a module the compiler's own source already
+// imports (like `std.sys`) would make `fun build` itself depend on this
+// prelude wrapper too. This file has no importers yet, so it stays out of
+// that graph until something other than a test helper needs it.
+pub fun __fun_process_id() num;
