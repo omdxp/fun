@@ -204,7 +204,7 @@
   },
   "scripts": {
     "check-types": "tsc -p ./ --noEmit",
-    "test": "esbuild src/testing-core.test.ts src/testing.smoke.test.ts --bundle --platform=node --external:vscode --outdir=out-test --log-level=warning && node --test out-test/",
+    "test": "esbuild src/testing-core.test.ts src/testing.smoke.test.ts --bundle --platform=node --external:vscode --outdir=out-test --log-level=warning && node --test out-test/testing-core.test.js out-test/testing.smoke.test.js",
     "vscode:prepublish": "npm run check-types && node esbuild.js --production",
     "compile": "npm run check-types && node esbuild.js",
     "watch": "node esbuild.js --watch",
