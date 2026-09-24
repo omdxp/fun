@@ -2678,3 +2678,42 @@ test "a for loop's own two-name form enumerates a direct Iterator<T> implementor
     "expected the two-name form to enumerate (i: num count, v: real Elem) for a non-tuple Elem"
   );
 }
+
+test "an enum whose variants carry data cannot be compared with == or !=, but a plain enum can" {
+  str tagged = `enum Outcome {
+  `  Done(num),
+  `  Failed,
+  `}
+  `fun main() {
+  `  Outcome a = Outcome.Failed;
+  `  flag same = a == Outcome.Failed;
+  `}`;
+  str msg = check(tagged);
+  assert contains(msg, "'==' cannot compare 'Outcome'"), "expected == on a data-carrying enum to be rejected by name";
+  assert contains(msg, "use `fit`"), "expected the message to point at fit";
+  rejects(`enum Outcome {
+  `  Done(num),
+  `  Failed,
+  `}
+  `fun main() {
+  `  Outcome a = Outcome.Failed;
+  `  flag differs = a != Outcome.Failed;
+  `}`, "expected != to be rejected too");
+  accepts(`enum Color {
+  `  Red,
+  `  Green,
+  `}
+  `fun main() {
+  `  Color c = Color.Red;
+  `  flag same = c == Color.Green;
+  `}`, "expected a plain enum to compare fine");
+  accepts(`enum Outcome {
+  `  Done(num),
+  `  Failed,
+  `}
+  `fun main() {
+  `  Outcome a = Outcome.Failed;
+  `  Outcome* p = &a;
+  `  flag same = p == nil;
+  `}`, "expected a pointer to a data-carrying enum to compare against nil");
+}
