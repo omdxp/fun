@@ -1371,10 +1371,7 @@ test "the msvc compiler is recognized by name" {
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
 
-// Both cases share `FUN_CC`, a process-wide env var, so they're one test
-// rather than two siblings that could otherwise run concurrently and race
-// on it (see run_test_suite/emit_test_runner's own parallel test runner).
-test "resolve_c_compiler honors FUN_CC verbatim, and falls back to a real search when unset" {
+sequential test "resolve_c_compiler honors FUN_CC verbatim, and falls back to a real search when unset" {
   set_env("FUN_CC", "some-made-up-cc");
   assert equals(resolve_c_compiler(), "some-made-up-cc"), "expected the exact override, unresolved against PATH";
   clear_env("FUN_CC");

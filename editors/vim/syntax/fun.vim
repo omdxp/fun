@@ -2,7 +2,7 @@ if exists("b:current_syntax")
   finish
 endif
 
-syn keyword funKeyword use as pub fun als compound quirk impl enum let const asm volatile arch defer ret if elif else for fit async await fork break continue assert panic test fuzz allow expect
+syn keyword funKeyword use as pub fun als compound quirk impl enum let const asm volatile arch defer ret if elif else for fit async await fork break continue assert panic test sequential fuzz allow expect
 syn keyword funType void raw num dec f32 f64 str flag chr
 syn match funType "\v\<(i|u)[1-9][0-9]*\>"
 syn match funCustomType "\v\<(compound|quirk|enum|impl)\s+\zs[A-Za-z_][A-Za-z0-9_]*\>"

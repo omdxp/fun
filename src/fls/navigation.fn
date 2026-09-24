@@ -2171,6 +2171,17 @@ pub fun keyword_doc(str word) str {
       `A test, run by fun -test and ignored by an ordinary build.`
     );
   }
+  if equals(word, "sequential") {
+    ret _doc(
+      `sequential test "what it does" {
+      `  ...
+      `}`,
+      `Runs a test on its own, before the parallel phase starts, instead of
+      `alongside its siblings. Use it for a test that touches process-wide
+      `state, such as an environment variable or the working directory.
+      `Sequential tests run in declaration order.`
+    );
+  }
   if equals(word, "fuzz") {
     ret _doc(
       `fuzz "never crashes on arbitrary input" (raw* data, num len) {

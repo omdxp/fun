@@ -640,9 +640,9 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     const lenses: vscode.CodeLens[] = [];
-    // Matches `test "name" {`, allowing an escaped `\"` inside the name the
+    // Matches `test "name" {` (optionally `sequential test`), allowing an escaped `\"` inside the name the
     // same way the lexer does for any other string literal.
-    const testLineRe = /^\s*test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
+    const testLineRe = /^\s*(?:sequential\s+)?test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
     // Matches `fuzz "name" (raw* data, num len) {` -- same name-escaping
     // rule as `test`; the params themselves aren't matched here (any
     // explicitly-typed two-param list is accepted at the `(`, and their

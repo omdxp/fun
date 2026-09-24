@@ -1569,6 +1569,7 @@ test "field and variant doc comments: a leading block scopes to just the field, 
 test "a keyword carries documentation, and an ordinary word does not" {
   assert !equals(keyword_doc("fit"), ""), "expected fit to be documented";
   assert contains(keyword_doc("fit"), "```fun"), "expected a fenced example";
+  assert contains(keyword_doc("sequential"), "sequential test"), "expected sequential to be documented";
   assert equals(keyword_doc("total"), ""), "expected no documentation for an ordinary name";
 }
 
@@ -3995,6 +3996,21 @@ test "hover and completion resolve a local declared inside a defer block" {
 
   str completed = completion(&reads, doc, 3, 10, false);
   assert contains(completed, `"label":"cleanup_count"`), "expected the defer-block local offered in scope completion";
+}
+
+test "hovering the sequential keyword on a test declaration shows its documentation" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///seqhover.fn";
+  doc.path = "seqhover.fn";
+  doc.text = `sequential test "touches the environment" {
+  `  assert true, "always";
+  `}`;
+  doc.version = 1;
+
+  str on_keyword = hover(&reads, doc, 0, 3);
+  assert contains(on_keyword, "sequential test"), "expected hover on 'sequential' to show its documentation";
 }
 
 test "hover and completion resolve a for loop's own bound variables, item type inferred from the iterable" {
