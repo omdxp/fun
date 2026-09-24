@@ -10,6 +10,9 @@ use std.io;
 use std.string;
 use std.vec;
 use std.time;
+use std.fs;
+
+use std.fs;
 
 // Log severity levels with explicit ordered values, so filtering is a stable
 // integer comparison and there's room to insert levels between the existing ones.
@@ -537,4 +540,123 @@ pub fun log_error(str msg) {
 pub fun log_fatal(str msg) {
   let l = logger_init(.Trace);
   l.fatal(msg);
+}
+
+// A logger that writes to `path` with timestamps off, so its output is exact.
+fun _test_logger(str path, LogLevel level, LogFormat format) Logger {
+  File f = open_write(path);
+  ret logger_init(level, format, Sink.File(f), false, "app", false);
+}
+
+// Closes the logger's file and returns what it wrote, removing the file.
+fun _test_output(Logger l, str path) str {
+  fit l.sink {
+    .File(f) -> { f.close(); }
+    _ -> {}
+  }
+  str out = read_all(path);
+  remove_file(path);
+  ret out;
+}
+
+test "a text logger writes level, name, message and fields on one line" {
+  str path = "fun-out/log_text_test.txt";
+  Logger l = _test_logger(path, .Info, .Text);
+  l.info("started");
+  l.info_r("request").str_field("path", "/x").num_field("n", 3).flag_field("ok", true).emit();
+  str out = _test_output(l, path);
+  assert contains(out, "[INFO] [app] started\n"), "expected the plain message line";
+  assert contains(out, "[INFO] [app] request path=/x n=3 ok=true\n"), "expected the fields after the message";
+}
+
+test "records below the level are dropped and enabled says so" {
+  str path = "fun-out/log_level_test.txt";
+  Logger l = _test_logger(path, .Warn, .Text);
+  l.trace("t");
+  l.debug("d");
+  l.info("i");
+  l.warn("w");
+  l.error("e");
+  assert !l.enabled(.Info) && l.enabled(.Warn) && l.enabled(.Fatal), "expected the threshold to decide what is enabled";
+  l.set_level(.Trace);
+  assert l.enabled(.Trace), "expected set_level to lower the threshold";
+  l.set_level(.Warn);
+  str out = _test_output(l, path);
+  assert !contains(out, "] t") && !contains(out, "] d") && !contains(out, "] i"), "expected records below warn dropped";
+  assert contains(out, "[WARN] [app] w") && contains(out, "[ERROR] [app] e"), "expected warn and error kept";
+}
+
+test "a json logger writes one object per line with escaped text and ordered fields" {
+  str path = "fun-out/log_json_test.txt";
+  Logger l = _test_logger(path, .Debug, .Json);
+  l.error_r("bad \"input\"\nline2").str_field("who", "me").num_field("code", 7).dec_field("ratio", 0.5).flag_field("retry", false).emit();
+  str out = _test_output(l, path);
+  assert contains(out, "{\"level\":\"ERROR\",\"logger\":\"app\",\"msg\":\"bad \\\"input\\\"\\nline2\",\"who\":\"me\",\"code\":7,"), "expected the JSON prefix with the escaped message";
+  assert contains(out, "\"retry\":false}\n"), "expected the last field and a newline";
+}
+
+test "a logger with timestamps writes an ISO time after the level" {
+  str path = "fun-out/log_ts_test.txt";
+  File f = open_write(path);
+  Logger l = logger_init(.Info, .Text, Sink.File(f), true, "", false);
+  l.info("tick");
+  str out = _test_output(l, path);
+  assert starts_with(out, "[INFO] 20"), "expected a year after the level";
+  assert contains(out, "Z tick\n"), "expected the UTC marker before the message";
+  assert !contains(out, " [] "), "expected no empty name brackets";
+}
+
+test "every level has its uppercase name" {
+  assert equals(level_name(.Trace), "TRACE") && equals(level_name(.Debug), "DEBUG"), "expected trace and debug";
+  assert equals(level_name(.Info), "INFO") && equals(level_name(.Warn), "WARN"), "expected info and warn";
+  assert equals(level_name(.Error), "ERROR") && equals(level_name(.Fatal), "FATAL"), "expected error and fatal";
+}
+
+test "field constructors and the builder attach typed fields" {
+  str path = "fun-out/log_fields_test.txt";
+  Logger l = _test_logger(path, .Trace, .Text);
+  l.trace_r("t").with(fstr("a", "x")).with(fnum("b", 2)).with(fdec("c", 1.5)).with(fflag("d", true)).emit();
+  l.debug_r("d").emit();
+  l.warn_r("w").emit();
+  l.fatal_r("f").emit();
+  str out = _test_output(l, path);
+  assert contains(out, "[TRACE] [app] t a=x b=2 c=1.5"), "expected the four field kinds in order";
+  assert contains(out, "d=true"), "expected the flag field";
+  assert contains(out, "[DEBUG] [app] d\n") && contains(out, "[WARN] [app] w\n") &&
+    contains(out, "[FATAL] [app] f\n"), "expected each builder level";
+  }
+
+test "log_tag, log_num, log_dec and log_flag write a labelled field" {
+  str path = "fun-out/log_labels_test.txt";
+  Logger l = _test_logger(path, .Info, .Text);
+  l.log_tag(.Info, "net", "connected");
+  l.log_num(.Info, "count", 4);
+  l.log_dec(.Info, "load", 0.25);
+  l.log_flag(.Info, "up", true);
+  l.log_num(.Debug, "hidden", 1);
+  str out = _test_output(l, path);
+  assert contains(out, "connected tag=net"), "expected the tag field";
+  assert contains(out, "count=4") && contains(out, "load=0.25") && contains(out, "up=true"), "expected the labelled values";
+  assert !contains(out, "hidden"), "expected a record below the level to be dropped";
+}
+
+test "the fluent setters change format, sink and name" {
+  str path = "fun-out/log_fluent_test.txt";
+  Logger base = logger_init(.Info);
+  File f = open_write(path);
+  Logger l = base.as_format(.Json).to_sink(Sink.File(f)).named("svc").with_timestamps(false).route_errors(false);
+  l.info("hello");
+  str out = _test_output(l, path);
+  assert equals(out, "{\"level\":\"INFO\",\"logger\":\"svc\",\"msg\":\"hello\"}\n"), "expected the reconfigured logger's exact output";
+}
+
+test "the one-off helpers log through a default logger" {
+  log_trace("one-off trace");
+  log_debug("one-off debug");
+  log_info("one-off info");
+  log_warn("one-off warn");
+  log_error("one-off error");
+  log_fatal("one-off fatal");
+  log(.Info, "one-off generic");
+  assert true, "expected every helper to return";
 }
