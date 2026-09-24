@@ -1687,6 +1687,7 @@ test "a coverage compile counts each measured statement once and leaves the test
   assert contains(c, "__fun_cov_line_tab[] = {4,5,7};"), "expected the table to name lines 4, 5 and 7";
   assert contains(c, "__fun_cov_file_tab[] = {\"src/cli/coverage_samples/sample.fn\""), "expected the table to name the file";
   assert contains(c, "fopen(\"counts.cov\""), "expected the dump to go where the driver asked";
+  assert contains(c, "#if defined(_MSC_VER)\n#include <intrin.h>"), "expected the MSVC counter to have the header that declares _InterlockedIncrement64";
 
   Vec<Define> defines2;
   defines2.init(0);

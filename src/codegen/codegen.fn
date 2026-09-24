@@ -15371,6 +15371,7 @@ impl Codegen {
       `static void __fun_cov_startup(void);
       `static void __fun_cov_dump(void);
       `#if defined(_MSC_VER)
+      `#include <intrin.h>
       `static void __fun_cov_hit(int id) { _InterlockedIncrement64((volatile __int64*)&__fun_cov_counts[id]); }
       `#else
       `static void __fun_cov_hit(int id) { __atomic_fetch_add(&__fun_cov_counts[id], 1, __ATOMIC_RELAXED); }
