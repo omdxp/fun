@@ -217,6 +217,19 @@ jobs:
           version: ${{ steps.bootstrap_fun.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # windows-11-arm has no MSVC dev environment set up by default, so
+      # the compiler's own clang/lld-link auto-detection falls back to
+      # whatever's already on PATH and links against a default (x64)
+      # Ws2_32.lib once std.net pulls it in, a real "machine type x64
+      # conflicts with arm64" linker error. x86_64-windows-gnu's own
+      # windows-latest runner needs no such setup: its default toolchain
+      # already targets x64 natively, matching what gets linked.
+      - name: Set up MSVC for Windows (arm64)
+        if: matrix.os == 'windows-11-arm'
+        uses: omdxp/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
       - name: Install WiX Toolset (v3)
         run: choco install wixtoolset -y
 
