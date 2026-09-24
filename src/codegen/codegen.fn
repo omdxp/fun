@@ -7,6 +7,7 @@
 // `let` binding relies on the C compiler's own `__auto_type` inference.
 
 use codegen_state;
+use ..ast.coverage_lines;
 use typedefs;
 use host_arch;
 use ..ast.ast;
@@ -534,6 +535,21 @@ pub compound Codegen {
   // equally in ordinary, test, and fuzz mode - all three lower to the
   // same statement-emission path this flag gates.
   flag debug_info;
+  // Count how often each statement of the measured files runs (`-cover`):
+  // every such statement gets a counter bumped in front of it, and the test
+  // binary writes the counts to `cover_out` when it exits. `cover_pwd` is the
+  // directory absolute paths are shown relative to. Statements inside a
+  // `test`/`fuzz` block (`cover_skip_*`) are the instrument, not the code
+  // measured.
+  flag coverage;
+  str cover_out;
+  str cover_pwd;
+  Map<str, num> cover_ids;
+  Vec<str> cover_id_files;
+  Vec<num> cover_id_lines;
+  Vec<str> cover_skip_files;
+  Vec<num> cover_skip_from;
+  Vec<num> cover_skip_to;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -632,6 +648,15 @@ pub fun codegen_new(CodegenState* state) Codegen {
   // true for the very first function, not just after the first nested
   // generic-impl-method transition sets it.
   g.root_state = state;
+  g.coverage = false;
+  g.cover_out = "";
+  g.cover_pwd = "";
+  g.cover_ids.init(64);
+  g.cover_id_files.init(64);
+  g.cover_id_lines.init(64);
+  g.cover_skip_files.init(8);
+  g.cover_skip_from.init(8);
+  g.cover_skip_to.init(8);
   g.typedef_cache_state = state;
   g.cache_splices.init(64);
   g.typedef_hints.init(64);
@@ -11911,6 +11936,7 @@ impl Codegen {
     flag last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
+      self.emit_cover_hit(stmt);
       // Armed fresh per statement, relative to whatever buffer
       // `self.state` currently is. Mid-swap that's a scratch buffer, so a
       // nested trigger from deeper in this body splices its inline
@@ -11957,13 +11983,94 @@ impl Codegen {
     ret .None;
   }
 
+  // Puts a counter in front of `stmt` when it is a counted statement of a
+  // measured file (see `coverage_counts_statement`). One counter serves
+  // every statement starting on the same line, so a line is either reached
+  // or not, however many statements it holds.
+  emit_cover_hit(Node* stmt) {
+    if !self.coverage || !coverage_counts_statement(stmt) {
+      ret;
+    }
+    if in_test_range(stmt.pos.filename, stmt.pos.line, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to) {
+      ret;
+    }
+    str path = cover_display_path(stmt.pos.filename, self.cover_pwd);
+    if !cover_is_measured(path) {
+      ret;
+    }
+    str key = format("{str}:{num}", path, stmt.pos.line);
+    num id = 0;
+    let known = self.cover_ids.at(key);
+    if known.is_some() {
+      id = known.unwrap();
+    } else {
+      id = self.cover_id_lines.len;
+      self.cover_ids.put(key, id);
+      self.cover_id_files.push(path);
+      self.cover_id_lines.push(stmt.pos.line);
+    }
+    self.state.write_indent();
+    self.state.write(format("__fun_cov_hit({num});\n", id));
+  }
+
+  // The tables behind the counters, defined after everything else so the
+  // number of statements is final: which file and line each counter is, the
+  // startup that allocates them, and the dump that writes every counter that
+  // ran, or not, as a `path<TAB>line<TAB>count` row to the file the driver named.
+  emit_cover_tables() {
+    num n = self.cover_id_lines.len;
+    StringBuilder sb = string_builder_init(1024);
+    sb.append("\nstatic const char* const __fun_cov_file_tab[] = {");
+    num i = 0;
+    for i < n {
+      if i > 0 {
+        sb.append(",");
+      }
+      sb.append("\"");
+      sb.append(c_string_escape(self.cover_id_files.get(i)));
+      sb.append("\"");
+      i = i + 1;
+    }
+    if n == 0 {
+      sb.append("0");
+    }
+    sb.append("};\nstatic const int __fun_cov_line_tab[] = {");
+    i = 0;
+    for i < n {
+      if i > 0 {
+        sb.append(",");
+      }
+      sb.append_num(self.cover_id_lines.get(i));
+      i = i + 1;
+    }
+    if n == 0 {
+      sb.append("0");
+    }
+    sb.append("};\n");
+    sb.append("static void __fun_cov_startup(void) {\n    __fun_cov_n = ");
+    sb.append_num(n);
+    sb.append(";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n");
+    sb.append("static void __fun_cov_dump(void) {\n");
+    sb.append("    FILE* __fun_cov_f = fopen(\"");
+    sb.append(c_string_escape(self.cover_out));
+    sb.append("\", \"w\");\n");
+    sb.append("    if (!__fun_cov_f) { return; }\n");
+    sb.append("    for (int __fun_cov_i = 0; __fun_cov_i < __fun_cov_n; __fun_cov_i++) {\n");
+    sb.append("        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n");
+    sb.append("    }\n    fclose(__fun_cov_f);\n}\n");
+    self.state.write(sb.build());
+  }
+
   // Emits `body`: every statement in order for a `Body` block, or the one
   // statement for a braceless body, since an `if`/`for` body doesn't
   // require `{ }` around a single statement.
   emit_body(Node body) Option<CodegenErrorKind> {
     fit body.kind {
       .Body(bn) -> { ret self.emit_statements(bn.statements); }
-      _ -> { ret self.emit_statement(body); }
+      _ -> {
+        self.emit_cover_hit(&body);
+        ret self.emit_statement(body);
+      }
     }
   }
 
@@ -15123,6 +15230,22 @@ impl Codegen {
     // spawns stays portable without them.
     // A failing assertion returns to the runner, which needs a jump
     // target per thread.
+    if self.coverage {
+      // The counters live in one heap array sized once every statement is
+      // known (see `emit_cover_tables`), hence the pointer and the
+      // prototypes for what is defined at the end of the file. An atomic
+      // add keeps counts right when tests run on several threads.
+      self.state.write(`static long long* __fun_cov_counts = 0;
+      `static int __fun_cov_n = 0;
+      `static void __fun_cov_startup(void);
+      `static void __fun_cov_dump(void);
+      `#if defined(_MSC_VER)
+      `static void __fun_cov_hit(int id) { _InterlockedIncrement64((volatile __int64*)&__fun_cov_counts[id]); }
+      `#else
+      `static void __fun_cov_hit(int id) { __atomic_fetch_add(&__fun_cov_counts[id], 1, __ATOMIC_RELAXED); }
+      `#endif
+      ``);
+    }
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
@@ -16869,6 +16992,9 @@ impl Codegen {
     // time any pass needs to know whether the program uses `fork`.
     self.uses_fork = uses_fork_in(nodes);
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
+    if self.coverage {
+      collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+    }
     self.write_prelude();
     self.register_function_signatures(nodes);
     self.register_top_level_consts(nodes);
@@ -17145,7 +17271,14 @@ impl Codegen {
     }
 
     if self.test_mode {
-      ret self.emit_test_runner(nodes);
+      let runner_err = self.emit_test_runner(nodes);
+      if runner_err.is_some() {
+        ret runner_err;
+      }
+      if self.coverage {
+        self.emit_cover_tables();
+      }
+      ret .None;
     }
     if self.fuzz_mode {
       ret self.emit_fuzz_harness(nodes);
@@ -17421,6 +17554,9 @@ impl Codegen {
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
+    if self.coverage {
+      self.state.write("    __fun_cov_startup();\n");
+    }
     self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
     self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
     self.state.write("    if (filter) {\n");
@@ -17533,6 +17669,9 @@ impl Codegen {
     self.state.write("        free(__fun_tt);\n");
     self.state.write("    }\n");
     self.state.write("    free(elapsed_ms);\n");
+    if self.coverage {
+      self.state.write("    __fun_cov_dump();\n");
+    }
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");
