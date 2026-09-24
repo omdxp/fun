@@ -3975,3 +3975,27 @@ sequential test "the fuzz budget and fuzz compiler follow their environment vari
     equals(defaults.get(1), "gcc"), "expected clang then gcc";
   defaults.free();
 }
+
+test "coverage measures project files and leaves out the standard library, dependencies and fixtures" {
+  assert cover_is_measured("src/a.fn") && cover_is_measured("a.fn") &&
+    cover_is_measured("src/deep/er/b.fn"), "expected project files to be measured";
+  assert !cover_is_measured("/home/u/.local/share/fun/share/fun/std/vec.fn"), "expected an installed standard library to be left out";
+  assert !cover_is_measured("/home/u/.local/share/fun/deps/example_com_lib/abc123/lib.fn"), "expected a fetched dependency to be left out";
+  assert !cover_is_measured("../sibling/x.fn"), "expected a file outside the project to be left out";
+  assert !cover_is_measured("C:/Users/u/deps/x.fn"), "expected a Windows absolute path to be left out";
+  assert !cover_is_measured("tests/fixtures/x.fn") &&
+    !cover_is_measured("src/parser/import_resolver_fixtures/a.fn"), "expected fixtures to be left out";
+  assert !cover_is_measured("fun-out/generated.fn"), "expected build output to be left out";
+  assert cover_is_measured("src/fixtures_not/x.fn") &&
+    cover_is_measured("src/my_fixtures_file.fn"), "expected only whole directory names to count as fixtures";
+  assert !cover_is_measured(""), "expected an empty path to be left out";
+}
+
+test "a path is shown relative to the working directory, and only when it really is inside it" {
+  assert equals(cover_display_path("/w/proj/src/a.fn", "/w/proj"), "src/a.fn"), "expected an absolute project path to be made relative";
+  assert equals(cover_display_path("./src/a.fn", ""), "src/a.fn"), "expected a leading ./ to be dropped";
+  assert equals(cover_display_path("C:\\w\\src\\a.fn", ""), "C:/w/src/a.fn"), "expected backslashes to become slashes";
+  assert equals(cover_display_path("C:\\w\\proj\\src\\a.fn", "C:\\w\\proj"), "src/a.fn"), "expected a Windows path to be made relative to a Windows directory";
+  assert equals(cover_display_path("/w/project/a.fn", "/w/pro"), "/w/project/a.fn"), "expected a sibling whose name starts the same not to be stripped";
+  assert equals(cover_display_path("/other/src/a.fn", "/w/proj"), "/other/src/a.fn"), "expected a path elsewhere to stay absolute";
+}
