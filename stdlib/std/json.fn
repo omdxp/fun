@@ -191,6 +191,10 @@ impl JsonValue {
             JsonValue vv = v.unwrap();
             vv.free();
           }
+        }
+        // Keys are the map's own lookup keys: free them only after every
+        // value has been looked up.
+        for k : ks {
           free(k);
         }
         ks.free();
