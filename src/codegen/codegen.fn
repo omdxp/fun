@@ -15248,11 +15248,17 @@ impl Codegen {
       `    (void)file; (void)attrp; (void)envp;
       `    if (pid == NULL || argv == NULL) return -1;
       `
-      `    STARTUPINFOA si;
+      `    STARTUPINFOEXA six;
       `    PROCESS_INFORMATION pi;
-      `    memset(&si, 0, sizeof(si));
+      `    memset(&six, 0, sizeof(six));
       `    memset(&pi, 0, sizeof(pi));
-      `    si.cb = sizeof(si);
+      `    STARTUPINFOA* si = &six.StartupInfo;
+      `    si->cb = sizeof(six);
+      `    DWORD create_flags = 0;
+      `    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+      `    HANDLE listed[3];
+      `    DWORD listed_prev[3];
+      `    DWORD nlisted = 0;
       `
       `    char* cmdline = __fun_win_build_cmdline(argv);
       `    if (cmdline == NULL) return -1;
@@ -15265,28 +15271,57 @@ impl Codegen {
       `       open, stalling the reader until an unrelated child exits). */
       `    AcquireSRWLockExclusive(&__fun_win_spawn_lock);
       `    BOOL inherit = FALSE;
-      `    HANDLE out_h = NULL, err_h = NULL;
-      `    DWORD out_prev = 0, err_prev = 0;
       `    if (file_actions != NULL && (file_actions->has_dup2_1 || file_actions->has_dup2_2)) {
-      `        si.dwFlags |= STARTF_USESTDHANDLES;
-      `        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-      `        si.hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);
-      `        si.hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);
-      `        if (file_actions->has_dup2_1) {
-      `            out_h = si.hStdOutput;
-      `            GetHandleInformation(out_h, &out_prev);
-      `            SetHandleInformation(out_h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        si->dwFlags |= STARTF_USESTDHANDLES;
+      `        si->hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+      `        si->hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);
+      `        si->hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);
+      `        /* Only these three handles may reach the child. Without an
+      `           explicit list, bInheritHandles hands over EVERY inheritable
+      `           handle in the process, including a file another thread has
+      `           open for writing at this moment (a freshly written C file,
+      `           say), which then stays locked until this child exits. */
+      `        HANDLE wanted[3] = { si->hStdInput, si->hStdOutput, si->hStdError };
+      `        for (int wi = 0; wi < 3; wi++) {
+      `            DWORD flags_now = 0;
+      `            if (wanted[wi] == NULL || wanted[wi] == INVALID_HANDLE_VALUE) continue;
+      `            if (!GetHandleInformation(wanted[wi], &flags_now)) continue;
+      `            int seen = 0;
+      `            for (DWORD li = 0; li < nlisted; li++) { if (listed[li] == wanted[wi]) seen = 1; }
+      `            if (seen) continue;
+      `            listed[nlisted] = wanted[wi];
+      `            listed_prev[nlisted] = flags_now;
+      `            nlisted++;
+      `            SetHandleInformation(wanted[wi], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
       `        }
-      `        if (file_actions->has_dup2_2) {
-      `            err_h = si.hStdError;
-      `            GetHandleInformation(err_h, &err_prev);
-      `            SetHandleInformation(err_h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        SIZE_T attr_size = 0;
+      `        InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+      `        if (nlisted > 0 && attr_size > 0) {
+      `            attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attr_size);
+      `            if (attrs != NULL && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) {
+      `                if (UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, listed, nlisted * sizeof(HANDLE), NULL, NULL)) {
+      `                    six.lpAttributeList = attrs;
+      `                    create_flags |= EXTENDED_STARTUPINFO_PRESENT;
+      `                } else {
+      `                    DeleteProcThreadAttributeList(attrs);
+      `                    free(attrs);
+      `                    attrs = NULL;
+      `                }
+      `            } else {
+      `                free(attrs);
+      `                attrs = NULL;
+      `            }
       `        }
       `        inherit = TRUE;
       `    }
-      `    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, 0, NULL, NULL, &si, &pi);
-      `    if (out_h != NULL) SetHandleInformation(out_h, HANDLE_FLAG_INHERIT, out_prev & HANDLE_FLAG_INHERIT);
-      `    if (err_h != NULL) SetHandleInformation(err_h, HANDLE_FLAG_INHERIT, err_prev & HANDLE_FLAG_INHERIT);
+      `    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, create_flags, NULL, NULL, (LPSTARTUPINFOA)&six, &pi);
+      `    for (DWORD li = 0; li < nlisted; li++) {
+      `        SetHandleInformation(listed[li], HANDLE_FLAG_INHERIT, listed_prev[li] & HANDLE_FLAG_INHERIT);
+      `    }
+      `    if (attrs != NULL) {
+      `        DeleteProcThreadAttributeList(attrs);
+      `        free(attrs);
+      `    }
       `
       `    /* The process handle is kept, not closed and later re-opened by pid:
       `       once a fast child has exited and nothing holds a handle to it, its
