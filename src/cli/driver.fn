@@ -1966,15 +1966,20 @@ compound SuiteTestResult {
 // it, so run_test_suite can decide what to display. Compile output still goes
 // to stderr when a compiler is explicitly set via FUN_CC.
 //
-// `worker_id` tags the intermediate `.c`/exe paths so concurrent
-// run_test_suite workers compiling different source files that happen to
-// share a basename (different directories, same filename) never write the
-// same output path at once; each worker keeps its own tag across every file
-// it processes, so a worker's own files still reuse (not accumulate) that
-// one path over time.
+// `compile_tag` tags the intermediate `.c`/exe paths so concurrent
+// run_test_suite workers never write the same output path at once: two
+// different source files that happen to share a basename (different
+// directories, same filename) would otherwise collide, and reusing a
+// per-worker tag across that worker's own many files over the run isn't
+// safe either (a just-deleted file isn't always immediately safe to
+// recreate under the exact same name on Windows - antivirus/indexer/
+// deferred handle release can still hold it briefly). The caller passes
+// each file's own claimed index, unique for the whole run, so no compile
+// ever reuses a path any other compile - on this worker or any other -
+// has ever touched.
 fun _run_tests_captured(
   str input,
-  num worker_id,
+  num compile_tag,
   flag debug_info,
   flag warn_unused,
   flag warn_unused_lenient,
@@ -1987,7 +1992,7 @@ fun _run_tests_captured(
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
 
-  str c_path = default_c_path(input, format(".w{num}.test.c", worker_id));
+  str c_path = default_c_path(input, format(".w{num}.test.c", compile_tag));
   let lowered = compile_to_c_mode(
     input,
     c_path,
@@ -2004,7 +2009,7 @@ fun _run_tests_captured(
     ret bad;
   }
 
-  str exe = default_exe_path(input, format(".w{num}.test", worker_id));
+  str exe = default_exe_path(input, format(".w{num}.test", compile_tag));
   let cc_code = compile_c_to_exe(c_path, exe, debug_info);
   remove_file(c_path);
   if cc_code != 0 {
@@ -2042,15 +2047,13 @@ fun _run_tests_captured(
 }
 
 // Shared state for run_test_suite's worker threads. `next_index`/
-// `next_worker_id`/`passed`/`failed`/`failed_files` are all written only
-// under `lock` (a plain counter, not `Atomic<num>`, since claiming a file
-// and reporting its result share the same critical section below); a Vec
-// push or a `println` isn't safe to run from more than one thread at once
-// either.
+// `passed`/`failed`/`failed_files` are all written only under `lock` (a
+// plain counter, not `Atomic<num>`, since claiming a file and reporting
+// its result share the same critical section below); a Vec push or a
+// `println` isn't safe to run from more than one thread at once either.
 compound _TestSuiteWorkerCtx {
   Vec<str>* files;
   num next_index;
-  num next_worker_id;
   flag debug_info;
   flag warn_unused;
   flag warn_unused_lenient;
@@ -2072,11 +2075,6 @@ fun _test_suite_worker(raw* arg) raw* {
   }
   _TestSuiteWorkerCtx* ctx = arg;
 
-  ctx.lock.lock();
-  num worker_id = ctx.next_worker_id;
-  ctx.next_worker_id = worker_id + 1;
-  ctx.lock.unlock();
-
   for true {
     ctx.lock.lock();
     num i = ctx.next_index;
@@ -2089,9 +2087,16 @@ fun _test_suite_worker(raw* arg) raw* {
     println(format("  running {str}", path));
     ctx.lock.unlock();
 
+    // `i`, not a per-worker id: a worker tag would get reused across
+    // every file that same worker processes over the run's lifetime,
+    // and on Windows a just-deleted file isn't always immediately safe
+    // to recreate under the exact same name (antivirus/indexer/deferred
+    // handle release can still hold it briefly). `i` is claimed once,
+    // globally, for the whole run, so no compile ever reuses a path
+    // another compile (on this worker or any other) has ever touched.
     let res = _run_tests_captured(
       path,
-      worker_id,
+      i,
       ctx.debug_info,
       ctx.warn_unused,
       ctx.warn_unused_lenient,
@@ -2208,7 +2213,6 @@ pub fun run_test_suite(
   _TestSuiteWorkerCtx ctx;
   ctx.files = &test_files;
   ctx.next_index = 0;
-  ctx.next_worker_id = 0;
   ctx.debug_info = debug_info;
   ctx.warn_unused = warn_unused;
   ctx.warn_unused_lenient = warn_unused_lenient;
