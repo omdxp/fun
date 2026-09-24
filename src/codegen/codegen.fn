@@ -1454,21 +1454,7 @@ impl Codegen {
           ret;
         }
         num rpos = self.root_hoist_pos.unwrap();
-        // `peek()`, not `build()`: this is the true root buffer, still
-        // being written to for the rest of the program after this
-        // splice, not a throwaway scratch one.
-        str rfull = self.root_state.out.peek();
-        str rhead = substr(rfull, 0, rpos);
-        str rtail = substr(rfull, rpos, len(rfull) - rpos);
-        StringBuilder rrebuilt = string_builder_init(len(rfull) + len(text) + 16);
-        rrebuilt.append(rhead);
-        rrebuilt.append(text);
-        rrebuilt.append(rtail);
-        free(rfull);
-        free(rhead);
-        free(rtail);
-        self.root_state.out.free();
-        self.root_state.out = rrebuilt;
+        self.root_state.out.insert_at(rpos, text);
         self.root_hoist_pos = .Some(rpos + len(text));
         self.root_stmt_start_pos = adjust_pos_after_splice(
           self.root_stmt_start_pos,
@@ -1481,19 +1467,7 @@ impl Codegen {
       ret;
     }
     num pos = self.hoist_insert_pos.unwrap();
-    // `peek()`, not `build()`, same reason as the root-buffer branch above.
-    str full = self.state.out.peek();
-    str head = substr(full, 0, pos);
-    str tail = substr(full, pos, len(full) - pos);
-    StringBuilder rebuilt = string_builder_init(len(full) + len(text) + 16);
-    rebuilt.append(head);
-    rebuilt.append(text);
-    rebuilt.append(tail);
-    free(full);
-    free(head);
-    free(tail);
-    self.state.out.free();
-    self.state.out = rebuilt;
+    self.state.out.insert_at(pos, text);
     self.hoist_insert_pos = .Some(pos + len(text));
     // Tracked independently of `hoist_insert_pos`, so it needs the same
     // shift.
@@ -4699,20 +4673,9 @@ impl Codegen {
     if pos <= 0 {
       ret false;
     }
-    str head = "";
-    flag head_built = false;
     for name : type_names {
       if equals(name, "") || equals(name, "void") || !equals(map_type_to_c(name), name) {
         continue;
-      }
-      if !head_built {
-        // `peek()`: a read-only check of what's already in the live
-        // buffer, not the end of it - `build()` here would silently
-        // wipe everything written so far on the very next `write`.
-        str out_so_far = self.state.out.peek();
-        head = substr(out_so_far, 0, pos);
-        free(out_so_far);
-        head_built = true;
       }
       StringBuilder struct_needle_sb = string_builder_init(20);
       struct_needle_sb.append("typedef struct ");
@@ -4722,18 +4685,13 @@ impl Codegen {
       enum_needle_sb.append(name);
       str struct_needle = struct_needle_sb.build();
       str enum_needle = enum_needle_sb.build();
-      flag found = contains(head, struct_needle) || contains(head, enum_needle);
+      flag found = self.state.out.contains_within(struct_needle, pos) ||
+        self.state.out.contains_within(enum_needle, pos);
       free(struct_needle);
       free(enum_needle);
       if !found {
-        if head_built {
-          free(head);
-        }
         ret false;
       }
-    }
-    if head_built {
-      free(head);
     }
     ret true;
   }
