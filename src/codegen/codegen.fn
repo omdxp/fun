@@ -772,10 +772,27 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
   ret false;
 }
 
-fun uses_fork_in(Vec<Node> nodes) flag {
+fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
   for n : nodes {
     if node_contains_fork(&n) {
       ret true;
+    }
+    // A `fork` written only inside a `test` or `fuzz` block needs the fork
+    // runtime when those blocks are being compiled, and must not when they
+    // are skipped: an imported module's tests would otherwise pull the
+    // scheduler into every ordinary program that imports it.
+    fit n.kind {
+      .Test(t) -> {
+        if test_mode && node_contains_fork(t.body) {
+          ret true;
+        }
+      }
+      .Fuzz(fz) -> {
+        if fuzz_mode && node_contains_fork(fz.body) {
+          ret true;
+        }
+      }
+      _ -> {}
     }
   }
   ret false;
@@ -17083,7 +17100,7 @@ impl Codegen {
     self.all_nodes = nodes;
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.
-    self.uses_fork = uses_fork_in(nodes);
+    self.uses_fork = uses_fork_in(nodes, self.test_mode, self.fuzz_mode);
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
     if self.coverage {
       collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);

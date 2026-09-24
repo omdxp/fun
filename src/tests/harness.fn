@@ -81,6 +81,31 @@ pub fun transpile_source(str src) Result<str, str> {
   ret .Ok(cst.out.build());
 }
 
+// `transpile_source`, in test mode: the program's `test` blocks are emitted
+// and the test runner replaces `main`.
+pub fun transpile_source_test_mode(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  g.test_mode = true;
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err("codegen error");
+  }
+  ret .Ok(cst.out.build());
+}
+
 // `transpile_source`, with `-g` debug-info emission (`#line` directives)
 // turned on.
 pub fun transpile_source_with_debug_info(str src) Result<str, str> {

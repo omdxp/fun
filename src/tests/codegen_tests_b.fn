@@ -2551,3 +2551,17 @@ test "a {flag} placeholder prints true or false for a literal, a comparison and 
   str out = run_source(src, "flag_placeholder_bool", "a flag is a bool for formatting, whatever its C type");
   assert contains(out, "true true false false"), "expected the words, not 1 and 0";
 }
+
+test "a fork inside a test needs the fork runtime only when tests are compiled" {
+  str src = `async fun worker() {}
+  `fun main() {}
+  `test "forks a worker" {
+  `  fork worker();
+  `}`;
+  let in_test_mode = transpile_source_test_mode(src);
+  assert in_test_mode.is_ok(), "expected the program to transpile in test mode";
+  assert contains(in_test_mode.unwrap(), "__fun_fork_call_worker"), "expected the fork wrapper when the test is compiled";
+  let ordinary = transpile_source(src);
+  assert ordinary.is_ok(), "expected the program to transpile normally";
+  assert !contains(ordinary.unwrap(), "M:N cooperative virtual-thread scheduler"), "expected an ordinary compile to skip the scheduler for a fork only its skipped test uses";
+}
