@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             runtime_backend: posix
             lane: linux-posix
           - os: macos-latest
@@ -82,7 +82,7 @@ jobs:
             FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
           fi
       - name: Run the test suite on ${{ matrix.lane }}
-        if: matrix.os != 'ubuntu-latest'
+        if: matrix.os != 'ubuntu-24.04'
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -106,14 +106,14 @@ jobs:
       # analysis is covered), the Windows-only sync backend, and the coverage
       # tests' own sample program.
       - name: Run the test suite on ${{ matrix.lane }} with coverage
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         timeout-minutes: 20
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           mkdir -p coverage
           ./fun-out/bin/fun test . -cover -cover-min 80 -cover-exclude examples,scripts,editors,src/cli/main.fn,src/fls/main.fn,src/fls/server.fn,src/cli/coverage_samples,stdlib/std/sync_backend_windows.fn -cover-report lcov=coverage/lcov.info,cobertura=coverage/cobertura.xml,json=coverage/coverage.json,html=coverage/index.html,text=coverage/summary.txt | tee coverage/test-output.txt
       - name: Summarize coverage
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always() && matrix.os == 'ubuntu-24.04'
         run: |
           if [ -f coverage/test-output.txt ]; then
             {
@@ -133,7 +133,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload the coverage reports
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always() && matrix.os == 'ubuntu-24.04'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-report
@@ -143,14 +143,14 @@ jobs:
       # check, then its unit tests and a smoke test that runs the integration
       # against the `fun` this job just built.
       - name: Set up Node for the VS Code extension
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
       - name: Test the VS Code extension
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         timeout-minutes: 10
         working-directory: editors/vscode
         run: |
@@ -167,7 +167,7 @@ jobs:
             FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
           fi
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
