@@ -2565,3 +2565,25 @@ test "a fork inside a test needs the fork runtime only when tests are compiled" 
   assert ordinary.is_ok(), "expected the program to transpile normally";
   assert !contains(ordinary.unwrap(), "M:N cooperative virtual-thread scheduler"), "expected an ordinary compile to skip the scheduler for a fork only its skipped test uses";
 }
+
+test "a program function named like a C math builtin is renamed so it does not redeclare the library's" {
+  str src = `use std.io;
+  `fun log(num level, str msg) { println_fmt("{num} {str}", level, msg); }
+  `fun exp(num n) num { ret n * 2; }
+  `fun main() {
+  `  log(1, "hi");
+  `  num v = exp(3);
+  `}`;
+  let out = emit_c(src, "libc builtin name shadowing");
+  assert contains(out, "void __fun_shadow__log("), "expected log to be emitted under the shadow prefix";
+  assert contains(out, "int64_t __fun_shadow__exp("), "expected exp to be emitted under the shadow prefix";
+  assert !contains(out, "void log(") && !contains(out, "int64_t exp("), "expected no declaration that would redeclare the builtin";
+  assert contains(out, "__fun_shadow__log(1, "), "expected the call to use the same name";
+}
+
+test "the prelude turns off the MS CRT's deprecation warnings on Windows only" {
+  let out = transpile_source("fun main() {}");
+  assert out.is_ok(), "expected the program to transpile";
+  assert contains(out.unwrap(), "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"), "expected the define";
+  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(out.unwrap(), "#include <stdio.h>"), "expected the define before the first include, where it takes effect";
+}

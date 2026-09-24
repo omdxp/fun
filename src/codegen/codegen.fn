@@ -810,6 +810,22 @@ fun node_is_std_c_binding(Node n) flag {
 // binding declared in `std/c/*`, such as `std/log.fn`'s `log` against
 // libc's `log(double)`. Such a function is emitted under a
 // `__fun_shadow__` prefix so the C declaration stays usable.
+// True for a name the C compiler treats as a library builtin even when no
+// declaration of it is in scope, so a program function of the same name (a
+// logging `log(level, msg)`, say) is a redeclaration with a different type
+// and draws a compiler warning. Only names that are plain functions of the
+// math library; `std.math`'s own helpers carry a suffix (`sin_dec`).
+fun is_c_library_builtin_name(str name) flag {
+  fit name {
+    "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil", "copysign", "cos",
+    "cosh", "erf", "erfc", "exp", "exp2", "expm1", "fabs", "fdim", "floor", "fma", "fmax", "fmin",
+    "fmod", "frexp", "hypot", "ilogb", "ldexp", "lgamma", "log", "log10", "log1p", "log2", "logb",
+    "modf", "nearbyint", "pow", "remainder", "rint", "round", "scalbn", "sin", "sinh", "sqrt",
+    "tan", "tanh", "tgamma", "trunc" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
 fun collect_c_shadow_names(Vec<Node> nodes, flag test_mode, flag fuzz_mode) Vec<str> {
   Vec<str> binding_names;
   binding_names.init(0);
@@ -846,7 +862,8 @@ fun collect_c_shadow_names(Vec<Node> nodes, flag test_mode, flag fuzz_mode) Vec<
           }
           continue;
         }
-        if binding_names.contains(f2.name) && !out.contains(f2.name) {
+        if (binding_names.contains(f2.name) || is_c_library_builtin_name(f2.name)) &&
+          !out.contains(f2.name) {
           out.push(f2.name);
         }
       }
@@ -15313,6 +15330,10 @@ impl Codegen {
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
     `#endif
+    `#else
+    `#ifndef _CRT_SECURE_NO_WARNINGS
+    `#define _CRT_SECURE_NO_WARNINGS
+    `#endif
     `#endif
     `#include <stdio.h>
     `#include <stdbool.h>
@@ -21742,6 +21763,10 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
+    `#endif
+    `#else
+    `#ifndef _CRT_SECURE_NO_WARNINGS
+    `#define _CRT_SECURE_NO_WARNINGS
     `#endif
     `#endif
     `#include <stdio.h>
