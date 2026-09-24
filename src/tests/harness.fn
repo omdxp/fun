@@ -19,6 +19,33 @@ use std.process;
 use std.vec;
 use std.option;
 use std.runtime_backend;
+use std.sys;
+use std.atomic;
+use std.c.pid;
+
+fun process_id() num {
+  ret __fun_process_id();
+}
+
+// Every helper below stages `src`/`name` as a real file under
+// `src/tests/fixtures/` before compiling it, so its own generated C and
+// exe siblings need a base path too. Building that base from `name`
+// alone (as this file used to) relied on every caller picking a name
+// unique across the WHOLE test corpus, an easy-to-violate convention
+// that stayed harmless only as long as `fun test` ran one file at a
+// time; once files run as concurrent processes (and now, tests within
+// one file run as concurrent threads too - see run_test_suite/
+// emit_test_runner), two callers sharing a name race on the same path
+// for real. `process_id()` (unique per concurrently-running process)
+// plus this counter (unique per call within one process) make the base
+// unique regardless of what name a caller picks; `name` stays in it
+// purely so a leftover fixture file is still recognizable by hand.
+Atomic<num> _fixture_seq;
+
+fun _fixture_base(str name) str {
+  let seq = _fixture_seq.fetch_add(1);
+  ret format("src/tests/fixtures/{str}.p{num}n{num}", name, process_id(), seq);
+}
 
 // Transpiles `src` and returns the emitted C, or an error describing the
 // stage that rejected it. Imports are not resolved: `src` is compiled on
@@ -204,11 +231,7 @@ pub fun transpile_file_forcing_msvc_with_debug_info(str path) Result<str, str> {
 // `emit_c_with_imports_forcing_msvc`, with `-g` debug-info emission also
 // turned on.
 pub fun emit_c_with_imports_forcing_msvc_with_debug_info(str src, str name, str label) str {
-  StringBuilder pbd = string_builder_init(32);
-  pbd.append("src/tests/fixtures/");
-  pbd.append(name);
-  pbd.append(".fn");
-  str pathd = pbd.build();
+  str pathd = format("{str}.fn", _fixture_base(name));
 
   assert write_string(pathd, src), format("{str}: could not stage {str}", label, pathd);
   let rd = transpile_file_forcing_msvc_with_debug_info(pathd);
@@ -220,15 +243,9 @@ pub fun emit_c_with_imports_forcing_msvc_with_debug_info(str src, str name, str 
   ret rd.unwrap();
 }
 
-// `emit_c_with_imports`, with the MSVC codegen path forced on. `name`
-// must be unique across tests, since the file is staged and removed the
-// same way.
+// `emit_c_with_imports`, with the MSVC codegen path forced on.
 pub fun emit_c_with_imports_forcing_msvc(str src, str name, str label) str {
-  StringBuilder pb = string_builder_init(32);
-  pb.append("src/tests/fixtures/");
-  pb.append(name);
-  pb.append(".fn");
-  str path = pb.build();
+  str path = format("{str}.fn", _fixture_base(name));
 
   assert write_string(path, src), format("{str}: could not stage {str}", label, path);
   let r = transpile_file_forcing_msvc(path);
@@ -252,14 +269,9 @@ pub fun emit_file(str path, str label) str {
 }
 
 // Transpiles `src` with its imports resolved, by staging it as a real
-// file next to the other fixtures. `name` must be unique across tests,
-// since the file is removed again once the C is in hand.
+// file next to the other fixtures.
 pub fun emit_c_with_imports(str src, str name, str label) str {
-  StringBuilder pb = string_builder_init(32);
-  pb.append("src/tests/fixtures/");
-  pb.append(name);
-  pb.append(".fn");
-  str path = pb.build();
+  str path = format("{str}.fn", _fixture_base(name));
 
   assert write_string(path, src), format("{str}: could not stage {str}", label, path);
   let r = transpile_file(path);
@@ -303,10 +315,7 @@ pub fun run_source_forcing_msvc(str src, str name, str label) str {
 
 // `run_source_forcing_msvc`, handing back everything the run produced.
 pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResult {
-  StringBuilder sb = string_builder_init(64);
-  sb.append("src/tests/fixtures/");
-  sb.append(name);
-  str base = sb.build();
+  str base = _fixture_base(name);
 
   StringBuilder fb = string_builder_init(64);
   fb.append(base);
@@ -373,10 +382,7 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
 // either stream and how it ended. Some expectations are about a program
 // being stopped rather than about what it printed.
 pub fun run_source_result(str src, str name, str label) ProcessResult {
-  StringBuilder sb = string_builder_init(64);
-  sb.append("src/tests/fixtures/");
-  sb.append(name);
-  str base = sb.build();
+  str base = _fixture_base(name);
 
   StringBuilder fb = string_builder_init(64);
   fb.append(base);

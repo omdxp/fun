@@ -16346,6 +16346,18 @@ impl Codegen {
     `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
     `#endif
     ``);
+    // `std.c.sys`'s `__fun_process_id` binding (behind `std.sys.process_id`),
+    // always emitted for the same reason as `__fun_cpu_count` above - a
+    // process-unique value is a reasonable general thing to want (e.g. a
+    // caller building a scratch file name that must never collide with
+    // another concurrently-running copy of the same program), not
+    // specific to any one gated feature.
+    self.state.write(`#ifdef _WIN32
+    `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
+    `#else
+    `static long __fun_process_id(void) { return (long)getpid(); }
+    `#endif
+    ``);
     // `std.c.net`'s socket bindings need these headers, in both their
     // Windows and POSIX forms, and are emitted unconditionally like every
     // other prelude header. Winsock additionally needs `WSAStartup` called
@@ -21497,6 +21509,11 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#else
     `#include <unistd.h>
     `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
+    `#endif
+    `#ifdef _WIN32
+    `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
+    `#else
+    `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
     `#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
