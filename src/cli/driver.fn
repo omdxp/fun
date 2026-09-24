@@ -2126,16 +2126,29 @@ fun _test_suite_worker(raw* arg) raw* {
 // bootstrap from that release needs to build it without relying on
 // anything only stage 2 onward can provide. A fixed default, overridable
 // with `FUN_TEST_JOBS`, has no such dependency.
+//
+// Lower by default on Windows: each compiled test binary also runs its
+// own worker pool (see emit_test_runner), and a test that shells out to
+// the C compiler pays for it there with `cl.exe`, which is markedly
+// heavier to spawn than gcc/clang and, under both layers of parallelism
+// running at once on a CI-sized Windows runner, was observed pushing
+// individual test times from under a second to 6-8 seconds - real
+// resource exhaustion, not a hang or a bug in any one test.
 const num default_test_suite_workers = 8;
+const num default_test_suite_workers_windows = 4;
 
 fun _test_suite_worker_count() num {
   str override_s = env_or("FUN_TEST_JOBS", "");
+  num fallback = default_test_suite_workers;
+  if runtime_backend_is_windows() {
+    fallback = default_test_suite_workers_windows;
+  }
   if equals(override_s, "") {
-    ret default_test_suite_workers;
+    ret fallback;
   }
   num parsed = atoi(override_s);
   if parsed <= 0 {
-    ret default_test_suite_workers;
+    ret fallback;
   }
   ret parsed;
 }
@@ -2221,6 +2234,17 @@ pub fun run_test_suite(
   ctx.passed = 0;
   ctx.failed = 0;
   ctx.failed_files = &failed_files;
+
+  // Each spawned file's own compiled test binary also sizes its OWN pool
+  // to the full CPU count by default (see emit_test_runner); on Windows
+  // that stacks on top of this process's own (already lower, see
+  // _test_suite_worker_count) worker count and, under `cl.exe`'s heavier
+  // spawn cost, was observed causing real slowdowns under CI-sized
+  // resource limits. Capped here, but only if the caller hasn't already
+  // set an explicit preference.
+  if runtime_backend_is_windows() && equals(env_or("FUN_TEST_INTRA_JOBS", ""), "") {
+    set_env("FUN_TEST_INTRA_JOBS", "2");
+  }
 
   ThreadPool pool = thread_pool_new(workers);
   defer pool.destroy();
