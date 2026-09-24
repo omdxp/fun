@@ -119,6 +119,18 @@ fun test file.fn -cover                  # just that file's own tests
   appears, at 0%. It needs no external tool, so it works the same with
   `clang`, `gcc` and `cl.exe` on Windows, macOS and Linux, and the counters
   are atomic, so parallel tests are counted correctly.
+- **What is measured, and whose tests run.** A test binary runs only its
+  own file's `test` blocks: the modules it imports (the standard library,
+  `[deps]` dependencies, your other files) are compiled in for their code,
+  but their tests are not run from the importer, so a dependency's tests
+  never run from your project. Coverage follows the same line: only files
+  under the project directory are measured. The standard library and
+  `[deps]` checkouts live outside it (the installed stdlib directory and,
+  by default, `~/.local/share/fun/deps`), so they never appear in a report,
+  nor do `fixtures` / `*_fixtures` directories or `fun-out`. If you point
+  `FUN_DEPS_CACHE` at a directory inside the project, that directory counts
+  as project code and `fun test <dir>` will discover its tests, so list it
+  in `[coverage] exclude`.
 - The total is always printed as the one line `coverage: 87.3% of
   statements`. That is the form CI systems scrape: for GitLab, set the job's
   `coverage:` regex to `/coverage: (\d+(?:\.\d+)?)% of statements/`.
