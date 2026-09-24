@@ -82,6 +82,7 @@ jobs:
             FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
           fi
       - name: Run the test suite on ${{ matrix.lane }}
+        if: matrix.os != 'ubuntu-latest'
         timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -90,6 +91,54 @@ jobs:
             export FUN_STDLIB_DIR="$PWD/stdlib"
             ./fun-out/bin/fun test .
           fi
+      # The Linux lane runs the suite once, with coverage: the reports below
+      # are produced from that one run, and it fails when total coverage is
+      # under 80% (docs/tooling.md, "Code Coverage"). Coverage is measured on
+      # one platform on purpose: platform-specific code (the Windows backend,
+      # for one) is exercised by its own lane's tests, not counted here.
+      #
+      # The minimum and the exclusions are flags rather than a `[coverage]`
+      # table in fun.toml only because this job bootstraps with an already
+      # released `fun`, and a release that predates the table rejects it as an
+      # unknown one. Once a release reads `[coverage]`, move them there.
+      # Left out: sample programs and scripts that are not the compiler, the two
+      # process entry points, the language server's stdin/stdout loop (its
+      # analysis is covered), the Windows-only sync backend, and the coverage
+      # tests' own sample program.
+      - name: Run the test suite on ${{ matrix.lane }} with coverage
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 20
+        run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          mkdir -p coverage
+          ./fun-out/bin/fun test . -cover -cover-min 80 -cover-exclude examples,scripts,editors,src/cli/main.fn,src/fls/main.fn,src/fls/server.fn,src/cli/coverage_samples,stdlib/std/sync_backend_windows.fn -cover-report lcov=coverage/lcov.info,cobertura=coverage/cobertura.xml,json=coverage/coverage.json,html=coverage/index.html,text=coverage/summary.txt | tee coverage/test-output.txt
+      - name: Summarize coverage
+        if: always() && matrix.os == 'ubuntu-latest'
+        run: |
+          if [ -f coverage/test-output.txt ]; then
+            {
+              echo "## Code coverage"
+              echo
+              grep '^coverage:' coverage/test-output.txt | tail -1
+              echo
+              echo "Enforced minimum: \`[coverage] min\` in fun.toml. The lcov, Cobertura, JSON and HTML reports are attached to this run as the \`coverage-report\` artifact."
+              echo
+              echo "<details><summary>Coverage by file</summary>"
+              echo
+              echo '```text'
+              cat coverage/summary.txt 2>/dev/null || true
+              echo '```'
+              echo
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the coverage reports
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
       - name: Validate examples/
         timeout-minutes: 20
         run: |
