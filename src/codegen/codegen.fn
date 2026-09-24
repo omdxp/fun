@@ -547,6 +547,12 @@ pub compound Codegen {
   Map<str, num> cover_ids;
   Vec<str> cover_id_files;
   Vec<num> cover_id_lines;
+  // How many enclosing expressions may run a sub-expression zero times or
+  // more than once (the right side of `&&`/`||`, a loop condition, an
+  // `elif` condition). A call-result receiver evaluated there cannot be
+  // hoisted into a temp before the statement, which would run it exactly
+  // once and out of order; see `hoist_call_result_operand`.
+  num cond_eval_depth;
   Vec<str> cover_skip_files;
   Vec<num> cover_skip_from;
   Vec<num> cover_skip_to;
@@ -654,6 +660,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.cover_ids.init(64);
   g.cover_id_files.init(64);
   g.cover_id_lines.init(64);
+  g.cond_eval_depth = 0;
   g.cover_skip_files.init(8);
   g.cover_skip_from.init(8);
   g.cover_skip_to.init(8);
@@ -5583,7 +5590,14 @@ impl Codegen {
             }
           }
         }
+        flag right_is_conditional = equals(e.op, "&&") || equals(e.op, "||");
+        if right_is_conditional {
+          self.cond_eval_depth = self.cond_eval_depth + 1;
+        }
         let rerr = self.emit_expr(*e.right);
+        if right_is_conditional {
+          self.cond_eval_depth = self.cond_eval_depth - 1;
+        }
         if resolves_rhs_shorthand {
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
@@ -6951,7 +6965,7 @@ impl Codegen {
     if r_opt.is_some() {
       let r = r_opt.unwrap();
       if r.is_call_result {
-        str tmp_name = self.hoist_call_result_to_temp(r.text, r.type_name, r.is_pointer);
+        str tmp_name = self.hoist_call_result_operand(r.text, r.type_name, r.is_pointer);
         self.state.write("&");
         self.state.write(tmp_name);
         ret .None;
@@ -6986,7 +7000,7 @@ impl Codegen {
       ret operand_err;
     }
     str operand_text = addr_scratch.out.build();
-    str tmp_name2 = self.hoist_call_result_to_temp(operand_text, self.expected_enum_type, false);
+    str tmp_name2 = self.hoist_call_result_operand(operand_text, self.expected_enum_type, false);
     self.state.write("&");
     self.state.write(tmp_name2);
     ret .None;
@@ -7007,6 +7021,26 @@ impl Codegen {
   // even under GNU/Clang, breaking `&tmp` against an `EnumName*`
   // parameter the same way MSVC would fail outright.
   hoist_call_result_to_temp(str call_text, str recv_type_name, flag recv_is_pointer) str {
+    ret self.hoist_call_result_temp(call_text, recv_type_name, recv_is_pointer, false);
+  }
+
+  // The form of `hoist_call_result_to_temp` for a caller that uses the temp
+  // once, as `&<result>`. Where the expression may run zero or several
+  // times (see `cond_eval_depth`) and the receiver's type is known, the temp
+  // is declared before the statement but assigned where the call belongs,
+  // `(*((tmp = call), &tmp))`, an lvalue that keeps the call's position in
+  // the evaluation order and its short-circuiting.
+  hoist_call_result_operand(str call_text, str recv_type_name, flag recv_is_pointer) str {
+    if self.cond_eval_depth == 0 || equals(recv_type_name, "") {
+      ret self.hoist_call_result_to_temp(call_text, recv_type_name, recv_is_pointer);
+    }
+    str tmp = self.hoist_call_result_temp(call_text, recv_type_name, recv_is_pointer, true);
+    ret format("(*(({str} = {str}), &{str}))", tmp, call_text, tmp);
+  }
+
+  // Shared by the two forms above. `declare_only` splices `T tmp;` and
+  // leaves the assignment to the caller.
+  hoist_call_result_temp(str call_text, str recv_type_name, flag recv_is_pointer, flag declare_only) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -7050,8 +7084,10 @@ impl Codegen {
     }
     recv_tmp_stmt_sb.append(" ");
     recv_tmp_stmt_sb.append(recv_tmp_name);
-    recv_tmp_stmt_sb.append(" = ");
-    recv_tmp_stmt_sb.append(call_text);
+    if !declare_only {
+      recv_tmp_stmt_sb.append(" = ");
+      recv_tmp_stmt_sb.append(call_text);
+    }
     recv_tmp_stmt_sb.append(";\n");
 
     // Inside a lazily emitted generic method's own body the scratch depth is
@@ -7352,7 +7388,7 @@ impl Codegen {
       // `&<rvalue>` is invalid C. It is hoisted into a fresh
       // `__auto_type` temp spliced right before the current statement,
       // and the temp's address is taken instead.
-      str recv_tmp_name = self.hoist_call_result_to_temp(
+      str recv_tmp_name = self.hoist_call_result_operand(
         recv_r.text,
         recv_r.type_name,
         recv_r.is_pointer
@@ -9340,7 +9376,9 @@ impl Codegen {
   emit_for_cond(ForCondNode fc) Option<CodegenErrorKind> {
     if fc.has_condition {
       self.state.write("while (");
+      self.cond_eval_depth = self.cond_eval_depth + 1;
       let cerr = self.emit_condition(*fc.condition);
+      self.cond_eval_depth = self.cond_eval_depth - 1;
       if cerr.is_some() {
         ret cerr;
       }
@@ -11789,16 +11827,29 @@ impl Codegen {
   }
 
   // Emits an `if (cond) { ... }` block, without the trailing newline;
-  // the caller decides what comes next.
-  emit_if_block(Node* condition, Node* body) Option<CodegenErrorKind> {
+  // the caller decides what comes next. An `elif` condition only runs when
+  // the earlier ones failed (`conditional_condition`), which matters for
+  // where a call-result receiver in it may be hoisted to.
+  emit_if_block(Node* condition, Node* body, flag conditional_condition) Option<CodegenErrorKind> {
     self.state.write("if (");
+    if conditional_condition {
+      self.cond_eval_depth = self.cond_eval_depth + 1;
+    }
     let cerr = self.emit_condition(*condition);
+    if conditional_condition {
+      self.cond_eval_depth = self.cond_eval_depth - 1;
+    }
     if cerr.is_some() {
       ret cerr;
     }
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
+    // The body's own statements move `current_stmt_start_pos` inside it. An
+    // `elif` condition that follows belongs to the whole chain, so anything
+    // it has to hoist goes before the chain, not into this body.
+    let chain_stmt_pos = self.current_stmt_start_pos;
     let berr = self.emit_body(*body);
+    self.current_stmt_start_pos = chain_stmt_pos;
     if berr.is_some() {
       ret berr;
     }
@@ -11817,7 +11868,7 @@ impl Codegen {
     Node* if_stmt = stmts.get(start_i);
     fit if_stmt.kind {
       .StatementIf(ifn) -> {
-        let ferr = self.emit_if_block(ifn.condition, ifn.body);
+        let ferr = self.emit_if_block(ifn.condition, ifn.body, false);
         if ferr.is_some() {
           ret ferr;
         }
@@ -11832,7 +11883,7 @@ impl Codegen {
       fit next.kind {
         .StatementElseIf(ein) -> {
           self.state.write(" else ");
-          let eerr = self.emit_if_block(ein.condition, ein.body);
+          let eerr = self.emit_if_block(ein.condition, ein.body, true);
           if eerr.is_some() {
             ret eerr;
           }

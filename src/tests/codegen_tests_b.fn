@@ -2452,3 +2452,91 @@ test "a generic method that calls through a call result keeps its temp in its ow
   str out = run_source(src, "generic_method_call_result_temp", "Set.clone reads Map.clone, which calls through self.at(k).unwrap()");
   assert contains(out, "2"), "expected the clone to compile, run and hold both elements";
 }
+
+// A method called on a call result (`c.bump().is_some()`) needs its result in a
+// temp, since the method takes the receiver's address. Where the expression
+// runs zero or several times that temp cannot simply be computed once before
+// the statement.
+test "a call-result receiver on the right of && or || only runs when it is reached" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  flag never = false;
+  `  flag always = true;
+  `  if never && c.bump().is_some() { println("no"); }
+  `  if always || c.bump().is_some() { println("yes"); }
+  `  println_fmt("calls={num}", c.calls);
+  `  if always && c.bump().is_some() { println("ran"); }
+  `  println_fmt("calls={num}", c.calls);
+  `}`;
+  str out = run_source(src, "short_circuit_call_result", "the right operand of && and || is skipped when the left decides");
+  assert contains(out, "yes"), "expected the || branch to be taken";
+  assert !contains(out, "no\n"), "expected the && branch not to be taken";
+  assert contains(out, "calls=0\n"), "expected neither skipped call to have run";
+  assert contains(out, "ran\ncalls=1\n"), "expected a reached right operand to run exactly once";
+}
+
+test "a call-result receiver in a loop condition runs on every iteration" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  num turns = 0;
+  `  for c.bump().unwrap() < 4 {
+  `    turns = turns + 1;
+  `  }
+  `  println_fmt("turns={num} calls={num}", turns, c.calls);
+  `}`;
+  str out = run_source(src, "loop_condition_call_result", "a loop condition is re-evaluated each pass");
+  assert contains(out, "turns=3 calls=4"), "expected the condition to be re-evaluated until it failed";
+}
+
+test "a call-result receiver in an elif condition only runs when the earlier branches fail" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  num mode = 1;
+  `  if mode == 1 {
+  `    println("first");
+  `  } elif c.bump().is_some() {
+  `    println("second");
+  `  }
+  `  println_fmt("calls={num}", c.calls);
+  `  mode = 2;
+  `  if mode == 1 {
+  `    println("first");
+  `  } elif c.bump().is_some() {
+  `    println("second");
+  `  }
+  `  println_fmt("calls={num}", c.calls);
+  `}`;
+  str out = run_source(src, "elif_call_result", "an elif condition is only evaluated when reached");
+  assert contains(out, "first\ncalls=0\n"), "expected the elif not to run when the if was taken";
+  assert contains(out, "second\ncalls=1\n"), "expected it to run once when reached";
+}
