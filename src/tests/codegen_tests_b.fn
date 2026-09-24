@@ -2438,3 +2438,17 @@ test "decimal literals keep their full precision in the generated C" {
   assert contains(out, "double big = 123456789.12345679;"), "expected the digits a double needs";
   assert contains(out, "double whole = 3.0;"), "expected a whole decimal to stay a decimal in C";
 }
+
+test "a generic method that calls through a call result keeps its temp in its own body" {
+  str src = `use std.set;
+  `use std.io;
+  `fun main() {
+  `  Set<num> a = set_init(0, 4);
+  `  a.add(1);
+  `  a.add(2);
+  `  Set<num> copy = a.clone();
+  `  println_fmt("{num}", copy.len());
+  `}`;
+  str out = run_source(src, "generic_method_call_result_temp", "Set.clone reads Map.clone, which calls through self.at(k).unwrap()");
+  assert contains(out, "2"), "expected the clone to compile, run and hold both elements";
+}

@@ -7054,7 +7054,11 @@ impl Codegen {
     recv_tmp_stmt_sb.append(call_text);
     recv_tmp_stmt_sb.append(";\n");
 
-    if self.hoist_scratch_depth > 0 {
+    // Inside a lazily emitted generic method's own body the scratch depth is
+    // also above zero, but there a statement position is active and the temp
+    // belongs in that body, right before its statement; only an expression
+    // buffer, which has no statement position, needs the reach-through below.
+    if self.hoist_scratch_depth > 0 && self.current_stmt_start_pos.is_none() {
       // Nested inside `resolve_field_chain`'s call-as-receiver scratch
       // buffer. `hoist_insert_pos`/`current_stmt_start_pos` only reach
       // that enclosing buffer, which holds an expression result rather
