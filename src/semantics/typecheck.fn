@@ -530,6 +530,10 @@ fun _free_variant_payloads_map(Map<str, Vec<CheckedType>>* m) {
   for name : names {
     Vec<CheckedType> bucket = m.at(name).unwrap();
     bucket.free();
+  }
+  // The keys are the map's own lookup keys, so they stay alive until every
+  // bucket has been looked up.
+  for name : names {
     free(name);
   }
   m.free();

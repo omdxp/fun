@@ -87,7 +87,12 @@ fun _decode_wait_status(i32 status) num {
 
 fun _wait_exit_code(num pid) num {
   i32* status = malloc(sizeof(i32));
-  waitpid(pid, status, 0);
+  // A failed wait leaves `status` unwritten; decoding it anyway would turn
+  // uninitialized memory into a random exit code, so report failure instead.
+  if waitpid(pid, status, 0) < 0 {
+    free(status);
+    ret 255;
+  }
   let code = _decode_wait_status(status[0]);
   free(status);
   ret code;

@@ -15205,6 +15205,12 @@ impl Codegen {
       `    return out;
       `}
       `
+      `typedef struct { DWORD pid; HANDLE h; } __fun_win_child;
+      `static __fun_win_child* __fun_win_children = NULL;
+      `static size_t __fun_win_children_len = 0;
+      `static size_t __fun_win_children_cap = 0;
+      `static SRWLOCK __fun_win_spawn_lock = SRWLOCK_INIT;
+      `
       `long long posix_spawnp(pid_t* pid, const char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {
       `    (void)file; (void)attrp; (void)envp;
       `    if (pid == NULL || argv == NULL) return -1;
@@ -15215,37 +15221,96 @@ impl Codegen {
       `    memset(&pi, 0, sizeof(pi));
       `    si.cb = sizeof(si);
       `
+      `    char* cmdline = __fun_win_build_cmdline(argv);
+      `    if (cmdline == NULL) return -1;
+      `
+      `    /* A handle marked inheritable is inherited by EVERY child a process
+      `       creates with bInheritHandles while the mark is set, not just the
+      `       one it was meant for. Marking it, spawning, and unmarking it all
+      `       under one lock means a concurrent spawn on another thread can
+      `       never pick up this child's pipe ends (which would hold the pipe
+      `       open, stalling the reader until an unrelated child exits). */
+      `    AcquireSRWLockExclusive(&__fun_win_spawn_lock);
       `    BOOL inherit = FALSE;
+      `    HANDLE out_h = NULL, err_h = NULL;
+      `    DWORD out_prev = 0, err_prev = 0;
       `    if (file_actions != NULL && (file_actions->has_dup2_1 || file_actions->has_dup2_2)) {
       `        si.dwFlags |= STARTF_USESTDHANDLES;
       `        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
       `        si.hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);
       `        si.hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);
-      `        if (file_actions->has_dup2_1) SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-      `        if (file_actions->has_dup2_2) SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        if (file_actions->has_dup2_1) {
+      `            out_h = si.hStdOutput;
+      `            GetHandleInformation(out_h, &out_prev);
+      `            SetHandleInformation(out_h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        }
+      `        if (file_actions->has_dup2_2) {
+      `            err_h = si.hStdError;
+      `            GetHandleInformation(err_h, &err_prev);
+      `            SetHandleInformation(err_h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+      `        }
       `        inherit = TRUE;
       `    }
-      `
-      `    char* cmdline = __fun_win_build_cmdline(argv);
-      `    if (cmdline == NULL) return -1;
       `    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, 0, NULL, NULL, &si, &pi);
+      `    if (out_h != NULL) SetHandleInformation(out_h, HANDLE_FLAG_INHERIT, out_prev & HANDLE_FLAG_INHERIT);
+      `    if (err_h != NULL) SetHandleInformation(err_h, HANDLE_FLAG_INHERIT, err_prev & HANDLE_FLAG_INHERIT);
+      `
+      `    /* The process handle is kept, not closed and later re-opened by pid:
+      `       once a fast child has exited and nothing holds a handle to it, its
+      `       process object is gone and OpenProcess can no longer find it (or,
+      `       worse, finds a different process that reused the pid). */
+      `    if (ok) {
+      `        if (__fun_win_children_len == __fun_win_children_cap) {
+      `            size_t ncap = __fun_win_children_cap ? __fun_win_children_cap * 2 : 16;
+      `            __fun_win_child* grown = (__fun_win_child*)realloc(__fun_win_children, ncap * sizeof(__fun_win_child));
+      `            if (grown != NULL) { __fun_win_children = grown; __fun_win_children_cap = ncap; }
+      `        }
+      `        if (__fun_win_children_len < __fun_win_children_cap) {
+      `            __fun_win_children[__fun_win_children_len].pid = pi.dwProcessId;
+      `            __fun_win_children[__fun_win_children_len].h = pi.hProcess;
+      `            __fun_win_children_len++;
+      `        } else {
+      `            CloseHandle(pi.hProcess);
+      `        }
+      `    }
+      `    ReleaseSRWLockExclusive(&__fun_win_spawn_lock);
       `    free(cmdline);
       `    if (!ok) return -1;
       `
       `    CloseHandle(pi.hThread);
-      `    CloseHandle(pi.hProcess);
       `    *pid = (pid_t)pi.dwProcessId;
       `    return 0;
       `}
       `
       `long long waitpid(pid_t pid, int32_t* status, long long options) {
       `    (void)options;
-      `    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
-      `    if (h == NULL) return -1;
+      `    /* Always leave a defined, nonzero status behind, so a caller that
+      `       ignores the return value can never decode uninitialized memory
+      `       into a random exit code. */
+      `    if (status != NULL) *status = (int32_t)(127 << 8);
+      `    HANDLE h = NULL;
+      `    AcquireSRWLockExclusive(&__fun_win_spawn_lock);
+      `    for (size_t i = 0; i < __fun_win_children_len; i++) {
+      `        if (__fun_win_children[i].pid == (DWORD)pid) {
+      `            h = __fun_win_children[i].h;
+      `            __fun_win_children[i] = __fun_win_children[--__fun_win_children_len];
+      `            break;
+      `        }
+      `    }
+      `    ReleaseSRWLockExclusive(&__fun_win_spawn_lock);
+      `    if (h == NULL) {
+      `        h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
+      `        if (h == NULL) return -1;
+      `    }
       `    WaitForSingleObject(h, INFINITE);
       `    DWORD code = 0;
       `    GetExitCodeProcess(h, &code);
       `    CloseHandle(h);
+      `    /* An exit code above 255 (every NTSTATUS crash code, e.g. an access
+      `       violation) can't survive being packed into a wait status's 8 exit
+      `       bits, and truncating it could land on 0, reading a crash as
+      `       success. Clamp to a nonzero value instead. */
+      `    if (code > 255) code = 255;
       `    if (status != NULL) *status = (int32_t)((code & 0xFF) << 8);
       `    return (long long)pid;
       `}
@@ -15260,7 +15325,11 @@ impl Codegen {
       `}
       `
       `long long pipe(int32_t* fds) {
-      `    return (long long)_pipe(fds, 4096, _O_BINARY);
+      `    /* Non-inheritable by default: posix_spawnp above marks just the
+      `       ends a specific child needs, only for the duration of that
+      `       spawn. Inheritable pipe ends would leak into every child any
+      `       thread spawns while they're open. */
+      `    return (long long)_pipe(fds, 4096, _O_BINARY | _O_NOINHERIT);
       `}
       `#else
       `#include <spawn.h>
@@ -16300,7 +16369,7 @@ impl Codegen {
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
-    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
@@ -17349,6 +17418,7 @@ impl Codegen {
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n");
+    self.state.write("        int started = 0;\n");
     self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
     // `__fun_thread_start_sized`, not the plain 8 MB `__fun_thread_start`:
     // a test body isn't a `fork`/`await` worker, it's exactly the kind of
@@ -17356,9 +17426,17 @@ impl Codegen {
     // for (see that reasoning above), and used to run on that same
     // generously-sized thread before this pool existed. A deep test body
     // now landing on an 8 MB worker instead would stack-overflow.
-    self.state.write("            __fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728);\n");
+    //
+    // A start that fails (out of memory or address space) stops spawning
+    // rather than joining a handle that was never filled in; whatever did
+    // start drains the queue, and if none did, this thread (already
+    // given the large stack) runs the whole queue itself, so a resource
+    // failure slows the run down instead of silently skipping tests.
+    self.state.write("            if (__fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728) != 0) { break; }\n");
+    self.state.write("            started++;\n");
     self.state.write("        }\n");
-    self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
+    self.state.write("        if (started == 0) { __fun_test_par_worker(&ctx); }\n");
+    self.state.write("        for (int wi = 0; wi < started; wi++) {\n");
     self.state.write("            __fun_thread_join(threads[wi]);\n");
     self.state.write("        }\n");
     self.state.write("        free(threads);\n");
@@ -21481,7 +21559,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }
     `static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }
-    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
+    `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, stack_bytes, __fun_thread_entry_win, pack, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }
     `#else
     `#include <pthread.h>
     `typedef pthread_t __fun_thread_t;
