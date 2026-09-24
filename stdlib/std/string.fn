@@ -1,6 +1,7 @@
 // String helpers.
 
 use std.c.mem;
+use std.c.string;
 use std.c.io;
 use std.vec;
 use std.quirks;
@@ -92,7 +93,10 @@ impl StringBuilder {
   // True when `needle` occurs entirely within the first `limit` bytes,
   // searched in place and stopping at the first match. Asking this of a
   // large buffer through `peek()` and `contains` copies and scans all of
-  // it every time.
+  // it every time. The search runs on libc's `strstr` with a terminator
+  // briefly written at `limit` (the byte there is restored before
+  // returning), so the buffer must not be read from another thread while
+  // this runs. Text containing a nul byte is searched only up to it.
   pub contains_within(str needle, num limit) flag {
     num nl = _string_len(needle);
     if nl == 0 {
@@ -101,6 +105,19 @@ impl StringBuilder {
     num end = limit;
     if end > self.total_len {
       end = self.total_len;
+    }
+    if end < nl {
+      ret false;
+    }
+    if end == self.total_len {
+      self._ensure_cap(1);
+    }
+    if end < self.cap {
+      chr saved = self.buf[end];
+      self.buf[end] = '\0';
+      str hit = strstr(self.buf, needle);
+      self.buf[end] = saved;
+      ret hit != nil;
     }
     num i = 0;
     for i + nl <= end {

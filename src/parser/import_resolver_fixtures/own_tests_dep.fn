@@ -1,0 +1,7 @@
+pub fun dep_value() num {
+  ret 7;
+}
+
+test "the imported module's own test" {
+  assert dep_value() == 7, "expected dep_value to return 7";
+}

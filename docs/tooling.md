@@ -52,6 +52,12 @@ fun main() {
   process, so one file's failure or crash can't take the rest of the run
   down with it. `fun test <file.fn>` keeps compiling and running just
   that one file, unchanged.
+- **Whose tests run**: a test binary runs only its own file's `test`
+  blocks. The modules a file imports (including `[deps]` dependencies and
+  the standard library) are compiled in for their code, but their tests
+  are not run from the importer; a module's tests run when that module is
+  tested itself. Directories named `fixtures` or ending in `_fixtures` are
+  left out of a `fun test <dir>` scan, the same as for `fun lint`.
 - **Failure semantics**: a failing `assert` inside a test is caught and
   reported as `FAIL`, it does NOT abort the run, so every other test
   still executes. `panic`, by contrast, still aborts the whole process

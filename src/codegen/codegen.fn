@@ -15,6 +15,7 @@ use ..parser.datatype_defs;
 use std.string;
 use std.option;
 use std.io;
+use std.map;
 use std.range;
 use std.ctype;
 
@@ -109,6 +110,16 @@ compound GenericEnumVariantTemplate {
 compound ProtoSplice {
   Option<num> pos;
   flag broad;
+}
+
+// A remembered answer to "is this typedef declared before position N": the
+// typedef was found within the first `before` bytes when `splices` splices
+// had been made into the buffer. It stays true for any later query at or
+// past `before` for as long as every splice made since landed at or past
+// `before` too, since nothing in front of it moved.
+compound TypedefHint {
+  num before;
+  num splices;
 }
 
 pub compound Codegen {
@@ -470,6 +481,12 @@ pub compound Codegen {
   // outermost buffer and positions, which `emit_hoisted` reads instead of
   // the live nested ones whenever this is above zero.
   num hoist_scratch_depth;
+  // The buffer `typedef_hints` describes, every splice made into it so far
+  // (see `TypedefHint`), and the hints themselves, keyed by the searched-for
+  // declaration text.
+  CodegenState* typedef_cache_state;
+  Vec<num> cache_splices;
+  Map<str, TypedefHint> typedef_hints;
   CodegenState* root_state;
   Option<num> root_hoist_pos;
   Option<num> root_stmt_start_pos;
@@ -615,6 +632,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   // true for the very first function, not just after the first nested
   // generic-impl-method transition sets it.
   g.root_state = state;
+  g.typedef_cache_state = state;
+  g.cache_splices.init(64);
+  g.typedef_hints.init(64);
   g.root_hoist_pos = .None;
   g.root_stmt_start_pos = .None;
   g.fit_subj_temp_counter = 0;
@@ -1455,6 +1475,9 @@ impl Codegen {
         }
         num rpos = self.root_hoist_pos.unwrap();
         self.root_state.out.insert_at(rpos, text);
+        if self.root_state == self.typedef_cache_state {
+          self.cache_splices.push(rpos);
+        }
         self.root_hoist_pos = .Some(rpos + len(text));
         self.root_stmt_start_pos = adjust_pos_after_splice(
           self.root_stmt_start_pos,
@@ -1468,6 +1491,9 @@ impl Codegen {
     }
     num pos = self.hoist_insert_pos.unwrap();
     self.state.out.insert_at(pos, text);
+    if self.state == self.typedef_cache_state {
+      self.cache_splices.push(pos);
+    }
     self.hoist_insert_pos = .Some(pos + len(text));
     // Tracked independently of `hoist_insert_pos`, so it needs the same
     // shift.
@@ -4669,6 +4695,47 @@ impl Codegen {
   // `map_type_to_c` (a scalar like `num`/`str`, or a raw C keyword
   // spelling it already maps to) never gets a typedef of its own, so
   // it's excluded rather than always failing the check.
+  // Whether `needle` (a typedef's declaration text) occurs within the first
+  // `pos` bytes of the output. Nearly every question of this kind is about a
+  // type declared long ago, so the answer is remembered (see `TypedefHint`)
+  // instead of searched for again from the start of a multi-megabyte buffer.
+  typedef_declared_before(str needle, num pos) flag {
+    flag cacheable = self.state == self.typedef_cache_state;
+    if cacheable {
+      let known = self.typedef_hints.at(needle);
+      if known.is_some() {
+        TypedefHint hint = known.unwrap();
+        if pos >= hint.before {
+          flag still_valid = true;
+          num si = hint.splices;
+          for si < self.cache_splices.len {
+            if self.cache_splices.get(si) < hint.before {
+              still_valid = false;
+              break;
+            }
+            si = si + 1;
+          }
+          if still_valid {
+            ret true;
+          }
+        }
+      }
+    }
+    flag found = self.state.out.contains_within(needle, pos);
+    if found && cacheable {
+      TypedefHint fresh;
+      fresh.before = pos;
+      fresh.splices = self.cache_splices.len;
+      let existing = self.typedef_hints.at(needle);
+      if existing.is_some() {
+        self.typedef_hints.put(needle, fresh);
+      } else {
+        self.typedef_hints.put(substr(needle, 0, len(needle)), fresh);
+      }
+    }
+    ret found;
+  }
+
   fn_types_declared_before(Vec<str> type_names, num pos) flag {
     if pos <= 0 {
       ret false;
@@ -4685,8 +4752,8 @@ impl Codegen {
       enum_needle_sb.append(name);
       str struct_needle = struct_needle_sb.build();
       str enum_needle = enum_needle_sb.build();
-      flag found = self.state.out.contains_within(struct_needle, pos) ||
-        self.state.out.contains_within(enum_needle, pos);
+      flag found = self.typedef_declared_before(struct_needle, pos) ||
+        self.typedef_declared_before(enum_needle, pos);
       free(struct_needle);
       free(enum_needle);
       if !found {
@@ -13155,6 +13222,14 @@ impl Codegen {
           }
           let wt = self.write_type(*f.dtype);
           if wt.is_none() {
+            if equals(self.error_note, "") {
+              self.error_note = format(
+                "the type '{str}' of field '{str}' in '{str}' is not declared in this program (missing an import?)",
+                f.dtype.type_str,
+                f.name,
+                c.name
+              );
+            }
             ret .Some(.UnsupportedNode);
           }
           flag fld_ptr = dtype_is_pointer(*f.dtype);
@@ -23358,4 +23433,24 @@ test "emit_function resets the locals table's type-name column between functions
 
   assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, resolving 'o' as Opt not a stale leaked type";
   assert contains(st.out.build(), "o.tag == Opt_Some"), "expected the bare-shorthand pattern to resolve against Opt, not a leaked type name";
+}
+
+test "typedef_declared_before remembers a hit and stays correct when a later splice moves or breaks it" {
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  g.state.write("AAAA typedef struct Foo; BBBB");
+  assert !g.typedef_declared_before("typedef struct Foo", 10), "expected a declaration that ends past the limit to be missed";
+  assert g.typedef_declared_before("typedef struct Foo", 29), "expected the declaration to be found";
+  assert g.typedef_declared_before("typedef struct Foo", 29), "expected the remembered answer to hold";
+  assert !g.typedef_declared_before("typedef struct Bar", 29), "expected an absent declaration to stay absent";
+
+  Option<num> splice_at_start = .Some(0);
+  g.hoist_insert_pos = splice_at_start;
+  g.emit_hoisted("ZZZZ ");
+  assert g.typedef_declared_before("typedef struct Foo", 34), "expected the declaration to still be found after a splice in front of it";
+
+  Option<num> splice_in_decl = .Some(14);
+  g.hoist_insert_pos = splice_in_decl;
+  g.emit_hoisted("XX");
+  assert !g.typedef_declared_before("typedef struct Foo", 36), "expected a splice through the declaration to make a remembered hit stale, not still true";
 }
