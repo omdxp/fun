@@ -323,6 +323,7 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
 | `FUN_DEADLOCK_ABORT` | warn only | When set to `1`, the deadlock watchdog aborts the process instead of just warning. |
 | `FUN_SCHED_MAX_WORKERS` | `4096` | Caps how many OS worker threads the virtual-thread scheduler may grow to under load. |
 | `FUN_TEST_JOBS` | `8` | How many test files `fun test [dir]` compiles and runs at once. `1` runs them strictly one at a time. |
+| `FUN_TEST_INTRA_JOBS` | CPU count | Caps how many worker threads a single compiled test binary's own pool uses. Unset by default (full CPU count); set it lower when running many test files concurrently already (e.g. under `fun test <dir>`) and the two layers of parallelism are oversubscribing the machine. |
 | `FUN_RUNTIME_BACKEND` | auto-detected | Forces the concurrency runtime backend (`posix`/`windows`, or `1`/`2`), mainly for cross-backend testing. |
 | `FUN_RUNTIME_OS` | auto-detected | Forces the OS family (`posix`/`unix`/`windows`) the runtime backend detection resolves to. |
 

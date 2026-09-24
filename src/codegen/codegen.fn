@@ -17196,6 +17196,19 @@ impl Codegen {
     self.state.write("    return 0;\n");
     self.state.write("}\n\n");
 
+    // Backs the "Slowest tests" report at the end of a whole-file run
+    // (see __fun_test_main_worker). `clock()` needs `<time.h>`, not
+    // otherwise guaranteed included by this point.
+    self.state.write("#include <time.h>\n");
+    self.state.write("typedef struct { int64_t idx; double ms; } __fun_test_timing;\n");
+    self.state.write("static int __fun_test_timing_cmp(const void* a, const void* b) {\n");
+    self.state.write("    double da = ((const __fun_test_timing*)a)->ms;\n");
+    self.state.write("    double db = ((const __fun_test_timing*)b)->ms;\n");
+    self.state.write("    if (da < db) { return 1; }\n");
+    self.state.write("    if (da > db) { return -1; }\n");
+    self.state.write("    return 0;\n");
+    self.state.write("}\n\n");
+
     // The real work runs in `__fun_test_main_worker`, not `main` itself:
     // on POSIX, `main` hands it off to a worker thread given an explicit
     // large stack (see the `#include <pthread.h>` comment above for why -
@@ -17211,12 +17224,16 @@ impl Codegen {
     // once can't interleave mid-line or double-count. Workers run the
     // full `0..total` range and skip (without counting) any index
     // `__fun_test_is_sequential` marks, since the caller already ran
-    // those, one at a time, before starting the pool.
+    // those, one at a time, before starting the pool. `elapsed_ms` is a
+    // caller-owned `total`-length array every worker writes its own
+    // claimed indices into (never the same slot twice, so no lock needed
+    // for it specifically) - see the "Slowest tests" report below.
     self.state.write("typedef struct {\n");
     self.state.write("    int64_t total;\n");
     self.state.write("    int64_t next;\n");
     self.state.write("    int64_t ran;\n");
     self.state.write("    int64_t passed;\n");
+    self.state.write("    double* elapsed_ms;\n");
     self.state.write("    pthread_mutex_t mu;\n");
     self.state.write("} __fun_test_par_ctx;\n\n");
     self.state.write("static void* __fun_test_par_worker(void* __fun_test_pargp) {\n");
@@ -17230,12 +17247,14 @@ impl Codegen {
     self.state.write("        if (__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("        char* name = __fun_test_name(i);\n");
     self.state.write("        int ok;\n");
+    self.state.write("        clock_t __fun_t0 = clock();\n");
     self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
     self.state.write("            __fun_test_dispatch(i);\n");
     self.state.write("            ok = 1;\n");
     self.state.write("        } else {\n");
     self.state.write("            ok = 0;\n");
     self.state.write("        }\n");
+    self.state.write("        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
     self.state.write("        pthread_mutex_lock(&ctx->mu);\n");
     self.state.write("        ctx->ran++;\n");
     self.state.write("        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n");
@@ -17253,6 +17272,8 @@ impl Codegen {
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
+    self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
+    self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
     self.state.write("    if (filter) {\n");
     // A single named test runs alone regardless of `sequential`: with at
     // most one test selected, there's no sibling to isolate from, and
@@ -17273,6 +17294,7 @@ impl Codegen {
     self.state.write("        if (ran == 0) {\n");
     self.state.write("            printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
     self.state.write("            __fun_test_a->result = 1;\n");
+    self.state.write("            free(elapsed_ms);\n");
     self.state.write("            return 0;\n");
     self.state.write("        }\n");
     self.state.write("    } else {\n");
@@ -17283,6 +17305,7 @@ impl Codegen {
     self.state.write("            if (!__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("            char* name = __fun_test_name(i);\n");
     self.state.write("            ran++;\n");
+    self.state.write("            clock_t __fun_t0 = clock();\n");
     self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
     self.state.write("                __fun_test_dispatch(i);\n");
     self.state.write("                passed++;\n");
@@ -17290,14 +17313,26 @@ impl Codegen {
     self.state.write("            } else {\n");
     self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
     self.state.write("            }\n");
+    self.state.write("            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
     self.state.write("        }\n");
     self.state.write("        __fun_test_par_ctx ctx;\n");
     self.state.write("        ctx.total = total;\n");
     self.state.write("        ctx.next = 0;\n");
     self.state.write("        ctx.ran = 0;\n");
     self.state.write("        ctx.passed = 0;\n");
+    self.state.write("        ctx.elapsed_ms = elapsed_ms;\n");
     self.state.write("        pthread_mutex_init(&ctx.mu, NULL);\n");
-    self.state.write("        int nworkers = __fun_cpu_count();\n");
+    // `FUN_TEST_INTRA_JOBS`, checked before the real CPU count: an escape
+    // hatch for a caller who knows this file is running alongside other
+    // concurrent `fun test` processes (e.g. `fun test <dir>`'s own
+    // per-file worker pool, see run_test_suite) and wants to cap how many
+    // threads this one file's own pool adds on top of that, rather than
+    // every concurrently-running file sizing its own pool to the full CPU
+    // count independently. Unset by default - a directly-invoked `fun
+    // test file.fn` gets the full pool.
+    self.state.write("        int nworkers;\n");
+    self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
+    self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
@@ -17319,6 +17354,27 @@ impl Codegen {
     self.state.write("        ran += ctx.ran;\n");
     self.state.write("        passed += ctx.passed;\n");
     self.state.write("    }\n");
+    // A whole-file run reports its slowest handful of tests, timed with
+    // `clock()` (portable, needs no platform-specific wrapper) - the
+    // parallel pool's own effective speedup is capped by however
+    // unevenly the work is actually distributed (a handful of expensive
+    // tests dominate, the rest are near-instant), and this is what makes
+    // that visible instead of requiring a manual binary search over
+    // FUN_TEST_INTRA_JOBS to find out.
+    self.state.write("    if (!filter && total > 0) {\n");
+    self.state.write("        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n");
+    self.state.write("        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n");
+    self.state.write("        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n");
+    self.state.write("        int64_t __fun_slow_n = total < 5 ? total : 5;\n");
+    self.state.write("        if (__fun_slow_n > 0 && __fun_tt[0].ms >= 1.0) {\n");
+    self.state.write("            printf(\"\\nSlowest tests:\\n\");\n");
+    self.state.write("            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n");
+    self.state.write("                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n");
+    self.state.write("            }\n");
+    self.state.write("        }\n");
+    self.state.write("        free(__fun_tt);\n");
+    self.state.write("    }\n");
+    self.state.write("    free(elapsed_ms);\n");
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");

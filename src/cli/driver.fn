@@ -1371,23 +1371,23 @@ test "the msvc compiler is recognized by name" {
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
 
-sequential test "resolve_c_compiler honors FUN_CC verbatim" {
+// Both cases share `FUN_CC`, a process-wide env var, so they're one test
+// rather than two siblings that could otherwise run concurrently and race
+// on it (see run_test_suite/emit_test_runner's own parallel test runner).
+test "resolve_c_compiler honors FUN_CC verbatim, and falls back to a real search when unset" {
   set_env("FUN_CC", "some-made-up-cc");
   assert equals(resolve_c_compiler(), "some-made-up-cc"), "expected the exact override, unresolved against PATH";
   clear_env("FUN_CC");
-}
 
-// Regression test: `cg.msvc_mode` used to come from `c_compiler()`'s own
-// hardcoded platform guess ("cl" on Windows), a DIFFERENT decision than
-// `compile_c_to_exe`'s own candidate search (clang tried first, and
-// normally present even on Windows) actually uses to pick a compiler -
-// silently mismatching codegen's emitted C shape against the compiler
-// that would actually receive it, on any machine where clang exists but
-// isn't literally named "cl". `resolve_c_compiler` runs that same
-// search itself, so it can never name a compiler `compile_c_to_exe`
-// wouldn't also pick.
-sequential test "resolve_c_compiler finds a real compiler on PATH, not just a platform guess" {
-  clear_env("FUN_CC");
+  // Regression: `cg.msvc_mode` used to come from `c_compiler()`'s own
+  // hardcoded platform guess ("cl" on Windows), a DIFFERENT decision than
+  // `compile_c_to_exe`'s own candidate search (clang tried first, and
+  // normally present even on Windows) actually uses to pick a compiler -
+  // silently mismatching codegen's emitted C shape against the compiler
+  // that would actually receive it, on any machine where clang exists but
+  // isn't literally named "cl". `resolve_c_compiler` runs that same
+  // search itself, so it can never name a compiler `compile_c_to_exe`
+  // wouldn't also pick.
   let resolved = resolve_c_compiler();
   assert !equals(resolved, ""), "expected some compiler to resolve on this machine";
 }
