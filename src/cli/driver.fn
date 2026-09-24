@@ -2194,6 +2194,17 @@ pub fun run_test_suite(
   failed_files.init(4);
   defer failed_files.free();
 
+  // `compile_c_to_exe` (via `_ensure_msvc_env`) probes for the MSVC
+  // toolchain and caches the result by setting `INCLUDE` in this
+  // process's own environment, a fast path every later caller checks
+  // first - but the probe itself isn't safe to run from more than one
+  // thread at once (it shells out to a FIXED, shared batch-file path and
+  // mutates the environment as it goes). Priming it once here, before
+  // the worker pool below starts, means every worker's own later call
+  // just hits the fast path instead of racing to do the real work
+  // concurrently.
+  _ensure_msvc_env();
+
   _TestSuiteWorkerCtx ctx;
   ctx.files = &test_files;
   ctx.next_index = 0;
