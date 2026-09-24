@@ -22,6 +22,34 @@ use std.runtime_backend;
 use std.sys;
 use std.atomic;
 use std.c.pid;
+use std.time;
+
+// Runs the C compiler, retrying a couple of times on a failure with
+// completely empty output: real compile errors always print diagnostics,
+// so empty stderr alongside a nonzero exit means the compiler process
+// itself never got to run - the signature of Windows briefly denying
+// access to a file it only just finished writing (antivirus/indexer
+// scanning it), which the high file-creation rate under the parallel
+// test runner (see run_test_suite/emit_test_runner) makes far more likely
+// to actually show up than it used to. A real compile error still fails
+// identically on every attempt, so this never papers over one - it just
+// costs a couple of wasted retries before failing for real.
+fun _run_cc_with_retry(Vec<str>* build_argv) Result<ProcessResult, Error> {
+  num attempt = 0;
+  for attempt < 3 {
+    let built = run(argv_from(build_argv));
+    if built.is_err() {
+      ret built;
+    }
+    ProcessResult r = built.unwrap();
+    if r.exit_code == 0 || !equals(r.stderr_text, "") {
+      ret .Ok(r);
+    }
+    attempt = attempt + 1;
+    sleep_ms(200);
+  }
+  ret run(argv_from(build_argv));
+}
 
 fun process_id() num {
   ret __fun_process_id();
@@ -358,7 +386,7 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
   build.push("-o");
   build.push(base);
   build.push(c_path);
-  let built = run(argv_from(&build));
+  let built = _run_cc_with_retry(&build);
   assert built.is_ok(), format("{str}: could not run the C compiler", label);
   assert built.unwrap().exit_code == 0, format(
     "{str}: the strict, non-GNU C compile rejected the MSVC-shaped program: {str}",
@@ -459,7 +487,7 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
     }
     build.push(c_path);
   }
-  let built = run(argv_from(&build));
+  let built = _run_cc_with_retry(&build);
   assert built.is_ok(), format("{str}: could not run the C compiler", label);
   assert built.unwrap().exit_code == 0, format(
     "{str}: the C compiler rejected the program: {str}",
