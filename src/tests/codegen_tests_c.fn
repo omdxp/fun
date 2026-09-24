@@ -696,7 +696,7 @@ test "default parameter values: free fn + method, omitting trailing args fills d
   assert contains(out, "Box__add(&b, 1, 50)"), "expected the method default to be filled";
 }
 
-test "the watchdog stops a program waiting on a channel nothing sends to" {
+sequential test "the watchdog stops a program waiting on a channel nothing sends to" {
   str src = `use std.c.io;
   `use std.channel;
   `fun main() num {
@@ -706,6 +706,21 @@ test "the watchdog stops a program waiting on a channel nothing sends to" {
   `  printf("never reached\n");
   `  ret 0;
   `}`;
+  // `run_source_result` waits on the child's own piped output over a
+  // channel this process's own scheduler drives, which is itself subject
+  // to the SAME process-wide watchdog these env vars arm - the watchdog's
+  // own C runtime latches armed/threshold from the environment on its
+  // first-ever wait in a process and never re-reads it. A throwaway run
+  // here, before the env vars below are set, forces that first wait to
+  // happen while they're still unset, so it latches disarmed once and
+  // this process's own later wait for the real probe isn't caught by the
+  // same 300ms/abort=1 it's only meant to hand to the child.
+  let _warm = run_source_result(
+    "fun main() num { ret 0; }",
+    "watchdog_probe_warmup",
+    "warm-up run before arming the watchdog"
+  );
+
   // The wait never ends on its own, so the watchdog is what ends it. On
   // its own the watchdog only warns, over and over, and the program keeps
   // waiting; asking it to abort is what makes this a test that finishes

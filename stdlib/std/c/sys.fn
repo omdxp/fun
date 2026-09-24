@@ -1,0 +1,8 @@
+// Number of logical CPUs, a compiler-emitted prelude wrapper.
+//
+// `sysconf(_SC_NPROCESSORS_ONLN)` (POSIX) and `GetSystemInfo` (Windows)
+// aren't a single portable libc call, so like `std.c.atomic`, the real
+// implementation is a small wrapper the compiler writes into every
+// program's prelude; this just describes that wrapper's signature. Always
+// at least 1.
+pub fun __fun_cpu_count() num;

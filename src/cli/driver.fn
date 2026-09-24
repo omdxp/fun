@@ -35,6 +35,7 @@ use std.c.mem;
 use std.task;
 use std.sync;
 use std.time;
+use std.thread_pool;
 
 // What the arguments asked for.
 pub compound Options {
@@ -1370,7 +1371,7 @@ test "the msvc compiler is recognized by name" {
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
 
-test "resolve_c_compiler honors FUN_CC verbatim" {
+sequential test "resolve_c_compiler honors FUN_CC verbatim" {
   set_env("FUN_CC", "some-made-up-cc");
   assert equals(resolve_c_compiler(), "some-made-up-cc"), "expected the exact override, unresolved against PATH";
   clear_env("FUN_CC");
@@ -1385,7 +1386,7 @@ test "resolve_c_compiler honors FUN_CC verbatim" {
 // isn't literally named "cl". `resolve_c_compiler` runs that same
 // search itself, so it can never name a compiler `compile_c_to_exe`
 // wouldn't also pick.
-test "resolve_c_compiler finds a real compiler on PATH, not just a platform guess" {
+sequential test "resolve_c_compiler finds a real compiler on PATH, not just a platform guess" {
   clear_env("FUN_CC");
   let resolved = resolve_c_compiler();
   assert !equals(resolved, ""), "expected some compiler to resolve on this machine";
@@ -1964,8 +1965,16 @@ compound SuiteTestResult {
 // Like run_tests but captures the test binary's stdout instead of inheriting
 // it, so run_test_suite can decide what to display. Compile output still goes
 // to stderr when a compiler is explicitly set via FUN_CC.
+//
+// `worker_id` tags the intermediate `.c`/exe paths so concurrent
+// run_test_suite workers compiling different source files that happen to
+// share a basename (different directories, same filename) never write the
+// same output path at once; each worker keeps its own tag across every file
+// it processes, so a worker's own files still reuse (not accumulate) that
+// one path over time.
 fun _run_tests_captured(
   str input,
+  num worker_id,
   flag debug_info,
   flag warn_unused,
   flag warn_unused_lenient,
@@ -1978,7 +1987,7 @@ fun _run_tests_captured(
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
 
-  str c_path = default_c_path(input, ".test.c");
+  str c_path = default_c_path(input, format(".w{num}.test.c", worker_id));
   let lowered = compile_to_c_mode(
     input,
     c_path,
@@ -1995,7 +2004,7 @@ fun _run_tests_captured(
     ret bad;
   }
 
-  str exe = default_exe_path(input, ".test");
+  str exe = default_exe_path(input, format(".w{num}.test", worker_id));
   let cc_code = compile_c_to_exe(c_path, exe, debug_info);
   remove_file(c_path);
   if cc_code != 0 {
@@ -2032,13 +2041,112 @@ fun _run_tests_captured(
   ret ok;
 }
 
+// Shared state for run_test_suite's worker threads. `next_index`/
+// `next_worker_id`/`passed`/`failed`/`failed_files` are all written only
+// under `lock` (a plain counter, not `Atomic<num>`, since claiming a file
+// and reporting its result share the same critical section below); a Vec
+// push or a `println` isn't safe to run from more than one thread at once
+// either.
+compound _TestSuiteWorkerCtx {
+  Vec<str>* files;
+  num next_index;
+  num next_worker_id;
+  flag debug_info;
+  flag warn_unused;
+  flag warn_unused_lenient;
+  Vec<Define>* extra_defines;
+  Mutex lock;
+  num passed;
+  num failed;
+  Vec<str>* failed_files;
+}
+
+// A run_test_suite worker: claims files one at a time from the shared
+// index until none remain, compiling and running each through
+// `_run_tests_captured` outside the lock (the expensive part, where
+// parallelism actually pays off) and only taking `lock` to claim the next
+// file, print a result line, and update the shared counters/list.
+fun _test_suite_worker(raw* arg) raw* {
+  if arg == nil {
+    ret nil;
+  }
+  _TestSuiteWorkerCtx* ctx = arg;
+
+  ctx.lock.lock();
+  num worker_id = ctx.next_worker_id;
+  ctx.next_worker_id = worker_id + 1;
+  ctx.lock.unlock();
+
+  for true {
+    ctx.lock.lock();
+    num i = ctx.next_index;
+    if i >= ctx.files.len {
+      ctx.lock.unlock();
+      break;
+    }
+    ctx.next_index = i + 1;
+    str path = ctx.files.get(i);
+    println(format("  running {str}", path));
+    ctx.lock.unlock();
+
+    let res = _run_tests_captured(
+      path,
+      worker_id,
+      ctx.debug_info,
+      ctx.warn_unused,
+      ctx.warn_unused_lenient,
+      ctx.extra_defines
+    );
+
+    ctx.lock.lock();
+    if res.exit_code == 0 {
+      ctx.passed = ctx.passed + 1;
+      num n = count(res.captured, " ... PASS");
+      println(format("  ok  {str}  ({num} tests)", path, n));
+    } else {
+      ctx.failed = ctx.failed + 1;
+      println(format("  FAIL  {str}", path));
+      print(res.captured);
+      ctx.failed_files.push(path);
+    }
+    ctx.lock.unlock();
+  }
+
+  ret nil;
+}
+
+// Worker count for run_test_suite. Not `std.sys.cpu_count()`: that binding
+// (and the compiler prelude wrapper backing it) is newer than the last
+// release, and this file compiles as part of `fun` itself, so a stage-1
+// bootstrap from that release needs to build it without relying on
+// anything only stage 2 onward can provide. A fixed default, overridable
+// with `FUN_TEST_JOBS`, has no such dependency.
+const num default_test_suite_workers = 8;
+
+fun _test_suite_worker_count() num {
+  str override_s = env_or("FUN_TEST_JOBS", "");
+  if equals(override_s, "") {
+    ret default_test_suite_workers;
+  }
+  num parsed = atoi(override_s);
+  if parsed <= 0 {
+    ret default_test_suite_workers;
+  }
+  ret parsed;
+}
+
 // `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
-// `root` that declares a `test` block, runs each with `_run_tests_captured`,
-// and prints an aggregate pass/fail summary. Passing files flicker on a
-// single overwritten line; failing files show their full captured output and
-// are listed again in the summary at the end. Every file gets its own compile
-// pass and its own process for the compiled binary, so one file's failure or
-// crash can't take the rest of the run down with it.
+// `root` that declares a `test` block, then runs them across a pool of
+// worker threads (see _test_suite_worker_count) pulling from a shared work
+// queue, and prints an aggregate pass/fail summary.
+// Every file still gets its own compile pass and its own process for the
+// compiled binary (see _run_tests_captured), so one file's failure or
+// crash can't take the rest of the run down with it - that per-file
+// isolation is what makes running them concurrently safe in the first
+// place. Result lines print as each worker finishes a file, so they
+// interleave in completion order rather than file order; failing files
+// still show their full captured output and are listed again in the
+// summary at the end.
 pub fun run_test_suite(
   str root,
   flag debug_info,
@@ -2057,38 +2165,70 @@ pub fun run_test_suite(
   _collect_fun_files(dir, &files);
   files.sort();
 
+  Vec<str> test_files;
+  test_files.init(16);
+  defer test_files.free();
+  num fi = 0;
+  for fi < files.len {
+    str path = files.get(fi);
+    fi = fi + 1;
+    if _declares_top_level_block(path, "test") {
+      test_files.push(path);
+    }
+  }
+
+  if test_files.len == 0 {
+    println(format("no `test` blocks found under {str}", dir));
+    ret 0;
+  }
+
+  num workers = _test_suite_worker_count();
+  if workers < 1 {
+    workers = 1;
+  }
+  if workers > test_files.len {
+    workers = test_files.len;
+  }
+
   Vec<str> failed_files;
   failed_files.init(4);
   defer failed_files.free();
 
-  num passed = 0;
-  num failed = 0;
-  num i = 0;
-  for i < files.len {
-    str path = files.get(i);
-    i = i + 1;
-    if !_declares_top_level_block(path, "test") {
-      continue;
-    }
-    // Show which file is being compiled/run; \r lets a pass overwrite this line.
-    print(format("\r  running {str}  ", path));
-    let res = _run_tests_captured(path, debug_info, warn_unused, warn_unused_lenient, extra_defines);
-    if res.exit_code == 0 {
-      passed = passed + 1;
-      num n = count(res.captured, " ... PASS");
-      println(format("\r  ok  {str}  ({num} tests)  ", path, n));
-    } else {
-      failed = failed + 1;
-      println(format("\r  FAIL  {str}", path));
-      print(res.captured);
-      failed_files.push(path);
-    }
+  _TestSuiteWorkerCtx ctx;
+  ctx.files = &test_files;
+  ctx.next_index = 0;
+  ctx.next_worker_id = 0;
+  ctx.debug_info = debug_info;
+  ctx.warn_unused = warn_unused;
+  ctx.warn_unused_lenient = warn_unused_lenient;
+  ctx.extra_defines = extra_defines;
+  ctx.lock = mutex_new();
+  ctx.passed = 0;
+  ctx.failed = 0;
+  ctx.failed_files = &failed_files;
+
+  ThreadPool pool = thread_pool_new(workers);
+  defer pool.destroy();
+
+  raw* args_mem = malloc(sizeof(raw*) * workers);
+  raw * [] args = args_mem;
+  num k = 0;
+  for k < workers {
+    args[k] = &ctx;
+    k = k + 1;
   }
 
-  if passed + failed == 0 {
-    println(format("no `test` blocks found under {str}", dir));
-    ret 0;
+  let start_rc = pool.start_all(_test_suite_worker, args);
+  if start_rc != 0 {
+    free(args_mem);
+    println(format("failed to start test worker threads (code {num})", start_rc));
+    ret 1;
   }
+  let _join_rc = pool.join_all(nil);
+  free(args_mem);
+
+  num passed = ctx.passed;
+  num failed = ctx.failed;
 
   println(format("\n{num}/{num} test files passed", passed, passed + failed));
   if failed > 0 {

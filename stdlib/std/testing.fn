@@ -1,79 +1,57 @@
-// Concurrent test runner: discovers and runs `test "name" { ... }` blocks
-// found in a compiled program, dispatching each one onto its own virtual
-// task (`fork`) and collecting results over a channel.
+// Everyday test helpers. `test "name" { ... }` blocks themselves need no
+// import - the compiler recognizes them directly and generates their own
+// runner (see `emit_test_runner` in the compiler's own codegen). That
+// generated runner, in one compiled test binary:
 //
-// In test-compile mode (`fun test file.fn`), the compiler auto-imports this
-// module and calls `run_discovered_tests` itself, passing three
-// compiler-generated bridge functions: a test count, an index-to-name
-// lookup, and a run-at-index function whose failures are recovered (via a
-// per-thread jump back to the runner) rather than aborting the whole
-// process. Ordinary Fun source never calls this directly.
+// - runs every `sequential test "name" { ... }` first, one at a time on
+// the calling thread, in declaration order;
+// - then runs every plain `test "name" { ... }` across a pool of worker
+// threads sized to the CPU count, pulled from a shared queue rather
+// than a fixed split, so a slow test doesn't leave a worker idle while
+// others queue up.
+//
+// A test is a plain `test` by default; write `sequential` in front of the
+// ones that can't tolerate a sibling test running at the same time -
+// mutating a shared global (an env var via `set_env`/`clear_env`, the
+// process's working directory), writing a fixed file path another test
+// also uses, or anything else that isn't safe under concurrent access.
+// Ordinary `test` blocks are expected to be thread-safe: independent state
+// only, no shared mutable globals.
+//
+// This module itself only holds small, common assertion helpers - nothing
+// here participates in discovery or scheduling.
 
-use std.channel;
+use std.string;
 use std.io;
 
-// One test's outcome, sent back over a channel by its own forked task.
-compound TestOutcome {
-  num index;
-  flag passed;
+// Asserts `actual == expected`, formatting both into the failure message
+// so a mismatch is legible without hand-writing the values into `label`.
+pub fun assert_eq_num(num actual, num expected, str label) {
+  assert actual == expected, format("{str}: expected {num}, got {num}", label, expected, actual);
 }
 
-fun default_outcome() TestOutcome {
-  TestOutcome o;
-  o.index = 0;
-  o.passed = false;
-  ret o;
+// `assert_eq_num`, for `str` (compared with `equals`, not `==`).
+pub fun assert_eq_str(str actual, str expected, str label) {
+  assert equals(actual, expected), format("{str}: expected \"{str}\", got \"{str}\"", label, expected, actual);
 }
 
-// Runs test `i` and reports its outcome over `out`. A forked virtual task's
-// body, one per discovered test. See `run_discovered_tests`.
-async fun run_one(num i, fun(num) flag run_at, Channel<TestOutcome>* out) {
-  TestOutcome o;
-  o.index = i;
-  o.passed = run_at(i);
-  out <- o;
+// `assert_eq_num`, for `flag`.
+pub fun assert_eq_flag(flag actual, flag expected, str label) {
+  assert actual == expected, format("{str}: expected {flag}, got {flag}", label, expected, actual);
 }
 
-// Runs every discovered test concurrently, printing a `PASS`/`FAIL` line per
-// test in completion order (not declaration order) and a final summary
-// line. `count` is the number of tests discovered (from the compiler's own
-// bridge function), `name_of` maps a test's index to its declared name, and
-// `run_at` runs test `i`, returning true on pass or false on a failed
-// assertion recovered without aborting the process. Returns 0 when every
-// test passed, 1 otherwise.
-pub fun run_discovered_tests(num count, fun(num) str name_of, fun(num) flag run_at) num {
-  if count == 0 {
-    println("no tests found");
-    ret 0;
-  }
+test "assert_eq_num passes on a match and reports both values on a mismatch" {
+  assert_eq_num(2 + 2, 4, "addition");
+}
 
-  Channel<TestOutcome> outcomes = channel_new_cap(default_outcome(), count);
+test "assert_eq_str passes on a match" {
+  assert_eq_str(format("{str}", "ok"), "ok", "format passthrough");
+}
 
-  num i = 0;
-  for i < count {
-    fork run_one(i, run_at, &outcomes);
-    i = i + 1;
-  }
+test "assert_eq_flag passes on a match" {
+  assert_eq_flag(1 == 1, true, "equality");
+}
 
-  num passed = 0;
-  num received = 0;
-  for received < count {
-    TestOutcome o = <- outcomes;
-    str name = name_of(o.index);
-    if o.passed {
-      println(format("test: {str} ... PASS", name));
-      passed = passed + 1;
-    } else {
-      println(format("test: {str} ... FAIL", name));
-    }
-    received = received + 1;
-  }
-
-  let _rc = outcomes.destroy();
-
-  println(format("{num}/{num} tests passed", passed, count));
-  if passed == count {
-    ret 0;
-  }
-  ret 1;
+sequential test "sequential test blocks compile and run like any other" {
+  assert_eq_num(1 + 1, 2, "sanity");
 }

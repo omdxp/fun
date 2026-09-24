@@ -1224,7 +1224,7 @@ test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib 
   assert ends_with(resolved, "std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
 }
 
-test "resolve_import_path resolves a 'deps.' import against the dependency's own root from fun.lock" {
+sequential test "resolve_import_path resolves a 'deps.' import against the dependency's own root from fun.lock" {
   str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
   str cache = path_join(fixture_root, "depscache");
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
@@ -1234,7 +1234,7 @@ test "resolve_import_path resolves a 'deps.' import against the dependency's own
   assert equals(resolved, path_join(cache, "example_com_mylib/abc123/some.fn")), "expected the import resolved against the locked dependency's own cache directory";
 }
 
-test "resolve_import_path resolves a bare 'deps.<name>' import to the dependency's root directory" {
+sequential test "resolve_import_path resolves a bare 'deps.<name>' import to the dependency's root directory" {
   str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
   str cache = path_join(fixture_root, "depscache");
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
@@ -1244,7 +1244,7 @@ test "resolve_import_path resolves a bare 'deps.<name>' import to the dependency
   assert equals(resolved, path_join(cache, "example_com_mylib/abc123")), "expected a bare dependency name to resolve to its own root";
 }
 
-test "resolve_import_path resolves an unknown 'deps.' name to a never-existing path rather than crashing" {
+sequential test "resolve_import_path resolves an unknown 'deps.' name to a never-existing path rather than crashing" {
   str fixture_root = "src/parser/import_resolver_fixtures/deps_project";
   str cache = path_join(fixture_root, "depscache");
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
