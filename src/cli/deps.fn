@@ -605,3 +605,253 @@ test "_spec_still_matches: Auto matches either a resolved tag or a resolved bran
   assert _spec_still_matches("branch:main", &d), "expected Auto to accept a previously resolved branch, e.g. a repo with no tags at all";
   assert !_spec_still_matches("rev:abc123", &d), "expected Auto to not accept a rev-pinned entry";
 }
+
+// Runs `git` in `dir` (or where it is, for "") and reports whether it worked.
+fun _git_in(str dir, Vec<str>* rest) flag {
+  Vec<str> args;
+  args.init(8);
+  defer args.free();
+  args.push("git");
+  if !equals(dir, "") {
+    args.push("-C");
+    args.push(dir);
+  }
+  for a : rest {
+    args.push(a);
+  }
+  let r = _git(args);
+  ret r.is_ok() && _git_ok(&r.unwrap());
+}
+
+// A manifest with one `[deps]` entry, written without `format`, whose brace
+// escaping would need care here.
+fun _manifest_with_dep(str package, str dep, str url, str tag) str {
+  StringBuilder b = string_builder_init(128);
+  b.append("[package]\nname = \"");
+  b.append(package);
+  b.append("\"\n\n[deps]\n");
+  b.append(dep);
+  b.append(" = { git = \"");
+  b.append(url);
+  b.append("\", tag = \"");
+  b.append(tag);
+  b.append("\" }\n");
+  ret b.build();
+}
+
+// `{ git = "url", tag = "tag" }`.
+fun _inline_dep(str url, str tag) str {
+  StringBuilder b = string_builder_init(96);
+  b.append("{ git = \"");
+  b.append(url);
+  b.append("\", tag = \"");
+  b.append(tag);
+  b.append("\" }");
+  ret b.build();
+}
+
+// Makes a git repository at `dir` (under fun-out) whose one commit holds
+// `files` (name, then text), tagged `tag` unless that is empty, and returns
+// its `file://` URL, or "" when this environment has no absolute working
+// directory to build one from.
+fun _local_repo(str name, str file_name, str file_text, str tag, str branch) str {
+  str pwd = env_or("PWD", "");
+  if equals(pwd, "") {
+    ret "";
+  }
+  str dir = format("fun-out/deps_test_repo_{str}", name);
+  remove_dir_best_effort(dir);
+  make_dir_all(dir);
+  Vec<str> a;
+  a.init(4);
+  a.push("init");
+  a.push("-q");
+  a.push("-b");
+  a.push(branch);
+  _git_in(dir, &a);
+  write_string(path_join(dir, file_name), file_text);
+  Vec<str> b;
+  b.init(4);
+  b.push("add");
+  b.push("-A");
+  _git_in(dir, &b);
+  Vec<str> c;
+  c.init(8);
+  c.push("-c");
+  c.push("user.name=test");
+  c.push("-c");
+  c.push("user.email=test@example.com");
+  c.push("commit");
+  c.push("-q");
+  c.push("-m");
+  c.push("first");
+  _git_in(dir, &c);
+  if !equals(tag, "") {
+    Vec<str> t;
+    t.init(4);
+    t.push("tag");
+    t.push(tag);
+    _git_in(dir, &t);
+  }
+  ret format("file://{str}/{str}", pwd, dir);
+}
+
+sequential test "a dependency resolves from a local repository by tag, branch, revision and default" {
+  set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
+  str url = _local_repo("basic", "lib.fn", "pub fun one() num { ret 1; }\n", "v1.0.0", "main");
+  if equals(url, "") {
+    clear_env("FUN_DEPS_CACHE");
+    ret;
+  }
+  Dependency d;
+  d.name = "lib";
+  d.git = url;
+  d.path = "";
+  d.token_env = "";
+  d.spec = .Tag("v1.0.0");
+  let by_tag = resolve_one(&d, "");
+  assert by_tag.is_ok(), "expected a tag to resolve";
+  ResolvedDep r = by_tag.unwrap();
+  assert len(r.resolved_rev) == 40 && equals(r.spec_text, "tag:v1.0.0"), "expected a full commit id and the spec it came from";
+  assert exists(path_join(r.local_root, "lib.fn")), "expected the checkout to hold the file";
+  d.spec = .Branch("main");
+  let by_branch = resolve_one(&d, "the project");
+  assert by_branch.is_ok() && equals(by_branch.unwrap().resolved_rev, r.resolved_rev), "expected the branch to resolve to the same commit";
+  d.spec = .Rev(r.resolved_rev);
+  let by_rev = resolve_one(&d, "");
+  assert by_rev.is_ok() &&
+    equals(by_rev.unwrap().spec_text, format("rev:{str}", r.resolved_rev)), "expected the commit id to resolve";
+  d.spec = .Rev(r.resolved_rev);
+  assert resolve_one(&d, "").is_ok(), "expected a second resolve of a cached revision to succeed";
+  d.spec = .Auto;
+  let automatic = resolve_one(&d, "");
+  assert automatic.is_ok() && equals(automatic.unwrap().spec_text, "tag:v1.0.0"), "expected Auto to pick the newest tag";
+  d.spec = .Tag("latest");
+  let latest = resolve_one(&d, "");
+  assert latest.is_ok() && equals(latest.unwrap().spec_text, "tag:v1.0.0"), "expected the tag `latest` to mean the newest tag";
+  d.spec = .Tag("v9.9.9");
+  assert resolve_one(&d, "").is_err(), "expected an unknown tag to fail";
+  d.spec = .Branch("nope");
+  assert resolve_one(&d, "").is_err(), "expected an unknown branch to fail";
+  d.path = "sub";
+  d.spec = .Tag("v1.0.0");
+  let with_path = resolve_one(&d, "");
+  assert with_path.is_ok() && ends_with(with_path.unwrap().local_root, "/sub"), "expected a subfolder to be part of the local root";
+  clear_env("FUN_DEPS_CACHE");
+}
+
+sequential test "a repository with no tags resolves to its default branch, and the tag lookup says so" {
+  set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
+  str url = _local_repo("notags", "lib.fn", "pub fun two() num { ret 2; }\n", "", "trunk");
+  if equals(url, "") {
+    clear_env("FUN_DEPS_CACHE");
+    ret;
+  }
+  assert _git_latest_tag(url).is_err(), "expected no tags to be reported";
+  Dependency d;
+  d.name = "lib";
+  d.git = url;
+  d.path = "";
+  d.token_env = "";
+  d.spec = .Auto;
+  let resolved = resolve_one(&d, "");
+  assert resolved.is_ok() && equals(resolved.unwrap().spec_text, "branch:trunk"), "expected the default branch to be found and named";
+  Dependency broken;
+  broken.name = "gone";
+  broken.git = "file:///no/such/repository";
+  broken.path = "";
+  broken.token_env = "";
+  broken.spec = .Auto;
+  assert resolve_one(&broken, "").is_err(), "expected an unreachable repository to fail";
+  assert _git_rev_parse_head("fun-out/deps_test_no_such_dir").is_err(), "expected no commit in a directory that is not a repository";
+  clear_env("FUN_DEPS_CACHE");
+}
+
+sequential test "resolve_all resolves a manifest's dependencies, follows theirs, and reuses the lock" {
+  set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
+  str leaf_url = _local_repo("leaf", "leaf.fn", "pub fun leaf() num { ret 3; }\n", "v1.0.0", "main");
+  if equals(leaf_url, "") {
+    clear_env("FUN_DEPS_CACHE");
+    ret;
+  }
+  str mid_toml = _manifest_with_dep("mid", "leaf", leaf_url, "v1.0.0");
+  str mid_url = _local_repo("mid", "fun.toml", mid_toml, "v2.0.0", "main");
+  str root = "fun-out/deps_test_root";
+  make_dir_all(root);
+  remove_file(path_join(root, "fun.lock"));
+  str top_toml = _manifest_with_dep("top", "mid", mid_url, "v2.0.0");
+  let parsed = parse_manifest(top_toml);
+  assert parsed.is_ok(), "expected the manifest to parse";
+  Manifest m = parsed.unwrap();
+  let first = resolve_all(&m, root, false);
+  assert first.is_ok() && first.unwrap().len == 2, "expected the direct and the transitive dependency";
+  assert exists(path_join(root, "fun.lock")), "expected a lock file to be written";
+  let second = resolve_all(&m, root, false);
+  assert second.is_ok() && second.unwrap().len == 2, "expected the lock to be reused";
+  let forced = resolve_all(&m, root, true);
+  assert forced.is_ok(), "expected a forced update to succeed";
+  clear_env("FUN_DEPS_CACHE");
+}
+
+sequential test "two dependencies that need the same library at different commits are reported" {
+  set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
+  str shared_v1 = _local_repo("shared", "s.fn", "pub fun s() num { ret 1; }\n", "v1.0.0", "main");
+  if equals(shared_v1, "") {
+    clear_env("FUN_DEPS_CACHE");
+    ret;
+  }
+  Vec<str> more;
+  more.init(4);
+  more.push("tag");
+  more.push("v2.0.0");
+  write_string("fun-out/deps_test_repo_shared/s.fn", "pub fun s() num { ret 2; }\n");
+  Vec<str> add;
+  add.init(2);
+  add.push("commit");
+  add.push("-q");
+  add.push("-a");
+  add.push("-m");
+  add.push("second");
+  add.push("--author=t <t@example.com>");
+  Vec<str> cfg;
+  cfg.init(4);
+  cfg.push("-c");
+  cfg.push("user.name=test");
+  cfg.push("-c");
+  cfg.push("user.email=test@example.com");
+  for a : add {
+    cfg.push(a);
+  }
+  _git_in("fun-out/deps_test_repo_shared", &cfg);
+  _git_in("fun-out/deps_test_repo_shared", &more);
+  str a_toml = _manifest_with_dep("a", "shared", shared_v1, "v1.0.0");
+  str b_toml = _manifest_with_dep("b", "shared", shared_v1, "v2.0.0");
+  str a_url = _local_repo("conflict_a", "fun.toml", a_toml, "v1.0.0", "main");
+  str b_url = _local_repo("conflict_b", "fun.toml", b_toml, "v1.0.0", "main");
+  str top_toml = format("{str}a = {str}\nb = {str}\n", "[package]\nname = \"top\"\n\n[deps]\n", _inline_dep(a_url, "v1.0.0"), _inline_dep(b_url, "v1.0.0"));
+  Manifest m = parse_manifest(top_toml).unwrap();
+  str root = "fun-out/deps_test_conflict_root";
+  make_dir_all(root);
+  remove_file(path_join(root, "fun.lock"));
+  let outcome = resolve_all(&m, root, false);
+  assert outcome.is_err(), "expected a version conflict to be an error";
+  assert contains(outcome.unwrap_err(), "`shared` is required by both `a` and `b`"), "expected the message to name the library and both requirers";
+  clear_env("FUN_DEPS_CACHE");
+}
+
+test "removing a directory best-effort deletes it, and a dependency's spec has a readable form" {
+  str dir = "fun-out/deps_test_removal/inner";
+  make_dir_all(dir);
+  write_string(path_join(dir, "f.txt"), "x");
+  remove_dir_best_effort("fun-out/deps_test_removal");
+  assert !is_dir("fun-out/deps_test_removal"), "expected the directory tree to be gone";
+  Dependency d;
+  d.spec = .Auto;
+  assert equals(_dep_ref_text(&d), "tag"), "expected the automatic spec to read as tag";
+  d.spec = .Tag("v1");
+  assert equals(_dep_ref_text(&d), "tag:v1"), "expected a tag";
+  d.spec = .Branch("main");
+  assert equals(_dep_ref_text(&d), "branch:main"), "expected a branch";
+  d.spec = .Rev("abc");
+  assert equals(_dep_ref_text(&d), "rev:abc"), "expected a revision";
+}
