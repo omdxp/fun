@@ -2,6 +2,7 @@
 
 use std.option;
 use std.quirks;
+use std.c.mem;
 
 // View over a generic array.
 pub compound Array<T> {
@@ -180,4 +181,75 @@ pub fun copy_num(num[] dst, num[] src, num len) {
     dst[i] = src[i];
     i = i + 1;
   }
+}
+
+fun _sample() Array<num> {
+  Array<num> a;
+  a.data = malloc(sizeof(num) * 5);
+  a.len = 5;
+  num i = 0;
+  for i < 5 {
+    a.set(i, i + 1);
+    i = i + 1;
+  }
+  ret a;
+}
+
+test "an array reads, writes and reports its length" {
+  Array<num> a = _sample();
+  assert a.get(0) == 1 && a.get(4) == 5, "expected the values set";
+  assert a.len() == 5 && !a.is_empty(), "expected five elements";
+  assert a.at(2).unwrap() == 3, "expected a checked read";
+  assert a.at(5).is_none() && a.at(-1).is_none(), "expected out-of-range reads to be None";
+  a.clear();
+  assert a.is_empty() && a.len() == 0, "expected clear to empty it";
+}
+
+test "swap, reverse, fill and copy_from" {
+  Array<num> a = _sample();
+  a.swap(0, 4);
+  assert a.get(0) == 5 && a.get(4) == 1, "expected the ends swapped";
+  a.reverse();
+  assert a.get(0) == 1 && a.get(1) == 4 && a.get(2) == 3 && a.get(4) == 5, "expected the order reversed";
+  a.fill(9);
+  assert a.get(0) == 9 && a.get(3) == 9, "expected every element filled";
+  num[] src = malloc(sizeof(num) * 3);
+  src[0] = 7;
+  src[1] = 8;
+  src[2] = 6;
+  a.copy_from(src, 3);
+  assert a.get(0) == 7 && a.get(2) == 6 && a.get(3) == 9, "expected the first three copied";
+  Array<num> one;
+  one.data = malloc(sizeof(num));
+  one.len = 1;
+  one.set(0, 4);
+  one.reverse();
+  assert one.get(0) == 4, "expected reversing one element to change nothing";
+}
+
+test "an array iterates in order" {
+  Array<num> a = _sample();
+  num total = 0;
+  num count = 0;
+  for v : a.iter() {
+    total = total + v;
+    count = count + 1;
+  }
+  assert total == 15 && count == 5, "expected every element visited once";
+}
+
+test "the plain number-array helpers" {
+  num[] xs = malloc(sizeof(num) * 4);
+  xs[0] = 4;
+  xs[1] = -2;
+  xs[2] = 9;
+  xs[3] = 1;
+  assert sum_num(xs, 4) == 12, "expected the sum";
+  assert min_num(xs, 4) == -2 && max_num(xs, 4) == 9, "expected the extremes";
+  assert min_num(xs, 0) == 0 && max_num(xs, 0) == 0, "expected an empty range to give 0";
+  num[] ys = malloc(sizeof(num) * 4);
+  copy_num(ys, xs, 4);
+  assert ys[2] == 9, "expected the copy";
+  fill_num(ys, 4, 3);
+  assert sum_num(ys, 4) == 12 && ys[0] == 3, "expected every element to be 3";
 }
