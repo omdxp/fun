@@ -98,6 +98,68 @@ fun main() {
 A concrete value always coerces to a quirk-typed parameter by its address
 (`&clk`), same as any other quirk coercion.
 
+## Code Coverage
+
+`fun test` can measure which statements your tests run. Coverage is line
+based: a line counts when a statement starts on it, and it is covered when
+that statement ran at least once. Statements inside `test` and `fuzz` blocks
+are not measured, only the code they exercise.
+
+```text
+fun test -cover                          # prints "coverage: 87.3% of statements"
+fun test src -cover -cover-report lcov,cobertura,html
+fun test -cover -cover-min 80            # exit 1 below 80%
+fun test file.fn -cover                  # just that file's own tests
+```
+
+- `-cover` builds each test binary with a counter in front of every
+  statement of your project's files (files under the current directory, not
+  the standard library, dependencies, `fixtures` directories or `fun-out`),
+  then merges the counts from every binary. A file no test touches still
+  appears, at 0%. It needs no external tool, so it works the same with
+  `clang`, `gcc` and `cl.exe` on Windows, macOS and Linux, and the counters
+  are atomic, so parallel tests are counted correctly.
+- The total is always printed as the one line `coverage: 87.3% of
+  statements`. That is the form CI systems scrape: for GitLab, set the job's
+  `coverage:` regex to `/coverage: (\d+(?:\.\d+)?)% of statements/`.
+- `-cover-report <format[=path],...>` writes one or more reports, and implies
+  `-cover`. Without `=path` each format goes to its default file:
+
+  | Format | Default file | Read by |
+  |---|---|---|
+  | `lcov` | `lcov.info` | Codecov, Coveralls, SonarQube, `genhtml`, most editor extensions (for example Coverage Gutters) |
+  | `cobertura` | `cobertura.xml` | GitLab merge-request line coloring, Jenkins, Azure DevOps |
+  | `json` | `coverage.json` | editors and scripts; the totals plus every counted line with its hit count |
+  | `html` | `coverage.html` | people; one self-contained page with each file's source shaded by coverage |
+  | `text` | standard output | people; a per-file table and the total |
+
+- `-cover-min <percent>` (`80`, `87.5`) makes the run exit 1 when total
+  coverage is below it, for a CI gate.
+- `-cover-exclude <path,...>` leaves files or directories out of the report
+  (`-cover-exclude examples,scripts`).
+
+A GitHub Actions job that uploads to Codecov:
+
+```yaml
+- run: fun test -cover -cover-report lcov
+- uses: codecov/codecov-action@v4
+  with:
+    files: lcov.info
+```
+
+and a GitLab job that shows coverage on the merge request:
+
+```yaml
+test:
+  script: fun test -cover -cover-report cobertura
+  coverage: '/coverage: (\d+(?:\.\d+)?)% of statements/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: cobertura.xml
+```
+
 ## Fuzzing
 
 ```fun
@@ -293,6 +355,8 @@ plain text in the GitHub UI.
 fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-version] [-- <program args>]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
 fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
+fun test [<path>] -cover [-cover-report <format[=path],...>] [-cover-min <pct>] [-cover-exclude <path,...>]
+                         (measures code coverage, see Code Coverage)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun lint [<path>] [-summary]   (reports every warning under <path>, a file or directory, default '.')

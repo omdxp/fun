@@ -246,7 +246,7 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // the whole merge as `.Err`, rather than returning a partial program.
 // The nodes the entry file declares, read from the file itself so the
 // import statements survive.
-fun _entry_nodes(str path, str source) Vec<Node> {
+pub fun _entry_nodes(str path, str source) Vec<Node> {
   Vec<Node> out;
   out.init(0);
   str src = source;
