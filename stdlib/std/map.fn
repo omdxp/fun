@@ -571,3 +571,138 @@ impl Map<str, str> as Display {
     ret out;
   }
 }
+
+fun _sample_map() Map<str, num> {
+  Map<str, num> m;
+  m.init(8);
+  m.put("a", 1);
+  m.put("b", 2);
+  m.put("c", 3);
+  ret m;
+}
+
+test "a map stores, replaces and looks up values" {
+  Map<str, num> m = _sample_map();
+  assert m.len() == 3 && !m.is_empty() && m.capacity() >= 8, "expected three entries";
+  assert m.has("a") && !m.has("z"), "expected membership";
+  assert m.get("b") == 2 && m.get("z") == 0, "expected a value, and the zero value for a missing key";
+  assert m.get_or("c", 9) == 3 && m.get_or("z", 9) == 9, "expected the fallback only for a missing key";
+  m.put("a", 10);
+  assert m.get("a") == 10 && m.len() == 3, "expected a repeated key to replace, not add";
+  assert m.at("b").unwrap() == 2 && m.at("z").is_none(), "expected the Option form";
+  num out = 0;
+  assert m.try_get("c", &out) && out == 3, "expected try_get to write the value";
+  assert !m.try_get("z", &out) && out == 3, "expected a miss to leave the output alone";
+  m.free();
+}
+
+test "put_if_absent and remove report what they did" {
+  Map<str, num> m = _sample_map();
+  assert !m.put_if_absent("a", 99) && m.get("a") == 1, "expected an existing key to be kept";
+  assert m.put_if_absent("d", 4) && m.get("d") == 4, "expected a new key to be added";
+  assert m.remove("a") && !m.remove("a"), "expected remove to report whether it removed anything";
+  assert !m.has("a") && m.len() == 3, "expected the entry gone";
+  m.put("a", 7);
+  assert m.get("a") == 7 && m.len() == 4, "expected a removed slot to be reusable";
+  m.free();
+}
+
+test "keys, values and iteration see every live entry" {
+  Map<str, num> m = _sample_map();
+  m.remove("b");
+  Vec<str> ks = m.keys();
+  assert ks.len == 2 && ks.contains("a") && ks.contains("c") && !ks.contains("b"), "expected the live keys";
+  Vec<num> vs = m.values();
+  vs.sort();
+  assert vs.len == 2 && vs.get(0) == 1 && vs.get(1) == 3, "expected the live values";
+  num total = 0;
+  num count = 0;
+  for pair : m {
+    total = total + pair.1;
+    count = count + 1;
+  }
+  assert total == 4 && count == 2, "expected each live pair visited once";
+  ks.free();
+  vs.free();
+  m.free();
+}
+
+test "a map grows past its first capacity and keeps every entry" {
+  Map<num, num> m;
+  m.init(8);
+  num i = 0;
+  for i < 200 {
+    m.put(i, i * 2);
+    i = i + 1;
+  }
+  assert m.len() == 200 && m.capacity() > 200, "expected it to have grown";
+  assert m.get(0) == 0 && m.get(137) == 274 && m.get(199) == 398, "expected every entry to survive the rehashes";
+  i = 0;
+  for i < 200 {
+    m.remove(i);
+    i = i + 2;
+  }
+  assert m.len() == 100 && !m.has(4) && m.has(5), "expected only the even keys removed";
+  m.reserve(1000);
+  assert m.capacity() >= 1000 && m.len() == 100 && m.get(5) == 10, "expected reserve to rehash without losing entries";
+  m.free();
+}
+
+test "clear, clone and the quirks" {
+  Map<str, num> m = _sample_map();
+  Map<str, num> copy = m.clone();
+  copy.put("d", 4);
+  assert m.len() == 3 && copy.len() == 4 && copy.get("a") == 1, "expected an independent copy with the same entries";
+  Clearable c = &copy;
+  c.clear();
+  assert copy.is_empty() && m.len() == 3, "expected clear through the quirk to empty only the copy";
+  m.clear();
+  assert m.is_empty() && !m.has("a"), "expected clear to empty the map";
+  m.put("x", 1);
+  assert m.get("x") == 1, "expected a cleared map to be reusable";
+  m.free();
+  copy.free();
+}
+
+test "reserve on a map with no storage allocates it, and a freed map can be reused" {
+  Map<str, num> m;
+  m.init(8);
+  m.free();
+  m.reserve(4);
+  assert m.capacity() >= 8, "expected reserve to allocate at least the minimum";
+  m.put("k", 1);
+  assert m.get("k") == 1, "expected the map to work after reserve";
+  m.free();
+  Map<str, num> untouched;
+  untouched.init(0);
+  assert untouched.capacity() >= 8, "expected init to enforce the minimum capacity";
+  untouched.free();
+}
+
+test "string maps render as text" {
+  Map<str, num> n;
+  n.init(8);
+  str empty = n.to_string();
+  assert _map_str_len(empty) == 2 && starts_with(empty, "{") && ends_with(empty, "}"), "expected empty braces";
+  free(empty);
+  n.put("a", 1);
+  str one = n.to_string();
+  assert equals(one, "{\"a\": 1}"), "expected one entry";
+  free(one);
+  n.put("b", -2);
+  str two = n.to_string();
+  assert contains(two, "\"a\": 1") && contains(two, "\"b\": -2") && contains(two, ", "), "expected both entries separated";
+  free(two);
+  Map<str, str> s;
+  s.init(8);
+  s.put("k", "v");
+  str text = s.to_string();
+  assert equals(text, "{\"k\": \"v\"}"), "expected a string value quoted";
+  free(text);
+  s.put("k2", "v2");
+  str both = s.to_string();
+  assert contains(both, "\"k2\": \"v2\"") && contains(both, ", "), "expected both string entries separated";
+  free(both);
+  n.free();
+  s.free();
+}
