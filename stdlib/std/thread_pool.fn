@@ -9,6 +9,8 @@ use std.c.mem;
 use std.result;
 use std.error;
 use std.quirks;
+use std.atomic;
+use std.time;
 
 // Managed pool of worker threads.
 pub compound ThreadPool {
@@ -195,4 +197,74 @@ impl ThreadPool {
     self.has_storage = true;
     ret 0;
   }
+}
+
+// Each worker bumps the counter it was handed.
+fun _pool_worker(raw* arg) raw* {
+  Atomic<num>* hits = arg;
+  hits.fetch_add(1);
+  ret nil;
+}
+
+// One argument per worker, all pointing at `hits`.
+fun _pool_args(Atomic<num>* hits, num workers) raw** {
+  raw** args = malloc(sizeof(raw*) * workers);
+  num i = 0;
+  for i < workers {
+    args[i] = hits;
+    i = i + 1;
+  }
+  ret args;
+}
+
+test "a pool starts every worker and joins them all" {
+  Atomic<num> hits;
+  hits.store(0);
+  ThreadPool pool = thread_pool_new(4);
+  assert pool.is_ready() && pool.count() == 4 && pool.len() == 4 && !pool.is_empty(), "expected four workers";
+  raw** args = _pool_args(&hits, 4);
+  assert pool.start_all(_pool_worker, args) == 0, "expected the workers to start";
+  assert pool.join_all(nil) == 0, "expected the workers to join";
+  assert hits.load() == 4, "expected each worker to have run once";
+  free(args);
+  assert pool.destroy() == 0 && pool.is_empty(), "expected destroy to empty the pool";
+}
+
+test "the try_ forms report the pool size" {
+  Atomic<num> hits;
+  hits.store(0);
+  ThreadPool pool = thread_pool_new(2);
+  raw** args = _pool_args(&hits, 2);
+  let started = pool.try_start_all(_pool_worker, args);
+  assert started.is_ok() && started.unwrap() == 2, "expected the start to report two workers";
+  let joined = pool.try_join_all(nil);
+  assert joined.is_ok() && joined.unwrap() == 2, "expected the join to report two workers";
+  assert hits.load() == 2, "expected both to have run";
+  free(args);
+  pool.destroy();
+}
+
+test "detached workers run to completion" {
+  Atomic<num> hits;
+  hits.store(0);
+  ThreadPool pool = thread_pool_new(2);
+  raw** args = _pool_args(&hits, 2);
+  assert pool.start_all(_pool_worker, args) == 0, "expected the workers to start";
+  assert pool.detach_all() == 0, "expected the workers to detach";
+  num waited = 0;
+  for hits.load() < 2 && waited < 300 {
+    sleep_ms(10);
+    waited = waited + 1;
+  }
+  assert hits.load() == 2, "expected both detached workers to finish";
+  free(args);
+  pool.destroy();
+}
+
+test "an empty or negative pool has no workers and nothing to do" {
+  ThreadPool none = thread_pool_new(0);
+  assert none.is_empty() && none.start_all(_pool_worker, nil) == 0 &&
+    none.join_all(nil) == 0, "expected an empty pool to start and join trivially";
+  ThreadPool negative = thread_pool_new(-3);
+  assert negative.count() == 0, "expected a negative size to read as zero";
 }

@@ -218,3 +218,91 @@ impl Set<str> as Display {
     ret out;
   }
 }
+
+fun _num_set(num a, num b, num c) Set<num> {
+  Set<num> s = set_init(0, 8);
+  s.add(a);
+  s.add(b);
+  s.add(c);
+  ret s;
+}
+
+test "a set adds, removes and answers membership" {
+  Set<num> s = set_init(0, 4);
+  assert s.is_empty() && s.len() == 0, "expected a new set to be empty";
+  s.add(3);
+  s.add(3);
+  s.add(7);
+  assert s.len() == 2 && !s.is_empty(), "expected a repeated add to count once";
+  assert s.has(3) && s.has(7) && !s.has(4), "expected membership";
+  assert s.remove(3) && !s.remove(3), "expected remove to report whether it removed anything";
+  assert !s.has(3) && s.len() == 1, "expected the element gone";
+  s.clear();
+  assert s.is_empty(), "expected clear to empty the set";
+  s.free();
+}
+
+test "union, intersection, difference and subset" {
+  Set<num> a = _num_set(1, 2, 3);
+  Set<num> b = _num_set(3, 4, 5);
+  Set<num> u = a.union(&b);
+  assert u.len() == 5 && u.has(1) && u.has(5), "expected every element of both";
+  Set<num> i = a.intersection(&b);
+  assert i.len() == 1 && i.has(3), "expected only the shared element";
+  Set<num> d = a.difference(&b);
+  assert d.len() == 2 && d.has(1) && d.has(2) && !d.has(3), "expected what a has and b lacks";
+  Set<num> small = _num_set(1, 2, 2);
+  assert small.is_subset(&a) && !a.is_subset(&small), "expected subset to be directional";
+  a.free();
+  b.free();
+  u.free();
+  i.free();
+  d.free();
+  small.free();
+}
+
+test "a set lists its keys, iterates, clones and clears through its quirks" {
+  Set<num> s = _num_set(4, 5, 6);
+  Vec<num> keys = s.keys();
+  assert keys.len == 3, "expected three keys";
+  keys.sort();
+  assert keys.get(0) == 4 && keys.get(2) == 6, "expected the keys";
+  keys.free();
+  num total = 0;
+  for x : s {
+    total = total + x;
+  }
+  assert total == 15, "expected iteration to visit every element once";
+  Set<num> copy = s.clone();
+  copy.add(9);
+  assert s.len() == 3 && copy.len() == 4, "expected a clone to be independent";
+  Clearable c = &copy;
+  c.clear();
+  assert copy.is_empty(), "expected clear through the quirk";
+  s.free();
+  copy.free();
+}
+
+test "a set of numbers and a set of strings render as text" {
+  Set<num> n = set_init(0, 4);
+  n.add(1);
+  str one = n.to_string();
+  assert equals(one, "{1}"), "expected a single number";
+  free(one);
+  n.add(2);
+  str two = n.to_string();
+  assert contains(two, "1") && contains(two, ", ") && starts_with(two, "{") &&
+    ends_with(two, "}"), "expected both numbers separated by a comma";
+  free(two);
+  Set<str> s = set_init("", 4);
+  s.add("a");
+  str only = s.to_string();
+  assert equals(only, "{\"a\"}"), "expected a quoted string";
+  free(only);
+  s.add("b");
+  str both = s.to_string();
+  assert contains(both, "\"a\"") && contains(both, "\"b\"") && contains(both, ", "), "expected both strings quoted and separated";
+  free(both);
+  n.free();
+  s.free();
+}

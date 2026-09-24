@@ -3,9 +3,13 @@
 
 use ast;
 use ..lexer.token;
+use ..semantics.warnings;
 use std.string;
 use std.io;
 use std.vec;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
 
 fun _indent(num depth) str {
   StringBuilder b = string_builder_init(depth * 2);
@@ -401,4 +405,123 @@ pub fun print_ast(Vec<Node>* nodes) {
     print_node(&nodes.data[i], 0);
     i = i + 1;
   }
+}
+
+// Parses `src` and returns its top-level nodes, failing the test if it does
+// not parse.
+fun _parse_for_print(str src) Vec<Node> {
+  let tokens = tokenize(src, "print_test.fn");
+  assert tokens.is_ok(), "expected the sample to tokenize";
+  ParseState state = parse_state_new("print_test.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  assert perr.is_none(), "expected the sample to parse";
+  ret state.nodes;
+}
+
+test "dtype text names tuples, pointers and plain types" {
+  DataType plain = dtype_new();
+  plain.type_str = "num";
+  assert equals(_dtype_str(&plain), "num"), "expected a plain type name";
+  DataType ptr = dtype_new();
+  ptr.type_str = "str";
+  ptr.pointer_depth = 2;
+  assert equals(_dtype_str(&ptr), "str (pointer depth: 2)"), "expected the pointer depth spelled out";
+  assert equals(_dtype_str(nil), ""), "expected nothing for a missing type";
+  DataType tup = dtype_new();
+  tup.is_tuple = true;
+  DataType* a = malloc(sizeof(DataType));
+  *a = plain;
+  DataType* b = malloc(sizeof(DataType));
+  *b = ptr;
+  tup.tuple_members.push(a);
+  tup.tuple_members.push(b);
+  assert equals(_dtype_str(&tup), "(num, str (pointer depth: 2))"), "expected the members in parentheses";
+  assert equals(_indent(0), "") && equals(_indent(2), "    "), "expected two spaces per level";
+}
+
+test "print_ast walks declarations, statements and expressions of every kind" {
+  Vec<Node> nodes = _parse_for_print(`use std.io;
+  `als Score = num;
+  `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `enum Shape {
+  `  Circle(num),
+  `  Square,
+  `}
+  `quirk Named {
+  `  name() str;
+  `}
+  `impl Point {
+  `  pub norm() num {
+  `    ret self.x * self.x + self.y * self.y;
+  `  }
+  `}
+  `impl Point as Named {
+  `  pub name() str { ret "p"; }
+  `}
+  `fun id<T>(T v, num extra = 1) T {
+  `  ret v;
+  `}
+  `fun sample(num a, str* s) num {
+  `  let total = 0;
+  `  Point p = Point{x = 1, y = 2};
+  `  (num, str) pair = (1, "two");
+  `  num[] arr = [1, 2, 3];
+  `  flag ok = !(a > 1) && true || false;
+  `  chr c = 'q';
+  `  dec d = 1.5;
+  `  str t = nil;
+  `  if a == 1 {
+  `    total = total + 1;
+  `  } elif a == 2 {
+  `    total = total + 2;
+  `  } else {
+  `    total = total - 1;
+  `  }
+  `  for total < 10 {
+  `    total = total + 1;
+  `    if total == 5 { continue; }
+  `    if total == 8 { break; }
+  `  }
+  `  for i : 0..3 {
+  `    total = total + i;
+  `  }
+  `  for i, v :: arr {
+  `    total = total + v;
+  `  }
+  `  for {
+  `    break;
+  `  }
+  `  fit a {
+  `    1 -> { total = 1; }
+  `    _ -> { total = 2; }
+  `  }
+  `  Shape sh = Shape.Circle(2);
+  `  fit sh {
+  `    .Circle(r) -> { total = r; }
+  `    .Square -> { total = 0; }
+  `  }
+  `  num q = id(3);
+  `  num neg = -a;
+  `  num deref = *(&a);
+  `  defer total = 0;
+  `  assert total >= 0, "non-negative";
+  `  ret total;
+  `}
+  `test "prints a test" {
+  `  assert sample(1, nil) > 0, "positive";
+  `}
+  `fun main() {
+  `  num n = sample(1, nil);
+  `  panic("stop");
+  `}`);
+  assert nodes.len > 8, "expected a node per top-level declaration";
+  print_ast(&nodes);
+  print_node(nil, 0);
+  assert true, "expected the walk to finish";
 }

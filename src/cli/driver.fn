@@ -16,6 +16,8 @@ use fmt;
 use ..ast.ast;
 use ..ast.ast_print;
 use manifest;
+use coverage;
+use ..ast.coverage_lines;
 use deps;
 use ..codegen.codegen;
 use ..codegen.codegen_state;
@@ -99,9 +101,35 @@ pub compound Options {
   str dep_branch;
   str dep_rev;
   str dep_token_env;
+  // `-cover` and its companions (see `CoverOptions`).
+  CoverOptions cover;
   // Set when parsing failed, with `error_text` explaining why.
   flag has_error;
   str error_text;
+}
+
+// What a `-cover` run should measure and produce. `formats[i]` is written
+// to `paths[i]` (`-` meaning standard output); `min_tenths` is a floor, in
+// tenths of a percent, the run fails below when `has_min` is set.
+pub compound CoverOptions {
+  flag enabled;
+  Vec<str> formats;
+  Vec<str> paths;
+  flag has_min;
+  num min_tenths;
+  // Files and directories left out of the report.
+  Vec<str> exclude;
+}
+
+fun _cover_options_new() CoverOptions {
+  CoverOptions c;
+  c.enabled = false;
+  c.formats.init(0);
+  c.paths.init(0);
+  c.has_min = false;
+  c.min_tenths = 0;
+  c.exclude.init(0);
+  ret c;
 }
 
 fun _options_new() Options {
@@ -135,6 +163,7 @@ fun _options_new() Options {
   o.dep_branch = "";
   o.dep_rev = "";
   o.dep_token_env = "";
+  o.cover = _cover_options_new();
   o.has_error = false;
   o.error_text = "";
   ret o;
@@ -144,6 +173,82 @@ impl Options {
   pub free() {
     self.program_args.free();
     self.defines.free();
+    self.cover.formats.free();
+    self.cover.paths.free();
+    self.cover.exclude.free();
+  }
+}
+
+// The default file a coverage format is written to.
+fun _cover_default_path(str format_name) str {
+  fit format_name {
+    "lcov" -> { ret "lcov.info"; }
+    "cobertura" -> { ret "cobertura.xml"; }
+    "json" -> { ret "coverage.json"; }
+    "html" -> { ret "coverage.html"; }
+    _ -> { ret "-"; }
+  }
+}
+
+fun _cover_format_known(str format_name) flag {
+  fit format_name {
+    "text", "lcov", "cobertura", "json", "html" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// Reads `-cover`, `-cover-report <format[=path],...>` and `-cover-min <pct>`
+// into `o.cover`. Asking for a report or a minimum implies `-cover`.
+fun _parse_cover_options(CliArgs* parsed, Options* o) {
+  o.cover.enabled = parsed.has("cover") || parsed.has("cover-report") ||
+    parsed.has("cover-min") || parsed.has("cover-exclude");
+  str reports = parsed.get_or("cover-report", "");
+  if !equals(reports, "") {
+    Vec<str> items = split(reports, ',');
+    defer items.free();
+    for entry : items {
+      if equals(entry, "") {
+        continue;
+      }
+      num eq = index_of_char(entry, '=');
+      str name = entry;
+      str where = "";
+      if eq != -1 {
+        name = substr(entry, 0, eq);
+        where = substr(entry, eq + 1, len(entry) - (eq + 1));
+      }
+      if !_cover_format_known(name) {
+        o.has_error = true;
+        o.error_text = format("-cover-report expects text, lcov, cobertura, json or html, found `{str}`", name);
+        ret;
+      }
+      if equals(where, "") {
+        where = _cover_default_path(name);
+      }
+      o.cover.formats.push(name);
+      o.cover.paths.push(where);
+    }
+  }
+  str excluded = parsed.get_or("cover-exclude", "");
+  if !equals(excluded, "") {
+    Vec<str> parts = split(excluded, ',');
+    for part : parts {
+      if !equals(part, "") {
+        o.cover.exclude.push(part);
+      }
+    }
+    parts.free();
+  }
+  str min_text = parsed.get_or("cover-min", "");
+  if !equals(min_text, "") {
+    num tenths = parse_percent_tenths(min_text);
+    if tenths < 0 {
+      o.has_error = true;
+      o.error_text = format("-cover-min expects a percentage from 0 to 100, found `{str}`", min_text);
+      ret;
+    }
+    o.cover.has_min = true;
+    o.cover.min_tenths = tenths;
   }
 }
 
@@ -161,6 +266,9 @@ fun _value_flags() Vec<str> {
   out.push("branch");
   out.push("rev");
   out.push("token-env");
+  out.push("cover-report");
+  out.push("cover-min");
+  out.push("cover-exclude");
   ret out;
 }
 
@@ -221,6 +329,10 @@ pub fun parse_args(str[] argv) Options {
   o.dep_branch = parsed.get_or("branch", "");
   o.dep_rev = parsed.get_or("rev", "");
   o.dep_token_env = parsed.get_or("token-env", "");
+  _parse_cover_options(&parsed, &o);
+  if o.has_error {
+    ret o;
+  }
   if !equals(o.output, "") {
     if !ends_with(o.output, ".c") {
       o.has_error = true;
@@ -416,6 +528,30 @@ pub fun compile_to_c_mode(
   flag debug_info,
   flag warn_unused_lenient
 ) Result<flag, str> {
+  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil);
+}
+
+// Where a coverage-instrumented test binary writes its counts. `nil` in
+// `compile_to_c_cover` means no instrumentation.
+pub compound CoverPlan {
+  str out_path;
+  str pwd;
+}
+
+// `compile_to_c_mode`, optionally instrumented for coverage (see
+// `CoverPlan`).
+pub fun compile_to_c_cover(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  flag test_mode,
+  flag warn_unused,
+  flag fuzz_mode,
+  str fuzz_target,
+  flag debug_info,
+  flag warn_unused_lenient,
+  CoverPlan* cover
+) Result<flag, str> {
   let merged = parse_program_with_imports(input)!;
   if test_mode {
     _drop_foreign_tests(&merged.nodes, input);
@@ -524,6 +660,11 @@ pub fun compile_to_c_mode(
   cg.fuzz_target = fuzz_target;
   cg.msvc_mode = compiler_is_msvc(resolve_c_compiler());
   cg.debug_info = debug_info;
+  if cover != nil {
+    cg.coverage = true;
+    cg.cover_out = cover.out_path;
+    cg.cover_pwd = cover.pwd;
+  }
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
@@ -1178,6 +1319,8 @@ pub fun help_text() str {
   `  fun -in <input.fn> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-help] [-- <program args>]
   `  fun test <input.fn>      compiles and runs just that file's own test blocks
   `  fun test [<dir>]         runs every test block found under <dir> (default '.')
+  `  fun test [<path>] -cover [-cover-report lcov|cobertura|json|html|text[=file],...] [-cover-min <pct>] [-cover-exclude <path,...>]
+  `                           measures code coverage while running the tests
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun lint [<path>] [-summary]  reports every warning under <path> (a file or directory, default '.'), then totals; exits 1 if any
@@ -1439,6 +1582,121 @@ test "a compound field whose type was never imported is reported by name" {
   assert lowered.is_err(), "expected the missing import to fail the compile";
   str message = lowered.unwrap_err();
   assert contains(message, "the type 'Map' of field 'hints' in 'Holder' is not declared"), "expected the message to name the type, the field and the compound";
+}
+
+test "-cover, -cover-report and -cover-min are read, and either of the last two implies -cover" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("test");
+  a.push("-cover-report");
+  a.push("lcov=out.info,json,text");
+  a.push("-cover-min");
+  a.push("87.5");
+  a.push("-cover-exclude");
+  a.push("examples,scripts");
+  let o = parse_args(_argv(&a));
+  defer o.free();
+  assert !o.has_error, "expected the coverage flags to parse";
+  assert o.cover.enabled, "expected a report request to enable coverage";
+  assert o.cover.formats.len == 3, "expected three formats";
+  assert equals(o.cover.formats.get(0), "lcov") &&
+    equals(o.cover.paths.get(0), "out.info"), "expected an explicit path to be kept";
+  assert equals(o.cover.paths.get(1), "coverage.json"), "expected a default file name for json";
+  assert equals(o.cover.paths.get(2), "-"), "expected text to default to standard output";
+  assert o.cover.has_min && o.cover.min_tenths == 875, "expected 87.5 to read as 875 tenths";
+  assert o.cover.exclude.len == 2 && equals(o.cover.exclude.get(1), "scripts"), "expected both exclusions";
+}
+
+test "a plain run has coverage off, and bad coverage flags are rejected" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("test");
+  let plain = parse_args(_argv(&a));
+  defer plain.free();
+  assert !plain.cover.enabled, "expected coverage off by default";
+
+  Vec<str> b;
+  b.init(0);
+  defer b.free();
+  b.push("test");
+  b.push("-cover-report");
+  b.push("pdf");
+  let bad_format = parse_args(_argv(&b));
+  defer bad_format.free();
+  assert bad_format.has_error, "expected an unknown format to be rejected";
+
+  Vec<str> c;
+  c.init(0);
+  defer c.free();
+  c.push("test");
+  c.push("-cover-min");
+  c.push("120");
+  let bad_min = parse_args(_argv(&c));
+  defer bad_min.free();
+  assert bad_min.has_error, "expected a minimum over 100 to be rejected";
+}
+
+test "percentages read as tenths of a percent" {
+  assert parse_percent_tenths("80") == 800, "expected a whole number";
+  assert parse_percent_tenths("87.5") == 875, "expected one decimal";
+  assert parse_percent_tenths("100") == 1000, "expected 100";
+  assert parse_percent_tenths("100.1") == -1, "expected over 100 rejected";
+  assert parse_percent_tenths("8x") == -1, "expected a non-number rejected";
+  assert parse_percent_tenths("87.55") == -1, "expected two decimals rejected";
+  assert parse_percent_tenths("") == -1, "expected empty rejected";
+}
+
+test "coverage lines are the statements outside tests, and a test's own range is recorded" {
+  Vec<Node> nodes = _entry_nodes("src/cli/coverage_samples/sample.fn", nil);
+  Vec<str> files;
+  files.init(8);
+  Vec<num> lines;
+  lines.init(8);
+  collect_program_lines(&nodes, &files, &lines);
+  assert lines.len == 3, "expected the if, the first ret and the last ret";
+  assert lines.get(0) == 4 && lines.get(1) == 5 && lines.get(2) == 7, "expected lines 4, 5 and 7";
+
+  Vec<str> range_files;
+  range_files.init(2);
+  Vec<num> from;
+  from.init(2);
+  Vec<num> to;
+  to.init(2);
+  collect_test_ranges(&nodes, &range_files, &from, &to);
+  assert from.len == 1 && from.get(0) == 10 && to.get(0) == 11, "expected the test to span lines 10 to 11";
+  assert in_test_range(range_files.get(0), 11, &range_files, &from, &to), "expected the assert inside the range";
+  assert !in_test_range(range_files.get(0), 5, &range_files, &from, &to), "expected code outside the range";
+}
+
+test "a coverage compile counts each measured statement once and leaves the test body alone" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverPlan plan;
+  plan.out_path = "counts.cov";
+  plan.pwd = "";
+  str out_path = "src/cli/coverage_samples/sample.cover.test.c";
+  let lowered = compile_to_c_cover("src/cli/coverage_samples/sample.fn", out_path, &defines, true, false, false, "", false, false, &plan);
+  assert lowered.is_ok(), "expected the sample to compile with instrumentation";
+  str c = read_to_string(out_path);
+  remove_file(out_path);
+  assert contains(c, "__fun_cov_hit(0);") && contains(c, "__fun_cov_hit(2);"), "expected a counter in front of each measured statement";
+  assert !contains(c, "__fun_cov_hit(3);"), "expected no counter for the test's own assert";
+  assert contains(c, "__fun_cov_line_tab[] = {4,5,7};"), "expected the table to name lines 4, 5 and 7";
+  assert contains(c, "__fun_cov_file_tab[] = {\"src/cli/coverage_samples/sample.fn\""), "expected the table to name the file";
+  assert contains(c, "fopen(\"counts.cov\""), "expected the dump to go where the driver asked";
+  assert contains(c, "#if defined(_MSC_VER)\n#include <intrin.h>"), "expected the MSVC counter to have the header that declares _InterlockedIncrement64";
+
+  Vec<Define> defines2;
+  defines2.init(0);
+  defer defines2.free();
+  let plain = compile_to_c(("src/cli/coverage_samples/sample.fn"), out_path, &defines2, false);
+  assert plain.is_ok(), "expected an ordinary compile";
+  str plain_c = read_to_string(out_path);
+  remove_file(out_path);
+  assert !contains(plain_c, "__fun_cov"), "expected no instrumentation without a plan";
 }
 
 test "a test binary keeps only its own file's test blocks, not the ones it imports" {
@@ -1922,6 +2180,136 @@ pub fun resolved_defines(Vec<Define>* extra) Vec<Define> {
   ret out;
 }
 
+// Fills `cover` from `[coverage]` in ./fun.toml wherever the command line
+// said nothing: the minimum when none was given, and the excluded paths in
+// addition to any that were. A missing or unreadable manifest changes
+// nothing.
+pub fun apply_manifest_coverage(CoverOptions* cover) {
+  if !cover.enabled || !exists("fun.toml") {
+    ret;
+  }
+  let parsed = parse_manifest(read_to_string("fun.toml"));
+  if parsed.is_err() {
+    ret;
+  }
+  Manifest m = parsed.unwrap();
+  if !cover.has_min && m.has_cover_min {
+    cover.has_min = true;
+    cover.min_tenths = m.cover_min_tenths;
+  }
+  for path : m.cover_exclude {
+    cover.exclude.push(path);
+  }
+}
+
+// The directory absolute paths are shown relative to in a coverage report,
+// where the shell tells us (empty otherwise, leaving paths as they came).
+fun _cover_pwd() str {
+  ret env_or("PWD", "");
+}
+
+// Where the test binary built for `input` writes its raw counts. Absolute
+// when the working directory is known, so a test that changes directory
+// cannot send them somewhere else.
+fun _cover_counts_path(str input, str tag) str {
+  str name = format("{str}{str}.cov", strip_ext(basename(input)), tag);
+  make_dir_all(out_dir());
+  str rel = path_join(out_dir(), name);
+  str pwd = _cover_pwd();
+  if equals(pwd, "") {
+    ret rel;
+  }
+  ret path_join(pwd, rel);
+}
+
+// The raw counts a coverage-instrumented binary left at `path`, removed once
+// read; empty when it wrote none (it crashed, or never reached its exit).
+fun _cover_take_counts(str path) str {
+  if !exists(path) {
+    ret "";
+  }
+  str text = read_to_string(path);
+  remove_file(path);
+  ret text;
+}
+
+// Declares every counted line of `files`, so a line no test reached still
+// shows as uncovered, and a file no test touched still shows at all. Each
+// file is read on its own, so one that does not parse without its imports
+// simply contributes no lines.
+fun _cover_declare_lines(CoverReport* report, Vec<str>* files, str pwd) {
+  for path : files {
+    str shown = cover_display_path(path, pwd);
+    if !cover_is_measured(shown) {
+      continue;
+    }
+    Vec<Node> nodes = _entry_nodes(_normalize_path(path), nil);
+    Vec<str> found_files;
+    found_files.init(16);
+    Vec<num> found_lines;
+    found_lines.init(16);
+    collect_program_lines(&nodes, &found_files, &found_lines);
+    num i = 0;
+    for i < found_lines.len {
+      report.declare(cover_display_path(found_files.get(i), pwd), found_lines.get(i));
+      i = i + 1;
+    }
+    found_files.free();
+    found_lines.free();
+  }
+}
+
+// Prints the summary line, writes each requested report and enforces the
+// minimum. Returns 0, or 1 when a report could not be written or the total
+// is under the minimum.
+fun _cover_finish(CoverReport* full, CoverOptions* cover) num {
+  CoverReport filtered = cover_without(full, &cover.exclude);
+  CoverReport* report = &filtered;
+  println("");
+  println(cover_summary_line(report));
+  num code = 0;
+  num i = 0;
+  for i < cover.formats.len {
+    str kind = cover.formats.get(i);
+    str where = cover.paths.get(i);
+    i = i + 1;
+    str body = "";
+    fit kind {
+      "lcov" -> { body = cover_to_lcov(report); }
+      "cobertura" -> { body = cover_to_cobertura(report); }
+      "json" -> { body = cover_to_json(report); }
+      "html" -> { body = cover_to_html(report); }
+      _ -> { body = cover_to_text(report); }
+    }
+    if equals(where, "-") {
+      print(body);
+      continue;
+    }
+    if write_string(where, body) {
+      println(format("wrote {str} coverage to {str}", kind, where));
+    } else {
+      writeln_to(Sink.Stderr, format("could not write {str} coverage to {str}", kind, where));
+      code = 1;
+    }
+  }
+  if cover.has_min {
+    num got = percent_tenths(report.covered(), report.statements());
+    if got < cover.min_tenths {
+      writeln_to(
+        Sink.Stderr,
+        format(
+        "coverage {str}% is below the required {num}.{num}%",
+        percent_text(report.covered(), report.statements()),
+        cover.min_tenths / 10,
+        cover.min_tenths % 10
+        )
+      );
+      code = 1;
+    }
+  }
+  ret code;
+}
+
 // Compiles `input` with its test blocks and runs them, passing `args` on
 // so a single test can be named. Returns the runner's exit code.
 // `no_exec` stops right after writing the C (to `out_override` when
@@ -1938,7 +2326,8 @@ pub fun run_tests(
   flag warn_unused,
   flag warn_unused_lenient,
   flag keep_c,
-  Vec<Define>* extra_defines
+  Vec<Define>* extra_defines,
+  CoverOptions* cover
 ) num {
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
@@ -1953,7 +2342,14 @@ pub fun run_tests(
   if equals(c_path, "") {
     c_path = default_c_path(input, ".test.c");
   }
-  let lowered = compile_to_c_mode(
+  CoverPlan plan;
+  plan.pwd = _cover_pwd();
+  plan.out_path = _cover_counts_path(input, ".test");
+  CoverPlan* plan_ptr = nil;
+  if cover.enabled {
+    plan_ptr = &plan;
+  }
+  let lowered = compile_to_c_cover(
     input,
     c_path,
     &defines,
@@ -1962,7 +2358,8 @@ pub fun run_tests(
     false,
     "",
     debug_info,
-    warn_unused_lenient
+    warn_unused_lenient,
+    plan_ptr
   );
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
@@ -1984,6 +2381,13 @@ pub fun run_tests(
 
   let code = run_exe(exe, args);
   remove_file(exe);
+  if cover.enabled {
+    CoverReport report = cover_report_new();
+    report.add_counts(_cover_take_counts(plan.out_path), false);
+    if _cover_finish(&report, cover) != 0 && code == 0 {
+      ret 1;
+    }
+  }
   ret code;
 }
 
@@ -2060,6 +2464,8 @@ compound SuiteTestResult {
   num lower_ms;
   num cc_ms;
   num run_ms;
+  // The raw coverage counts the test binary wrote, empty without `-cover`.
+  str cover_text;
 }
 
 // Wall-clock milliseconds, only meaningful as a difference between two
@@ -2099,11 +2505,13 @@ fun _run_tests_captured(
   flag debug_info,
   flag warn_unused,
   flag warn_unused_lenient,
-  Vec<Define>* extra_defines
+  Vec<Define>* extra_defines,
+  CoverOptions* cover
 ) SuiteTestResult {
   SuiteTestResult bad;
   bad.exit_code = 1;
   bad.captured = "";
+  bad.cover_text = "";
   bad.lower_ms = 0;
   bad.cc_ms = 0;
   bad.run_ms = 0;
@@ -2112,8 +2520,15 @@ fun _run_tests_captured(
   defer defines.free();
 
   str c_path = default_c_path(input, format(".w{num}.test.c", compile_tag));
+  CoverPlan plan;
+  plan.pwd = _cover_pwd();
+  plan.out_path = _cover_counts_path(input, format(".w{num}", compile_tag));
+  CoverPlan* plan_ptr = nil;
+  if cover.enabled {
+    plan_ptr = &plan;
+  }
   let t_lower = _wall_ms();
-  let lowered = compile_to_c_mode(
+  let lowered = compile_to_c_cover(
     input,
     c_path,
     &defines,
@@ -2122,7 +2537,8 @@ fun _run_tests_captured(
     false,
     "",
     debug_info,
-    warn_unused_lenient
+    warn_unused_lenient,
+    plan_ptr
   );
   let lower_ms = _wall_ms() - t_lower;
   bad.lower_ms = lower_ms;
@@ -2163,6 +2579,10 @@ fun _run_tests_captured(
   ok.lower_ms = lower_ms;
   ok.cc_ms = cc_ms;
   ok.run_ms = run_ms;
+  ok.cover_text = "";
+  if cover.enabled {
+    ok.cover_text = _cover_take_counts(plan.out_path);
+  }
   // A failed `assert`'s own "Assertion failed: ..." message goes to
   // stderr (see StatementAssert's own codegen), so stdout alone never
   // shows why a test actually failed - appended here rather than
@@ -2192,6 +2612,8 @@ compound _TestSuiteWorkerCtx {
   num passed;
   num failed;
   Vec<str>* failed_files;
+  CoverOptions* cover;
+  CoverReport* report;
   flag timing;
   num total_lower_ms;
   num total_cc_ms;
@@ -2234,10 +2656,16 @@ fun _test_suite_worker(raw* arg) raw* {
       ctx.debug_info,
       ctx.warn_unused,
       ctx.warn_unused_lenient,
-      ctx.extra_defines
+      ctx.extra_defines,
+      ctx.cover
     );
 
     ctx.lock.lock();
+    if ctx.cover.enabled {
+      // Only files that were declared from the source tree: a run limited to
+      // one directory ignores the rest of what its binaries were built from.
+      ctx.report.add_counts(res.cover_text, true);
+    }
     ctx.total_lower_ms = ctx.total_lower_ms + res.lower_ms;
     ctx.total_cc_ms = ctx.total_cc_ms + res.cc_ms;
     ctx.total_run_ms = ctx.total_run_ms + res.run_ms;
@@ -2326,7 +2754,8 @@ pub fun run_test_suite(
   flag debug_info,
   flag warn_unused,
   flag warn_unused_lenient,
-  Vec<Define>* extra_defines
+  Vec<Define>* extra_defines,
+  CoverOptions* cover
 ) num {
   str dir = root;
   if equals(dir, "") {
@@ -2390,6 +2819,12 @@ pub fun run_test_suite(
   ctx.passed = 0;
   ctx.failed = 0;
   ctx.failed_files = &failed_files;
+  CoverReport report = cover_report_new();
+  ctx.cover = cover;
+  ctx.report = &report;
+  if cover.enabled {
+    _cover_declare_lines(&report, &files, _cover_pwd());
+  }
   ctx.timing = !equals(env_or("FUN_TEST_TIMING", ""), "");
   ctx.total_lower_ms = 0;
   ctx.total_cc_ms = 0;
@@ -2443,6 +2878,10 @@ pub fun run_test_suite(
       )
     );
   }
+  num cover_code = 0;
+  if cover.enabled {
+    cover_code = _cover_finish(&report, cover);
+  }
   if failed > 0 {
     println("\nFailed:");
     num j = 0;
@@ -2452,7 +2891,7 @@ pub fun run_test_suite(
     }
     ret 1;
   }
-  ret 0;
+  ret cover_code;
 }
 
 // Default wall-clock budget (seconds) for one fuzz target when running
@@ -3368,4 +3807,202 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
   assert _in_fixtures_dir("src\\parser\\import_resolver_fixtures\\x.fn"), "expected a *_fixtures directory recognized on backslashes";
   assert !_in_fixtures_dir("src/fixtures_helper.fn"), "expected a file merely named like fixtures kept";
   assert !_in_fixtures_dir("fixtures"), "expected the last component, a file or leaf, not counted as a directory";
+}
+
+// A directory of `.fn` files made for one test, emptied of anything left from
+// an earlier run. Lives under fun-out, which a scan of the project skips.
+fun _scratch_project(str name) str {
+  str dir = format("fun-out/driver_test_{str}", name);
+  make_dir_all(dir);
+  Vec<str> old = list_dir(dir).unwrap();
+  for entry : old {
+    remove_file(path_join(dir, entry));
+  }
+  old.free();
+  ret dir;
+}
+
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "a suite run over a directory passes, and reports coverage in the format asked for" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  cover.enabled = true;
+  cover.formats.push("lcov");
+  cover.paths.push("fun-out/driver_suite_cover.info");
+  cover.formats.push("text");
+  cover.paths.push("-");
+  num code = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert code == 0, "expected the sample's passing test to give a zero exit";
+  str lcov = read_to_string("fun-out/driver_suite_cover.info");
+  assert contains(lcov, "SF:src/cli/coverage_samples/sample.fn"), "expected the measured file in the report";
+  assert contains(lcov, "DA:4,1") && contains(lcov, "DA:7,0"), "expected the reached and unreached lines with their counts";
+  remove_file("fun-out/driver_suite_cover.info");
+}
+
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "a coverage minimum turns a passing run into a failure, and -g builds too" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  cover.enabled = true;
+  cover.has_min = true;
+  cover.min_tenths = 1000;
+  num under = run_test_suite("src/cli/coverage_samples", true, false, false, &defines, &cover);
+  assert under == 1, "expected a run below the minimum to fail";
+  cover.min_tenths = 100;
+  num met = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert met == 0, "expected a run at or above the minimum to pass";
+  cover.exclude.push("src/cli/coverage_samples");
+  num excluded = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  assert excluded == 1, "expected an empty report to fall below a nonzero minimum";
+}
+
+test "a suite with a failing test, or a file that does not compile, exits nonzero" {
+  str dir = _scratch_project("failing");
+  write_string(path_join(dir, "fails.fn"), "test \"always fails\" {\n  assert false, \"boom\";\n}\n");
+  write_string(path_join(dir, "broken.fn"), "fun broken( {\ntest \"never\" { assert true, \"x\"; }\n");
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  num code = run_test_suite(dir, false, false, false, &defines, &cover);
+  assert code == 1, "expected any failing file to give a nonzero exit";
+}
+
+test "an empty directory has no tests to run" {
+  str dir = _scratch_project("empty");
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  assert run_test_suite(dir, false, false, false, &defines, &cover) == 0, "expected no tests to be a success";
+}
+
+// Runs a suite over the same sample as its siblings, which build to the same
+// output path, so it cannot run beside them.
+sequential test "running one file's tests returns their result, and can stop at the C file" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected the sample's tests to pass";
+  args.push("pick returns 1 for a positive number");
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a single named test to run";
+  args.pop();
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, true, "fun-out/driver_one_file.c", false, false, true, &defines, &cover) == 0, "expected no_exec to stop after writing the C";
+  assert exists("fun-out/driver_one_file.c"), "expected the C file to be kept";
+  remove_file("fun-out/driver_one_file.c");
+  cover.enabled = true;
+  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a covered single-file run to pass";
+  str dir = _scratch_project("onefile");
+  write_string(path_join(dir, "bad.fn"), "fun bad( {\n");
+  assert run_tests(path_join(dir, "bad.fn"), &args, false, false, "", false, false, false, &defines, &cover) == 1, "expected a file that does not compile to fail";
+}
+
+test "lint reports findings and gives a nonzero exit for them" {
+  str dir = _scratch_project("lint");
+  write_string(path_join(dir, "a.fn"), "fun main() {\n  num unused = 1;\n}\n");
+  assert run_lint(dir, false) == 1, "expected an unused variable to be a finding";
+  assert run_lint(dir, true) == 1, "expected the summary form to fail the same way";
+  str clean = _scratch_project("lint_clean");
+  write_string(path_join(clean, "ok.fn"), "fun main() {\n}\n");
+  assert run_lint(clean, false) == 0, "expected a clean directory to pass";
+  assert run_lint("fun-out/driver_no_such_path", false) == 1, "expected a missing path to be an error";
+}
+
+test "format_file_and_imports rewrites an unformatted file and its imports" {
+  str dir = _scratch_project("format");
+  str helper = path_join(dir, "helper.fn");
+  str main_path = path_join(dir, "main.fn");
+  write_string(helper, "pub fun helper()   num {  ret   1;}\n");
+  write_string(main_path, "use helper;\nfun main() {   num x=helper( );}\n");
+  let first = format_file_and_imports(main_path);
+  assert first.is_ok() && first.unwrap() == 2, "expected both files to be rewritten";
+  let second = format_file_and_imports(main_path);
+  assert second.is_ok() && second.unwrap() == 0, "expected a second pass to change nothing";
+  assert contains(read_to_string(helper), "pub fun helper() num {"), "expected the import to have been formatted";
+  assert format_file_and_imports(path_join(dir, "missing.fn")).is_err(), "expected a missing file to be an error";
+}
+
+test "fuzz targets are read from a file by name" {
+  str dir = _scratch_project("fuzz");
+  str path = path_join(dir, "targets.fn");
+  write_string(path, "fuzz \"first target\" (raw* data, num len) {\n}\nfuzz \"second\" (raw* data, num len) {\n}\n");
+  Vec<str> found = _collect_fuzz_targets(path);
+  assert found.len == 2 && equals(found.get(0), "first target") &&
+    equals(found.get(1), "second"), "expected both names in order";
+  found.free();
+  Vec<str> none = _collect_fuzz_targets(path_join(dir, "missing.fn"));
+  assert none.len == 0, "expected a missing file to have no targets";
+  none.free();
+}
+
+sequential test "the fuzz budget and fuzz compiler follow their environment variables" {
+  clear_env("FUN_FUZZ_DEFAULT_SECONDS");
+  assert _fuzz_budget_seconds() == default_fuzz_seconds, "expected the default budget";
+  set_env("FUN_FUZZ_DEFAULT_SECONDS", "7");
+  assert _fuzz_budget_seconds() == 7, "expected the override";
+  set_env("FUN_FUZZ_DEFAULT_SECONDS", "0");
+  assert _fuzz_budget_seconds() == default_fuzz_seconds, "expected a non-positive override to be ignored";
+  clear_env("FUN_FUZZ_DEFAULT_SECONDS");
+  clear_env("FUN_FUZZ_CC");
+  Vec<str> many = _fuzz_cc_candidates();
+  assert many.len > 3 && equals(many.get(0), "clang"), "expected the search list to start with clang";
+  many.free();
+  set_env("FUN_FUZZ_CC", "my-clang");
+  Vec<str> one = _fuzz_cc_candidates();
+  assert one.len == 1 && equals(one.get(0), "my-clang"), "expected an override to be the only candidate";
+  one.free();
+  clear_env("FUN_FUZZ_CC");
+  Vec<str> defaults = _default_cc_candidates();
+  assert defaults.len == 3 && equals(defaults.get(0), "clang") &&
+    equals(defaults.get(1), "gcc"), "expected clang then gcc";
+  defaults.free();
+}
+
+test "coverage measures project files and leaves out the standard library, dependencies and fixtures" {
+  assert cover_is_measured("src/a.fn") && cover_is_measured("a.fn") &&
+    cover_is_measured("src/deep/er/b.fn"), "expected project files to be measured";
+  assert !cover_is_measured("/home/u/.local/share/fun/share/fun/std/vec.fn"), "expected an installed standard library to be left out";
+  assert !cover_is_measured("/home/u/.local/share/fun/deps/example_com_lib/abc123/lib.fn"), "expected a fetched dependency to be left out";
+  assert !cover_is_measured("../sibling/x.fn"), "expected a file outside the project to be left out";
+  assert !cover_is_measured("C:/Users/u/deps/x.fn"), "expected a Windows absolute path to be left out";
+  assert !cover_is_measured("tests/fixtures/x.fn") &&
+    !cover_is_measured("src/parser/import_resolver_fixtures/a.fn"), "expected fixtures to be left out";
+  assert !cover_is_measured("fun-out/generated.fn"), "expected build output to be left out";
+  assert cover_is_measured("src/fixtures_not/x.fn") &&
+    cover_is_measured("src/my_fixtures_file.fn"), "expected only whole directory names to count as fixtures";
+  assert !cover_is_measured(""), "expected an empty path to be left out";
+}
+
+test "a path is shown relative to the working directory, and only when it really is inside it" {
+  assert equals(cover_display_path("/w/proj/src/a.fn", "/w/proj"), "src/a.fn"), "expected an absolute project path to be made relative";
+  assert equals(cover_display_path("./src/a.fn", ""), "src/a.fn"), "expected a leading ./ to be dropped";
+  assert equals(cover_display_path("C:\\w\\src\\a.fn", ""), "C:/w/src/a.fn"), "expected backslashes to become slashes";
+  assert equals(cover_display_path("C:\\w\\proj\\src\\a.fn", "C:\\w\\proj"), "src/a.fn"), "expected a Windows path to be made relative to a Windows directory";
+  assert equals(cover_display_path("/w/project/a.fn", "/w/pro"), "/w/project/a.fn"), "expected a sibling whose name starts the same not to be stripped";
+  assert equals(cover_display_path("/other/src/a.fn", "/w/proj"), "/other/src/a.fn"), "expected a path elsewhere to stay absolute";
 }

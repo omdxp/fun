@@ -779,3 +779,209 @@ pub fun write_all(str path, str data) flag {
   let ok = f.write(data);
   ret ok;
 }
+
+test "format fills placeholders in order and keeps what it cannot fill" {
+  str a = format("{} and {}", "x", "y");
+  assert equals(a, "x and y"), "expected bare placeholders filled in order";
+  free(a);
+  str b = format("{num}/{str}/{flag}", 3, "s", true);
+  assert equals(b, "3/s/true"), "expected typed placeholders";
+  free(b);
+  str c = format("{{literal}} {}", "v");
+  assert equals(c, "{literal}} v"), "expected an escaped brace to print one brace";
+  free(c);
+  str d = format("{} {}", "only");
+  assert equals(d, "only {}"), "expected a placeholder with no argument to stay";
+  free(d);
+  str e = format("{unknown} {}", "v");
+  assert equals(e, "{unknown} v"), "expected an unrecognized word to stay as written";
+  free(e);
+  str g = format("{dec} {chr} {ptr}", 1.5, 'q', nil);
+  assert starts_with(g, "1.5") && contains(g, "q"), "expected the decimal and character placeholders";
+  free(g);
+}
+
+test "the fmt_ helpers render each type" {
+  str n = fmt_num(-42);
+  assert equals(n, "-42"), "expected a number";
+  free(n);
+  str d = fmt_dec(2.5);
+  assert equals(d, "2.5"), "expected a decimal without trailing zeros";
+  free(d);
+  str t = fmt_flag(true);
+  str f = fmt_bin(false);
+  assert equals(t, "true") && equals(f, "false"), "expected both flag spellings";
+  free(t);
+  free(f);
+  str c = fmt_chr('z');
+  assert equals(c, "z"), "expected a character";
+  free(c);
+  str s = fmt_str("copy");
+  assert equals(s, "copy"), "expected a copy of the string";
+  free(s);
+  raw* p = malloc(1);
+  str r = fmt_raw(p);
+  assert len(r) > 0, "expected a pointer rendering";
+  free(r);
+  free(p);
+}
+
+test "the print helpers write to standard output" {
+  print("p ");
+  println("line");
+  print_num(7);
+  print_dec(1.5);
+  print_flag(true);
+  print_flag(false);
+  print_fmt("{} ", "fmt");
+  println_fmt("{num}", 3);
+  assert true, "expected every printer to return";
+}
+
+test "a file round-trips text and reports its size, position and lines" {
+  str path = "fun-out/io_roundtrip_test.txt";
+  File w = open_write(path);
+  assert w.write("alpha\nbeta\ngamma\n"), "expected the write";
+  assert w.try_write("delta\n").is_ok(), "expected the try_ write";
+  assert w.flush() && w.try_flush().is_ok(), "expected both flushes";
+  assert w.size() == 23, "expected the size of what was written";
+  w.close();
+  assert !w.write("late"), "expected a closed file to refuse writes";
+  File r = open_read(path);
+  str all = r.read_all();
+  assert equals(all, "alpha\nbeta\ngamma\ndelta\n"), "expected the whole text back";
+  free(all);
+  r.rewind();
+  str first = r.read_line_max(64);
+  assert equals(first, "alpha\n"), "expected the first line";
+  free(first);
+  assert r.tell() == 6, "expected the position after one line";
+  assert r.seek(0, 0) && r.tell() == 0, "expected seek to the start";
+  Vec<str> lines = r.read_lines(64);
+  assert lines.len == 4 && equals(lines.get(3), "delta\n"), "expected every line";
+  lines.free();
+  assert r.try_seek(0, 0).is_ok() && r.try_tell().unwrap() == 0, "expected the try_ seek and tell";
+  str head = r.read_bytes(5);
+  assert equals(head, "alpha"), "expected five bytes";
+  free(head);
+  assert r.try_read_bytes(3).is_ok() && r.try_read_line_max(8).is_ok() &&
+    r.try_read_all().is_ok(), "expected the try_ readers to succeed";
+  assert r.try_read_lines(64).is_ok(), "expected try_read_lines";
+  r.close();
+  remove(path);
+}
+
+test "a file reads and writes raw bytes" {
+  str path = "fun-out/io_bytes_test.bin";
+  File w = open_write(path);
+  raw* data = malloc(4);
+  str bytes = data;
+  bytes[0] = 'a';
+  bytes[1] = 'b';
+  bytes[2] = 'c';
+  bytes[3] = 'd';
+  assert w.write_bytes(data, 4) && w.try_write_bytes(data, 2).is_ok(), "expected raw writes";
+  w.close();
+  File r = open_read(path);
+  raw* back = malloc(8);
+  assert r.read_into(back, 8) == 6, "expected six bytes back";
+  r.rewind();
+  assert r.try_read_into(back, 2).unwrap() == 2, "expected the try_ form";
+  r.close();
+  free(data);
+  free(back);
+  remove(path);
+}
+
+test "append adds to the end of a file" {
+  str path = "fun-out/io_append_test.txt";
+  write_all(path, "one\n");
+  File a = open_append(path);
+  a.write("two\n");
+  a.close();
+  str text = read_all(path);
+  assert equals(text, "one\ntwo\n"), "expected the appended text after the original";
+  free(text);
+  assert try_open_append(path).is_ok(), "expected the try_ form";
+  remove(path);
+}
+
+test "opening a missing file fails, and a closed file refuses everything" {
+  assert try_open_read("fun-out/io_no_such_file.txt").is_err(), "expected a missing file to fail to open";
+  assert try_open_write("fun-out/io_no_such_dir/x.txt").is_err(), "expected a missing directory to fail";
+  assert try_open_append("fun-out/io_no_such_dir/x.txt").is_err(), "expected append to a missing directory to fail";
+  assert read_all("fun-out/io_no_such_file.txt") == nil, "expected the helper to give nil for a missing file";
+  assert !write_all("fun-out/io_no_such_dir/x.txt", "x"), "expected the helper to report a failed write";
+  File closed = open_read("fun-out/io_no_such_file.txt");
+  assert closed.read_all() == nil && closed.read_bytes(4) == nil &&
+    closed.read_line_max(8) == nil, "expected reads from nothing to give nil";
+  assert closed.try_read_all().is_err() && closed.try_read_bytes(4).is_err() &&
+    closed.try_read_line_max(8).is_err(), "expected the try_ reads to fail";
+  assert closed.try_read_lines(8).is_err() && closed.read_lines(8).len == 0, "expected no lines";
+  assert !closed.write("x") && closed.try_write("x").is_err(), "expected writes to fail";
+  assert !closed.write_bytes(nil, 0) && closed.try_write_bytes(nil, 0).is_err(), "expected raw writes to fail";
+  assert closed.read_into(nil, 0) == 0 && closed.try_read_into(nil, 0).is_err(), "expected raw reads to fail";
+  assert !closed.seek(0, 0) && closed.try_seek(0, 0).is_err(), "expected seek to fail";
+  assert closed.tell() == -1 && closed.try_tell().is_err() && closed.size() == -1, "expected no position or size";
+  assert !closed.flush() && closed.try_flush().is_err(), "expected flush to fail";
+  closed.rewind();
+  closed.close();
+  assert true, "expected rewind and close on a closed file to be harmless";
+}
+
+test "a sink writes to a file, to standard streams, and reads back" {
+  str path = "fun-out/io_sink_test.txt";
+  File f = open_write(path);
+  Sink s = Sink.File(f);
+  assert s.write("hello\n") && s.try_write("world\n").is_ok(), "expected both writes";
+  write_to(s, "raw");
+  writeln_to(s, "!");
+  assert s.flush() && s.try_flush().is_ok(), "expected the flushes";
+  f.close();
+  File r = open_read(path);
+  Sink in = Sink.File(r);
+  str line = in.read_line_max(64);
+  assert equals(line, "hello\n"), "expected the first line back";
+  free(line);
+  str bytes = in.read_bytes(6);
+  assert equals(bytes, "world\n"), "expected six bytes";
+  free(bytes);
+  assert in.read_bytes(1000) == nil, "expected a short read to give nil";
+  assert in.read_line_max(0) == nil, "expected a zero-length line read to give nil";
+  r.close();
+  remove(path);
+  Sink out = Sink.Stdout;
+  Sink err = Sink.Stderr;
+  assert out.write("") && err.write("") && out.try_write("").is_ok() &&
+    err.try_write("").is_ok(), "expected the standard streams to accept text";
+  assert out.flush() && err.try_flush().is_ok(), "expected the standard streams to flush";
+  Sink unavailable = Sink.File(open_read("fun-out/io_no_such_file.txt"));
+  assert !unavailable.write("x") && unavailable.try_write("x").is_err() &&
+    !unavailable.flush(), "expected a sink with no file to refuse";
+  assert unavailable.read_line_max(8) == nil && unavailable.read_bytes(2) == nil, "expected no reads from it";
+}
+
+test "a rotating sink starts a new file when the limit would be passed" {
+  str path = "fun-out/io_rotate_test.log";
+  remove(path);
+  remove("fun-out/io_rotate_test.log.1");
+  remove("fun-out/io_rotate_test.log.2");
+  RotatingSink r = rotating_sink_new(path, 10, 3);
+  Sink s = Sink.Rotating(&r);
+  assert s.write("aaaaaa") && s.try_write("bbbbbb").is_ok(), "expected both writes across a rotation";
+  assert s.write("cccccc"), "expected a third write across another rotation";
+  assert s.flush() && s.try_flush().is_ok(), "expected the flushes";
+  r.close();
+  str current = read_all(path);
+  str older = read_all("fun-out/io_rotate_test.log.1");
+  str oldest = read_all("fun-out/io_rotate_test.log.2");
+  assert equals(current, "cccccc"), "expected the newest text in the live file";
+  assert equals(older, "bbbbbb"), "expected the previous text in .1";
+  assert equals(oldest, "aaaaaa"), "expected the oldest text in .2";
+  free(current);
+  free(older);
+  free(oldest);
+  remove(path);
+  remove("fun-out/io_rotate_test.log.1");
+  remove("fun-out/io_rotate_test.log.2");
+}

@@ -17,6 +17,7 @@ use ..ast.ast;
 use ..lexer.lexdefs;
 use std.string;
 use std.toml;
+use coverage;
 use std.vec;
 use std.option;
 use std.result;
@@ -87,6 +88,11 @@ pub compound Manifest {
   LibTarget lib;
   Vec<ExeTarget> exes;
   Vec<Dependency> deps;
+  // `[coverage]`: the minimum total coverage `fun test -cover` enforces, in
+  // tenths of a percent, and the paths left out of its report.
+  flag has_cover_min;
+  num cover_min_tenths;
+  Vec<str> cover_exclude;
 }
 
 impl Manifest {
@@ -202,6 +208,30 @@ pub fun is_safe_dep_path(str s) flag {
   ret !starts_with(s, "/") && !contains(s, "\\") && !contains(s, "..");
 }
 
+// The strings of a one-line `["a", "b"]` array as the TOML reader leaves it
+// (the raw text, since it has no array type). Anything else reads as empty.
+pub fun _parse_string_array(str value) Vec<str> {
+  Vec<str> out;
+  out.init(0);
+  str text = trim(value);
+  if len(text) < 2 || text[0] != '[' || text[len(text) - 1] != ']' {
+    ret out;
+  }
+  str inner = substr(text, 1, len(text) - 2);
+  Vec<str> parts = split(inner, ',');
+  for part : parts {
+    str item = trim(part);
+    if len(item) >= 2 && item[0] == '"' && item[len(item) - 1] == '"' {
+      item = substr(item, 1, len(item) - 2);
+    }
+    if !equals(item, "") {
+      out.push(item);
+    }
+  }
+  parts.free();
+  ret out;
+}
+
 // Reads `text` as a manifest. Targets are taken exactly as declared;
 // see `resolve_targets` for filling in the conventional defaults.
 pub fun parse_manifest(str text) Result<Manifest, str> {
@@ -216,6 +246,9 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.lib.path = "";
   m.exes.init(0);
   m.deps.init(0);
+  m.has_cover_min = false;
+  m.cover_min_tenths = 0;
+  m.cover_exclude.init(0);
 
   let pkg = doc.table("package");
   if pkg.is_none() {
@@ -233,7 +266,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   num ti = 0;
   for ti < doc.tables.len {
     str tname = doc.tables.get(ti).name;
-    if !equals(tname, "package") && !equals(tname, "lib") && !equals(tname, "deps") {
+    if !equals(tname, "package") && !equals(tname, "lib") && !equals(tname, "deps") &&
+      !equals(tname, "coverage") {
       ret .Err(format("unknown table `[{str}]`", tname));
     }
     ti = ti + 1;
@@ -245,6 +279,27 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       ret .Err(format("unknown table `[[{str}]]`", aname));
     }
     ai = ai + 1;
+  }
+
+  let cover = doc.table("coverage");
+  if cover.is_some() {
+    let min = cover.unwrap().get("min");
+    if min.is_some() {
+      num tenths = -1;
+      let whole = min.unwrap().as_int();
+      let fractional = min.unwrap().as_float();
+      if whole.is_some() {
+        tenths = whole.unwrap() * 10;
+      } elif fractional.is_some() {
+        tenths = parse_percent_tenths(format_dec(fractional.unwrap(), 1));
+      }
+      if tenths < 0 || tenths > 1000 {
+        ret .Err("[coverage] `min` must be a percentage from 0 to 100");
+      }
+      m.has_cover_min = true;
+      m.cover_min_tenths = tenths;
+    }
+    m.cover_exclude = _parse_string_array(cover.unwrap().get_str("exclude"));
   }
 
   let lib = doc.table("lib");
@@ -747,4 +802,33 @@ test "a non-inline-table [deps] entry is rejected" {
   `somejson = "not a table"`;
   let r = parse_manifest(text);
   assert r.is_err(), "expected a scalar [deps] entry to be rejected";
+}
+
+test "[coverage] reads a minimum and a list of excluded paths" {
+  let ok = parse_manifest("[package]\nname = \"demo\"\n\n[coverage]\nmin = 80\nexclude = [\"examples\", \"scripts/tools\"]\n");
+  assert ok.is_ok(), "expected a manifest with [coverage] to parse";
+  Manifest m = ok.unwrap();
+  assert m.has_cover_min && m.cover_min_tenths == 800, "expected 80 to read as 800 tenths";
+  assert m.cover_exclude.len == 2, "expected both exclusions";
+  assert equals(m.cover_exclude.get(0), "examples") &&
+    equals(m.cover_exclude.get(1), "scripts/tools"), "expected the paths without quotes";
+  }
+
+test "[coverage] min accepts one decimal and rejects out-of-range values" {
+  let frac = parse_manifest("[package]\nname = \"demo\"\n\n[coverage]\nmin = 87.5\n");
+  assert frac.is_ok(), "expected a decimal minimum to parse";
+  assert frac.unwrap().cover_min_tenths == 875, "expected 87.5 to read as 875 tenths";
+  let too_big = parse_manifest("[package]\nname = \"demo\"\n\n[coverage]\nmin = 120\n");
+  assert too_big.is_err(), "expected a minimum over 100 to be rejected";
+  let none = parse_manifest("[package]\nname = \"demo\"\n");
+  assert none.is_ok() && !none.unwrap().has_cover_min, "expected no [coverage] to mean no minimum";
+}
+
+test "a string array reads its items and ignores anything else" {
+  Vec<str> two = _parse_string_array("[\"a\", \"b\"]");
+  assert two.len == 2 && equals(two.get(1), "b"), "expected two items";
+  Vec<str> none = _parse_string_array("not an array");
+  assert none.len == 0, "expected a non-array to read as empty";
+  Vec<str> empty = _parse_string_array("[]");
+  assert empty.len == 0, "expected an empty array to read as empty";
 }

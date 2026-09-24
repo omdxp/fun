@@ -7,6 +7,7 @@
 // `let` binding relies on the C compiler's own `__auto_type` inference.
 
 use codegen_state;
+use ..ast.coverage_lines;
 use typedefs;
 use host_arch;
 use ..ast.ast;
@@ -534,6 +535,27 @@ pub compound Codegen {
   // equally in ordinary, test, and fuzz mode - all three lower to the
   // same statement-emission path this flag gates.
   flag debug_info;
+  // Count how often each statement of the measured files runs (`-cover`):
+  // every such statement gets a counter bumped in front of it, and the test
+  // binary writes the counts to `cover_out` when it exits. `cover_pwd` is the
+  // directory absolute paths are shown relative to. Statements inside a
+  // `test`/`fuzz` block (`cover_skip_*`) are the instrument, not the code
+  // measured.
+  flag coverage;
+  str cover_out;
+  str cover_pwd;
+  Map<str, num> cover_ids;
+  Vec<str> cover_id_files;
+  Vec<num> cover_id_lines;
+  // How many enclosing expressions may run a sub-expression zero times or
+  // more than once (the right side of `&&`/`||`, a loop condition, an
+  // `elif` condition). A call-result receiver evaluated there cannot be
+  // hoisted into a temp before the statement, which would run it exactly
+  // once and out of order; see `hoist_call_result_operand`.
+  num cond_eval_depth;
+  Vec<str> cover_skip_files;
+  Vec<num> cover_skip_from;
+  Vec<num> cover_skip_to;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -632,6 +654,16 @@ pub fun codegen_new(CodegenState* state) Codegen {
   // true for the very first function, not just after the first nested
   // generic-impl-method transition sets it.
   g.root_state = state;
+  g.coverage = false;
+  g.cover_out = "";
+  g.cover_pwd = "";
+  g.cover_ids.init(64);
+  g.cover_id_files.init(64);
+  g.cover_id_lines.init(64);
+  g.cond_eval_depth = 0;
+  g.cover_skip_files.init(8);
+  g.cover_skip_from.init(8);
+  g.cover_skip_to.init(8);
   g.typedef_cache_state = state;
   g.cache_splices.init(64);
   g.typedef_hints.init(64);
@@ -740,10 +772,27 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
   ret false;
 }
 
-fun uses_fork_in(Vec<Node> nodes) flag {
+fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
   for n : nodes {
     if node_contains_fork(&n) {
       ret true;
+    }
+    // A `fork` written only inside a `test` or `fuzz` block needs the fork
+    // runtime when those blocks are being compiled, and must not when they
+    // are skipped: an imported module's tests would otherwise pull the
+    // scheduler into every ordinary program that imports it.
+    fit n.kind {
+      .Test(t) -> {
+        if test_mode && node_contains_fork(t.body) {
+          ret true;
+        }
+      }
+      .Fuzz(fz) -> {
+        if fuzz_mode && node_contains_fork(fz.body) {
+          ret true;
+        }
+      }
+      _ -> {}
     }
   }
   ret false;
@@ -761,6 +810,22 @@ fun node_is_std_c_binding(Node n) flag {
 // binding declared in `std/c/*`, such as `std/log.fn`'s `log` against
 // libc's `log(double)`. Such a function is emitted under a
 // `__fun_shadow__` prefix so the C declaration stays usable.
+// True for a name the C compiler treats as a library builtin even when no
+// declaration of it is in scope, so a program function of the same name (a
+// logging `log(level, msg)`, say) is a redeclaration with a different type
+// and draws a compiler warning. Only names that are plain functions of the
+// math library; `std.math`'s own helpers carry a suffix (`sin_dec`).
+fun is_c_library_builtin_name(str name) flag {
+  fit name {
+    "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil", "copysign", "cos",
+    "cosh", "erf", "erfc", "exp", "exp2", "expm1", "fabs", "fdim", "floor", "fma", "fmax", "fmin",
+    "fmod", "frexp", "hypot", "ilogb", "ldexp", "lgamma", "log", "log10", "log1p", "log2", "logb",
+    "modf", "nearbyint", "pow", "remainder", "rint", "round", "scalbn", "sin", "sinh", "sqrt",
+    "tan", "tanh", "tgamma", "trunc" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
 fun collect_c_shadow_names(Vec<Node> nodes, flag test_mode, flag fuzz_mode) Vec<str> {
   Vec<str> binding_names;
   binding_names.init(0);
@@ -797,7 +862,8 @@ fun collect_c_shadow_names(Vec<Node> nodes, flag test_mode, flag fuzz_mode) Vec<
           }
           continue;
         }
-        if binding_names.contains(f2.name) && !out.contains(f2.name) {
+        if (binding_names.contains(f2.name) || is_c_library_builtin_name(f2.name)) &&
+          !out.contains(f2.name) {
           out.push(f2.name);
         }
       }
@@ -5158,7 +5224,7 @@ impl Codegen {
             ret .None;
           }
           .Dec(d) -> {
-            self.state.write(format_dec(d, 6));
+            self.state.write(format_dec_exact(d));
             ret .None;
           }
           _ -> { ret .Some(.InvalidNode); }
@@ -5558,7 +5624,14 @@ impl Codegen {
             }
           }
         }
+        flag right_is_conditional = equals(e.op, "&&") || equals(e.op, "||");
+        if right_is_conditional {
+          self.cond_eval_depth = self.cond_eval_depth + 1;
+        }
         let rerr = self.emit_expr(*e.right);
+        if right_is_conditional {
+          self.cond_eval_depth = self.cond_eval_depth - 1;
+        }
         if resolves_rhs_shorthand {
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
@@ -6379,15 +6452,35 @@ impl Codegen {
               .Character(_) -> { va_is_chr_literal = true; }
               _ -> {}
             }
+            // Likewise a flag: `true` and a comparison are `int` in C, so
+            // `__fun_tag` would print `1` where `{flag}` promises `true`.
+            // An argument of type `flag`, or one a `{flag}` placeholder
+            // names, is cast to `_Bool` so the tag is `'b'`.
+            flag va_is_flag = false;
+            if !va_is_chr_literal {
+              let va_flag_type = self.infer_arg_type_name(va_arg);
+              va_is_flag = va_flag_type.is_some() &&
+                equals(va_flag_type.unwrap(), "flag");
+              if va_i < va_placeholder_types.len &&
+                equals(va_placeholder_types.get(va_i), "flag") {
+                va_is_flag = true;
+              }
+            }
             self.state.write("__auto_type __fun_va_");
             self.state.write(format_num(va_i));
             self.state.write(" = ");
             if va_is_chr_literal {
               self.state.write("(char)");
             }
+            if va_is_flag {
+              self.state.write("(_Bool)(");
+            }
             let va_err = self.emit_expr(*va_arg);
             if va_err.is_some() {
               ret va_err;
+            }
+            if va_is_flag {
+              self.state.write(")");
             }
             self.state.write("; ");
             if va_is_display.get(va_i) {
@@ -6926,7 +7019,7 @@ impl Codegen {
     if r_opt.is_some() {
       let r = r_opt.unwrap();
       if r.is_call_result {
-        str tmp_name = self.hoist_call_result_to_temp(r.text, r.type_name, r.is_pointer);
+        str tmp_name = self.hoist_call_result_operand(r.text, r.type_name, r.is_pointer);
         self.state.write("&");
         self.state.write(tmp_name);
         ret .None;
@@ -6961,7 +7054,7 @@ impl Codegen {
       ret operand_err;
     }
     str operand_text = addr_scratch.out.build();
-    str tmp_name2 = self.hoist_call_result_to_temp(operand_text, self.expected_enum_type, false);
+    str tmp_name2 = self.hoist_call_result_operand(operand_text, self.expected_enum_type, false);
     self.state.write("&");
     self.state.write(tmp_name2);
     ret .None;
@@ -6982,6 +7075,26 @@ impl Codegen {
   // even under GNU/Clang, breaking `&tmp` against an `EnumName*`
   // parameter the same way MSVC would fail outright.
   hoist_call_result_to_temp(str call_text, str recv_type_name, flag recv_is_pointer) str {
+    ret self.hoist_call_result_temp(call_text, recv_type_name, recv_is_pointer, false);
+  }
+
+  // The form of `hoist_call_result_to_temp` for a caller that uses the temp
+  // once, as `&<result>`. Where the expression may run zero or several
+  // times (see `cond_eval_depth`) and the receiver's type is known, the temp
+  // is declared before the statement but assigned where the call belongs,
+  // `(*((tmp = call), &tmp))`, an lvalue that keeps the call's position in
+  // the evaluation order and its short-circuiting.
+  hoist_call_result_operand(str call_text, str recv_type_name, flag recv_is_pointer) str {
+    if self.cond_eval_depth == 0 || equals(recv_type_name, "") {
+      ret self.hoist_call_result_to_temp(call_text, recv_type_name, recv_is_pointer);
+    }
+    str tmp = self.hoist_call_result_temp(call_text, recv_type_name, recv_is_pointer, true);
+    ret format("(*(({str} = {str}), &{str}))", tmp, call_text, tmp);
+  }
+
+  // Shared by the two forms above. `declare_only` splices `T tmp;` and
+  // leaves the assignment to the caller.
+  hoist_call_result_temp(str call_text, str recv_type_name, flag recv_is_pointer, flag declare_only) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -7025,11 +7138,17 @@ impl Codegen {
     }
     recv_tmp_stmt_sb.append(" ");
     recv_tmp_stmt_sb.append(recv_tmp_name);
-    recv_tmp_stmt_sb.append(" = ");
-    recv_tmp_stmt_sb.append(call_text);
+    if !declare_only {
+      recv_tmp_stmt_sb.append(" = ");
+      recv_tmp_stmt_sb.append(call_text);
+    }
     recv_tmp_stmt_sb.append(";\n");
 
-    if self.hoist_scratch_depth > 0 {
+    // Inside a lazily emitted generic method's own body the scratch depth is
+    // also above zero, but there a statement position is active and the temp
+    // belongs in that body, right before its statement; only an expression
+    // buffer, which has no statement position, needs the reach-through below.
+    if self.hoist_scratch_depth > 0 && self.current_stmt_start_pos.is_none() {
       // Nested inside `resolve_field_chain`'s call-as-receiver scratch
       // buffer. `hoist_insert_pos`/`current_stmt_start_pos` only reach
       // that enclosing buffer, which holds an expression result rather
@@ -7323,7 +7442,7 @@ impl Codegen {
       // `&<rvalue>` is invalid C. It is hoisted into a fresh
       // `__auto_type` temp spliced right before the current statement,
       // and the temp's address is taken instead.
-      str recv_tmp_name = self.hoist_call_result_to_temp(
+      str recv_tmp_name = self.hoist_call_result_operand(
         recv_r.text,
         recv_r.type_name,
         recv_r.is_pointer
@@ -9311,7 +9430,9 @@ impl Codegen {
   emit_for_cond(ForCondNode fc) Option<CodegenErrorKind> {
     if fc.has_condition {
       self.state.write("while (");
+      self.cond_eval_depth = self.cond_eval_depth + 1;
       let cerr = self.emit_condition(*fc.condition);
+      self.cond_eval_depth = self.cond_eval_depth - 1;
       if cerr.is_some() {
         ret cerr;
       }
@@ -11760,16 +11881,29 @@ impl Codegen {
   }
 
   // Emits an `if (cond) { ... }` block, without the trailing newline;
-  // the caller decides what comes next.
-  emit_if_block(Node* condition, Node* body) Option<CodegenErrorKind> {
+  // the caller decides what comes next. An `elif` condition only runs when
+  // the earlier ones failed (`conditional_condition`), which matters for
+  // where a call-result receiver in it may be hoisted to.
+  emit_if_block(Node* condition, Node* body, flag conditional_condition) Option<CodegenErrorKind> {
     self.state.write("if (");
+    if conditional_condition {
+      self.cond_eval_depth = self.cond_eval_depth + 1;
+    }
     let cerr = self.emit_condition(*condition);
+    if conditional_condition {
+      self.cond_eval_depth = self.cond_eval_depth - 1;
+    }
     if cerr.is_some() {
       ret cerr;
     }
     self.state.write(") {\n");
     self.state.indent_level = self.state.indent_level + 1;
+    // The body's own statements move `current_stmt_start_pos` inside it. An
+    // `elif` condition that follows belongs to the whole chain, so anything
+    // it has to hoist goes before the chain, not into this body.
+    let chain_stmt_pos = self.current_stmt_start_pos;
     let berr = self.emit_body(*body);
+    self.current_stmt_start_pos = chain_stmt_pos;
     if berr.is_some() {
       ret berr;
     }
@@ -11788,7 +11922,7 @@ impl Codegen {
     Node* if_stmt = stmts.get(start_i);
     fit if_stmt.kind {
       .StatementIf(ifn) -> {
-        let ferr = self.emit_if_block(ifn.condition, ifn.body);
+        let ferr = self.emit_if_block(ifn.condition, ifn.body, false);
         if ferr.is_some() {
           ret ferr;
         }
@@ -11803,7 +11937,7 @@ impl Codegen {
       fit next.kind {
         .StatementElseIf(ein) -> {
           self.state.write(" else ");
-          let eerr = self.emit_if_block(ein.condition, ein.body);
+          let eerr = self.emit_if_block(ein.condition, ein.body, true);
           if eerr.is_some() {
             ret eerr;
           }
@@ -11911,6 +12045,7 @@ impl Codegen {
     flag last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
+      self.emit_cover_hit(stmt);
       // Armed fresh per statement, relative to whatever buffer
       // `self.state` currently is. Mid-swap that's a scratch buffer, so a
       // nested trigger from deeper in this body splices its inline
@@ -11957,13 +12092,94 @@ impl Codegen {
     ret .None;
   }
 
+  // Puts a counter in front of `stmt` when it is a counted statement of a
+  // measured file (see `coverage_counts_statement`). One counter serves
+  // every statement starting on the same line, so a line is either reached
+  // or not, however many statements it holds.
+  emit_cover_hit(Node* stmt) {
+    if !self.coverage || !coverage_counts_statement(stmt) {
+      ret;
+    }
+    if in_test_range(stmt.pos.filename, stmt.pos.line, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to) {
+      ret;
+    }
+    str path = cover_display_path(stmt.pos.filename, self.cover_pwd);
+    if !cover_is_measured(path) {
+      ret;
+    }
+    str key = format("{str}:{num}", path, stmt.pos.line);
+    num id = 0;
+    let known = self.cover_ids.at(key);
+    if known.is_some() {
+      id = known.unwrap();
+    } else {
+      id = self.cover_id_lines.len;
+      self.cover_ids.put(key, id);
+      self.cover_id_files.push(path);
+      self.cover_id_lines.push(stmt.pos.line);
+    }
+    self.state.write_indent();
+    self.state.write(format("__fun_cov_hit({num});\n", id));
+  }
+
+  // The tables behind the counters, defined after everything else so the
+  // number of statements is final: which file and line each counter is, the
+  // startup that allocates them, and the dump that writes every counter that
+  // ran, or not, as a `path<TAB>line<TAB>count` row to the file the driver named.
+  emit_cover_tables() {
+    num n = self.cover_id_lines.len;
+    StringBuilder sb = string_builder_init(1024);
+    sb.append("\nstatic const char* const __fun_cov_file_tab[] = {");
+    num i = 0;
+    for i < n {
+      if i > 0 {
+        sb.append(",");
+      }
+      sb.append("\"");
+      sb.append(c_string_escape(self.cover_id_files.get(i)));
+      sb.append("\"");
+      i = i + 1;
+    }
+    if n == 0 {
+      sb.append("0");
+    }
+    sb.append("};\nstatic const int __fun_cov_line_tab[] = {");
+    i = 0;
+    for i < n {
+      if i > 0 {
+        sb.append(",");
+      }
+      sb.append_num(self.cover_id_lines.get(i));
+      i = i + 1;
+    }
+    if n == 0 {
+      sb.append("0");
+    }
+    sb.append("};\n");
+    sb.append("static void __fun_cov_startup(void) {\n    __fun_cov_n = ");
+    sb.append_num(n);
+    sb.append(";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n");
+    sb.append("static void __fun_cov_dump(void) {\n");
+    sb.append("    FILE* __fun_cov_f = fopen(\"");
+    sb.append(c_string_escape(self.cover_out));
+    sb.append("\", \"w\");\n");
+    sb.append("    if (!__fun_cov_f) { return; }\n");
+    sb.append("    for (int __fun_cov_i = 0; __fun_cov_i < __fun_cov_n; __fun_cov_i++) {\n");
+    sb.append("        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n");
+    sb.append("    }\n    fclose(__fun_cov_f);\n}\n");
+    self.state.write(sb.build());
+  }
+
   // Emits `body`: every statement in order for a `Body` block, or the one
   // statement for a braceless body, since an `if`/`for` body doesn't
   // require `{ }` around a single statement.
   emit_body(Node body) Option<CodegenErrorKind> {
     fit body.kind {
       .Body(bn) -> { ret self.emit_statements(bn.statements); }
-      _ -> { ret self.emit_statement(body); }
+      _ -> {
+        self.emit_cover_hit(&body);
+        ret self.emit_statement(body);
+      }
     }
   }
 
@@ -13662,6 +13878,14 @@ impl Codegen {
         }
       }
       .Unary(u) -> {
+        // Negating, keeping or complementing a value leaves its type alone
+        // (`twice(-4)` is still a `num`), and `!` gives a flag.
+        if equals(u.op, "!") {
+          ret .Some("flag");
+        }
+        if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "~") {
+          ret self.infer_arg_type_name(u.operand);
+        }
         // A pointer dereference `*ptr` infers the pointee's type by
         // resolving `ptr` via the field chain and dropping one pointer level.
         if equals(u.op, "*") && u.has_indirection && u.indirection_depth == 1 {
@@ -13794,6 +14018,16 @@ impl Codegen {
         ret .None;
       }
       .Unary(u) -> {
+        // A negated, kept or complemented value has its operand's type, and
+        // `!` gives a flag (see `infer_arg_type_name`).
+        if equals(u.op, "!") {
+          DataType flag_dt = dtype_new();
+          flag_dt.type_str = "flag";
+          ret .Some(flag_dt);
+        }
+        if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "~") {
+          ret self.infer_arg_dtype(u.operand);
+        }
         // `&x` takes a pointer to the inner value: add one pointer level so
         // a generic call like `print_list(&l)` can read `l`'s generic_args
         // and infer T from them.
@@ -15096,6 +15330,10 @@ impl Codegen {
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
     `#endif
+    `#else
+    `#ifndef _CRT_SECURE_NO_WARNINGS
+    `#define _CRT_SECURE_NO_WARNINGS
+    `#endif
     `#endif
     `#include <stdio.h>
     `#include <stdbool.h>
@@ -15123,6 +15361,23 @@ impl Codegen {
     // spawns stays portable without them.
     // A failing assertion returns to the runner, which needs a jump
     // target per thread.
+    if self.coverage {
+      // The counters live in one heap array sized once every statement is
+      // known (see `emit_cover_tables`), hence the pointer and the
+      // prototypes for what is defined at the end of the file. An atomic
+      // add keeps counts right when tests run on several threads.
+      self.state.write(`static long long* __fun_cov_counts = 0;
+      `static int __fun_cov_n = 0;
+      `static void __fun_cov_startup(void);
+      `static void __fun_cov_dump(void);
+      `#if defined(_MSC_VER)
+      `#include <intrin.h>
+      `static void __fun_cov_hit(int id) { _InterlockedIncrement64((volatile __int64*)&__fun_cov_counts[id]); }
+      `#else
+      `static void __fun_cov_hit(int id) { __atomic_fetch_add(&__fun_cov_counts[id], 1, __ATOMIC_RELAXED); }
+      `#endif
+      ``);
+    }
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
@@ -16867,8 +17122,11 @@ impl Codegen {
     self.all_nodes = nodes;
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.
-    self.uses_fork = uses_fork_in(nodes);
+    self.uses_fork = uses_fork_in(nodes, self.test_mode, self.fuzz_mode);
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
+    if self.coverage {
+      collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+    }
     self.write_prelude();
     self.register_function_signatures(nodes);
     self.register_top_level_consts(nodes);
@@ -17145,7 +17403,14 @@ impl Codegen {
     }
 
     if self.test_mode {
-      ret self.emit_test_runner(nodes);
+      let runner_err = self.emit_test_runner(nodes);
+      if runner_err.is_some() {
+        ret runner_err;
+      }
+      if self.coverage {
+        self.emit_cover_tables();
+      }
+      ret .None;
     }
     if self.fuzz_mode {
       ret self.emit_fuzz_harness(nodes);
@@ -17421,6 +17686,9 @@ impl Codegen {
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
+    if self.coverage {
+      self.state.write("    __fun_cov_startup();\n");
+    }
     self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
     self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
     self.state.write("    if (filter) {\n");
@@ -17533,6 +17801,9 @@ impl Codegen {
     self.state.write("        free(__fun_tt);\n");
     self.state.write("    }\n");
     self.state.write("    free(elapsed_ms);\n");
+    if self.coverage {
+      self.state.write("    __fun_cov_dump();\n");
+    }
     self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");
@@ -21493,6 +21764,10 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
+    `#endif
+    `#else
+    `#ifndef _CRT_SECURE_NO_WARNINGS
+    `#define _CRT_SECURE_NO_WARNINGS
     `#endif
     `#endif
     `#include <stdio.h>

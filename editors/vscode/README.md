@@ -92,10 +92,19 @@ Every `.fn` file that defines `fun main(` shows two buttons above it:
 - **▶ Run** — compiles and runs the file in an integrated terminal (equivalent to `fun -in file.fn`).
 - **⚙ Debug** — compiles with debug info, then launches the native debugger.
 
-Every `test "..."` block gets the same pair, scoped to just that one test:
+Tests are not lensed: they get VS Code's own Testing integration, described next.
 
-- **▶ Run Test** — compiles in test mode and runs only the named test in an integrated terminal (`fun -in file.fn -test -- "test name"`).
-- **⚙ Debug Test** — same compile, under the native debugger. Breakpoints inside the test (or in a function it calls) work exactly as in an ordinary Debug session.
+### Tests and code coverage
+
+Every `test "..."` block is a real test in VS Code's **Testing** view (the flask icon), and VS Code draws its own green play button in the gutter beside each one. The view lists your tests by folder, file and test, and updates as you type.
+
+- **Run** a single test, a whole file or a folder from the gutter, the Testing view, or the context menu. Results appear per test with the assertion message on a failure, and the full output in the test results panel.
+- **Coverage** is the second run profile (the play button with a shield, or *Run with Coverage*). It runs `fun test ... -cover`, then VS Code shades the lines of your source **green** (ran) and **red** (never ran) in the editor, shows a percentage per file and in total in the Testing view, and a *Test Coverage* view lists every file. *Toggle Inline Coverage* (`Test: Show Inline Coverage`) turns the shading on and off. Only project files are measured: not the standard library, not `[deps]` dependencies, not `fixtures` directories.
+- **Debug** runs one test under the native debugger, the same as ▶ Debug for a program.
+
+Tests run one at a time inside a file so a failed assertion's message is attached to the right test. A file's tests are compiled once per run, and up to three files run at a time. A `[coverage] exclude` list in `fun.toml` (see the compiler docs) is honoured.
+
+Only lines that hold a statement are counted, so a blank line, a comment or a closing brace is never red. A test's own body is not measured, only the code it exercises.
 
 Every `fuzz "..."` block gets a **▶ Fuzz** button, which runs that one target (`fun -in file.fn -fuzz -fuzz-target "target name"`). There's no Debug variant for fuzzing: the fuzzing engine's own driver takes over the process and runs indefinitely, so attaching a debugger up front isn't useful the way it is for a single deterministic test — reproduce a crash fuzzing found from its saved input instead, then debug that.
 

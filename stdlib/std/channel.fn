@@ -5,6 +5,7 @@
 use std.sync;
 use std.sync_runtime;
 use std.c.mem;
+use std.string;
 use std.c.string;
 use std.c.time;
 use std.c.wd;
@@ -1915,4 +1916,295 @@ impl Channel<T> {
     }
     ret runtime_mutex_destroy(&self.mu);
   }
+}
+
+fun _fresh(num capacity) Channel<num> {
+  ret channel_new_cap(0, capacity);
+}
+
+test "a buffered channel delivers values in order and reports its size" {
+  Channel<num> ch = _fresh(4);
+  assert ch.is_empty() && ch.len() == 0 && ch.capacity() == 4 && !ch.is_closed(), "expected an empty open channel with its capacity";
+  assert ch.send(10) == CHANNEL_RC_OK && ch.send(20) == CHANNEL_RC_OK &&
+    ch.send(30) == CHANNEL_RC_OK, "expected sends into free space to succeed";
+  assert ch.len() == 3 && !ch.is_empty(), "expected three queued";
+  num out = 0;
+  assert ch.recv_into(&out) == CHANNEL_RC_OK && out == 10, "expected the first value first";
+  assert ch.recv() == 20, "expected the second value";
+  assert ch.recv() == 30 && ch.is_empty(), "expected the third and then empty";
+  assert ch.destroy() == 0, "expected destroy to succeed";
+}
+
+test "the non-blocking forms say full, empty and closed" {
+  Channel<num> ch = _fresh(1);
+  num out = 0;
+  assert ch.try_recv(&out) == CHANNEL_RC_EMPTY, "expected nothing to receive yet";
+  assert ch.try_send(1) == CHANNEL_RC_OK, "expected the first send to fit";
+  assert ch.try_send(2) == CHANNEL_RC_FULL, "expected the second to find it full";
+  assert ch.try_recv(&out) == CHANNEL_RC_OK && out == 1, "expected the queued value";
+  assert ch.try_recv(nil) == CHANNEL_RC_NULL_ARG, "expected a nil output to be rejected";
+  ch.send(7);
+  assert ch.close() == CHANNEL_RC_OK && ch.is_closed(), "expected close to mark it";
+  assert ch.try_send(8) == CHANNEL_RC_CLOSED, "expected sends to a closed channel to fail";
+  assert ch.send(8) == CHANNEL_RC_SEND_CLOSED_BLOCKING, "expected a blocking send to a closed channel to fail";
+  assert ch.try_recv(&out) == CHANNEL_RC_OK && out == 7, "expected what was queued to drain after close";
+  assert ch.try_recv(&out) == CHANNEL_RC_CLOSED, "expected a drained closed channel to say closed";
+  assert ch.recv_into(&out) == CHANNEL_RC_CLOSED, "expected a blocking receive to say closed rather than wait";
+  assert ch.recv_into(nil) == CHANNEL_RC_NULL_ARG, "expected a nil output to be rejected";
+  ch.destroy();
+}
+
+test "timeouts give up on a full or empty channel" {
+  Channel<num> ch = _fresh(1);
+  num out = 0;
+  assert ch.recv_timeout_into(&out, 2) == CHANNEL_RC_TIMEOUT, "expected an empty receive to time out";
+  assert ch.recv_timeout(2) == 0, "expected the value form to return the zero value on a timeout";
+  assert ch.send_timeout(1, 2) == CHANNEL_RC_OK, "expected a send with room to succeed";
+  assert ch.send_timeout(2, 2) == CHANNEL_RC_TIMEOUT, "expected a send to a full channel to time out";
+  assert ch.recv_timeout_into(&out, 50) == CHANNEL_RC_OK && out == 1, "expected a timed receive to get the value";
+  ch.send(9);
+  assert ch.recv_timeout(50) == 9, "expected the timed value form to return the value";
+  ch.close();
+  assert ch.recv_timeout_into(&out, 5) == CHANNEL_RC_CLOSED, "expected a closed channel to say so, not time out";
+  assert ch.send_timeout(1, 5) != CHANNEL_RC_OK, "expected a send to a closed channel to fail";
+  ch.destroy();
+}
+
+test "a cancelled flag or token stops a wait" {
+  Channel<num> ch = _fresh(1);
+  num out = 0;
+  num flag_set = 1;
+  assert ch.recv_timeout_into_with_cancel(&out, 5, &flag_set) == CHANNEL_RC_CANCELLED, "expected a set flag to cancel a receive";
+  assert ch.recv_into_with_cancel(&out, &flag_set) == CHANNEL_RC_CANCELLED, "expected the untimed form to cancel too";
+  assert ch.recv_with_cancel(&flag_set) == 0 &&
+    ch.recv_timeout_with_cancel(5, &flag_set) == 0, "expected the value forms to return the zero value";
+  assert ch.send_with_cancel(1, &flag_set) == CHANNEL_RC_CANCELLED &&
+    ch.send_timeout_with_cancel(1, 5, &flag_set) == CHANNEL_RC_CANCELLED, "expected sends to cancel";
+  ChannelCancelToken token = channel_cancel_token_new();
+  assert !channel_cancel_token_is_cancelled(&token), "expected a new token not to be cancelled";
+  assert channel_cancel_token_cancel(&token) == CHANNEL_RC_OK &&
+    channel_cancel_token_is_cancelled(&token), "expected cancel to mark it";
+  assert ch.recv_into_with_token(&out, &token) == CHANNEL_RC_CANCELLED, "expected a cancelled token to stop a receive";
+  assert ch.recv_timeout_into_with_token(&out, 5, &token) == CHANNEL_RC_CANCELLED, "expected the timed form to stop";
+  assert ch.recv_with_token(&token) == 0 && ch.recv_timeout_with_token(5, &token) == 0, "expected the value forms to return the zero value";
+  assert ch.send_with_token(1, &token) == CHANNEL_RC_CANCELLED &&
+    ch.send_timeout_with_token(1, 5, &token) == CHANNEL_RC_CANCELLED, "expected sends to stop";
+  assert channel_cancel_token_reset(&token) == CHANNEL_RC_OK &&
+    !channel_cancel_token_is_cancelled(&token), "expected reset to clear it";
+  ChannelCancelToken pre = channel_cancel_token_cancelled();
+  assert channel_cancel_token_is_cancelled(&pre), "expected a pre-cancelled token";
+  assert channel_cancel_token_cancel(nil) == CHANNEL_RC_NULL_ARG &&
+    channel_cancel_token_reset(nil) == CHANNEL_RC_NULL_ARG &&
+    !channel_cancel_token_is_cancelled(nil), "expected nil tokens to be handled";
+  ch.destroy();
+}
+
+fun _send_kind(SendResult r) str {
+  fit r {
+    .Ok -> { ret "ok"; }
+    .Closed -> { ret "closed"; }
+    .Full -> { ret "full"; }
+    .Cancelled -> { ret "cancelled"; }
+    .Error(_) -> { ret "error"; }
+  }
+  ret "";
+}
+
+fun _recv_kind(RecvResult<num> r) str {
+  fit r {
+    .Ok(_) -> { ret "ok"; }
+    .Closed -> { ret "closed"; }
+    .Timeout -> { ret "timeout"; }
+    .Cancelled -> { ret "cancelled"; }
+    .Error(_) -> { ret "error"; }
+  }
+  ret "";
+}
+
+test "the result forms name what happened" {
+  Channel<num> ch = _fresh(1);
+  assert equals(_send_kind(ch.send_result(5)), "ok"), "expected the send to be ok";
+  assert equals(_send_kind(ch.try_send_result(6)), "full"), "expected a full channel";
+  assert equals(_send_kind(ch.send_result_timeout(6, 2)), "full"), "expected a timed send to a full channel to report full";
+  RecvResult<num> got = ch.recv_result();
+  fit got {
+    .Ok(v) -> { assert v == 5, "expected the value"; }
+    _ -> { assert false, "expected an ok result"; }
+  }
+  assert equals(_recv_kind(ch.try_recv_result()), "timeout"), "expected the empty case to be reported as a timeout";
+  assert equals(_recv_kind(ch.recv_result_timeout(2)), "timeout"), "expected a timeout";
+  ChannelCancelToken token = channel_cancel_token_cancelled();
+  assert equals(_recv_kind(ch.recv_result_with_token(&token)), "cancelled"), "expected a cancelled receive";
+  assert equals(_recv_kind(ch.recv_result_timeout_with_token(2, &token)), "cancelled"), "expected a cancelled timed receive";
+  assert equals(_send_kind(ch.send_result_with_token(1, &token)), "cancelled"), "expected a cancelled send";
+  assert equals(_send_kind(ch.send_result_timeout_with_token(1, 2, &token)), "cancelled"), "expected a cancelled timed send";
+  ch.close();
+  assert equals(_recv_kind(ch.recv_result()), "closed"), "expected closed";
+  assert equals(_recv_kind(ch.try_recv_result()), "closed"), "expected closed from the non-blocking form";
+  assert equals(_send_kind(ch.send_result(1)), "closed") &&
+    equals(_send_kind(ch.try_send_result(1)), "closed"), "expected sends to say closed";
+  ch.destroy();
+}
+
+test "a channel can grow while holding wrapped-around values" {
+  Channel<num> ch = _fresh(3);
+  ch.send(1);
+  ch.send(2);
+  ch.send(3);
+  assert ch.recv() == 1, "expected the first value";
+  ch.send(4);
+  assert ch.grow_capacity(6) == CHANNEL_RC_OK && ch.capacity() == 6, "expected the capacity to grow";
+  assert ch.grow_capacity(2) == CHANNEL_RC_OK && ch.capacity() == 6, "expected a smaller size to change nothing";
+  ch.send(5);
+  assert ch.recv() == 2 && ch.recv() == 3 && ch.recv() == 4 && ch.recv() == 5, "expected the order to survive the move";
+  ch.destroy();
+}
+
+test "tuning knobs and the unbuffered constructor" {
+  Channel<num> ch = channel_new(0);
+  assert ch.capacity() == 1, "expected the single-slot channel";
+  ch.set_select_wait_slice_ms(9);
+  ch.set_select_wait_backoff_steps(4);
+  assert ch.get_select_wait_slice_ms() == 9 && ch.get_select_wait_backoff_steps() == 4, "expected the tuning to read back";
+  Channel<num> zero = channel_new_cap(0, 0);
+  assert zero.capacity() == 1, "expected a non-positive capacity to read as one";
+  ch.destroy();
+  zero.destroy();
+}
+
+test "select takes from whichever channel has a value, and can fall back to a default" {
+  Channel<num> a = _fresh(2);
+  Channel<num> b = _fresh(2);
+  num out = 0;
+  num which = -5;
+  assert a.select_try_recv_with(&b, &out, &which) == CHANNEL_RC_EMPTY &&
+    which == CHANNEL_SELECT_INDEX_DEFAULT, "expected nothing ready";
+  assert a.select_recv_default_with(&b, &out, &which) == CHANNEL_RC_DEFAULT, "expected the default when nothing is ready";
+  b.send(20);
+  assert a.select_try_recv_with(&b, &out, &which) == CHANNEL_RC_OK && out == 20 &&
+    which == CHANNEL_SELECT_INDEX_OTHER, "expected the other channel's value";
+  a.send(10);
+  assert a.select_try_recv_with(&b, &out, &which) == CHANNEL_RC_OK && out == 10 &&
+    which == CHANNEL_SELECT_INDEX_SELF, "expected this channel's value";
+  assert a.select_try_recv_with(nil, &out, &which) == CHANNEL_RC_NULL_ARG, "expected a nil channel to be rejected";
+  b.send(30);
+  assert a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, 20) == CHANNEL_RC_OK &&
+    out == 30, "expected a timed select to find the value";
+  assert a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, 3, 1, 2) == CHANNEL_RC_TIMEOUT, "expected a timed select on empty channels to time out";
+  num cancelled = 1;
+  assert a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, 20, -1, -1, &cancelled) == CHANNEL_RC_CANCELLED, "expected a set flag to cancel the select";
+  ChannelCancelToken token = channel_cancel_token_cancelled();
+  assert a.select_recv_timeout_with_tuning_token(&b, &out, &which, 20, -1, -1, &token) == CHANNEL_RC_CANCELLED, "expected a cancelled token to cancel the select";
+  a.close();
+  b.close();
+  assert a.select_try_recv_with(&b, &out, &which) == CHANNEL_RC_CLOSED, "expected both closed to say closed";
+  assert a.wait_recv_hint_timeout(&b, 2) == CHANNEL_RC_OK, "expected a closed hint to return at once";
+  assert a.wait_recv_hint_timeout(nil, 2) == CHANNEL_RC_NULL_ARG, "expected a nil hint to be rejected";
+  a.destroy();
+  b.destroy();
+}
+
+test "wait_recv_hint_timeout wakes for data and times out when there is none" {
+  Channel<num> a = _fresh(2);
+  Channel<num> hint = _fresh(2);
+  assert a.wait_recv_hint_timeout(&hint, 3) == CHANNEL_RC_TIMEOUT, "expected an empty hint to time out";
+  hint.send(1);
+  assert a.wait_recv_hint_timeout(&hint, 3) == CHANNEL_RC_OK, "expected queued data to return at once";
+  a.destroy();
+  hint.destroy();
+}
+
+test "a three-way select rotates its starting channel" {
+  Channel<num> a = _fresh(2);
+  Channel<num> b = _fresh(2);
+  Channel<num> c = _fresh(2);
+  num out = 0;
+  num which = -5;
+  num next = 0;
+  assert a.select_try_recv3_rr_with(&b, &c, &next, &out, &which) == CHANNEL_RC_EMPTY, "expected nothing ready";
+  assert a.select_recv3_rr_default_with(&b, &c, &next, &out, &which) == CHANNEL_RC_DEFAULT &&
+    which == CHANNEL_SELECT_INDEX_DEFAULT, "expected the default";
+  a.send(1);
+  b.send(2);
+  c.send(3);
+  num total = 0;
+  num i = 0;
+  for i < 3 {
+    assert a.select_try_recv3_rr_with(&b, &c, &next, &out, &which) == CHANNEL_RC_OK, "expected a value on each pass";
+    total = total + out;
+    i = i + 1;
+  }
+  assert total == 6, "expected every channel to be served";
+  assert a.select_try_recv3_rr_with(nil, &c, &next, &out, &which) == CHANNEL_RC_NULL_ARG, "expected a nil channel to be rejected";
+  c.send(9);
+  assert a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 20) == CHANNEL_RC_OK &&
+    out == 9, "expected a timed three-way select to find it";
+  assert a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 3, 1, 2) == CHANNEL_RC_TIMEOUT, "expected it to time out on empty channels";
+  ChannelCancelToken token = channel_cancel_token_cancelled();
+  assert a.select_recv_timeout3_rr_with_tuning_token(&b, &c, &next, &out, &which, 20, -1, -1, &token) == CHANNEL_RC_CANCELLED, "expected a cancelled token to stop it";
+  a.close();
+  b.close();
+  c.close();
+  assert a.select_try_recv3_rr_with(&b, &c, &next, &out, &which) == CHANNEL_RC_CLOSED, "expected all closed to say closed";
+  a.destroy();
+  b.destroy();
+  c.destroy();
+}
+
+// A producer that sends `n` values through the async wrappers, then closes.
+async fun _produce(Channel<num>* ch, num n) {
+  num i = 1;
+  for i <= n {
+    _ = await ch.send_async(i);
+    i = i + 1;
+  }
+  _ = ch.close();
+}
+
+// Receives through the async wrappers until the channel closes, then reports
+// the sum over `done`.
+async fun _consume(Channel<num>* ch, Channel<num>* done) {
+  num total = 0;
+  num got = 0;
+  for got < 1000 {
+    RecvResult<num> r = await ch.recv_result_async();
+    flag stop = false;
+    fit r {
+      .Ok(v) -> { total = total + v; }
+      _ -> { stop = true; }
+    }
+    if stop {
+      break;
+    }
+    got = got + 1;
+  }
+  _ = await done.send_async(total);
+}
+
+test "a producer and a consumer on separate tasks move every value through a small buffer" {
+  Channel<num> ch = _fresh(2);
+  Channel<num> done = _fresh(1);
+  fork _produce(&ch, 50);
+  fork _consume(&ch, &done);
+  assert done.recv_timeout(5000) == 1275, "expected the sum of 1 to 50 to arrive";
+  ch.destroy();
+  done.destroy();
+}
+
+async fun _forward_probe(Channel<num>* src, Channel<num>* dst, Channel<num>* report) {
+  _ = await src.send_async(55);
+  num rc = await src.forward_one_to_async(dst, 50);
+  num moved = await dst.recv_async();
+  _ = await report.send_async(rc * 1000 + moved);
+}
+
+test "an async forward moves one value between channels" {
+  Channel<num> src = _fresh(1);
+  Channel<num> dst = _fresh(1);
+  Channel<num> report = _fresh(1);
+  fork _forward_probe(&src, &dst, &report);
+  assert report.recv_timeout(5000) == 55, "expected rc 0 and the moved value 55";
+  src.destroy();
+  dst.destroy();
+  report.destroy();
 }

@@ -1,0 +1,12 @@
+// A tiny module the coverage tests instrument and measure.
+
+pub fun pick(num x) num {
+  if x > 0 {
+    ret 1;
+  }
+  ret 0;
+}
+
+test "pick returns 1 for a positive number" {
+  assert pick(2) == 1, "expected 1";
+}

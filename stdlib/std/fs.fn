@@ -555,3 +555,132 @@ pub async fun read_lines_into_channel_async(
 
   ret sent;
 }
+
+// A scratch directory under fun-out for one test, created empty.
+fun _scratch(str name) str {
+  str dir = format("fun-out/fs_test_{str}", name);
+  make_dir_all(dir);
+  ret dir;
+}
+
+test "write, read, append, size and copy round-trip a file" {
+  str dir = _scratch("basic");
+  str path = format("{str}/a.txt", dir);
+  assert write_string(path, "hello\nworld\n") && exists(path), "expected the file to be written and to exist";
+  str back = read_to_string(path);
+  assert equals(back, "hello\nworld\n"), "expected the text back";
+  free(back);
+  assert append_string(path, "more\n"), "expected the append to succeed";
+  assert size(path) == 17 && try_size(path).unwrap() == 17, "expected the size to include the appended text";
+  str head = read_bytes(path, 5);
+  assert equals(head, "hello"), "expected the first five bytes";
+  free(head);
+  str copy = format("{str}/b.txt", dir);
+  assert copy_file(path, copy), "expected the copy to succeed";
+  str copied = read_to_string(copy);
+  assert equals(copied, "hello\nworld\nmore\n"), "expected the copy to match";
+  free(copied);
+  assert remove_file(path) && remove_file(copy), "expected both files removed";
+  assert !exists(path) && !remove_file(path), "expected a removed file to be gone, and removing it again to say so";
+}
+
+test "the fs value has the same operations as the free functions" {
+  str dir = _scratch("methods");
+  Fs files = fs();
+  str path = format("{str}/m.txt", dir);
+  assert files.write_string(path, "abc") && files.exists(path), "expected write and exists";
+  assert files.try_write_string(path, "abcdef").is_ok(), "expected the try_ write";
+  assert files.try_append_string(path, "!").is_ok() && files.append_string(path, "?"), "expected both appends";
+  str all = files.read_to_string(path);
+  assert equals(all, "abcdef!?"), "expected the accumulated text";
+  free(all);
+  assert files.try_read_to_string(path).is_ok() &&
+    files.try_read_bytes(path, 3).is_ok(), "expected the try_ reads";
+  assert files.size(path) == 8 && files.try_size(path).unwrap() == 8, "expected the size";
+  str dst = format("{str}/m2.txt", dir);
+  assert files.try_copy_file(path, dst).is_ok() && files.copy_file(path, dst), "expected both copies";
+  assert files.remove_file(dst) && files.remove_file(path), "expected the removals";
+}
+
+test "missing files and bad arguments report failure" {
+  str nowhere = "fun-out/fs_no_such_dir/file.txt";
+  assert !exists(nowhere) && read_to_string(nowhere) == nil && read_bytes(nowhere, 4) == nil, "expected nothing to read";
+  assert read_bytes("fun-out", 0) == nil, "expected a zero-length byte read to give nil";
+  assert size(nowhere) == -1 && try_size(nowhere).is_err(), "expected no size";
+  assert !write_string(nowhere, "x") && !append_string(nowhere, "x"), "expected writes into a missing directory to fail";
+  assert !copy_file(nowhere, "fun-out/fs_never.txt"), "expected copying a missing file to fail";
+  Fs files = fs();
+  assert files.try_read_to_string(nowhere).is_err() &&
+    files.try_read_bytes(nowhere, 4).is_err(), "expected the try_ reads to fail";
+  assert files.try_write_string(nowhere, "x").is_err() &&
+    files.try_append_string(nowhere, "x").is_err(), "expected the try_ writes to fail";
+  assert files.try_copy_file(nowhere, "fun-out/fs_never.txt").is_err(), "expected the try_ copy to fail on the read";
+  str dir = _scratch("copyfail");
+  str src = format("{str}/s.txt", dir);
+  write_string(src, "x");
+  assert files.try_copy_file(src, nowhere).is_err(), "expected the try_ copy to fail on the write";
+  remove_file(src);
+}
+
+test "lines are read whole, with a limit on their length" {
+  str dir = _scratch("lines");
+  str path = format("{str}/l.txt", dir);
+  write_string(path, "one\ntwo\nthree\n");
+  Vec<str> lines = read_lines(path, 64);
+  assert lines.len == 3 && equals(lines.get(0), "one\n") &&
+    equals(lines.get(2), "three\n"), "expected three lines";
+  lines.free();
+  Vec<str> none = read_lines(path, 1);
+  assert none.len == 0, "expected a limit of one to read nothing";
+  none.free();
+  Fs files = fs();
+  assert files.try_read_lines(path, 64).is_ok(), "expected the try_ read of an existing file";
+  write_string(path, "");
+  assert files.try_read_lines(path, 64).is_ok(), "expected an empty existing file to be fine";
+  assert files.try_read_lines("fun-out/fs_no_such_file.txt", 64).is_err(), "expected a missing file to be reported";
+  Vec<str> absent = read_lines("fun-out/fs_no_such_file.txt", 64);
+  assert absent.len == 0, "expected a missing file to have no lines";
+  absent.free();
+  remove_file(path);
+}
+
+// Removes the entries `_tree_cleanup` knows the directory test creates, deepest
+// first, so it can run again from nothing.
+fun _tree_cleanup(str root) {
+  remove(format("{str}/a/b/c/three.txt", root));
+  remove(format("{str}/a/b/two.fn", root));
+  remove(format("{str}/a/one.fn", root));
+  remove(format("{str}/a/b/c", root));
+  remove(format("{str}/a/b", root));
+  remove(format("{str}/a", root));
+  remove(format("{str}/d", root));
+}
+
+test "directories can be made, listed and walked" {
+  str root = "fun-out/fs_test_tree";
+  _tree_cleanup(root);
+  _scratch("tree");
+  assert is_dir(root) && !is_dir("fun-out/fs_test_missing_dir"), "expected the scratch directory to exist";
+  assert make_dir_all(format("{str}/a/b/c", root)).is_ok(), "expected nested directories to be made";
+  assert make_dir_all(format("{str}/a/b/c", root)).is_ok(), "expected making an existing directory to be fine";
+  assert make_dir_all("").is_ok(), "expected the empty path to be fine";
+  assert make_dir(format("{str}/d", root)).is_ok() &&
+    make_dir(format("{str}/d", root)).is_err(), "expected a second make_dir of the same name to fail";
+  write_string(format("{str}/a/one.fn", root), "x");
+  write_string(format("{str}/a/b/two.fn", root), "x");
+  write_string(format("{str}/a/b/c/three.txt", root), "x");
+  Vec<str> listed = list_dir(format("{str}/a", root)).unwrap();
+  assert listed.len == 2 && listed.contains("b") && listed.contains("one.fn"), "expected the entries of a directory, not . or ..";
+  listed.free();
+  assert list_dir("fun-out/fs_no_such_dir").is_err(), "expected listing a missing directory to fail";
+  Vec<str> walked = walk_dir(root);
+  assert walked.len == 2, "expected only the .fn files, found recursively";
+  walked.sort();
+  assert ends_with(walked.get(0), "a/b/two.fn") && ends_with(walked.get(1), "a/one.fn"), "expected the two source files";
+  walked.free();
+  Vec<str> nothing = walk_dir("fun-out/fs_no_such_dir");
+  assert nothing.len == 0, "expected walking a missing directory to find nothing";
+  nothing.free();
+  assert make_dir_all(format("{str}/a/one.fn/x", root)).is_err(), "expected a path through a file to fail";
+  _tree_cleanup(root);
+}

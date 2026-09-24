@@ -2409,3 +2409,181 @@ test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
   assert line_idx < va_idx && va_idx - line_idx < 80,
   "expected the #line directive to sit directly before the hoisted vararg temp, not only somewhere earlier in the file";
 }
+
+test "a generic call with a negated argument still specializes on the operand's type" {
+  str src = `fun twice<T: num | dec>(T x) T { ret x + x; }
+  `fun main() {
+  `  num a = twice(-4);
+  `  dec b = twice(-2.5);
+  `  num n = 3;
+  `  num c = twice(-n);
+  `}`;
+  let out = emit_c(src, "negated generic argument");
+  assert contains(out, "twice__num((-4))"), "expected the negated integer literal to pick the num version";
+  assert contains(out, "twice__dec((-2.5))"), "expected the negated decimal literal to pick the dec version";
+  assert contains(out, "twice__num((-n))"), "expected a negated variable to pick its own type";
+  assert !contains(out, "twice((-"), "expected no call to the unspecialized template";
+}
+
+test "decimal literals keep their full precision in the generated C" {
+  str src = `fun main() {
+  `  dec pi = 3.141592653589793;
+  `  dec tiny = 0.000000001;
+  `  dec big = 123456789.123456789;
+  `  dec whole = 3.0;
+  `}`;
+  let out = emit_c(src, "decimal literal precision");
+  assert contains(out, "double pi = 3.141592653589793;"), "expected pi without truncation to six places";
+  assert contains(out, "double tiny = 1e-09;"), "expected a tiny value not to collapse to zero";
+  assert contains(out, "double big = 123456789.12345679;"), "expected the digits a double needs";
+  assert contains(out, "double whole = 3.0;"), "expected a whole decimal to stay a decimal in C";
+}
+
+test "a generic method that calls through a call result keeps its temp in its own body" {
+  str src = `use std.set;
+  `use std.io;
+  `fun main() {
+  `  Set<num> a = set_init(0, 4);
+  `  a.add(1);
+  `  a.add(2);
+  `  Set<num> copy = a.clone();
+  `  println_fmt("{num}", copy.len());
+  `}`;
+  str out = run_source(src, "generic_method_call_result_temp", "Set.clone reads Map.clone, which calls through self.at(k).unwrap()");
+  assert contains(out, "2"), "expected the clone to compile, run and hold both elements";
+}
+
+// A method called on a call result (`c.bump().is_some()`) needs its result in a
+// temp, since the method takes the receiver's address. Where the expression
+// runs zero or several times that temp cannot simply be computed once before
+// the statement.
+test "a call-result receiver on the right of && or || only runs when it is reached" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  flag never = false;
+  `  flag always = true;
+  `  if never && c.bump().is_some() { println("no"); }
+  `  if always || c.bump().is_some() { println("yes"); }
+  `  println_fmt("calls={num}", c.calls);
+  `  if always && c.bump().is_some() { println("ran"); }
+  `  println_fmt("calls={num}", c.calls);
+  `}`;
+  str out = run_source(src, "short_circuit_call_result", "the right operand of && and || is skipped when the left decides");
+  assert contains(out, "yes"), "expected the || branch to be taken";
+  assert !contains(out, "no\n"), "expected the && branch not to be taken";
+  assert contains(out, "calls=0\n"), "expected neither skipped call to have run";
+  assert contains(out, "ran\ncalls=1\n"), "expected a reached right operand to run exactly once";
+}
+
+test "a call-result receiver in a loop condition runs on every iteration" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  num turns = 0;
+  `  for c.bump().unwrap() < 4 {
+  `    turns = turns + 1;
+  `  }
+  `  println_fmt("turns={num} calls={num}", turns, c.calls);
+  `}`;
+  str out = run_source(src, "loop_condition_call_result", "a loop condition is re-evaluated each pass");
+  assert contains(out, "turns=3 calls=4"), "expected the condition to be re-evaluated until it failed";
+}
+
+test "a call-result receiver in an elif condition only runs when the earlier branches fail" {
+  str src = `use std.io;
+  `use std.option;
+  `compound Counter { num calls; }
+  `impl Counter {
+  `  pub bump() Option<num> {
+  `    self.calls = self.calls + 1;
+  `    ret .Some(self.calls);
+  `  }
+  `}
+  `fun main() {
+  `  Counter c;
+  `  c.calls = 0;
+  `  num mode = 1;
+  `  if mode == 1 {
+  `    println("first");
+  `  } elif c.bump().is_some() {
+  `    println("second");
+  `  }
+  `  println_fmt("calls={num}", c.calls);
+  `  mode = 2;
+  `  if mode == 1 {
+  `    println("first");
+  `  } elif c.bump().is_some() {
+  `    println("second");
+  `  }
+  `  println_fmt("calls={num}", c.calls);
+  `}`;
+  str out = run_source(src, "elif_call_result", "an elif condition is only evaluated when reached");
+  assert contains(out, "first\ncalls=0\n"), "expected the elif not to run when the if was taken";
+  assert contains(out, "second\ncalls=1\n"), "expected it to run once when reached";
+}
+
+test "a {flag} placeholder prints true or false for a literal, a comparison and a variable" {
+  str src = `use std.io;
+  `fun main() {
+  `  flag known = false;
+  `  num n = 5;
+  `  println_fmt("{flag} {flag} {flag} {flag}", true, n > 3, known, n == 4);
+  `}`;
+  str out = run_source(src, "flag_placeholder_bool", "a flag is a bool for formatting, whatever its C type");
+  assert contains(out, "true true false false"), "expected the words, not 1 and 0";
+}
+
+test "a fork inside a test needs the fork runtime only when tests are compiled" {
+  str src = `async fun worker() {}
+  `fun main() {}
+  `test "forks a worker" {
+  `  fork worker();
+  `}`;
+  let in_test_mode = transpile_source_test_mode(src);
+  assert in_test_mode.is_ok(), "expected the program to transpile in test mode";
+  assert contains(in_test_mode.unwrap(), "__fun_fork_call_worker"), "expected the fork wrapper when the test is compiled";
+  let ordinary = transpile_source(src);
+  assert ordinary.is_ok(), "expected the program to transpile normally";
+  assert !contains(ordinary.unwrap(), "M:N cooperative virtual-thread scheduler"), "expected an ordinary compile to skip the scheduler for a fork only its skipped test uses";
+}
+
+test "a program function named like a C math builtin is renamed so it does not redeclare the library's" {
+  str src = `use std.io;
+  `fun log(num level, str msg) { println_fmt("{num} {str}", level, msg); }
+  `fun exp(num n) num { ret n * 2; }
+  `fun main() {
+  `  log(1, "hi");
+  `  num v = exp(3);
+  `}`;
+  let out = emit_c(src, "libc builtin name shadowing");
+  assert contains(out, "void __fun_shadow__log("), "expected log to be emitted under the shadow prefix";
+  assert contains(out, "int64_t __fun_shadow__exp("), "expected exp to be emitted under the shadow prefix";
+  assert !contains(out, "void log(") && !contains(out, "int64_t exp("), "expected no declaration that would redeclare the builtin";
+  assert contains(out, "__fun_shadow__log(1, "), "expected the call to use the same name";
+}
+
+test "the prelude turns off the MS CRT's deprecation warnings on Windows only" {
+  let out = transpile_source("fun main() {}");
+  assert out.is_ok(), "expected the program to transpile";
+  assert contains(out.unwrap(), "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"), "expected the define";
+  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(out.unwrap(), "#include <stdio.h>"), "expected the define before the first include, where it takes effect";
+}

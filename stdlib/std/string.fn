@@ -345,8 +345,17 @@ pub fun contains(str s, str needle) flag {
   ret index_of_str(s, needle) != -1;
 }
 
-// Substring by start/length (nil on allocation failure).
+// Substring by start/length (nil on allocation failure). A negative `start` or
+// `length` counts as zero, so `substr(s, 1, len(s) - 2)` on a one-character
+// string is "" instead of a wrapped-around huge allocation. It does not check
+// against the end of `s`; `try_substr` does.
 pub fun substr(str s, num start, num length) str {
+  if start < 0 {
+    start = 0;
+  }
+  if length < 0 {
+    length = 0;
+  }
   str out = malloc(length + 1);
   if out == nil {
     ret nil;
@@ -888,6 +897,40 @@ pub fun format_dec(dec d, num places) str {
   ret buf;
 }
 
+// The text of `d` that reads back as exactly `d`, using as few digits as it
+// takes (up to 17), and always spelled as a decimal (`3` becomes `3.0`) so a C
+// compiler does not read it as an integer. Unlike `format_dec` it never
+// truncates to a fixed number of places. The caller frees the result.
+pub fun format_dec_exact(dec d) str {
+  str buf = malloc(48);
+  if buf == nil {
+    ret nil;
+  }
+  _ = snprintf(buf, 48, "%.15g", d);
+  if atof(buf) != d {
+    _ = snprintf(buf, 48, "%.16g", d);
+  }
+  if atof(buf) != d {
+    _ = snprintf(buf, 48, "%.17g", d);
+  }
+  num n = _string_len(buf);
+  flag marked = false;
+  num i = 0;
+  for i < n {
+    chr c = buf[i];
+    if c == '.' || c == 'e' || c == 'E' || c == 'n' || c == 'i' {
+      marked = true;
+    }
+    i = i + 1;
+  }
+  if !marked {
+    buf[n] = '.';
+    buf[n + 1] = '0';
+    buf[n + 2] = '\0';
+  }
+  ret buf;
+}
+
 // Formats a flag as "true" or "false" (static string, do not free).
 pub fun format_flag(flag b) str {
   if b {
@@ -896,80 +939,51 @@ pub fun format_flag(flag b) str {
   ret "false";
 }
 
-// Parses a decimal string into a dec (lenient: stops at the first invalid char, so
-// malformed input yields a partial/0.0 result). Use `try_parse_dec` to validate.
+// Parses a decimal string into a dec, leniently: the longest numeric prefix is
+// read (an optional `-`, digits, an optional `.` and digits, an optional
+// exponent) and anything after it is ignored, so malformed input yields a
+// partial or 0.0 result. The conversion itself is the C library's, which
+// rounds correctly, so `parse_dec("0.1")` is exactly the double nearest 0.1.
+// Use `try_parse_dec` to validate.
 pub fun parse_dec(str s) dec {
+  num n = _string_len(s);
   num i = 0;
-  dec sign = 1.0;
-  if s[0] == '-' {
-    sign = -1.0;
+  if n > 0 && s[0] == '-' {
     i = 1;
   }
-  dec value = 0.0;
-  for s[i] != 0 {
-    if s[i] == '.' {
-      i = i + 1;
-      break;
-    }
-    if s[i] < '0' {
-      break;
-    }
-    if s[i] > '9' {
-      break;
-    }
-    value = value * 10.0 + (s[i] - '0');
-    i = i + 1;
+  num end = i;
+  num digits = 0;
+  for end < n && s[end] >= '0' && s[end] <= '9' {
+    end = end + 1;
+    digits = digits + 1;
   }
-  dec frac = 0.1;
-  for s[i] != 0 {
-    if s[i] < '0' {
-      break;
+  if end < n && s[end] == '.' {
+    end = end + 1;
+    for end < n && s[end] >= '0' && s[end] <= '9' {
+      end = end + 1;
+      digits = digits + 1;
     }
-    if s[i] > '9' {
-      break;
+  }
+  if digits == 0 {
+    ret 0.0;
+  }
+  // An exponent counts only when digits follow it; a bare `e` is not one.
+  if end < n && (s[end] == 'e' || s[end] == 'E') {
+    num j = end + 1;
+    if j < n && (s[j] == '+' || s[j] == '-') {
+      j = j + 1;
     }
-    value = value + (s[i] - '0') * frac;
-    frac = frac * 0.1;
-    i = i + 1;
-  }
-  value = value * sign;
-
-  // An exponent, as in `1e6` or `1.5e-1`, scales what was read so far.
-  if s[i] != 'e' && s[i] != 'E' {
-    ret value;
-  }
-  i = i + 1;
-  flag negative_exponent = false;
-  if s[i] == '+' {
-    i = i + 1;
-  } elif s[i] == '-' {
-    negative_exponent = true;
-    i = i + 1;
-  }
-  num exponent = 0;
-  flag any = false;
-  for s[i] != 0 {
-    if s[i] < '0' || s[i] > '9' {
-      break;
+    num k = j;
+    for k < n && s[k] >= '0' && s[k] <= '9' {
+      k = k + 1;
     }
-    exponent = exponent * 10 + (s[i] - '0');
-    any = true;
-    i = i + 1;
-  }
-  // A trailing `e` with nothing after it is not an exponent at all, and
-  // what was read before it stands on its own.
-  if !any {
-    ret value;
-  }
-  num step = 0;
-  for step < exponent {
-    if negative_exponent {
-      value = value / 10.0;
-    } else {
-      value = value * 10.0;
+    if k > j {
+      end = k;
     }
-    step = step + 1;
   }
+  str text = substr(s, 0, end);
+  dec value = atof(text);
+  free(text);
   ret value;
 }
 
@@ -1164,4 +1178,53 @@ test "StringBuilder.contains_within searches only the first limit bytes" {
   assert !b.contains_within("nothing like this", 40), "expected no match for absent text";
   assert b.contains_within("", 0), "expected an empty needle to always match";
   b.free();
+}
+
+test "parse_dec reads the longest numeric prefix and rounds correctly" {
+  assert parse_dec("12abc") == 12.0 && parse_dec("-0.5") == -0.5, "expected a prefix and a negative";
+  assert parse_dec(".5") == 0.5 && parse_dec("5.") == 5.0, "expected a missing whole or fractional part to be fine";
+  assert parse_dec("abc") == 0.0 && parse_dec("") == 0.0 && parse_dec("-") == 0.0 &&
+    parse_dec(".") == 0.0, "expected no digits to give 0";
+  assert parse_dec("1e3") == 1000.0 && parse_dec("2.5E-1") == 0.25 &&
+    parse_dec("1e+2") == 100.0, "expected exponents";
+  assert parse_dec("1e") == 1.0 && parse_dec("1ex") == 1.0, "expected a bare e to end the number";
+  assert parse_dec("0.1") == 0.1 && parse_dec("1e-9") == 0.000000001, "expected the nearest double, not an accumulated one";
+  assert parse_dec("3.141592653589793") == 3.141592653589793, "expected full precision";
+  assert parse_dec("1e300") == 1e300, "expected a large exponent without a loop of multiplications";
+}
+
+test "format_dec_exact reads back exactly, with as few digits as it takes" {
+  str a = format_dec_exact(0.1);
+  assert equals(a, "0.1"), "expected the shortest text for 0.1";
+  free(a);
+  str b = format_dec_exact(2.5);
+  assert equals(b, "2.5"), "expected 2.5";
+  free(b);
+  str c = format_dec_exact(3.0);
+  assert equals(c, "3.0"), "expected a whole decimal to keep a decimal point";
+  free(c);
+  str d = format_dec_exact(-0.000000001);
+  assert contains(d, "e-") && atof(d) == -0.000000001, "expected a tiny value to survive, in exponent form";
+  free(d);
+  str e = format_dec_exact(123456789.123456789);
+  assert atof(e) == 123456789.123456789, "expected 17 digits when fewer do not round-trip";
+  free(e);
+  str f = format_dec_exact(3.141592653589793);
+  assert equals(f, "3.141592653589793"), "expected pi without truncation";
+  free(f);
+}
+
+test "substr treats a negative start or length as zero" {
+  str a = substr("hello", 1, 3);
+  assert equals(a, "ell"), "expected an ordinary substring";
+  free(a);
+  str b = substr("hello", 1, -2);
+  assert equals(b, ""), "expected a negative length to give an empty string";
+  free(b);
+  str c = substr("hello", -3, 2);
+  assert equals(c, "he"), "expected a negative start to count from the beginning";
+  free(c);
+  str d = substr("x", 1, -1);
+  assert equals(d, ""), "expected the len - 2 shape on a one-character string to be safe";
+  free(d);
 }

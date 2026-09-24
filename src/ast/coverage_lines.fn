@@ -1,0 +1,202 @@
+// Which statements count toward code coverage, shared by the code generator
+// (which puts a counter in front of each one) and by the report (which needs
+// the full list of executable lines, including ones no test ever reached).
+// Keeping one definition here is what stops the two from drifting apart.
+//
+// A line counts when a statement starts on it. `test` and `fuzz` blocks are
+// left out: they are the measuring instrument, not the code being measured.
+
+use ast;
+use std.io;
+use std.string;
+use std.vec;
+
+// True when `stmt` is a statement that gets its own counter. A block, the
+// `elif`/`else` continuation of an `if` chain, and a warning-control
+// annotation are not statements in their own right: the statements inside a
+// block are counted, and the chain is counted once, at its `if`.
+pub fun coverage_counts_statement(Node* stmt) flag {
+  if stmt == nil || !stmt.has_pos {
+    ret false;
+  }
+  fit stmt.kind {
+    .Body(_) -> { ret false; }
+    .StatementElseIf(_) -> { ret false; }
+    .StatementElse(_) -> { ret false; }
+    .StatementWarningControl(_) -> { ret false; }
+    .Blank -> { ret false; }
+    _ -> { ret true; }
+  }
+}
+
+// Appends the (file, line) of every counted statement under `stmt`, walking
+// into blocks, `if`/`elif`/`else`, loops and `fit` arms. A `defer` counts at
+// the line that registers it; what it runs at scope exit is not walked.
+pub fun collect_statement_lines(Node* stmt, Vec<str>* files, Vec<num>* lines) {
+  if stmt == nil {
+    ret;
+  }
+  if coverage_counts_statement(stmt) {
+    files.push(stmt.pos.filename);
+    lines.push(stmt.pos.line);
+  }
+  fit stmt.kind {
+    .Body(b) -> {
+      for s : b.statements {
+        collect_statement_lines(s, files, lines);
+      }
+    }
+    .StatementIf(i) -> { collect_statement_lines(i.body, files, lines); }
+    .StatementElseIf(i) -> { collect_statement_lines(i.body, files, lines); }
+    .StatementElse(b) -> { collect_statement_lines(b, files, lines); }
+    .StatementFor(k) -> {
+      fit k {
+        .Cond(c) -> { collect_statement_lines(c.body, files, lines); }
+        .Iter(i) -> { collect_statement_lines(i.body, files, lines); }
+      }
+    }
+    .StatementFit(f) -> {
+      for br : f.branches {
+        collect_statement_lines(br.body, files, lines);
+      }
+    }
+    _ -> {}
+  }
+}
+
+// Appends the counted lines of every function and method body among
+// `nodes`, which is one file's own top-level declarations.
+pub fun collect_program_lines(Vec<Node>* nodes, Vec<str>* files, Vec<num>* lines) {
+  for n : nodes {
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_body {
+          collect_statement_lines(f.body, files, lines);
+        }
+      }
+      .Impl(i) -> {
+        for m : i.methods {
+          fit m.kind {
+            .Function(mf) -> {
+              if mf.has_body {
+                collect_statement_lines(mf.body, files, lines);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+}
+
+// `filename` as it is shown in a report: forward slashes, no leading `./`,
+// and relative to `pwd` when it sits under it, so the same file has the same
+// name whether the compiler reached it by a relative or an absolute path.
+pub fun cover_display_path(str filename, str pwd) str {
+  str slashed = replace_char(filename, '\\', '/');
+  str path = slashed;
+  if starts_with(path, "./") {
+    path = substr(path, 2, len(path) - 2);
+  }
+  if !equals(pwd, "") {
+    str prefix = format("{str}/", replace_char(pwd, '\\', '/'));
+    if starts_with(path, prefix) {
+      path = substr(path, len(prefix), len(path) - len(prefix));
+    }
+  }
+  ret path;
+}
+
+// `text` as the inside of a C string literal.
+pub fun c_string_escape(str text) str {
+  StringBuilder sb = string_builder_init(len(text) + 8);
+  num i = 0;
+  for i < len(text) {
+    chr c = text[i];
+    if c == '\\' {
+      sb.append("\\\\");
+    } elif c == '"' {
+      sb.append("\\\"");
+    } elif c == '\n' {
+      sb.append("\\n");
+    } else {
+      sb.append_char(c);
+    }
+    i = i + 1;
+  }
+  ret sb.build();
+}
+
+// True when the file at report path `path` is project code worth measuring:
+// under the current directory (not an absolute path or one climbing out of
+// it, which is how the standard library and dependencies are reached), and
+// not a test fixture or build output.
+pub fun cover_is_measured(str path) flag {
+  if len(path) == 0 || path[0] == '/' || starts_with(path, "..") {
+    ret false;
+  }
+  if len(path) > 1 && path[1] == ':' {
+    ret false;
+  }
+  Vec<str> parts = split(path, '/');
+  defer parts.free();
+  num i = 0;
+  for i + 1 < parts.len {
+    str part = parts.get(i);
+    if equals(part, "fixtures") || ends_with(part, "_fixtures") || equals(part, "fun-out") {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// Records where each `test` and `fuzz` block among `nodes` sits: its file and
+// the first and last line a statement of it starts on. Statements inside such
+// a range belong to the measuring instrument and are not counted, even when
+// they are emitted late, as part of a generic function a test happened to
+// instantiate.
+pub fun collect_test_ranges(Vec<Node>* nodes, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+  for n : nodes {
+    Node* body = nil;
+    fit n.kind {
+      .Test(t) -> { body = t.body; }
+      .Fuzz(f) -> { body = f.body; }
+      _ -> {}
+    }
+    if body == nil || !n.has_pos {
+      continue;
+    }
+    Vec<str> body_files;
+    body_files.init(8);
+    Vec<num> body_lines;
+    body_lines.init(8);
+    collect_statement_lines(body, &body_files, &body_lines);
+    num last = n.pos.line;
+    for bl : body_lines {
+      if bl > last {
+        last = bl;
+      }
+    }
+    files.push(n.pos.filename);
+    from.push(n.pos.line);
+    to.push(last);
+    body_files.free();
+    body_lines.free();
+  }
+}
+
+// True when a statement at `line` of `filename` sits inside one of the
+// ranges `collect_test_ranges` recorded.
+pub fun in_test_range(str filename, num line, Vec<str>* files, Vec<num>* from, Vec<num>* to) flag {
+  num i = 0;
+  for i < files.len {
+    if line >= from.get(i) && line <= to.get(i) && equals(files.get(i), filename) {
+      ret true;
+    }
+    i = i + 1;
+  }
+  ret false;
+}

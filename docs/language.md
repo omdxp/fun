@@ -49,7 +49,7 @@ fun main() {
 | Fun type | C representation | Notes |
 |---|---|---|
 | `num` | `int64_t` | Signed 64-bit integer, the default integer type. |
-| `dec` | `double` | 64-bit floating-point. |
+| `dec` | `double` | 64-bit floating-point. A decimal literal keeps every digit it needs (`3.141592653589793`, `0.000000001`), written to the generated C so it reads back as exactly the same `double`. |
 | `i8` / `u8` | `int8_t` / `uint8_t` | Fixed-width 8-bit integer. |
 | `i16` / `u16` | `int16_t` / `uint16_t` | Fixed-width 16-bit integer. |
 | `i32` / `u32` | `int32_t` / `uint32_t` | Fixed-width 32-bit integer. |
@@ -352,6 +352,10 @@ fun main() {
   lowering.
 - The same `fit_non_exhaustive` check applies: cover every variant or add
   a `_` catch-all.
+- A tagged-union enum has no `==` or `!=`: it is a struct in the generated C,
+  and comparing two is a compile error that points at `fit`, the way to ask
+  which variant a value is. A plain enum (no payloads) still compares with
+  `==`, and a pointer to a tagged-union enum compares against `nil`.
 - Any variant, payload-carrying or not, may declare its own explicit
   discriminant (`Ok = 200, NotFound = 404, Unknown(num) = -1`) - useful
   when the numbers mean something (a wire status code) rather than being

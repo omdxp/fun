@@ -309,3 +309,76 @@ pub fun length(Vec2 v) dec {
 pub fun dot(Vec2 a, Vec2 b) dec {
   ret a.dot(b);
 }
+
+// True when `a` and `b` agree to 1e-9, for comparing computed decimals.
+fun _near(dec a, dec b) flag {
+  dec d = a - b;
+  if d < 0.0 {
+    d = -d;
+  }
+  ret d < 0.000000001;
+}
+
+test "trigonometry and its inverses" {
+  assert _near(sin_dec(0.0), 0.0) && _near(cos_dec(0.0), 1.0) &&
+    _near(tan_dec(0.0), 0.0), "expected the values at zero";
+  assert _near(asin_dec(1.0), 1.5707963267948966), "expected asin(1) to be a right angle";
+  assert _near(acos_dec(1.0), 0.0) && _near(atan_dec(0.0), 0.0), "expected acos(1) and atan(0) to be zero";
+  assert _near(atan2_dec(1.0, 1.0), 0.7853981633974483), "expected atan2(1, 1) to be an eighth turn";
+}
+
+test "roots, powers and logarithms" {
+  assert _near(sqrt_dec(9.0), 3.0) && _near(cbrt_dec(27.0), 3.0), "expected the square and cube roots";
+  assert _near(pow_dec(2.0, 10.0), 1024.0), "expected 2^10";
+  assert _near(exp_dec(0.0), 1.0) && _near(log_dec(1.0), 0.0), "expected exp(0) and log(1)";
+  assert _near(log10_dec(1000.0), 3.0) && _near(log2_dec(8.0), 3.0), "expected the base-10 and base-2 logarithms";
+  assert _near(hypot_dec(3.0, 4.0), 5.0), "expected the 3-4-5 triangle";
+}
+
+test "rounding and conversion between decimals and numbers" {
+  assert floor_dec(2.7) == 2.0 && ceil_dec(2.1) == 3.0, "expected floor and ceil";
+  assert round_dec(2.5) == 3.0 && trunc_dec(-2.7) == -2.0, "expected round half away from zero and truncation toward zero";
+  assert dec_to_num(3.9) == 3 && dec_to_num(-3.9) == -3, "expected truncation to a whole number";
+  assert dec_round_to_num(3.5) == 4 && dec_round_to_num(3.4) == 3, "expected rounding to a whole number";
+  assert _near(fmod_dec(7.5, 2.0), 1.5), "expected the remainder";
+  assert copysign_dec(3.0, -1.0) == -3.0 && copysign_dec(-3.0, 1.0) == 3.0, "expected the sign to be borrowed";
+}
+
+test "abs, sign, min, max and clamp" {
+  assert abs(-4) == 4 && abs(4) == 4 && abs(-2.5) == 2.5, "expected the magnitude of a number and a decimal";
+  assert sign(-9) == -1 && sign(0) == 0 && sign(9) == 1, "expected -1, 0 or 1";
+  assert sign_of(-1) == Sign.Negative && sign_of(0) == Sign.Zero &&
+    sign_of(1.5) == Sign.Positive, "expected the typed sign";
+  assert min_num(2, 5) == 2 && min_num(5, 2) == 2 && max_num(2, 5) == 5 && max_num(5, 2) == 5, "expected the smaller and larger number";
+  assert min_dec(0.5, 1.5) == 0.5 && min_dec(1.5, 0.5) == 0.5 &&
+    max_dec(0.5, 1.5) == 1.5 && max_dec(1.5, 0.5) == 1.5, "expected the smaller and larger decimal";
+  assert clamp(15, 0, 10) == 10 && clamp(-5, 0, 10) == 0 && clamp(5, 0, 10) == 5, "expected a value held inside its range";
+}
+
+test "interpolation and angle conversion" {
+  assert _near(lerp_dec(10.0, 20.0, 0.25), 12.5), "expected a quarter of the way";
+  assert _near(deg_to_rad(180.0), 3.141592653589793), "expected 180 degrees to be pi";
+  assert _near(rad_to_deg(3.141592653589793), 180.0), "expected pi to be 180 degrees";
+}
+
+test "integer powers, and the checked form rejects a negative exponent" {
+  assert pow_int(3, 4) == 81 && pow_int(5, 0) == 1 && pow_int(2, -1) == 1, "expected integer powers with the documented fallback";
+  assert try_pow_int(2, 8).is_ok() && try_pow_int(2, 8).unwrap() == 256, "expected 2^8";
+  assert try_pow_int(2, -1).is_err(), "expected a negative exponent to be an error";
+}
+
+test "vectors: length, distance, dot product and normalization" {
+  Vec2 a;
+  a.x = 3.0;
+  a.y = 4.0;
+  Vec2 b;
+  b.x = 0.0;
+  b.y = 0.0;
+  assert _near(a.length(), 5.0) && _near(length(a), 5.0), "expected the length";
+  assert _near(a.distance(b), 5.0) && _near(distance(a, b), 5.0), "expected the distance";
+  assert _near(a.dot(a), 25.0) && _near(dot(a, b), 0.0), "expected the dot product";
+  Vec2 unit = a.normalize();
+  assert _near(unit.x, 0.6) && _near(unit.y, 0.8), "expected a unit vector";
+  Vec2 zero = b.normalize();
+  assert zero.x == 0.0 && zero.y == 0.0, "expected the zero vector to stay zero";
+}

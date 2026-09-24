@@ -1274,6 +1274,15 @@ impl Checker {
   // as the number behind it, so comparing one to a number is ordinary;
   // comparing two enums that share no variants is asking whether two
   // unrelated ordinals happen to coincide, which is never what was meant.
+  // True for a value (not a pointer or an array) of an enum some variant of
+  // which carries data.
+  carries_data_by_value(CheckedType t) flag {
+    if t.pointer_depth > 0 || t.is_array || equals(t.name, "") {
+      ret false;
+    }
+    ret self.enum_names.has(t.name) && !self.plain_enums.has(t.name);
+  }
+
   check_comparison(Node* node, ExprNode e, TypeEnv* env) {
     if !e.has_left || !e.has_right {
       ret;
@@ -1284,6 +1293,25 @@ impl Checker {
     self.check_shorthand_variant(e.left, right, env);
     if self.failed {
       ret;
+    }
+    // A tagged-union enum is a struct in the generated C, which has no `==`.
+    // Say so and point at `fit`, rather than let the C compiler reject it.
+    if equals(e.op, "==") || equals(e.op, "!=") {
+      if self.carries_data_by_value(left) || self.carries_data_by_value(right) {
+        CheckedType offender = left;
+        if !self.carries_data_by_value(left) {
+          offender = right;
+        }
+        self.fail(
+          format(
+          "'{str}' cannot compare '{str}', an enum whose variants carry data; use `fit` to test which variant it is",
+          e.op,
+          offender.name
+          ),
+          node
+        );
+        ret;
+      }
     }
     if !self.plain_enums.has(left.name) || !self.plain_enums.has(right.name) {
       ret;
