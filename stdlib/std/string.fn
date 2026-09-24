@@ -1,6 +1,7 @@
 // String helpers.
 
 use std.c.mem;
+use std.c.string;
 use std.c.io;
 use std.vec;
 use std.quirks;
@@ -85,6 +86,91 @@ impl StringBuilder {
     for i < n {
       self.buf[self.total_len + i] = s[i];
       i = i + 1;
+    }
+    self.total_len = self.total_len + n;
+  }
+
+  // True when `needle` occurs entirely within the first `limit` bytes,
+  // searched in place and stopping at the first match. Asking this of a
+  // large buffer through `peek()` and `contains` copies and scans all of
+  // it every time. The search runs on libc's `strstr` with a terminator
+  // briefly written at `limit` (the byte there is restored before
+  // returning), so the buffer must not be read from another thread while
+  // this runs. Text containing a nul byte is searched only up to it.
+  pub contains_within(str needle, num limit) flag {
+    num nl = _string_len(needle);
+    if nl == 0 {
+      ret true;
+    }
+    num end = limit;
+    if end > self.total_len {
+      end = self.total_len;
+    }
+    if end < nl {
+      ret false;
+    }
+    if end == self.total_len {
+      self._ensure_cap(1);
+    }
+    if end < self.cap {
+      chr saved = self.buf[end];
+      self.buf[end] = '\0';
+      str hit = strstr(self.buf, needle);
+      self.buf[end] = saved;
+      ret hit != nil;
+    }
+    num i = 0;
+    for i + nl <= end {
+      num j = 0;
+      flag ok = true;
+      for j < nl {
+        if self.buf[i + j] != needle[j] {
+          ok = false;
+          break;
+        }
+        j = j + 1;
+      }
+      if ok {
+        ret true;
+      }
+      i = i + 1;
+    }
+    ret false;
+  }
+
+  // Inserts `s` so it starts at byte `pos` (clamped to the current
+  // content), shifting only what follows it. Splicing into the middle of
+  // a large buffer this way costs the length of the tail, where
+  // rebuilding the whole string around the insertion costs the whole
+  // buffer every time.
+  pub insert_at(num pos, str s) {
+    if s == nil {
+      ret;
+    }
+    num n = _string_len(s);
+    if n == 0 {
+      ret;
+    }
+    num at = pos;
+    if at < 0 {
+      at = 0;
+    }
+    if at > self.total_len {
+      at = self.total_len;
+    }
+    self._ensure_cap(n);
+    if self.total_len + n > self.cap {
+      ret;
+    }
+    num i = self.total_len - 1;
+    for i >= at {
+      self.buf[i + n] = self.buf[i];
+      i = i - 1;
+    }
+    num k = 0;
+    for k < n {
+      self.buf[at + k] = s[k];
+      k = k + 1;
     }
     self.total_len = self.total_len + n;
   }
@@ -1038,4 +1124,44 @@ pub fun utf16_units_for_utf8_seq_len(num seq_len) num {
     ret 2;
   }
   ret 1;
+}
+
+test "StringBuilder.insert_at splices in the middle, at the ends, and clamps a stray position" {
+  StringBuilder b = string_builder_init(4);
+  b.append("ad");
+  b.insert_at(1, "bc");
+  str middle = b.peek();
+  assert equals(middle, "abcd"), "expected an insert between the first and last byte";
+  free(middle);
+  b.insert_at(0, ">");
+  b.insert_at(99, "<");
+  b.insert_at(-5, "^");
+  str ends = b.peek();
+  assert equals(ends, "^>abcd<"), "expected the start, the end, and clamped positions to land where they belong";
+  free(ends);
+  assert b.len() == 7, "expected the length to track every insert";
+  b.free();
+}
+
+test "StringBuilder.insert_at ignores nil and empty text" {
+  StringBuilder b = string_builder_init(4);
+  b.append("ok");
+  b.insert_at(1, nil);
+  b.insert_at(1, "");
+  str out = b.peek();
+  assert equals(out, "ok"), "expected nothing inserted";
+  free(out);
+  b.free();
+}
+
+test "StringBuilder.contains_within searches only the first limit bytes" {
+  StringBuilder b = string_builder_init(8);
+  b.append("typedef struct Foo; typedef enum Bar;");
+  assert b.contains_within("typedef struct Foo", 40), "expected a match inside the limit";
+  assert b.contains_within("typedef enum Bar", 999), "expected a limit past the end to search everything";
+  assert !b.contains_within("typedef enum Bar", 20), "expected a match starting past the limit to be missed";
+  assert !b.contains_within("struct Foo;", 15), "expected a match cut off by the limit to be missed";
+  assert !b.contains_within("nothing like this", 40), "expected no match for absent text";
+  assert b.contains_within("", 0), "expected an empty needle to always match";
+  b.free();
 }

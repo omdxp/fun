@@ -1,0 +1,7 @@
+compound Holder {
+  Map<str, num> hints;
+}
+
+fun main() num {
+  ret 0;
+}

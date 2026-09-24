@@ -379,6 +379,32 @@ fun _print_warning(Warning w) {
   writeln_to(Sink.Stderr, line.build());
 }
 
+// Drops every `test` block that came from a file other than `entry`, so a
+// test binary runs just its own file's tests, as `fun test <file>` promises.
+// The imported modules are compiled in for their code, but their tests are
+// run by their own `fun test`, and running them again from every importer
+// would multiply the work and, in a user's project, run a dependency's tests.
+fun _drop_foreign_tests(Vec<Node>* nodes, str entry) {
+  str want = _normalize_path(entry);
+  num kept = 0;
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    flag foreign = false;
+    fit n.kind {
+      .Test(_) -> { foreign = n.has_pos && !equals(n.pos.filename, want); }
+      _ -> {}
+    }
+    if !foreign {
+      nodes.data[kept] = nodes.data[i];
+      kept = kept + 1;
+    }
+    i = i + 1;
+  }
+  nodes.len = kept;
+  free(want);
+}
+
 pub fun compile_to_c_mode(
   str input,
   str out_path,
@@ -391,6 +417,9 @@ pub fun compile_to_c_mode(
   flag warn_unused_lenient
 ) Result<flag, str> {
   let merged = parse_program_with_imports(input)!;
+  if test_mode {
+    _drop_foreign_tests(&merged.nodes, input);
+  }
 
   // Injected ahead of the program's own declarations, so anything in it
   // can refer to them.
@@ -1400,6 +1429,46 @@ test "the msvc compiler is recognized by name" {
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
 
+test "a compound field whose type was never imported is reported by name" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  str out_path = "src/parser/import_resolver_fixtures/missing_map_import.test.c";
+  let lowered = compile_to_c("src/parser/import_resolver_fixtures/missing_map_import.fn", out_path, &defines, false);
+  remove_file(out_path);
+  assert lowered.is_err(), "expected the missing import to fail the compile";
+  str message = lowered.unwrap_err();
+  assert contains(message, "the type 'Map' of field 'hints' in 'Holder' is not declared"), "expected the message to name the type, the field and the compound";
+}
+
+test "a test binary keeps only its own file's test blocks, not the ones it imports" {
+  let merged = parse_program_with_imports("src/parser/import_resolver_fixtures/own_tests_main.fn");
+  assert merged.is_ok(), "expected the fixture to parse";
+  let nodes = merged.unwrap().nodes;
+  num before = 0;
+  for n : nodes {
+    fit n.kind {
+      .Test(_) -> { before = before + 1; }
+      _ -> {}
+    }
+  }
+  assert before == 2, "expected the entry's test and its import's test before filtering";
+  _drop_foreign_tests(&nodes, "src/parser/import_resolver_fixtures/own_tests_main.fn");
+  num after = 0;
+  str kept_name = "";
+  for n : nodes {
+    fit n.kind {
+      .Test(t) -> {
+        after = after + 1;
+        kept_name = t.name;
+      }
+      _ -> {}
+    }
+  }
+  assert after == 1, "expected only the entry file's own test to remain";
+  assert equals(kept_name, "the entry file's own test"), "expected the surviving test to be the entry's";
+}
+
 sequential test "resolve_c_compiler honors FUN_CC verbatim, and falls back to a real search when unset" {
   set_env("FUN_CC", "some-made-up-cc");
   assert equals(resolve_c_compiler(), "some-made-up-cc"), "expected the exact override, unresolved against PATH";
@@ -2277,7 +2346,7 @@ pub fun run_test_suite(
   for fi < files.len {
     str path = files.get(fi);
     fi = fi + 1;
-    if _declares_top_level_block(path, "test") {
+    if !_in_fixtures_dir(path) && _declares_top_level_block(path, "test") {
       test_files.push(path);
     }
   }
