@@ -2540,3 +2540,14 @@ test "a call-result receiver in an elif condition only runs when the earlier bra
   assert contains(out, "first\ncalls=0\n"), "expected the elif not to run when the if was taken";
   assert contains(out, "second\ncalls=1\n"), "expected it to run once when reached";
 }
+
+test "a {flag} placeholder prints true or false for a literal, a comparison and a variable" {
+  str src = `use std.io;
+  `fun main() {
+  `  flag known = false;
+  `  num n = 5;
+  `  println_fmt("{flag} {flag} {flag} {flag}", true, n > 3, known, n == 4);
+  `}`;
+  str out = run_source(src, "flag_placeholder_bool", "a flag is a bool for formatting, whatever its C type");
+  assert contains(out, "true true false false"), "expected the words, not 1 and 0";
+}

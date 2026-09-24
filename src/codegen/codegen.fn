@@ -6418,15 +6418,35 @@ impl Codegen {
               .Character(_) -> { va_is_chr_literal = true; }
               _ -> {}
             }
+            // Likewise a flag: `true` and a comparison are `int` in C, so
+            // `__fun_tag` would print `1` where `{flag}` promises `true`.
+            // An argument of type `flag`, or one a `{flag}` placeholder
+            // names, is cast to `_Bool` so the tag is `'b'`.
+            flag va_is_flag = false;
+            if !va_is_chr_literal {
+              let va_flag_type = self.infer_arg_type_name(va_arg);
+              va_is_flag = va_flag_type.is_some() &&
+                equals(va_flag_type.unwrap(), "flag");
+              if va_i < va_placeholder_types.len &&
+                equals(va_placeholder_types.get(va_i), "flag") {
+                va_is_flag = true;
+              }
+            }
             self.state.write("__auto_type __fun_va_");
             self.state.write(format_num(va_i));
             self.state.write(" = ");
             if va_is_chr_literal {
               self.state.write("(char)");
             }
+            if va_is_flag {
+              self.state.write("(_Bool)(");
+            }
             let va_err = self.emit_expr(*va_arg);
             if va_err.is_some() {
               ret va_err;
+            }
+            if va_is_flag {
+              self.state.write(")");
             }
             self.state.write("; ");
             if va_is_display.get(va_i) {
