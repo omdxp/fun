@@ -351,6 +351,48 @@ fun _json_is_number_char(chr c) flag {
   ret c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
 }
 
+// True when `text` is a number as JSON's grammar writes it: an optional minus,
+// a whole part with no leading zero, an optional fraction, an optional
+// exponent. `-`, `01`, `1.` and `.5` are not numbers.
+fun _json_valid_number(str text) flag {
+  num i = 0;
+  if text[i] == '-' {
+    i = i + 1;
+  }
+  if !_json_is_digit(text[i]) {
+    ret false;
+  }
+  if text[i] == '0' {
+    i = i + 1;
+  } else {
+    for _json_is_digit(text[i]) {
+      i = i + 1;
+    }
+  }
+  if text[i] == '.' {
+    i = i + 1;
+    if !_json_is_digit(text[i]) {
+      ret false;
+    }
+    for _json_is_digit(text[i]) {
+      i = i + 1;
+    }
+  }
+  if text[i] == 'e' || text[i] == 'E' {
+    i = i + 1;
+    if text[i] == '+' || text[i] == '-' {
+      i = i + 1;
+    }
+    if !_json_is_digit(text[i]) {
+      ret false;
+    }
+    for _json_is_digit(text[i]) {
+      i = i + 1;
+    }
+  }
+  ret text[i] == 0;
+}
+
 // Cursor state threaded through the parser: the source plus the current offset.
 pub compound JsonParser {
   str src;
@@ -361,7 +403,7 @@ impl JsonParser {
   skip_ws() {
     for true {
       let c = self.src[self.pos];
-      if c == ' ' || c == '\n' || c == '\t' {
+      if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
         self.pos = self.pos + 1;
       } else {
         ret;
@@ -469,6 +511,10 @@ impl JsonParser {
     }
     if _json_is_digit(c) || c == '-' {
       let numtext = self.parse_number_text();
+      if !_json_valid_number(numtext) {
+        free(numtext);
+        ret err_kind(.Parse, "invalid number in JSON", JsonValue.Null);
+      }
       let n = parse_dec(numtext);
       free(numtext);
       ret .Ok(JsonValue.Num(n));
@@ -559,7 +605,17 @@ impl JsonParser {
 // Parse JSON text into a typed `JsonValue`. Returns `Err` on malformed input.
 pub fun parse(str src) Result<JsonValue, Error> {
   let p = JsonParser{src = src, pos = 0};
-  ret p.parse_value();
+  let value = p.parse_value();
+  if value.is_err() {
+    ret value;
+  }
+  p.skip_ws();
+  if p.pos < len(src) {
+    JsonValue parsed = value.unwrap();
+    parsed.free();
+    ret err_kind(.Parse, "unexpected text after the JSON value", JsonValue.Null);
+  }
+  ret value;
 }
 
 // A `JsonValue` serializes to its JSON text (the text-layer conversion, same
@@ -610,3 +666,122 @@ pub fun to_json_string(To<JsonValue> value) str {
   let v = value.to();
   ret v.to_string();
 }
+
+test "parse reads scalars and their accessors" {
+  let n = parse("null");
+  assert n.is_ok() && n.unwrap().is_null(), "expected null";
+  let t = parse("true");
+  assert t.is_ok() && t.unwrap().is_bool() && t.unwrap().as_bool().unwrap(), "expected true";
+  let f = parse(" false ");
+  assert f.is_ok() && !f.unwrap().as_bool().unwrap(), "expected false with surrounding spaces";
+  let i = parse("42");
+  assert i.is_ok() && i.unwrap().is_num() &&
+    i.unwrap().as_num().unwrap() == 42.0, "expected 42";
+  let neg = parse("-7.5");
+  assert neg.is_ok() && neg.unwrap().as_num().unwrap() == -7.5, "expected a negative decimal";
+  let exp = parse("1e3");
+  assert exp.is_ok() && exp.unwrap().as_num().unwrap() == 1000.0, "expected an exponent";
+  let s = parse("\"hi\"");
+  assert s.is_ok() && s.unwrap().is_str() &&
+    equals(s.unwrap().as_str().unwrap(), "hi"), "expected a string";
+  assert !s.unwrap().is_num() && s.unwrap().as_num().is_none(), "expected a string not to read as a number";
+}
+
+test "parse decodes string escapes" {
+  let r = parse("\"a\\nb\\t\\\"q\\\" \\\\ \\/ \"");
+  assert r.is_ok(), "expected the escapes to parse";
+  str got = r.unwrap().as_str().unwrap();
+  assert equals(got, "a\nb\t\"q\" \\ / "), "expected each escape decoded";
+}
+
+test "parse reads arrays and objects, and they can be indexed" {
+  let a = parse("[1, \"two\", [3], {\"k\": true}]");
+  assert a.is_ok() && a.unwrap().is_array(), "expected an array";
+  JsonValue arr = a.unwrap();
+  assert arr.len() == 4, "expected four elements";
+  assert arr.index(0).unwrap().as_num().unwrap() == 1.0, "expected the first element";
+  assert equals(arr.index(1).unwrap().as_str().unwrap(), "two"), "expected the second element";
+  assert arr.index(2).unwrap().len() == 1, "expected a nested array";
+  assert arr.index(3).unwrap().get("k").unwrap().as_bool().unwrap(), "expected a nested object member";
+  assert arr.index(4).is_none() && arr.index(-1).is_none(), "expected out-of-range indexes to be None";
+
+  let o = parse("{\"name\": \"fun\", \"n\": 3}");
+  assert o.is_ok() && o.unwrap().is_object(), "expected an object";
+  JsonValue obj = o.unwrap();
+  assert obj.len() == 2, "expected two members";
+  assert equals(obj.get("name").unwrap().as_str().unwrap(), "fun"), "expected a member by key";
+  assert obj.get("absent").is_none(), "expected a missing key to be None";
+  assert obj.as_object().is_some() && obj.as_array().is_none(), "expected the object view and no array view";
+  assert arr.as_array().is_some() && arr.as_object().is_none(), "expected the array view and no object view";
+}
+
+test "empty arrays and objects parse and stringify" {
+  let a = parse("[]");
+  assert a.is_ok() && a.unwrap().len() == 0, "expected an empty array";
+  assert equals(a.unwrap().stringify(), "[]"), "expected [] back";
+  let o = parse("{}");
+  assert o.is_ok() && o.unwrap().len() == 0, "expected an empty object";
+  assert equals(o.unwrap().stringify(), "{}"), "expected {} back";
+}
+
+test "malformed input is an error, not a guess" {
+  assert parse("").is_err(), "expected empty text to fail";
+  assert parse("{").is_err(), "expected an unclosed object to fail";
+  assert parse("[1,").is_err(), "expected an unfinished array to fail";
+  assert parse("tru").is_err(), "expected a truncated literal to fail";
+  assert parse("\"abc").is_err(), "expected an unterminated string to fail";
+  assert parse("{\"a\" 1}").is_err(), "expected a missing colon to fail";
+  assert parse("{a: 1}").is_err(), "expected an unquoted key to fail";
+  assert parse("[1] x").is_err(), "expected trailing text to fail";
+  assert parse("-").is_err(), "expected a bare minus to fail";
+}
+
+test "stringify output parses back to the same text" {
+  let a = parse("[1,2.5,\"x\",true,null,[],{\"k\":[1]}]");
+  assert a.is_ok(), "expected the array to parse";
+  str text = a.unwrap().stringify();
+  assert equals(text, "[1, 2.500000, \"x\", true, null, [], {\"k\": [1]}]"), "expected the array rendered with its separators";
+  let again = parse(text);
+  assert again.is_ok() && equals(again.unwrap().to_string(), text), "expected a stable round trip";
+}
+
+test "stringify escapes what JSON requires" {
+  JsonValue v = json_str("a\"b\\c\nd\te");
+  assert equals(v.to_string(), "\"a\\\"b\\\\c\\nd\\te\""), "expected quotes, backslashes and control characters escaped";
+}
+
+test "values can be built by hand and rendered" {
+  let o = json_object();
+  o.put("n", json_num(3.0));
+  o.put("ok", json_bool(true));
+  JsonValue obj = JsonValue.Object(o);
+  assert equals(obj.get("n").unwrap().to_string(), "3"), "expected a whole number without a decimal point";
+  assert equals(obj.get("ok").unwrap().to_string(), "true"), "expected true";
+  let arr = json_array();
+  arr.push(json_str("a"));
+  arr.push(JsonValue.Null);
+  JsonValue list = JsonValue.Array(arr);
+  assert equals(list.to_string(), "[\"a\", null]"), "expected the array rendered in order";
+}
+
+test "a JsonValue converts to its text through To<str>" {
+  JsonValue v = json_bool(false);
+  assert equals(v.to(), "false"), "expected the text of the value";
+}
+
+test "a document with Windows line endings parses" {
+  let r = parse("{\r\n  \"a\": [1,\r\n 2]\r\n}\r\n");
+  assert r.is_ok(), "expected carriage returns to count as whitespace";
+  assert r.unwrap().get("a").unwrap().len() == 2, "expected both elements";
+}
+
+test "numbers must follow JSON's grammar" {
+  assert parse("-").is_err(), "expected a bare minus to fail";
+  assert parse("01").is_err(), "expected a leading zero to fail";
+  assert parse("1.").is_err(), "expected a dangling decimal point to fail";
+  assert parse("1e").is_err(), "expected a dangling exponent to fail";
+  assert parse("1e+").is_err(), "expected a signed but empty exponent to fail";
+  assert parse("--1").is_err(), "expected a doubled minus to fail";
+  assert parse("0").is_ok() && parse("-0.5").is_ok() && parse("2E-3").is_ok() &&
+    parse("10").is_ok(), "expected valid numbers to parse";
+  }
