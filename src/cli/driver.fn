@@ -35,6 +35,7 @@ use std.c.mem;
 use std.task;
 use std.sync;
 use std.time;
+use std.c.time;
 use std.thread_pool;
 
 // What the arguments asked for.
@@ -560,10 +561,24 @@ fun _find_openssl_prefix() str {
 // after `cc`'s own name is already in `argv_args`. MSVC spells its
 // arguments differently and links the C runtime itself, so the thread
 // and math flags apply only to gcc-style compilers.
-fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, flag debug_info) {
+// True when the caller asked for an optimized build and nothing overrides
+// it: a debug build stays unoptimized, and an optimization level the user
+// already put in `FUN_CC_ARGS` is theirs to keep.
+fun _wants_optimization(flag optimize, flag debug_info) flag {
+  if !optimize || debug_info {
+    ret false;
+  }
+  str extra = env_or("FUN_CC_ARGS", "");
+  ret !contains(extra, "-O") && !contains(extra, "/O");
+}
+
+fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, flag debug_info, flag optimize) {
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
     argv_args.push("/std:c17");
+    if _wants_optimization(optimize, debug_info) {
+      argv_args.push("/O2");
+    }
     argv_args.push(c_path);
     if debug_info {
       argv_args.push("/Zi");
@@ -582,6 +597,9 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     argv_args.push("/link");
     argv_args.push("/STACK:134217728");
   } else {
+    if _wants_optimization(optimize, debug_info) {
+      argv_args.push("-O2");
+    }
     argv_args.push(c_path);
     argv_args.push("-o");
     argv_args.push(exe_path);
@@ -743,12 +761,15 @@ fun _ensure_msvc_env() {
 // fallback when `_ensure_msvc_env` could not propagate INCLUDE to the current
 // process environment (which happens on some Windows configurations where
 // _putenv_s does not update the Windows environment block for child processes).
-fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_info) num {
+fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_info, flag optimize) num {
   str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
   str bat_path = path_join(temp_dir, "fun_cl.bat");
   str debug_flag = "";
   if debug_info {
     debug_flag = " /Zi";
+  }
+  if _wants_optimization(optimize, debug_info) {
+    debug_flag = format("{str} /O2", debug_flag);
   }
   if !write_string(bat_path, format(
     "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\" /link /STACK:134217728\nexit /b %ERRORLEVEL%\n",
@@ -849,7 +870,7 @@ fun _strip_cl_filename_echo(str text) str {
 // so this streams the compiler's own output live rather than capturing it).
 // For MSVC, output is captured and filename-echo lines are filtered out
 // before printing, so only real diagnostics appear.
-fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
+fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info, flag optimize) num {
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
@@ -869,7 +890,7 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
     }
   }
 
-  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+  _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info, optimize);
 
   str[] argv = argv_from(&argv_args);
   if !compiler_is_msvc(cc) {
@@ -901,10 +922,18 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info) num {
 // search there rather than trying the next one, since a real compile
 // error is never solved by switching compilers.
 pub fun compile_c_to_exe(str c_path, str exe_path, flag debug_info) num {
+  ret compile_c_to_exe_mode(c_path, exe_path, debug_info, false);
+}
+
+// `compile_c_to_exe`, optionally with the C compiler's own optimizer on
+// (`-O2`, `/O2` for MSVC). Used by `fun build`, whose output is a program
+// that gets run many times, unlike the quick compile-and-run and test paths
+// that stay unoptimized to keep the edit loop fast.
+pub fun compile_c_to_exe_mode(str c_path, str exe_path, flag debug_info, flag optimize) num {
   _ensure_msvc_env();
   str override_cc = env_or("FUN_CC", "");
   if !equals(override_cc, "") {
-    ret _compile_with_cc(override_cc, c_path, exe_path, debug_info);
+    ret _compile_with_cc(override_cc, c_path, exe_path, debug_info, optimize);
   }
 
   Vec<str> candidates = _default_cc_candidates();
@@ -922,7 +951,7 @@ pub fun compile_c_to_exe(str c_path, str exe_path, flag debug_info) num {
     if compiler_is_msvc(cc) && equals(env_or("INCLUDE", ""), "") {
       str vcvarsall = _find_vcvarsall();
       if !equals(vcvarsall, "") {
-        ret _compile_with_msvc_bat(vcvarsall, c_path, exe_path, debug_info);
+        ret _compile_with_msvc_bat(vcvarsall, c_path, exe_path, debug_info, optimize);
       }
     }
 
@@ -930,7 +959,7 @@ pub fun compile_c_to_exe(str c_path, str exe_path, flag debug_info) num {
     argv_args.init(0);
     defer argv_args.free();
     argv_args.push(cc);
-    _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info);
+    _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info, optimize);
 
     str[] argv = argv_from(&argv_args);
     let result = run(argv);
@@ -1493,7 +1522,7 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
       ret 1;
     }
     str exe = path_join("fun-out/bin", format("{str}{str}", e.name, exe_suffix()));
-    let code = compile_c_to_exe(c_path, exe, debug_info);
+    let code = compile_c_to_exe_mode(c_path, exe, debug_info, true);
     if code != 0 {
       ret 1;
     }
@@ -1957,6 +1986,27 @@ pub fun run_fuzz(
 compound SuiteTestResult {
   num exit_code;
   str captured;
+  // Wall-clock milliseconds spent lowering to C, in the C compiler, and
+  // running the compiled test binary.
+  num lower_ms;
+  num cc_ms;
+  num run_ms;
+}
+
+// Wall-clock milliseconds, only meaningful as a difference between two
+// calls.
+fun _wall_ms() num {
+  i64* ts = malloc(16);
+  ts[0] = 0;
+  ts[1] = 0;
+  raw* ts_raw = ts;
+  let rc = clock_gettime(0, ts_raw);
+  num ms = 0;
+  if rc == 0 {
+    ms = ts[0] * 1000 + ts[1] / 1000000;
+  }
+  free(ts);
+  ret ms;
 }
 
 // Like run_tests but captures the test binary's stdout instead of inheriting
@@ -1985,11 +2035,15 @@ fun _run_tests_captured(
   SuiteTestResult bad;
   bad.exit_code = 1;
   bad.captured = "";
+  bad.lower_ms = 0;
+  bad.cc_ms = 0;
+  bad.run_ms = 0;
 
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
 
   str c_path = default_c_path(input, format(".w{num}.test.c", compile_tag));
+  let t_lower = _wall_ms();
   let lowered = compile_to_c_mode(
     input,
     c_path,
@@ -2001,13 +2055,18 @@ fun _run_tests_captured(
     debug_info,
     warn_unused_lenient
   );
+  let lower_ms = _wall_ms() - t_lower;
+  bad.lower_ms = lower_ms;
   if lowered.is_err() {
     bad.captured = format("[Error]\n{str}", lowered.unwrap_err());
     ret bad;
   }
 
   str exe = default_exe_path(input, format(".w{num}.test", compile_tag));
+  let t_cc = _wall_ms();
   let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  let cc_ms = _wall_ms() - t_cc;
+  bad.cc_ms = cc_ms;
   remove_file(c_path);
   if cc_code != 0 {
     bad.captured = "C compiler returned non-zero";
@@ -2019,7 +2078,9 @@ fun _run_tests_captured(
   defer argv_args.free();
   argv_args.push(executable_path(exe));
   str[] argv = argv_from(&argv_args);
+  let t_run = _wall_ms();
   let result = run(argv);
+  let run_ms = _wall_ms() - t_run;
   free_argv(argv);
   remove_file(exe);
 
@@ -2030,6 +2091,9 @@ fun _run_tests_captured(
   ProcessResult r = result.unwrap();
   SuiteTestResult ok;
   ok.exit_code = r.exit_code;
+  ok.lower_ms = lower_ms;
+  ok.cc_ms = cc_ms;
+  ok.run_ms = run_ms;
   // A failed `assert`'s own "Assertion failed: ..." message goes to
   // stderr (see StatementAssert's own codegen), so stdout alone never
   // shows why a test actually failed - appended here rather than
@@ -2059,6 +2123,10 @@ compound _TestSuiteWorkerCtx {
   num passed;
   num failed;
   Vec<str>* failed_files;
+  flag timing;
+  num total_lower_ms;
+  num total_cc_ms;
+  num total_run_ms;
 }
 
 // A run_test_suite worker: claims files one at a time from the shared
@@ -2101,10 +2169,26 @@ fun _test_suite_worker(raw* arg) raw* {
     );
 
     ctx.lock.lock();
+    ctx.total_lower_ms = ctx.total_lower_ms + res.lower_ms;
+    ctx.total_cc_ms = ctx.total_cc_ms + res.cc_ms;
+    ctx.total_run_ms = ctx.total_run_ms + res.run_ms;
     if res.exit_code == 0 {
       ctx.passed = ctx.passed + 1;
       num n = count(res.captured, " ... PASS");
-      println(format("  ok  {str}  ({num} tests)", path, n));
+      if ctx.timing {
+        println(
+          format(
+          "  ok  {str}  ({num} tests)  lower {num}ms, cc {num}ms, run {num}ms",
+          path,
+          n,
+          res.lower_ms,
+          res.cc_ms,
+          res.run_ms
+          )
+        );
+      } else {
+        println(format("  ok  {str}  ({num} tests)", path, n));
+      }
     } else {
       ctx.failed = ctx.failed + 1;
       println(format("  FAIL  {str}  (exit code {num})", path, res.exit_code));
@@ -2237,6 +2321,11 @@ pub fun run_test_suite(
   ctx.passed = 0;
   ctx.failed = 0;
   ctx.failed_files = &failed_files;
+  ctx.timing = !equals(env_or("FUN_TEST_TIMING", ""), "");
+  ctx.total_lower_ms = 0;
+  ctx.total_cc_ms = 0;
+  ctx.total_run_ms = 0;
+  let suite_start_ms = _wall_ms();
 
   // Each spawned file's own compiled test binary also sizes its OWN pool
   // to the full CPU count by default (see emit_test_runner); on Windows
@@ -2273,6 +2362,18 @@ pub fun run_test_suite(
   num failed = ctx.failed;
 
   println(format("\n{num}/{num} test files passed", passed, passed + failed));
+  if ctx.timing {
+    println(
+      format(
+      "wall {num}ms across {num} workers; summed per phase: lower {num}ms, cc {num}ms, run {num}ms",
+      _wall_ms() - suite_start_ms,
+      workers,
+      ctx.total_lower_ms,
+      ctx.total_cc_ms,
+      ctx.total_run_ms
+      )
+    );
+  }
   if failed > 0 {
     println("\nFailed:");
     num j = 0;
