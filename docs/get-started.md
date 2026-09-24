@@ -112,6 +112,10 @@ path = "src/main.fn"
 ```
 
 - `version` is optional (defaults to `0.0.0`).
+- An optional `[coverage]` table sets what `fun test -cover` enforces:
+  `min = 80` (a percentage, decimals allowed) fails the run below it, and
+  `exclude = ["examples", "scripts"]` leaves files or directories out of the
+  report. See "Code Coverage" in the tooling guide.
 - Multiple `[[exe]]` targets are supported (the Fun compiler's own
   `fun`/`fls` binaries are a real example, built from one manifest).
 - A `[lib]` table (one `path`, no name) declares a library entry point:
