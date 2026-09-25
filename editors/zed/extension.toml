@@ -3,7 +3,7 @@ name = "Fun"
 description = "Fun language support: syntax highlighting, outline, run buttons and the fls language server."
 version = "0.1.0"
 schema_version = 1
-authors = ["Omar"]
+authors = ["omdxp"]
 repository = "https://github.com/omdxp/fun"
 
 [grammars.fun]

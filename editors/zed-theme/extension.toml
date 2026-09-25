@@ -3,5 +3,5 @@ name = "Fun Web Theme"
 description = "The Fun website color themes, dark and light."
 version = "0.1.0"
 schema_version = 1
-authors = ["Omar"]
+authors = ["omdxp"]
 repository = "https://github.com/omdxp/fun"
