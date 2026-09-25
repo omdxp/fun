@@ -12,7 +12,7 @@ The extension looks for `fls` in this order:
 
 1. `lsp.fls.binary.path` in your Zed settings.
 2. `fls` on your `PATH`.
-3. The latest Fun release, downloaded on first use.
+3. The latest Fun release, downloaded on first use. It gives `fls` its own `fun` and standard library but does not put `fun` on your `PATH`, so install Fun for the run and test buttons.
 
 ```json
 {
