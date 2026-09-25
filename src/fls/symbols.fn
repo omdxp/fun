@@ -4693,24 +4693,9 @@ fun _propagated_operand_type(
                 _ -> {}
               }
               if !equals(method_name2, "") {
-                fit callee.left.kind {
-                  .Identifier(recv_name2) -> {
-                    str recv_type2 = type_name_of_local(tokens, program, recv_name2, file, line);
-                    if !equals(recv_type2, "") {
-                      Vec<str> concrete_args2 = local_generic_args(
-                        tokens,
-                        program,
-                        recv_name2,
-                        file,
-                        line
-                      );
-                      let m2 = lookup_method(program, recv_type2, method_name2, concrete_args2);
-                      if m2.is_some() {
-                        ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
-                      }
-                    }
-                  }
-                  _ -> {}
+                let m2 = _method_call_target(tokens, program, callee, file, line);
+                if m2.is_some() {
+                  ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
                 }
               }
             }
@@ -4722,6 +4707,75 @@ fun _propagated_operand_type(
     _ -> {}
   }
   ret "";
+}
+
+// The concrete generic args of an expression's own type, as far as the
+// AST-only resolution here reaches: a bare local's declared args, or a
+// field access's declared field type read against its base's args
+// (`self.map` inside `impl Set<T>` is `Map<T, flag>`). Empty for
+// anything else.
+fun _expr_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) Vec<str> {
+  Vec<str> empty;
+  empty.init(0);
+  if expr == nil {
+    ret empty;
+  }
+  fit expr.kind {
+    .Identifier(s) -> { ret local_generic_args(tokens, program, s, file, line); }
+    .Expression(fe) -> {
+      if !equals(fe.op, ".") || !fe.has_left || fe.left == nil || !fe.has_right ||
+        fe.right == nil {
+        ret empty;
+      }
+      str base_type = _expr_type_name(tokens, program, fe.left, file, line);
+      if equals(base_type, "") {
+        ret empty;
+      }
+      fit fe.right.kind {
+        .Identifier(field_name) -> {
+          Vec<str> base_args = _expr_generic_args(tokens, program, fe.left, file, line);
+          let field = lookup_field(program, base_type, field_name, base_args);
+          if field.is_some() {
+            ret generic_args_of_detail(field.unwrap().detail);
+          }
+        }
+        _ -> {}
+      }
+      ret empty;
+    }
+    _ -> { ret empty; }
+  }
+}
+
+// The method a `receiver.method(...)` call resolves to, for any receiver
+// `_expr_type_name` can type: a bare local, or a field access such as
+// `self.map`. `callee` is the `receiver.method` access itself. The
+// method's own signature comes back already read against the receiver's
+// concrete generic args, so its return type is concrete too.
+fun _method_call_target(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  ExprNode callee,
+  str file,
+  num line
+) Option<Declaration> {
+  if !callee.has_left || callee.left == nil || !callee.has_right || callee.right == nil {
+    ret .None;
+  }
+  str method_name = "";
+  fit callee.right.kind {
+    .Identifier(m) -> { method_name = m; }
+    _ -> {}
+  }
+  if equals(method_name, "") {
+    ret .None;
+  }
+  str recv_type = _expr_type_name(tokens, program, callee.left, file, line);
+  if equals(recv_type, "") {
+    ret .None;
+  }
+  Vec<str> recv_args = _expr_generic_args(tokens, program, callee.left, file, line);
+  ret lookup_method(program, recv_type, method_name, recv_args);
 }
 
 // The type name of an arbitrary expression, as far as `fit_subject_type`
@@ -4845,19 +4899,9 @@ pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, 
           // resolution `chain_receiver` uses elsewhere in this file for
           // a chain ending in a call, just entered from the subject's
           // own AST node rather than a token position.
-          fit callee.left.kind {
-            .Identifier(recv_name) -> {
-              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
-              if equals(recv_type, "") {
-                ret "";
-              }
-              Vec<str> concrete_args = local_generic_args(tokens, program, recv_name, file, line);
-              let m = lookup_method(program, recv_type, method_name, concrete_args);
-              if m.is_some() {
-                ret _bare_return_type(m.unwrap().detail);
-              }
-            }
-            _ -> {}
+          let m = _method_call_target(tokens, program, callee, file, line);
+          if m.is_some() {
+            ret _bare_return_type(m.unwrap().detail);
           }
         }
         _ -> {}
@@ -4950,22 +4994,12 @@ pub fun fit_subject_generic_args(
           if equals(method_name, "") || equals(method_name, "try_recv") {
             ret empty;
           }
-          fit callee.left.kind {
-            .Identifier(recv_name) -> {
-              str recv_type = type_name_of_local(tokens, program, recv_name, file, line);
-              if equals(recv_type, "") {
-                ret empty;
-              }
-              Vec<str> recv_args = local_generic_args(tokens, program, recv_name, file, line);
-              let m = lookup_method(program, recv_type, method_name, recv_args);
-              if m.is_some() {
-                str rtype_text2 = _return_type_text(m.unwrap().detail);
-                Vec<str> args2 = generic_args_of_detail(rtype_text2);
-                free(rtype_text2);
-                ret args2;
-              }
-            }
-            _ -> {}
+          let m = _method_call_target(tokens, program, callee, file, line);
+          if m.is_some() {
+            str rtype_text2 = _return_type_text(m.unwrap().detail);
+            Vec<str> args2 = generic_args_of_detail(rtype_text2);
+            free(rtype_text2);
+            ret args2;
           }
         }
         _ -> {}
