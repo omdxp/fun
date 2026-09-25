@@ -4,7 +4,7 @@ Language support for [Fun](https://github.com/omdxp/fun) in [Zed](https://zed.de
 
 - Syntax highlighting, brackets, indents, outline and text objects, from the [tree-sitter-fun](https://github.com/omdxp/tree-sitter-fun) grammar.
 - The `fls` language server: diagnostics, hover, completion, goto definition, formatting and references.
-- Runnable tags for `fun main` and `test` blocks.
+- Gutter run buttons for `main`, `test` and `fuzz` blocks.
 
 ## Language server
 
@@ -33,33 +33,17 @@ The extension looks for `fls` in this order:
 
 ## Run buttons
 
-`fun main` and every `test "..."` block carry the runnable tags `fun-main` and `fun-test`. Zed shows a run button for a tag once a task uses it. Add these to `~/.config/zed/tasks.json` or `.zed/tasks.json`:
+The extension ships tasks and tags the code they apply to, so Zed shows a run button in the gutter:
 
-```json
-[
-  {
-    "label": "fun run $ZED_FILE",
-    "command": "fun",
-    "args": ["run", "$ZED_FILE"],
-    "tags": ["fun-main"]
-  },
-  {
-    "label": "fun test $ZED_FILE",
-    "command": "fun",
-    "args": ["test", "$ZED_FILE"],
-    "tags": ["fun-test"]
-  },
-  {
-    "label": "fun test $ZED_FILE with coverage",
-    "command": "fun",
-    "args": ["test", "$ZED_FILE", "-cover"]
-  }
-]
-```
+- `fun main`: runs the file (`fun -in <file>`).
+- Each `test "..."` block: runs that one test.
+- Each `fuzz "..."` block: runs that fuzz target.
+
+The same tasks, plus running the whole file's tests, running them with coverage and linting the file, are in the task picker (`task: spawn`). `fun` must be on your `PATH`.
 
 ## Not available in Zed
 
-Zed has no Test Explorer or coverage API, so coverage shading and the Testing view exist only in the VS Code extension. Use the coverage task above and read the printed percentage.
+Zed has no Test Explorer or coverage API, so coverage shading and the Testing view exist only in the VS Code extension. Use the coverage task and read the printed percentage.
 
 ## Develop
 
