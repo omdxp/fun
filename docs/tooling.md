@@ -365,8 +365,9 @@ LSP.
 ## Other Editors
 
 The official VS Code extension is published on the Visual Studio
-Marketplace. Vim, Neovim, Emacs, and JetBrains setup notes are available
-in `editors/README.md` in the repository.
+Marketplace. A Zed extension (`editors/zed`) and a matching theme extension
+(`editors/zed-theme`) live in the repository. Vim, Neovim, Emacs, JetBrains,
+and Sublime setup notes are available in `editors/README.md`.
 
 ### Tests and coverage in the editor
 

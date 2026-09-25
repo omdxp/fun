@@ -12,5 +12,6 @@ Most editor packages are designed to work alongside `fls`, the Fun language serv
 - Emacs: [editors/emacs](emacs/)
 - Sublime Text: [editors/sublime](sublime/)
 - JetBrains: [editors/jetbrains](jetbrains/)
+- Zed: [editors/zed](zed/), with the Fun Web themes in [editors/zed-theme](zed-theme/)
 
 Several integrations also include the "Fun Web" color theme or a matching editor theme derived from the project website palette.

@@ -1,0 +1,72 @@
+[
+  {
+    "label": "fun run $ZED_RELATIVE_FILE",
+    "command": "fun",
+    "args": [
+      "-in",
+      "\"$ZED_FILE\""
+    ],
+    "tags": [
+      "fun-main"
+    ]
+  },
+  {
+    "label": "fun test $ZED_CUSTOM_test_name",
+    "command": "fun",
+    "args": [
+      "-in",
+      "\"$ZED_FILE\"",
+      "-test",
+      "--",
+      "\"$ZED_CUSTOM_test_name\""
+    ],
+    "tags": [
+      "fun-test"
+    ]
+  },
+  {
+    "label": "fun fuzz $ZED_CUSTOM_fuzz_name",
+    "command": "fun",
+    "args": [
+      "-in",
+      "\"$ZED_FILE\"",
+      "-fuzz",
+      "-fuzz-target",
+      "\"$ZED_CUSTOM_fuzz_name\""
+    ],
+    "tags": [
+      "fun-fuzz"
+    ]
+  },
+  {
+    "label": "fun test $ZED_RELATIVE_FILE",
+    "command": "fun",
+    "args": [
+      "test",
+      "\"$ZED_FILE\""
+    ]
+  },
+  {
+    "label": "fun test $ZED_RELATIVE_FILE with coverage",
+    "command": "fun",
+    "args": [
+      "test",
+      "\"$ZED_FILE\"",
+      "-cover"
+    ]
+  },
+  {
+    "label": "fun lint $ZED_RELATIVE_FILE",
+    "command": "fun",
+    "args": [
+      "lint",
+      "\"$ZED_FILE\""
+    ]
+  },
+  {
+    "label": "fun debug build",
+    "command": "mkdir -p \"$ZED_WORKTREE_ROOT/fun-out/debug\" && fun -in \"$ZED_FILE\" -g -no-exec -out \"$ZED_WORKTREE_ROOT/fun-out/debug/fun-debug.c\" && cc -g \"$ZED_WORKTREE_ROOT/fun-out/debug/fun-debug.c\" -o \"$ZED_WORKTREE_ROOT/fun-out/debug/fun-debug\" -lm -pthread",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  }
+]
