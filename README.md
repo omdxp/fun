@@ -148,7 +148,7 @@ The official VS Code extension is published on the Visual Studio Marketplace: [F
 
 ### Other Editors
 
-Vim, Neovim, Emacs, JetBrains, and Sublime setup notes are available in [editors/README.md](editors/README.md).
+A Zed extension is in [editors/zed](editors/zed/). Vim, Neovim, Emacs, JetBrains, and Sublime setup notes are available in [editors/README.md](editors/README.md).
 
 ### GitHub Syntax Highlighting
 
