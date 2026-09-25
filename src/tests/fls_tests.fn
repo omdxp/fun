@@ -1770,7 +1770,7 @@ test "documentLink covers a resolvable import's own path, and silently skips one
 
   str out = document_links(&reads, doc);
   assert contains(out, `"target":"file://`), "expected at least one resolved link";
-  assert contains(out, "stdlib/std/io.fn"), "expected std.io's own link target";
+  assert contains(out, "std/io.fn"), "expected std.io's own link target";
   assert contains(out, "lexer/lexer.fn"), "expected the '..' parent-traversal link target";
   assert !contains(out, "nope"), "expected an unresolvable specifier to be skipped, not reported as a broken link";
 
