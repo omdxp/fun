@@ -1770,7 +1770,7 @@ test "documentLink covers a resolvable import's own path, and silently skips one
 
   str out = document_links(&reads, doc);
   assert contains(out, `"target":"file://`), "expected at least one resolved link";
-  assert contains(out, "stdlib/std/io.fn"), "expected std.io's own link target";
+  assert contains(out, "std/io.fn"), "expected std.io's own link target";
   assert contains(out, "lexer/lexer.fn"), "expected the '..' parent-traversal link target";
   assert !contains(out, "nope"), "expected an unresolvable specifier to be skipped, not reported as a broken link";
 
@@ -3388,6 +3388,40 @@ test "hover resolves a fit arm's own payload binding when the subject is a plain
 
   assert contains(hover(&reads, doc, 11, 14), "Box doc"), "expected the call's own concrete Ok payload type, not a bare T";
   assert contains(hover(&reads, doc, 12, 15), "Oops e"), "expected the call's own concrete Err payload type, not a bare E";
+}
+
+test "hover resolves a fit arm's payload binding when the subject is a method call on a field" {
+  // A method called through a field (`self.inner.take()`) has a receiver that is a
+  // field access, not a bare local, so the subject's own type used to resolve to
+  // nothing and neither the variant nor its binding hovered at all.
+  str src = `enum Maybe<T> {
+  `  Some(T),
+  `  None
+  `}
+  `compound Cell<K, V> { K key; V value; }
+  `impl Cell<K, V> {
+  `  pub take() Maybe<(K, V)> { ret .None; }
+  `}
+  `compound Holder<T> { Cell<T, flag> inner; }
+  `impl Holder<T> {
+  `  pub go() {
+  `    fit self.inner.take() {
+  `      .Some(pair) -> { _ = pair; }
+  `      .None -> { }
+  `    }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fieldcall.fn";
+  doc.path = "fieldcall.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 12, 8), "Some"), "expected the variant to hover";
+  assert contains(hover(&reads, doc, 12, 13), "(T, flag) pair"), "expected the binding read against the field's own generic args";
+  assert contains(hover(&reads, doc, 12, 28), "(T, flag) pair"), "expected the binding to hover where it is used";
 }
 
 test "hovering a fit arm's own payload binding resolves when the subject is a let-inferred local" {
