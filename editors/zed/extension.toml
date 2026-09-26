@@ -1,4 +1,4 @@
-id = "fun"
+id = "fun-lang"
 name = "Fun"
 description = "Fun language support: syntax highlighting, outline, run buttons and the fls language server."
 version = "0.1.0"
