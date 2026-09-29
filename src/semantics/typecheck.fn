@@ -3517,6 +3517,55 @@ impl Checker {
       );
       ret;
     }
+    // A concrete instantiation of a generic type (`impl Box<num> as
+    // Sized`, whose own `type_name` is already mangled to `Box__num` by
+    // the parser) has a real vtable, but codegen can emit it after the
+    // fit code referencing it - a real ordering bug with no fix yet, so
+    // this is rejected here rather than risking a silent bad build.
+    // `mangled_name` (used throughout this file and codegen alike) never
+    // produces a plain identifier containing "__" any other way, so this
+    // is a reliable enough signal without new state to track it properly.
+    if contains(type_name, "__") {
+      self.fail(
+        format(
+        "'{str}' is a generic instantiation, which shape-downcast fit doesn't support yet",
+        type_name
+        ),
+        branch.condition
+      );
+      ret;
+    }
+    // A generic type's own impl (`impl Box<T> as Sized`) has no single
+    // concrete vtable to dispatch to - codegen only ever emits one for a
+    // fully concrete impl (`emit_shape_vtable_machinery`'s own
+    // "no single monomorphic vtable signature" case). `implements_shape`
+    // doesn't distinguish this (it just tracks the bare template name as
+    // a registered implementor, same as a concrete one), so this has to
+    // be checked separately - otherwise a bare generic name here
+    // typechecks fine and only fails much later, as an undefined C
+    // symbol out of codegen.
+    let compound_info = self.compounds.at(type_name);
+    if compound_info.is_some() && compound_info.unwrap().is_generic {
+      self.fail(
+        format(
+        "'{str}' is generic and has no single concrete implementation to downcast to",
+        type_name
+        ),
+        branch.condition
+      );
+      ret;
+    }
+    let enum_params = self.enum_type_params.at(type_name);
+    if enum_params.is_some() && enum_params.unwrap().len > 0 {
+      self.fail(
+        format(
+        "'{str}' is generic and has no single concrete implementation to downcast to",
+        type_name
+        ),
+        branch.condition
+      );
+      ret;
+    }
     if branch.bindings.len != 1 {
       self.fail(
         format(
