@@ -1,7 +1,7 @@
 id = "fun-lang"
 name = "Fun"
 description = "Fun language support: syntax highlighting, outline, run buttons and the fls language server."
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["omdxp"]
 repository = "https://github.com/omdxp/fun"
