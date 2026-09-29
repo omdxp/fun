@@ -805,3 +805,280 @@ test "a plural expect is met by, and absorbs, every later occurrence of that war
   assert !contains(found, "fit_non_exhaustive:"), "expected both non-exhaustive fits absorbed by the one plural expect";
   assert !contains(found, "was not emitted"), "expected the expectation met, not left unmet";
 }
+
+// A `test`/`fuzz` block's own body was never walked at all: the
+// top-level dispatch in `analyze()` only ever matched `.Function` and
+// `.Impl`, so every statement-level check (exhaustiveness, unreachable
+// code, unused locals, allow/expect scoping) silently never ran for
+// what is written inside one, regardless of nesting depth.
+
+test "fit_non_exhaustive is noticed inside a test block" {
+  notices(
+    `enum Color { Red, Green, Blue }
+    `test "t" {
+    `  Color c = .Red;
+    `  fit c {
+    `    .Red -> { }
+    `  }
+    `}`,
+    "fit does not handle",
+    "expected a non-exhaustive fit inside a test block to be noticed"
+  );
+}
+
+test "fit_non_exhaustive is noticed inside a fuzz block" {
+  notices(
+    `enum Color { Red, Green, Blue }
+    `fuzz "f" (raw* data, num len) {
+    `  Color c = .Red;
+    `  fit c {
+    `    .Red -> { }
+    `  }
+    `}`,
+    "fit does not handle",
+    "expected a non-exhaustive fit inside a fuzz block to be noticed"
+  );
+}
+
+test "fit_non_exhaustive is noticed inside a nested if inside a test block" {
+  notices(
+    `enum Color { Red, Green, Blue }
+    `test "t" {
+    `  Color c = .Red;
+    `  if true {
+    `    fit c {
+    `      .Red -> { }
+    `    }
+    `  }
+    `}`,
+    "fit does not handle",
+    "expected a non-exhaustive fit nested inside a test block's own if to be noticed"
+  );
+}
+
+test "unreachable_code is noticed inside a test block" {
+  notices(
+    `test "t" {
+    `  assert true, "a";
+    `  ret;
+    `  assert true, "b";
+    `}`,
+    "unreachable",
+    "expected code after a ret inside a test block to be noticed"
+  );
+}
+
+test "unused_variable is noticed inside a test block, but only with -warn-unused" {
+  str src = `test "t" {
+    `  num unused_here = 1;
+    `  assert 1 + 1 == 2, "keeps the test from being empty, not a bare boolean literal";
+    `}`;
+  says_nothing(src, "expected unused_variable to stay quiet without -warn-unused");
+  notices_unused(
+    src,
+    "unused variable 'unused_here'",
+    "expected the unused local inside a test block to be noticed with -warn-unused"
+  );
+}
+
+test "unused_variable is noticed inside a fuzz block, but only with -warn-unused" {
+  str src = `fuzz "f" (raw* data, num len) {
+    `  num unused_here = 1;
+    `}`;
+  says_nothing(src, "expected unused_variable to stay quiet without -warn-unused");
+  notices_unused(
+    src,
+    "unused variable 'unused_here'",
+    "expected the unused local inside a fuzz block to be noticed with -warn-unused"
+  );
+}
+
+test "fuzz's own two parameters are real fit subjects, not unresolved locals" {
+  // Mirrors `walk_function`'s own parameter registration (a `fit` over
+  // a plain parameter needs its declared type resolved the same way a
+  // `let` local's does), now shared with a fuzz block's two fixed ones.
+  says_nothing(
+    `fuzz "f" (raw* data, num len) {
+    `  if len > 0 {
+    `  }
+    `}`,
+    "expected a fuzz block's own parameters to need no separate declaration"
+  );
+}
+
+test "a singular statement-level allow written inside a test block covers only its own next occurrence" {
+  str found = notice(
+    `enum Color { Red, Green, Blue }
+    `test "t" {
+    `  allow fit_non_exhaustive, "only the first fit here is deliberately partial";
+    `  Color a = .Red;
+    `  fit a {
+    `    .Red -> { }
+    `  }
+    `  Color b = .Green;
+    `  fit b {
+    `    .Green -> { }
+    `  }
+    `}`,
+    false
+  );
+  assert contains(found, "fit does not handle 'Color.Red', 'Color.Blue'"), "expected the second, un-covered fit to still be reported";
+  Vec<str> occurrences = split(found, '\n');
+  defer occurrences.free();
+  num fit_lines = 0;
+  for line : occurrences {
+    if contains(line, "fit_non_exhaustive:") {
+      fit_lines = fit_lines + 1;
+    }
+  }
+  assert fit_lines == 1, "expected the allow to absorb exactly the first occurrence, leaving exactly one reported";
+}
+
+test "an expect written inside a test block is met by, and absorbs, a warning from that same test block" {
+  str found = notice(
+    `test "t" {
+    `  expect assert_constant, "deliberately constant, on purpose";
+    `  assert true, "always true";
+    `}`,
+    false
+  );
+  assert !contains(found, "was not emitted"), "expected the expectation met from inside its own test block, not left unmet";
+  assert !contains(found, "assert_constant:"), "expected the met expectation to absorb the warning, not also report it";
+}
+
+test "an expect written inside a test block that never fires is reported unmet at the expect statement's own position" {
+  str found = notice(
+    `test "t" {
+    `  expect assert_constant, "this one never actually fires";
+    `  assert 1 == 1, "not a bare boolean literal, so it stays undetected as constant";
+    `}`,
+    false
+  );
+  assert equals(found, "expected warning 'assert_constant' was not emitted"), "expected the unmet expectation itself, not any other notice";
+}
+
+// Every remaining warning category, run through the same test/fuzz-body
+// gap once more - each one routes through `walk_declared_body`/
+// `walk_body` the same way `fit_non_exhaustive` and `unused_variable`
+// already proved does, so this closes out the full set rather than
+// leaving the rest to assumption.
+
+test "fit_unreachable_branch is noticed inside a test block" {
+  notices(
+    `enum S { A, B }
+    `test "t" {
+    `  S s = .A;
+    `  fit s {
+    `    .A -> { }
+    `    .A -> { }
+    `    _ -> { }
+    `  }
+    `}`,
+    "fit_unreachable_branch",
+    "expected a repeated fit branch inside a test block to be noticed"
+  );
+}
+
+test "blocking_fork_deadlock is noticed inside a test block" {
+  notices(
+    `async fun worker() {}
+    `test "t" {
+    `  let wg = wait_group_new(0);
+    `  for i : 0..4 {
+    `    fork worker();
+    `  }
+    `}`,
+    "never grown",
+    "expected an ungrown empty wait group inside a test block to be noticed"
+  );
+}
+
+test "shared_mutable_capture_race is noticed inside a test block" {
+  notices(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun bump(Counter* c) {
+    `  c.n = c.n + 1;
+    `}
+    `test "t" {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork bump(&counter);
+    `  }
+    `}`,
+    "write through it",
+    "expected a shared mutable capture inside a test block to be noticed"
+  );
+}
+
+test "shared_mutable_capture_race is noticed inside a fuzz block" {
+  notices(
+    `compound Counter {
+    `  num n;
+    `}
+    `async fun bump(Counter* c) {
+    `  c.n = c.n + 1;
+    `}
+    `fuzz "f" (raw* data, num len) {
+    `  Counter counter;
+    `  for i : 0..4 {
+    `    fork bump(&counter);
+    `  }
+    `}`,
+    "write through it",
+    "expected a shared mutable capture inside a fuzz block to be noticed"
+  );
+}
+
+test "integer_literal_out_of_range is noticed inside a test block" {
+  notices(
+    `test "t" {
+    `  u2 a = 5;
+    `}`,
+    "does not fit",
+    "expected an out-of-range literal inside a test block to be noticed"
+  );
+}
+
+test "channel_capacity_overflow is noticed inside a test block" {
+  notices(
+    `test "t" {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  c <- 2;
+    `  c <- 3;
+    `}`,
+    "nothing receiving",
+    "expected an over-sent channel inside a test block to be noticed"
+  );
+}
+
+test "channel_capacity_overflow is noticed inside a fuzz block" {
+  notices(
+    `fuzz "f" (raw* data, num len) {
+    `  let c = channel_new_cap(0, 1);
+    `  c <- 1;
+    `  c <- 2;
+    `  c <- 3;
+    `}`,
+    "nothing receiving",
+    "expected an over-sent channel inside a fuzz block to be noticed"
+  );
+}
+
+test "return_local_ptr is noticed inside a test block" {
+  // `test`/`fuzz` bodies are conceptually void, but `ret <value>;`
+  // still parses inside one (it just discards the value), and
+  // `.StatementReturn`'s own check in `walk_body` never asked what
+  // kind of body it is in - only whether the returned expression takes
+  // the address of a local. Checked directly rather than assumed.
+  notices(
+    `test "t" {
+    `  num x = 1;
+    `  ret &x;
+    `}`,
+    "returning address of local variable",
+    "expected the address of a local returned inside a test block to be noticed"
+  );
+}
