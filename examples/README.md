@@ -94,6 +94,7 @@ fun -in examples/<example>.fn
 - advanced/unreachable_code_warning.fn
 - advanced/assert_constant_warning.fn
 - advanced/shapes.fn
+- advanced/shape_fit_downcast.fn
 - advanced/const_bindings.fn
 - advanced/explicit_generic_call.fn
 - advanced/raw_string_literal.fn
