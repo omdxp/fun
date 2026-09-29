@@ -36,25 +36,6 @@ pub fun sleep_ms(num milliseconds) {
   __fun_sleep_seconds(milliseconds / 1000.0);
 }
 
-fun _copy_str(str dst, num dst_len, str src) num {
-  if dst == nil {
-    ret 0;
-  }
-  if dst_len <= 0 {
-    ret 0;
-  }
-  num i = 0;
-  for i < dst_len - 1 {
-    if src[i] == 0 {
-      break;
-    }
-    dst[i] = src[i];
-    i = i + 1;
-  }
-  dst[i] = '\0';
-  ret i;
-}
-
 fun _time_buf_from_epoch(num epoch) raw* {
   raw* buf = malloc(8);
   if buf == nil {
@@ -66,23 +47,51 @@ fun _time_buf_from_epoch(num epoch) raw* {
   ret buf;
 }
 
+// `tm`'s real C layout varies by platform (glibc/macOS add `tm_gmtoff`/
+// `tm_zone` past the 9 portable fields); 128 bytes is generous headroom
+// on every target rather than a tight, platform-exact size.
+const num _TM_BUF_SIZE = 128;
+
+// Broken-down local time for `epoch`, in a freshly allocated, caller-owned
+// buffer (the caller must `free` it). Reentrant: unlike raw `localtime`,
+// this never touches a shared static buffer, so it's safe to call from
+// multiple threads (e.g. concurrent test files) at once.
 fun _localtime_from_epoch(num epoch) raw* {
   raw* tbuf = _time_buf_from_epoch(epoch);
   if tbuf == nil {
     ret nil;
   }
-  raw* tm = localtime(tbuf);
+  raw* result = malloc(_TM_BUF_SIZE);
+  if result == nil {
+    free(tbuf);
+    ret nil;
+  }
+  raw* tm = __fun_localtime_r(tbuf, result);
   free(tbuf);
+  if tm == nil {
+    free(result);
+    ret nil;
+  }
   ret tm;
 }
 
+// Broken-down UTC time for `epoch`, see `_localtime_from_epoch`.
 fun _gmtime_from_epoch(num epoch) raw* {
   raw* tbuf = _time_buf_from_epoch(epoch);
   if tbuf == nil {
     ret nil;
   }
-  raw* tm = gmtime(tbuf);
+  raw* result = malloc(_TM_BUF_SIZE);
+  if result == nil {
+    free(tbuf);
+    ret nil;
+  }
+  raw* tm = __fun_gmtime_r(tbuf, result);
   free(tbuf);
+  if tm == nil {
+    free(result);
+    ret nil;
+  }
   ret tm;
 }
 
@@ -93,7 +102,9 @@ impl Timestamp {
     if t == nil {
       ret 0;
     }
-    ret strftime(buf, buf_len, format, t);
+    num n = strftime(buf, buf_len, format, t);
+    free(t);
+    ret n;
   }
 
   // Format using a custom strftime format (UTC).
@@ -102,7 +113,9 @@ impl Timestamp {
     if t == nil {
       ret 0;
     }
-    ret strftime(buf, buf_len, format, t);
+    num n = strftime(buf, buf_len, format, t);
+    free(t);
+    ret n;
   }
 
   // Format using a default pattern.
@@ -111,7 +124,9 @@ impl Timestamp {
     if t == nil {
       ret 0;
     }
-    ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+    num n = strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+    free(t);
+    ret n;
   }
 
   // Format using a default pattern (UTC).
@@ -120,7 +135,9 @@ impl Timestamp {
     if t == nil {
       ret 0;
     }
-    ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+    num n = strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+    free(t);
+    ret n;
   }
 }
 
@@ -181,11 +198,7 @@ pub fun format_human(num epoch, str buf, num buf_len) num {
   if tbuf == nil {
     ret 0;
   }
-  str cstr = ctime(tbuf);
-  num n = 0;
-  if cstr != nil {
-    n = _copy_str(buf, buf_len, cstr);
-  }
+  num n = __fun_ctime_r(tbuf, buf, buf_len);
   free(tbuf);
   ret n;
 }

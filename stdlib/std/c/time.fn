@@ -71,6 +71,21 @@ pub fun gmtime(num* timep) raw*;
 // Converts calendar time to local broken-down time (pointer to static tm, C semantics).
 pub fun localtime(num* timep) raw*;
 
+// Reentrant `gmtime`: writes into caller-owned `result` (must be large
+// enough for a `tm`) instead of a shared static buffer, and returns it (or
+// null on failure). Not a real libc function on every platform: the
+// compiler emits it in the prelude, backed by `gmtime_r` on POSIX and
+// `gmtime_s` on Windows, the same approach as `__fun_sleep_seconds`.
+pub fun __fun_gmtime_r(num* timep, raw* result) raw*;
+
+// Reentrant `localtime`, see `__fun_gmtime_r`.
+pub fun __fun_localtime_r(num* timep, raw* result) raw*;
+
+// Reentrant `ctime`: writes into caller-owned `buf` (capacity `buf_len`)
+// instead of a shared static buffer. Returns the number of bytes written,
+// or 0 on failure or if `buf` is too small. See `__fun_gmtime_r`.
+pub fun __fun_ctime_r(num* timep, str buf, num buf_len) num;
+
 // Formats broken-down time `t` into `s` (capacity `max`) according to
 // `format`, returning the number of bytes written (C semantics).
 pub fun strftime(str s, num max, str format, raw* t) num;
