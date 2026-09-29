@@ -65,6 +65,9 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
     }
     if equals(id_name, "fit_non_exhaustive") {
       str fit_fix = _fit_arm_action(cache, doc, document_uri, d);
+      if equals(fit_fix, "") {
+        fit_fix = _shape_fit_arm_action(cache, doc, document_uri, d);
+      }
       if !equals(fit_fix, "") {
         if any {
           b.append(",");
@@ -288,6 +291,102 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   ret b.build();
 }
 
+// `TypeName(v) -> {}`, the shape-downcast counterpart to `_stub_arm`
+// above - always exactly one binding, never a payload arity, so there's
+// no equivalent of `_stub_arm`'s v0/v1/... numbering. The binding name
+// is the type's own lowercased first letter, matching the style this
+// file's own hand-written examples already use (`Circle(c)`).
+fun _stub_shape_arm(str type_name) str {
+  str binding = "v";
+  if len(type_name) > 0 {
+    binding = to_lower(substr(type_name, 0, 1));
+  }
+  StringBuilder b = string_builder_init(24);
+  b.append(type_name);
+  b.append("(");
+  b.append(binding);
+  b.append(") -> {}");
+  ret b.build();
+}
+
+// The quick fix for a `fit does not handle 'Circle', 'Square', ...`
+// shape-downcast diagnostic: a stub arm (`Circle(c) -> {}`) for every
+// implementor the message names, inserted together right before the
+// fit's own closing brace. "" when the message names none (an ordinary
+// enum fit_non_exhaustive, handled by `_fit_arm_action` above instead),
+// or the enclosing fit's closing brace can't be found.
+fun _shape_fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  Vec<str> names = _bare_type_names_from_message(d.message);
+  defer names.free();
+  if names.len == 0 {
+    ret "";
+  }
+  Analyzed read = cache.of(doc);
+  if !read.lexed || !read.parsed {
+    ret "";
+  }
+
+  StringBuilder arms = string_builder_init(64);
+  defer arms.free();
+  StringBuilder title_names = string_builder_init(32);
+  defer title_names.free();
+  num written = 0;
+  num ni = 0;
+  for ni < names.len {
+    str type_name = names.get(ni);
+    ni = ni + 1;
+    str arm_line = format("  {str}\n", _stub_shape_arm(type_name));
+    arms.append(arm_line);
+    free(arm_line);
+    if written > 0 {
+      title_names.append(", ");
+    }
+    str name_ref = format("'{str}'", type_name);
+    title_names.append(name_ref);
+    free(name_ref);
+    written = written + 1;
+  }
+  if written == 0 {
+    ret "";
+  }
+
+  Vec<Token> tokens = read.tokens;
+  let close = _find_block_close(&tokens, d.line);
+  if close.is_none() {
+    ret "";
+  }
+  Pos p = close.unwrap();
+  num line0 = p.line - 1;
+  num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
+  str names_text = title_names.build();
+  str title = format("Fill in missing {str} arm", names_text);
+  if written > 1 {
+    free(title);
+    title = format("Fill in missing {str} arms", names_text);
+  }
+  free(names_text);
+  StringBuilder b = string_builder_init(192);
+  b.append(`{"title":`);
+  json_quote_into(&b, title);
+  free(title);
+  b.append(`,"kind":"quickfix","edit":{"changes":{`);
+  json_quote_into(&b, document_uri);
+  b.append(`:[{"range":{"start":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`},"end":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(character);
+  b.append(`}},"newText":`);
+  str arms_text = arms.build();
+  json_quote_into(&b, arms_text);
+  free(arms_text);
+  b.append(`}]}}}`);
+  ret b.build();
+}
+
 // Every `'Enum.Variant'`-shaped reference the message names, in the
 // order it lists them.
 fun _enum_and_variants_from_message(str message) Vec<EnumVariantRef> {
@@ -311,6 +410,33 @@ fun _enum_and_variants_from_message(str message) Vec<EnumVariantRef> {
       ev.enum_name = substr(inner, 0, dot);
       ev.variant_name = substr(inner, dot + 1, len(inner) - dot - 1);
       out.push(ev);
+    }
+    rest = substr(after_open, close_q + 1, len(after_open) - close_q - 1);
+  }
+  ret out;
+}
+
+// Every bare `'TypeName'`-shaped reference the message names (no `.`
+// inside the quotes) - what a shape-downcast fit's own `fit does not
+// handle 'Circle', 'Square'` non-exhaustive message names, as opposed
+// to an enum's `'Enum.Variant'` shape above.
+fun _bare_type_names_from_message(str message) Vec<str> {
+  Vec<str> out;
+  out.init(2);
+  str rest = message;
+  for true {
+    num open_q = index_of_char(rest, '\'');
+    if open_q < 0 {
+      break;
+    }
+    str after_open = substr(rest, open_q + 1, len(rest) - open_q - 1);
+    num close_q = index_of_char(after_open, '\'');
+    if close_q < 0 {
+      break;
+    }
+    str inner = substr(after_open, 0, close_q);
+    if index_of_char(inner, '.') < 0 {
+      out.push(inner);
     }
     rest = substr(after_open, close_q + 1, len(after_open) - close_q - 1);
   }
