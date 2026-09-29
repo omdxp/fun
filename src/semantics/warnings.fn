@@ -1460,8 +1460,6 @@ impl Analysis {
     }
   }
 
-  // Walks one function, with the names it declares tracked so a returned
-  // address can be recognized as pointing at one of them.
   // Registers one parameter as a body-scope local: exactly as good a
   // `fit` subject as a `let` local, but only a `.Variable` statement
   // inside a body ever registered here before this - `fit` over a
@@ -1504,6 +1502,8 @@ impl Analysis {
     }
   }
 
+  // Walks one function, with the names it declares tracked so a returned
+  // address can be recognized as pointing at one of them.
   walk_function(FunctionNode f, Node* decl) {
     if !f.has_body {
       ret;
