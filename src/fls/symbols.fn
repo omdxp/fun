@@ -5671,6 +5671,31 @@ fun _lookup_fit_binding(
               free_params_vec(&pieces);
             }
           } elif idx >= 0 {
+            // A shape-downcast arm (`Circle(c) -> ...`) always parses
+            // to a bare `.Identifier` condition - the enum-destructure
+            // path below always builds a `.`-qualified one instead - so
+            // this is unambiguous, matching the same check
+            // typecheck.fn/codegen.fn/warnings.fn each make their own
+            // copy of.
+            str shape_type_name = "";
+            fit br.condition.kind {
+              .Identifier(sname) -> { shape_type_name = sname; }
+              _ -> {}
+            }
+            if !equals(shape_type_name, "") && br.body != nil {
+              StringBuilder shb = string_builder_init(24);
+              shb.append(shape_type_name);
+              shb.append("* ");
+              shb.append(name);
+              Pos shape_decl_pos = body.pos;
+              if br.body.has_pos {
+                shape_decl_pos = br.body.pos;
+              }
+              if br.has_condition && br.condition != nil && br.condition.has_pos {
+                shape_decl_pos = br.condition.pos;
+              }
+              ret .Some(_declaration(name, .Local, shb.build(), shape_decl_pos));
+            }
             str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
             if !equals(enum_name, "") {
               Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);
