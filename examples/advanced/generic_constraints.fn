@@ -53,8 +53,8 @@ impl Circle as Renderable {
   }
 }
 
-fun label<T: Renderable>(T shape) T {
-  ret shape;
+fun label<T: Renderable>(T item) T {
+  ret item;
 }
 
 // A bound alternative that is itself a generic instantiation, not a bare
