@@ -759,6 +759,11 @@ pub compound QuirkNode {
   // one param has a default, every later one does too. A default may name
   // earlier params (`B = A`), never itself or a later one.
   Vec<DataType*> type_param_defaults;
+  // True when the source spelled this declaration `shape Name { ... }`
+  // rather than `quirk Name { ... }` - the two are the same declaration,
+  // just two accepted spellings of the keyword, kept here so hover/outline
+  // can echo back whichever one the author actually wrote.
+  flag spelled_shape;
 }
 
 pub fun quirk_node_new() QuirkNode {
@@ -769,6 +774,7 @@ pub fun quirk_node_new() QuirkNode {
   q.type_params.init(0);
   q.has_type_params = false;
   q.type_param_defaults.init(0);
+  q.spelled_shape = false;
   ret q;
 }
 
