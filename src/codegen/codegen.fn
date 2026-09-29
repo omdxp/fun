@@ -11056,24 +11056,20 @@ impl Codegen {
   // subj.payload.Variant._N;` declaration first, and is registered as a
   // known local when its payload field type is on record.
   // The bare type name a shape-downcast fit arm names (`Circle(c) ->
-  // ...`), or empty when `condition` isn't that shape: a call whose
-  // callee is a plain, undotted identifier. Mirrors
+  // ...`), or empty when `branch` isn't that shape. The parser
+  // (`_try_parse_fit_shape_destructure`) already commits this pattern to
+  // a plain `.Identifier` condition with `bindings` populated, never
+  // produced by the enum-destructure path (which always builds a
+  // `.`-qualified condition instead), so this is unambiguous. Mirrors
   // `typecheck.fn`'s own `_shape_destructure_type_name` - each layer
   // keeps its own copy rather than sharing across files, same as
   // `warnings.fn`'s independent `enum_variants` scan.
-  _fit_shape_destructure_type_name(Node* condition) str {
-    if condition == nil {
+  _fit_shape_destructure_type_name(FitBranch branch) str {
+    if !branch.has_condition || !branch.has_bindings || branch.bindings.len != 1 {
       ret "";
     }
-    fit condition.kind {
-      .Expression(e) -> {
-        if equals(e.op, "()") && e.has_left && e.left != nil {
-          fit e.left.kind {
-            .Identifier(name) -> { ret name; }
-            _ -> {}
-          }
-        }
-      }
+    fit branch.condition.kind {
+      .Identifier(name) -> { ret name; }
       _ -> {}
     }
     ret "";
@@ -11112,40 +11108,23 @@ impl Codegen {
     self.state.write(shape_name);
     self.state.write("_vtable) {\n");
     self.state.indent_level = self.state.indent_level + 1;
-    Vec<Node*> written;
-    written.init(1);
-    defer written.free();
-    fit br.condition.kind {
-      .Expression(e) -> {
-        if e.has_right {
-          self.flatten_call_args(e.right, &written);
-        }
+    str bname = br.bindings.get(0);
+    if !equals(bname, "_") {
+      self.state.write_indent();
+      self.state.write(type_name);
+      self.state.write("* ");
+      self.state.write(bname);
+      self.state.write(" = (");
+      self.state.write(type_name);
+      self.state.write("*)");
+      self.state.write(subj_name);
+      if subj_is_pointer {
+        self.state.write("->");
+      } else {
+        self.state.write(".");
       }
-      _ -> {}
-    }
-    if written.len == 1 {
-      fit written.get(0).kind {
-        .Identifier(bname) -> {
-          if !equals(bname, "_") {
-            self.state.write_indent();
-            self.state.write(type_name);
-            self.state.write("* ");
-            self.state.write(bname);
-            self.state.write(" = (");
-            self.state.write(type_name);
-            self.state.write("*)");
-            self.state.write(subj_name);
-            if subj_is_pointer {
-              self.state.write("->");
-            } else {
-              self.state.write(".");
-            }
-            self.state.write("self;\n");
-            self.record_local(bname, type_name, true);
-          }
-        }
-        _ -> {}
-      }
+      self.state.write("self;\n");
+      self.record_local(bname, type_name, true);
     }
     let berr = self.emit_body(*br.body);
     if berr.is_some() {
@@ -11759,7 +11738,7 @@ impl Codegen {
       // `br.bindings` populated (that field only ever comes from the
       // dotted enum-shorthand destructure path handled above).
       if subj_type.is_some() && self.shape_names.contains(subj_type.unwrap()) {
-        str shape_downcast_type = self._fit_shape_destructure_type_name(br.condition);
+        str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
           let sherr = self.emit_fit_shape_branch(
             subj_name,
