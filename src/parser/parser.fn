@@ -5026,38 +5026,52 @@ impl Parser {
     }
     let sp0 = sp0_opt.unwrap();
     let sp1 = sp1_opt.unwrap();
-    if sp0.type != .Identifier || !token_is_operator(sp1, "(") {
+    if sp0.type != .Identifier {
       ret .None;
     }
-    // Peek past the parenthesized list without consuming: it must hold
-    // nothing but a comma-separated identifier list, or this isn't a
-    // shape-destructure pattern at all (falls through to the ordinary
-    // expression fallback unchanged, e.g. a real call with a computed
-    // argument).
-    num peek_i = 2;
-    for true {
-      let pk_opt = self.state.token_peek_n(peek_i);
-      if pk_opt.is_none() {
-        ret .None;
-      }
-      let pk = pk_opt.unwrap();
-      if pk.type != .Identifier {
-        ret .None;
-      }
-      peek_i = peek_i + 1;
-      let sep_opt = self.state.token_peek_n(peek_i);
-      if sep_opt.is_none() {
-        ret .None;
-      }
-      let sep = sep_opt.unwrap();
-      if token_is_operator(sep, ",") {
-        peek_i = peek_i + 1;
-        continue;
-      }
-      if token_is_symbol(sep, ')') {
-        break;
-      }
+    // A concrete generic instantiation (`Circle<num>(c) -> ...`, matching
+    // a real `impl Circle<num> as Shape { ... }`) commits unconditionally
+    // once `Ident<` is seen here - there is no other sensible meaning for
+    // that shape in fit-pattern position, unlike the bare `Ident(` case
+    // just below (which could, in principle, be an ordinary call used as
+    // a value-equality pattern, hence its own extra validation). A
+    // genuinely malformed `<...>` list still reports a real parse error
+    // rather than silently falling through.
+    flag has_generic_args = token_is_operator(sp1, "<");
+    if !has_generic_args && !token_is_operator(sp1, "(") {
       ret .None;
+    }
+    if !has_generic_args {
+      // Peek past the parenthesized list without consuming: it must hold
+      // nothing but a comma-separated identifier list, or this isn't a
+      // shape-destructure pattern at all (falls through to the ordinary
+      // expression fallback unchanged, e.g. a real call with a computed
+      // argument).
+      num peek_i = 2;
+      for true {
+        let pk_opt = self.state.token_peek_n(peek_i);
+        if pk_opt.is_none() {
+          ret .None;
+        }
+        let pk = pk_opt.unwrap();
+        if pk.type != .Identifier {
+          ret .None;
+        }
+        peek_i = peek_i + 1;
+        let sep_opt = self.state.token_peek_n(peek_i);
+        if sep_opt.is_none() {
+          ret .None;
+        }
+        let sep = sep_opt.unwrap();
+        if token_is_operator(sep, ",") {
+          peek_i = peek_i + 1;
+          continue;
+        }
+        if token_is_symbol(sep, ')') {
+          break;
+        }
+        ret .None;
+      }
     }
 
     str type_name = "";
@@ -5065,11 +5079,29 @@ impl Parser {
       .Sval(s) -> { type_name = s; }
       _ -> {}
     }
+    Pos type_pos = sp0.pos;
+    self.state.token_next(); // Type
+
+    if has_generic_args {
+      DataType generic_dt = dtype_new();
+      generic_dt.type_str = type_name;
+      let gaerr = self.state.parse_generic_type_args(&generic_dt);
+      if gaerr.is_some() {
+        ret gaerr;
+      }
+      // Mangled exactly the way an `impl Circle<num> as Shape { ... }`
+      // header's own `type_name` already is, so a concrete instantiation
+      // written here lines up with what's registered as a real
+      // implementor without typecheck/codegen needing to know anything
+      // about generics at all - they just see a plain (if unusually
+      // spelled) type name, same as any other shape-downcast arm.
+      type_name = _mangled_dtype_name(&generic_dt);
+    }
+
     Node type_node = node_new(.Identifier(type_name));
-    type_node.pos = sp0.pos;
+    type_node.pos = type_pos;
     type_node.has_pos = true;
     type_node.flags.inside_expression = true;
-    self.state.token_next(); // Type
 
     let slperr = self.state.expect_op("(");
     if slperr.is_some() {
