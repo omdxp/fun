@@ -2817,7 +2817,7 @@ test "hover resolves a chain ending in a call, including generic specialization 
 }
 
 test "a quirk-conforming impl's own method resolves, mangled name de-mangled correctly" {
-  // A quirk-conforming impl mangles its methods Type__Quirk__method
+  // A quirk-conforming impl mangles its methods Type__Shape__method
   // (three parts), not Type__method (two) like a plain impl; the
   // de-mangling helper only ever stripped one Type__ prefix, leaving
   // "Quirk__method" and never matching the bare method name a reader
@@ -3550,7 +3550,7 @@ test "hover resolves a quirk-typed receiver's own method, not just a concrete on
 }
 
 test "hover resolves a method called on a parenthesized receiver chain, not just a bare one" {
-  // User-reported (examples/advanced/async_quirk_await_parenthesized_receiver.fn).
+  // User-reported (examples/advanced/async_shape_await_parenthesized_receiver.fn).
   // chain_receiver's own backward walk always assumed a ')' immediately
   // before a '.' meant a function call (looking for a callee identifier
   // right before the matching '('), so `(pack(q).v).add(1)` - a plain
@@ -3592,7 +3592,7 @@ test "hover resolves a method called on a parenthesized receiver chain, not just
 }
 
 test "hover resolves a method on a chain whose own paren group ends in a dereferenced call" {
-  // User-reported (examples/advanced/async_quirk_await_pointer_receiver.fn,
+  // User-reported (examples/advanced/async_shape_await_pointer_receiver.fn,
   // `let out3 = await ((*ptr(&b)).v).add(1);`). The parenthesized-group fix
   // above only handled a group whose own inner tail was a nameable
   // identifier (a bare local or field); here the outer group's inner tail
@@ -4817,7 +4817,7 @@ test "let inference dispatches a method call through a value typed as a quirk, n
   // falling back to the quirk's own declared signature - a quirk-typed
   // field or local's own method call (dispatched dynamically at
   // runtime) never resolved at all. User-reported, from
-  // examples/advanced/async_quirk_await_pointer_receiver.fn.
+  // examples/advanced/async_shape_await_pointer_receiver.fn.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;

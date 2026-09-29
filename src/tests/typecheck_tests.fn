@@ -341,7 +341,7 @@ test "an impl supplies every method its quirk requires" {
 }
 
 test "a missing quirk method is reported at its own impl block, not file start" {
-  // check_quirk_conformance used to call self.fail with a nil node, so
+  // check_shape_conformance used to call self.fail with a nil node, so
   // every such error landed at line 0 col 0 regardless of where the
   // offending impl actually was, useless for an editor pointing a
   // squiggle at it, and indistinguishable from a second, unrelated
@@ -929,7 +929,7 @@ test "a mixed bound list accepts both a concrete type and a quirk implementor" {
 test "a bound naming a generic quirk's own self-referential instantiation accepts a real implementor" {
   // `T: Steppable<T>` renders its own bound text as the literal,
   // unsubstituted "Steppable<T>" at the point the bound is declared -
-  // `implements_quirk` only ever keys its registry on a quirk's bare
+  // `implements_shape` only ever keys its registry on a quirk's bare
   // name ("Steppable"), so this needs the bound's own `<...>` suffix
   // stripped before the membership lookup, or a real implementor
   // (Counter here) is wrongly rejected no matter what. Also covers the

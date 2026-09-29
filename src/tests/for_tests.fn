@@ -243,7 +243,7 @@ test "a for loop over a pointer to a collection iterates the value it points to"
   `use std.map;
   `use std.set;
   `use std.option;
-  `use std.quirks;
+  `use std.shapes;
   `compound Counter { num cur; num end; }
   `impl Counter as Iterator<num> {
   `  pub next() Option<num> {
@@ -305,7 +305,7 @@ test "a for loop over a pointer to a collection iterates the value it points to"
 test "a for loop over a plain iterator type iterates a copy, leaving the variable and other loops alone" {
   str src = `use std.c.io;
   `use std.option;
-  `use std.quirks;
+  `use std.shapes;
   `compound Counter { num cur; num end; }
   `impl Counter as Iterator<num> {
   `  pub next() Option<num> {

@@ -37,7 +37,7 @@ test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method
   `  printf("%lld\n", qa.to_b().to_c().gv());
   `  ret 0;
   `}`;
-  str out = run_source(src, "deep_quirk_chain_3level", "ra3: deep method chains");
+  str out = run_source(src, "deep_shape_chain_3level", "ra3: deep method chains");
   assert equals(out, "123\n"), "expected the 3-level quirk chain to dispatch to the innermost value";
 }
 
@@ -615,7 +615,7 @@ test "a plain type's call-based next() fallback supports the two-name enumerate 
 test "a plain type's call-based next() fallback supports destructuring a tuple Elem" {
   // Same reasoning as the enumerate test above, for the destructure
   // form and a tuple-shaped `Elem` - the fallback's own `elem_dt` used
-  // to come from string-stripping `quirk_concrete_instantiation`, which
+  // to come from string-stripping `shape_concrete_instantiation`, which
   // never represented a tuple at all.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
@@ -743,7 +743,7 @@ sequential test "the watchdog stops a program waiting on a channel nothing sends
 
 test "a value renders through Display when written as {}" {
   str src = `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `compound Point {
   `  num x;
   `}
@@ -767,7 +767,7 @@ test "a value renders through Display when written as {}" {
 
 test "every branch of an exhaustive fit can render through Display" {
   str src = `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `enum Shape {
   `  Dot,
   `  Line,
@@ -804,7 +804,7 @@ test "an explicit '{ptr}' shows the raw pointer even when the pointee implements
   // string explicitly wrote '{ptr}' asking for the raw address. '{}'
   // (a bare placeholder) still prefers Display, unaffected.
   str src = `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `compound Point {
   `  num x;
   `}
@@ -836,7 +836,7 @@ test "an explicit '{ptr}' shows the raw pointer even when the pointee implements
 test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
   StringBuilder src_b = string_builder_init(256);
   src_b.append("use std.io;\n");
-  src_b.append("use std.quirks;\n");
+  src_b.append("use std.shapes;\n");
   src_b.append("compound Node {\n");
   src_b.append("  num v;\n");
   src_b.append("  Node* next;\n");
@@ -868,7 +868,7 @@ test "'{ptr}' skips Display even nested inside a raw (backtick) format string" {
 
 test "'{ptr}' vs Display renders correctly at runtime" {
   str src = `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `compound Point {
   `  num x;
   `}
@@ -898,7 +898,7 @@ test "'{ptr}' vs Display renders correctly at runtime" {
 
 test "'{ptr}' skips Display under MSVC codegen too, not just the GNU path" {
   str src = `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `compound Point {
   `  num x;
   `}
@@ -1606,7 +1606,7 @@ test "a self-referential generic-quirk bound (T: Quirk<T>) monomorphizes for a r
   `  printf("%lld\n", n.v);
   `  ret 0;
   `}`;
-  let out = run_source(src, "self_ref_quirk_bound", "a self-referential quirk bound monomorphizes for a real implementor");
+  let out = run_source(src, "self_ref_shape_bound", "a self-referential quirk bound monomorphizes for a real implementor");
   assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
 }
 
@@ -1619,7 +1619,7 @@ test "a generic user type implementing Iterator<T> directly on itself works in a
   // registered generic Iterator impls, so a user's own generic type
   // gets identical treatment.
   str src = `use std.c.io;
-  `use std.quirks;
+  `use std.shapes;
   `use std.option;
   `compound Counter { num v; }
   `impl Counter as Steppable<Counter> {
@@ -1668,7 +1668,7 @@ test "a next() body calling a further quirk method through self.<field> falls ba
   // which IS still inlined - see "range for loop desugars into a Range
   // value" nearby.
   str src = `use std.c.io;
-  `use std.quirks;
+  `use std.shapes;
   `use std.option;
   `compound Counter { num v; }
   `impl Counter as Steppable<Counter> {

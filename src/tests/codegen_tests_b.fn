@@ -442,7 +442,7 @@ test "a generic compound's impl of a plain quirk coerces and dispatches dynamica
   `}`;
   str out = run_source(
     src,
-    "generic_quirk_dispatch",
+    "generic_shape_dispatch",
     "a generic compound's impl of a plain quirk coerces and dispatches dynamically"
   );
   assert contains(out, "8"), "expected sizeof(num) through the dynamically-dispatched quirk call";
@@ -466,7 +466,7 @@ test "two instantiations of the same generic compound's quirk impl share one vta
   `}`;
   str out = run_source(
     src,
-    "generic_quirk_dispatch_shared_vtable",
+    "generic_shape_dispatch_shared_vtable",
     "two instantiations of the same generic compound's quirk impl share one vtable"
   );
   assert contains(out, "8 8 18"), "expected both instantiations to dispatch through their own coercion";
@@ -2378,7 +2378,7 @@ test "-g debug info tags a printf-style call's own MSVC-hoisted vararg temps" {
   // MSVC path specifically to catch.
   str src = `use std.option;
   `use std.io;
-  `use std.quirks;
+  `use std.shapes;
   `compound Point {
   `  num x;
   `  num y;
