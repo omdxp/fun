@@ -3,7 +3,7 @@
 use std.map;
 use std.vec;
 use std.string;
-use std.quirks;
+use std.shapes;
 use std.option;
 use std.c.mem;
 

@@ -3,7 +3,7 @@
 // other `Iterator`-implementing value, rather than a special form the
 // compiler hand-codes on its own.
 
-use quirks;
+use shapes;
 use option;
 
 pub compound Range {

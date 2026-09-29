@@ -1,9 +1,9 @@
-// Collection quirks and helpers.
+// Collection shapes and helpers.
 
-use std.quirks;
+use std.shapes;
 
-// Collection quirk for basic size introspection.
-pub quirk Collection {
+// Collection shape for basic size introspection.
+pub shape Collection {
   // Returns the number of elements.
   len() num;
   // Returns true when the collection is empty.
@@ -20,7 +20,7 @@ pub fun is_empty_of(Sized s) flag {
   ret s.is_empty();
 }
 
-// Clears a collection-like value via the Clearable quirk.
+// Clears a collection-like value via the Clearable shape.
 pub fun clear_of(Clearable c) {
   c.clear();
 }

@@ -4,7 +4,7 @@ use std.c.mem;
 use std.c.string;
 use std.string;
 use std.vec;
-use std.quirks;
+use std.shapes;
 use std.option;
 
 // Generic open-addressing hash map.
@@ -648,14 +648,14 @@ test "a map grows past its first capacity and keeps every entry" {
   m.free();
 }
 
-test "clear, clone and the quirks" {
+test "clear, clone and the shapes" {
   Map<str, num> m = _sample_map();
   Map<str, num> copy = m.clone();
   copy.put("d", 4);
   assert m.len() == 3 && copy.len() == 4 && copy.get("a") == 1, "expected an independent copy with the same entries";
   Clearable c = &copy;
   c.clear();
-  assert copy.is_empty() && m.len() == 3, "expected clear through the quirk to empty only the copy";
+  assert copy.is_empty() && m.len() == 3, "expected clear through the shape to empty only the copy";
   m.clear();
   assert m.is_empty() && !m.has("a"), "expected clear to empty the map";
   m.put("x", 1);

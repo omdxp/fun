@@ -1,11 +1,11 @@
-// Common quirks (traits) implemented across stdlib types.
+// Common shapes (traits) implemented across stdlib types.
 //
 // ```
 // fun len_of(Sized s) num { ret s.len(); }
 // ```
 
 // Basic size/introspection for collections.
-pub quirk Sized {
+pub shape Sized {
   // Returns the number of elements or items.
   len() num;
   // Returns true when there are no elements or items.
@@ -14,13 +14,13 @@ pub quirk Sized {
 
 // Types that can render themselves as a string. Implemented by the collections,
 // Error, and the serialization value types so any of them can be `to_string`-ed.
-pub quirk Display {
+pub shape Display {
   // Renders the value as text.
   to_string() str;
 }
 
 // Types that can clear internal state (Vec, Map, Set, StringBuilder).
-pub quirk Clearable {
+pub shape Clearable {
   // Reset the value to an empty/cleared state.
   clear() void;
 }
@@ -40,19 +40,19 @@ pub quirk Clearable {
 //   }
 // }
 // ```
-pub quirk Iterator<T> {
+pub shape Iterator<T> {
   // Advances and returns `Some(item)` while elements remain, `None` once exhausted.
   next() Option<T>;
 }
 
 // Any type with a well-defined "next value" and "reached the end"
 // notion, self-referential the same way `Iterator<T>` is:
-// `impl MyType as Steppable<MyType> { ... }` binds the quirk's own T to
+// `impl MyType as Steppable<MyType> { ... }` binds the shape's own T to
 // the implementing type itself, giving `succ()`/`reached()` a concrete
 // return/argument type with no separate `Self` keyword needed. Drives
 // `StepRange<T>` (`std.step_range`), which iterates `[start, end)` over
 // any `T: Steppable<T>` the same way `Range` already does for `num`.
-pub quirk Steppable<T> {
+pub shape Steppable<T> {
   // The value one step after this one.
   succ() T;
   // True once this value has reached or passed `end`.
@@ -72,14 +72,14 @@ pub quirk Steppable<T> {
 //   }
 // }
 // let doc = p.to();               // direct method call
-// JsonValue doc2 = to_json_value(&p); // quirk-typed parameter (see std.json)
+// JsonValue doc2 = to_json_value(&p); // shape-typed parameter (see std.json)
 // ```
 //
 // Dispatches both via a direct method call (`value.to()`) and through a
-// concrete instantiation used as a quirk-typed parameter or variable
+// concrete instantiation used as a shape-typed parameter or variable
 // (`fun f(To<JsonValue> v) { ret v.to(); }`, then `f(&point)` for any type
 // implementing `To<JsonValue>`).
-pub quirk To<T> {
+pub shape To<T> {
   // Produce a `T` from this value.
   to() T;
 }
@@ -96,7 +96,7 @@ pub quirk To<T> {
 // }
 // cfg.from(doc);
 // ```
-pub quirk From<T> {
+pub shape From<T> {
   // Apply state to this value from a `T` (best-effort; missing data takes defaults).
   from(T value);
 }
@@ -113,7 +113,7 @@ pub quirk From<T> {
 // }
 // let copy = original.clone();
 // ```
-pub quirk Clonable<T> {
+pub shape Clonable<T> {
   // Returns an independent copy of this value.
   clone() T;
 }

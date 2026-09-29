@@ -5,7 +5,7 @@
 // own: construct it directly, `for x : StepRange<MyType>{start = a,
 // end = b} { ... }`.
 
-use quirks;
+use shapes;
 use option;
 
 pub compound StepRange<T: Steppable<T>> {

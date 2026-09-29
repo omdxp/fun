@@ -22,7 +22,7 @@ use std.result;
 use std.error;
 use std.string;
 use std.math;
-use std.quirks;
+use std.shapes;
 use std.c.mem;
 
 // Any JSON value. Arrays and objects nest recursively.
@@ -629,7 +629,7 @@ impl JsonValue as To<str> {
 // --- Structured (de)serialization for your own compounds -----------------------------
 
 // Convert your own compounds to/from a structured `JsonValue` with the generic
-// `std.quirks.To<T>`/`From<T>` quirks. Fun has no reflection/derive, so
+// `std.shapes.To<T>`/`From<T>` shapes. Fun has no reflection/derive, so
 // implement these by hand — the explicit equivalent of a derived serializer:
 //
 // ```
@@ -653,7 +653,7 @@ impl JsonValue as To<str> {
 // ```
 //
 // Dispatch directly (`p.to()`, `back.from(doc)`) or through the free-function
-// wrappers below, which accept any `To<JsonValue>` implementer via a quirk-typed
+// wrappers below, which accept any `To<JsonValue>` implementer via a shape-typed
 // parameter.
 
 // Convert any `To<JsonValue>` implementer into a `JsonValue`.

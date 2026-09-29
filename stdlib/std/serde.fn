@@ -1,7 +1,7 @@
-// Serialization built on `std.quirks`' generic `To<T>`/`From<T>`. A type
+// Serialization built on `std.shapes`' generic `To<T>`/`From<T>`. A type
 // that converts to/from `str` (e.g. `impl TomlDoc as From<str>`) is what
 // serializable means here — there's no separate `Serialize`/`Deserialize`
-// quirk, and the same primitive generalizes to other target types (e.g.
+// shape, and the same primitive generalizes to other target types (e.g.
 // `std.json` targets `JsonValue`).
 //
 // ```
@@ -10,10 +10,10 @@
 // ```
 //
 // For structured, typed (de)serialization of your own compounds, see
-// `std.quirks`'s `To<JsonValue>`/`From<JsonValue>`. Fun has no reflection or
+// `std.shapes`'s `To<JsonValue>`/`From<JsonValue>`. Fun has no reflection or
 // derive macros, so each type hand-implements the conversion.
 
-use std.quirks;
+use std.shapes;
 
 // Convert any `To<str>` implementer to text.
 pub fun to_string(To<str> value) str {

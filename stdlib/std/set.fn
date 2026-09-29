@@ -3,7 +3,7 @@
 use std.map;
 use std.vec;
 use std.string;
-use std.quirks;
+use std.shapes;
 use std.option;
 
 // Generic set backed by Map<T, flag>.
@@ -261,7 +261,7 @@ test "union, intersection, difference and subset" {
   small.free();
 }
 
-test "a set lists its keys, iterates, clones and clears through its quirks" {
+test "a set lists its keys, iterates, clones and clears through its shapes" {
   Set<num> s = _num_set(4, 5, 6);
   Vec<num> keys = s.keys();
   assert keys.len == 3, "expected three keys";
@@ -278,7 +278,7 @@ test "a set lists its keys, iterates, clones and clears through its quirks" {
   assert s.len() == 3 && copy.len() == 4, "expected a clone to be independent";
   Clearable c = &copy;
   c.clear();
-  assert copy.is_empty(), "expected clear through the quirk";
+  assert copy.is_empty(), "expected clear through the shape";
   s.free();
   copy.free();
 }
