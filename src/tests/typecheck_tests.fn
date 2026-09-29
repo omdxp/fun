@@ -2774,3 +2774,54 @@ test "a shape-downcast fit accepts a real implementor and rejects everything els
     "expected an ordinary enum fit to be unaffected by shape-downcast recognition"
   );
 }
+
+test "a shape-downcast fit rejects a generic implementor's own type" {
+  // An unbound generic impl (`impl Box<T> as Sized`) has no single
+  // concrete vtable to dispatch to at all - there's no way to write a
+  // valid destructure arm for it.
+  str msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<T> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    msg,
+    "'Box' is generic and has no single concrete implementation to downcast to"
+  ), "expected the unbound generic template to be rejected by name";
+
+  // A concrete instantiation (`impl Box<num> as Sized`) has a real
+  // vtable, but naming it directly by its own mangled form is rejected
+  // too - codegen can emit that vtable after the code referencing it,
+  // an ordering bug with no fix yet.
+  str mangled_msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box__num(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    mangled_msg,
+    "'Box__num' is a generic instantiation, which shape-downcast fit doesn't support yet"
+  ), "expected a mangled concrete-instantiation name to be rejected too, not just the bare template";
+}
