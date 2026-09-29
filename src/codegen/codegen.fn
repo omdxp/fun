@@ -11055,6 +11055,108 @@ impl Codegen {
   // `wrote_branch`. Each positional binding gets an `__auto_type name =
   // subj.payload.Variant._N;` declaration first, and is registered as a
   // known local when its payload field type is on record.
+  // The bare type name a shape-downcast fit arm names (`Circle(c) ->
+  // ...`), or empty when `condition` isn't that shape: a call whose
+  // callee is a plain, undotted identifier. Mirrors
+  // `typecheck.fn`'s own `_shape_destructure_type_name` - each layer
+  // keeps its own copy rather than sharing across files, same as
+  // `warnings.fn`'s independent `enum_variants` scan.
+  _fit_shape_destructure_type_name(Node* condition) str {
+    if condition == nil {
+      ret "";
+    }
+    fit condition.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") && e.has_left && e.left != nil {
+          fit e.left.kind {
+            .Identifier(name) -> { ret name; }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+    ret "";
+  }
+
+  // Emits one `fit` branch recovering the concrete type behind a
+  // shape-typed subject (`Circle(c) -> { ... }`): compares the fat
+  // pointer's `vtable` field against that concrete impl's own singleton
+  // vtable instance, already emitted unconditionally for every concrete
+  // shape impl in the whole program (`emit_shape_vtable_machinery`, run
+  // from the top-level impl pass before any function body), so the
+  // symbol referenced here is always already defined by the time a
+  // `fit` block reaches it.
+  emit_fit_shape_branch(
+    str subj_name,
+    flag subj_is_pointer,
+    str shape_name,
+    str type_name,
+    FitBranch br,
+    flag wrote_branch
+  ) Option<CodegenErrorKind> {
+    if wrote_branch {
+      self.state.write(" else if (");
+    } else {
+      self.state.write("if (");
+    }
+    self.state.write(subj_name);
+    if subj_is_pointer {
+      self.state.write("->");
+    } else {
+      self.state.write(".");
+    }
+    self.state.write("vtable == &__fun_impl_");
+    self.state.write(type_name);
+    self.state.write("_");
+    self.state.write(shape_name);
+    self.state.write("_vtable) {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    Vec<Node*> written;
+    written.init(1);
+    defer written.free();
+    fit br.condition.kind {
+      .Expression(e) -> {
+        if e.has_right {
+          self.flatten_call_args(e.right, &written);
+        }
+      }
+      _ -> {}
+    }
+    if written.len == 1 {
+      fit written.get(0).kind {
+        .Identifier(bname) -> {
+          if !equals(bname, "_") {
+            self.state.write_indent();
+            self.state.write(type_name);
+            self.state.write("* ");
+            self.state.write(bname);
+            self.state.write(" = (");
+            self.state.write(type_name);
+            self.state.write("*)");
+            self.state.write(subj_name);
+            if subj_is_pointer {
+              self.state.write("->");
+            } else {
+              self.state.write(".");
+            }
+            self.state.write("self;\n");
+            self.record_local(bname, type_name, true);
+          }
+        }
+        _ -> {}
+      }
+    }
+    let berr = self.emit_body(*br.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
+    ret .None;
+  }
+
   emit_fit_enum_branch(
     str subj_name,
     flag subj_is_pointer,
@@ -11648,6 +11750,31 @@ impl Codegen {
       }
       if handled_as_enum {
         continue;
+      }
+
+      // Shape downcast arm (`Circle(c) -> { ... }`): only when the
+      // subject itself is shape-typed and the branch names a known
+      // implementor of it. Checked before the bindings guard just below,
+      // since `Circle(c)` parses as an ordinary call with no
+      // `br.bindings` populated (that field only ever comes from the
+      // dotted enum-shorthand destructure path handled above).
+      if subj_type.is_some() && self.shape_names.contains(subj_type.unwrap()) {
+        str shape_downcast_type = self._fit_shape_destructure_type_name(br.condition);
+        if !equals(shape_downcast_type, "") {
+          let sherr = self.emit_fit_shape_branch(
+            subj_name,
+            subj_is_pointer,
+            subj_type.unwrap(),
+            shape_downcast_type,
+            br,
+            wrote_branch
+          );
+          if sherr.is_some() {
+            ret sherr;
+          }
+          wrote_branch = true;
+          continue;
+        }
       }
 
       if br.has_bindings && br.bindings.len > 0 {
