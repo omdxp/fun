@@ -2126,7 +2126,18 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
         state.enum_variants.put(decl.name, names);
       }
       .Impl(i) -> {
-        if i.has_shape_name {
+        // A generic impl (`impl Box<T> as Sized`) or a concrete
+        // instantiation of one (`impl Box<num> as Sized`, `type_name`
+        // mangled to `Box__num`) is excluded here: shape-downcast `fit`
+        // syntax only ever writes a bare, ungenericized `Type(binding)`
+        // (see `_shape_destructure_type_name` in typecheck.fn, which
+        // rejects any type name involving generics before codegen ever
+        // sees it - a concrete generic instantiation's vtable can be
+        // emitted after the code referencing it, which C rejects, and
+        // that ordering isn't fixed yet), so neither is ever something a
+        // real arm could actually name. Demanding coverage of either
+        // would ask for an arm with no valid way to write it.
+        if i.has_shape_name && !i.has_type_params && !i.has_concrete_dtype {
           Vec<str> implementors;
           implementors.init(1);
           let existing = state.shape_implementors.at(i.shape_name);
