@@ -101,8 +101,8 @@ test "parses an async impl method" {
   }
 }
 
-test "parses an async quirk method signature" {
-  str src = `quirk AsyncQ {
+test "parses an async shape method signature" {
+  str src = `shape AsyncQ {
   `  async get() num;
   `}`;
   let st = parse_ok(src);
@@ -117,7 +117,7 @@ test "parses an async quirk method signature" {
   }
 }
 
-test "'shape' parses as a full synonym for 'quirk', generic constraints included" {
+test "'shape' with a generic constraint parses" {
   str src = `shape Named<T: num | str> {
   `  get() T;
   `}`;
@@ -125,7 +125,6 @@ test "'shape' parses as a full synonym for 'quirk', generic constraints included
   assert st.nodes.len == 1, "expected a single top-level node";
   fit st.nodes.get(0).kind {
     .Shape(q) -> {
-      assert q.spelled_shape, "expected the node to remember it was spelled 'shape'";
       assert equals(q.name, "Named"), "expected the name read correctly";
       assert q.is_generic && q.type_params.len == 1, "expected the generic type param parsed";
       assert q.methods.len == 1, "expected one method signature";
@@ -134,15 +133,16 @@ test "'shape' parses as a full synonym for 'quirk', generic constraints included
   }
 }
 
-test "'quirk' still parses and does not set the 'shape' spelling flag" {
+test "'quirk' is no longer a keyword - it lexes as an ordinary identifier" {
+  // The old spelling was removed once `shape` had shipped as the sole
+  // spelling for a release, mirroring the `bin`/`imp` removal. `quirk`
+  // now has no special meaning at all: two identifiers back to back
+  // with nothing between them is a plain parse error, the same as any
+  // other pair of unrelated words.
   str src = `quirk Named {
   `  get() num;
   `}`;
-  let st = parse_ok(src);
-  fit st.nodes.get(0).kind {
-    .Shape(q) -> { assert !q.spelled_shape, "expected 'quirk' to leave the shape flag false"; }
-    _ -> { panic("expected a Shape node"); }
-  }
+  assert parse_fails(src), "expected 'quirk Named' to fail to parse, 'quirk' is not a keyword";
 }
 
 test "parses an await expression" {
@@ -545,7 +545,7 @@ test "free_node_tree frees a tree touching every major node shape without corrup
   // can't assert bytes reclaimed - what it can assert is that freeing
   // a tree built from a wide variety of node shapes at once (an
   // impl's own generic method, a fit with a data-carrying enum, a
-  // for-each loop, a compound literal, nested calls, a quirk, a
+  // for-each loop, a compound literal, nested calls, a shape, a
   // constant) doesn't corrupt anything: parsing a second, unrelated
   // program right after still succeeds and reads back correctly, and
   // the whole test suite already runs this same free path under
@@ -559,7 +559,7 @@ test "free_node_tree frees a tree touching every major node shape without corrup
   `compound Box<T> {
   `  T value;
   `}
-  `quirk Greeter {
+  `shape Greeter {
   `  greet() str;
   `}
   `impl Box<T> {

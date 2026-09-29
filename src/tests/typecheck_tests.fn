@@ -312,25 +312,25 @@ test "a method body reads fields from the type it belongs to" {
   );
 }
 
-test "an impl supplies every method its quirk requires" {
+test "an impl supplies every method its shape requires" {
   rejects(
     `compound Point {
     `  num x;
     `}
-    `quirk Q {
+    `shape Q {
     `  a() num;
     `  b(num x) num;
     `}
     `impl Point as Q {
     `  a() num { ret 1; }
     `}`,
-    "expected the missing quirk method to be reported"
+    "expected the missing shape method to be reported"
   );
   accepts(
     `compound Point {
     `  num x;
     `}
-    `quirk Q {
+    `shape Q {
     `  a() num;
     `}
     `impl Point as Q {
@@ -340,7 +340,7 @@ test "an impl supplies every method its quirk requires" {
   );
 }
 
-test "a missing quirk method is reported at its own impl block, not file start" {
+test "a missing shape method is reported at its own impl block, not file start" {
   // check_shape_conformance used to call self.fail with a nil node, so
   // every such error landed at line 0 col 0 regardless of where the
   // offending impl actually was, useless for an editor pointing a
@@ -349,7 +349,7 @@ test "a missing quirk method is reported at its own impl block, not file start" 
   str src = `compound Point {
   `  num x;
   `}
-  `quirk Q {
+  `shape Q {
   `  a() num;
   `  b(num x) num;
   `}
@@ -366,18 +366,18 @@ test "a missing quirk method is reported at its own impl block, not file start" 
   Parser p = parser_new(&state);
   p.parse();
   let checked = typecheck_program(&state.nodes);
-  assert checked.is_err(), "expected the missing quirk method to be reported";
+  assert checked.is_err(), "expected the missing shape method to be reported";
   TypeError e = checked.unwrap_err();
   assert e.has_pos, "expected the error to carry a position";
   assert e.pos.line == 11, "expected the position at the 'impl Point as Q' line, not file start";
 }
 
-test "a quirk is not what a let infers" {
+test "a shape is not what a let infers" {
   rejects(
     `compound Point {
     `  num x;
     `}
-    `quirk HasX {
+    `shape HasX {
     `  get_x() num;
     `}
     `impl Point as HasX {
@@ -388,7 +388,7 @@ test "a quirk is not what a let infers" {
     `  Point p;
     `  let inferred = as_hasx(&p);
     `}`,
-    "expected a quirk not to be inferred"
+    "expected a shape not to be inferred"
   );
 }
 
@@ -576,12 +576,12 @@ test "a constrained type parameter accepts only what it lists" {
   );
 }
 
-test "an impl matches how its quirk declares a method" {
+test "an impl matches how its shape declares a method" {
   rejects(
     `compound Counter {
     `  num base;
     `}
-    `quirk AsyncCounter {
+    `shape AsyncCounter {
     `  async add(num x) num;
     `}
     `impl Counter as AsyncCounter {
@@ -593,7 +593,7 @@ test "an impl matches how its quirk declares a method" {
     `compound Counter {
     `  num base;
     `}
-    `quirk AsyncCounter {
+    `shape AsyncCounter {
     `  async add(num x) num;
     `}
     `impl Counter as AsyncCounter {
@@ -853,9 +853,9 @@ test "a method call inside the bound is accepted" {
   );
 }
 
-test "a quirk-bounded generic parameter accepts a real implementor" {
+test "a shape-bounded generic parameter accepts a real implementor" {
   accepts(
-    `quirk Renderable { render() str; }
+    `shape Renderable { render() str; }
     `compound Point { num x; }
     `impl Point as Renderable {
     `  render() str { ret "point"; }
@@ -865,16 +865,16 @@ test "a quirk-bounded generic parameter accepts a real implementor" {
     `  Point p;
     `  ret show(&p);
     `}`,
-    "expected a real quirk implementor accepted"
+    "expected a real shape implementor accepted"
   );
 }
 
-test "a quirk-bounded generic parameter rejects a non-implementor" {
+test "a shape-bounded generic parameter rejects a non-implementor" {
   // Renderable has no `impl Other as Renderable`, unlike `assignable`'s
-  // coarser any-pointer-satisfies-any-quirk approximation used for
-  // ordinary quirk-typed parameters - a bound is held to real membership.
+  // coarser any-pointer-satisfies-any-shape approximation used for
+  // ordinary shape-typed parameters - a bound is held to real membership.
   assert contains(
-    check(`quirk Renderable { render() str; }
+    check(`shape Renderable { render() str; }
     `compound Other { num v; }
     `fun show<T: Renderable>(T x) str { ret x.render(); }
     `fun main() str {
@@ -910,9 +910,9 @@ test "a generic-instantiation bound alternative rejects a mismatching instantiat
   ), "expected a type outside the bound list rejected";
 }
 
-test "a mixed bound list accepts both a concrete type and a quirk implementor" {
+test "a mixed bound list accepts both a concrete type and a shape implementor" {
   accepts(
-    `quirk Renderable { render() str; }
+    `shape Renderable { render() str; }
     `compound Point { num x; }
     `impl Point as Renderable {
     `  render() str { ret "point"; }
@@ -922,21 +922,21 @@ test "a mixed bound list accepts both a concrete type and a quirk implementor" {
     `  Point p;
     `  ret describe(5) + describe(&p);
     `}`,
-    "expected both the concrete type and the quirk implementor accepted"
+    "expected both the concrete type and the shape implementor accepted"
   );
 }
 
-test "a bound naming a generic quirk's own self-referential instantiation accepts a real implementor" {
+test "a bound naming a generic shape's own self-referential instantiation accepts a real implementor" {
   // `T: Steppable<T>` renders its own bound text as the literal,
   // unsubstituted "Steppable<T>" at the point the bound is declared -
-  // `implements_shape` only ever keys its registry on a quirk's bare
+  // `implements_shape` only ever keys its registry on a shape's bare
   // name ("Steppable"), so this needs the bound's own `<...>` suffix
   // stripped before the membership lookup, or a real implementor
   // (Counter here) is wrongly rejected no matter what. Also covers the
   // simpler, non-self-referential case (`T: To<num>`) the same way,
   // since the fix strips any bound's generic-arg suffix uniformly.
   accepts(
-    `quirk Steppable<T> { succ() T; }
+    `shape Steppable<T> { succ() T; }
     `compound Counter { num v; }
     `impl Counter as Steppable<Counter> {
     `  pub succ() Counter {
@@ -952,13 +952,13 @@ test "a bound naming a generic quirk's own self-referential instantiation accept
     `  let b = bump(a);
     `  ret b.v;
     `}`,
-    "expected a real implementor of a self-referential generic quirk bound accepted"
+    "expected a real implementor of a self-referential generic shape bound accepted"
   );
 }
 
-test "a bound naming a generic quirk's own instantiation still rejects a non-implementor" {
+test "a bound naming a generic shape's own instantiation still rejects a non-implementor" {
   assert contains(
-    check(`quirk Steppable<T> { succ() T; }
+    check(`shape Steppable<T> { succ() T; }
     `compound Other { num v; }
     `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
     `fun main() num {
@@ -1417,7 +1417,7 @@ test "printf's own %-specifiers are checked against the arguments passed, flag w
 test "a for loop's own two-variable form types a Map's key/value pair, not an always-num index" {
   accepts(
     `enum Option<T> { Some(T), None }
-    `quirk Iterator<T> { next() Option<T>; }
+    `shape Iterator<T> { next() Option<T>; }
     `compound Map<K, V> {
     `  K k;
     `  V v;
@@ -2605,12 +2605,12 @@ test "a fit tuple pattern rejects matching against a non-tuple subject" {
 }
 
 test "a for loop's own item resolves the real Elem of a direct Iterator<T> implementor" {
-  // `quirk_arg_of` replacing the earlier `checked_unknown()` fallback:
+  // `shape_arg_of` replacing the earlier `checked_unknown()` fallback:
   // a field access on the loop item only type-checks if its real
   // element type (Box, not Unknown) actually resolved.
   accepts(
     `enum Option<T> { Some(T), None }
-    `quirk Iterator<T> { next() Option<T>; }
+    `shape Iterator<T> { next() Option<T>; }
     `compound Box { num n; }
     `compound Boxes { num idx; num limit; }
     `impl Boxes as Iterator<Box> {
@@ -2634,7 +2634,7 @@ test "a for loop's own item resolves the real Elem of a direct Iterator<T> imple
 test "a for loop's own destructuring form works over a direct Iterator<T> implementor, not just Vec" {
   accepts(
     `enum Option<T> { Some(T), None }
-    `quirk Iterator<T> { next() Option<T>; }
+    `shape Iterator<T> { next() Option<T>; }
     `compound Pairs { num idx; num limit; }
     `impl Pairs as Iterator<(num, num)> {
     `  pub next() Option<(num, num)> {
@@ -2658,7 +2658,7 @@ test "a for loop's own destructuring form works over a direct Iterator<T> implem
 test "a for loop's own two-name form enumerates a direct Iterator<T> implementor's non-tuple Elem" {
   accepts(
     `enum Option<T> { Some(T), None }
-    `quirk Iterator<T> { next() Option<T>; }
+    `shape Iterator<T> { next() Option<T>; }
     `compound Letters { num idx; num limit; }
     `impl Letters as Iterator<num> {
     `  pub next() Option<num> {
