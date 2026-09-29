@@ -1426,7 +1426,7 @@ impl ParseState {
       if !(token_is_keyword(t, "compound") || token_is_keyword(t, "enum") || token_is_keyword(
         t,
         "quirk"
-      )) {
+        ) || token_is_keyword(t, "shape")) {
         continue;
       }
       num j = i;
@@ -7222,9 +7222,26 @@ impl Parser {
   // `parse_type_params_with_constraints` so `T: a | b` constraint syntax
   // parses here too.
   pub parse_quirk(flag is_public) Option<ParseErrorKind> {
-    let kwerr = self.state.expect_keyword("quirk");
-    if kwerr.is_some() {
-      ret kwerr;
+    // Accepts either spelling of the keyword - the caller has already
+    // peeked and confirmed it is one or the other, so this just consumes
+    // it and remembers which, rather than hard-failing on one spelling
+    // the way a plain `expect_keyword("quirk")` would.
+    flag spelled_shape = false;
+    flag kw_matched = false;
+    fit self.state.token_next() {
+      .Some(t) -> {
+        if token_is_keyword(t, "shape") {
+          kw_matched = true;
+          spelled_shape = true;
+        } elif token_is_keyword(t, "quirk") {
+          kw_matched = true;
+        }
+      }
+      .None -> {}
+    }
+    if !kw_matched {
+      self.state.err("expected keyword 'quirk' or 'shape'");
+      ret .Some(.InvalidKeyword);
     }
 
     let name_tok = self.state.token_next();
@@ -7398,6 +7415,7 @@ impl Parser {
     qn.type_params = type_params;
     qn.type_param_defaults = type_param_defaults;
     qn.has_type_params = type_params.len > 0;
+    qn.spelled_shape = spelled_shape;
 
     Node node = node_new(.Quirk(qn));
     node.pos = name_tok.unwrap().pos;
@@ -7915,7 +7933,7 @@ impl Parser {
         ret self.parse_enum(false);
       }
 
-      if equals(kw, "quirk") {
+      if equals(kw, "quirk") || equals(kw, "shape") {
         ret self.parse_quirk(false);
       }
 
@@ -7957,7 +7975,7 @@ impl Parser {
           if equals(nkw, "enum") {
             ret self.parse_enum(true);
           }
-          if equals(nkw, "quirk") {
+          if equals(nkw, "quirk") || equals(nkw, "shape") {
             ret self.parse_quirk(true);
           }
           if equals(nkw, "impl") {
