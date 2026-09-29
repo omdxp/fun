@@ -2029,7 +2029,10 @@ test "the result forms name what happened" {
   RecvResult<num> got = ch.recv_result();
   fit got {
     .Ok(v) -> { assert v == 5, "expected the value"; }
-    _ -> { assert false, "expected an ok result"; }
+    _ -> {
+      allow assert_constant, "reports the wrong result variant if receiving regresses";
+      assert false, "expected an ok result";
+    }
   }
   assert equals(_recv_kind(ch.try_recv_result()), "timeout"), "expected the empty case to be reported as a timeout";
   assert equals(_recv_kind(ch.recv_result_timeout(2)), "timeout"), "expected a timeout";

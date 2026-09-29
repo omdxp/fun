@@ -835,6 +835,7 @@ test "the print helpers write to standard output" {
   print_flag(false);
   print_fmt("{} ", "fmt");
   println_fmt("{num}", 3);
+  allow assert_constant, "documents that reaching this line means every printer returned";
   assert true, "expected every printer to return";
 }
 
@@ -926,6 +927,7 @@ test "opening a missing file fails, and a closed file refuses everything" {
   assert !closed.flush() && closed.try_flush().is_err(), "expected flush to fail";
   closed.rewind();
   closed.close();
+  allow assert_constant, "documents that rewind and close on a closed file are harmless";
   assert true, "expected rewind and close on a closed file to be harmless";
 }
 

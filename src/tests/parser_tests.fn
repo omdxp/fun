@@ -569,7 +569,10 @@ test "free_node_tree frees a tree touching every major node shape without corrup
     .Function(f) -> {
       assert equals(f.name, "add"), "expected its own name read back correctly";
     }
-    _ -> { assert false, "expected a function declaration"; }
+    _ -> {
+      allow assert_constant, "reports the wrong node kind if parsing regresses";
+      assert false, "expected a function declaration";
+    }
   }
 }
 

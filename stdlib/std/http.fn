@@ -1202,7 +1202,10 @@ test "http_method_name/http_method_from_name round-trip every method" {
   assert parsed.is_some(), "expected 'POST' to parse to something";
   fit parsed.unwrap() {
     .Post -> {}
-    _ -> { assert false, "expected 'POST' to parse back to .Post"; }
+    _ -> {
+      allow assert_constant, "reports the wrong method variant if parsing regresses";
+      assert false, "expected 'POST' to parse back to .Post";
+    }
   }
   assert http_method_from_name("TRACE").is_none(), "expected an unmodeled verb to read as none";
 }
@@ -1210,13 +1213,19 @@ test "http_method_name/http_method_from_name round-trip every method" {
 test "http_status_from_code/http_status_code round-trip named codes, and Unknown covers the rest" {
   fit http_status_from_code(404) {
     .NotFound -> {}
-    _ -> { assert false, "expected 404 to name its own variant"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected 404 to name its own variant";
+    }
   }
   assert http_status_code(.NotFound) == 404, "expected .NotFound's own code back";
 
   fit http_status_from_code(418) {
     .Unknown(code) -> { assert code == 418, "expected the real code preserved in Unknown"; }
-    _ -> { assert false, "expected an unmodeled code to fall back to Unknown"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected an unmodeled code to fall back to Unknown";
+    }
   }
   assert http_status_code(.Unknown(999)) == 999, "expected Unknown's own code back";
 
@@ -1250,7 +1259,10 @@ test "parse_http_response reads status line, headers, and a plain body" {
   let resp = result.unwrap();
   fit resp.status {
     .NotFound -> {}
-    _ -> { assert false, "expected the real status to parse to .NotFound"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected the real status to parse to .NotFound";
+    }
   }
   assert resp.status_code() == 404, "expected the real numeric status code";
   assert equals(resp.body, "not found"), "expected the real body";
@@ -1268,7 +1280,10 @@ test "parse_http_response decodes a chunked body" {
   let resp = result.unwrap();
   fit resp.status {
     .Ok -> {}
-    _ -> { assert false, "expected 200 to parse to .Ok"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected 200 to parse to .Ok";
+    }
   }
   assert equals(resp.body, "hello world"), "expected the chunks decoded and concatenated";
 }
@@ -1380,7 +1395,10 @@ test "http_post sends a real body and a real Content-Length, and the server actu
   let resp = result.unwrap();
   fit resp.status {
     .Created -> {}
-    _ -> { assert false, "expected 201 to parse to .Created"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected 201 to parse to .Created";
+    }
   }
   assert starts_with(srv.received_request, "POST /items HTTP/1.1"), "expected the real request line";
   assert index_of_str(srv.received_request, "Content-Length: 17") != -1, "expected a real, correctly computed Content-Length header";
@@ -1453,7 +1471,10 @@ test "http_get follows a 302 redirect to a real second server and returns its re
   let resp = result.unwrap();
   fit resp.status {
     .Ok -> {}
-    _ -> { assert false, "expected the final response's real 200 status"; }
+    _ -> {
+      allow assert_constant, "reports the wrong status variant if parsing regresses";
+      assert false, "expected the final response's real 200 status";
+    }
   }
   assert equals(resp.body, "landed here"), "expected the real body from the redirect target, not the redirecting server";
   assert starts_with(to_srv.received_request, "GET /landed HTTP/1.1"), "expected the redirect target to actually receive a real request";
@@ -1518,7 +1539,10 @@ test "parse_http_request reads a real GET request line, headers, and no body" {
   let req = result.unwrap();
   fit req.method {
     .Get -> {}
-    _ -> { assert false, "expected the real method parsed from the request line"; }
+    _ -> {
+      allow assert_constant, "reports the wrong method variant if parsing regresses";
+      assert false, "expected the real method parsed from the request line";
+    }
   }
   assert equals(req.path, "/items?id=5"), "expected the real path (query string included) from the request line";
   let accept = req.header("Accept");
@@ -1534,7 +1558,10 @@ test "parse_http_request reads a real POST request's body via Content-Length" {
   let req = result.unwrap();
   fit req.method {
     .Post -> {}
-    _ -> { assert false, "expected the real method parsed from the request line"; }
+    _ -> {
+      allow assert_constant, "reports the wrong method variant if parsing regresses";
+      assert false, "expected the real method parsed from the request line";
+    }
   }
   assert equals(req.path, "/items"), "expected the real path";
   assert equals(req.body, "hello, world!"), "expected the real body";
