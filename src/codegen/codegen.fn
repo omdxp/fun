@@ -2686,12 +2686,69 @@ impl Codegen {
     Vec<flag> arg_is_pointer,
     Vec<DataType*> arg_dtypes
   ) {
+    // More than one impl can share the same (base_name, shape_name,
+    // argument count) - `impl Wrapper<Circle> as Sized` and `impl
+    // Wrapper<Square> as Sized` both look identical to this search by
+    // name and arity alone, since an already-declared type used as a
+    // generic argument is stored exactly like a fresh type-param name
+    // (the parser can't tell them apart at that position; see
+    // `Checker.shape_impl_type_params`'s own doc comment for the same
+    // ambiguity on the typecheck side). Without this pre-scan, whichever
+    // one happened to be declared first would be used for EVERY
+    // instantiation sharing that arity, producing a method whose real
+    // name is correctly `Wrapper__Square__Sized__len` (from
+    // `shape_inst_override_name`) but whose parameter type is wrongly
+    // `Wrapper__Circle*` (Circle's own impl body, never touched by
+    // substitution below - substitution only replaces the COMPOUND's own
+    // declared param name, e.g. "T", which neither "Circle" nor "Square"
+    // ever literally is). A real, still-abstract template (`impl Box<T>
+    // as Sized`) is unaffected: "T" never equals a real concrete
+    // argument name, so no exact match is ever found for it here, and
+    // the existing arity-only matching below still applies unchanged.
+    flag exact_match_exists = false;
+    for tmpl0 : self.generic_impl_templates {
+      fit tmpl0.kind {
+        .Impl(i0) -> {
+          if !equals(i0.type_name, base_name) || !i0.has_shape_name ||
+            i0.has_shape_concrete_instantiation || i0.type_params.len != arg_type_names.len {
+            continue;
+          }
+          flag all_eq = true;
+          num pj = 0;
+          for pj < i0.type_params.len {
+            if !equals(i0.type_params.get(pj), arg_type_names.get(pj)) {
+              all_eq = false;
+              break;
+            }
+            pj = pj + 1;
+          }
+          if all_eq {
+            exact_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || !i.has_shape_name ||
             i.has_shape_concrete_instantiation || i.type_params.len != arg_type_names.len {
             continue;
+          }
+          if exact_match_exists {
+            flag this_is_exact = true;
+            num pj2 = 0;
+            for pj2 < i.type_params.len {
+              if !equals(i.type_params.get(pj2), arg_type_names.get(pj2)) {
+                this_is_exact = false;
+                break;
+              }
+              pj2 = pj2 + 1;
+            }
+            if !this_is_exact {
+              continue;
+            }
           }
           // `i.has_shape_concrete_instantiation` only flags a generic
           // shape already resolved to concrete args at the impl (`impl

@@ -566,15 +566,18 @@ fun _free_shape_implementors_map(Map<str, Set<str>>* implementors) {
   implementors.free();
 }
 
-// Frees a whole `Map<str, Vec<str>>` where every value's own strings are
-// borrowed from the AST (never a fresh allocation) - same shape as
+// Frees a whole `Map<str, Vec<Vec<str>>>` where every value's own strings
+// are borrowed from the AST (never a fresh allocation) - same shape as
 // `_free_shape_implementors_map` just above, for `Checker.shape_impl_type_params`.
-fun _free_shape_impl_type_params_map(Map<str, Vec<str>>* type_params_by_key) {
+fun _free_shape_impl_type_params_map(Map<str, Vec<Vec<str>>>* type_params_by_key) {
   Vec<str> keys = type_params_by_key.keys();
   defer keys.free();
   for k : keys {
-    Vec<str> bucket = type_params_by_key.at(k).unwrap();
-    bucket.free();
+    Vec<Vec<str>> entries = type_params_by_key.at(k).unwrap();
+    for e : entries {
+      e.free();
+    }
+    entries.free();
   }
   type_params_by_key.free();
 }
@@ -981,7 +984,12 @@ compound Checker {
   // (`Box__Circle(b)`, what `Box<Circle>(b)` parses to) needs this to
   // reconstruct that same mangled identity and confirm which case it
   // actually is - see `check_shape_destructure_condition`.
-  Map<str, Vec<str>> shape_impl_type_params;
+  // One entry per distinct impl matching that key - `impl Box<num> as
+  // Sized` and `impl Box<str> as Sized` both key to "Box::Sized", each
+  // contributing its own `type_params` list, since the base+shape name
+  // alone doesn't distinguish them (only the reconstructed mangled
+  // identity does).
+  Map<str, Vec<Vec<str>>> shape_impl_type_params;
   // A shape implementor's own declared argument type for that shape
   // (`Range` -> `num` for `impl Range as Iterator<num>`), keyed by
   // `"{type_name}::{shape_name}"` - lets a for-loop's own general
@@ -3651,8 +3659,8 @@ impl Checker {
     }
     let keys = self.shape_impl_type_params.keys();
     for k : keys {
-      let tps_opt = self.shape_impl_type_params.at(k);
-      if tps_opt.is_none() {
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
         continue;
       }
       num sep = last_index_of_char(k, ':');
@@ -3666,21 +3674,31 @@ impl Checker {
       if !equals(this_shape, shape_name) {
         continue;
       }
-      Vec<str> tps = tps_opt.unwrap();
-      StringBuilder recon_sb = string_builder_init(16);
-      recon_sb.append(base_name);
-      for tp : tps {
-        recon_sb.append("__");
-        recon_sb.append(tp);
-      }
-      str reconstructed = recon_sb.build();
-      if !equals(reconstructed, type_name) {
-        continue;
-      }
-      for tp : tps {
-        if !self._is_known_concrete_name(tp) {
-          ret .Generic;
+      // More than one impl can share this base+shape key (`impl Box<num>
+      // as Sized` and `impl Box<str> as Sized` both key to "Box::Sized"),
+      // so every candidate's own reconstruction is tried, not just one.
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      flag matched_entry = false;
+      for tps : entries {
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
         }
+        if !equals(recon_sb.build(), type_name) {
+          continue;
+        }
+        matched_entry = true;
+        for tp : tps {
+          if !self._is_known_concrete_name(tp) {
+            ret .Generic;
+          }
+        }
+        break;
+      }
+      if !matched_entry {
+        continue;
       }
       ret .Concrete;
     }
@@ -3699,8 +3717,8 @@ impl Checker {
   _reconstruct_generic_checked_type(str type_name) Option<CheckedType> {
     let keys = self.shape_impl_type_params.keys();
     for k : keys {
-      let tps_opt = self.shape_impl_type_params.at(k);
-      if tps_opt.is_none() {
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
         continue;
       }
       num sep = last_index_of_char(k, ':');
@@ -3708,27 +3726,32 @@ impl Checker {
         continue;
       }
       str base_name = substr(k, 0, sep - 1);
-      Vec<str> tps = tps_opt.unwrap();
-      StringBuilder recon_sb = string_builder_init(16);
-      recon_sb.append(base_name);
-      for tp : tps {
-        recon_sb.append("__");
-        recon_sb.append(tp);
+      // More than one impl can share this base+shape key (`impl Box<num>
+      // as Sized` and `impl Box<str> as Sized` both key to "Box::Sized"),
+      // so every candidate's own reconstruction is tried, not just one.
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      for tps : entries {
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        if !equals(recon_sb.build(), type_name) {
+          continue;
+        }
+        CheckedType ct = checked_unknown();
+        ct.name = base_name;
+        Vec<CheckedType> gargs;
+        gargs.init(tps.len);
+        for tp : tps {
+          CheckedType arg_ct = checked_unknown();
+          arg_ct.name = tp;
+          gargs.push(arg_ct);
+        }
+        ct.generic_args = gargs;
+        ret .Some(ct);
       }
-      if !equals(recon_sb.build(), type_name) {
-        continue;
-      }
-      CheckedType ct = checked_unknown();
-      ct.name = base_name;
-      Vec<CheckedType> gargs;
-      gargs.init(tps.len);
-      for tp : tps {
-        CheckedType arg_ct = checked_unknown();
-        arg_ct.name = tp;
-        gargs.push(arg_ct);
-      }
-      ct.generic_args = gargs;
-      ret .Some(ct);
     }
     ret .None;
   }
@@ -4697,7 +4720,15 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
             for tp : block.type_params {
               tp_names.push(tp);
             }
-            checker.shape_impl_type_params.put(tp_key_sb.build(), tp_names);
+            str tp_key = tp_key_sb.build();
+            Vec<Vec<str>> tp_entries;
+            tp_entries.init(1);
+            let existing_tp = checker.shape_impl_type_params.at(tp_key);
+            if existing_tp.is_some() {
+              tp_entries = existing_tp.unwrap();
+            }
+            tp_entries.push(tp_names);
+            checker.shape_impl_type_params.put(tp_key, tp_entries);
           }
           if block.has_shape_arg_dtype {
             StringBuilder qeb_key_sb = string_builder_init(24);
