@@ -2,7 +2,7 @@
   (block)
   (field_list)
   (enum_body)
-  (quirk_body)
+  (shape_body)
   (impl_body)
   (arguments)
   (parameters)

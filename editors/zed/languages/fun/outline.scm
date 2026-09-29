@@ -17,9 +17,9 @@
   "enum" @context
   name: (_) @name) @item
 
-(quirk_declaration
+(shape_declaration
   (visibility)? @context
-  "quirk" @context
+  "shape" @context
   name: (_) @name) @item
 
 (impl_declaration

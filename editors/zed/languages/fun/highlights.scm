@@ -10,7 +10,7 @@
   "als"
   "as"
   "impl"
-  "quirk"
+  "shape"
   "compound"
   "enum"
   "let"
