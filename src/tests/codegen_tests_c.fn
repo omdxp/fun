@@ -55,6 +55,38 @@ test "ra3: deep method chains (generic-method chain)" {
   assert contains(out, "Box__num__get"), "expected the chained method on its result";
 }
 
+test "two instantiations of the same generic implementing the same shape dispatch independently" {
+  // Regression: an already-declared compound used as a generic argument
+  // (impl Wrapper<Circle> as Sized) is indistinguishable from a fresh
+  // type-param name at that parser position, so it's stored exactly
+  // like a template (has_type_params true). The shape-vtable
+  // instantiation trigger matched candidate templates by name+arity
+  // only, so a second instantiation (Wrapper<Square>) silently reused
+  // the first one's (Wrapper<Circle>'s) own method body, producing a
+  // real C compile error - ordinary dynamic dispatch, no fit involved.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Wrapper<T> { T inner; num extra; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `impl Wrapper<Square> as Sized { len() num { ret self.extra * 10; } }
+  `fun main() num {
+  `  Wrapper<Circle> wc; wc.extra = 5;
+  `  Wrapper<Square> ws; ws.extra = 7;
+  `  Sized sc = &wc;
+  `  Sized ss = &ws;
+  `  printf("%lld %lld\n", sc.len(), ss.len());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "two_generic_shape_instantiations",
+    "two instantiations of the same generic implementing the same shape"
+  );
+  assert equals(out, "5 70\n"), "expected each instantiation's own len() to dispatch correctly, not the first-declared one's";
+}
+
 test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field" {
   str src = `use std.c.io;
   `compound Inner { num v; }

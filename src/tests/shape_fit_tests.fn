@@ -188,3 +188,41 @@ test "a shape-downcast fit dispatches to a concrete generic instantiation (compo
   );
   assert equals(out, "3 9\n"), "expected dispatch to the concrete Wrapper<Circle> implementor with correct field access";
 }
+
+test "a shape-downcast fit dispatches correctly when two instantiations of the same generic implement the same shape" {
+  // Regression: the template search matched (base name, shape, arity)
+  // only, so Wrapper<Square>'s own vtable trampoline was built from
+  // Wrapper<Circle>'s method body (declared first), producing a real C
+  // compile error - a bug in ordinary shape dispatch too, not specific
+  // to fit, just surfaced by testing this arm shape thoroughly.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Wrapper<T> { T inner; num extra; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `impl Wrapper<Square> as Sized { len() num { ret self.extra * 10; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Wrapper<Circle>(a) -> { out = a.extra; }
+  `    Wrapper<Square>(b) -> { out = b.extra; }
+  `    _ -> { out = -1; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Wrapper<Circle> wc; wc.extra = 5;
+  `  Wrapper<Square> ws; ws.extra = 7;
+  `  Sized sc = &wc;
+  `  Sized ss = &ws;
+  `  printf("%lld %lld\n", describe(sc), describe(ss));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_two_generic_instantiations",
+    "shape-downcast fit dispatches correctly with two instantiations of the same generic"
+  );
+  assert equals(out, "5 7\n"), "expected each instantiation to dispatch to its own method body, not the first-declared one's";
+}
