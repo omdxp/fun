@@ -5109,6 +5109,90 @@ test "code actions fill in a fit's missing arm with a correctly-sized stub" {
   assert contains(out, `"start":{"line":7,"character":2}`), "expected the insertion right before the fit's closing brace";
 }
 
+test "code actions fill in a shape-downcast fit's missing implementor arm" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapenonexhaustive.fn";
+  doc.path = "shapenonexhaustive.fn";
+  doc.text = `shape HasArea {
+  `  area() num;
+  `}
+  `compound Circle {
+  `  num radius;
+  `}
+  `compound Square {
+  `  num side;
+  `}
+  `impl Circle as HasArea {
+  `  area() num { ret self.radius * self.radius; }
+  `}
+  `impl Square as HasArea {
+  `  area() num { ret self.side * self.side; }
+  `}
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 16;
+  d.col = 2;
+  d.end_line = 16;
+  d.end_col = 5;
+  d.severity = DIAG_SEVERITY_WARNING;
+  d.message = "fit_non_exhaustive: fit does not handle 'Square'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Fill in missing 'Square' arm"`), "expected the shape-downcast fit-arm quick fix";
+  assert contains(out, `"newText":"  Square(s) -> {}\n"`), "expected a bare, undotted stub with a lowercased binding name";
+  // Inserted right before the fit block's own closing brace (line 18).
+  assert contains(out, `"start":{"line":18,"character":2}`), "expected the insertion right before the fit's closing brace";
+}
+
+test "code actions fill in every missing shape-downcast implementor at once" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapenonexhaustive_multi.fn";
+  doc.path = "shapenonexhaustive_multi.fn";
+  doc.text = `shape HasArea {
+  `  area() num;
+  `}
+  `compound Circle {
+  `  num radius;
+  `}
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 6;
+  d.col = 2;
+  d.end_line = 6;
+  d.end_col = 5;
+  d.severity = DIAG_SEVERITY_WARNING;
+  d.message = "fit_non_exhaustive: fit does not handle 'Square', 'Triangle'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Fill in missing 'Square', 'Triangle' arms"`), "expected one fix naming both missing implementors, plural";
+  assert contains(out, `Square(s) -> {}`), "expected a stub for Square";
+  assert contains(out, `Triangle(t) -> {}`), "expected a stub for Triangle too, in the same fix";
+}
+
 test "code actions fill in every missing arm at once, not just the first" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
