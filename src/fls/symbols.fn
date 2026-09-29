@@ -766,7 +766,11 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
       .Quirk(q) -> {
         if equals(q.name, name) {
           StringBuilder b = string_builder_init(32);
-          b.append("quirk ");
+          if q.spelled_shape {
+            b.append("shape ");
+          } else {
+            b.append("quirk ");
+          }
           b.append(q.name);
           _append_type_params(&b, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
           ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
@@ -5838,7 +5842,11 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
       }
       .Quirk(q) -> {
         StringBuilder qb = string_builder_init(32);
-        qb.append("quirk ");
+        if q.spelled_shape {
+          qb.append("shape ");
+        } else {
+          qb.append("quirk ");
+        }
         qb.append(q.name);
         _append_type_params(&qb, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
         out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));

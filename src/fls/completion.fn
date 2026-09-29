@@ -1186,7 +1186,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
     str kw = token_word(t);
     flag is_compound = equals(kw, "compound");
     flag is_enum = equals(kw, "enum");
-    flag is_methods = equals(kw, "quirk") || equals(kw, "impl");
+    flag is_methods = equals(kw, "quirk") || equals(kw, "shape") || equals(kw, "impl");
     if !is_compound && !is_enum && !is_methods {
       continue;
     }
@@ -1273,7 +1273,8 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
           struct_names.push(name);
         } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
           enum_names.push(name);
-        } elif token_is_keyword(prev, "quirk") && !quirk_names.contains(name) {
+        } elif (token_is_keyword(prev, "quirk") || token_is_keyword(prev, "shape")) &&
+          !quirk_names.contains(name) {
           quirk_names.push(name);
         }
       }
@@ -3130,6 +3131,9 @@ fun _skeleton(str word) str {
   }
   if equals(word, "quirk") {
     ret "quirk ${1:Name} {\n  ${0:method}() ${2:num};\n}";
+  }
+  if equals(word, "shape") {
+    ret "shape ${1:Name} {\n  ${0:method}() ${2:num};\n}";
   }
   if equals(word, "impl") {
     ret "impl ${1:Type} {\n  $0\n}";

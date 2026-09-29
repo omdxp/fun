@@ -2144,13 +2144,14 @@ pub fun keyword_doc(str word) str {
       `Declares methods on a type, or implements a quirk for it.`
     );
   }
-  if equals(word, "quirk") {
+  if equals(word, "quirk") || equals(word, "shape") {
     ret _doc(
       `quirk Named {
       `  name() str;
       `}`,
       `A set of methods a type can implement, which a value can then be
-      `used through.`
+      `used through. ``shape`` is the same declaration under a second,
+      `equally valid spelling of the keyword.`
     );
   }
   if equals(word, "raw") {
