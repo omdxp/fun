@@ -117,6 +117,34 @@ test "parses an async quirk method signature" {
   }
 }
 
+test "'shape' parses as a full synonym for 'quirk', generic constraints included" {
+  str src = `shape Named<T: num | str> {
+  `  get() T;
+  `}`;
+  let st = parse_ok(src);
+  assert st.nodes.len == 1, "expected a single top-level node";
+  fit st.nodes.get(0).kind {
+    .Quirk(q) -> {
+      assert q.spelled_shape, "expected the node to remember it was spelled 'shape'";
+      assert equals(q.name, "Named"), "expected the name read correctly";
+      assert q.is_generic && q.type_params.len == 1, "expected the generic type param parsed";
+      assert q.methods.len == 1, "expected one method signature";
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
+test "'quirk' still parses and does not set the 'shape' spelling flag" {
+  str src = `quirk Named {
+  `  get() num;
+  `}`;
+  let st = parse_ok(src);
+  fit st.nodes.get(0).kind {
+    .Quirk(q) -> { assert !q.spelled_shape, "expected 'quirk' to leave the shape flag false"; }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
 test "parses an await expression" {
   str src = `fun inc(num x) num { ret x + 1; }
   `fun main() {

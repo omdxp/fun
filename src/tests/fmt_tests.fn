@@ -84,6 +84,22 @@ test "preserves blank lines between top-level constructs" {
   assert equals(got, format("{str}\n", want)), "expected the formatted layout";
 }
 
+test "formats a 'shape' declaration the same way as 'quirk', keeping the author's own spelling" {
+  str src = `shape Q{f() num;}
+  `impl A as Q {f() num{ret self.x;}}`;
+  str want = `shape Q {
+  `  f() num;
+  `}
+  `
+  `impl A as Q {
+  `  f() num {
+  `    ret self.x;
+  `  }
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected 'shape' formatted like 'quirk', not rewritten to it";
+}
+
 test "formats pointer and address-of spacing" {
   str src = `compound User{raw* p;}
   `fun main() void{User user;User * u2=& user;raw * buf=malloc(10);num x=1;num y=2;ret x*y;}`;
