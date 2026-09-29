@@ -3419,6 +3419,16 @@ impl Checker {
       str shape_type_name = "";
       if branch.has_condition && subject_is_shape {
         shape_type_name = _shape_destructure_type_name(branch);
+        if !equals(shape_type_name, "") {
+          shape_type_name = self._auto_resolve_bare_generic_shape_target(
+            shape_type_name,
+            subject_type.name,
+            branch.condition
+          );
+          if self.failed {
+            ret;
+          }
+        }
       }
       if branch.has_condition {
         if branch.is_tuple_pattern {
@@ -3607,6 +3617,105 @@ impl Checker {
       equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
       equals(name, "void");
     }
+
+  // A bare generic compound name (`Box(b)`, no `<Args>`) auto-resolves
+  // to its one concrete implementation of `shape_name` when exactly one
+  // exists (`Box<num>`, say, is the only `impl Box<...> as Sized` in
+  // the program) - same convenience `Wrapper<T> w;` already gets from
+  // type inference elsewhere, applied here to a fit arm's pattern.
+  // Anything else about `type_name` (not a generic compound at all,
+  // already `<Args>`-mangled, a genuinely unbound template with zero
+  // concrete instantiations) passes through unchanged, and
+  // `_shape_downcast_target_verdict` reports the right thing for it.
+  // Two or more concrete instantiations is ambiguous - reported here
+  // directly (not deferred to the verdict's generic catch-all) since
+  // only this function still has the actual candidate list to name.
+  _auto_resolve_bare_generic_shape_target(str type_name, str shape_name, Node* condition) str {
+    let compound_info = self.compounds.at(type_name);
+    if compound_info.is_none() || !compound_info.unwrap().is_generic {
+      ret type_name;
+    }
+    let keys = self.shape_impl_type_params.keys();
+    Vec<str> concrete_names;
+    concrete_names.init(2);
+    for k : keys {
+      num sep = last_index_of_char(k, ':');
+      if sep < 1 {
+        continue;
+      }
+      str base_name = substr(k, 0, sep - 1);
+      str this_shape = substr(k, sep + 1, len(k) - sep - 1);
+      if !equals(base_name, type_name) || !equals(this_shape, shape_name) {
+        continue;
+      }
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
+        continue;
+      }
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      for tps : entries {
+        flag all_concrete = true;
+        for tp : tps {
+          if !self._is_known_concrete_name(tp) {
+            all_concrete = false;
+            break;
+          }
+        }
+        if !all_concrete {
+          continue;
+        }
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        concrete_names.push(recon_sb.build());
+      }
+    }
+    // A scalar-argument instantiation (`impl Box<num> as Sized`) never
+    // shows up in `shape_impl_type_params` at all - `has_concrete_dtype`
+    // resolves its own mangled identity immediately at parse time, with
+    // nothing ambiguous left to record there, so it's registered
+    // directly under its final mangled name in `shape_implementors`
+    // instead. Every entry there sharing `type_name`'s own mangling
+    // prefix is one of these.
+    let bucket_opt = self.shape_implementors.at(shape_name);
+    if bucket_opt.is_some() {
+      str prefix = format("{str}__", type_name);
+      for candidate : bucket_opt.unwrap().keys() {
+        if starts_with(candidate, prefix) {
+          concrete_names.push(candidate);
+        }
+      }
+    }
+    if concrete_names.len == 1 {
+      ret concrete_names.get(0);
+    }
+    if concrete_names.len > 1 {
+      StringBuilder list_sb = string_builder_init(16);
+      num li = 0;
+      for li < concrete_names.len {
+        if li > 0 {
+          list_sb.append(", ");
+        }
+        list_sb.append("'");
+        list_sb.append(concrete_names.get(li));
+        list_sb.append("'");
+        li = li + 1;
+      }
+      self.fail(
+        format(
+        "'{str}' is ambiguous between {str} - write the generic arguments explicitly, like '{str}<...>(...)'",
+        type_name,
+        list_sb.build(),
+        type_name
+        ),
+        condition
+      );
+    }
+    ret type_name;
+  }
 
   // What a shape-downcast fit arm's named type (`type_name`, the bare
   // identifier the arm wrote, or the mangled form a `Type<Args>(...)`
