@@ -78,7 +78,7 @@
         <key>name</key>
         <string>meta.type.declaration.interface.fun</string>
         <key>match</key>
-        <string>\b(quirk)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+        <string>\b(shape)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
         <key>captures</key>
         <dict>
           <key>1</key>
@@ -217,7 +217,7 @@
         <string>keyword.control.fun</string>
         <key>match</key>
         <string>
-          \b(use|as|pub|fun|als|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
+          \b(use|as|pub|fun|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
       </dict>
       <dict>
         <key>name</key>

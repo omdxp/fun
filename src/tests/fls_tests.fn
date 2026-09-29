@@ -6367,6 +6367,20 @@ test "a trigger still writes its whole shape even while the document does not pa
   assert contains(out, `"label":"mainio"`), "expected the entry-point-that-prints trigger even while the document does not parse";
 }
 
+test "completion offers 'impls' to implement a shape, not the removed 'implq' trigger" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///implstrigger.fn";
+  doc.path = "implstrigger.fn";
+  doc.text = "fun helper( {\n";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 1, 0, true);
+  assert contains(out, `"label":"impls"`), "expected the 'impls' trigger offered";
+  assert !contains(out, `"label":"implq"`), "expected the removed 'implq' trigger not to be offered anymore";
+}
+
 test "a client that does not understand a skeleton is sent none" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

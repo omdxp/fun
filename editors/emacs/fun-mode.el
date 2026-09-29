@@ -11,7 +11,7 @@
   "Syntax table for fun-mode.")
 
 (defconst fun-keywords
-  '("use" "as" "pub" "fun" "als" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
+  '("use" "as" "pub" "fun" "als" "compound" "shape" "impl" "enum" "asm" "volatile" "arch"
     "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "fork" "break" "continue" "assert" "allow" "expect" "let"))
 
 (defconst fun-types
@@ -42,7 +42,7 @@
   `((,(regexp-opt fun-keywords 'words) . font-lock-keyword-face)
     ("\\(->\\|::\\|\\+=\\|-=\\|\\*=\\|/=\\|%=\\|==\\|!=\\|<=\\|>=\\|&&\\|[|][|]\\|<<\\|>>\\|\\+\\+\\|--\\|[+\\-*/%=<>!?&|^~.:;,]\\)"
      . fun-operator-face)
-    ("\\_<\\(compound\\|quirk\\|enum\\|impl\\)\\_>\\s-+\\([A-Za-z_][A-Za-z0-9_]*\\)"
+    ("\\_<\\(compound\\|shape\\|enum\\|impl\\)\\_>\\s-+\\([A-Za-z_][A-Za-z0-9_]*\\)"
      (1 font-lock-keyword-face)
      (2 fun-custom-type-face))
     ("\\_<\\([A-Z][A-Za-z0-9_]*\\)\\_>\\s-*\\(?:\\*+\\s-*\\)?[A-Za-z_][A-Za-z0-9_]*\\_>"

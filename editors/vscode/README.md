@@ -17,7 +17,7 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 
 **Type a real keyword to write its whole shape** — accepting `fun` writes a full declaration with the places to fill marked, not just the bare word:
 
-`fun`, `compound`, `enum`, `quirk`, `impl`, `als`, `fit`, `if`, `elif`, `else`, `for`, `test`, `sequential`, `fuzz`, `asm`, `use`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
+`fun`, `compound`, `enum`, `shape`, `impl`, `als`, `fit`, `if`, `elif`, `else`, `for`, `test`, `sequential`, `fuzz`, `asm`, `use`, `let`, `const`, `ret`, `defer`, `assert`, `panic`, `allow`, `expect`, `async`, `await`
 
 **Short triggers for a common multi-line shape**, offered alongside ordinary completions:
 
@@ -28,7 +28,7 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 | `fore` | `for` each item |
 | `fori` | `for` each item, with its index |
 | `forw` | `for` while a condition holds |
-| `implq` | implement a quirk for a type |
+| `impls` | implement a shape for a type |
 | `iferr` | return early when a `Result` failed |
 | `ifnone` | return early when an `Option` is empty |
 | `fitr` | `fit` over a `Result` |
