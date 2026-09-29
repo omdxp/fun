@@ -3103,6 +3103,31 @@ test "hovering a constant shows its own literal value, not just its type" {
   assert contains(hovered_neg, "const num NEGATIVE = -1"), "expected a negative numeric literal (a unary minus over the literal) shown with its sign";
 }
 
+test "hovering a local const shows const and its own literal value, not just an ordinary local's type" {
+  // User-reported: only a top-level const's own hover said "const" -
+  // `_lookup_in_body`'s own `.Variable` case, which is what resolves a
+  // local (as opposed to `lookup_top_level`'s own `.Variable` case for
+  // a global), never read `v.is_const` at all, so a local declared
+  // with `const x = 1;` hovered identically to a plain `let`/typed one.
+  str src = `fun main() num {
+  `  const num limit = 7;
+  `  ret limit;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///localconst.fn";
+  doc.path = "localconst.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 12);
+  assert contains(hovered, "const num limit = 7"), "expected the local const's own keyword and literal value shown, not just its type";
+
+  str hovered_use = hover(&reads, doc, 2, 8);
+  assert contains(hovered_use, "const num limit = 7"), "expected the same at the local const's own use site";
+}
+
 test "a let local's inferred type resolves through a call-ending chain, not just one hop" {
   // _infer_type only ever handled a single receiver.member or
   // receiver.method() hop; a longer chain (`a.b.get(...)`) fell

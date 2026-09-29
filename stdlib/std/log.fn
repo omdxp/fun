@@ -658,5 +658,6 @@ test "the one-off helpers log through a default logger" {
   log_error("one-off error");
   log_fatal("one-off fatal");
   log(.Info, "one-off generic");
+  allow assert_constant, "documents that reaching this line means every helper returned";
   assert true, "expected every helper to return";
 }
