@@ -1211,9 +1211,15 @@ fun describe(HasArea s) str {
 - A concrete instantiation of a generic implementor can be named too:
   `Box<num>(b) -> ...` against `impl Box<num> as Sized { ... }`, or
   `Wrapper<Circle>(w) -> ...` against `impl Wrapper<Circle> as Sized {
-  ... }`. Only an unbound generic itself is rejected - `Box(b) -> ...`
-  against `impl Box<T> as Sized { ... }` has no single concrete vtable to
-  dispatch to at all, so there's no valid arm to write for it.
+  ... }`.
+- A bare generic name auto-resolves when it's unambiguous: `Box(b) ->
+  ...` (no `<Args>`) works exactly like `Box<num>(b) -> ...` when
+  `Box<num>` is the only instantiation of `Box` implementing the shape
+  being matched. Two or more instantiations make the bare form
+  ambiguous - write the generic arguments explicitly to pick one. An
+  unbound generic itself is still rejected outright: `impl Box<T> as
+  Sized { ... }` has no single concrete vtable to dispatch to at all, so
+  there's no valid arm to write for it, bare or otherwise.
 
 ## Defer
 
