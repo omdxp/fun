@@ -126,6 +126,27 @@ fun _analysis_new() Analysis {
 }
 
 impl Analysis {
+  // Whether `name` is usable as one fixed, real value's own type: a
+  // declared compound (generic template excluded - it names no single
+  // type on its own), a declared enum, or a builtin scalar - never a
+  // still-abstract type-parameter name (`T`, `K`, `V`, ...), which is
+  // never actually declared as any of these. Used only to decide whether
+  // a generic shape impl's own `type_params` are real arguments (a
+  // concrete instantiation) or genuinely unbound ones (a template),
+  // mirroring `typecheck.fn`'s own `Checker._is_known_concrete_name`.
+  is_known_concrete_type_name(str name) flag {
+    let decl = self.compound_decls.at(name);
+    if decl.is_some() {
+      ret !decl.unwrap().has_type_params;
+    }
+    if self.enum_variants.at(name).is_some() {
+      ret true;
+    }
+    ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
+      equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
+      equals(name, "void");
+    }
+
   // Records a finding, unless the program asked for silence. An
   // expectation counts as met whether or not it silences the message.
   // A `Next`-scoped allow/expect is removed the moment it matches here,
@@ -2126,18 +2147,15 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
         state.enum_variants.put(decl.name, names);
       }
       .Impl(i) -> {
-        // A generic impl (`impl Box<T> as Sized`) or a concrete
-        // instantiation of one (`impl Box<num> as Sized`, `type_name`
-        // mangled to `Box__num`) is excluded here: shape-downcast `fit`
-        // syntax only ever writes a bare, ungenericized `Type(binding)`
-        // (see `_shape_destructure_type_name` in typecheck.fn, which
-        // rejects any type name involving generics before codegen ever
-        // sees it - a concrete generic instantiation's vtable can be
-        // emitted after the code referencing it, which C rejects, and
-        // that ordering isn't fixed yet), so neither is ever something a
-        // real arm could actually name. Demanding coverage of either
-        // would ask for an arm with no valid way to write it.
-        if i.has_shape_name && !i.has_type_params && !i.has_concrete_dtype {
+        if !i.has_shape_name {
+          continue;
+        }
+        // A plain impl (`impl Circle as HasArea`) or a concrete
+        // instantiation whose own argument was a builtin scalar (`impl
+        // Box<num> as Sized`) already resolves `type_name` to its real,
+        // final identity (mangled to `Box__num` for the latter) with no
+        // ambiguity at all.
+        if !i.has_type_params {
           Vec<str> implementors;
           implementors.init(1);
           let existing = state.shape_implementors.at(i.shape_name);
@@ -2146,7 +2164,42 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
           }
           implementors.push(i.type_name);
           state.shape_implementors.put(i.shape_name, implementors);
+          continue;
         }
+        // `has_type_params` covers two indistinguishable-at-parse-time
+        // cases: a genuine unbound template (`impl Box<T> as Sized`,
+        // nothing to ever write an arm for) and a concrete instantiation
+        // whose argument was an already-declared compound/enum rather
+        // than a scalar (`impl Box<Circle> as Sized` - the parser can't
+        // tell a fresh type-param name from a reference to a real type
+        // at that position, so both end up stored the same way). Only
+        // register the reconstructed mangled name when every argument is
+        // confirmed real; a genuinely abstract one is excluded exactly
+        // like the template case, since there's still nothing to write.
+        flag all_real = true;
+        for tp : i.type_params {
+          if !state.is_known_concrete_type_name(tp) {
+            all_real = false;
+            break;
+          }
+        }
+        if !all_real {
+          continue;
+        }
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(i.type_name);
+        for tp : i.type_params {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        Vec<str> implementors2;
+        implementors2.init(1);
+        let existing2 = state.shape_implementors.at(i.shape_name);
+        if existing2.is_some() {
+          implementors2 = existing2.unwrap();
+        }
+        implementors2.push(recon_sb.build());
+        state.shape_implementors.put(i.shape_name, implementors2);
       }
       _ -> {}
     }
