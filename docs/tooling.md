@@ -63,7 +63,7 @@ fun main() {
   still executes. `panic`, by contrast, still aborts the whole process
   outright (no per-test recovery for it yet), prefer `assert` over
   `panic` inside a test body for this reason.
-- **Time-mocked tests**: `use std.mock_time;` provides a `Clock` quirk
+- **Time-mocked tests**: `use std.mock_time;` provides a `Clock` shape
   implemented by `SystemClock` (the real clock) and `MockClock` (a fully
   controllable fake one, for tests). A function that needs "the current
   time" to be testable should accept a `Clock` parameter instead of
@@ -95,8 +95,8 @@ fun main() {
 }
 ```
 
-A concrete value always coerces to a quirk-typed parameter by its address
-(`&clk`), same as any other quirk coercion.
+A concrete value always coerces to a shape-typed parameter by its address
+(`&clk`), same as any other shape coercion.
 
 ## Code Coverage
 
@@ -460,7 +460,7 @@ quick orientation.
   between the two (an `Option` into a `Result`, or the reverse); see
   [Option/Result Propagation](#language?anchor=language-option/result-propagation) and
   [Cross-type propagation](#language?anchor=language-cross-type-propagation-/).
-- `std.collections`: collection quirks (`len`/`is_empty`).
+- `std.collections`: collection shapes (`len`/`is_empty`).
 - `std.string`: string helpers.
 - `std.channel`/`std.task`/`std.sync`: the concurrency primitives covered
   in [Concurrency](#concurrency).
@@ -473,11 +473,11 @@ quick orientation.
 - `std.toml`: typed TOML via `TomlValue`; `parse_document`, typed
   `get`/`as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`.
 - `std.serde`: text-layer `to_string`/`from_string`, dispatching through
-  `std.quirks`' generic `To<str>`/`From<str>`.
+  `std.shapes`' generic `To<str>`/`From<str>`.
 - `std.log`: structured logging (`LogLevel`, `LogFormat`, a `Logger`
   routed to any `std.io.Sink`, text or one-JSON-object-per-line output).
-- `std.quirks`: common quirks, `Sized`, `Display`, `Clearable`,
-  `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>`.
+- `std.shapes`: common shapes, `Sized`, `Display`, `Clearable`,
+  `Iterator<T>`, and the generic conversion shapes `To<T>`/`From<T>`.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, and more.
 - `std.mock_time`: `Clock`/`SystemClock`/`MockClock`, see Testing above.
 - `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/
