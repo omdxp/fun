@@ -16542,6 +16542,7 @@ impl Codegen {
     `#define NOGDI
     `#endif
     `#include <windows.h>
+    `#include <time.h>
     `static int setenv(const char* name, const char* value, int overwrite) {
     `  if (!overwrite && getenv(name) != NULL) { return 0; }
     `  return _putenv_s(name, value);
@@ -16550,6 +16551,25 @@ impl Codegen {
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
+    `}
+    `static void* __fun_gmtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  if (gmtime_s((struct tm*)result, &__fun_tt) != 0) return NULL;
+    `  return result;
+    `}
+    `static void* __fun_localtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  if (localtime_s((struct tm*)result, &__fun_tt) != 0) return NULL;
+    `  return result;
+    `}
+    `static long long __fun_ctime_r(int64_t* timep, char* buf, int64_t buf_len) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  char __fun_cbuf[32];
+    `  if (ctime_s(__fun_cbuf, sizeof(__fun_cbuf), &__fun_tt) != 0) return 0;
+    `  size_t __fun_clen = strlen(__fun_cbuf);
+    `  if ((int64_t)__fun_clen + 1 > buf_len) return 0;
+    `  memcpy(buf, __fun_cbuf, __fun_clen + 1);
+    `  return (long long)__fun_clen;
     `}
     `#ifndef __MINGW32__
     `#ifndef __fun_clock_gettime_defined
@@ -16574,6 +16594,23 @@ impl Codegen {
     `  if (seconds < 0) seconds = 0;
     `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `static void* __fun_gmtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  return gmtime_r(&__fun_tt, (struct tm*)result);
+    `}
+    `static void* __fun_localtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  return localtime_r(&__fun_tt, (struct tm*)result);
+    `}
+    `static long long __fun_ctime_r(int64_t* timep, char* buf, int64_t buf_len) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  char __fun_cbuf[32];
+    `  if (!ctime_r(&__fun_tt, __fun_cbuf)) return 0;
+    `  size_t __fun_clen = strlen(__fun_cbuf);
+    `  if ((int64_t)__fun_clen + 1 > buf_len) return 0;
+    `  memcpy(buf, __fun_cbuf, __fun_clen + 1);
+    `  return (long long)__fun_clen;
     `}
     `#endif
     ``);
@@ -21789,6 +21826,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#define NOGDI
     `#endif
     `#include <windows.h>
+    `#include <time.h>
     `static int setenv(const char* name, const char* value, int overwrite) {
     `  if (!overwrite && getenv(name) != NULL) { return 0; }
     `  return _putenv_s(name, value);
@@ -21797,6 +21835,25 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static void __fun_sleep_seconds(double seconds) {
     `  if (seconds < 0) seconds = 0;
     `  Sleep((DWORD)(seconds * 1000.0));
+    `}
+    `static void* __fun_gmtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  if (gmtime_s((struct tm*)result, &__fun_tt) != 0) return NULL;
+    `  return result;
+    `}
+    `static void* __fun_localtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  if (localtime_s((struct tm*)result, &__fun_tt) != 0) return NULL;
+    `  return result;
+    `}
+    `static long long __fun_ctime_r(int64_t* timep, char* buf, int64_t buf_len) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  char __fun_cbuf[32];
+    `  if (ctime_s(__fun_cbuf, sizeof(__fun_cbuf), &__fun_tt) != 0) return 0;
+    `  size_t __fun_clen = strlen(__fun_cbuf);
+    `  if ((int64_t)__fun_clen + 1 > buf_len) return 0;
+    `  memcpy(buf, __fun_cbuf, __fun_clen + 1);
+    `  return (long long)__fun_clen;
     `}
     `#ifndef __MINGW32__
     `#ifndef __fun_clock_gettime_defined
@@ -21821,6 +21878,23 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  if (seconds < 0) seconds = 0;
     `  struct timespec __fun_sleep_ts; __fun_sleep_ts.tv_sec = (time_t)seconds; __fun_sleep_ts.tv_nsec = (long)((seconds - (double)__fun_sleep_ts.tv_sec) * 1000000000.0);
     `  nanosleep(&__fun_sleep_ts, NULL);
+    `}
+    `static void* __fun_gmtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  return gmtime_r(&__fun_tt, (struct tm*)result);
+    `}
+    `static void* __fun_localtime_r(int64_t* timep, void* result) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  return localtime_r(&__fun_tt, (struct tm*)result);
+    `}
+    `static long long __fun_ctime_r(int64_t* timep, char* buf, int64_t buf_len) {
+    `  time_t __fun_tt = (time_t)*timep;
+    `  char __fun_cbuf[32];
+    `  if (!ctime_r(&__fun_tt, __fun_cbuf)) return 0;
+    `  size_t __fun_clen = strlen(__fun_cbuf);
+    `  if ((int64_t)__fun_clen + 1 > buf_len) return 0;
+    `  memcpy(buf, __fun_cbuf, __fun_clen + 1);
+    `  return (long long)__fun_clen;
     `}
     `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
