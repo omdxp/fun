@@ -3259,22 +3259,19 @@ fun _branch_enum_name(Node* condition) str {
 }
 
 // The bare type name a shape-downcast fit arm names (`Circle(c) -> ...`),
-// or empty when `condition` isn't that shape: a call whose callee is a
-// plain, undotted identifier. Distinct from `_branch_enum_name` above,
-// which only reads a `.`-qualified callee (`Enum.Variant(...)`).
-fun _shape_destructure_type_name(Node* condition) str {
-  if condition == nil {
+// or empty when `branch` isn't that shape: the parser
+// (`_try_parse_fit_shape_destructure`) already commits a bare, undotted
+// `Type(binding)` pattern to exactly this AST shape - a plain
+// `.Identifier` condition with `bindings` populated - never produced by
+// the enum-destructure path, which always builds a `.`-qualified
+// condition instead. So `bindings.len == 1` plus a bare identifier
+// condition is unambiguous here, not just a heuristic.
+fun _shape_destructure_type_name(FitBranch branch) str {
+  if !branch.has_condition || !branch.has_bindings || branch.bindings.len != 1 {
     ret "";
   }
-  fit condition.kind {
-    .Expression(e) -> {
-      if equals(e.op, "()") && e.has_left && e.left != nil {
-        fit e.left.kind {
-          .Identifier(name) -> { ret name; }
-          _ -> {}
-        }
-      }
-    }
+  fit branch.condition.kind {
+    .Identifier(name) -> { ret name; }
     _ -> {}
   }
   ret "";
@@ -3366,7 +3363,7 @@ impl Checker {
     for branch : f.branches {
       str shape_type_name = "";
       if branch.has_condition && subject_is_shape {
-        shape_type_name = _shape_destructure_type_name(branch.condition);
+        shape_type_name = _shape_destructure_type_name(branch);
       }
       if branch.has_condition {
         if branch.is_tuple_pattern {
@@ -3493,11 +3490,9 @@ impl Checker {
   }
 
   // Verifies a shape-downcast arm (`Circle(c) -> ...`, only reached when
-  // the fit subject is itself shape-typed): `type_name` must be a real
-  // `impl type_name as <subject's shape> { ... }`, and the arm must bind
-  // exactly one name to recover the concrete value, mirroring
-  // `Option.Some(v)`/`Result.Ok(v)`'s single-payload shape rather than
-  // multi-field enum-payload destructuring.
+  // the fit subject is itself shape-typed and `_shape_destructure_type_name`
+  // already confirmed the arm binds exactly one name): `type_name` must
+  // be a real `impl type_name as <subject's shape> { ... }`.
   check_shape_destructure_condition(FitBranch branch, str type_name, CheckedType subject_type) {
     CheckedType candidate = checked_unknown();
     candidate.name = type_name;
@@ -3511,28 +3506,6 @@ impl Checker {
         ),
         branch.condition
       );
-      ret;
-    }
-    fit branch.condition.kind {
-      .Expression(e) -> {
-        Vec<Node*> written;
-        written.init(2);
-        defer written.free();
-        if e.has_right {
-          _call_args(e.right, &written);
-        }
-        if written.len != 1 {
-          self.fail(
-            format(
-            "expected exactly one binding to recover the concrete '{str}' value, got {num}",
-            type_name,
-            written.len
-            ),
-            branch.condition
-          );
-        }
-      }
-      _ -> {}
     }
   }
 
@@ -3542,31 +3515,12 @@ impl Checker {
   // verified the arm names a real implementor with exactly one binding,
   // and pushed a fresh `env` scope for the arm body.
   bind_fit_shape_pattern(FitBranch branch, str type_name, TypeEnv* env) {
-    fit branch.condition.kind {
-      .Expression(e) -> {
-        if !e.has_right {
-          ret;
-        }
-        Vec<Node*> written;
-        written.init(2);
-        defer written.free();
-        _call_args(e.right, &written);
-        if written.len != 1 {
-          ret;
-        }
-        fit written.get(0).kind {
-          .Identifier(bname) -> {
-            if !equals(bname, "_") {
-              CheckedType bound = checked_unknown();
-              bound.name = type_name;
-              bound.pointer_depth = 1;
-              env.define(bname, bound);
-            }
-          }
-          _ -> {}
-        }
-      }
-      _ -> {}
+    str bname = branch.bindings.get(0);
+    if !equals(bname, "_") {
+      CheckedType bound = checked_unknown();
+      bound.name = type_name;
+      bound.pointer_depth = 1;
+      env.define(bname, bound);
     }
   }
 
