@@ -9,7 +9,7 @@ test "for range transpiles" {
   // `Iterator<num>` impl is inlined here rather than imported.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Range { num start; num end; }
   `impl Range as Iterator<num> {
   `  pub next() Option<num> {
@@ -88,7 +88,7 @@ test "for Vec values transpiles via inlining Vec's own next()" {
   // stdlib/std/vec.fn: `emit_for_iter` dispatches on the type name "Vec"
   // structurally, regardless of whether it came from an import.
   str src = `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Vec<T> {
   `  T* data;
   `  num len;

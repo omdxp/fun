@@ -179,7 +179,7 @@ pub enum WarningControlAction {
   Expect,
 }
 
-// Kept as a free function (rather than only the `From<str>` quirk impl
+// Kept as a free function (rather than only the `From<str>` shape impl
 // below) because callers that validate a warning-control directive from
 // source (`allow unknown_id;`) need to detect and report an invalid id as a
 // real compile error; `From<T>`'s `from(T value)` is void/best-effort by
@@ -295,7 +295,7 @@ impl WarningId as From<str> {
 }
 
 // `id.to()` instead of a free function: WarningId -> str is exactly the
-// shape std.shapes' `To<T>` conversion quirk is for.
+// shape std.shapes' `To<T>` conversion shape is for.
 impl WarningId as To<str> {
   pub to() str {
     fit *self {
@@ -665,25 +665,25 @@ pub fun compound_node_new() CompoundNode {
   ret c;
 }
 
-// One named, typed parameter of a quirk method signature.
-pub compound QuirkArg {
+// One named, typed parameter of a shape method signature.
+pub compound ShapeArg {
   str name;
   DataType* dtype;
 }
 
-// One required method signature inside a `quirk Name { ... }` declaration
-// (no body, quirks only declare a contract; `impl Type as Name` supplies
+// One required method signature inside a `shape Name { ... }` declaration
+// (no body, shapes only declare a contract; `impl Type as Name` supplies
 // the implementation).
-pub compound QuirkMethodSig {
+pub compound ShapeMethodSig {
   str name;
   DataType* rtype;
-  Vec<QuirkArg> args;
+  Vec<ShapeArg> args;
   flag is_async;
   Pos pos;
 }
 
-pub fun quirk_method_sig_new() QuirkMethodSig {
-  QuirkMethodSig m;
+pub fun shape_method_sig_new() ShapeMethodSig {
+  ShapeMethodSig m;
   m.name = "";
   m.rtype = nil;
   m.args.init(0);
@@ -743,12 +743,12 @@ pub fun type_alias_node_new() TypeAliasNode {
   ret a;
 }
 
-// A `quirk Name { methods }` declaration (a structural interface).
+// A `shape Name { methods }` declaration (a structural interface).
 pub compound ShapeNode {
   str name;
-  Vec<QuirkMethodSig> methods;
-  // True for a generic quirk (`quirk Iterator<T> { ... }`): static dispatch
-  // only, no monomorphic vtable/quirk-object struct (an unbound type param
+  Vec<ShapeMethodSig> methods;
+  // True for a generic shape (`shape Iterator<T> { ... }`): static dispatch
+  // only, no monomorphic vtable/shape-object struct (an unbound type param
   // can't be represented in a single emitted signature) unless a concrete
   // instantiation is used as a type annotation.
   flag is_generic;
@@ -759,11 +759,6 @@ pub compound ShapeNode {
   // one param has a default, every later one does too. A default may name
   // earlier params (`B = A`), never itself or a later one.
   Vec<DataType*> type_param_defaults;
-  // True when the source spelled this declaration `shape Name { ... }`
-  // rather than `quirk Name { ... }` - the two are the same declaration,
-  // just two accepted spellings of the keyword, kept here so hover/outline
-  // can echo back whichever one the author actually wrote.
-  flag spelled_shape;
 }
 
 pub fun shape_node_new() ShapeNode {
@@ -774,7 +769,6 @@ pub fun shape_node_new() ShapeNode {
   q.type_params.init(0);
   q.has_type_params = false;
   q.type_param_defaults.init(0);
-  q.spelled_shape = false;
   ret q;
 }
 
@@ -833,7 +827,7 @@ pub fun enum_decl_node_new() EnumDeclNode {
 }
 
 // An `impl Type { methods }` (plain) or `impl Type as Shape { methods }`
-// (quirk-implementing) block.
+// (shape-implementing) block.
 pub compound ImplNode {
   str type_name;
   Vec<str> type_params;
@@ -844,23 +838,23 @@ pub compound ImplNode {
   // type_params; see FunctionNode's own field of the same name.
   Vec<Vec<str>> type_param_constraints;
   flag has_type_param_constraints;
-  // Bare quirk name (`Iterator`, `To`, ...), even when the `as` clause names
+  // Bare shape name (`Iterator`, `To`, ...), even when the `as` clause names
   // a concrete instantiation (`as Iterator<num>`). Absent for a plain impl
   // block (`impl Type { ... }`).
   str shape_name;
   flag has_shape_name;
   // Set when the `as` clause names a concrete instantiation of a generic
-  // quirk whose argument is not the enclosing impl's own type param (`as
-  // To<num>`), the mangled name (`To__num`) of that distinct quirk
+  // shape whose argument is not the enclosing impl's own type param (`as
+  // To<num>`), the mangled name (`To__num`) of that distinct shape
   // identity, registered alongside `shape_name` above.
   str shape_concrete_instantiation;
   flag has_shape_concrete_instantiation;
-  // The quirk's own single type argument (`num` in `as Iterator<num>`,
+  // The shape's own single type argument (`num` in `as Iterator<num>`,
   // `T` in a symbolic `as Iterator<T>`), as a real `DataType` rather than
   // only the pre-mangled string above - needed to resolve it structurally
   // (substituting a symbolic reference against a receiver's own concrete
   // `generic_args`), not just to recognize it as a fixed identity. Set
-  // whenever the quirk name is followed by `<...>` at all, symbolic or
+  // whenever the shape name is followed by `<...>` at all, symbolic or
   // concrete alike; absent for a bare `as Shape` with no argument.
   DataType* shape_arg_dtype;
   flag has_shape_arg_dtype;
@@ -1290,14 +1284,14 @@ fun _free_compound_init_fields(Vec<CompoundInitField>* fields) {
   fields.free();
 }
 
-fun _free_shape_methods(Vec<QuirkMethodSig>* methods) {
+fun _free_shape_methods(Vec<ShapeMethodSig>* methods) {
   num i = 0;
   for i < methods.len {
-    QuirkMethodSig m = methods.get(i);
+    ShapeMethodSig m = methods.get(i);
     dtype_free(m.rtype);
     num j = 0;
     for j < m.args.len {
-      QuirkArg a = m.args.get(j);
+      ShapeArg a = m.args.get(j);
       dtype_free(a.dtype);
       j = j + 1;
     }
@@ -1761,20 +1755,20 @@ fun _clone_compound_init_fields(Vec<CompoundInitField>* fields) Vec<CompoundInit
   ret out;
 }
 
-fun _clone_shape_methods(Vec<QuirkMethodSig>* methods) Vec<QuirkMethodSig> {
-  Vec<QuirkMethodSig> out;
+fun _clone_shape_methods(Vec<ShapeMethodSig>* methods) Vec<ShapeMethodSig> {
+  Vec<ShapeMethodSig> out;
   out.init(methods.len);
   num i = 0;
   for i < methods.len {
-    QuirkMethodSig m = methods.get(i);
-    QuirkMethodSig c = m;
+    ShapeMethodSig m = methods.get(i);
+    ShapeMethodSig c = m;
     c.rtype = dtype_clone(m.rtype);
-    Vec<QuirkArg> cargs;
+    Vec<ShapeArg> cargs;
     cargs.init(m.args.len);
     num j = 0;
     for j < m.args.len {
-      QuirkArg a = m.args.get(j);
-      QuirkArg ca = a;
+      ShapeArg a = m.args.get(j);
+      ShapeArg ca = a;
       ca.dtype = dtype_clone(a.dtype);
       cargs.push(ca);
       j = j + 1;

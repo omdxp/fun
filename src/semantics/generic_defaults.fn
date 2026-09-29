@@ -1,6 +1,6 @@
 // Default generic type parameters.
 //
-// A generic enum, compound, quirk or alias may give trailing type
+// A generic enum, compound, shape or alias may give trailing type
 // parameters a default (`enum Result<T, E = Error>`), and a reference that
 // writes fewer type arguments than the declaration has (`Result<num>`)
 // gets the missing ones filled in from those defaults. A default may name

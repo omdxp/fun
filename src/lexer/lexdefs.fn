@@ -12,7 +12,7 @@ use std.vec;
 // True if `s` is a reserved word.
 pub fun is_keyword(str s) flag {
   fit s {
-    "use", "pub", "fun", "as", "als", "enum", "compound", "quirk", "shape", "impl", "let",
+    "use", "pub", "fun", "as", "als", "enum", "compound", "shape", "impl", "let",
     "const",
     "defer",
     "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "flag", "chr", "if",
@@ -28,7 +28,7 @@ pub fun is_keyword(str s) flag {
 // changed together.
 pub fun keywords() Vec<str> {
   Vec<str> out;
-  out.init(43);
+  out.init(42);
   out.push("use");
   out.push("pub");
   out.push("fun");
@@ -36,7 +36,6 @@ pub fun keywords() Vec<str> {
   out.push("als");
   out.push("enum");
   out.push("compound");
-  out.push("quirk");
   out.push("shape");
   out.push("impl");
   out.push("let");

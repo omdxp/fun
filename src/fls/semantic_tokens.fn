@@ -23,7 +23,7 @@ use std.map;
 // declare this same legend, or a client will show the wrong colors.
 // `defaultLibrary` marks a language primitive (`num`, `str`, `i7`,
 // ...) as distinct from every declared type - a `compound`/`enum`/
-// `quirk`, whether written in this project or the stdlib, is a
+// `shape`, whether written in this project or the stdlib, is a
 // "type" like any other, uncolored differently by where it happens
 // to be declared.
 pub const str TOKEN_TYPES = `["keyword","comment","string","number","operator","function","variable","type","enumMember","boolean"]`;

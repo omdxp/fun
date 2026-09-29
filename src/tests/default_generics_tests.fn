@@ -182,9 +182,9 @@ test "an impl on a defaulted compound or enum serves a receiver written without 
   assert equals(out, "7 1 0\n"), "expected the impl's methods to run on the default-filled types";
 }
 
-test "a quirk parameter can have a default, whether the impl writes it or not" {
+test "a shape parameter can have a default, whether the impl writes it or not" {
   str src = `use std.c.io;
-  `quirk Conv<F, T = str> { conv(F x) T; }
+  `shape Conv<F, T = str> { conv(F x) T; }
   `compound A { num v; }
   `compound B { num v; }
   `impl A as Conv<num> {
@@ -202,13 +202,13 @@ test "a quirk parameter can have a default, whether the impl writes it or not" {
   `  printf("%s %s %s %s\n", a.conv(1), b.conv(1), run(a), run(b));
   `  ret 0;
   `}`;
-  str out = run_source(src, "dg_shape", "quirk default");
-  assert equals(out, "short long short long\n"), "expected Conv<num> and Conv<num, str> to be the same quirk, and usable as a bound";
+  str out = run_source(src, "dg_shape", "shape default");
+  assert equals(out, "short long short long\n"), "expected Conv<num> and Conv<num, str> to be the same shape, and usable as a bound";
 }
 
-test "a defaulted compound implements a quirk and satisfies a quirk bound" {
+test "a defaulted compound implements a shape and satisfies a shape bound" {
   str src = `use std.c.io;
-  `quirk Show { show() str; }
+  `shape Show { show() str; }
   `compound Pair<A, B = A> { A a; B b; }
   `impl Pair<A, B> as Show {
   `  pub show() str { ret "pair"; }
@@ -219,7 +219,7 @@ test "a defaulted compound implements a quirk and satisfies a quirk bound" {
   `  printf("%s\n", describe(p));
   `  ret 0;
   `}`;
-  str out = run_source(src, "dg_shape_impl", "quirk implemented by a defaulted compound");
+  str out = run_source(src, "dg_shape_impl", "shape implemented by a defaulted compound");
   assert equals(out, "pair\n"), "expected Pair<num> to satisfy Show";
 }
 

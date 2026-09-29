@@ -39,7 +39,7 @@ test "range for loop desugars into a Range value and inlines its own Iterator" {
   // user-Iterator test does for its own `Counter` type.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Range { num start; num end; }
   `impl Range as Iterator<num> {
   `  pub next() Option<num> {
@@ -592,7 +592,7 @@ test "let destructuring compiles under MSVC's strict, non-GNU C, with no '__auto
   );
   // `starts_with`, not an exact `equals` against a trailing '\n': every
   // other `run_source_forcing_msvc` test in this file already relaxes
-  // this same way (a real Windows output-capture quirk around the final
+  // this same way (a real Windows output-capture shape around the final
   // byte under the strict/MSVC path, unrelated to the actual computed
   // values - confirmed directly against real Windows CI: the destructured
   // values themselves came back exactly right, "3 9", only the trailing

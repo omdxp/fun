@@ -21,16 +21,16 @@ test "ra3: no crash on field access of a generic-impl method returning a compoun
   assert contains(out, "get_inner"), "expected the method to be emitted";
 }
 
-test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
+test "ra3: deep method chains (3-level shape, fn-returns-generic, generic-method chain)" {
   str src = `use std.c.io;
   `compound C { num val; }
-  `quirk QC { gv() num; }
+  `shape QC { gv() num; }
   `impl C as QC { gv() num { ret self.val; } }
   `compound B { C c; }
-  `quirk QB { to_c() QC; }
+  `shape QB { to_c() QC; }
   `impl B as QB { to_c() QC { ret &self.c; } }
   `compound A { B b; }
-  `quirk QA { to_b() QB; }
+  `shape QA { to_b() QB; }
   `impl A as QA { to_b() QB { ret &self.b; } }
   `fun main() num {
   `  A a; a.b.c.val = 123; QA qa = &a;
@@ -38,7 +38,7 @@ test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method
   `  ret 0;
   `}`;
   str out = run_source(src, "deep_shape_chain_3level", "ra3: deep method chains");
-  assert equals(out, "123\n"), "expected the 3-level quirk chain to dispatch to the innermost value";
+  assert equals(out, "123\n"), "expected the 3-level shape chain to dispatch to the innermost value";
 }
 
 test "ra3: deep method chains (generic-method chain)" {
@@ -55,11 +55,11 @@ test "ra3: deep method chains (generic-method chain)" {
   assert contains(out, "Box__num__get"), "expected the chained method on its result";
 }
 
-test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field" {
+test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field" {
   str src = `use std.c.io;
   `compound Inner { num v; }
   `compound Outer { Inner* inner; }
-  `quirk HasV { getV() num; }
+  `shape HasV { getV() num; }
   `impl Inner as HasV { getV() num { ret self.v; } }
   `fun extract(Outer* o) HasV { ret o.inner; }
   `fun main() num {
@@ -74,15 +74,15 @@ test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field"
   `}`;
   let out = emit_c(
     src,
-    "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field"
+    "ra3: shape coercion of deref, parenthesized address-of, and pointer-field"
   );
-  assert contains(out, "Inner__HasV__getV"), "expected the quirk implementation";
+  assert contains(out, "Inner__HasV__getV"), "expected the shape implementation";
   assert contains(out, "__fun_coerce_Inner_HasV"), "expected the coercion helper";
 }
 
-test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable" {
+test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable" {
   str src = `use std.c.io;
-  `quirk Named { name() str; }
+  `shape Named { name() str; }
   `compound Box<T> { T[] data; num n; }
   `impl Box<T> { pub fill(T[] src, num c) { self.data = src; self.n = c; } pub at(num i) T { ret self.data[i]; } }
   `compound Dog { num age; }
@@ -97,10 +97,10 @@ test "ra3: generic T[] param accepts a concrete array arg; extra pub method in a
   `}`;
   let out = emit_c(
     src,
-    "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable"
+    "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable"
   );
   assert contains(out, "Box__num__fill"), "expected the monomorphized fill method";
-  assert contains(out, "Dog__Named__age_years"), "expected the extra pub method in the as-Quirk impl";
+  assert contains(out, "Dog__Named__age_years"), "expected the extra pub method in the as-Shape impl";
 }
 
 test "P3: nil literal lowers to NULL and coerces to pointer/str" {
@@ -423,9 +423,9 @@ test "a method's own default does not collide with its receiver" {
 // assert contains(out, "show__num((&n), false)"), "expected the default filled at the monomorphized call";
 // }
 
-test "quirk-impl method call chains onto a call-expression receiver" {
+test "shape-impl method call chains onto a call-expression receiver" {
   str src = `use std.c.io;
-  `quirk Sized { len() num; is_empty() flag; }
+  `shape Sized { len() num; is_empty() flag; }
   `compound Bag<T> { num len; }
   `impl Bag<T> as Sized { pub len() num { ret self.len; } pub is_empty() flag { ret self.len == 0; } }
   `fun make_bag() Bag<num> {
@@ -437,8 +437,8 @@ test "quirk-impl method call chains onto a call-expression receiver" {
   `  printf("%lld %d\n", make_bag().len(), make_bag().is_empty());
   `  ret 0;
   `}`;
-  let out = emit_c(src, "quirk-impl method call chains onto a call-expression receiver");
-  assert contains(out, "Bag__num__Sized__len"), "expected the quirk method, not the same-named field";
+  let out = emit_c(src, "shape-impl method call chains onto a call-expression receiver");
+  assert contains(out, "Bag__num__Sized__len"), "expected the shape method, not the same-named field";
   assert contains(out, "__fun_recv_tmp"), "expected the call receiver hoisted into a temporary";
 }
 
@@ -469,7 +469,7 @@ test "a rotating sink writes what was logged to its file" {
 test "for item : iterable inlines a user Iterator's own next() body; break exits the loop" {
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Counter { num cur; num limit; }
   `impl Counter as Iterator<num> {
   `  pub next() Option<num> {
@@ -503,7 +503,7 @@ test "for item : iterable inlines a user Iterator's own next() body; break exits
 test "an inlined Iterator's own next() with a nested for/if (ret two levels deep) still yields correctly" {
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Evens { num idx; num limit; }
   `impl Evens as Iterator<num> {
   `  pub next() Option<num> {
@@ -538,7 +538,7 @@ test "an inlined Iterator's own next() with a nested for/if (ret two levels deep
 test "two for loops inlining the same Iterator type in one function don't collide" {
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Counter { num cur; num limit; }
   `impl Counter as Iterator<num> {
   `  pub next() Option<num> {
@@ -580,7 +580,7 @@ test "a plain type's call-based next() fallback supports the two-name enumerate 
   // emitting an undeclared `i`.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Evens { num idx; num limit; }
   `impl Evens as Iterator<num> {
   `  pub next() Option<num> {
@@ -619,7 +619,7 @@ test "a plain type's call-based next() fallback supports destructuring a tuple E
   // never represented a tuple at all.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Pairs { num idx; num limit; }
   `impl Pairs as Iterator<(num, num)> {
   `  pub next() Option<(num, num)> {
@@ -1108,10 +1108,10 @@ test "a generic container instantiated with a pointer type argument mangles dist
   assert contains(out, "Bag__Node_ptr1__put(Bag__Node_ptr1* self, Node* v)"), "expected the pointer instantiation to take a pointer";
 }
 
-test "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature" {
+test "a concrete shape instantiation with a pointer type argument validates against its own substituted signature" {
   str src = `use std.c.io;
   `compound Node { num value; }
-  `quirk Box<T> { get() T; }
+  `shape Box<T> { get() T; }
   `compound PtrBox { Node* held; }
   `impl PtrBox as Box<Node*> {
   `  get() Node* { ret self.held; }
@@ -1127,9 +1127,9 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
   `}`;
   let out = emit_c(
     src,
-    "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature"
+    "a concrete shape instantiation with a pointer type argument validates against its own substituted signature"
   );
-  assert contains(out, "Box__Node_ptr1_vtable"), "expected the quirk instantiation to mangle its pointer argument";
+  assert contains(out, "Box__Node_ptr1_vtable"), "expected the shape instantiation to mangle its pointer argument";
   assert contains(out, "Node* PtrBox__Box__get(PtrBox* self)"), "expected the impl method to keep its pointer return type";
 }
 
@@ -1414,9 +1414,9 @@ test "a generic function-type alias emits the real callback signature, not the a
   assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
 }
 
-test "a type alias naming a quirk still dispatches dynamically through the alias" {
+test "a type alias naming a shape still dispatches dynamically through the alias" {
   str src = `use std.c.io;
-  `quirk Shape {
+  `shape Shape {
   `  area() num;
   `}
   `compound Square {
@@ -1434,9 +1434,9 @@ test "a type alias naming a quirk still dispatches dynamically through the alias
   `  printf("%lld\n", describe(d));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a type alias naming a quirk still dispatches dynamically through the alias");
+  let out = emit_c(src, "a type alias naming a shape still dispatches dynamically through the alias");
   assert !contains(out, "Drawable"), "expected the alias name to never reach emitted C";
-  assert contains(out, "Shape"), "expected the real quirk type to reach emitted C";
+  assert contains(out, "Shape"), "expected the real shape type to reach emitted C";
 }
 
 test "a bound-list type alias's own expansion agrees with a hand-written bound list" {
@@ -1492,9 +1492,9 @@ test "a bound-list type alias on a generic impl's own constraint does not monomo
   );
 }
 
-test "a quirk-bounded generic impl monomorphizes for a real implementor" {
+test "a shape-bounded generic impl monomorphizes for a real implementor" {
   str src = `use std.c.io;
-  `quirk Renderable { render() str; }
+  `shape Renderable { render() str; }
   `compound Point { num x; }
   `impl Point as Renderable {
   `  render() str { ret "point"; }
@@ -1508,12 +1508,12 @@ test "a quirk-bounded generic impl monomorphizes for a real implementor" {
   `  printf("%s\n", w.describe());
   `  ret 0;
   `}`;
-  assert_emits(src, "Wrapper__Point__describe", "expected the quirk-implementor instantiation to monomorphize");
+  assert_emits(src, "Wrapper__Point__describe", "expected the shape-implementor instantiation to monomorphize");
 }
 
-test "a quirk-bounded generic impl does not monomorphize for a non-implementor" {
+test "a shape-bounded generic impl does not monomorphize for a non-implementor" {
   str src = `use std.c.io;
-  `quirk Renderable { render() str; }
+  `shape Renderable { render() str; }
   `compound Other { num v; }
   `compound Wrapper<T> { T value; }
   `impl Wrapper<T: Renderable> {
@@ -1577,15 +1577,15 @@ test "a generic-instantiation-bounded impl does not monomorphize for a mismatchi
   );
 }
 
-test "a self-referential generic-quirk bound (T: Quirk<T>) monomorphizes for a real implementor" {
-  // `dtype_matches_constraint_name`'s own quirk-membership check only
-  // keys on a quirk's bare name; a bound naming a generic quirk's own
+test "a self-referential generic-shape bound (T: Shape<T>) monomorphizes for a real implementor" {
+  // `dtype_matches_constraint_name`'s own shape-membership check only
+  // keys on a shape's bare name; a bound naming a generic shape's own
   // instantiation (self-referential here - the bound is literally
   // "Steppable<T>" at declaration time, before any instantiation
   // supplies a real type for T) needs that `<...>` suffix stripped
   // first, or a real implementor is never recognized.
   str src = `use std.c.io;
-  `quirk Steppable<T> { succ() T; }
+  `shape Steppable<T> { succ() T; }
   `compound Counter { num v; }
   `impl Counter as Steppable<Counter> {
   `  pub succ() Counter {
@@ -1606,7 +1606,7 @@ test "a self-referential generic-quirk bound (T: Quirk<T>) monomorphizes for a r
   `  printf("%lld\n", n.v);
   `  ret 0;
   `}`;
-  let out = run_source(src, "self_ref_shape_bound", "a self-referential quirk bound monomorphizes for a real implementor");
+  let out = run_source(src, "self_ref_shape_bound", "a self-referential shape bound monomorphizes for a real implementor");
   assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
 }
 
@@ -1655,16 +1655,16 @@ test "a generic user type implementing Iterator<T> directly on itself works in a
   assert equals(out, "6\n"), "expected 1+2+3 over [1, 4) through the user's own generic Iterator<T> impl";
 }
 
-test "a next() body calling a further quirk method through self.<field> falls back to the call-based dispatch, not inlining" {
+test "a next() body calling a further shape method through self.<field> falls back to the call-based dispatch, not inlining" {
   // `_next_body_inlinable` only checked statement-level control-flow
-  // shape before this fix - a next() body calling a quirk method
+  // shape before this fix - a next() body calling a shape method
   // through self.<field> (self.start.succ(), needing the nested
   // generic instantiation resolved inside the inlined splice, which
   // this pass doesn't do correctly yet) was wrongly accepted for
   // inlining. Confirmed by the ABSENCE of the inlining pass's own
   // telltale marker (__fun_iter_local, the renamed-local prefix
   // emit_inlined_iterator_next always writes), contrasting with
-  // Range's own next() (plain arithmetic, no nested quirk calls),
+  // Range's own next() (plain arithmetic, no nested shape calls),
   // which IS still inlined - see "range for loop desugars into a Range
   // value" nearby.
   str src = `use std.c.io;
@@ -1701,9 +1701,9 @@ test "a next() body calling a further quirk method through self.<field> falls ba
   let out = emit_c_with_imports(
     src,
     "nested_self_call_fallback",
-    "next() body with a nested self-rooted quirk call falls back to call-based dispatch"
+    "next() body with a nested self-rooted shape call falls back to call-based dispatch"
   );
-  assert !contains(out, "__fun_iter_local"), "expected the call-based fallback, not the inlining pass, given the nested quirk call this pass can't yet resolve inline";
+  assert !contains(out, "__fun_iter_local"), "expected the call-based fallback, not the inlining pass, given the nested shape call this pass can't yet resolve inline";
 }
 
 // A call violating a generic bound is rejected by the typechecker,

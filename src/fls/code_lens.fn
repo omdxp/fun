@@ -20,9 +20,9 @@ use std.vec;
 use std.string;
 use std.c.mem;
 
-// Every top-level function/compound/enum/quirk's own code lens in
+// Every top-level function/compound/enum/shape's own code lens in
 // `doc`, as the result a client is sent: "N references" for a
-// function/compound/enum, "N implementations" for a quirk (a
+// function/compound/enum, "N implementations" for a shape (a
 // structural `impl X as Shape` scan, not the same naive name match -
 // see `_implementations_lens`). Skips `main` and an impl's own
 // methods: `main` is an entry point invoked by the runtime, never
@@ -101,14 +101,14 @@ fun _references_lens(
   ret _lens(found, "reference", decl_pos, len(name), document_uri, decl_text);
 }
 
-// The "N implementations" lens for the quirk named `name` at
+// The "N implementations" lens for the shape named `name` at
 // `decl_pos`. Unlike a reference count, this is a structural scan
 // (every `impl X as name { ... }` block, workspace-wide) rather than
 // a name match, so it stays precise even though `name` itself might
-// coincide with an unrelated identifier elsewhere - a quirk name and
+// coincide with an unrelated identifier elsewhere - a shape name and
 // a function/compound/enum name can never collide (Fun's own flat
 // top-level namespace already forbids it), and an impl's own `as`
-// clause names its quirk exactly, no guessing which one a bare
+// clause names its shape exactly, no guessing which one a bare
 // occurrence of the word actually meant.
 fun _implementations_lens(
   AnalysisCache* cache,

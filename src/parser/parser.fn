@@ -1408,7 +1408,7 @@ impl ParseState {
   }
 
   // Scans the whole token stream once for every top-level
-  // `compound`/`enum`/`quirk` name, so a `Name{...}` initializer can
+  // `compound`/`enum`/`shape` name, so a `Name{...}` initializer can
   // forward-reference a type declared later in the same file --
   // `is_known_compound_symbol` alone only sees symbols registered by the
   // point the cursor has reached. Guarded by `forward_type_names_scanned`
@@ -1425,8 +1425,8 @@ impl ParseState {
       i = i + 1;
       if !(token_is_keyword(t, "compound") || token_is_keyword(t, "enum") || token_is_keyword(
         t,
-        "quirk"
-        ) || token_is_keyword(t, "shape")) {
+        "shape"
+      )) {
         continue;
       }
       num j = i;
@@ -1448,7 +1448,7 @@ impl ParseState {
     }
   }
 
-  // True when `name` is a top-level `compound`/`enum`/`quirk` declared
+  // True when `name` is a top-level `compound`/`enum`/`shape` declared
   // anywhere in the file, per `prescan_forward_type_names`.
   pub is_forward_declared_type(str name) flag {
     ret self.forward_type_names.has(name);
@@ -7215,38 +7215,21 @@ impl Parser {
     ret .None;
   }
 
-  // Parses `quirk Name { method sigs }` (optionally generic, `quirk
+  // Parses `shape Name { method sigs }` (optionally generic, `shape
   // Name<T> { ... }`): a structural interface of method signatures with no
   // bodies, which `impl Type as Name { ... }` supplies. Registers the
-  // quirk's name as a symbol, and reuses
+  // shape's name as a symbol, and reuses
   // `parse_type_params_with_constraints` so `T: a | b` constraint syntax
   // parses here too.
   pub parse_shape(flag is_public) Option<ParseErrorKind> {
-    // Accepts either spelling of the keyword - the caller has already
-    // peeked and confirmed it is one or the other, so this just consumes
-    // it and remembers which, rather than hard-failing on one spelling
-    // the way a plain `expect_keyword("quirk")` would.
-    flag spelled_shape = false;
-    flag kw_matched = false;
-    fit self.state.token_next() {
-      .Some(t) -> {
-        if token_is_keyword(t, "shape") {
-          kw_matched = true;
-          spelled_shape = true;
-        } elif token_is_keyword(t, "quirk") {
-          kw_matched = true;
-        }
-      }
-      .None -> {}
-    }
-    if !kw_matched {
-      self.state.err("expected keyword 'quirk' or 'shape'");
-      ret .Some(.InvalidKeyword);
+    let kwerr = self.state.expect_keyword("shape");
+    if kwerr.is_some() {
+      ret kwerr;
     }
 
     let name_tok = self.state.token_next();
     if name_tok.is_none() || name_tok.unwrap().type != .Identifier {
-      self.state.err("expected identifier after 'quirk'");
+      self.state.err("expected identifier after 'shape'");
       ret .Some(.InvalidIdentifier);
     }
     str name = "";
@@ -7279,7 +7262,7 @@ impl Parser {
       ret lberr;
     }
 
-    Vec<QuirkMethodSig> methods;
+    Vec<ShapeMethodSig> methods;
     methods.init(0);
 
     for !self.state.next_token_is_symbol('}') {
@@ -7305,7 +7288,7 @@ impl Parser {
         ret lperr;
       }
 
-      Vec<QuirkArg> margs;
+      Vec<ShapeArg> margs;
       margs.init(0);
       for !self.state.next_token_is_symbol(')') {
         DataType* adt = malloc(sizeof(DataType));
@@ -7332,7 +7315,7 @@ impl Parser {
           _ -> {}
         }
 
-        QuirkArg qa;
+        ShapeArg qa;
         qa.name = aname;
         qa.dtype = adt;
         margs.push(qa);
@@ -7394,7 +7377,7 @@ impl Parser {
         ret serr;
       }
 
-      QuirkMethodSig ms = quirk_method_sig_new();
+      ShapeMethodSig ms = shape_method_sig_new();
       ms.name = mname;
       ms.rtype = rtype;
       ms.args = margs;
@@ -7415,7 +7398,6 @@ impl Parser {
     qn.type_params = type_params;
     qn.type_param_defaults = type_param_defaults;
     qn.has_type_params = type_params.len > 0;
-    qn.spelled_shape = spelled_shape;
 
     Node node = node_new(.Shape(qn));
     node.pos = name_tok.unwrap().pos;
@@ -7436,7 +7418,7 @@ impl Parser {
   // monomorphizing `impl Type<num> { ... }` by
   // `impl_generic_args_are_params`; likewise `as Shape<T>` is a symbolic
   // binding to the impl's own param while `as Shape<num>` is a distinctly
-  // mangled quirk identity. Each method becomes a top-level function named
+  // mangled shape identity. Each method becomes a top-level function named
   // `<Type>__<method>` (or `<Type>__<Shape>__<method>`) with an implicit
   // `<Type>* self` first argument, parsed through the same
   // scope/`current_function` machinery as `parse_function`, and may carry
@@ -7527,38 +7509,38 @@ impl Parser {
 
     if peek_after_type.is_some() && token_is_keyword(peek_after_type.unwrap(), "as") {
       self.state.token_next(); // consume 'as'
-      let quirk_tok = self.state.token_next();
-      if quirk_tok.is_none() || quirk_tok.unwrap().type != .Identifier {
+      let shape_tok = self.state.token_next();
+      if shape_tok.is_none() || shape_tok.unwrap().type != .Identifier {
         self.state.err("expected shape name after 'as'");
         ret .Some(.InvalidIdentifier);
       }
       str qname = "";
-      fit quirk_tok.unwrap().data {
+      fit shape_tok.unwrap().data {
         .Sval(s) -> { qname = s; }
         _ -> {}
       }
       shape_name = qname;
       has_shape_name = true;
 
-      // A generic quirk binding is either symbolic, where the arg is the
+      // A generic shape binding is either symbolic, where the arg is the
       // enclosing impl's own type param and mangling keys off the base
       // shape name alone, or concrete, a fixed instantiation that is a
-      // distinct quirk identity mangled like any generic instantiation.
+      // distinct shape identity mangled like any generic instantiation.
       if self.state.next_token_is_angle_open() {
-        DataType* quirk_dt = malloc(sizeof(DataType));
-        *quirk_dt = dtype_new();
-        quirk_dt.type_str = qname;
-        let qgaerr = self.state.parse_generic_type_args(quirk_dt);
+        DataType* shape_dt = malloc(sizeof(DataType));
+        *shape_dt = dtype_new();
+        shape_dt.type_str = qname;
+        let qgaerr = self.state.parse_generic_type_args(shape_dt);
         if qgaerr.is_some() {
           ret qgaerr;
         }
-        if quirk_dt.generic_args.len >= 1 {
-          shape_arg_dtype = quirk_dt.generic_args.get(0);
+        if shape_dt.generic_args.len >= 1 {
+          shape_arg_dtype = shape_dt.generic_args.get(0);
           has_shape_arg_dtype = true;
         }
-        flag is_symbolic = _dtype_references_any_param(quirk_dt, type_params);
+        flag is_symbolic = _dtype_references_any_param(shape_dt, type_params);
         if !is_symbolic {
-          shape_concrete_instantiation = _mangled_dtype_name(quirk_dt);
+          shape_concrete_instantiation = _mangled_dtype_name(shape_dt);
           has_shape_concrete_instantiation = true;
         }
       }
@@ -7881,7 +7863,7 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `use`, `test`, `compound`, `enum`, `quirk`,
+  // Parses one top-level item: `use`, `test`, `compound`, `enum`, `shape`,
   // `impl`, `pub`/`async fun`/`fun`, or a bare-datatype-keyword global
   // variable (`num x = 5;`). Anything `parse_statement` already
   // understands is delegated there directly, so a bare top-level
@@ -7933,7 +7915,7 @@ impl Parser {
         ret self.parse_enum(false);
       }
 
-      if equals(kw, "quirk") || equals(kw, "shape") {
+      if equals(kw, "shape") {
         ret self.parse_shape(false);
       }
 
@@ -7975,7 +7957,7 @@ impl Parser {
           if equals(nkw, "enum") {
             ret self.parse_enum(true);
           }
-          if equals(nkw, "quirk") || equals(nkw, "shape") {
+          if equals(nkw, "shape") {
             ret self.parse_shape(true);
           }
           if equals(nkw, "impl") {
@@ -10555,9 +10537,9 @@ test "parse_enum parses an array-typed variant payload element" {
 }
 
 test "parse_shape parses an array-typed arg and return type" {
-  ParseState st = _state_from("quirk Sized { fill(num[] buf) num[]; }");
+  ParseState st = _state_from("shape Sized { fill(num[] buf) num[]; }");
   Parser p = parser_new(&st);
-  assert p.parse_shape(false).is_none(), "expected the quirk to parse";
+  assert p.parse_shape(false).is_none(), "expected the shape to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Shape(q) -> {
@@ -10721,7 +10703,7 @@ test "a type parameter without a default cannot follow one with a default" {
   assert p.parse_function(true, false).is_some(), "expected a non-default after a default to be rejected";
 }
 
-test "enum, compound, quirk and alias declarations record their type parameter defaults" {
+test "enum, compound, shape and alias declarations record their type parameter defaults" {
   ParseState st = _state_from("enum Res<T, E = str> { Ok(T), Err(E) }");
   Parser p = parser_new(&st);
   assert p.parse_enum(true).is_none(), "expected the enum to parse";
@@ -10745,9 +10727,9 @@ test "enum, compound, quirk and alias declarations record their type parameter d
     _ -> { panic("expected a Compound node"); }
   }
 
-  ParseState st3 = _state_from("quirk Conv<F, T = str> { conv(F x) T; }");
+  ParseState st3 = _state_from("shape Conv<F, T = str> { conv(F x) T; }");
   Parser p3 = parser_new(&st3);
-  assert p3.parse_shape(true).is_none(), "expected the quirk to parse";
+  assert p3.parse_shape(true).is_none(), "expected the shape to parse";
   let q = st3.nodes.get(st3.nodes.len - 1);
   fit q.kind {
     .Shape(qn) -> {
@@ -12151,15 +12133,15 @@ test "parse_top_level_declaration dispatches 'compound' and 'enum'" {
 }
 
 test "parse_shape parses method signatures with args and return types" {
-  ParseState st = _state_from("quirk Sized { len() num; is_empty() flag; }");
+  ParseState st = _state_from("shape Sized { len() num; is_empty() flag; }");
   Parser p = parser_new(&st);
-  assert p.parse_shape(true).is_none(), "expected the quirk to parse";
+  assert p.parse_shape(true).is_none(), "expected the shape to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Shape(q) -> {
       assert equals(q.name, "Sized"), "expected shape name 'Sized'";
-      assert top.flags.is_public, "expected the quirk to be public";
-      assert !q.is_generic, "expected a non-generic quirk";
+      assert top.flags.is_public, "expected the shape to be public";
+      assert !q.is_generic, "expected a non-generic shape";
       assert q.methods.len == 2, "expected 2 method signatures";
       let m0 = q.methods.get(0);
       assert equals(m0.name, "len"), "expected first method 'len'";
@@ -12174,9 +12156,9 @@ test "parse_shape parses method signatures with args and return types" {
 }
 
 test "parse_shape parses a method argument and defaults an omitted return type to void" {
-  ParseState st = _state_from("quirk Writer { write(str s); }");
+  ParseState st = _state_from("shape Writer { write(str s); }");
   Parser p = parser_new(&st);
-  assert p.parse_shape(false).is_none(), "expected the quirk to parse";
+  assert p.parse_shape(false).is_none(), "expected the shape to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Shape(q) -> {
@@ -12195,13 +12177,13 @@ test "parse_shape parses a method argument and defaults an omitted return type t
 }
 
 test "parse_shape parses an async method and generic type parameters" {
-  ParseState st = _state_from("quirk Iterator<T> { async next() Option<T>; }");
+  ParseState st = _state_from("shape Iterator<T> { async next() Option<T>; }");
   Parser p = parser_new(&st);
-  assert p.parse_shape(false).is_none(), "expected the generic quirk to parse";
+  assert p.parse_shape(false).is_none(), "expected the generic shape to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Shape(q) -> {
-      assert q.is_generic, "expected a generic quirk";
+      assert q.is_generic, "expected a generic shape";
       assert q.has_type_params, "expected type params";
       assert equals(q.type_params.get(0), "T"), "expected type param 'T'";
       let m0 = q.methods.get(0);
@@ -12212,16 +12194,16 @@ test "parse_shape parses an async method and generic type parameters" {
 }
 
 test "parse_shape registers the shape name as a symbol" {
-  ParseState st = _state_from("quirk Sized { len() num; }");
+  ParseState st = _state_from("shape Sized { len() num; }");
   Parser p = parser_new(&st);
-  assert p.parse_shape(false).is_none(), "expected the quirk to parse";
+  assert p.parse_shape(false).is_none(), "expected the shape to parse";
   assert st.get_symbol("Sized").is_some(), "expected 'Sized' to be registered as a symbol";
 }
 
-test "parse_top_level_declaration dispatches 'quirk'" {
-  ParseState st = _state_from("quirk Sized { len() num; }");
+test "parse_top_level_declaration dispatches 'shape'" {
+  ParseState st = _state_from("shape Sized { len() num; }");
   Parser p = parser_new(&st);
-  assert p.parse_top_level_declaration().is_none(), "expected 'quirk' to dispatch";
+  assert p.parse_top_level_declaration().is_none(), "expected 'shape' to dispatch";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Shape(q) -> { assert equals(q.name, "Sized"), "expected shape name 'Sized'"; }
@@ -12229,7 +12211,7 @@ test "parse_top_level_declaration dispatches 'quirk'" {
   }
 }
 
-test "parse_impl parses a plain (non-quirk) impl with a method body" {
+test "parse_impl parses a plain (non-shape) impl with a method body" {
   ParseState st = _state_from("impl Point { getx() num { ret self.x; } }");
   Parser p = parser_new(&st);
   assert p.parse_impl(true).is_none(), "expected the plain impl to parse";
@@ -12263,10 +12245,10 @@ test "parse_impl parses a plain (non-quirk) impl with a method body" {
   }
 }
 
-test "parse_impl parses a symbolic generic quirk binding" {
+test "parse_impl parses a symbolic generic shape binding" {
   ParseState st = _state_from("impl VecIter<T> as Iterator<T> { next() Option<T> { ret .None; } }");
   Parser p = parser_new(&st);
-  assert p.parse_impl(false).is_none(), "expected the generic quirk impl to parse";
+  assert p.parse_impl(false).is_none(), "expected the generic shape impl to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Impl(i) -> {
@@ -12288,10 +12270,10 @@ test "parse_impl parses a symbolic generic quirk binding" {
   }
 }
 
-test "parse_impl parses a concrete generic quirk instantiation" {
+test "parse_impl parses a concrete generic shape instantiation" {
   ParseState st = _state_from("impl Point as To<num> { convert() num { ret 0; } }");
   Parser p = parser_new(&st);
-  assert p.parse_impl(false).is_none(), "expected the concrete quirk impl to parse";
+  assert p.parse_impl(false).is_none(), "expected the concrete shape impl to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
     .Impl(i) -> {
@@ -12726,7 +12708,7 @@ fun _is_dot_run_operator(Token t) flag {
 }
 
 // Builds the mangled, flat name for `dt` used to key generic
-// instantiations and concrete quirk-binding identities (`Vec<num>` ->
+// instantiations and concrete shape-binding identities (`Vec<num>` ->
 // `Vec__num`, `Box<Node*>` -> `Box__Node_ptr1`). Codegen uses the same
 // mangling scheme so both agree on the name.
 fun _mangled_dtype_name(DataType* dt) str {
@@ -12749,10 +12731,10 @@ fun _mangled_dtype_name_depth(DataType* dt, num depth) str {
 }
 
 // True if `dt` (or any of its nested generic args) references one of
-// `params` by bare name. This distinguishes a symbolic quirk binding
+// `params` by bare name. This distinguishes a symbolic shape binding
 // (`impl VecIter<T> as Iterator<T>`, whose arg is the enclosing impl's own
 // type param) from a concrete one (`impl Point as To<num>`), which is a
-// distinct quirk identity needing its own mangled name to dispatch.
+// distinct shape identity needing its own mangled name to dispatch.
 // True when some entry of `defaults` (a type-param list's defaults so far)
 // is a real default rather than nil.
 fun _has_earlier_default(Vec<DataType*>* defaults) flag {

@@ -462,7 +462,7 @@ compound CompoundInfo {
   flag is_generic;
 }
 
-// The methods declared on a type, keyed by method name. A quirk's
+// The methods declared on a type, keyed by method name. A shape's
 // methods are registered the same way, since a call reads the same.
 compound MethodTable {
   Map<str, FnSig> methods;
@@ -739,7 +739,7 @@ fun _check_c_names(Checker* c, Vec<Node>* nodes) {
         }
       }
       .Enum(e) -> { _check_c_name(c, e.name, "an enum", node); }
-      .Shape(q) -> { _check_c_name(c, q.name, "a quirk", node); }
+      .Shape(q) -> { _check_c_name(c, q.name, "a shape", node); }
       .Function(f) -> {
         for tp : f.type_params {
           _check_c_name(c, tp, "a type parameter", node);
@@ -855,8 +855,8 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
 
 fun _method_leaf_name(str declared, str type_name) str {
   _ = type_name;
-  // The declared name carries the type, and a quirk impl's carries the
-  // quirk as well, so the call's own name is what follows the last
+  // The declared name carries the type, and a shape impl's carries the
+  // shape as well, so the call's own name is what follows the last
   // separator.
   num cut = -1;
   num i = 0;
@@ -890,13 +890,13 @@ test "_method_leaf_name keeps a leaf name's own leading underscore" {
   assert equals(_method_leaf_name("Box__half", "Box"), "half"),
   "expected an ordinary (non-underscore) leaf name to still strip cleanly";
   assert equals(_method_leaf_name("Box__Lenable__wrap", "Box"), "wrap"),
-  "expected a quirk-mangled name to still cut at its last separator";
+  "expected a shape-mangled name to still cut at its last separator";
   assert equals(_method_leaf_name("Box__Lenable___wrap", "Box"), "_wrap"),
-  "expected a quirk-mangled name whose leaf also starts with '_' to keep it too";
+  "expected a shape-mangled name whose leaf also starts with '_' to keep it too";
 }
 
-// The signature a quirk's method declaration promises.
-fun _signature_of_shape_method(QuirkMethodSig m) FnSig {
+// The signature a shape's method declaration promises.
+fun _signature_of_shape_method(ShapeMethodSig m) FnSig {
   FnSig sig;
   sig.args.init(m.args.len);
   sig.rtype = checked_unknown();
@@ -908,7 +908,7 @@ fun _signature_of_shape_method(QuirkMethodSig m) FnSig {
   sig.is_generic = false;
   sig.ambiguous = false;
   sig.min_args = m.args.len;
-  // A quirk method has no privacy of its own: naming the quirk is what
+  // A shape method has no privacy of its own: naming the shape is what
   // grants access to it, not which file declared it, so this reads as
   // public everywhere `check_visibility` looks.
   sig.file = "";
@@ -941,31 +941,31 @@ compound Checker {
   // C compiler would otherwise be the one to notice, far from the
   // actual cause and in terms the program's own source never used.
   Map<str, TopLevelSite> declared_at;
-  // The quirks a program declares. A pointer to a compound that
-  // implements one stands where the quirk is expected.
-  Set<str> quirks;
-  // Quirk name -> the type_name of every impl block that implements it
+  // The shapes a program declares. A pointer to a compound that
+  // implements one stands where the shape is expected.
+  Set<str> shapes;
+  // Shape name -> the type_name of every impl block that implements it
   // (both a generic impl's own bare template name, e.g. `impl Vec<T> as
   // Renderable` -> "Vec", and a monomorphizing impl's mangled concrete
   // name, e.g. `impl Vec<num> as Renderable` -> "Vec__num" - see
   // `implements_shape`, which tries both forms the same way
   // `receiver_method` does for method lookup). Used to check a real
-  // `impl X as Quirk` relationship for a generic bound naming a quirk
+  // `impl X as Shape` relationship for a generic bound naming a shape
   // (`T: Renderable`), as opposed to `assignable`'s coarser
-  // any-pointer-satisfies-any-quirk approximation used for ordinary
-  // quirk-typed-parameter coercion - the two are deliberately different
-  // strictness levels, not a shared notion of "satisfies this quirk".
-  Map<str, Set<str>> quirk_implementors;
-  // A quirk implementor's own declared argument type for that quirk
+  // any-pointer-satisfies-any-shape approximation used for ordinary
+  // shape-typed-parameter coercion - the two are deliberately different
+  // strictness levels, not a shared notion of "satisfies this shape".
+  Map<str, Set<str>> shape_implementors;
+  // A shape implementor's own declared argument type for that shape
   // (`Range` -> `num` for `impl Range as Iterator<num>`), keyed by
   // `"{type_name}::{shape_name}"` - lets a for-loop's own general
   // `Iterator<T>` element-type resolution read the real `Elem` a type
   // declared, not just confirm the relationship exists the way
-  // `implements_shape` alone does. Absent for a bare `as Quirk` with no
+  // `implements_shape` alone does. Absent for a bare `as Shape` with no
   // argument, or a symbolic binding whose argument is the enclosing
   // impl's own erased type param (never independently useful without
   // that impl's own concrete instantiation).
-  Map<str, CheckedType> quirk_elem_by_type;
+  Map<str, CheckedType> shape_elem_by_type;
   // Enums whose variants carry no payload, which stand for the numbers
   // they are written as.
   Set<str> plain_enums;
@@ -985,7 +985,7 @@ compound Checker {
   // argument list can be held to the payload type it lands on.
   Map<str, Vec<CheckedType>> variant_payloads;
   Map<str, Vec<str>> enum_type_params;
-  // What each declared compound holds, and what each type and quirk
+  // What each declared compound holds, and what each type and shape
   // declares as methods.
   Map<str, CompoundInfo> compounds;
   Map<str, MethodTable> methods;
@@ -1017,9 +1017,9 @@ fun _checker_new() Checker {
   c.active_type_param_bounds.init(4);
   c.fns.init(32);
   c.declared_at.init(32);
-  c.quirks = set_init("", 16);
-  c.quirk_implementors.init(16);
-  c.quirk_elem_by_type.init(16);
+  c.shapes = set_init("", 16);
+  c.shape_implementors.init(16);
+  c.shape_elem_by_type.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
   c.enum_names = set_init("", 16);
@@ -1080,26 +1080,26 @@ impl Checker {
   // instantiation, exactly as `ImplNode.type_name` carries it) has a real
   // `impl ... as shape_name { ... }` block, for `implements_shape` below.
   record_shape_impl(str type_name, str shape_name) {
-    let existing = self.quirk_implementors.at(shape_name);
+    let existing = self.shape_implementors.at(shape_name);
     if existing.is_some() {
       Set<str> bucket = existing.unwrap();
       bucket.add(type_name);
-      self.quirk_implementors.put(shape_name, bucket);
+      self.shape_implementors.put(shape_name, bucket);
     } else {
       Set<str> bucket = set_init("", 4);
       bucket.add(type_name);
-      self.quirk_implementors.put(shape_name, bucket);
+      self.shape_implementors.put(shape_name, bucket);
     }
   }
 
-  // True when `t` is a real, registered implementor of `quirk` - a
-  // genuine `impl X as quirk { ... }` block was seen for it, not just
-  // "any pointer satisfies any quirk" (`assignable`'s coarser check,
-  // left as-is for ordinary quirk-typed-parameter coercion). Tries both
+  // True when `t` is a real, registered implementor of `shape` - a
+  // genuine `impl X as shape { ... }` block was seen for it, not just
+  // "any pointer satisfies any shape" (`assignable`'s coarser check,
+  // left as-is for ordinary shape-typed-parameter coercion). Tries both
   // the mangled concrete-instantiation name and the bare type name, the
   // same lookup order `receiver_method` already uses for method lookup.
   implements_shape(CheckedType t, str shape_name) flag {
-    let bucket_opt = self.quirk_implementors.at(shape_name);
+    let bucket_opt = self.shape_implementors.at(shape_name);
     if bucket_opt.is_none() {
       ret false;
     }
@@ -1117,10 +1117,10 @@ impl Checker {
   // `Iterator<Elem>`), substituted against `t`'s own concrete
   // `generic_args` when the implementor is itself generic - `Elem` for
   // `RingBuf<num>` implementing `Iterator<T>` on its own type param `T`
-  // is `num`, not the bare `T` `quirk_elem_by_type` recorded at
+  // is `num`, not the bare `T` `shape_elem_by_type` recorded at
   // registration time. `.None` when `t` doesn't implement `shape_name`
   // at all, or the impl took no argument for it.
-  quirk_arg_of(CheckedType t, str shape_name) Option<CheckedType> {
+  shape_arg_of(CheckedType t, str shape_name) Option<CheckedType> {
     if !self.implements_shape(t, shape_name) {
       ret .None;
     }
@@ -1131,7 +1131,7 @@ impl Checker {
     mangled_key_sb.append(mangled);
     mangled_key_sb.append("::");
     mangled_key_sb.append(shape_name);
-    let by_mangled = self.quirk_elem_by_type.at(mangled_key_sb.build());
+    let by_mangled = self.shape_elem_by_type.at(mangled_key_sb.build());
     if by_mangled.is_some() {
       ret by_mangled;
     }
@@ -1139,7 +1139,7 @@ impl Checker {
     bare_key_sb.append(named.name);
     bare_key_sb.append("::");
     bare_key_sb.append(shape_name);
-    let by_bare = self.quirk_elem_by_type.at(bare_key_sb.build());
+    let by_bare = self.shape_elem_by_type.at(bare_key_sb.build());
     if by_bare.is_none() {
       ret .None;
     }
@@ -1153,7 +1153,7 @@ impl Checker {
   }
 
   // True when a value of type `from` can stand where `to` is expected,
-  // including where `to` is a quirk a pointer satisfies.
+  // including where `to` is a shape a pointer satisfies.
   assignable(CheckedType to, CheckedType from) flag {
     if can_assign(to, from) {
       // Two instantiations of one generic type are the same type only
@@ -1174,8 +1174,8 @@ impl Checker {
     if self.reads_as_number(to) && self.reads_as_number(from) {
       ret true;
     }
-    if self.quirks.has(to.name) {
-      ret from.pointer_depth > 0 || self.quirks.has(from.name);
+    if self.shapes.has(to.name) {
+      ret from.pointer_depth > 0 || self.shapes.has(from.name);
     }
     ret false;
   }
@@ -1199,7 +1199,7 @@ impl Checker {
     // A value of that name, or a type of that name, means this is not an
     // alias at all.
     if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() ||
-      self.quirks.has(alias) || self.enum_names.has(alias) {
+      self.shapes.has(alias) || self.enum_names.has(alias) {
       ret false;
     }
     let known = self.globals.at(name);
@@ -1253,7 +1253,7 @@ impl Checker {
     if equals(bare, "") || keyword_is_datatype(bare) {
       ret;
     }
-    if self.compounds.at(bare).is_some() || self.quirks.has(bare) ||
+    if self.compounds.at(bare).is_some() || self.shapes.has(bare) ||
       self.plain_enums.has(bare) {
       ret;
     }
@@ -1393,7 +1393,7 @@ impl Checker {
       ret true;
     }
     str name = self.canonical_type_name(t.name);
-    if self.compounds.at(name).is_some() || self.quirks.has(name) ||
+    if self.compounds.at(name).is_some() || self.shapes.has(name) ||
       self.plain_enums.has(name) {
       ret true;
     }
@@ -2319,7 +2319,7 @@ impl Checker {
   // genuinely unknown type) untouched.
   canonical_type_name(str name) str {
     if self.compounds.at(name).is_some() || self.methods.at(name).is_some() ||
-      self.quirks.has(name) || self.plain_enums.has(name) {
+      self.shapes.has(name) || self.plain_enums.has(name) {
       ret name;
     }
     num sep = index_of_str(name, "__");
@@ -2488,16 +2488,16 @@ impl Checker {
     ret sig.rtype;
   }
 
-  // A quirk-bound alternative's own bare name, with any generic-arg
-  // suffix stripped (`Steppable<T>` -> `Steppable`). `quirk_implementors`
-  // only ever keys on a quirk's bare name (real membership is `impl X as
+  // A shape-bound alternative's own bare name, with any generic-arg
+  // suffix stripped (`Steppable<T>` -> `Steppable`). `shape_implementors`
+  // only ever keys on a shape's bare name (real membership is `impl X as
   // Steppable<...> { ... }` having been seen for X at all, not which
-  // concrete argument it used), so a bound naming a generic quirk's own
+  // concrete argument it used), so a bound naming a generic shape's own
   // instantiation - including a self-referential one like `T:
   // Steppable<T>`, where the type param the bound is even ATTACHED to is
   // still the unsubstituted literal "T" here, before any instantiation
   // site has supplied a real type for it - could otherwise never match:
-  // `implements_shape` would look up a quirk registered under the
+  // `implements_shape` would look up a shape registered under the
   // literal, never-matching string "Steppable<T>" instead of "Steppable".
   _bare_shape_bound_name(str bound) str {
     num lt = index_of_char(bound, '<');
@@ -2540,12 +2540,12 @@ impl Checker {
           continue;
         }
         str bound = combination.get(at_param);
-        // A bound alternative naming a quirk is checked by real
-        // membership (a genuine `impl X as quirk` block was seen), not
+        // A bound alternative naming a shape is checked by real
+        // membership (a genuine `impl X as shape` block was seen), not
         // name equality - `bound` itself is never resolved against a
-        // declared type/quirk table until now, so this is the first
+        // declared type/shape table until now, so this is the first
         // point either check is even possible. A bound naming a
-        // concrete instantiation of a generic quirk (`T: To<num>`, or a
+        // concrete instantiation of a generic shape (`T: To<num>`, or a
         // self-referential one like `T: Steppable<T>`) is handled by
         // `_bare_shape_bound_name` stripping the `<...>` suffix first.
         if equals(bound, supplied_name) ||
@@ -2553,7 +2553,7 @@ impl Checker {
           listed = true;
         }
       }
-      // `supplied_name` might not name a concrete type or quirk at all,
+      // `supplied_name` might not name a concrete type or shape at all,
       // but a type parameter still active in the declaration being
       // checked (e.g. `T` inside the very generic function/impl that
       // declared it) - not yet substituted for a concrete type. In that
@@ -2664,7 +2664,7 @@ impl Checker {
         num a = 0;
         for a < allowed.len {
           str bound = allowed.get(a);
-          // See the matching comment in `check_instantiation`: a quirk
+          // See the matching comment in `check_instantiation`: a shape
           // bound is checked by real membership, not name equality,
           // with any generic-arg suffix on the bound itself stripped
           // first.
@@ -2716,7 +2716,7 @@ impl Checker {
     // A value of that name, or a type of that name, means this is not an
     // alias at all.
     if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() ||
-      self.quirks.has(alias) || self.plain_enums.has(alias) {
+      self.shapes.has(alias) || self.plain_enums.has(alias) {
       ret false;
     }
     let known = self.fns.at(method);
@@ -3473,7 +3473,7 @@ impl Checker {
         // directly implement `Iterator<Elem>`? Covers `Range`, `Vec`,
         // `Map` (yielding `(K, V)` pairs), `Set`, and any user-defined
         // type with its own `impl X as Iterator<T>`.
-        let elem_opt = self.quirk_arg_of(iterable_type, "Iterator");
+        let elem_opt = self.shape_arg_of(iterable_type, "Iterator");
         if it.item_is_destructure {
           // `for (a, b) : pairs`: the loop item is a tuple, destructured
           // into its own names the same way a declared-type `let`
@@ -3699,11 +3699,11 @@ impl Checker {
             ret;
           }
         }
-        // A quirk names a contract rather than a type a value can be
+        // A shape names a contract rather than a type a value can be
         // stored as, so it cannot be what a `let` infers.
-        if self.quirks.has(value.name) {
+        if self.shapes.has(value.name) {
           self.fail(
-            format("cannot infer a type for '{str}': '{str}' is a quirk", v.name, value.name),
+            format("cannot infer a type for '{str}': '{str}' is a shape", v.name, value.name),
             stmt
           );
           ret;
@@ -4037,7 +4037,7 @@ impl Checker {
     }
   }
 
-  // Reports a method a quirk requires that the impl block does not
+  // Reports a method a shape requires that the impl block does not
   // supply.
   check_shape_conformance(ImplNode block, Node* node) {
     if !block.has_shape_name {
@@ -4232,9 +4232,9 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   Checker checker = _checker_new();
   defer _free_fn_sig_map(&checker.fns);
   defer checker.declared_at.free();
-  defer checker.quirks.free();
-  defer _free_shape_implementors_map(&checker.quirk_implementors);
-  defer checker.quirk_elem_by_type.free();
+  defer checker.shapes.free();
+  defer _free_shape_implementors_map(&checker.shape_implementors);
+  defer checker.shape_elem_by_type.free();
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
@@ -4280,10 +4280,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         }
       }
       .Shape(q) -> {
-        checker.quirks.add(q.name);
+        checker.shapes.add(q.name);
         MethodTable table = _method_table_new();
         for m : q.methods {
-          // A generic quirk's methods mention its type parameters, which
+          // A generic shape's methods mention its type parameters, which
           // stand for whatever the implementing type supplies.
           FnSig sig = _signature_of_shape_method(m);
           if q.is_generic {
@@ -4396,7 +4396,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
             qeb_key_sb.append(block.type_name);
             qeb_key_sb.append("::");
             qeb_key_sb.append(block.shape_name);
-            checker.quirk_elem_by_type.put(
+            checker.shape_elem_by_type.put(
               qeb_key_sb.build(),
               checked_from_dtype(block.shape_arg_dtype)
             );

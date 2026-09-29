@@ -434,7 +434,7 @@ test "for-each over Vec<num> and Vec<str> in separate functions each resolve the
   assert equals(out, "hi\n5\n"), "expected each function's own local table to resolve its own Vec element type, not a stale one from the other function";
 }
 
-test "a quirk implemented by a stdlib type dispatches through its vtable" {
+test "a shape implemented by a stdlib type dispatches through its vtable" {
   str src = `use std.vec;
   `use std.shapes;
   `use std.c.io;
@@ -445,7 +445,7 @@ test "a quirk implemented by a stdlib type dispatches through its vtable" {
   `  printf("%lld\n", v.len());
   `  ret 0;
   `}`;
-  let out = emit_c_with_imports(src, "sl_shape_sized", "Sized quirk on Vec");
+  let out = emit_c_with_imports(src, "sl_shape_sized", "Sized shape on Vec");
   assert contains(out, "Vec__num"), "expected the instantiation";
 }
 

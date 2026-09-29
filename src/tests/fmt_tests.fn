@@ -59,7 +59,7 @@ test "preserves blank lines in function bodies" {
 test "preserves blank lines between top-level constructs" {
   str src = `compound A{num x;}
   `
-  `quirk Q{f() num;}
+  `shape Q{f() num;}
   `
   `impl A as Q {f() num{ret self.x;}}
   `
@@ -68,7 +68,7 @@ test "preserves blank lines between top-level constructs" {
   `  num x;
   `}
   `
-  `quirk Q {
+  `shape Q {
   `  f() num;
   `}
   `
@@ -84,7 +84,7 @@ test "preserves blank lines between top-level constructs" {
   assert equals(got, format("{str}\n", want)), "expected the formatted layout";
 }
 
-test "formats a 'shape' declaration the same way as 'quirk', keeping the author's own spelling" {
+test "formats a 'shape' declaration" {
   str src = `shape Q{f() num;}
   `impl A as Q {f() num{ret self.x;}}`;
   str want = `shape Q {
@@ -97,7 +97,7 @@ test "formats a 'shape' declaration the same way as 'quirk', keeping the author'
   `  }
   `}`;
   str got = format_source(src, "t.fn").unwrap();
-  assert equals(got, format("{str}\n", want)), "expected 'shape' formatted like 'quirk', not rewritten to it";
+  assert equals(got, format("{str}\n", want)), "expected the layout shown";
 }
 
 test "formats pointer and address-of spacing" {
@@ -326,7 +326,7 @@ test "reports the stage that rejected the input" {
 test "wraps an over-long fit arm's own conditions, filling each line rather than one per line" {
   str src = `fun classify(str text) flag {
   `  fit text {
-  `    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
+  `    "fun", "compound", "enum", "shape", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm" -> {
   `      ret true;
   `    }
   `    _ -> { ret false; }
@@ -338,7 +338,7 @@ test "wraps an over-long fit arm's own conditions, filling each line rather than
   assert contains(got, `"fun", "compound"`), "expected consecutive short conditions to stay packed on one line, not each on its own";
   assert !contains(
     got,
-    `"fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm"`
+    `"fun", "compound", "enum", "shape", "impl", "test", "fuzz", "if", "elif", "else", "for", "fit", "defer", "asm"`
   ), "expected the whole list not to still be on one line";
 }
 

@@ -1,7 +1,7 @@
 // Code actions.
 //
 // Quick fixes offered for a diagnostic already reported: removing an
-// unused import outright, filling in a fit's missing arm or a quirk
+// unused import outright, filling in a fit's missing arm or a shape
 // impl's missing method, inserting a missing `await` or marking a
 // function `async`, or silencing any warning with the same `allow` a
 // reader could write by hand.
@@ -372,31 +372,31 @@ fun _stub_arm(str variant_name, num arity) str {
   ret b.build();
 }
 
-// The method and quirk names out of `diagnose()`'s own "'Type' does
+// The method and shape names out of `diagnose()`'s own "'Type' does
 // not supply 'method', which 'Shape' requires" message: its second
 // and third single-quoted segments.
-compound QuirkConformanceRef {
+compound ShapeConformanceRef {
   str method_name;
   str shape_name;
 }
 
-// The quick fix for a "does not supply" quirk-conformance error: a
+// The quick fix for a "does not supply" shape-conformance error: a
 // stub method (`pub name(args) rtype { // TODO: implement }`) with
-// the exact signature the quirk itself declares, inserted right
+// the exact signature the shape itself declares, inserted right
 // before the impl block's own closing brace. "" when the message
-// isn't shaped that way, the quirk or method can't be found, or the
+// isn't shaped that way, the shape or method can't be found, or the
 // enclosing impl block's closing brace can't be found.
 fun _shape_stub_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
   let parsed = _shape_conformance_from_message(d.message);
   if parsed.is_none() {
     ret "";
   }
-  QuirkConformanceRef qc = parsed.unwrap();
+  ShapeConformanceRef qc = parsed.unwrap();
   Analyzed read = cache.of(doc);
   if !read.lexed || !read.parsed {
     ret "";
   }
-  let method = quirk_method_declaration(&read.program.nodes, qc.shape_name, qc.method_name);
+  let method = shape_method_declaration(&read.program.nodes, qc.shape_name, qc.method_name);
   if method.is_none() {
     ret "";
   }
@@ -434,12 +434,12 @@ fun _shape_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   ret b.build();
 }
 
-fun _shape_conformance_from_message(str message) Option<QuirkConformanceRef> {
+fun _shape_conformance_from_message(str message) Option<ShapeConformanceRef> {
   if !contains(message, "does not supply") || !contains(message, "requires") {
     ret .None;
   }
   // Segment 1 is the impl's own type name, which this fix has no use
-  // for; only the method (segment 2) and quirk (segment 3) matter.
+  // for; only the method (segment 2) and shape (segment 3) matter.
   num q1 = index_of_char(message, '\'');
   if q1 < 0 {
     ret .None;
@@ -473,7 +473,7 @@ fun _shape_conformance_from_message(str message) Option<QuirkConformanceRef> {
   }
   str shape_name = substr(after5, 0, q6);
 
-  QuirkConformanceRef qc;
+  ShapeConformanceRef qc;
   qc.method_name = method_name;
   qc.shape_name = shape_name;
   ret .Some(qc);
@@ -483,7 +483,7 @@ fun _shape_conformance_from_message(str message) Option<QuirkConformanceRef> {
 // opening `{` is the first one found at or after `diag_line`
 // (0-indexed): the fit statement's own body when `diag_line` is a
 // `fit_non_exhaustive` warning's own position, or the impl block's
-// own body when it is a quirk-conformance error's, since that's
+// own body when it is a shape-conformance error's, since that's
 // exactly where each diagnostic's own position points.
 fun _find_block_close(Vec<Token>* tokens, num diag_line) Option<Pos> {
   num source_line = diag_line + 1;

@@ -62,7 +62,7 @@ test "defer in range loop runs at each iteration end" {
   // codegen_tests_c.fn's user-Iterator test for the same pattern.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Range { num start; num end; }
   `impl Range as Iterator<num> {
   `  pub next() Option<num> {
@@ -249,12 +249,12 @@ test "async generic impl method await transpiles" {
   assert contains(out, "__fun_async_call_Box__num__forty_two("), "expected the monomorphized async method thunk";
 }
 
-test "async quirk dispatch await transpiles" {
+test "async shape dispatch await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -267,17 +267,17 @@ test "async quirk dispatch await transpiles" {
   `  num out = await q.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk dispatch await transpiles");
+  let out = emit_c(src, "async shape dispatch await transpiles");
   assert contains(out, "vtable->add("), "expected a vtable dispatch";
-  assert contains(out, "__fun_async_call_Counter__AsyncCounter__add"), "expected the quirk-impl async thunk";
+  assert contains(out, "__fun_async_call_Counter__AsyncCounter__add"), "expected the shape-impl async thunk";
 }
 
-test "async quirk field dispatch await transpiles" {
+test "async shape field dispatch await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Holder {
@@ -293,17 +293,17 @@ test "async quirk field dispatch await transpiles" {
   `  num out = await h.q.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk field dispatch await transpiles");
+  let out = emit_c(src, "async shape field dispatch await transpiles");
   assert contains(out, "vtable->add("), "expected a vtable dispatch through the field";
   assert contains(out, "h.q"), "expected the field receiver to be preserved";
 }
 
-test "async quirk function-returned receiver await transpiles" {
+test "async shape function-returned receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -319,17 +319,17 @@ test "async quirk function-returned receiver await transpiles" {
   `  num out = await passthrough(q).add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk function-returned receiver await transpiles");
+  let out = emit_c(src, "async shape function-returned receiver await transpiles");
   assert contains(out, "vtable->add("), "expected a vtable dispatch on a call-expression receiver";
   assert contains(out, "passthrough"), "expected the receiver call to be emitted";
 }
 
-test "async quirk nested composite receiver await transpiles" {
+test "async shape nested composite receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Holder {
@@ -351,17 +351,17 @@ test "async quirk nested composite receiver await transpiles" {
   `  num out = await wrap(q).h.q.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk nested composite receiver await transpiles");
+  let out = emit_c(src, "async shape nested composite receiver await transpiles");
   assert contains(out, "vtable->add("), "expected a vtable dispatch through a nested receiver";
   assert contains(out, "wrap"), "expected the receiver call to be emitted";
 }
 
-test "async quirk generic wrapper receiver await transpiles" {
+test "async shape generic wrapper receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -380,17 +380,17 @@ test "async quirk generic wrapper receiver await transpiles" {
   `  num out = await pack(q).v.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk generic wrapper receiver await transpiles");
+  let out = emit_c(src, "async shape generic wrapper receiver await transpiles");
   assert contains(out, "vtable->add("), "expected a vtable dispatch through the generic wrapper";
   assert contains(out, "Box"), "expected the wrapper instantiation to be emitted";
 }
 
-test "async quirk parenthesized generic receiver await transpiles" {
+test "async shape parenthesized generic receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -409,16 +409,16 @@ test "async quirk parenthesized generic receiver await transpiles" {
   `  num out = await (pack(q).v).add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk parenthesized generic receiver await transpiles");
-  assert contains(out, "vtable->add("), "expected parentheses around the receiver not to hide the quirk";
+  let out = emit_c(src, "async shape parenthesized generic receiver await transpiles");
+  assert contains(out, "vtable->add("), "expected parentheses around the receiver not to hide the shape";
 }
 
-test "async quirk pointer generic receiver await transpiles" {
+test "async shape pointer generic receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -438,16 +438,16 @@ test "async quirk pointer generic receiver await transpiles" {
   `  num out = await (*ptr(&b)).v.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk pointer generic receiver await transpiles");
-  assert contains(out, "vtable->add("), "expected a dereferenced pointer receiver to keep the quirk dispatch";
+  let out = emit_c(src, "async shape pointer generic receiver await transpiles");
+  assert contains(out, "vtable->add("), "expected a dereferenced pointer receiver to keep the shape dispatch";
 }
 
-test "async quirk helper pointer generic receiver await transpiles" {
+test "async shape helper pointer generic receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -470,16 +470,16 @@ test "async quirk helper pointer generic receiver await transpiles" {
   `  num out = await (box(ptr(&b)).v).add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk helper pointer generic receiver await transpiles");
-  assert contains(out, "vtable->add("), "expected a chained helper receiver to keep the quirk dispatch";
+  let out = emit_c(src, "async shape helper pointer generic receiver await transpiles");
+  assert contains(out, "vtable->add("), "expected a chained helper receiver to keep the shape dispatch";
 }
 
-test "async quirk indexed generic receiver await transpiles" {
+test "async shape indexed generic receiver await transpiles" {
   str src = `use std.c.io;
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -491,8 +491,8 @@ test "async quirk indexed generic receiver await transpiles" {
   `  num out = await picked.add(1);
   `  printf("%lld", out);
   `}`;
-  let out = emit_c(src, "async quirk indexed generic receiver await transpiles");
-  assert contains(out, "Counter__AsyncCounter__add"), "expected the quirk-impl method to be emitted";
+  let out = emit_c(src, "async shape indexed generic receiver await transpiles");
+  assert contains(out, "Counter__AsyncCounter__add"), "expected the shape-impl method to be emitted";
   assert contains(out, "[1]"), "expected the indexed initializer to be preserved";
 }
 
@@ -1073,7 +1073,7 @@ test "std.c.thread_windows import emits portable thread include layer" {
 // which the harness cannot supply. The aliased-import group ("aliased import
 // calls transpile to qualified symbols", "aliased import supports public type
 // and value access", "aliased compound method calls use canonical impl",
-// "aliased module async quirk generic receiver await", "aliased io.format",
+// "aliased module async shape generic receiver await", "aliased io.format",
 // "aliased math rand option", "aliased sys try_env and log") asserts on a second
 // module's emitted symbols. The std.channel group (send/recv, buffered, timeout,
 // cancel-aware, cancel token, every select variant, the conformance matrix, the

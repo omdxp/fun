@@ -68,9 +68,9 @@ test "assert emits abort and message" {
   assert contains(out, "abort()"), "expected the abort call";
 }
 
-test "compounds + quirks + impl vtables transpile" {
+test "compounds + shapes + impl vtables transpile" {
   str src = `compound Point { num x; num y; }
-  `quirk HasX { getX() num; }
+  `shape HasX { getX() num; }
   `impl Point as HasX {
   `  getX() num { ret self.x; }
   `}
@@ -80,7 +80,7 @@ test "compounds + quirks + impl vtables transpile" {
   `  HasX h = &p;
   `  num v = h.getX();
   `}`;
-  let out = emit_c(src, "compounds + quirks + impl vtables transpile");
+  let out = emit_c(src, "compounds + shapes + impl vtables transpile");
   assert contains(out, "typedef struct Point"), "expected the struct typedef";
   assert contains(out, "int64_t x;"), "expected the lowered field";
   assert contains(out, "_vtable"), "expected a vtable type";
@@ -101,21 +101,21 @@ test "pointer field access uses arrow" {
   assert contains(out, "pp->x"), "expected an arrow field access";
 }
 
-// The reference compiler canonicalizes structurally identical quirks
+// The reference compiler canonicalizes structurally identical shapes
 // (same method name/signature) to one shared C vtable type internally,
 // as a code-size optimization; this codegen has no such deduping and
-// gives each declared quirk its own independent vtable machinery
+// gives each declared shape its own independent vtable machinery
 // instead. Tried reproducing a resulting failure directly against the
 // reference across several shapes (two/three structurally identical
-// quirks, each concretely implemented and dispatched separately; one
+// shapes, each concretely implemented and dispatched separately; one
 // declared but never implemented; a parameterized method signature) and
 // none failed, so whatever bug this note originally tracked looks
 // already fixed on the reference side. Not deduping costs nothing but
 // emitted C size, which this test doesn't check.
-test "structurally identical quirks each dispatch correctly, independently" {
+test "structurally identical shapes each dispatch correctly, independently" {
   str src = `use std.c.io;
-  `quirk Speaker { speak() str; }
-  `quirk Talker { speak() str; }
+  `shape Speaker { speak() str; }
+  `shape Talker { speak() str; }
   `compound Dog { num age; }
   `impl Dog as Speaker { pub speak() str { ret "woof"; } }
   `compound Cat { num age; }
@@ -128,9 +128,9 @@ test "structurally identical quirks each dispatch correctly, independently" {
   `  printf("%s %s\n", s.speak(), t.speak());
   `  ret 0;
   `}`;
-  let out = emit_c(src, "structurally identical quirks each dispatch correctly, independently");
-  assert contains(out, "Dog__Speaker__speak"), "expected the first quirk's own vtable machinery";
-  assert contains(out, "Cat__Talker__speak"), "expected the second quirk's own vtable machinery, not skipped";
+  let out = emit_c(src, "structurally identical shapes each dispatch correctly, independently");
+  assert contains(out, "Dog__Speaker__speak"), "expected the first shape's own vtable machinery";
+  assert contains(out, "Cat__Talker__speak"), "expected the second shape's own vtable machinery, not skipped";
 }
 
 test "asm statement transpiles" {
@@ -198,8 +198,8 @@ test "hexadecimal literals with a-f and A-F digits compile" {
   assert contains(out, "31"), "expected 0x1f to decode";
 }
 
-test "long type name with quirk impl does not overflow mangled C identifiers" {
-  str src = `quirk Greeter {
+test "long type name with shape impl does not overflow mangled C identifiers" {
+  str src = `shape Greeter {
   `  greet() str;
   `}
   `compound AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {
@@ -213,7 +213,7 @@ test "long type name with quirk impl does not overflow mangled C identifiers" {
   `  g.x = 1;
   `  ret 0;
   `}`;
-  let out = emit_c(src, "long type name with quirk impl does not overflow mangled C identifiers");
+  let out = emit_c(src, "long type name with shape impl does not overflow mangled C identifiers");
   assert contains(out, "AAAAAAAAAA__Greeter__greet"), "expected the mangled impl method";
 }
 
@@ -295,9 +295,9 @@ test "raw string literal: multi-line block joins lines with a real newline" {
   assert contains(out, `line one\nline two`), "expected the lines joined by a newline escape";
 }
 
-test "single-letter quirk name emits impl method bodies" {
+test "single-letter shape name emits impl method bodies" {
   str src = `use std.c.io;
-  `quirk Q { getX() num; }
+  `shape Q { getX() num; }
   `compound Foo { num x; }
   `impl Foo as Q { getX() num { ret self.x; } }
   `compound G<T> { T x; }
@@ -307,7 +307,7 @@ test "single-letter quirk name emits impl method bodies" {
   `  G<num> g; g.x = 9;
   `  ret 0;
   `}`;
-  let out = emit_c(src, "single-letter quirk name emits impl method bodies");
+  let out = emit_c(src, "single-letter shape name emits impl method bodies");
   assert contains(out, "Foo__Q__getX(Foo* self) {"), "expected the impl method body, not just a prototype";
   assert contains(out, "G__num"), "expected the generic instantiation";
 }
@@ -429,9 +429,9 @@ test "compound initializer field after an address-of-valued field parses correct
   assert contains(out, ".wheels = 4"), "expected the field that follows it";
 }
 
-test "a generic compound's impl of a plain quirk coerces and dispatches dynamically" {
+test "a generic compound's impl of a plain shape coerces and dispatches dynamically" {
   str src = `use std.c.io;
-  `quirk Lenable { size() num; }
+  `shape Lenable { size() num; }
   `compound Box<T> { T v; }
   `impl Box<T> as Lenable { size() num { ret sizeof(T); } }
   `fun main() num {
@@ -443,14 +443,14 @@ test "a generic compound's impl of a plain quirk coerces and dispatches dynamica
   str out = run_source(
     src,
     "generic_shape_dispatch",
-    "a generic compound's impl of a plain quirk coerces and dispatches dynamically"
+    "a generic compound's impl of a plain shape coerces and dispatches dynamically"
   );
-  assert contains(out, "8"), "expected sizeof(num) through the dynamically-dispatched quirk call";
+  assert contains(out, "8"), "expected sizeof(num) through the dynamically-dispatched shape call";
 }
 
-test "two instantiations of the same generic compound's quirk impl share one vtable" {
+test "two instantiations of the same generic compound's shape impl share one vtable" {
   str src = `use std.c.io;
-  `quirk Lenable { size() num; addTo(num n) num; }
+  `shape Lenable { size() num; addTo(num n) num; }
   `compound Box<T> { T v; }
   `impl Box<T> as Lenable {
   `  size() num { ret sizeof(T); }
@@ -467,7 +467,7 @@ test "two instantiations of the same generic compound's quirk impl share one vta
   str out = run_source(
     src,
     "generic_shape_dispatch_shared_vtable",
-    "two instantiations of the same generic compound's quirk impl share one vtable"
+    "two instantiations of the same generic compound's shape impl share one vtable"
   );
   assert contains(out, "8 8 18"), "expected both instantiations to dispatch through their own coercion";
 }
@@ -539,7 +539,7 @@ test "P3: float literals and the range operator coexist" {
   // `Iterator<num>` impl is inlined here rather than imported.
   str src = `use std.c.io;
   `enum Option<T> { Some(T), None }
-  `quirk Iterator<T> { next() Option<T>; }
+  `shape Iterator<T> { next() Option<T>; }
   `compound Range { num start; num end; }
   `impl Range as Iterator<num> {
   `  pub next() Option<num> {
@@ -753,9 +753,9 @@ test "tagged-union enum honors an explicit discriminant on the _tag enum" {
   assert contains(out, "Status_NotFound = 404"), "expected the second explicit discriminant";
 }
 
-test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
+test "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce" {
   str src = `use std.c.io;
-  `quirk Speaker { speak() str; }
+  `shape Speaker { speak() str; }
   `compound Dog { num age; }
   `impl Dog as Speaker { speak() str { ret "woof"; } }
   `fun describe(num n, Speaker s, str tag) {
@@ -767,14 +767,14 @@ test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" 
   `  describe(7, &d, "hi");
   `  ret 0;
   `}`;
-  let out = emit_c(src, "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce");
-  assert contains(out, "describe(7, __fun_coerce_Dog_"), "expected the quirk argument to be wrapped";
-  assert contains(out, "int64_t plain(int64_t a, int64_t b)"), "expected the non-quirk callee untouched";
+  let out = emit_c(src, "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce");
+  assert contains(out, "describe(7, __fun_coerce_Dog_"), "expected the shape argument to be wrapped";
+  assert contains(out, "int64_t plain(int64_t a, int64_t b)"), "expected the non-shape callee untouched";
 }
 
-test "generic compound coerces to a quirk at a call site and via var-init" {
+test "generic compound coerces to a shape at a call site and via var-init" {
   str src = `use std.c.io;
-  `quirk Sized { size() num; }
+  `shape Sized { size() num; }
   `compound Box<T> { T v; }
   `impl Box<num> as Sized { size() num { ret 8; } }
   `fun report(Sized s) num { ret s.size(); }
@@ -785,15 +785,15 @@ test "generic compound coerces to a quirk at a call site and via var-init" {
   `  num viaVar = sz.size();
   `  ret 0;
   `}`;
-  let out = emit_c(src, "generic compound coerces to a quirk at a call site and via var-init");
+  let out = emit_c(src, "generic compound coerces to a shape at a call site and via var-init");
   assert contains(out, "report(__fun_coerce_Box__num_"), "expected the call site to use the mangled helper";
   assert contains(out, "Sized sz = __fun_coerce_Box__num_"), "expected the var-init to use the mangled helper";
 }
 
-test "quirk method dispatched on a call result materializes the receiver once" {
+test "shape method dispatched on a call result materializes the receiver once" {
   str src = `use std.c.io;
   `compound St { num v; }
-  `quirk Weighted { weight() num; }
+  `shape Weighted { weight() num; }
   `impl St as Weighted { weight() num { ret self.v; } }
   `num call_count = 0;
   `fun make(St* s) Weighted {
@@ -807,8 +807,8 @@ test "quirk method dispatched on a call result materializes the receiver once" {
   `}`;
   str out = run_source(
     src,
-    "quirk_call_result_once",
-    "quirk method dispatched on a call result materializes the receiver once"
+    "shape_call_result_once",
+    "shape method dispatched on a call result materializes the receiver once"
   );
   assert equals(out, "5 1\n"), "expected the receiver call to run once, materialized into a temp";
 }
@@ -936,18 +936,18 @@ test "P1: plain-impl method chaining on call results materializes once" {
   assert !contains(out, ").get("), "expected no raw member access on a call result";
 }
 
-test "quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch and assignment" {
+test "shape coercion from &arr[i] and &struct.field, plus shape array element dispatch and assignment" {
   // Both `&arr[i]` and `&struct.field` used to compile to C that
-  // assigned a plain pointer where the quirk's fat-pointer struct was
+  // assigned a plain pointer where the shape's fat-pointer struct was
   // expected, since the coercion resolver only recognized `&identifier`.
-  // A quirk-typed array element was worse: the receiver was rejected
+  // A shape-typed array element was worse: the receiver was rejected
   // outright, and once that resolved, plain assignment into an already-
-  // declared quirk slot (`arr[i] = &x;`) turned out to need the same
+  // declared shape slot (`arr[i] = &x;`) turned out to need the same
   // coercion wrapper a declaration's own initializer gets, which nothing
   // but a `let`/typed declaration had ever triggered.
   str src = `use std.c.io;
   `compound Item { num v; }
-  `quirk HasV { getV() num; }
+  `shape HasV { getV() num; }
   `impl Item as HasV { getV() num { ret self.v; } }
   `compound Holder { Item it; }
   `fun main() num {
@@ -959,35 +959,35 @@ test "quirk coercion from &arr[i] and &struct.field, plus quirk array element di
   `  HasV h2 = &hd.it;
   `  Item a = Item{v = 1};
   `  Item b = Item{v = 2};
-  `  HasV[2] quirk_arr;
-  `  quirk_arr[0] = &a;
-  `  quirk_arr[1] = &b;
-  `  printf("%lld %lld %lld %lld\n", h1.getV(), h2.getV(), quirk_arr[0].getV(), quirk_arr[1].getV());
+  `  HasV[2] shape_arr;
+  `  shape_arr[0] = &a;
+  `  shape_arr[1] = &b;
+  `  printf("%lld %lld %lld %lld\n", h1.getV(), h2.getV(), shape_arr[0].getV(), shape_arr[1].getV());
   `  ret 0;
   `}`;
   str out = run_source(
     src,
-    "quirk_coerce_index_field",
-    "quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch and assignment"
+    "shape_coerce_index_field",
+    "shape coercion from &arr[i] and &struct.field, plus shape array element dispatch and assignment"
   );
   assert equals(out, "7 9 1 2\n"), "expected every coercion and dispatch shape to run correctly";
 }
 
-test "returning a coerced self from a quirk method, and chaining onto a quirk-returning quirk method" {
-  // A method returning the very quirk it implements needs that quirk's
+test "returning a coerced self from a shape method, and chaining onto a shape-returning shape method" {
+  // A method returning the very shape it implements needs that shape's
   // struct typedef to already exist when its own signature is written;
-  // resolving a chained call's receiver type needs a quirk-typed call
-  // result's return type read from the quirk's own declaration, since no
+  // resolving a chained call's receiver type needs a shape-typed call
+  // result's return type read from the shape's own declaration, since no
   // single concrete impl owns a dynamically-dispatched call.
   str src = `use std.c.io;
   `compound Item { num v; }
-  `quirk Chain { self_ref() Chain; getV() num; }
+  `shape Chain { self_ref() Chain; getV() num; }
   `impl Item as Chain { self_ref() Chain { ret self; } getV() num { ret self.v; } }
   `compound C { num val; }
-  `quirk QC { gv() num; }
+  `shape QC { gv() num; }
   `impl C as QC { gv() num { ret self.val; } }
   `compound B { C c; }
-  `quirk QB { to_c() QC; }
+  `shape QB { to_c() QC; }
   `impl B as QB { to_c() QC { ret &self.c; } }
   `fun main() num {
   `  Item a = Item{v = 5};
@@ -1000,10 +1000,10 @@ test "returning a coerced self from a quirk method, and chaining onto a quirk-re
   `}`;
   str out = run_source(
     src,
-    "quirk_self_return_chain",
-    "returning a coerced self from a quirk method, and chaining onto a quirk-returning quirk method"
+    "shape_self_return_chain",
+    "returning a coerced self from a shape method, and chaining onto a shape-returning shape method"
   );
-  assert equals(out, "5 42\n"), "expected the self-return and the cross-quirk chain to both run correctly";
+  assert equals(out, "5 42\n"), "expected the self-return and the cross-shape chain to both run correctly";
 }
 
 test "P1: fit on dec, comma multi-label, duplicate enum case" {
@@ -2288,7 +2288,7 @@ test "-g debug info survives a generic function's first monomorphized instantiat
 test "-g debug info tags a hoisted call-result receiver's own temp assignment, not just the statement that follows it" {
   // `call(...).method()`, no intermediate `let`: the call's own result
   // is hoisted into a temp (`hoist_call_result_to_temp`) before the
-  // method call reads it, since some callers (quirk dispatch, a bare
+  // method call reads it, since some callers (shape dispatch, a bare
   // `.field` read) need to read the receiver's text more than once and
   // evaluating the call itself twice would run it twice at runtime.
   // That temp assignment is hand-assembled C text, outside the ordinary

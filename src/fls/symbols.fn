@@ -272,7 +272,7 @@ pub fun render_function(FunctionNode f) str {
 // (`pub doubled(...) num { ... }`, not `pub fun doubled(...)`).
 // Appends a declaration's own `<T, U>` type-param list to `b`, when it
 // has any - shared by every declaration kind that can be generic
-// (function, compound, enum, quirk), so a compound/enum/quirk's own
+// (function, compound, enum, shape), so a compound/enum/shape's own
 // hover shows its type params the same way a function's already does,
 // not just "compound Box" with no `<T>` at all.
 // `type_param_constraints`, when not nil, is index-aligned with
@@ -766,11 +766,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
       .Shape(q) -> {
         if equals(q.name, name) {
           StringBuilder b = string_builder_init(32);
-          if q.spelled_shape {
-            b.append("shape ");
-          } else {
-            b.append("quirk ");
-          }
+          b.append("shape ");
           b.append(q.name);
           _append_type_params(&b, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
           ret .Some(_declaration_vis(name, .Shape, b.build(), n.pos, n.flags.is_public));
@@ -1074,21 +1070,21 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
       _ -> {}
     }
   }
-  // `type_name` names a quirk directly, not a concrete type with its own
-  // impl block, whenever the receiver itself is quirk-typed (`AsyncCounter
-  // q = &c;` then `q.add(...)`, or a quirk-typed parameter/return) - no
-  // `impl` block is ever literally named after a quirk (`impl Counter as
+  // `type_name` names a shape directly, not a concrete type with its own
+  // impl block, whenever the receiver itself is shape-typed (`AsyncCounter
+  // q = &c;` then `q.add(...)`, or a shape-typed parameter/return) - no
+  // `impl` block is ever literally named after a shape (`impl Counter as
   // AsyncCounter`'s own type_name is "Counter"), so the search above
   // always comes back empty for one and needs this fallback to resolve
   // at all.
-  ret quirk_method_declaration(program, type_name, method_name);
+  ret shape_method_declaration(program, type_name, method_name);
 }
 
 // The signature `shape_name` requires for `method_name`, as declared
-// in the `quirk` block itself (no `self`, no body): what an `impl ...
-// as shape_name` block has to supply. `None` when no such quirk or
+// in the `shape` block itself (no `self`, no body): what an `impl ...
+// as shape_name` block has to supply. `None` when no such shape or
 // method exists.
-pub fun quirk_method_declaration(Vec<Node>* program, str shape_name, str method_name) Option<Declaration> {
+pub fun shape_method_declaration(Vec<Node>* program, str shape_name, str method_name) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1100,7 +1096,7 @@ pub fun quirk_method_declaration(Vec<Node>* program, str shape_name, str method_
         }
         num m = 0;
         for m < q.methods.len {
-          QuirkMethodSig ms = q.methods.get(m);
+          ShapeMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
             Declaration d = _declaration(method_name, .Function, _render_shape_method(ms), ms.pos);
@@ -1116,8 +1112,8 @@ pub fun quirk_method_declaration(Vec<Node>* program, str shape_name, str method_
 }
 
 // `m` as a reader would write it inside an `impl` block: no `self`,
-// since a quirk method's signature never carries one of its own.
-fun _render_shape_method(QuirkMethodSig m) str {
+// since a shape method's signature never carries one of its own.
+fun _render_shape_method(ShapeMethodSig m) str {
   StringBuilder b = string_builder_init(48);
   if m.is_async {
     b.append("async ");
@@ -1129,7 +1125,7 @@ fun _render_shape_method(QuirkMethodSig m) str {
     if i > 0 {
       b.append(", ");
     }
-    QuirkArg a = m.args.get(i);
+    ShapeArg a = m.args.get(i);
     str arg_type_text = render_type(a.dtype);
     b.append(arg_type_text);
     free(arg_type_text);
@@ -1552,8 +1548,8 @@ fun _is_type_param_ident_char(chr c) flag {
 
 // A method's own written name, with whatever it was mangled with
 // removed: `Type__method` for a plain impl, `Type__Shape__method`
-// for one conforming to a quirk (see `_parse_impl_method`'s own
-// `gen_name` construction). Neither a type nor a quirk name is ever
+// for one conforming to a shape (see `_parse_impl_method`'s own
+// `gen_name` construction). Neither a type nor a shape name is ever
 // written with a leading or embedded `__` of its own, but the
 // method's own name can start with one; the separator is always the
 // first two underscores of whichever run sits at that boundary, not
@@ -2099,7 +2095,7 @@ fun _walk_forward_chain(
   ret current_full;
 }
 
-// `lookup_method`, falling back to `quirk_method_declaration` when
+// `lookup_method`, falling back to `shape_method_declaration` when
 // `f`'s own return type, substituted when it's a bare generic type
 // parameter (`fun pick_first<T>(T a, T b) T`) and the call at
 // `name_tok` in `tokens` supplies a resolvable concrete type for it:
@@ -5755,7 +5751,7 @@ fun _declaration_vis(str name, DeclarationKind kind, str detail, Pos pos, flag i
 
 // Every declaration `file` itself makes at the top level, as
 // `Declaration`s: a function, a compound and each of its own fields,
-// an enum and each of its own variants, a quirk, a plain top-level
+// an enum and each of its own variants, a shape, a plain top-level
 // global, and each impl method declared for a type in this file.
 // Mirrors `outline.fn`'s own `_collect` (same five-way node-kind
 // split, since that's the richer of the two existing walks —
@@ -5842,11 +5838,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
       }
       .Shape(q) -> {
         StringBuilder qb = string_builder_init(32);
-        if q.spelled_shape {
-          qb.append("shape ");
-        } else {
-          qb.append("quirk ");
-        }
+        qb.append("shape ");
         qb.append(q.name);
         _append_type_params(&qb, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
         out.push(_declaration_vis(q.name, .Shape, qb.build(), n.pos, n.flags.is_public));

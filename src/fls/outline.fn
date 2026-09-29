@@ -4,8 +4,8 @@
 // show an outline and jump around by name.
 //
 // `textDocument/documentSymbol` is sent as the protocol's own nested
-// `DocumentSymbol` tree (a field/variant/quirk-method-signature under
-// its own compound/enum/quirk, an impl's own method under whichever
+// `DocumentSymbol` tree (a field/variant/shape-method-signature under
+// its own compound/enum/shape, an impl's own method under whichever
 // compound or enum it targets), not the flat, deprecated
 // `SymbolInformation` form: a client would otherwise have to guess the
 // same tree back from a flat list's ranges, which is exactly the
@@ -285,16 +285,16 @@ fun _is_subsequence(str needle, str haystack) flag {
 
 // What `nodes` declares in `file`, in source order, as a tree - a
 // field under its own compound, a variant under its own enum, a
-// method-signature under its own quirk, an impl's own method under
+// method-signature under its own shape, an impl's own method under
 // whichever compound or enum it targets. Only the file's own top-level
 // declarations are listed: what it imports belongs to the outline of
 // the file that declares it.
 //
 // Two passes, since an impl targeting a compound or enum can (and
 // commonly does) appear anywhere relative to that declaration's own
-// position in the file: the first collects every compound/enum/quirk/
+// position in the file: the first collects every compound/enum/shape/
 // function/global this file declares, with its own directly-nested
-// children (fields, variants, quirk method signatures); the second
+// children (fields, variants, shape method signatures); the second
 // walks every impl block and nests its methods under the matching
 // compound/enum entry the first pass already built, falling back to a
 // plain top-level entry when the type an impl targets isn't declared
@@ -346,11 +346,11 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
         OutlineEntry e = _entry(q.name, .Interface, n.pos);
         num qm = 0;
         for qm < q.methods.len {
-          QuirkMethodSig m = q.methods.get(qm);
+          ShapeMethodSig m = q.methods.get(qm);
           qm = qm + 1;
           // Neither carries its own position in the tree - unlike a
           // compound field or an enum variant, falls back to the
-          // quirk's own.
+          // shape's own.
           e.children.push(_entry(m.name, .Method, n.pos));
         }
         out.push(e);
@@ -414,7 +414,7 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
             .Function(f) -> {
               if f.has_name && !equals(f.name, "") {
                 // A method is stored under the name it is emitted as,
-                // `Type__method` or, for a quirk impl,
+                // `Type__method` or, for a shape impl,
                 // `Type__Shape__method`; a reader wants the name they
                 // wrote, not either mangled form.
                 OutlineEntry me = _entry(
@@ -440,7 +440,7 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
 
 // The method's own name, with whatever it is mangled with removed: just
 // the type (`Type__method`) for a plain impl, or the type and the
-// quirk both (`Type__Shape__method`) for a quirk impl.
+// shape both (`Type__Shape__method`) for a shape impl.
 fun _method_name(str mangled, str type_name, str shape_name) str {
   StringBuilder tb = string_builder_init(len(type_name) + 2);
   tb.append(type_name);
@@ -456,9 +456,9 @@ fun _method_name(str mangled, str type_name, str shape_name) str {
   StringBuilder qb = string_builder_init(len(shape_name) + 2);
   qb.append(shape_name);
   qb.append("__");
-  str quirk_prefix = qb.build();
-  if starts_with(after_type, quirk_prefix) {
-    ret substr(after_type, len(quirk_prefix), len(after_type) - len(quirk_prefix));
+  str shape_prefix = qb.build();
+  if starts_with(after_type, shape_prefix) {
+    ret substr(after_type, len(shape_prefix), len(after_type) - len(shape_prefix));
   }
   ret after_type;
 }

@@ -1045,22 +1045,22 @@ test "hover appends a 'See also' footer linking a user-defined type in the signa
   assert contains(hovered, "[`Point`]"), "expected a link to the return type";
   assert contains(hovered, "#L1"), "expected the link to point at Point's own declaration line";
 
-  // A quirk name is resolved the same way (lookup_top_level previously
-  // had no case for it at all, so a quirk-typed parameter never
+  // A shape name is resolved the same way (lookup_top_level previously
+  // had no case for it at all, so a shape-typed parameter never
   // resolved here).
-  Document quirk_doc;
-  quirk_doc.uri = "file:///seealsoquirk.fn";
-  quirk_doc.path = "seealsoquirk.fn";
-  quirk_doc.text = `quirk Greeter {
+  Document shape_doc;
+  shape_doc.uri = "file:///seealsoshape.fn";
+  shape_doc.path = "seealsoshape.fn";
+  shape_doc.text = `shape Greeter {
   `  greet() str;
   `}
   `fun announce(Greeter* g) str {
   `  ret g.greet();
   `}`;
-  quirk_doc.version = 1;
-  str quirk_hovered = hover(&reads, quirk_doc, 3, 5);
-  assert contains(quirk_hovered, "See also:"), "expected the footer for a quirk-typed parameter too";
-  assert contains(quirk_hovered, "[`Greeter`]"), "expected a link to the quirk's own declaration";
+  shape_doc.version = 1;
+  str shape_hovered = hover(&reads, shape_doc, 3, 5);
+  assert contains(shape_hovered, "See also:"), "expected the footer for a shape-typed parameter too";
+  assert contains(shape_hovered, "[`Greeter`]"), "expected a link to the shape's own declaration";
 }
 
 test "the 'See also' footer never links a cross-file type that isn't pub" {
@@ -1446,7 +1446,7 @@ test "go-to-definition inside a tuple type's own parenthesized slot resolves the
   assert contains(jumped, `"line":0`), "expected the tuple's own Point member to resolve to its real declaration";
 }
 
-test "completion offers a declared type alias name alongside compound/enum/quirk" {
+test "completion offers a declared type alias name alongside compound/enum/shape" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -1462,22 +1462,22 @@ test "completion offers a declared type alias name alongside compound/enum/quirk
   assert contains(out, `"label":"Meters"`), "expected the alias offered among general completions";
 }
 
-test "go-to-definition on a quirk-typed receiver's method lands on the method's own line, not the quirk's" {
-  // User-reported. QuirkMethodSig carried no position of its own -
-  // quirk_method_declaration fell back to the whole quirk node's
-  // position, so a receiver typed AS the quirk (not a concrete impl)
-  // always jumped to the quirk's own name line instead of the method
-  // signature inside it. Fixed by giving QuirkMethodSig a real `pos`,
+test "go-to-definition on a shape-typed receiver's method lands on the method's own line, not the shape's" {
+  // User-reported. ShapeMethodSig carried no position of its own -
+  // shape_method_declaration fell back to the whole shape node's
+  // position, so a receiver typed AS the shape (not a concrete impl)
+  // always jumped to the shape's own name line instead of the method
+  // signature inside it. Fixed by giving ShapeMethodSig a real `pos`,
   // set from the method name token in the parser.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkdef.fn";
-  doc.path = "quirkdef.fn";
+  doc.uri = "file:///shapedef.fn";
+  doc.path = "shapedef.fn";
   doc.text = `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -1490,15 +1490,15 @@ test "go-to-definition on a quirk-typed receiver's method lands on the method's 
   `}`;
   doc.version = 1;
 
-  // 'add' is declared on line 4 (0-indexed) inside the quirk, not the
-  // quirk's own line 3.
+  // 'add' is declared on line 4 (0-indexed) inside the shape, not the
+  // shape's own line 3.
   str method_def = definition(&reads, doc, 12, 20);
-  assert contains(method_def, `"line":4`), "expected the quirk method's own declaration line, not the quirk's";
+  assert contains(method_def, `"line":4`), "expected the shape method's own declaration line, not the shape's";
 }
 
 test "go-to-definition on a call prefers the method over a same-named field on the same compound" {
   // resolve_at tried lookup_field before ever considering lookup_method,
-  // unconditionally - a compound with a field and a quirk-impl method
+  // unconditionally - a compound with a field and a shape-impl method
   // sharing one name (a plausible getter-over-its-own-backing-field
   // shape) always resolved `b.len()` to the FIELD, since a field call
   // was never distinguished from a field read by whether a '(' follows.
@@ -1507,7 +1507,7 @@ test "go-to-definition on a call prefers the method over a same-named field on t
   Document doc;
   doc.uri = "file:///namecollide.fn";
   doc.path = "namecollide.fn";
-  doc.text = `quirk Sized {
+  doc.text = `shape Sized {
   `  len() num;
   `}
   `compound Buffer {
@@ -1651,7 +1651,7 @@ test "hovering a decimal literal names its own type, without a meaningless base 
   assert !contains(hovered, "hex:"), "expected no hex/binary conversion for a decimal literal";
 }
 
-test "hovering 'as' reads contextually: import alias vs quirk impl" {
+test "hovering 'as' reads contextually: import alias vs shape impl" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
 
@@ -1662,7 +1662,7 @@ test "hovering 'as' reads contextually: import alias vs quirk impl" {
   import_doc.version = 1;
   str import_hover = hover(&reads, import_doc, 0, 11);
   assert contains(import_hover, "Binds an import to a different name"), "expected the import-alias doc for 'as' inside a use statement";
-  assert !contains(import_hover, "Names the quirk"), "expected the impl-quirk doc not to leak into an import context";
+  assert !contains(import_hover, "Names the shape"), "expected the impl-shape doc not to leak into an import context";
 
   Document impl_doc;
   impl_doc.uri = "file:///aliasimpl.fn";
@@ -1670,7 +1670,7 @@ test "hovering 'as' reads contextually: import alias vs quirk impl" {
   impl_doc.text = `compound Point {
   `  num x;
   `}
-  `quirk Q {
+  `shape Q {
   `  a() num;
   `}
   `impl Point as Q {
@@ -1678,7 +1678,7 @@ test "hovering 'as' reads contextually: import alias vs quirk impl" {
   `}`;
   impl_doc.version = 1;
   str impl_hover = hover(&reads, impl_doc, 6, 11);
-  assert contains(impl_hover, "Names the quirk"), "expected the impl-quirk doc for 'as' inside an impl statement";
+  assert contains(impl_hover, "Names the shape"), "expected the impl-shape doc for 'as' inside an impl statement";
   assert !contains(impl_hover, "Binds an import"), "expected the import-alias doc not to leak into an impl context";
 }
 
@@ -1990,14 +1990,14 @@ test "a method is listed under the name it was written as" {
   assert buffer_at >= 0 && clear_at > buffer_at, "expected clear nested inside Buffer's own children";
 }
 
-test "a quirk impl's method is listed under the name it was written as, not either mangled segment" {
-  // A quirk impl's own method is stored mangled as `Buffer__Sized__len`
-  // (type and quirk both); an outline used to strip only the leading
-  // `Buffer__`, leaking the quirk-prefixed remainder `Sized__len`
+test "a shape impl's method is listed under the name it was written as, not either mangled segment" {
+  // A shape impl's own method is stored mangled as `Buffer__Sized__len`
+  // (type and shape both); an outline used to strip only the leading
+  // `Buffer__`, leaking the shape-prefixed remainder `Sized__len`
   // straight through. User-reported (screenshot of stdlib/std/vec.fn's
   // own outline, `impl Vec<T> as Sized` methods showing as flat,
   // wrongly named entries).
-  str src = `quirk Sized {
+  str src = `shape Sized {
   `  len() num;
   `}
   `compound Buffer {
@@ -2009,14 +2009,14 @@ test "a quirk impl's method is listed under the name it was written as, not eith
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkmethod.fn";
-  doc.path = "quirkmethod.fn";
+  doc.uri = "file:///shapemethod.fn";
+  doc.path = "shapemethod.fn";
   doc.text = src;
   doc.version = 1;
 
   str out = document_symbols(&reads, doc);
   assert contains(out, `"name":"len","kind":6`), "expected the written name, not a mangled remainder";
-  assert !contains(out, "Sized__len"), "expected no quirk-mangled remainder to leak through";
+  assert !contains(out, "Sized__len"), "expected no shape-mangled remainder to leak through";
   assert !contains(out, "Buffer__Sized__len"), "expected no fully mangled name to leak through";
   num buffer_at = index_of_str(out, `"name":"Buffer"`);
   assert buffer_at >= 0, "expected Buffer's own entry";
@@ -2816,14 +2816,14 @@ test "hover resolves a chain ending in a call, including generic specialization 
   assert contains(hovered2, "get(Vec<num>* self, num i) num"), "expected get resolved and specialized past a call in the middle of the chain";
 }
 
-test "a quirk-conforming impl's own method resolves, mangled name de-mangled correctly" {
-  // A quirk-conforming impl mangles its methods Type__Shape__method
+test "a shape-conforming impl's own method resolves, mangled name de-mangled correctly" {
+  // A shape-conforming impl mangles its methods Type__Shape__method
   // (three parts), not Type__method (two) like a plain impl; the
   // de-mangling helper only ever stripped one Type__ prefix, leaving
-  // "Quirk__method" and never matching the bare method name a reader
+  // "Shape__method" and never matching the bare method name a reader
   // actually typed. Found incidentally verifying the chain fix above,
   // via std.vec's own VecIter (impl VecIter<T> as Iterator<T>).
-  str src = `quirk Nextable<T> {
+  str src = `shape Nextable<T> {
   `  next() Option<T>;
   `}
   `compound Counter<T> {
@@ -2842,13 +2842,13 @@ test "a quirk-conforming impl's own method resolves, mangled name de-mangled cor
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkimpl.fn";
-  doc.path = "quirkimpl.fn";
+  doc.uri = "file:///shapeimpl.fn";
+  doc.path = "shapeimpl.fn";
   doc.text = src;
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 13, 12);
-  assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the quirk-conforming method's own bare name resolved and specialized, not the mangled Quirk__method form";
+  assert contains(hovered, "next(Counter<num>* self) Option<num>"), "expected the shape-conforming method's own bare name resolved and specialized, not the mangled Shape__method form";
 }
 
 test "an impl method whose own written name starts with an underscore resolves correctly, in hover, completion, and let-inference" {
@@ -2928,10 +2928,10 @@ test "a constant string value with an embedded quote is escaped exactly once, ei
   assert contains(hovered_raw, `const str RAWQUOTED = \"he said \\\"hi\\\"\"`), "expected the unescaped raw-string source newly escaped, also one backslash per quote";
 }
 
-test "hover on a generic compound/enum/quirk's own name shows its type params, not just the bare declaration" {
+test "hover on a generic compound/enum/shape's own name shows its type params, not just the bare declaration" {
   // User-reported: hovering a generic compound's own name (at its
   // declaration or a use site) showed "compound Box" with no mention
-  // of <T> at all - lookup_top_level's own Compound/Enum/Quirk cases
+  // of <T> at all - lookup_top_level's own Compound/Enum/Shape cases
   // never rendered their type params, unlike a function's own
   // render_function_named. This also silently defeated the "is this
   // compound generic" check bare-generic-literal inference needs, so
@@ -2948,7 +2948,7 @@ test "hover on a generic compound/enum/quirk's own name shows its type params, n
   `  Has(T),
   `  None
   `}
-  `quirk Mapper<T> {
+  `shape Mapper<T> {
   `  map(T x) T;
   `}
   `fun main() {
@@ -2959,14 +2959,10 @@ test "hover on a generic compound/enum/quirk's own name shows its type params, n
 
   assert contains(hover(&reads, doc, 11, 3), "compound Box<T>"), "expected the compound's own type param shown";
   assert contains(hover(&reads, doc, 3, 6), "enum Maybe<T>"), "expected the enum's own type param shown";
-  assert contains(hover(&reads, doc, 7, 7), "quirk Mapper<T>"), "expected the quirk's own type param shown";
+  assert contains(hover(&reads, doc, 7, 7), "shape Mapper<T>"), "expected the shape's own type param shown";
 }
 
-test "hover on a 'shape'-spelled declaration echoes back 'shape', not 'quirk'" {
-  // 'shape' is a full synonym for 'quirk' - the AST node has no separate
-  // kind of its own, only a `spelled_shape` flag, so this is what proves
-  // hover/outline read that flag back correctly instead of hardcoding
-  // "quirk " regardless of which spelling the author actually wrote.
+test "hover on a shape declaration's own use site also shows its type params" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -2978,9 +2974,8 @@ test "hover on a 'shape'-spelled declaration echoes back 'shape', not 'quirk'" {
   `fun apply<T: Mapper<num>>(T m) { }`;
   doc.version = 1;
 
-  assert contains(hover(&reads, doc, 0, 6), "shape Mapper<T>"), "expected the declaration's own hover to say 'shape'";
-  assert !contains(hover(&reads, doc, 0, 6), "quirk"), "expected no leftover 'quirk' text for a 'shape'-spelled declaration";
-  assert contains(hover(&reads, doc, 3, 13), "shape Mapper<T>"), "expected the use site's own hover to say 'shape' too";
+  assert contains(hover(&reads, doc, 0, 6), "shape Mapper<T>"), "expected the declaration's own hover";
+  assert contains(hover(&reads, doc, 3, 13), "shape Mapper<T>"), "expected the use site's own hover too";
 }
 
 test "hover on a sized array local shows its own declared size, not a bare '[]'" {
@@ -3511,22 +3506,22 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
-test "hover resolves a quirk-typed receiver's own method, not just a concrete one" {
+test "hover resolves a shape-typed receiver's own method, not just a concrete one" {
   // User-reported. lookup_method only ever searched impl blocks by
   // their own type_name, which is always the concrete implementing
   // type (impl Counter as AsyncCounter's own type_name is "Counter",
-  // never "AsyncCounter") - a receiver declared as the quirk itself
+  // never "AsyncCounter") - a receiver declared as the shape itself
   // (AsyncCounter q = &c; q.add(1)) has no impl block literally named
   // after it, so this came back empty no matter what. Every one of
   // this function's 8 call sites across hover, go-to-definition, inlay
   // hints, and signature help shared the same gap; fixed once, inside
-  // lookup_method itself, by falling back to quirk_method_declaration
+  // lookup_method itself, by falling back to shape_method_declaration
   // (which already existed for exactly this, just never consulted from
   // any of them).
   str src = `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -3541,12 +3536,12 @@ test "hover resolves a quirk-typed receiver's own method, not just a concrete on
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkreceiver.fn";
-  doc.path = "quirkreceiver.fn";
+  doc.uri = "file:///shapereceiver.fn";
+  doc.path = "shapereceiver.fn";
   doc.text = src;
   doc.version = 1;
 
-  assert contains(hover(&reads, doc, 13, 21), "async add(num x) num"), "expected the quirk-typed receiver's own method to resolve";
+  assert contains(hover(&reads, doc, 13, 21), "async add(num x) num"), "expected the shape-typed receiver's own method to resolve";
 }
 
 test "hover resolves a method called on a parenthesized receiver chain, not just a bare one" {
@@ -3562,7 +3557,7 @@ test "hover resolves a method called on a parenthesized receiver chain, not just
   str src = `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -3604,7 +3599,7 @@ test "hover resolves a method on a chain whose own paren group ends in a derefer
   str src = `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `compound Box<T> {
@@ -3652,7 +3647,7 @@ test "hover resolves a compound-literal's own field name, generic instantiation 
   `compound Counter {
   `  num base;
   `}
-  `quirk AsyncCounter {
+  `shape AsyncCounter {
   `  async add(num x) num;
   `}
   `impl Counter as AsyncCounter {
@@ -4811,19 +4806,19 @@ test "let inference unwraps a pointer dereference to one level shallower than it
   assert contains(hints, `"position":{"line":9,"character":7},"label":": Point"`), "expected the dereference one level shallower than its operand";
 }
 
-test "let inference dispatches a method call through a value typed as a quirk, not just a concrete impl type" {
+test "let inference dispatches a method call through a value typed as a shape, not just a concrete impl type" {
   // chain_receiver/chain_ending_receiver only ever searched an impl
   // block by the implementing type's own name (lookup_method), never
-  // falling back to the quirk's own declared signature - a quirk-typed
+  // falling back to the shape's own declared signature - a shape-typed
   // field or local's own method call (dispatched dynamically at
   // runtime) never resolved at all. User-reported, from
   // examples/advanced/async_shape_await_pointer_receiver.fn.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkchain.fn";
-  doc.path = "quirkchain.fn";
-  doc.text = `quirk Greeter {
+  doc.uri = "file:///shapechain.fn";
+  doc.path = "shapechain.fn";
+  doc.text = `shape Greeter {
   `  greet() num;
   `}
   `compound Loud {
@@ -4842,7 +4837,7 @@ test "let inference dispatches a method call through a value typed as a quirk, n
   doc.version = 1;
 
   str hints = inlay_hints(&reads, doc, 0, 20);
-  assert contains(hints, `"position":{"line":14,"character":9},"label":": num"`), "expected a method call through a quirk-typed local to resolve via the quirk's own declared signature";
+  assert contains(hints, `"position":{"line":14,"character":9},"label":": num"`), "expected a method call through a shape-typed local to resolve via the shape's own declared signature";
 }
 
 test "let inference specializes a generic compound field's own type against its receiver's concrete instantiation" {
@@ -5034,7 +5029,7 @@ test "code actions offer to remove an unused import and to silence any warning" 
   assert contains(out, `"newText":"allow unused_import;\n"`), "expected the allow statement inserted above";
 
   // Most errors carry no mechanical fix of their own (unlike the
-  // quirk-conformance shape tested below).
+  // shape-conformance shape tested below).
   Diagnostic err;
   err.line = 2;
   err.col = 0;
@@ -5125,16 +5120,16 @@ test "code actions fill in every missing arm at once, not just the first" {
   assert contains(out, `"start":{"line":8,"character":2}`), "expected one insertion point for both stubs";
 }
 
-test "code actions implement a quirk's missing method with its exact declared signature" {
+test "code actions implement a shape's missing method with its exact declared signature" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkgap.fn";
-  doc.path = "quirkgap.fn";
+  doc.uri = "file:///shapegap.fn";
+  doc.path = "shapegap.fn";
   doc.text = `compound Point {
   `  num x;
   `}
-  `quirk Q {
+  `shape Q {
   `  a() num;
   `  b(num n) flag;
   `}
@@ -5155,8 +5150,8 @@ test "code actions implement a quirk's missing method with its exact declared si
   diags.push(d);
 
   str out = code_actions(&reads, doc, doc.uri, &diags);
-  assert contains(out, `"title":"Implement missing 'Q.b'"`), "expected the quirk-method quick fix";
-  assert contains(out, `"newText":"  pub b(num n) flag {\n    // TODO: implement\n  }\n"`), "expected a stub with the quirk's own declared signature, no 'self'";
+  assert contains(out, `"title":"Implement missing 'Q.b'"`), "expected the shape-method quick fix";
+  assert contains(out, `"newText":"  pub b(num n) flag {\n    // TODO: implement\n  }\n"`), "expected a stub with the shape's own declared signature, no 'self'";
   // Inserted right before the impl block's own closing brace (line 9).
   assert contains(out, `"start":{"line":9,"character":0}`), "expected the insertion right before the impl's closing brace";
 }
@@ -5993,7 +5988,7 @@ test "code lens shows a reference count per function, correctly pluralized" {
   assert contains(out, `"command":"fun.showReferences"`), "expected the extension-side wrapper command, not the raw built-in one";
 }
 
-test "code lens skips main and impl methods, but covers compounds, enums, and quirks" {
+test "code lens skips main and impl methods, but covers compounds, enums, and shapes" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Documents docs = documents_new();
@@ -6006,7 +6001,7 @@ test "code lens skips main and impl methods, but covers compounds, enums, and qu
     `enum Shape {
     `  Circle(num),
     `}
-    `quirk Speaks {
+    `shape Speaks {
     `  say() str;
     `}
     `impl Widget {
@@ -6028,14 +6023,14 @@ test "code lens skips main and impl methods, but covers compounds, enums, and qu
   assert !contains(out, `"start":{"line":10,"character":6}`), "expected no lens on free, an impl method";
 }
 
-test "code lens on a quirk shows its own implementation count, a structural scan, not a name match" {
+test "code lens on a shape shows its own implementation count, a structural scan, not a name match" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Documents docs = documents_new();
   defer docs.free();
   docs.opened(
     "file:///impl_count.fn",
-    `quirk Speaks {
+    `shape Speaks {
     `  say() str;
     `}
     `compound Dog {
@@ -6058,7 +6053,7 @@ test "code lens on a quirk shows its own implementation count, a structural scan
   str out = code_lenses(&reads, &docs, doc);
   assert contains(out, `"title":"2 implementations"`), "expected Speaks' own implementation count";
   // Dog/Cat each show an ordinary reference count (declaration + own
-  // impl block), not an implementation count - only a quirk gets that.
+  // impl block), not an implementation count - only a shape gets that.
   assert contains(out, `"title":"2 references"`), "expected Dog/Cat's own ordinary reference counts";
   assert !contains(out, `"title":"0 implementations"`), "expected no zero-implementation lens on Dog or Cat";
 }
@@ -6427,13 +6422,13 @@ test "hover on a generic compound shows each type param's own constraint" {
   assert contains(hovered, "Node<T: dec | num>"), "expected the constraint to render alongside the type param, not just 'T'";
 }
 
-test "hover on a generic function shows a quirk bound alongside its type param" {
+test "hover on a generic function shows a shape bound alongside its type param" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
-  doc.uri = "file:///quirkbound.fn";
-  doc.path = "quirkbound.fn";
-  doc.text = `quirk Renderable {
+  doc.uri = "file:///shapebound.fn";
+  doc.path = "shapebound.fn";
+  doc.text = `shape Renderable {
   `  render() str;
   `}
   `fun show<T: Renderable>(T x) str {
@@ -6442,7 +6437,7 @@ test "hover on a generic function shows a quirk bound alongside its type param" 
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 3, 6);
-  assert contains(hovered, "T: Renderable"), "expected the quirk bound to render alongside the type param";
+  assert contains(hovered, "T: Renderable"), "expected the shape bound to render alongside the type param";
 }
 
 test "hover on a generic compound shows a generic-instantiation bound alongside its type param" {
@@ -6506,13 +6501,13 @@ test "completion inside a tuple type's own parenthesized slot offers ordinary ty
   assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside a tuple type's own slot";
 }
 
-test "completion inside a type-param bound offers a quirk and a builtin type, never a function" {
+test "completion inside a type-param bound offers a shape and a builtin type, never a function" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
   doc.uri = "file:///boundcompletion.fn";
   doc.path = "boundcompletion.fn";
-  doc.text = `quirk Renderable {
+  doc.text = `shape Renderable {
   `  render() str;
   `}
   `fun helper() num {
@@ -6530,7 +6525,7 @@ test "completion inside a type-param bound offers a quirk and a builtin type, ne
   // tested separately below. One partial identifier is what a real
   // editor's completion trigger looks like once typing has started.
   str out = completion(&reads, doc, 6, 13, false);
-  assert contains(out, `"label":"Renderable"`), "expected the quirk offered inside the bound position";
+  assert contains(out, `"label":"Renderable"`), "expected the shape offered inside the bound position";
   assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside the bound position";
   assert !contains(out, `"label":"helper"`), "expected a function name never offered inside a bound position";
 }
@@ -6606,7 +6601,7 @@ test "completion on 'self.' filters to the enclosing impl's own members, even wh
 
   str out = completion(&reads, doc, 5, 9, false);
   assert contains(out, `"label":"value"`), "expected the enclosing impl's own field to be offered";
-  assert !contains(out, `"label":"quirk"`), "expected filtering to the impl's own members, not every reserved word in scope";
+  assert !contains(out, `"label":"shape"`), "expected filtering to the impl's own members, not every reserved word in scope";
 }
 
 test "completion never triggers on a '.' typed inside a comment" {
@@ -6906,7 +6901,7 @@ test "signature help on a call passing a tuple-typed argument shows the real par
 test "dot-completion offers positional indices for a tuple-typed local, still mid-typing (unparsed document)" {
   // `_members_from_tokens` (the token-only completion path a half-
   // written `t.` always hits, since it makes the whole document fail
-  // to parse) only ever matched a NAMED compound/enum/quirk/impl by
+  // to parse) only ever matched a NAMED compound/enum/shape/impl by
   // its own declared name - a tuple type has none, so `t.` on a tuple
   // local offered nothing from it and fell all the way through to an
   // unfiltered dump of every keyword and C builtin. Fixed by reading
@@ -7280,7 +7275,7 @@ test "completion offers 'use'/'flag' as keyword suggestions, not the removed 'im
   assert !contains(comp, `"label":"bin"`), "expected the removed 'bin' spelling not to be offered anymore";
 }
 
-test "completion offers 'shape' alongside 'quirk', both real keyword suggestions" {
+test "completion offers 'shape' as a keyword suggestion, not the removed 'quirk' spelling" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -7290,8 +7285,8 @@ test "completion offers 'shape' alongside 'quirk', both real keyword suggestions
   doc.version = 1;
 
   str comp = completion(&reads, doc, 0, 0, false);
-  assert contains(comp, `"label":"quirk"`), "expected 'quirk' still offered";
-  assert contains(comp, `"label":"shape"`), "expected 'shape' offered as a real synonym, not just quirk";
+  assert contains(comp, `"label":"shape"`), "expected 'shape' offered";
+  assert !contains(comp, `"label":"quirk"`), "expected the removed 'quirk' spelling not to be offered anymore";
 }
 
 test "a nested bare '.Variant(...)' inside '?!(...)' resolves its own payload's enum, in hover, definition, and completion, parsed or not" {

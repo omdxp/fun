@@ -73,7 +73,7 @@ pub compound ParseState {
   // Cross-module duplicate-symbol detection (see `register_symbol`).
   Map<str, GlobalSymbolInfo> global_symbols;
 
-  // Every top-level `compound`/`enum`/`quirk` name in this file, found by
+  // Every top-level `compound`/`enum`/`shape` name in this file, found by
   // a one-time scan of the whole token stream before parsing starts, so a
   // `Name{...}` initializer can forward-reference a type declared later
   // in the same file. See `prescan_forward_type_names`.

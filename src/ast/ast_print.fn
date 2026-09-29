@@ -331,7 +331,7 @@ pub fun print_node(Node* node, num depth) {
         _line(depth + 1, format("Methods ({num}):", q.methods.len));
         num mi = 0;
         for mi < q.methods.len {
-          QuirkMethodSig m = q.methods.get(mi);
+          ShapeMethodSig m = q.methods.get(mi);
           _line(depth + 2, format("{str}", m.name));
           mi = mi + 1;
         }
@@ -453,7 +453,7 @@ test "print_ast walks declarations, statements and expressions of every kind" {
   `  Circle(num),
   `  Square,
   `}
-  `quirk Named {
+  `shape Named {
   `  name() str;
   `}
   `impl Point {
