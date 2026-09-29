@@ -3258,6 +3258,28 @@ fun _branch_enum_name(Node* condition) str {
   ret "";
 }
 
+// The bare type name a shape-downcast fit arm names (`Circle(c) -> ...`),
+// or empty when `condition` isn't that shape: a call whose callee is a
+// plain, undotted identifier. Distinct from `_branch_enum_name` above,
+// which only reads a `.`-qualified callee (`Enum.Variant(...)`).
+fun _shape_destructure_type_name(Node* condition) str {
+  if condition == nil {
+    ret "";
+  }
+  fit condition.kind {
+    .Expression(e) -> {
+      if equals(e.op, "()") && e.has_left && e.left != nil {
+        fit e.left.kind {
+          .Identifier(name) -> { ret name; }
+          _ -> {}
+        }
+      }
+    }
+    _ -> {}
+  }
+  ret "";
+}
+
 fun _is_comparison(str op) flag {
   ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") ||
     equals(
@@ -3340,10 +3362,20 @@ impl Checker {
       subject = subject_type.name;
       have_subject_type = true;
     }
+    flag subject_is_shape = have_subject_type && self.shapes.has(subject_type.name);
     for branch : f.branches {
+      str shape_type_name = "";
+      if branch.has_condition && subject_is_shape {
+        shape_type_name = _shape_destructure_type_name(branch.condition);
+      }
       if branch.has_condition {
         if branch.is_tuple_pattern {
           self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
+        } elif !equals(shape_type_name, "") {
+          self.check_shape_destructure_condition(branch, shape_type_name, subject_type);
+          if self.failed {
+            ret;
+          }
         } else {
           self.check_shorthand_variant(branch.condition, subject_type, env);
           if self.failed {
@@ -3366,6 +3398,8 @@ impl Checker {
       if branch.is_tuple_pattern && branch.has_condition && have_subject_type &&
         subject_type.is_tuple {
         self.bind_fit_tuple_pattern(branch, subject_type, env);
+      } elif !equals(shape_type_name, "") {
+        self.bind_fit_shape_pattern(branch, shape_type_name, env);
       }
       self.check_statement(branch.body, env);
       env.pop();
@@ -3452,6 +3486,84 @@ impl Checker {
             }
           }
           i = i + 1;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Verifies a shape-downcast arm (`Circle(c) -> ...`, only reached when
+  // the fit subject is itself shape-typed): `type_name` must be a real
+  // `impl type_name as <subject's shape> { ... }`, and the arm must bind
+  // exactly one name to recover the concrete value, mirroring
+  // `Option.Some(v)`/`Result.Ok(v)`'s single-payload shape rather than
+  // multi-field enum-payload destructuring.
+  check_shape_destructure_condition(FitBranch branch, str type_name, CheckedType subject_type) {
+    CheckedType candidate = checked_unknown();
+    candidate.name = type_name;
+    candidate.pointer_depth = 1;
+    if !self.implements_shape(candidate, subject_type.name) {
+      self.fail(
+        format(
+        "'{str}' does not implement shape '{str}'",
+        type_name,
+        subject_type.name
+        ),
+        branch.condition
+      );
+      ret;
+    }
+    fit branch.condition.kind {
+      .Expression(e) -> {
+        Vec<Node*> written;
+        written.init(2);
+        defer written.free();
+        if e.has_right {
+          _call_args(e.right, &written);
+        }
+        if written.len != 1 {
+          self.fail(
+            format(
+            "expected exactly one binding to recover the concrete '{str}' value, got {num}",
+            type_name,
+            written.len
+            ),
+            branch.condition
+          );
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Binds a shape-downcast arm's single name to the concrete
+  // implementor's own type, as a pointer (matching how `self` is
+  // received inside that type's own methods). Caller has already
+  // verified the arm names a real implementor with exactly one binding,
+  // and pushed a fresh `env` scope for the arm body.
+  bind_fit_shape_pattern(FitBranch branch, str type_name, TypeEnv* env) {
+    fit branch.condition.kind {
+      .Expression(e) -> {
+        if !e.has_right {
+          ret;
+        }
+        Vec<Node*> written;
+        written.init(2);
+        defer written.free();
+        _call_args(e.right, &written);
+        if written.len != 1 {
+          ret;
+        }
+        fit written.get(0).kind {
+          .Identifier(bname) -> {
+            if !equals(bname, "_") {
+              CheckedType bound = checked_unknown();
+              bound.name = type_name;
+              bound.pointer_depth = 1;
+              env.define(bname, bound);
+            }
+          }
+          _ -> {}
         }
       }
       _ -> {}
