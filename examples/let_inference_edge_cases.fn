@@ -17,7 +17,7 @@ compound Point {
   num y;
 }
 
-quirk HasX {
+shape HasX {
   get_x() num;
 }
 
@@ -112,7 +112,7 @@ fun main() {
   _ = p_from_call;
   _ = points2;
 
-  // Quirk inference remains explicit by design.
+  // Shape inference remains explicit by design.
   HasX hx = as_hasx(&p);
   _ = hx;
 }

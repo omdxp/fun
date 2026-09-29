@@ -2,7 +2,7 @@ pub compound Counter {
   num base;
 }
 
-pub quirk AsyncCounter {
+pub shape AsyncCounter {
   async add(num x) num;
 }
 

@@ -1,11 +1,11 @@
-// Expect: compiler error that let cannot infer quirk type; explicit quirk annotation is required.
+// Expect: compiler error that let cannot infer shape type; explicit shape annotation is required.
 
 compound Point {
   num x;
   num y;
 }
 
-quirk HasX {
+shape HasX {
   get_x() num;
 }
 
@@ -21,6 +21,6 @@ fun as_hasx(Point* p) HasX {
 
 fun main() {
   Point p = Point{x = 1, y = 2};
-  let inferred_quirk = as_hasx(&p);
-  inferred_quirk.get_x();
+  let inferred_shape = as_hasx(&p);
+  inferred_shape.get_x();
 }

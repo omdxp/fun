@@ -8,7 +8,7 @@ use std.thread_runtime;
 use std.c.mem;
 use std.result;
 use std.error;
-use std.quirks;
+use std.shapes;
 use std.atomic;
 use std.time;
 

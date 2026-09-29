@@ -556,7 +556,7 @@ fun _free_variant_owners_map(Map<str, Vec<str>>* owners) {
 // borrowed from the AST (never a fresh allocation): unlike
 // `_free_variant_owners_map`'s buckets, only each `Set<str>` and the map
 // itself need freeing, not the strings inside.
-fun _free_quirk_implementors_map(Map<str, Set<str>>* implementors) {
+fun _free_shape_implementors_map(Map<str, Set<str>>* implementors) {
   Vec<str> names = implementors.keys();
   defer names.free();
   for name : names {
@@ -739,7 +739,7 @@ fun _check_c_names(Checker* c, Vec<Node>* nodes) {
         }
       }
       .Enum(e) -> { _check_c_name(c, e.name, "an enum", node); }
-      .Quirk(q) -> { _check_c_name(c, q.name, "a quirk", node); }
+      .Shape(q) -> { _check_c_name(c, q.name, "a quirk", node); }
       .Function(f) -> {
         for tp : f.type_params {
           _check_c_name(c, tp, "a type parameter", node);
@@ -896,7 +896,7 @@ test "_method_leaf_name keeps a leaf name's own leading underscore" {
 }
 
 // The signature a quirk's method declaration promises.
-fun _signature_of_quirk_method(QuirkMethodSig m) FnSig {
+fun _signature_of_shape_method(QuirkMethodSig m) FnSig {
   FnSig sig;
   sig.args.init(m.args.len);
   sig.rtype = checked_unknown();
@@ -948,7 +948,7 @@ compound Checker {
   // (both a generic impl's own bare template name, e.g. `impl Vec<T> as
   // Renderable` -> "Vec", and a monomorphizing impl's mangled concrete
   // name, e.g. `impl Vec<num> as Renderable` -> "Vec__num" - see
-  // `implements_quirk`, which tries both forms the same way
+  // `implements_shape`, which tries both forms the same way
   // `receiver_method` does for method lookup). Used to check a real
   // `impl X as Quirk` relationship for a generic bound naming a quirk
   // (`T: Renderable`), as opposed to `assignable`'s coarser
@@ -958,10 +958,10 @@ compound Checker {
   Map<str, Set<str>> quirk_implementors;
   // A quirk implementor's own declared argument type for that quirk
   // (`Range` -> `num` for `impl Range as Iterator<num>`), keyed by
-  // `"{type_name}::{quirk_name}"` - lets a for-loop's own general
+  // `"{type_name}::{shape_name}"` - lets a for-loop's own general
   // `Iterator<T>` element-type resolution read the real `Elem` a type
   // declared, not just confirm the relationship exists the way
-  // `implements_quirk` alone does. Absent for a bare `as Quirk` with no
+  // `implements_shape` alone does. Absent for a bare `as Quirk` with no
   // argument, or a symbolic binding whose argument is the enclosing
   // impl's own erased type param (never independently useful without
   // that impl's own concrete instantiation).
@@ -1078,17 +1078,17 @@ impl Checker {
 
   // Records that `type_name` (a bare template name or a mangled concrete
   // instantiation, exactly as `ImplNode.type_name` carries it) has a real
-  // `impl ... as quirk_name { ... }` block, for `implements_quirk` below.
-  record_quirk_impl(str type_name, str quirk_name) {
-    let existing = self.quirk_implementors.at(quirk_name);
+  // `impl ... as shape_name { ... }` block, for `implements_shape` below.
+  record_shape_impl(str type_name, str shape_name) {
+    let existing = self.quirk_implementors.at(shape_name);
     if existing.is_some() {
       Set<str> bucket = existing.unwrap();
       bucket.add(type_name);
-      self.quirk_implementors.put(quirk_name, bucket);
+      self.quirk_implementors.put(shape_name, bucket);
     } else {
       Set<str> bucket = set_init("", 4);
       bucket.add(type_name);
-      self.quirk_implementors.put(quirk_name, bucket);
+      self.quirk_implementors.put(shape_name, bucket);
     }
   }
 
@@ -1098,8 +1098,8 @@ impl Checker {
   // left as-is for ordinary quirk-typed-parameter coercion). Tries both
   // the mangled concrete-instantiation name and the bare type name, the
   // same lookup order `receiver_method` already uses for method lookup.
-  implements_quirk(CheckedType t, str quirk_name) flag {
-    let bucket_opt = self.quirk_implementors.at(quirk_name);
+  implements_shape(CheckedType t, str shape_name) flag {
+    let bucket_opt = self.quirk_implementors.at(shape_name);
     if bucket_opt.is_none() {
       ret false;
     }
@@ -1113,15 +1113,15 @@ impl Checker {
     ret implementors.has(named.name);
   }
 
-  // `t`'s own declared argument type for `quirk_name` (`Elem` in
+  // `t`'s own declared argument type for `shape_name` (`Elem` in
   // `Iterator<Elem>`), substituted against `t`'s own concrete
   // `generic_args` when the implementor is itself generic - `Elem` for
   // `RingBuf<num>` implementing `Iterator<T>` on its own type param `T`
   // is `num`, not the bare `T` `quirk_elem_by_type` recorded at
-  // registration time. `.None` when `t` doesn't implement `quirk_name`
+  // registration time. `.None` when `t` doesn't implement `shape_name`
   // at all, or the impl took no argument for it.
-  quirk_arg_of(CheckedType t, str quirk_name) Option<CheckedType> {
-    if !self.implements_quirk(t, quirk_name) {
+  quirk_arg_of(CheckedType t, str shape_name) Option<CheckedType> {
+    if !self.implements_shape(t, shape_name) {
       ret .None;
     }
     CheckedType named = t;
@@ -1130,7 +1130,7 @@ impl Checker {
     StringBuilder mangled_key_sb = string_builder_init(24);
     mangled_key_sb.append(mangled);
     mangled_key_sb.append("::");
-    mangled_key_sb.append(quirk_name);
+    mangled_key_sb.append(shape_name);
     let by_mangled = self.quirk_elem_by_type.at(mangled_key_sb.build());
     if by_mangled.is_some() {
       ret by_mangled;
@@ -1138,7 +1138,7 @@ impl Checker {
     StringBuilder bare_key_sb = string_builder_init(24);
     bare_key_sb.append(named.name);
     bare_key_sb.append("::");
-    bare_key_sb.append(quirk_name);
+    bare_key_sb.append(shape_name);
     let by_bare = self.quirk_elem_by_type.at(bare_key_sb.build());
     if by_bare.is_none() {
       ret .None;
@@ -2497,9 +2497,9 @@ impl Checker {
   // Steppable<T>`, where the type param the bound is even ATTACHED to is
   // still the unsubstituted literal "T" here, before any instantiation
   // site has supplied a real type for it - could otherwise never match:
-  // `implements_quirk` would look up a quirk registered under the
+  // `implements_shape` would look up a quirk registered under the
   // literal, never-matching string "Steppable<T>" instead of "Steppable".
-  _bare_quirk_bound_name(str bound) str {
+  _bare_shape_bound_name(str bound) str {
     num lt = index_of_char(bound, '<');
     if lt < 0 {
       ret bound;
@@ -2547,9 +2547,9 @@ impl Checker {
         // point either check is even possible. A bound naming a
         // concrete instantiation of a generic quirk (`T: To<num>`, or a
         // self-referential one like `T: Steppable<T>`) is handled by
-        // `_bare_quirk_bound_name` stripping the `<...>` suffix first.
+        // `_bare_shape_bound_name` stripping the `<...>` suffix first.
         if equals(bound, supplied_name) ||
-          self.implements_quirk(supplied, self.canonical_type_name(self._bare_quirk_bound_name(bound))) {
+          self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
           listed = true;
         }
       }
@@ -2669,7 +2669,7 @@ impl Checker {
           // with any generic-arg suffix on the bound itself stripped
           // first.
           if equals(bound, supplied_name) ||
-            self.implements_quirk(supplied, self.canonical_type_name(self._bare_quirk_bound_name(bound))) {
+            self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
             listed = true;
           }
           a = a + 1;
@@ -4039,11 +4039,11 @@ impl Checker {
 
   // Reports a method a quirk requires that the impl block does not
   // supply.
-  check_quirk_conformance(ImplNode block, Node* node) {
-    if !block.has_quirk_name {
+  check_shape_conformance(ImplNode block, Node* node) {
+    if !block.has_shape_name {
       ret;
     }
-    let declared = self.methods.at(block.quirk_name);
+    let declared = self.methods.at(block.shape_name);
     if declared.is_none() {
       ret;
     }
@@ -4061,7 +4061,7 @@ impl Checker {
           "'{str}' does not supply '{str}', which '{str}' requires",
           block.type_name,
           name,
-          block.quirk_name
+          block.shape_name
           ),
           node
         );
@@ -4076,7 +4076,7 @@ impl Checker {
           format(
           "'{str}' does not match how '{str}' declares '{str}'",
           block.type_name,
-          block.quirk_name,
+          block.shape_name,
           name
           ),
           node
@@ -4233,7 +4233,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer _free_fn_sig_map(&checker.fns);
   defer checker.declared_at.free();
   defer checker.quirks.free();
-  defer _free_quirk_implementors_map(&checker.quirk_implementors);
+  defer _free_shape_implementors_map(&checker.quirk_implementors);
   defer checker.quirk_elem_by_type.free();
   defer checker.plain_enums.free();
   defer checker.globals.free();
@@ -4279,13 +4279,13 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
           checker.fns.put(f.name, sig);
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         checker.quirks.add(q.name);
         MethodTable table = _method_table_new();
         for m : q.methods {
           // A generic quirk's methods mention its type parameters, which
           // stand for whatever the implementing type supplies.
-          FnSig sig = _signature_of_quirk_method(m);
+          FnSig sig = _signature_of_shape_method(m);
           if q.is_generic {
             sig = _erase_signature(sig, &q.type_params);
           }
@@ -4389,16 +4389,16 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
       }
       .Impl(block) -> {
         checker.register_impl(block);
-        if block.has_quirk_name {
-          checker.record_quirk_impl(block.type_name, block.quirk_name);
-          if block.has_quirk_arg_dtype {
+        if block.has_shape_name {
+          checker.record_shape_impl(block.type_name, block.shape_name);
+          if block.has_shape_arg_dtype {
             StringBuilder qeb_key_sb = string_builder_init(24);
             qeb_key_sb.append(block.type_name);
             qeb_key_sb.append("::");
-            qeb_key_sb.append(block.quirk_name);
+            qeb_key_sb.append(block.shape_name);
             checker.quirk_elem_by_type.put(
               qeb_key_sb.build(),
-              checked_from_dtype(block.quirk_arg_dtype)
+              checked_from_dtype(block.shape_arg_dtype)
             );
           }
         }
@@ -4428,7 +4428,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         if node.has_pos {
           checker.current_file = node.pos.filename;
         }
-        checker.check_quirk_conformance(block, node);
+        checker.check_shape_conformance(block, node);
         checker.check_impl(block, nodes);
       }
       .Variable(v) -> {

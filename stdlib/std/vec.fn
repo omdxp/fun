@@ -2,7 +2,7 @@
 
 use std.c.mem;
 use std.c.string;
-use std.quirks;
+use std.shapes;
 use std.option;
 
 // A comparison function for two values of one type, following the `strcmp`
@@ -897,7 +897,7 @@ test "slice clamps its bounds, and sort_by uses the comparator" {
   all.free();
 }
 
-test "a vector iterates, clones independently and clears through its quirks" {
+test "a vector iterates, clones independently and clears through its shapes" {
   Vec<num> v = _nums(1, 2, 3);
   num total = 0;
   for x : v {
@@ -909,7 +909,7 @@ test "a vector iterates, clones independently and clears through its quirks" {
   assert v.len() == 3 && copy.len() == 4, "expected a clone to be independent";
   Clearable c = &copy;
   c.clear();
-  assert copy.is_empty(), "expected clear through the quirk";
+  assert copy.is_empty(), "expected clear through the shape";
   v.free();
   copy.free();
 }

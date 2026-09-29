@@ -1,9 +1,9 @@
-// Expect: compiler error about missing quirk methods
+// Expect: compiler error about missing shape methods
 compound Point {
   num x;
 }
 
-quirk Q {
+shape Q {
   a() num;
   b(num x) num;
 }

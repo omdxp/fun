@@ -4,7 +4,7 @@ use std.c.mem;
 use std.c.string;
 use std.c.io;
 use std.vec;
-use std.quirks;
+use std.shapes;
 use std.result;
 use std.error;
 

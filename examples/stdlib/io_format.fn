@@ -3,7 +3,7 @@
 use std.io;
 use std.c.mem;
 use std.string;
-use std.quirks;
+use std.shapes;
 
 compound Point {
   num x;

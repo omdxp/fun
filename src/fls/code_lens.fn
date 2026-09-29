@@ -23,7 +23,7 @@ use std.c.mem;
 // Every top-level function/compound/enum/quirk's own code lens in
 // `doc`, as the result a client is sent: "N references" for a
 // function/compound/enum, "N implementations" for a quirk (a
-// structural `impl X as Quirk` scan, not the same naive name match -
+// structural `impl X as Shape` scan, not the same naive name match -
 // see `_implementations_lens`). Skips `main` and an impl's own
 // methods: `main` is an entry point invoked by the runtime, never
 // really "called" by other code the way an ordinary function is, and
@@ -48,7 +48,7 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
     Node n = read.program.entry_nodes.get(i);
     i = i + 1;
     str name = "";
-    flag is_quirk = false;
+    flag is_shape = false;
     fit n.kind {
       .Function(f) -> {
         if !equals(f.name, "main") {
@@ -57,9 +57,9 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
       }
       .Compound(c) -> { name = c.name; }
       .Enum(e) -> { name = e.name; }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         name = q.name;
-        is_quirk = true;
+        is_shape = true;
       }
       _ -> {}
     }
@@ -70,7 +70,7 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
       b.append(",");
     }
     any = true;
-    if is_quirk {
+    if is_shape {
       str impl_lens_text = _implementations_lens(cache, docs, name, n.pos, document_uri, doc.text);
       b.append(impl_lens_text);
       free(impl_lens_text);
@@ -121,13 +121,13 @@ fun _implementations_lens(
   Vec<Occurrence> found;
   found.init(4);
   defer found.free();
-  _collect_quirk_implementations(cache, docs, name, &found);
+  _collect_shape_implementations(cache, docs, name, &found);
   ret _lens(found, "implementation", decl_pos, len(name), document_uri, decl_text);
 }
 
 // Every `impl X as name { ... }` block, across the documents `docs`
 // holds, regardless of which file declares `name` itself.
-fun _collect_quirk_implementations(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+fun _collect_shape_implementations(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
   Vec<str> uris = docs.all_uris();
   defer uris.free();
   num i = 0;
@@ -149,7 +149,7 @@ fun _collect_quirk_implementations(AnalysisCache* cache, Documents* docs, str na
       j = j + 1;
       fit n.kind {
         .Impl(im) -> {
-          if !im.has_quirk_name || !equals(im.quirk_name, name) || !n.has_pos {
+          if !im.has_shape_name || !equals(im.shape_name, name) || !n.has_pos {
             continue;
           }
           Occurrence o;

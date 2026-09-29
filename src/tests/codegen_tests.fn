@@ -34,7 +34,7 @@ test "while-style for loop transpiles to a C for" {
 
 test "range for loop desugars into a Range value and inlines its own Iterator" {
   // `transpile_source` doesn't resolve imports (see its own doc
-  // comment), so this stands in for `std.range`/`std.quirks`/
+  // comment), so this stands in for `std.range`/`std.shapes`/
   // `std.option` with the same shape, matching how codegen_tests_c.fn's
   // user-Iterator test does for its own `Counter` type.
   str src = `use std.c.io;

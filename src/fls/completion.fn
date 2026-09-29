@@ -125,7 +125,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       Vec<Node> no_program;
       no_program.init(0);
       if _in_type_param_bound_position(&tokens, line, character) {
-        _type_and_quirk_bound_completions(&no_program, &items);
+        _type_and_shape_bound_completions(&no_program, &items);
         ret _reply(&items);
       }
       _reserved(&items, snippets);
@@ -244,7 +244,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
 
   if equals(receiver, "") {
     if _in_type_param_bound_position(&tokens, line, character) {
-      _type_and_quirk_bound_completions(&program.nodes, &items);
+      _type_and_shape_bound_completions(&program.nodes, &items);
       ret _reply(&items);
     }
     str init_type = _compound_init_type_at(&tokens, &program.nodes, line, character);
@@ -650,7 +650,7 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
     "implq",
     .Snippet,
     "implement a quirk for a type",
-    "impl ${1:Type} as ${2:Quirk} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
+    "impl ${1:Type} as ${2:Shape} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
   ));
   items.push(_snippet_item(
     "iferr",
@@ -1254,9 +1254,9 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
   Vec<str> enum_names;
   enum_names.init(8);
   defer enum_names.free();
-  Vec<str> quirk_names;
-  quirk_names.init(8);
-  defer quirk_names.free();
+  Vec<str> shape_names;
+  shape_names.init(8);
+  defer shape_names.free();
 
   num i = 0;
   for i < tokens.len {
@@ -1274,8 +1274,8 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
         } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
           enum_names.push(name);
         } elif (token_is_keyword(prev, "quirk") || token_is_keyword(prev, "shape")) &&
-          !quirk_names.contains(name) {
-          quirk_names.push(name);
+          !shape_names.contains(name) {
+          shape_names.push(name);
         }
       }
     }
@@ -1300,8 +1300,8 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
           items.push(_item(name, .Struct, "compound"));
         } elif enum_names.contains(name) {
           items.push(_item(name, .Enumeration, "enum"));
-        } elif quirk_names.contains(name) {
-          items.push(_item(name, .Interface, "quirk"));
+        } elif shape_names.contains(name) {
+          items.push(_item(name, .Interface, "shape"));
         } elif fn_names.contains(name) {
           items.push(_item(name, .Function, "in this file"));
         } else {
@@ -2346,7 +2346,7 @@ fun _bare_type_name(Vec<Node>* program, str name) str {
           ret name;
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         if equals(q.name, name) {
           ret name;
         }
@@ -2446,7 +2446,7 @@ fun _in_type_param_bound_position(Vec<Token>* tokens, num line, num character) f
 // name - never a function, variable, or local, none of which are valid
 // there. `program` may be empty (the unparsed-document caller has no
 // tree), in which case only the builtin keywords are offered.
-fun _type_and_quirk_bound_completions(Vec<Node>* program, Vec<Item>* items) {
+fun _type_and_shape_bound_completions(Vec<Node>* program, Vec<Item>* items) {
   Vec<str> words = keywords();
   defer words.free();
   num i = 0;
@@ -2464,7 +2464,7 @@ fun _type_and_quirk_bound_completions(Vec<Node>* program, Vec<Item>* items) {
     fit n.kind {
       .Compound(c) -> { items.push(_item(c.name, .Struct, "compound")); }
       .Enum(e) -> { items.push(_item(e.name, .Enumeration, "enum")); }
-      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .Shape(q) -> { items.push(_item(q.name, .Interface, "shape")); }
       .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       _ -> {}
     }
@@ -2598,7 +2598,7 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
           _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
         );
       }
-      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .Shape(q) -> { items.push(_item(q.name, .Interface, "shape")); }
       .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);
@@ -2894,7 +2894,7 @@ fun _declared(
           _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
         );
       }
-      .Quirk(q) -> { items.push(_item(q.name, .Interface, "quirk")); }
+      .Shape(q) -> { items.push(_item(q.name, .Interface, "shape")); }
       .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);

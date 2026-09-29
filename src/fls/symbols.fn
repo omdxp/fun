@@ -22,7 +22,7 @@ pub enum DeclarationKind {
   Function,
   Compound,
   Enum,
-  Quirk,
+  Shape,
   Field,
   Local,
   Parameter,
@@ -48,7 +48,7 @@ pub compound Declaration {
   str container;
   // Whether this declaration was written `pub`. Meaningful for the
   // top-level kinds a cross-file lookup can actually reach (Function,
-  // Compound, Enum, Quirk, Global) and, matching `check_visibility`'s
+  // Compound, Enum, Shape, Global) and, matching `check_visibility`'s
   // own per-method rule in typecheck.fn, an impl method too - `true`
   // for everything else (a field, a local, a parameter, a variant),
   // which this language has no independent `pub`/private concept for
@@ -763,7 +763,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         if equals(q.name, name) {
           StringBuilder b = string_builder_init(32);
           if q.spelled_shape {
@@ -773,7 +773,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
           }
           b.append(q.name);
           _append_type_params(&b, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
-          ret .Some(_declaration_vis(name, .Quirk, b.build(), n.pos, n.flags.is_public));
+          ret .Some(_declaration_vis(name, .Shape, b.build(), n.pos, n.flags.is_public));
         }
       }
       .Variable(v) -> {
@@ -1084,18 +1084,18 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
   ret quirk_method_declaration(program, type_name, method_name);
 }
 
-// The signature `quirk_name` requires for `method_name`, as declared
+// The signature `shape_name` requires for `method_name`, as declared
 // in the `quirk` block itself (no `self`, no body): what an `impl ...
-// as quirk_name` block has to supply. `None` when no such quirk or
+// as shape_name` block has to supply. `None` when no such quirk or
 // method exists.
-pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_name) Option<Declaration> {
+pub fun quirk_method_declaration(Vec<Node>* program, str shape_name, str method_name) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
     i = i + 1;
     fit n.kind {
-      .Quirk(q) -> {
-        if !equals(q.name, quirk_name) {
+      .Shape(q) -> {
+        if !equals(q.name, shape_name) {
           continue;
         }
         num m = 0;
@@ -1103,8 +1103,8 @@ pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_
           QuirkMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            Declaration d = _declaration(method_name, .Function, _render_quirk_method(ms), ms.pos);
-            d.container = quirk_name;
+            Declaration d = _declaration(method_name, .Function, _render_shape_method(ms), ms.pos);
+            d.container = shape_name;
             ret .Some(d);
           }
         }
@@ -1117,7 +1117,7 @@ pub fun quirk_method_declaration(Vec<Node>* program, str quirk_name, str method_
 
 // `m` as a reader would write it inside an `impl` block: no `self`,
 // since a quirk method's signature never carries one of its own.
-fun _render_quirk_method(QuirkMethodSig m) str {
+fun _render_shape_method(QuirkMethodSig m) str {
   StringBuilder b = string_builder_init(48);
   if m.is_async {
     b.append("async ");
@@ -1551,7 +1551,7 @@ fun _is_type_param_ident_char(chr c) flag {
 }
 
 // A method's own written name, with whatever it was mangled with
-// removed: `Type__method` for a plain impl, `Type__Quirk__method`
+// removed: `Type__method` for a plain impl, `Type__Shape__method`
 // for one conforming to a quirk (see `_parse_impl_method`'s own
 // `gen_name` construction). Neither a type nor a quirk name is ever
 // written with a leading or embedded `__` of its own, but the
@@ -5840,7 +5840,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
           out.push(vd);
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         StringBuilder qb = string_builder_init(32);
         if q.spelled_shape {
           qb.append("shape ");
@@ -5849,7 +5849,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         }
         qb.append(q.name);
         _append_type_params(&qb, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
-        out.push(_declaration_vis(q.name, .Quirk, qb.build(), n.pos, n.flags.is_public));
+        out.push(_declaration_vis(q.name, .Shape, qb.build(), n.pos, n.flags.is_public));
       }
       .TypeAlias(a) -> {
         StringBuilder ab = string_builder_init(32);

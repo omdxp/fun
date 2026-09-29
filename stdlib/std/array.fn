@@ -1,7 +1,7 @@
 // Helper utilities for fixed arrays.
 
 use std.option;
-use std.quirks;
+use std.shapes;
 use std.c.mem;
 
 // View over a generic array.

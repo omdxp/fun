@@ -135,7 +135,7 @@ fun _outline_kind_for(Declaration d) OutlineKind {
     }
     .Compound -> { ret .Struct; }
     .Enum -> { ret .Enumeration; }
-    .Quirk -> { ret .Interface; }
+    .Shape -> { ret .Interface; }
     .Field -> { ret .Field; }
     .Variant -> { ret .EnumMember; }
     .Global -> {
@@ -342,7 +342,7 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
         }
         out.push(e);
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         OutlineEntry e = _entry(q.name, .Interface, n.pos);
         num qm = 0;
         for qm < q.methods.len {
@@ -399,9 +399,9 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
           }
           oi = oi + 1;
         }
-        str quirk_name = "";
-        if block.has_quirk_name {
-          quirk_name = block.quirk_name;
+        str shape_name = "";
+        if block.has_shape_name {
+          shape_name = block.shape_name;
         }
         num m = 0;
         for m < block.methods.len {
@@ -415,10 +415,10 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
               if f.has_name && !equals(f.name, "") {
                 // A method is stored under the name it is emitted as,
                 // `Type__method` or, for a quirk impl,
-                // `Type__Quirk__method`; a reader wants the name they
+                // `Type__Shape__method`; a reader wants the name they
                 // wrote, not either mangled form.
                 OutlineEntry me = _entry(
-                  _method_name(f.name, block.type_name, quirk_name),
+                  _method_name(f.name, block.type_name, shape_name),
                   .Method,
                   method.pos
                 );
@@ -440,8 +440,8 @@ fun _collect(Vec<Node>* nodes, str file, Vec<OutlineEntry>* out) {
 
 // The method's own name, with whatever it is mangled with removed: just
 // the type (`Type__method`) for a plain impl, or the type and the
-// quirk both (`Type__Quirk__method`) for a quirk impl.
-fun _method_name(str mangled, str type_name, str quirk_name) str {
+// quirk both (`Type__Shape__method`) for a quirk impl.
+fun _method_name(str mangled, str type_name, str shape_name) str {
   StringBuilder tb = string_builder_init(len(type_name) + 2);
   tb.append(type_name);
   tb.append("__");
@@ -450,11 +450,11 @@ fun _method_name(str mangled, str type_name, str quirk_name) str {
     ret mangled;
   }
   str after_type = substr(mangled, len(type_prefix), len(mangled) - len(type_prefix));
-  if equals(quirk_name, "") {
+  if equals(shape_name, "") {
     ret after_type;
   }
-  StringBuilder qb = string_builder_init(len(quirk_name) + 2);
-  qb.append(quirk_name);
+  StringBuilder qb = string_builder_init(len(shape_name) + 2);
+  qb.append(shape_name);
   qb.append("__");
   str quirk_prefix = qb.build();
   if starts_with(after_type, quirk_prefix) {

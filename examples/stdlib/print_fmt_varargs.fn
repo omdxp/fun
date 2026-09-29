@@ -2,7 +2,7 @@
 
 use std.io;
 use std.c.def;
-use std.quirks;
+use std.shapes;
 
 compound Point {
   num x;

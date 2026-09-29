@@ -1,12 +1,12 @@
 // AST module: the recursive expression tree the parser builds and the
 // evaluator walks. Lives in its own file/module, imported by both
 // parser.fn and eval.fn, to stress cross-file resolution of a recursive
-// pointer-based tagged-union type (and its Display quirk impl).
+// pointer-based tagged-union type (and its Display shape impl).
 
 use std.io;
 use std.string;
 use std.vec;
-use std.quirks;
+use std.shapes;
 
 // `Call`'s args are a real `Vec<Expr*>` (variable arity) -- this used to hit
 // a genuine compiler bug: a generic container instantiated with a POINTER

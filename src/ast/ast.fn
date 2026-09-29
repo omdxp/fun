@@ -14,7 +14,7 @@ use ..lexer.token;
 use std.vec;
 use std.string;
 use std.option;
-use std.quirks;
+use std.shapes;
 use std.c.mem;
 
 // ===== Data types =====
@@ -183,7 +183,7 @@ pub enum WarningControlAction {
 // below) because callers that validate a warning-control directive from
 // source (`allow unknown_id;`) need to detect and report an invalid id as a
 // real compile error; `From<T>`'s `from(T value)` is void/best-effort by
-// contract (see std.quirks), which can't express that failure.
+// contract (see std.shapes), which can't express that failure.
 pub fun warning_id_from_string(str name) Option<WarningId> {
   fit name {
     "return_local_ptr" -> { ret .Some(.ReturnLocalPtr); }
@@ -295,7 +295,7 @@ impl WarningId as From<str> {
 }
 
 // `id.to()` instead of a free function: WarningId -> str is exactly the
-// shape std.quirks' `To<T>` conversion quirk is for.
+// shape std.shapes' `To<T>` conversion quirk is for.
 impl WarningId as To<str> {
   pub to() str {
     fit *self {
@@ -744,7 +744,7 @@ pub fun type_alias_node_new() TypeAliasNode {
 }
 
 // A `quirk Name { methods }` declaration (a structural interface).
-pub compound QuirkNode {
+pub compound ShapeNode {
   str name;
   Vec<QuirkMethodSig> methods;
   // True for a generic quirk (`quirk Iterator<T> { ... }`): static dispatch
@@ -766,8 +766,8 @@ pub compound QuirkNode {
   flag spelled_shape;
 }
 
-pub fun quirk_node_new() QuirkNode {
-  QuirkNode q;
+pub fun shape_node_new() ShapeNode {
+  ShapeNode q;
   q.name = "";
   q.methods.init(0);
   q.is_generic = false;
@@ -832,7 +832,7 @@ pub fun enum_decl_node_new() EnumDeclNode {
   ret e;
 }
 
-// An `impl Type { methods }` (plain) or `impl Type as Quirk { methods }`
+// An `impl Type { methods }` (plain) or `impl Type as Shape { methods }`
 // (quirk-implementing) block.
 pub compound ImplNode {
   str type_name;
@@ -847,23 +847,23 @@ pub compound ImplNode {
   // Bare quirk name (`Iterator`, `To`, ...), even when the `as` clause names
   // a concrete instantiation (`as Iterator<num>`). Absent for a plain impl
   // block (`impl Type { ... }`).
-  str quirk_name;
-  flag has_quirk_name;
+  str shape_name;
+  flag has_shape_name;
   // Set when the `as` clause names a concrete instantiation of a generic
   // quirk whose argument is not the enclosing impl's own type param (`as
   // To<num>`), the mangled name (`To__num`) of that distinct quirk
-  // identity, registered alongside `quirk_name` above.
-  str quirk_concrete_instantiation;
-  flag has_quirk_concrete_instantiation;
+  // identity, registered alongside `shape_name` above.
+  str shape_concrete_instantiation;
+  flag has_shape_concrete_instantiation;
   // The quirk's own single type argument (`num` in `as Iterator<num>`,
   // `T` in a symbolic `as Iterator<T>`), as a real `DataType` rather than
   // only the pre-mangled string above - needed to resolve it structurally
   // (substituting a symbolic reference against a receiver's own concrete
   // `generic_args`), not just to recognize it as a fixed identity. Set
   // whenever the quirk name is followed by `<...>` at all, symbolic or
-  // concrete alike; absent for a bare `as Quirk` with no argument.
-  DataType* quirk_arg_dtype;
-  flag has_quirk_arg_dtype;
+  // concrete alike; absent for a bare `as Shape` with no argument.
+  DataType* shape_arg_dtype;
+  flag has_shape_arg_dtype;
   // Set when this impl targets a concrete instantiation of an
   // already-generic type (`impl Vec<num> { ... }`, `type_name` mangled
   // to `Vec__num`): the full, un-mangled DataType, so codegen can force
@@ -884,12 +884,12 @@ pub fun impl_node_new() ImplNode {
   i.has_type_param_forced_insts = false;
   i.type_param_constraints.init(0);
   i.has_type_param_constraints = false;
-  i.quirk_name = "";
-  i.has_quirk_name = false;
-  i.quirk_concrete_instantiation = "";
-  i.has_quirk_concrete_instantiation = false;
-  i.quirk_arg_dtype = nil;
-  i.has_quirk_arg_dtype = false;
+  i.shape_name = "";
+  i.has_shape_name = false;
+  i.shape_concrete_instantiation = "";
+  i.has_shape_concrete_instantiation = false;
+  i.shape_arg_dtype = nil;
+  i.has_shape_arg_dtype = false;
   i.concrete_dtype = nil;
   i.has_concrete_dtype = false;
   i.methods.init(0);
@@ -1016,7 +1016,7 @@ pub enum NodeKind {
   TupleLiteral(TupleLiteralNode),
   Import(ImportNode),
   Compound(CompoundNode),
-  Quirk(QuirkNode),
+  Shape(ShapeNode),
   Enum(EnumDeclNode),
   Impl(ImplNode),
   TypeAlias(TypeAliasNode),
@@ -1059,7 +1059,7 @@ pub fun node_kind_name(NodeKind kind) str {
     .Function(_) -> { ret "function"; }
     .Compound(_) -> { ret "compound declaration"; }
     .Enum(_) -> { ret "enum declaration"; }
-    .Quirk(_) -> { ret "quirk declaration"; }
+    .Shape(_) -> { ret "shape declaration"; }
     .Impl(_) -> { ret "impl block"; }
     .TypeAlias(_) -> { ret "type alias"; }
     .Import(_) -> { ret "import"; }
@@ -1290,7 +1290,7 @@ fun _free_compound_init_fields(Vec<CompoundInitField>* fields) {
   fields.free();
 }
 
-fun _free_quirk_methods(Vec<QuirkMethodSig>* methods) {
+fun _free_shape_methods(Vec<QuirkMethodSig>* methods) {
   num i = 0;
   for i < methods.len {
     QuirkMethodSig m = methods.get(i);
@@ -1418,8 +1418,8 @@ fun _free_node_contents(Node* n) {
       _free_dtype_vec(&c.type_param_defaults);
       _free_str_str_vec(&c.type_param_forced_insts);
     }
-    .Quirk(q) -> {
-      _free_quirk_methods(&q.methods);
+    .Shape(q) -> {
+      _free_shape_methods(&q.methods);
       q.type_params.free();
       _free_dtype_vec(&q.type_param_defaults);
     }
@@ -1434,8 +1434,8 @@ fun _free_node_contents(Node* n) {
       if im.has_concrete_dtype {
         dtype_free(im.concrete_dtype);
       }
-      if im.has_quirk_arg_dtype {
-        dtype_free(im.quirk_arg_dtype);
+      if im.has_shape_arg_dtype {
+        dtype_free(im.shape_arg_dtype);
       }
       _free_node_vec(&im.methods);
     }
@@ -1761,7 +1761,7 @@ fun _clone_compound_init_fields(Vec<CompoundInitField>* fields) Vec<CompoundInit
   ret out;
 }
 
-fun _clone_quirk_methods(Vec<QuirkMethodSig>* methods) Vec<QuirkMethodSig> {
+fun _clone_shape_methods(Vec<QuirkMethodSig>* methods) Vec<QuirkMethodSig> {
   Vec<QuirkMethodSig> out;
   out.init(methods.len);
   num i = 0;
@@ -1941,12 +1941,12 @@ pub fun node_clone(Node n) Node {
       cc.type_param_forced_insts = _clone_str_str_vec(&cn.type_param_forced_insts);
       c.kind = .Compound(cc);
     }
-    .Quirk(q) -> {
-      QuirkNode cq = q;
-      cq.methods = _clone_quirk_methods(&q.methods);
+    .Shape(q) -> {
+      ShapeNode cq = q;
+      cq.methods = _clone_shape_methods(&q.methods);
       cq.type_params = _clone_str_vec(&q.type_params);
       cq.type_param_defaults = _clone_dtype_vec(&q.type_param_defaults);
-      c.kind = .Quirk(cq);
+      c.kind = .Shape(cq);
     }
     .Enum(e) -> {
       EnumDeclNode ce = e;
@@ -1962,8 +1962,8 @@ pub fun node_clone(Node n) Node {
       if im.has_concrete_dtype {
         ci.concrete_dtype = dtype_clone(im.concrete_dtype);
       }
-      if im.has_quirk_arg_dtype {
-        ci.quirk_arg_dtype = dtype_clone(im.quirk_arg_dtype);
+      if im.has_shape_arg_dtype {
+        ci.shape_arg_dtype = dtype_clone(im.shape_arg_dtype);
       }
       ci.methods = _clone_node_vec(&im.methods);
       c.kind = .Impl(ci);

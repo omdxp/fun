@@ -1,6 +1,6 @@
 // Entry point: ties together a mini "compiler" spread across six files
 // (token/lexer/ast/parser/eval/trace) — a multi-module compilation graph
-// with cross-file recursive types, generics, and quirks, the way a real
+// with cross-file recursive types, generics, and shapes, the way a real
 // self-hosted compiler's own source tree would be laid out.
 
 use std.c.io;

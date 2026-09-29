@@ -14,7 +14,7 @@
 A regular `//` comment immediately above a declaration becomes its
 documentation, picked up by the website reference and by hover in the
 language server. This applies to module summaries, public symbols,
-compound fields, and quirk members. Keep them short and
+compound fields, and shape members. Keep them short and
 declaration-specific.
 
 ```fun
@@ -30,8 +30,8 @@ pub compound Maybe<T> {
 }
 
 // Value that can render itself as text. Named Renderable here (not
-// Display) only to avoid colliding with std.quirks' own Display.
-pub quirk Renderable {
+// Display) only to avoid colliding with std.shapes' own Display.
+pub shape Renderable {
   // Produce a textual representation.
   to_string() str;
 }
@@ -523,7 +523,7 @@ fun safe_parse(num x) Option<num> {
   }
   ```
 
-## Compounds & Quirks
+## Compounds & Shapes
 
 Compounds are like C structs, and can have methods via `impl`.
 
@@ -567,10 +567,14 @@ fun main() {
 }
 ```
 
-### Quirks (interfaces)
+### Shapes (interfaces)
+
+`shape` and `quirk` are the same declaration, just two accepted
+spellings of the keyword - `quirk` still works, `shape` is the one
+used through the rest of this reference.
 
 ```fun
-quirk Shape {
+shape HasArea {
   area() num;
 }
 
@@ -578,7 +582,7 @@ compound Square {
   num side;
 }
 
-impl Square as Shape {
+impl Square as HasArea {
   area() num { ret self.side * self.side; }
 }
 
@@ -590,8 +594,8 @@ fun main() {
 }
 ```
 
-- Quirk values can be used for dynamic dispatch, like trait objects.
-- Quirk methods follow normal visibility rules: non-`pub` methods are
+- Shape values can be used for dynamic dispatch, like trait objects.
+- Shape methods follow normal visibility rules: non-`pub` methods are
   callable inside the declaring module, but not from importing modules.
 - Formatting with `{}` uses `Display.to_string()` only when that method
   is accessible at the call site. If `to_string()` is private in another
@@ -602,7 +606,7 @@ fun main() {
 ```fun
 use std.io;
 
-quirk Shape {
+shape HasArea {
   area() num;
 }
 
@@ -623,7 +627,7 @@ impl Point {
   }
 }
 
-impl Rectangle as Shape {
+impl Rectangle as HasArea {
   area() num { ret self.w * self.h; }
 }
 
@@ -641,7 +645,7 @@ fun main() {
 ```
 
 A plain `impl Point { ... }` attaches methods to a compound directly;
-`impl Rectangle as Shape { ... }` implements a quirk for it.
+`impl Rectangle as HasArea { ... }` implements a shape for it.
 
 ### Generics
 
@@ -693,10 +697,10 @@ fun main() {
 This lets one body work for a fixed set of concrete types; the compiler
 monomorphizes each concrete instantiation and rejects a call/instantiation
 whose type argument isn't in the declared bound at compile time. A bound
-alternative can also name a quirk instead of a concrete type, checked by
+alternative can also name a shape instead of a concrete type, checked by
 "does this type implement it" rather than an exact match, or be a full type
 expression like a generic instantiation (`T: User | Vec<num>`), not just a
-bare identifier - a bound list is a union of concrete types, quirks, and
+bare identifier - a bound list is a union of concrete types, shapes, and
 type expressions, mixed freely.
 
 ### Default type parameters
@@ -736,7 +740,7 @@ Here `Res<num>` means `Res<num, str>`, and `Pair<num>` means `Pair<num,
 num>`: a default can name an earlier parameter, which stands for whatever
 was written for it, so `Pair<num, str>` keeps its own second argument.
 
-- Enums, compounds, quirks, aliases, generic functions and a method's own
+- Enums, compounds, shapes, aliases, generic functions and a method's own
   type parameters can all have defaults. An `impl`'s type parameters cannot,
   since they come from the type it implements, and an impl header must write
   every type argument of the type it names.
@@ -761,22 +765,22 @@ was written for it, so `Pair<num, str>` keeps its own second argument.
   `std.result`, so `Result<num>` means `Result<num, Error>` and a custom
   error type is still written out (`Result<num, ParseErrorKind>`).
 
-### Generic quirks
+### Generic shapes
 
-A quirk can be generic too: `quirk To<T> { to() T; }`, and `impl Point as
+A shape can be generic too: `shape To<T> { to() T; }`, and `impl Point as
 To<JsonValue> { pub to() JsonValue { ... } }` binds a concrete
 instantiation.
 
-- A concrete instantiation dispatches the same way a non-generic quirk
-  does: a direct method call (`p.to()`), or a quirk-typed
+- A concrete instantiation dispatches the same way a non-generic shape
+  does: a direct method call (`p.to()`), or a shape-typed
   parameter/variable naming the same concrete instantiation
   (`fun to_json_value(To<JsonValue> value) JsonValue { ret value.to(); }`,
   called as `to_json_value(&p)`).
 - Each concrete instantiation (`To<JsonValue>`, `To<num>`, ...) is its own
-  quirk identity: an `impl` binds one specific instantiation, and a
-  quirk-typed parameter/variable must name that same instantiation to
+  shape identity: an `impl` binds one specific instantiation, and a
+  shape-typed parameter/variable must name that same instantiation to
   dispatch.
-- A still-generic reference to a quirk's own type parameter (`impl
+- A still-generic reference to a shape's own type parameter (`impl
   Vec<T> as Iterator<T>`) is a different, symbolic binding that
   resolves through the enclosing type's own generic instantiation
   instead of naming one concrete type.
@@ -833,8 +837,8 @@ fun main() {
   like any other type.
 - A bound-list alias (the `a | b` form) can't itself be generic - it has
   no single instantiation site of its own the way an ordinary alias does.
-- An alias's own body can name a quirk (`als Drawable = Shape;`), and
-  dynamic dispatch through it works exactly like a plain quirk-typed
+- An alias's own body can name a shape (`als Drawable = HasArea;`), and
+  dynamic dispatch through it works exactly like a plain shape-typed
   variable: `Drawable d = &square;` then `d.area()`. This is still a
   value type, not a pointer - `Drawable*` follows the same explicit-
   pointer-at-the-use-site rule as any other alias.
@@ -977,17 +981,17 @@ fun main() {
 - While-style (condition): `for i < len { ... }`
 - Infinite loop: `for true { ... }`
 - Everything else - a range, `Vec`, `Map`, `Set`, or any user-defined
-  type - iterates through the `Iterator<T>` quirk, below.
+  type - iterates through the `Iterator<T>` shape, below.
 
 A raw C array (`num[] arr`) is the one special case: it iterates by
-direct index, since it's a primitive language construct with no quirk
+direct index, since it's a primitive language construct with no shape
 impls of its own. Every other iterable dispatches structurally through
 `Iterator<T>`.
 
 #### Iterator\<T\>
 
 ```fun
-pub quirk Iterator<T> {
+pub shape Iterator<T> {
   next() Option<T>;
 }
 ```
@@ -1061,14 +1065,14 @@ a custom counter, ...), implement `Steppable<T>` and use `StepRange<T>`
 directly; there's no `..` syntax for it, only explicit construction.
 
 ```fun
-pub quirk Steppable<T> {
+pub shape Steppable<T> {
   succ() T;
   reached(T end) flag;
 }
 ```
 
 `Steppable<T>` is self-referential the same way `Iterator<T>` is:
-`impl MyType as Steppable<MyType>` binds the quirk's own `T` to the
+`impl MyType as Steppable<MyType>` binds the shape's own `T` to the
 implementing type itself, so `succ()` returns a real, concrete `MyType`
 with no separate `Self` keyword needed.
 
@@ -1289,7 +1293,7 @@ fun main() {
   special in Fun itself, but every declared name is emitted to C, so:
   - C's reserved words (`do`, `int`, `for`, `while`, `void`, ...) can't
     name a function, parameter, `let`/`const`/global variable, compound,
-    enum, quirk, field, type parameter, `fit` binding, or a `for` loop's
+    enum, shape, field, type parameter, `fit` binding, or a `for` loop's
     item, index or destructured names.
   - Neither can a macro or type the always-included C headers declare:
     `NULL`, `EOF`, `bool`, `stdin`/`stdout`/`stderr`, `FILE`, `size_t`,
@@ -1314,7 +1318,7 @@ behavior.
 ## Error Handling
 
 - Type mismatches, undeclared symbols, duplicate declarations, missing
-  imports, and incomplete quirk implementations are compile errors.
+  imports, and incomplete shape implementations are compile errors.
 - Pointer-return, `fit` exhaustiveness, redundant `fit` branches,
   unreachable statements, constant assertions, and optional unused-*
   diagnostics are emitted as warnings (see [Warning Controls](#language?anchor=language-warning-controls) below).

@@ -2,7 +2,7 @@
 // and parser.fn.
 
 use std.io;
-use std.quirks;
+use std.shapes;
 
 pub enum Token {
   Num(dec),

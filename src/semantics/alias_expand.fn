@@ -348,7 +348,7 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
           node.kind = .Compound(c);
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         num mi = 0;
         for mi < q.methods.len {
           QuirkMethodSig m = q.methods.get(mi);

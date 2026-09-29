@@ -4,7 +4,7 @@
 
 - Declare async functions with `async fun name(args) type { ... }`.
 - `await` is valid only inside an `async fun` body.
-- Calls to async functions and async quirk methods must be awaited.
+- Calls to async functions and async shape methods must be awaited.
 - The awaited expression must resolve to an async call.
 
 ```fun
@@ -12,7 +12,7 @@ compound Counter {
   num base;
 }
 
-quirk AsyncCounter {
+shape AsyncCounter {
   async add(num x) num;
 }
 

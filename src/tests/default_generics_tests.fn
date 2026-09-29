@@ -202,7 +202,7 @@ test "a quirk parameter can have a default, whether the impl writes it or not" {
   `  printf("%s %s %s %s\n", a.conv(1), b.conv(1), run(a), run(b));
   `  ret 0;
   `}`;
-  str out = run_source(src, "dg_quirk", "quirk default");
+  str out = run_source(src, "dg_shape", "quirk default");
   assert equals(out, "short long short long\n"), "expected Conv<num> and Conv<num, str> to be the same quirk, and usable as a bound";
 }
 
@@ -219,14 +219,14 @@ test "a defaulted compound implements a quirk and satisfies a quirk bound" {
   `  printf("%s\n", describe(p));
   `  ret 0;
   `}`;
-  str out = run_source(src, "dg_quirk_impl", "quirk implemented by a defaulted compound");
+  str out = run_source(src, "dg_shape_impl", "quirk implemented by a defaulted compound");
   assert equals(out, "pair\n"), "expected Pair<num> to satisfy Show";
 }
 
 test "a defaulted compound can implement Iterator and drive a for loop" {
   str src = `use std.c.io;
   `use std.option;
-  `use std.quirks;
+  `use std.shapes;
   `compound Counter<A, B = A> { A cur; B end; }
   `impl Counter<A, B> as Iterator<A> {
   `  pub next() Option<A> {

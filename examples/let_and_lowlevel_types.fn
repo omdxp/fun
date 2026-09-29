@@ -5,7 +5,7 @@ compound Point {
   num y;
 }
 
-quirk HasX {
+shape HasX {
   get_x() num;
 }
 
@@ -82,11 +82,11 @@ fun main(str[] args) {
   let from_wide_signed = wide_signed;
   let from_wide_unsigned = wide_unsigned;
 
-  HasX explicit_quirk = &from_method_return;
+  HasX explicit_shape = &from_method_return;
 
-  // let inferred_quirk = as_hasx(&from_method_return);
-  // ^ invalid by design: let cannot infer quirk types; use explicit type:
-  // HasX inferred_quirk = as_hasx(&from_method_return);
+  // let inferred_shape = as_hasx(&from_method_return);
+  // ^ invalid by design: let cannot infer shape types; use explicit type:
+  // HasX inferred_shape = as_hasx(&from_method_return);
 
   printf("total=%lld final=%lld s32=%d u64=%llu\n", total, final_total, signed_32, mask);
   printf(
@@ -96,7 +96,7 @@ fun main(str[] args) {
     from_generic_compound.x
   );
   printf("small mix=%lld dec=%f bool=%d\n", mixed_small, inferred_dec, inferred_bool);
-  printf("quirk get_x=%lld\n", explicit_quirk.get_x());
+  printf("shape get_x=%lld\n", explicit_shape.get_x());
   printf("chr=%c str=%s\n", inferred_chr, inferred_str);
 
   _ = from_wide_signed;

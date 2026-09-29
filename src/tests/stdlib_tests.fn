@@ -436,7 +436,7 @@ test "for-each over Vec<num> and Vec<str> in separate functions each resolve the
 
 test "a quirk implemented by a stdlib type dispatches through its vtable" {
   str src = `use std.vec;
-  `use std.quirks;
+  `use std.shapes;
   `use std.c.io;
   `fun main() num {
   `  Vec<num> v;
@@ -445,7 +445,7 @@ test "a quirk implemented by a stdlib type dispatches through its vtable" {
   `  printf("%lld\n", v.len());
   `  ret 0;
   `}`;
-  let out = emit_c_with_imports(src, "sl_quirk_sized", "Sized quirk on Vec");
+  let out = emit_c_with_imports(src, "sl_shape_sized", "Sized quirk on Vec");
   assert contains(out, "Vec__num"), "expected the instantiation";
 }
 

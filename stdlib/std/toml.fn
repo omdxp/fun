@@ -16,7 +16,7 @@ use std.option;
 use std.result;
 use std.error;
 use std.string;
-use std.quirks;
+use std.shapes;
 
 // A TOML value: a scalar, or one level of inline table (`{ key = value,
 // ... }`, the value-position construct a manifest's own `[dependencies]`

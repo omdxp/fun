@@ -325,7 +325,7 @@ pub fun print_node(Node* node, num depth) {
         }
       }
     }
-    .Quirk(q) -> {
+    .Shape(q) -> {
       _line(depth + 1, format("Name: {str}", q.name));
       if q.methods.len > 0 {
         _line(depth + 1, format("Methods ({num}):", q.methods.len));
@@ -372,8 +372,8 @@ pub fun print_node(Node* node, num depth) {
     }
     .Impl(i) -> {
       _line(depth + 1, format("Type: {str}", i.type_name));
-      if i.has_quirk_name {
-        _line(depth + 1, format("Quirk: {str}", i.quirk_name));
+      if i.has_shape_name {
+        _line(depth + 1, format("Shape: {str}", i.shape_name));
       }
       if i.methods.len > 0 {
         _line(depth + 1, format("Methods ({num}):", i.methods.len));

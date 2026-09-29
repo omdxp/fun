@@ -1,10 +1,10 @@
 // Cryptography: hashing, HMAC, secure random, AEAD symmetric encryption,
 // and Ed25519 signing. Ports and adapters - `Hasher`/`AeadCipher`/`Signer`/
-// `Verifier` are quirks (the port), each concrete algorithm (`Sha256`,
+// `Verifier` are shapes (the port), each concrete algorithm (`Sha256`,
 // `Aes256Gcm`, `Ed25519PrivateKey`) its own compound implementing one
-// (the adapter), so code written against the quirk works with whichever
+// (the adapter), so code written against the shape works with whichever
 // algorithm a caller picks, dispatched dynamically the same way any
-// other quirk already does in this language.
+// other shape already does in this language.
 //
 // Backed by real, vetted native crypto (OpenSSL's libcrypto on POSIX,
 // Windows' own CNG/BCrypt), never hand-rolled: correctness bugs and
@@ -30,7 +30,7 @@ use std.error;
 // A running hash: feed it data incrementally, read the digest once at
 // the end. `sha256_new()`/`sha512_new()` build one; the one-shot
 // `sha256(data)`/`sha512(data)` functions below are the common case.
-pub quirk Hasher {
+pub shape Hasher {
   // Feeds more data into the running hash. Callable any number of times.
   update(str data);
   // Finalizes the hash, returned as a lowercase hex digest. Single-use:
@@ -126,7 +126,7 @@ pub fun random_bytes(num n) str {
 // `key`/`nonce`/`ciphertext` are hex, algorithm-specific lengths
 // (`Aes256Gcm`: a 32-byte key as 64 hex chars, a 12-byte nonce as 24) -
 // `random_bytes` is the usual way to generate a fresh one of either.
-pub quirk AeadCipher {
+pub shape AeadCipher {
   encrypt(str plaintext, str key, str nonce, str aad) Result<str, Error>;
   decrypt(str ciphertext, str key, str nonce, str aad) Result<str, Error>;
 }
@@ -175,10 +175,10 @@ impl Aes256Gcm as AeadCipher {
 // to get wrong, unlike ECDSA/RSA-PSS), fast, and the current recommended
 // default asymmetric signature scheme. Key and signature bytes are hex,
 // same reason as everywhere else in this module.
-pub quirk Signer {
+pub shape Signer {
   sign(str message) str;
 }
-pub quirk Verifier {
+pub shape Verifier {
   verify(str message, str signature) flag;
 }
 

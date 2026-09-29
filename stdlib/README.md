@@ -10,7 +10,7 @@ This directory contains the Fun standard library source and the documentation co
 Reference docs for stdlib modules are generated from source comments in `stdlib/std/*.fn`.
 
 - Use `//` comments immediately above public declarations.
-- Add comments for compound fields and quirk members, not just top-level symbols.
+- Add comments for compound fields and shape members, not just top-level symbols.
 - Keep comments focused on behavior/intent.
 - Prefer concise one-line summaries unless extra context is needed.
 
@@ -23,7 +23,7 @@ pub compound Map<K, V> {
 	K* key_slots;
 }
 
-pub quirk Serialize {
+pub shape Serialize {
 	// Encode the value as text.
 	serialize() str;
 }
@@ -44,7 +44,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
 - **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, token variants `*_with_token`), await-friendly async APIs (`send_async`, `recv_async`, timeout/token/select async variants), composed async forwarding helpers (`forward_one_to_async`, `forward_one_to_with_token_async`, `select_forward_one_to_async`, `select_forward_one_to_with_token_async`), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`, token variants `*_with_token`), dedicated cancel tokens (`ChannelCancelToken`, `channel_cancel_token_*`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), plus channel-level/per-call select wait-slice/backoff tuning, with synchronization routed through std.sync_runtime.
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
-- **std/collections.fn**: Collection quirks (len/is_empty) aligned with std.quirks.
+- **std/collections.fn**: Collection shapes (len/is_empty) aligned with std.shapes.
 - **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines) plus async streaming/cancellation helpers (`copy_file_progress_async`, `read_lines_into_channel_async`).
 - **std/io.fn**: File helpers (append, size, read bytes, read line, flush).
 - **std/json.fn**: JSON stringify/parse for string objects and arrays (with escaping, keys/has/remove).
@@ -74,8 +74,8 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).
 - **std/error.fn**: Error value helpers (construct/check ok/err).
 - **std/result.fn**: Generic `Result<T, E = Error>` container (`Result<T>` means `Result<T, Error>`) with `ok<T>`/`err<T>` helpers.
-- **std/quirks.fn**: Common quirks (`Sized`, `Display`) for generic APIs.
-- **std/serde.fn**: Serialization quirks (`Serialize`, `Deserialize`) and text conversion helpers.
+- **std/shapes.fn**: Common shapes (`Sized`, `Display`) for generic APIs.
+- **std/serde.fn**: Serialization shapes (`Serialize`, `Deserialize`) and text conversion helpers.
 
 ### C signature modules (std/c/*)
 

@@ -34,10 +34,10 @@ fun double<T: Numeric>(T x) T {
   ret x + x;
 }
 
-// An alias's body can also name a quirk, and dynamic dispatch through it
-// works exactly like a plain quirk-typed variable: `Drawable` is still a
+// An alias's body can also name a shape, and dynamic dispatch through it
+// works exactly like a plain shape-typed variable: `Drawable` is still a
 // value type, never a pointer.
-quirk Shape {
+shape Shape {
   area() num;
 }
 
