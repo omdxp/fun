@@ -604,8 +604,9 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
       equals(bt, "pub") || equals(
       bt,
       "enum"
-    ) || equals(bt, "quirk") || equals(bt, "as") || equals(bt, "ret") || equals(bt, "als");
-  }
+    ) || equals(bt, "quirk") || equals(bt, "shape") || equals(bt, "as") || equals(bt, "ret") ||
+      equals(bt, "als");
+    }
   ret equals(bt, "{") || equals(bt, "}") || equals(bt, ";") || equals(bt, ",") ||
     equals(bt, "(") || equals(
     bt,
@@ -658,7 +659,8 @@ fun _is_bare_tuple_type_decl_close(Vec<Token>* tokens, num close_idx) flag {
 // brace is a block rather than a compound literal.
 fun _is_block_keyword(str text) flag {
   fit text {
-    "fun", "compound", "enum", "quirk", "impl", "test", "fuzz", "if", "elif", "else", "for",
+    "fun", "compound", "enum", "quirk", "shape", "impl", "test", "fuzz", "if", "elif", "else",
+    "for",
     "fit", "defer", "asm" -> { ret true; }
     _ -> { ret false; }
   }
@@ -2032,7 +2034,8 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if t.type == .Keyword {
       if equals(text, "fun") {
         s.in_fun_signature = true;
-      } elif equals(text, "compound") || equals(text, "quirk") || equals(text, "impl") {
+      } elif equals(text, "compound") || equals(text, "quirk") || equals(text, "shape") ||
+        equals(text, "impl") {
         s.pending_decl_block = true;
       } elif equals(text, "enum") {
         s.pending_enum_block = true;
