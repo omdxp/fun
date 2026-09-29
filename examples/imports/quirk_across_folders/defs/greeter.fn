@@ -1,4 +1,4 @@
-pub quirk Greeter {
+pub shape Greeter {
   greet(str prefix) void;
   bye() void;
 }

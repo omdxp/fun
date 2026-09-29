@@ -1,4 +1,4 @@
-// Generic conversion quirks: `To<T>` / `From<T>` (std.quirks).
+// Generic conversion shapes: `To<T>` / `From<T>` (std.shapes).
 //
 // A type implements `To<JsonValue>` to convert itself into a JsonValue and
 // `From<JsonValue>` to rebuild itself from one. Fun has no reflection/derive,
@@ -6,13 +6,13 @@
 // Into/From.
 //
 // An impl dispatches both via a direct method call (`c.to()` / `back.from(doc)`)
-// and through a quirk-typed parameter/variable (`std.json`'s
+// and through a shape-typed parameter/variable (`std.json`'s
 // `to_json_value`/`to_json_string` take a `To<JsonValue>` parameter, so any
 // implementer coerces at the call site: `to_json_value(&c)`).
 
 use std.c.io;
 use std.json;
-use std.quirks;
+use std.shapes;
 use std.result;
 
 pub compound Config {
@@ -59,7 +59,7 @@ fun main() num {
     Result.Err(e) -> { printf("parse failed\n"); }
   }
 
-  // Same conversion through std.json's quirk-typed-parameter wrappers instead
+  // Same conversion through std.json's shape-typed-parameter wrappers instead
   // of a direct method call — `to_json_value`/`to_json_string` accept any
   // `To<JsonValue>` implementer.
   printf("via wrapper: %s\n", to_json_string(&c));

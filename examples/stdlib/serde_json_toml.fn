@@ -1,6 +1,6 @@
 // Structured (de)serialization: a compound converts to/from a typed JsonValue via the
-// generic To<JsonValue>/From<JsonValue> quirks (the reflection-free equivalent of
-// derive), plus the same To<str>/From<str> quirks (via std.serde) for the text
+// generic To<JsonValue>/From<JsonValue> shapes (the reflection-free equivalent of
+// derive), plus the same To<str>/From<str> shapes (via std.serde) for the text
 // layer shared by JsonValue and TomlDoc.
 
 use std.c.io;
@@ -8,7 +8,7 @@ use std.json;
 use std.toml;
 use std.serde;
 use std.result;
-use std.quirks;
+use std.shapes;
 
 pub compound Config {
   str name;
@@ -55,7 +55,7 @@ fun main() num {
     Result.Err(e) -> { printf("parse failed\n"); }
   }
 
-  // Text-layer To<str> quirk over a TomlDoc.
+  // Text-layer To<str> shape over a TomlDoc.
   let t = parse_document("channel = \"stable\"\n");
   To<str> ts = &t;
   printf("toml=%s", to_string(ts));

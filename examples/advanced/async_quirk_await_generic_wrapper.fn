@@ -4,7 +4,7 @@ compound Counter {
   num base;
 }
 
-quirk AsyncCounter {
+shape AsyncCounter {
   async add(num x) num;
 }
 

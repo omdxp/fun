@@ -1,11 +1,11 @@
-// A constrained-generic recursive linked compound with a generic quirk
+// A constrained-generic recursive linked compound with a generic shape
 // impl, in its own module — stresses cross-file resolution of generics
 // (sizeof(Trace<T>) inside a constrained generic function, monomorphized
 // Display) alongside the plain-enum AST machinery in ast.fn/eval.fn.
 
 use std.c.mem;
 use std.io;
-use std.quirks;
+use std.shapes;
 
 pub compound Trace<T: num | dec> {
   T value;

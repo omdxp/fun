@@ -1,11 +1,11 @@
 use std.io;
-use std.quirks;
+use std.shapes;
 
 pub compound Boxed {
   num v;
 }
 
-quirk ReadV {
+shape ReadV {
   get_v() num;
 }
 
@@ -31,7 +31,7 @@ pub fun local_checks() {
   Boxed b;
   b.new(11);
   println_fmt("local-display {}", b);
-  println_fmt("local-quirk {num}", b.get_v());
+  println_fmt("local-shape {num}", b.get_v());
 }
 
 pub fun make_boxed(num v) Boxed {

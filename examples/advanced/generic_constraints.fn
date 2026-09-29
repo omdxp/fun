@@ -4,11 +4,11 @@
 // The compiler monomorphizes each concrete instantiation (zero runtime cost) AND
 // type-checks, at every call/instantiation site, that the concrete type argument
 // is one of the listed bounds: a violation is a compile-time error, not a
-// mysterious C link failure. A bound alternative can also be a quirk name,
+// mysterious C link failure. A bound alternative can also be a shape name,
 // checked by real "does this type implement it" membership rather than an exact
 // name match, or a full type expression like a generic instantiation
 // (`Vec<num>`), not just a bare identifier. The bound list is a union of type
-// expressions and quirk names, mixed freely.
+// expressions and shape names, mixed freely.
 
 use std.io;
 
@@ -37,9 +37,9 @@ compound Boxed<T: num | str> {
   T value;
 }
 
-// A bound naming a quirk instead of a fixed list of concrete types: any type
+// A bound naming a shape instead of a fixed list of concrete types: any type
 // with a real `impl X as Renderable { ... }` satisfies it, not just Circle.
-quirk Renderable {
+shape Renderable {
   render() str;
 }
 

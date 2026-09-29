@@ -1,5 +1,5 @@
 use std.c.io;
-use std.quirks;
+use std.shapes;
 use std.vec;
 use std.map;
 

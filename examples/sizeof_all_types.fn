@@ -7,12 +7,12 @@ use std.c.io;
 // - `raw` maps to C `void`, so `sizeof(raw)` is also invalid.
 // For that reason, this example focuses on the sized value types.
 
-quirk Greeter {
+shape Greeter {
   greet() void;
 }
 
-// Empty quirks are allowed.
-quirk Empty {
+// Empty shapes are allowed.
+shape Empty {
 }
 
 compound UserPlain {
@@ -25,8 +25,8 @@ compound UserImpl {
   num age;
 }
 
-// Implementing a quirk should not change the in-memory layout of the compound.
-// (The compound is still a plain struct; the quirk value is a separate wrapper.)
+// Implementing a shape should not change the in-memory layout of the compound.
+// (The compound is still a plain struct; the shape value is a separate wrapper.)
 impl UserImpl as Empty {
 }
 
