@@ -457,6 +457,59 @@ test "a shape-downcast fit naming the same implementor twice is noticed" {
   ), "expected the second Circle arm to be reported unreachable";
 }
 
+test "a shape-downcast fit missing a concrete generic instantiation is noticed" {
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing concrete instantiation to be noticed";
+  assert contains(found, "'Box__num'"), "expected the message to name the mangled instantiation";
+}
+
+test "a shape-downcast fit missing an unbound generic implementor asks for nothing impossible" {
+  // impl Box<T> as Sized has no valid arm syntax at all - it must not be
+  // demanded.
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<T> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected the unbound generic template not to be demanded";
+}
+
+test "a shape-downcast fit covering a concrete generic instantiation needs no wildcard" {
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Box<num>(b) -> { ret b.count; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected covering the concrete instantiation to need no catch-all";
+}
+
 test "a fit comma-separated arm counts every alternative as covered" {
   str src = `enum Color { Red, Green, Blue }
   `fun warm(Color c) flag {

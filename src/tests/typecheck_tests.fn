@@ -2775,7 +2775,7 @@ test "a shape-downcast fit accepts a real implementor and rejects everything els
   );
 }
 
-test "a shape-downcast fit rejects a generic implementor's own type" {
+test "a shape-downcast fit rejects an unbound generic implementor's own type" {
   // An unbound generic impl (`impl Box<T> as Sized`) has no single
   // concrete vtable to dispatch to at all - there's no way to write a
   // valid destructure arm for it.
@@ -2800,11 +2800,78 @@ test "a shape-downcast fit rejects a generic implementor's own type" {
     "'Box' is generic and has no single concrete implementation to downcast to"
   ), "expected the unbound generic template to be rejected by name";
 
-  // A concrete instantiation (`impl Box<num> as Sized`) has a real
-  // vtable, but naming it directly by its own mangled form is rejected
-  // too - codegen can emit that vtable after the code referencing it,
-  // an ordering bug with no fix yet.
-  str mangled_msg = check(
+  // A hand-typed mangled form naming a genuinely unbound template's own
+  // type param is rejected too (Box__T, matching impl Box<T> as Sized's
+  // own type_params reconstructed) - T is never a real declared type.
+  str fake_mangled_msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<T> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box__T(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    fake_mangled_msg,
+    "'Box__T' is generic and has no single concrete implementation to downcast to"
+  ), "expected a reconstructed-but-still-abstract name to be rejected the same way";
+}
+
+test "a shape-downcast fit accepts a concrete generic instantiation" {
+  // A builtin/scalar argument (`impl Box<num> as Sized`) resolves its
+  // own concrete_dtype immediately - type_name is already mangled to
+  // Box__num, no ambiguity at all.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box<num>(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a concrete scalar-argument instantiation to be accepted"
+  );
+  // An already-declared compound argument (`impl Wrapper<Circle> as
+  // Sized`) is stored exactly like a generic template at parse time -
+  // the reconstruction check in check_shape_destructure_condition must
+  // recognize Circle as a real type to accept this.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Circle { num radius; }
+    `impl Circle as Sized { len() num { ret self.radius; } }
+    `compound Wrapper<T> {
+    `  T inner;
+    `  num extra;
+    `}
+    `impl Wrapper<Circle> as Sized {
+    `  len() num { ret self.extra; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Circle(c) -> { ret c.radius; }
+    `    Wrapper<Circle>(w) -> { ret w.extra; }
+    `  }
+    `}`,
+    "expected a concrete compound-argument instantiation to be accepted, disambiguated from a real unbound template"
+  );
+  // The bare mangled form works too, not just the <Args> sugar - both
+  // parse to the exact same AST shape.
+  accepts(
     `shape Sized { len() num; }
     `compound Box<T> {
     `  T val;
@@ -2818,10 +2885,7 @@ test "a shape-downcast fit rejects a generic implementor's own type" {
     `    Box__num(b) -> { ret b.count; }
     `    _ -> { ret 0; }
     `  }
-    `}`
+    `}`,
+    "expected the bare mangled form to be accepted the same as the <num> sugar"
   );
-  assert contains(
-    mangled_msg,
-    "'Box__num' is a generic instantiation, which shape-downcast fit doesn't support yet"
-  ), "expected a mangled concrete-instantiation name to be rejected too, not just the bare template";
 }

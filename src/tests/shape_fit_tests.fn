@@ -123,3 +123,68 @@ test "an ordinary data-carrying enum destructure is unaffected by shape-downcast
   );
   assert equals(out, "circle 5\n"), "expected ordinary enum-payload destructure to be unaffected";
 }
+
+test "a shape-downcast fit dispatches to a concrete generic instantiation (scalar argument)" {
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Box<num>(b) -> { out = "box"; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Box<num> b; b.val = 5; b.count = 7;
+  `  Sized sc = &c;
+  `  Sized sb = &b;
+  `  printf("%s %s\n", describe(sc), describe(sb));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_generic_scalar", "shape-downcast fit, concrete scalar generic instantiation");
+  assert equals(out, "circle box\n"), "expected dispatch to the concrete Box<num> implementor";
+}
+
+test "a shape-downcast fit dispatches to a concrete generic instantiation (compound argument), field access included" {
+  // The harder case: the parser can't tell a fresh type-param name from
+  // a reference to an already-declared type at `impl Wrapper<Circle> as
+  // Sized`'s own position, so this is stored exactly like a generic
+  // template internally - disambiguating it, instantiating its vtable
+  // early enough for the fit's own C output to reference it, and
+  // resolving field access on the recovered value all have to work
+  // together here.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Circle(c) -> { out = c.radius; }
+  `    Wrapper<Circle>(w) -> { out = w.extra; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Wrapper<Circle> w; w.inner = c; w.extra = 9;
+  `  Sized sc = &c;
+  `  Sized sw = &w;
+  `  printf("%lld %lld\n", describe(sc), describe(sw));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_generic_compound",
+    "shape-downcast fit, concrete compound generic instantiation"
+  );
+  assert equals(out, "3 9\n"), "expected dispatch to the concrete Wrapper<Circle> implementor with correct field access";
+}
