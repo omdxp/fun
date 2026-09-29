@@ -11386,6 +11386,78 @@ impl Codegen {
     }
   }
 
+  // Mirrors `Checker._is_known_concrete_name`: whether `name` is a
+  // fixed, real type (a non-generic compound, a non-generic enum, or a
+  // builtin scalar), never a still-abstract type-parameter name.
+  _is_known_concrete_type_name(str name) flag {
+    if self.compound_names.contains(name) {
+      ret !self.generic_compound_names.contains(name);
+    }
+    if self.enum_names.contains(name) {
+      ret !self.generic_enum_names.contains(name);
+    }
+    ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
+      equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
+      equals(name, "void");
+    }
+
+  // Mirrors `Checker._auto_resolve_bare_generic_shape_target` (each
+  // layer keeps its own copy, same as every other piece of this
+  // feature): a bare generic compound name (`Box`, no `<Args>`)
+  // resolves to its one concrete instantiation of `shape_name` when
+  // exactly one such `impl` exists in the program. Typecheck has
+  // already rejected an ambiguous (2+) or genuinely unbound case before
+  // codegen ever runs, so unlike the typecheck-side helper this one
+  // only needs to find the unique match, not report on the rest.
+  // Anything that isn't a bare known-generic compound name passes
+  // through unchanged.
+  _auto_resolve_bare_generic_shape_target(str type_name, str shape_name) str {
+    if !self.generic_compound_names.contains(type_name) {
+      ret type_name;
+    }
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) {
+            continue;
+          }
+          // A scalar-argument instantiation (`impl Box<num> as Sized`)
+          // never sets `has_type_params` at all - `has_concrete_dtype`
+          // resolves its own mangled identity immediately at parse
+          // time, so `type_name` here is already the final `Box__num`.
+          if i.has_concrete_dtype {
+            if starts_with(i.type_name, format("{str}__", type_name)) {
+              ret i.type_name;
+            }
+            continue;
+          }
+          if !i.has_type_params || !equals(i.type_name, type_name) {
+            continue;
+          }
+          flag all_concrete = true;
+          for tp : i.type_params {
+            if !self._is_known_concrete_type_name(tp) {
+              all_concrete = false;
+              break;
+            }
+          }
+          if !all_concrete {
+            continue;
+          }
+          StringBuilder recon_sb = string_builder_init(16);
+          recon_sb.append(i.type_name);
+          for tp : i.type_params {
+            recon_sb.append("__");
+            recon_sb.append(tp);
+          }
+          ret recon_sb.build();
+        }
+        _ -> {}
+      }
+    }
+    ret type_name;
+  }
+
   // Emits one `fit` branch recovering the concrete type behind a
   // shape-typed subject (`Circle(c) -> { ... }`): compares the fat
   // pointer's `vtable` field against that concrete impl's own singleton
@@ -12062,6 +12134,10 @@ impl Codegen {
       if subj_type.is_some() && self.shape_decl_names.contains(subj_type.unwrap()) {
         str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
+          shape_downcast_type = self._auto_resolve_bare_generic_shape_target(
+            shape_downcast_type,
+            subj_type.unwrap()
+          );
           self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
           let sherr = self.emit_fit_shape_branch(
             subj_name,
