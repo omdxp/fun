@@ -1646,8 +1646,8 @@ impl Analysis {
         .Function(f) -> { _collect_function_reads(f, &read); }
         .Impl(block) -> {
           read.add(block.type_name);
-          if block.has_quirk_name {
-            read.add(block.quirk_name);
+          if block.has_shape_name {
+            read.add(block.shape_name);
           }
           for m : block.methods {
             if m == nil {
@@ -1880,7 +1880,7 @@ fun _is_reexport_passthrough(str path, str importer, Vec<Node>* program) flag {
       .Function(_) -> { declares_something = true; }
       .Compound(_) -> { declares_something = true; }
       .Enum(_) -> { declares_something = true; }
-      .Quirk(_) -> { declares_something = true; }
+      .Shape(_) -> { declares_something = true; }
       .Variable(_) -> { declares_something = true; }
       _ -> {}
     }
@@ -1924,7 +1924,7 @@ fun _module_is_read(str path, str importer, Vec<Node>* program, Set<str>* read) 
           }
         }
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         if read.has(q.name) {
           ret true;
         }

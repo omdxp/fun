@@ -319,7 +319,7 @@ fun _fill_node(Node* node, Map<str, _DefaultsEntry>* table, str* err) {
       }
       _fill_dtype_vec(&c.type_param_defaults, table, err);
     }
-    .Quirk(q) -> {
+    .Shape(q) -> {
       for m : q.methods {
         _fill_dtype(m.rtype, table, 0, err);
         for qa : m.args {
@@ -344,8 +344,8 @@ fun _fill_node(Node* node, Map<str, _DefaultsEntry>* table, str* err) {
           );
         }
       }
-      if im.has_quirk_arg_dtype {
-        _fill_dtype(im.quirk_arg_dtype, table, 0, err);
+      if im.has_shape_arg_dtype {
+        _fill_dtype(im.shape_arg_dtype, table, 0, err);
       }
       for m2 : im.methods {
         _fill_node(m2, table, err);
@@ -387,7 +387,7 @@ pub fun fill_generic_defaults(Vec<Node>* nodes) Option<str> {
       .Compound(c) -> {
         problem = _register(c.name, &c.type_params, &c.type_param_defaults, &table);
       }
-      .Quirk(q) -> {
+      .Shape(q) -> {
         problem = _register(q.name, &q.type_params, &q.type_param_defaults, &table);
       }
       .TypeAlias(a) -> {
