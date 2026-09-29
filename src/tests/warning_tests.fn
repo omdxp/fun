@@ -510,6 +510,28 @@ test "a shape-downcast fit covering a concrete generic instantiation needs no wi
   ), "expected covering the concrete instantiation to need no catch-all";
 }
 
+test "a shape-downcast fit's bare auto-resolved arm counts as covering its one concrete instantiation" {
+  // Box(b) (no <Args>) auto-resolves to Box<num> at typecheck since it's
+  // the only impl of Box<...> for Sized - exhaustiveness must credit it
+  // against the same reconstructed name, not treat the bare arm as
+  // covering nothing.
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Box(b) -> { ret b.count; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected the bare auto-resolved arm to need no catch-all";
+}
+
 test "a fit comma-separated arm counts every alternative as covered" {
   str src = `enum Color { Red, Green, Blue }
   `fun warm(Color c) flag {

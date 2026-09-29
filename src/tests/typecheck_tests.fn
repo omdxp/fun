@@ -2889,3 +2889,72 @@ test "a shape-downcast fit accepts a concrete generic instantiation" {
     "expected the bare mangled form to be accepted the same as the <num> sugar"
   );
 }
+
+test "a shape-downcast fit auto-resolves a bare generic name to its one concrete instantiation" {
+  // Only one impl of Box<...> for Sized exists in this program, so
+  // `Box(b)` (no `<Args>`) unambiguously means `Box<num>(b)`.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a bare name with exactly one concrete instantiation to auto-resolve"
+  );
+  // Same auto-resolve for a compound-argument instantiation, field
+  // access included, so the bound value's real type came through.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Circle { num radius; }
+    `compound Wrapper<T> {
+    `  T inner;
+    `  num extra;
+    `}
+    `impl Wrapper<Circle> as Sized {
+    `  len() num { ret self.extra; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Wrapper(w) -> { ret w.extra; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a bare name to auto-resolve to a concrete compound-argument instantiation"
+  );
+}
+
+test "a shape-downcast fit rejects a bare generic name with two concrete instantiations as ambiguous" {
+  str msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `impl Box<str> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(msg, "'Box' is ambiguous between"), "expected an ambiguous bare name to be rejected by name";
+  assert contains(msg, "'Box__num'") && contains(msg, "'Box__str'"),
+  "expected the ambiguous message to name both candidates";
+  assert contains(msg, "write the generic arguments explicitly"),
+  "expected the ambiguous message to point at the <Args> fix";
+}

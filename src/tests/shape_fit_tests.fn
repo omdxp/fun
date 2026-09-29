@@ -226,3 +226,38 @@ test "a shape-downcast fit dispatches correctly when two instantiations of the s
   );
   assert equals(out, "5 7\n"), "expected each instantiation to dispatch to its own method body, not the first-declared one's";
 }
+
+test "a shape-downcast fit dispatches a bare generic name auto-resolved to its one concrete instantiation" {
+  // Only one impl of Wrapper<...> for Sized exists here, so the arm can
+  // write the bare `Wrapper(w)` (no `<Circle>`) and still dispatch
+  // correctly - codegen's own copy of the auto-resolve has to find the
+  // same unique instantiation typecheck already accepted.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Circle(c) -> { out = c.radius; }
+  `    Wrapper(w) -> { out = w.extra; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Wrapper<Circle> w; w.inner = c; w.extra = 9;
+  `  Sized sc = &c;
+  `  Sized sw = &w;
+  `  printf("%lld %lld\n", describe(sc), describe(sw));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_bare_generic_auto_resolve",
+    "shape-downcast fit, bare generic name auto-resolved to its one concrete instantiation"
+  );
+  assert equals(out, "3 9\n"), "expected the bare Wrapper(w) arm to dispatch to Wrapper<Circle>'s vtable and read the right field";
+}
