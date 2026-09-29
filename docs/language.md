@@ -1208,12 +1208,12 @@ fun describe(HasArea s) str {
 - Ordinary shape method dispatch and this downcast use the same runtime
   representation, so there is no extra cost to make a value fit-able -
   a shape-typed value already carries a vtable pointer.
-- A generic type's own implementor is not something a downcast arm can
-  name yet: `Box(b) -> ...` against `impl Box<T> as Sized { ... }` is
-  rejected, since an unbound generic has no single concrete vtable to
-  dispatch to. A specific concrete instantiation (`impl Box<num> as
-  Sized`) does have a real vtable, but naming it is rejected too for
-  now - a compiler ordering limitation, not a fundamental one.
+- A concrete instantiation of a generic implementor can be named too:
+  `Box<num>(b) -> ...` against `impl Box<num> as Sized { ... }`, or
+  `Wrapper<Circle>(w) -> ...` against `impl Wrapper<Circle> as Sized {
+  ... }`. Only an unbound generic itself is rejected - `Box(b) -> ...`
+  against `impl Box<T> as Sized { ... }` has no single concrete vtable to
+  dispatch to at all, so there's no valid arm to write for it.
 
 ## Defer
 
