@@ -208,24 +208,24 @@ pub compound Codegen {
   // nested row, or a compound-init field value. When false, a bare array
   // literal is rejected outright rather than emitting invalid C.
   flag in_array_initializer;
-  // Names of every quirk with at least one concrete (non-generic) impl
+  // Names of every shape with at least one concrete (non-generic) impl
   // emitted so far, used to recognize a receiver/declared type as a
-  // quirk (dispatched through a vtable) rather than a concrete compound.
-  // A generic quirk impl never adds its name here: dynamic dispatch
+  // shape (dispatched through a vtable) rather than a concrete compound.
+  // A generic shape impl never adds its name here: dynamic dispatch
   // through an unbound type param has no single C vtable signature.
   Vec<str> shape_names;
-  // Keys (`<type_name>::<shape_name>`) of every concrete quirk impl
+  // Keys (`<type_name>::<shape_name>`) of every concrete shape impl
   // whose vtable machinery has already run, so a plain compound with a
-  // quirk-typed field can trigger it early without the normal pass
+  // shape-typed field can trigger it early without the normal pass
   // re-emitting it later.
   Vec<str> emitted_shape_impl_vtables;
-  // Every generic quirk's declaration, registered up front so a concrete
+  // Every generic shape's declaration, registered up front so a concrete
   // instantiation's vtable can be derived structurally even when no impl
-  // of it exists in the translation unit. A non-generic quirk's vtable is
+  // of it exists in the translation unit. A non-generic shape's vtable is
   // instead derived from its first concrete impl.
-  Vec<str> quirk_decl_names;
-  Vec<Vec<str>> quirk_decl_type_params;
-  Vec<Vec<QuirkMethodSig>> quirk_decl_methods;
+  Vec<str> shape_decl_names;
+  Vec<Vec<str>> shape_decl_type_params;
+  Vec<Vec<ShapeMethodSig>> shape_decl_methods;
   // Every import alias name seen across the transitive import graph, set
   // by the caller right after `codegen_new`. Consulted wherever a
   // `y.symbol` reference could be misread as a receiver or type; each
@@ -270,7 +270,7 @@ pub compound Codegen {
   Vec<str> top_level_const_type_names;
   // Every impl method's owning type, bare name, and fully mangled
   // call-site name. A plain impl's method mangles to `Type__method`; a
-  // quirk-implementing impl's mangles to `Type__Shape__method`.
+  // shape-implementing impl's mangles to `Type__Shape__method`.
   Vec<str> impl_method_owner_type;
   Vec<str> impl_method_bare_name;
   Vec<str> impl_method_mangled_name;
@@ -358,9 +358,9 @@ pub compound Codegen {
   // Every generic impl method emitted (or enqueued, see
   // `pending_generic_impl_method_owner`) so far, keyed
   // `"<mangled_name>::<shape_name>::<bare_method_name>"` (`<shape_name>`
-  // empty for a plain impl method). The quirk segment matters: a type
-  // can define a plain method and a same-named quirk method side by
-  // side (`Vec<T>`'s own `clear()` next to its `Clearable` quirk's
+  // empty for a plain impl method). The shape segment matters: a type
+  // can define a plain method and a same-named shape method side by
+  // side (`Vec<T>`'s own `clear()` next to its `Clearable` shape's
   // `clear()`), and without it the second lookup would see the first
   // one's key and wrongly skip emitting its own definition.
   Vec<str> emitted_generic_impl_methods;
@@ -384,7 +384,7 @@ pub compound Codegen {
   // from the outermost call rather than nested inline.
   Vec<str> pending_generic_impl_method_owner;
   Vec<str> pending_generic_impl_method_bare;
-  // Parallel to the queue above: the quirk name this entry's lookup
+  // Parallel to the queue above: the shape name this entry's lookup
   // needs to match against (empty for a plain impl method). See
   // `emitted_generic_impl_methods`'s own comment for why this can't
   // just be folded into `bare_name`.
@@ -421,10 +421,10 @@ pub compound Codegen {
   Vec<DataType*> type_subst_arg_dtypes;
   // Non-empty while `emit_shape_vtable_machinery` is building the
   // machinery for one concrete instantiation of a generic compound's
-  // quirk impl, naming that instantiation's mangled struct name (e.g.
+  // shape impl, naming that instantiation's mangled struct name (e.g.
   // `Box__num`) in place of the template's own bare `type_name`. Empty
   // is the ordinary, non-generic case.
-  str quirk_inst_override_name;
+  str shape_inst_override_name;
   // Where a lazily-monomorphized typedef or generic impl method
   // definition is spliced, instead of wherever the output happens to be
   // when it's first triggered: for a type used inside a function body
@@ -637,7 +637,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
-  g.quirk_inst_override_name = "";
+  g.shape_inst_override_name = "";
   g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
@@ -679,9 +679,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.in_array_initializer = false;
   g.shape_names.init(0);
   g.emitted_shape_impl_vtables.init(0);
-  g.quirk_decl_names.init(0);
-  g.quirk_decl_type_params.init(0);
-  g.quirk_decl_methods.init(0);
+  g.shape_decl_names.init(0);
+  g.shape_decl_type_params.init(0);
+  g.shape_decl_methods.init(0);
   g.import_aliases.init(0);
   g.alias_rename_keys.init(0);
   g.alias_rename_targets.init(0);
@@ -948,7 +948,7 @@ fun dtype_is_array_as_pointer(DataType dt) flag {
 // mangled concrete form) - the codegen-side counterpart to typecheck's
 // `Checker.implements_shape`, scanning the same raw impl-template AST
 // `maybe_instantiate_generic_impl_methods` already reads elsewhere in
-// this file, since codegen keeps no separate (type, quirk) registry of
+// this file, since codegen keeps no separate (type, shape) registry of
 // its own (a different compilation phase/struct than typecheck's
 // `Checker`).
 fun dtype_implements_shape(Vec<Node> all_nodes, DataType dt, str shape_name) flag {
@@ -967,7 +967,7 @@ fun dtype_implements_shape(Vec<Node> all_nodes, DataType dt, str shape_name) fla
   ret false;
 }
 
-// A quirk-bound alternative's own bare name, with any generic-arg
+// A shape-bound alternative's own bare name, with any generic-arg
 // suffix stripped (`Steppable<T>` -> `Steppable`) - see the matching
 // helper and comment on typecheck's own `Checker.implements_shape`
 // call sites (`_bare_shape_bound_name` there), the same gap in this
@@ -1006,13 +1006,13 @@ fun dtype_matches_constraint_name(DataType dt, str expected, Vec<Node> all_nodes
       if sep >= 0 && equals(substr(dt.type_str, 0, sep), expected) {
         ret true;
       }
-      // A bound naming a quirk is checked by real membership - is there
-      // a registered `impl dt as <bare quirk name> { ... }`?
-      // `dtype_implements_shape` only ever keys on a quirk's bare name
+      // A bound naming a shape is checked by real membership - is there
+      // a registered `impl dt as <bare shape name> { ... }`?
+      // `dtype_implements_shape` only ever keys on a shape's bare name
       // (matching typecheck's own `implements_shape`), so a bound
-      // naming a concrete instantiation of a generic quirk - including
+      // naming a concrete instantiation of a generic shape - including
       // a self-referential one like `T: Steppable<T>` - needs its
-      // `<...>` suffix stripped first, or it looks up a quirk
+      // `<...>` suffix stripped first, or it looks up a shape
       // registered under the never-matching literal string
       // "Steppable<T>" instead of "Steppable".
       ret dtype_implements_shape(all_nodes, dt, _bare_shape_bound_name(expected));
@@ -1306,7 +1306,7 @@ impl Codegen {
     if enum_inst.is_some() {
       ret enum_inst;
     }
-    // A concrete instantiation of a generic quirk used directly as a
+    // A concrete instantiation of a generic shape used directly as a
     // type: neither a compound nor an enum template recognizes it.
     ret self.ensure_shape_instantiated(rdt);
   }
@@ -2135,17 +2135,17 @@ impl Codegen {
     ret .Some(mangled_name);
   }
 
-  // Resolves a concrete generic-quirk instantiation and, the first time
+  // Resolves a concrete generic-shape instantiation and, the first time
   // it is seen, emits its vtable struct and fat pointer type, deriving
-  // each method's signature from the quirk declaration. Covers a type
+  // each method's signature from the shape declaration. Covers a type
   // reference to an instantiation with no impl in the translation unit.
-  // `.None` when `dt.type_str` doesn't name a registered generic quirk or
+  // `.None` when `dt.type_str` doesn't name a registered generic shape or
   // the argument count doesn't match.
   ensure_shape_instantiated(DataType dt) Option<str> {
     num qdi = 0;
     flag qfound = false;
-    for qdi < self.quirk_decl_names.len {
-      if equals(self.quirk_decl_names.get(qdi), dt.type_str) {
+    for qdi < self.shape_decl_names.len {
+      if equals(self.shape_decl_names.get(qdi), dt.type_str) {
         qfound = true;
         break;
       }
@@ -2154,7 +2154,7 @@ impl Codegen {
     if !qfound {
       ret .None;
     }
-    let q_type_params = self.quirk_decl_type_params.get(qdi);
+    let q_type_params = self.shape_decl_type_params.get(qdi);
     if q_type_params.len != dt.generic_args.len {
       ret .None;
     }
@@ -2187,7 +2187,7 @@ impl Codegen {
       ret .Some(q_mangled);
     }
 
-    let q_methods = self.quirk_decl_methods.get(qdi);
+    let q_methods = self.shape_decl_methods.get(qdi);
 
     let prev_params = self.type_subst_param_names;
     let prev_arg_names = self.type_subst_arg_type_strs;
@@ -2472,10 +2472,10 @@ impl Codegen {
             ret true;
           }
         }
-        // A quirk's C typedef (its vtable and fat-pointer struct) isn't
+        // A shape's C typedef (its vtable and fat-pointer struct) isn't
         // emitted until its first concrete impl is processed, so it's
         // unsafe here for the same reason a plain enum is. A generic
-        // quirk has no monomorphic struct at all.
+        // shape has no monomorphic struct at all.
         .Shape(q) -> {
           if !q.is_generic && equals(q.name, dt.type_str) {
             ret true;
@@ -2667,14 +2667,14 @@ impl Codegen {
   }
 
   // Companion to `maybe_instantiate_generic_impl_methods`: builds dynamic
-  // dispatch machinery for a generic compound's quirk impl, once per
+  // dispatch machinery for a generic compound's shape impl, once per
   // concrete instantiation (`Box<num>` gets its own `__fun_coerce_Box__num_
   // Lenable`, wrapper trampolines, and vtable instance calling into that
-  // instantiation's own monomorphized methods). The quirk's vtable struct
+  // instantiation's own monomorphized methods). The shape's vtable struct
   // and fat-pointer type themselves are still shared across every
-  // instantiation, since a plain (non-generic) quirk's shape doesn't
+  // instantiation, since a plain (non-generic) shape's shape doesn't
   // depend on `T` — `emit_shape_vtable_machinery` already keys that half
-  // by bare quirk name. A doubly-generic quirk (`impl Box<T> as To<T>`,
+  // by bare shape name. A doubly-generic shape (`impl Box<T> as To<T>`,
   // `i.has_shape_concrete_instantiation`) is out of scope here; its
   // vtable shape would depend on `T` too, needing machinery this doesn't
   // attempt.
@@ -2694,27 +2694,27 @@ impl Codegen {
             continue;
           }
           // `i.has_shape_concrete_instantiation` only flags a generic
-          // quirk already resolved to concrete args at the impl (`impl
+          // shape already resolved to concrete args at the impl (`impl
           // PtrBox as Box<Node*>`, where `PtrBox` itself isn't generic).
-          // It says nothing about a generic quirk whose own argument is
+          // It says nothing about a generic shape whose own argument is
           // still one of the compound's unresolved type params (`impl
           // MapIter<K, V> as Iterator<K>`), checked separately here
-          // against the quirk's own declaration: that shape needs a
+          // against the shape's own declaration: that shape needs a
           // vtable keyed by the resolved `K`, which this machinery
           // doesn't build, so it's skipped rather than misfiring with a
           // stale, unsubstituted vtable shape.
-          flag quirk_itself_generic = false;
+          flag shape_itself_generic = false;
           num qdi = 0;
-          for qdi < self.quirk_decl_names.len {
-            if equals(self.quirk_decl_names.get(qdi), i.shape_name) {
-              if self.quirk_decl_type_params.get(qdi).len > 0 {
-                quirk_itself_generic = true;
+          for qdi < self.shape_decl_names.len {
+            if equals(self.shape_decl_names.get(qdi), i.shape_name) {
+              if self.shape_decl_type_params.get(qdi).len > 0 {
+                shape_itself_generic = true;
               }
               break;
             }
             qdi = qdi + 1;
           }
-          if quirk_itself_generic {
+          if shape_itself_generic {
             continue;
           }
           // A forced instantiation (`impl Map<str, num> as Display`) only
@@ -2739,8 +2739,8 @@ impl Codegen {
           self.type_subst_arg_type_strs = arg_type_names;
           self.type_subst_arg_is_pointer = arg_is_pointer;
           self.type_subst_arg_dtypes = arg_dtypes;
-          str prev_override = self.quirk_inst_override_name;
-          self.quirk_inst_override_name = mangled_name;
+          str prev_override = self.shape_inst_override_name;
+          self.shape_inst_override_name = mangled_name;
 
           // Writes real struct/function definitions, not just
           // declarations, so it can't go straight to `self.state`: this
@@ -2823,7 +2823,7 @@ impl Codegen {
           self.current_stmt_start_pos = saved_qv_stmt_start_pos;
           self.emit_hoisted(qv_scratch.out.build());
 
-          self.quirk_inst_override_name = prev_override;
+          self.shape_inst_override_name = prev_override;
           self.type_subst_param_names = prev_params;
           self.type_subst_arg_type_strs = prev_arg_names;
           self.type_subst_arg_is_pointer = prev_arg_ptrs;
@@ -2840,7 +2840,7 @@ impl Codegen {
   // that body can call another not-yet-bodied method of the same
   // instantiation. A no-op when `owner_type` isn't a known instantiation
   // or `self.state` points at a throwaway text-capture probe.
-  // `shape_name`, when non-empty, narrows the search to that quirk's
+  // `shape_name`, when non-empty, narrows the search to that shape's
   // own impl, same as `emit_one_generic_impl_method`.
   emit_generic_impl_method_prototype_now(str owner_type, str bare_name, str shape_name) {
     num ii = 0;
@@ -3078,7 +3078,7 @@ impl Codegen {
     // The receiver's type needs the same "not yet defined this early"
     // check as any other param, since `impl_method_param_types` excludes
     // the implicit `self`. Narrower than
-    // `prototype_type_is_unsafe_early`: just the plain-enum and quirk
+    // `prototype_type_is_unsafe_early`: just the plain-enum and shape
     // name check, since a mangled generic instantiation has its own path.
     flag pm_owner_unsafe = false;
     for pm_owner_n : self.all_nodes {
@@ -3365,14 +3365,14 @@ impl Codegen {
     }
   }
 
-  // Resolves the quirk name a `bare_name` lookup on `owner_type`
+  // Resolves the shape name a `bare_name` lookup on `owner_type`
   // actually lands on, given the caller's own `requested_shape`. A
-  // non-empty request is trusted outright: the quirk vtable machinery
-  // already knows exactly which quirk it means. An empty request (an
+  // non-empty request is trusted outright: the shape vtable machinery
+  // already knows exactly which shape it means. An empty request (an
   // ordinary static call site, `v.len()`) mirrors the same search
   // `emit_one_generic_impl_method` runs later, so it agrees with
   // whichever impl that search would land on: for a method that exists
-  // ONLY via one quirk impl (`Vec<T>`'s `len()`, from `Sized`, with no
+  // ONLY via one shape impl (`Vec<T>`'s `len()`, from `Sized`, with no
   // plain-impl duplicate), a plain call site and the vtable's own
   // explicit lookup must resolve to the SAME canonical identity, or
   // the method gets emitted twice under two different dedup keys.
@@ -3445,11 +3445,11 @@ impl Codegen {
   // already draining, since a queued body may call another not-yet-
   // emitted method while `self.state` is the outer method's scratch
   // buffer. `.None` when `owner_type` isn't a known instantiation.
-  // `shape_name` narrows the lookup to one specific quirk impl (see
+  // `shape_name` narrows the lookup to one specific shape impl (see
   // `emitted_generic_impl_methods`); every ordinary static-call site
   // passes `""`, resolved against the real target impl below rather
-  // than trusted as-is, so it can't disagree with a quirk-qualified
-  // call site over the identity of a quirk-only method.
+  // than trusted as-is, so it can't disagree with a shape-qualified
+  // call site over the identity of a shape-only method.
   ensure_generic_impl_method_emitted(str owner_type, str bare_name, str shape_name) Option<CodegenErrorKind> {
     str resolved_shape = self.resolve_generic_impl_shape_for_bare(
       owner_type,
@@ -3490,7 +3490,7 @@ impl Codegen {
     ret self.drain_pending_generic_impl_methods();
   }
 
-  // Processes every queued (owner, bare name, quirk name) triple. Writes
+  // Processes every queued (owner, bare name, shape name) triple. Writes
   // straight to `self.state`/`self.hoist_insert_pos`, so the caller must
   // have restored the real ones first.
   drain_pending_generic_impl_methods() Option<CodegenErrorKind> {
@@ -3518,12 +3518,12 @@ impl Codegen {
     ret first_err;
   }
 
-  // Emits the body for one queued (owner, bare name, quirk name)
+  // Emits the body for one queued (owner, bare name, shape name)
   // triple; the prototype is already written by now. `shape_name`,
   // when non-empty, restricts matching to the impl that implements
-  // that specific quirk, so a plain method and a same-named quirk
+  // that specific shape, so a plain method and a same-named shape
   // method on the same type (`Vec<T>`'s own `clear()` next to its
-  // `Clearable` quirk's `clear()`) can't shadow each other.
+  // `Clearable` shape's `clear()`) can't shadow each other.
   emit_one_generic_impl_method(str owner_type, str bare_name, str shape_name) Option<CodegenErrorKind> {
     num ii = 0;
     flag found_inst = false;
@@ -3549,10 +3549,10 @@ impl Codegen {
             continue;
           }
           // An empty `shape_name` keeps the original behavior of
-          // matching whichever impl (plain or quirk) provides the bare
-          // name first, since most call sites here have no quirk to
+          // matching whichever impl (plain or shape) provides the bare
+          // name first, since most call sites here have no shape to
           // disambiguate with in the first place. Only a non-empty
-          // `shape_name` narrows the search, and only to that quirk.
+          // `shape_name` narrows the search, and only to that shape.
           if !equals(shape_name, "") &&
             (!i.has_shape_name || !equals(i.shape_name, shape_name)) {
             continue;
@@ -4498,16 +4498,16 @@ impl Codegen {
     self.impl_method_default_values.push(default_values);
   }
 
-  // The declared return type of `bare_name` on the quirk `shape_name`
+  // The declared return type of `bare_name` on the shape `shape_name`
   // itself, read from its declaration rather than from any one impl.
-  // What a dynamically-dispatched call returns is what the quirk says it
-  // returns; every impl of it agrees, since the quirk is what a caller
+  // What a dynamically-dispatched call returns is what the shape says it
+  // returns; every impl of it agrees, since the shape is what a caller
   // sees.
   lookup_shape_method_rtype(str shape_name, str bare_name) Option<DataType*> {
     num i = 0;
-    for i < self.quirk_decl_names.len {
-      if equals(self.quirk_decl_names.get(i), shape_name) {
-        for m : self.quirk_decl_methods.get(i) {
+    for i < self.shape_decl_names.len {
+      if equals(self.shape_decl_names.get(i), shape_name) {
+        for m : self.shape_decl_methods.get(i) {
           if equals(m.name, bare_name) {
             if m.rtype == nil {
               ret .None;
@@ -5581,7 +5581,7 @@ impl Codegen {
           equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
         str prev_expected_compound = self.expected_compound_type;
-        // A quirk-typed left side needs the same coercion wrapper a
+        // A shape-typed left side needs the same coercion wrapper a
         // declaration's own initializer gets: `h = &a;` for an already-
         // declared `HasV h` hits the identical mismatch a fresh `HasV h
         // = &a;` would, since plain assignment never went through that
@@ -6823,9 +6823,9 @@ impl Codegen {
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
           // A concrete-typed argument passed where the declared parameter
-          // is a quirk type needs the same coercion wrap a `Variable` or
+          // is a shape type needs the same coercion wrap a `Variable` or
           // `ret` initializer gets; without it the argument's concrete
-          // pointer would be passed where C expects the quirk's
+          // pointer would be passed where C expects the shape's
           // fat-pointer struct by value.
           if self.shape_names.contains(resolved.unwrap()) {
             let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
@@ -7199,9 +7199,9 @@ impl Codegen {
 
   // Emits `recv.method(args...)` as C `recv.vtable->method(recv.self,
   // args...)`, using `->` throughout when `recv` is a pointer to the
-  // quirk's fat-pointer struct. The dynamic-dispatch counterpart to
+  // shape's fat-pointer struct. The dynamic-dispatch counterpart to
   // `emit_method_call`'s static dispatch, called once `recv_r.type_name`
-  // is recognized as a quirk. A call-result receiver is hoisted into a
+  // is recognized as a shape. A call-result receiver is hoisted into a
   // temp first, since its rendered text is read twice below (`.vtable`,
   // then `.self`) and evaluating the call itself twice would run it
   // twice at runtime.
@@ -7238,8 +7238,8 @@ impl Codegen {
   }
 
   // Resolves the concrete type an expression's value coerces from, for a
-  // quirk-typed destination such as a `Variable` initializer or a `ret`
-  // from a quirk-returning function; the `__fun_coerce_<Type>_<Shape>`
+  // shape-typed destination such as a `Variable` initializer or a `ret`
+  // from a shape-returning function; the `__fun_coerce_<Type>_<Shape>`
   // helper needs `<Type>` by name. Handles `&identifier` and a bare
   // identifier that's already a pointer; `.None` for anything else.
   resolve_shape_coerce_concrete_type(Node* exp) Option<str> {
@@ -7292,10 +7292,10 @@ impl Codegen {
   // Emits a method call `recv.method(arg1, ...)` as C
   // `TypeName__method(<self-arg>, arg1, ...)`, or
   // `TypeName__Shape__method(...)` when `method` came from a
-  // quirk-implementing impl, falling back to plain `TypeName__method`
+  // shape-implementing impl, falling back to plain `TypeName__method`
   // when nothing is registered. `recv` must be a plain identifier or a
   // chain `resolve_field_chain` can resolve; anything else is rejected
-  // rather than guessed. A receiver whose resolved type is a known quirk
+  // rather than guessed. A receiver whose resolved type is a known shape
   // dispatches dynamically through its vtable instead.
   // Calls a function-typed field held on `recv` (`recv.field_name(args)`
   // where `field_name` names a `fun(T1, T2) R` field, not a method): C
@@ -7503,9 +7503,9 @@ impl Codegen {
   // Emits `await expr`, where `expr` must be a call. Lowers to the
   // callee's call helper (`__fun_async_call_<mangled name>`) rather than
   // its plain mangled name. Only a generic impl method's async method is
-  // monomorphized here, not a generic plain async function. A quirk-typed
+  // monomorphized here, not a generic plain async function. A shape-typed
   // receiver degrades to a synchronous call, since the concrete callee
-  // behind a quirk dispatch isn't known until runtime.
+  // behind a shape dispatch isn't known until runtime.
   emit_await(Node* operand) Option<CodegenErrorKind> {
     fit operand.kind {
       .Expression(e) -> {
@@ -8136,9 +8136,9 @@ impl Codegen {
                   call_rtype = .Some(*rt.unwrap());
                 }
               }
-              // A quirk-typed receiver dispatches dynamically, so no
+              // A shape-typed receiver dispatches dynamically, so no
               // concrete impl owns the call; the return type comes
-              // from what the quirk itself declares instead.
+              // from what the shape itself declares instead.
               if call_rtype.is_none() && self.shape_names.contains(recv_r2.type_name) {
                 let qrt = self.lookup_shape_method_rtype(recv_r2.type_name, method_name);
                 if qrt.is_some() {
@@ -8831,7 +8831,7 @@ impl Codegen {
         // evaluated into an `__auto_type` temp first, so a deferred
         // statement can't change what gets returned by mutating a
         // variable the expression already read. A `ret` value coerced to
-        // a quirk-typed return gets the same coercion wrap a `Variable`
+        // a shape-typed return gets the same coercion wrap a `Variable`
         // initializer does.
         flag ret_did_shape_coerce = false;
         str ret_shape_concrete = "";
@@ -9232,10 +9232,10 @@ impl Codegen {
           // bare `[1, 2, 3]` array literal needs the brace-list form.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
-          // A quirk-typed declaration's initializer needs a coercion call
+          // A shape-typed declaration's initializer needs a coercion call
           // wrapped around the RHS.
           flag did_shape_coerce = false;
-          // A concrete quirk instantiation is registered under its
+          // A concrete shape instantiation is registered under its
           // mangled identity (`To__num`), not `v.var_type.type_str`.
           str var_shape_type = v.var_type.type_str;
           if !self.shape_names.contains(var_shape_type) && v.var_type.generic_args.len > 0 {
@@ -9718,8 +9718,8 @@ impl Codegen {
   // True when `n` contains a call whose own receiver is itself a field
   // access (`x.y.method(...)`, at least two dots deep before the call) -
   // another real gap alongside `_next_body_inlinable`'s existing
-  // structural checks. A quirk-bounded generic's own field (`self.start`
-  // when `T: Steppable<T>`) calling a further quirk method on itself
+  // structural checks. A shape-bounded generic's own field (`self.start`
+  // when `T: Steppable<T>`) calling a further shape method on itself
   // (`self.start.succ()`) needs its own generic-instantiation context
   // resolved through the inlined splice's locally-declared `self`, which
   // this first version of the inlining pass doesn't do correctly yet -
@@ -10339,7 +10339,7 @@ impl Codegen {
     Node* next_body = nil;
     Vec<str> tmpl_type_params;
     tmpl_type_params.init(0);
-    Option<DataType> quirk_elem_dt = .None;
+    Option<DataType> shape_elem_dt = .None;
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -10362,7 +10362,7 @@ impl Codegen {
                   next_body = fnv.body;
                   tmpl_type_params = i.type_params;
                   if i.has_shape_arg_dtype {
-                    quirk_elem_dt = .Some(*i.shape_arg_dtype);
+                    shape_elem_dt = .Some(*i.shape_arg_dtype);
                   }
                 }
               }
@@ -10373,7 +10373,7 @@ impl Codegen {
         _ -> {}
       }
     }
-    if next_body == nil || quirk_elem_dt.is_none() {
+    if next_body == nil || shape_elem_dt.is_none() {
       ret .Some(.UnsupportedNode);
     }
 
@@ -10405,7 +10405,7 @@ impl Codegen {
     self.type_subst_arg_dtypes = arg_dtypes;
     self.type_subst_arg_is_pointer = arg_is_pointer;
 
-    DataType elem_dt = self.resolve_type_subst(quirk_elem_dt.unwrap());
+    DataType elem_dt = self.resolve_type_subst(shape_elem_dt.unwrap());
 
     Option<CodegenErrorKind> ierr = .None;
     if self._next_body_inlinable(next_body) {
@@ -10592,7 +10592,7 @@ impl Codegen {
   // Vec fast path: `for (int64_t idx = 0; idx < arr.len; idx++) {
   // __auto_type item = arr.data[idx]; ... }`, reading `Vec<T>`'s
   // `.len`/`.data` directly rather than dispatching through an
-  // `Iterator`-quirk `.next()`. `idx` is `fi.index_name` when given, else
+  // `Iterator`-shape `.next()`. `idx` is `fi.index_name` when given, else
   // a synthetic `__fun_i`, and `__auto_type` lets the C compiler infer
   // `item`'s type, so `T` never needs to be known here.
   // Every generic type's own base name that directly implements
@@ -10684,7 +10684,7 @@ impl Codegen {
     // shape (a monomorphized method's return type, `"Vec__num"`, empty
     // `generic_args`), directly from that name already being in its
     // final form. `direct_iter_base_names` is discovered from
-    // `self.generic_impl_templates` itself (every generic impl quirk-
+    // `self.generic_impl_templates` itself (every generic impl shape-
     // qualified as `Iterator`), not a fixed list, so a user's own
     // generic type gets exactly the same dispatch Vec/Map/Set do.
     flag is_direct_iter_coll = false;
@@ -10777,11 +10777,11 @@ impl Codegen {
     }
     // `Set<T>`/`Map<K, V>` are caught above via `is_direct_iter_coll` -
     // this only remains reachable for a genuinely plain, non-generic
-    // user type with its own concrete `Iterator<T>` quirk impl (`impl
+    // user type with its own concrete `Iterator<T>` shape impl (`impl
     // Counter as Iterator<num> { pub next() Option<num> { ... } }`).
     if !is_raw_array && iterable_is_identifier && arr_dtype.is_some() {
       let coll_dt = arr_dtype.unwrap();
-      // A plain type with a concrete `Iterator<T>` quirk impl (`impl
+      // A plain type with a concrete `Iterator<T>` shape impl (`impl
       // Counter as Iterator<num> { pub next() Option<num> { ... } }`)
       // iterates by calling `.next()` on itself directly each pass, no
       // `.iter()` indirection - the value already IS its own iterator
@@ -10816,7 +10816,7 @@ impl Codegen {
         Node* plain_inline_body = nil;
         if user_iter_impl.is_some() {
           let impl_node = user_iter_impl.unwrap();
-          // A quirk-qualified impl's own methods are parsed with their
+          // A shape-qualified impl's own methods are parsed with their
           // generated name already, `Owner__Shape__bare` (see
           // `_parse_impl_method`), not the bare method name.
           StringBuilder next_pfx_sb = string_builder_init(24);
@@ -13072,14 +13072,14 @@ impl Codegen {
   }
 
   // Companion to `ensure_plain_type_emitted`, for a by-value field whose
-  // type is a quirk rather than a plain compound or enum.
+  // type is a shape rather than a plain compound or enum.
   // `emit_shape_vtable_machinery` normally runs once per concrete impl in
   // `pub transpile`'s late per-impl pass, at that impl's source position,
-  // which is too late for a compound embedding the quirk by value
+  // which is too late for a compound embedding the shape by value
   // earlier. This finds the first concrete impl of `type_name` and
   // triggers its machinery early; `emitted_shape_impl_vtables` memoizes,
   // so it's safe whether or not the later pass already ran. A no-op when
-  // `type_name` isn't a quirk with a concrete impl.
+  // `type_name` isn't a shape with a concrete impl.
   ensure_shape_vtable_emitted_early(str type_name) Option<CodegenErrorKind> {
     for n : self.all_nodes {
       fit n.kind {
@@ -13148,8 +13148,8 @@ impl Codegen {
                 if fderr.is_some() {
                   ret fderr;
                 }
-                // A by-value quirk field needs the same early emission,
-                // but the call above never finds it: a quirk is neither
+                // A by-value shape field needs the same early emission,
+                // but the call above never finds it: a shape is neither
                 // a `.Compound` nor an `.Enum` node.
                 let fqerr = self.ensure_shape_vtable_emitted_early(f.dtype.type_str);
                 if fqerr.is_some() {
@@ -14321,31 +14321,31 @@ impl Codegen {
               ret .None;
             }
             let recv_r = recv_r_opt.unwrap();
-            // A quirk-typed receiver dispatches through the quirk's
+            // A shape-typed receiver dispatches through the shape's
             // declared method signature, not `lookup_impl_method_rtype`,
             // which only knows concrete impls' registered methods.
             // `recv_r.type_name` is the mangled concrete identity
-            // (`To__MyEnum`), so stripping the quirk's bare-name prefix
+            // (`To__MyEnum`), so stripping the shape's bare-name prefix
             // recovers the concrete argument, which then substitutes for
-            // the quirk's type param in the method's return type.
+            // the shape's type param in the method's return type.
             if self.shape_names.contains(recv_r.type_name) {
               num qdi2 = 0;
-              for qdi2 < self.quirk_decl_names.len {
-                let qn = self.quirk_decl_names.get(qdi2);
+              for qdi2 < self.shape_decl_names.len {
+                let qn = self.shape_decl_names.get(qdi2);
                 StringBuilder qpfx_sb = string_builder_init(16);
                 qpfx_sb.append(qn);
                 qpfx_sb.append("__");
                 str qpfx = qpfx_sb.build();
                 if starts_with(recv_r.type_name, qpfx) {
                   str qarg_name = strip_prefix(recv_r.type_name, qpfx);
-                  let qmethods = self.quirk_decl_methods.get(qdi2);
+                  let qmethods = self.shape_decl_methods.get(qdi2);
                   for qm2 : qmethods {
                     if equals(qm2.name, method_name) {
                       if qm2.rtype == nil {
                         ret .None;
                       }
                       DataType qm_rdt = *qm2.rtype;
-                      let q_type_params2 = self.quirk_decl_type_params.get(qdi2);
+                      let q_type_params2 = self.shape_decl_type_params.get(qdi2);
                       if q_type_params2.len == 1 &&
                         equals(qm_rdt.type_str, q_type_params2.get(0)) &&
                         qm_rdt.generic_args.len == 0 {
@@ -14876,7 +14876,7 @@ impl Codegen {
     ret .None;
   }
 
-  // Pre-registers every method of a plain or quirk-implementing
+  // Pre-registers every method of a plain or shape-implementing
   // (non-generic) impl block under its bare and mangled call-site names,
   // emitting no C. A whole-program pass run before any impl method body,
   // so a method calling another type's method already has that type's row
@@ -14952,14 +14952,14 @@ impl Codegen {
     }
   }
 
-  // Emits every method of a plain or quirk-implementing (non-generic)
+  // Emits every method of a plain or shape-implementing (non-generic)
   // `impl Type { methods }` block as an ordinary top-level C function.
   // Each method is already parsed as a `Function` node pre-mangled to
   // `Type__method` (or `Type__Shape__method`) with `<Type>* self` as its
   // first arg, so it emits like any other function, with no
   // self-injection or mangling here. Assumes `register_impl_methods`
   // already ran for every impl. Dynamic dispatch through an abstract
-  // quirk-typed value is handled by `emit_shape_vtable_machinery`, called
+  // shape-typed value is handled by `emit_shape_vtable_machinery`, called
   // right after these concrete bodies; a static call through a concrete
   // receiver resolves entirely in `emit_method_call`. A generic impl is
   // skipped, as in `emit_compound`.
@@ -14994,17 +14994,17 @@ impl Codegen {
   }
 
   // Emits the C machinery backing dynamic dispatch through an abstract
-  // quirk-typed value (`Shape s = &rect; s.area();`) for one concrete,
-  // non-generic quirk-implementing impl. A no-op for a plain or generic
-  // impl. One vtable struct is emitted per quirk name (`Shape_vtable`)
+  // shape-typed value (`Shape s = &rect; s.area();`) for one concrete,
+  // non-generic shape-implementing impl. A no-op for a plain or generic
+  // impl. One vtable struct is emitted per shape name (`Shape_vtable`)
   // rather than a signature-hash struct shared across identically-shaped
-  // quirks, which would be a size optimization only.
+  // shapes, which would be a size optimization only.
   //
   // Three pieces, in order:
-  // 1. The first time this quirk name is seen: the vtable struct, one
+  // 1. The first time this shape name is seen: the vtable struct, one
   // function-pointer field per method each taking `void* self` first, and
   // the fat-pointer wrapper struct `Shape` resolves to as a C type,
-  // derived from this impl's signatures. Every other impl of the quirk
+  // derived from this impl's signatures. Every other impl of the shape
   // must structurally match; there is no typechecker to verify it.
   // 2. Always: a `void* self`-taking wrapper trampoline per method,
   // casting back to `Type*` and calling `Type__Shape__method`, plus a
@@ -15014,14 +15014,14 @@ impl Codegen {
   emit_shape_vtable_machinery(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Impl(i) -> {
-        // A generic quirk impl (`impl Vec<T> as Sized { ... }`) has no
+        // A generic shape impl (`impl Vec<T> as Sized { ... }`) has no
         // single monomorphic vtable signature: an unbound `T` in a method
         // signature can't be expressed as one C function pointer. The
-        // exception is a call arriving through `quirk_inst_override_name`,
+        // exception is a call arriving through `shape_inst_override_name`,
         // where the caller has already bound `T` to one concrete
         // instantiation and set up substitution context accordingly.
         if !i.has_shape_name ||
-          (i.has_type_params && equals(self.quirk_inst_override_name, "")) {
+          (i.has_type_params && equals(self.shape_inst_override_name, "")) {
           ret .None;
         }
         str shape_name = i.shape_name;
@@ -15030,8 +15030,8 @@ impl Codegen {
         // bare method name regardless of instantiation.
         str bare_type_name = i.type_name;
         str type_name = i.type_name;
-        if !equals(self.quirk_inst_override_name, "") {
-          type_name = self.quirk_inst_override_name;
+        if !equals(self.shape_inst_override_name, "") {
+          type_name = self.shape_inst_override_name;
         }
         // A no-op when this impl's machinery already ran, such as when
         // `ensure_plain_type_emitted`'s field-dependency check triggered
@@ -15046,14 +15046,14 @@ impl Codegen {
         }
         self.emitted_shape_impl_vtables.push(eqiv_key);
         // The vtable and fat-pointer type's identity. A concrete
-        // instantiation of a generic quirk (`impl Config as
+        // instantiation of a generic shape (`impl Config as
         // To<JsonValue>`) is distinct from `To<str>` and needs its own
         // mangled name, which `i.shape_concrete_instantiation` carries.
-        // Method-name mangling below stays keyed on the bare quirk name,
+        // Method-name mangling below stays keyed on the bare shape name,
         // `fnv.name` already being pre-mangled that way by the parser.
-        str quirk_type_identity = shape_name;
+        str shape_type_identity = shape_name;
         if i.has_shape_concrete_instantiation {
-          quirk_type_identity = i.shape_concrete_instantiation;
+          shape_type_identity = i.shape_concrete_instantiation;
         }
 
         StringBuilder pfx = string_builder_init(16);
@@ -15063,25 +15063,25 @@ impl Codegen {
         pfx.append("__");
         str prefix = pfx.build();
 
-        if !self.shape_names.contains(quirk_type_identity) {
+        if !self.shape_names.contains(shape_type_identity) {
           // Forward-declared ahead of the vtable struct: a method can
-          // return the very quirk it belongs to (`self_ref() Chain` on
+          // return the very shape it belongs to (`self_ref() Chain` on
           // `impl X as Chain`), and the vtable's function-pointer field
-          // for it needs the name in scope before the quirk's own fat
+          // for it needs the name in scope before the shape's own fat
           // pointer struct is completed below. Harmless when nothing
           // actually self-refers.
           self.state.write("typedef struct ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write(" ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write(";\n");
           self.state.write("typedef struct ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write("_vtable ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write("_vtable;\n");
           self.state.write("struct ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write("_vtable {\n");
           flag vtable_has_methods = false;
           for m : i.methods {
@@ -15130,20 +15130,20 @@ impl Codegen {
           }
           self.state.write("};\n");
           self.state.write("typedef struct ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write(" { void* self; const ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write("_vtable* vtable; } ");
-          self.state.write(quirk_type_identity);
+          self.state.write(shape_type_identity);
           self.state.write(";\n\n");
-          self.shape_names.push(quirk_type_identity);
+          self.shape_names.push(shape_type_identity);
         }
 
         StringBuilder vsb = string_builder_init(24);
         vsb.append("__fun_impl_");
         vsb.append(type_name);
         vsb.append("_");
-        vsb.append(quirk_type_identity);
+        vsb.append(shape_type_identity);
         vsb.append("_vtable");
         str vtbl_instance_name = vsb.build();
 
@@ -15168,7 +15168,7 @@ impl Codegen {
               wsb.append("__fun_wrap_");
               wsb.append(type_name);
               wsb.append("_");
-              wsb.append(quirk_type_identity);
+              wsb.append(shape_type_identity);
               wsb.append("_");
               wsb.append(base);
               str wrap_name = wsb.build();
@@ -15274,7 +15274,7 @@ impl Codegen {
         }
 
         self.state.write("static const ");
-        self.state.write(quirk_type_identity);
+        self.state.write(shape_type_identity);
         self.state.write("_vtable ");
         self.state.write(vtbl_instance_name);
         self.state.write(" = {\n");
@@ -15286,7 +15286,7 @@ impl Codegen {
               wsb2.append("__fun_wrap_");
               wsb2.append(type_name);
               wsb2.append("_");
-              wsb2.append(quirk_type_identity);
+              wsb2.append(shape_type_identity);
               wsb2.append("_");
               wsb2.append(base2);
               self.state.write("  .");
@@ -15301,15 +15301,15 @@ impl Codegen {
         self.state.write("};\n\n");
 
         self.state.write("static inline ");
-        self.state.write(quirk_type_identity);
+        self.state.write(shape_type_identity);
         self.state.write(" __fun_coerce_");
         self.state.write(type_name);
         self.state.write("_");
-        self.state.write(quirk_type_identity);
+        self.state.write(shape_type_identity);
         self.state.write("(");
         self.state.write(type_name);
         self.state.write("* self) { return (");
-        self.state.write(quirk_type_identity);
+        self.state.write(shape_type_identity);
         self.state.write("){ .self = self, .vtable = &");
         self.state.write(vtbl_instance_name);
         self.state.write(" }; }\n\n");
@@ -17130,7 +17130,7 @@ impl Codegen {
     self.write_prelude();
     self.register_function_signatures(nodes);
     self.register_top_level_consts(nodes);
-    // Registers every quirk's declaration, pure bookkeeping with no C
+    // Registers every shape's declaration, pure bookkeeping with no C
     // text: a generic one, before anything referencing a concrete
     // instantiation of it as a bare type needs to resolve it, and a
     // plain one, so a dynamically-dispatched call's return type can be
@@ -17138,9 +17138,9 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Shape(q) -> {
-          self.quirk_decl_names.push(q.name);
-          self.quirk_decl_type_params.push(q.type_params);
-          self.quirk_decl_methods.push(q.methods);
+          self.shape_decl_names.push(q.name);
+          self.shape_decl_type_params.push(q.type_params);
+          self.shape_decl_methods.push(q.methods);
         }
         _ -> {}
       }
@@ -17349,8 +17349,8 @@ impl Codegen {
       fit n.kind {
         .Impl(i) -> {
           // The vtable machinery first: a method returning the very
-          // quirk it implements (`self_ref() Chain` on `impl X as
-          // Chain`) needs that quirk's own struct typedef to already
+          // shape it implements (`self_ref() Chain` on `impl X as
+          // Chain`) needs that shape's own struct typedef to already
           // exist when its signature is written, and nothing this
           // writes depends on the method bodies emitted after it.
           self.hoist_insert_pos = .Some(self.state.out.len());
@@ -17388,7 +17388,7 @@ impl Codegen {
     }
 
     // Catches any generic impl method enqueued but never drained: a
-    // quirk's vtable wrapper (`maybe_emit_shape_vtable_for_instantiation`)
+    // shape's vtable wrapper (`maybe_emit_shape_vtable_for_instantiation`)
     // enqueues its methods under suppression, since that trigger fires
     // too early (right when the compound is first instantiated) for a
     // body that references some other type by value. By now every type
@@ -21039,7 +21039,7 @@ test "emit_impl emits each method as a mangled top-level C function, with self r
   ), "expected the method emitted as a plain C function reading 'self->x'";
 }
 
-test "emit_impl emits a quirk-implementing impl's method under its already-double-mangled name" {
+test "emit_impl emits a shape-implementing impl's method under its already-double-mangled name" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -21073,7 +21073,7 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   *body = node_new(.Body(bn));
 
   FunctionNode fnv = function_node_new();
-  // Double-mangled, exactly as `_parse_impl_method` names a quirk impl's
+  // Double-mangled, exactly as `_parse_impl_method` names a shape impl's
   // method (`Type__Shape__method`); codegen must reproduce that
   // verbatim rather than invent its own scheme.
   fnv.name = "Point__To__convert";
@@ -21097,7 +21097,7 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   impln.methods.push(method_node);
 
   Node impl_node = node_new(.Impl(impln));
-  assert g.emit_impl(impl_node).is_none(), "expected the quirk-implementing impl's method to emit";
+  assert g.emit_impl(impl_node).is_none(), "expected the shape-implementing impl's method to emit";
   assert equals(
     st.out.build(),
     `int64_t Point__To__convert(Point* self) {
@@ -21107,7 +21107,7 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   ), "expected the method emitted under its own already-mangled name, unmodified";
 }
 
-test "register_impl_methods lets emit_method_call resolve a quirk-implementing impl's double-mangled name" {
+test "register_impl_methods lets emit_method_call resolve a shape-implementing impl's double-mangled name" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   g.record_local("p", "Point", false);
@@ -21180,7 +21180,7 @@ test "register_impl_methods lets emit_method_call resolve a quirk-implementing i
   Node n = node_new(.Expression(call_e));
 
   assert g.emit_expr(n).is_none(), "expected the method call to emit";
-  assert equals(st.out.build(), "Point__To__convert(&p)"), "expected the double-mangled quirk name, not the naive 'Point__convert'";
+  assert equals(st.out.build(), "Point__To__convert(&p)"), "expected the double-mangled shape name, not the naive 'Point__convert'";
 }
 
 test "emit_compound records a generic compound as a template without emitting it" {

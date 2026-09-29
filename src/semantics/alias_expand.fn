@@ -270,7 +270,7 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
 // `alternatives` in place of a reference to it by name, or substitutes
 // an ordinary alias reference with its own rendered, fully-expanded
 // text; leaves anything not naming a registered alias (a concrete type,
-// a quirk name) untouched. Sets `*saw_unresolved` when an alternative
+// a shape name) untouched. Sets `*saw_unresolved` when an alternative
 // names a registered alias not yet resolved this round.
 fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>* resolved, flag* saw_unresolved) {
   Vec<str> out;
@@ -311,7 +311,7 @@ fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>*
 // Walks every top-level declaration's own DataType-bearing positions and
 // expands each in place: a function/method's own params and return type,
 // a compound's own fields, a plain variable declaration's own type, a
-// quirk method's own signature, and every generic bound-list's own
+// shape method's own signature, and every generic bound-list's own
 // alternatives (function, compound, and impl - a method's own bound list
 // is covered via the function-shaped branch inside `.Impl`'s methods).
 // `fit node.kind { .Function(f) -> {...} }` gives `f` as a plain VALUE
@@ -351,12 +351,12 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
       .Shape(q) -> {
         num mi = 0;
         for mi < q.methods.len {
-          QuirkMethodSig m = q.methods.get(mi);
+          ShapeMethodSig m = q.methods.get(mi);
           mi = mi + 1;
           _expand_dtype(m.rtype, resolved, &unused);
           num ai = 0;
           for ai < m.args.len {
-            QuirkArg qa = m.args.get(ai);
+            ShapeArg qa = m.args.get(ai);
             ai = ai + 1;
             _expand_dtype(qa.dtype, resolved, &unused);
           }
@@ -591,7 +591,7 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
   // completely unnoticed and this function would silently replace every
   // real reference to the other declaration with the alias's own body
   // instead. Matches `_check_duplicate_top_level`'s own checked kinds
-  // exactly (function, compound, enum, global variable) - quirks aren't
+  // exactly (function, compound, enum, global variable) - shapes aren't
   // checked against each other today either, so they're left out here too
   // rather than holding aliases to a stricter standard than everything
   // else.
