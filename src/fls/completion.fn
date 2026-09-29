@@ -647,7 +647,7 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
     "for ${1:i} < ${2:n} {\n  $0\n  ${1:i} = ${1:i} + 1;\n}"
   ));
   items.push(_snippet_item(
-    "implq",
+    "impls",
     .Snippet,
     "implement a shape for a type",
     "impl ${1:Type} as ${2:Shape} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
