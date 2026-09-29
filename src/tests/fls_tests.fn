@@ -3506,6 +3506,36 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
+test "hovering a shape-downcast fit arm's binding resolves to the concrete type" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    _ -> { ret 0; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapedowncast.fn";
+  doc.path = "shapedowncast.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 5, 11), "Circle* c"), "expected the binding site to show the concrete pointer type";
+  assert contains(hover(&reads, doc, 5, 23), "Circle* c"), "expected a use site inside the arm body to resolve the same way";
+
+  // The type name itself (`Circle` in `Circle(c) -> ...`) is an
+  // ordinary identifier reference as far as the parser is concerned -
+  // no shape-downcast-specific handling needed here, unlike the binding
+  // above.
+  str jumped = definition(&reads, doc, 5, 6);
+  assert contains(jumped, "shapedowncast.fn"), "expected go-to-definition on the pattern's type name to resolve";
+  assert !equals(jumped, "[]"), "expected a real location, not an empty result";
+}
+
 test "hover resolves a shape-typed receiver's own method, not just a concrete one" {
   // User-reported. lookup_method only ever searched impl blocks by
   // their own type_name, which is always the concrete implementing

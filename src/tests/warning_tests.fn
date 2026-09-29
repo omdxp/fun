@@ -400,6 +400,63 @@ test "a fit missing several variants names every one of them, not just the first
   assert count(found, "fit_non_exhaustive") == 1, "expected every missing variant folded into a single warning";
 }
 
+test "a shape-downcast fit missing an implementor is noticed" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `  }
+  `  ret out;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing implementor to be noticed";
+  assert contains(found, "'Square'"), "expected the message to name what is missing";
+}
+
+test "a shape-downcast fit covering every implementor needs no wildcard" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Square(sq) -> { out = "square"; }
+  `  }
+  `  ret out;
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected covering every implementor to need no catch-all, same as an enum's own variants";
+}
+
+test "a shape-downcast fit naming the same implementor twice is noticed" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Circle(c2) -> { out = "circle again"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}`;
+  assert contains(
+    notice(src, false),
+    "fit_unreachable_branch"
+  ), "expected the second Circle arm to be reported unreachable";
+}
+
 test "a fit comma-separated arm counts every alternative as covered" {
   str src = `enum Color { Red, Green, Blue }
   `fun warm(Color c) flag {
