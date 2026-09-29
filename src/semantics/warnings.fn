@@ -1462,6 +1462,48 @@ impl Analysis {
 
   // Walks one function, with the names it declares tracked so a returned
   // address can be recognized as pointing at one of them.
+  // Registers one parameter as a body-scope local: exactly as good a
+  // `fit` subject as a `let` local, but only a `.Variable` statement
+  // inside a body ever registered here before this - `fit` over a
+  // plain parameter never resolved its own enum type, so exhaustiveness
+  // checking silently never ran for what is, in practice, the single
+  // most common shape (`fit` straight over what a function/test/fuzz
+  // block was handed). Shared by every body-like declaration
+  // (`walk_function`'s own arguments, `walk_fuzz`'s two fixed ones) so
+  // each gets this for free instead of its own copy of the same walk.
+  _register_param_local(Node* arg, Set<str>* locals) {
+    if arg == nil {
+      ret;
+    }
+    fit arg.kind {
+      .Variable(av) -> {
+        locals.add(av.name);
+        if av.var_type != nil {
+          str atype = av.var_type.type_str;
+          if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
+            atype = format("{str}*", atype);
+          }
+          self.local_types.put(av.name, atype);
+          self._record_channel_element_type(av.name, av.var_type);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // The checks a function body, a test body, and a fuzz body all need
+  // alike: channel-send/wait-group analysis, the full statement walk,
+  // and (when `-warn-unused` is on) unused locals. `locals` already
+  // carries whatever parameters the caller registered.
+  walk_declared_body(Node* body, Set<str>* locals) {
+    self.waits_on_unsized_group = _creates_empty_wait_group(body);
+    self.check_channel_sends(body);
+    self.walk_body(body, locals);
+    if self.report_unused {
+      self.check_unused_locals(body);
+    }
+  }
+
   walk_function(FunctionNode f, Node* decl) {
     if !f.has_body {
       ret;
@@ -1470,36 +1512,14 @@ impl Analysis {
     defer locals.free();
     self.local_types.clear();
     self.channel_element_types.clear();
-    // A parameter is exactly as good a `fit` subject as a `let`
-    // local, but only a `.Variable` statement inside the body ever
-    // registered here before this: `fit` over a plain parameter never
-    // resolved its own enum type, so exhaustiveness checking silently
-    // never ran for what is, in practice, the single most common
-    // shape (`fit` straight over what the function was handed).
     for arg : f.args {
-      if arg == nil {
-        continue;
-      }
-      fit arg.kind {
-        .Variable(av) -> {
-          locals.add(av.name);
-          if av.var_type != nil {
-            str atype = av.var_type.type_str;
-            if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
-              atype = format("{str}*", atype);
-            }
-            self.local_types.put(av.name, atype);
-            self._record_channel_element_type(av.name, av.var_type);
-          }
-        }
-        _ -> {}
-      }
+      self._register_param_local(arg, &locals);
     }
-    self.waits_on_unsized_group = _creates_empty_wait_group(f.body);
-    self.check_channel_sends(f.body);
-    self.walk_body(f.body, &locals);
+    self.walk_declared_body(f.body, &locals);
     // A function that names a return type promises a value on every
-    // path, and a void one promises nothing.
+    // path, and a void one promises nothing. `test`/`fuzz` blocks have
+    // no return type of their own to promise, so this check is
+    // function-only.
     if f.has_rtype && f.rtype != nil && f.rtype.kind != .Void {
       if !_always_returns(f.body) {
         self.report(
@@ -1509,18 +1529,40 @@ impl Analysis {
         );
       }
     }
-    if self.report_unused {
-      self.check_unused_locals(f);
-    }
+  }
+
+  // A `test "name" { ... }` block gets the same warning coverage as an
+  // ordinary function body: exhaustiveness, unreachable code, unused
+  // locals, and everything else `walk_body` checks. It has no
+  // parameters of its own to register as locals first.
+  walk_test(TestDeclNode t) {
+    Set<str> locals = set_init("", 8);
+    defer locals.free();
+    self.local_types.clear();
+    self.channel_element_types.clear();
+    self.walk_declared_body(t.body, &locals);
+  }
+
+  // A `fuzz "name" (raw* data, num len) { ... }` block, the same way:
+  // its own two fixed parameters register as locals first, exactly
+  // like a function's arguments do.
+  walk_fuzz(FuzzDeclNode fz) {
+    Set<str> locals = set_init("", 8);
+    defer locals.free();
+    self.local_types.clear();
+    self.channel_element_types.clear();
+    self._register_param_local(fz.data_param, &locals);
+    self._register_param_local(fz.len_param, &locals);
+    self.walk_declared_body(fz.body, &locals);
   }
 
   // Reports a local nothing reads. A parameter is not judged: what a
   // function accepts is part of how it is called.
-  check_unused_locals(FunctionNode f) {
+  check_unused_locals(Node* body) {
     Set<str> read = set_init("", 16);
     defer read.free();
-    _collect_reads_excluding_declarations(f.body, &read);
-    self.report_unused_declarations(f.body, &read);
+    _collect_reads_excluding_declarations(body, &read);
+    self.report_unused_declarations(body, &read);
   }
 
   // Walks the declarations in a body, reporting each name the body never
@@ -2022,6 +2064,8 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
     }
     fit node.kind {
       .Function(f) -> { state.walk_function(f, node); }
+      .Test(t) -> { state.walk_test(t); }
+      .Fuzz(fz) -> { state.walk_fuzz(fz); }
       .Impl(block) -> {
         for m : block.methods {
           fit m.kind {
