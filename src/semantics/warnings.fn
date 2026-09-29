@@ -147,6 +147,42 @@ impl Analysis {
       equals(name, "void");
     }
 
+  // Mirrors `Checker._auto_resolve_bare_generic_shape_target`: a bare
+  // generic compound name (`Box(b)`, no `<Args>`) resolves to its one
+  // concrete instantiation of `shape_name` when exactly one exists, so
+  // exhaustiveness tracking credits it against the same reconstructed
+  // name `shape_implementors` registers that instantiation under.
+  // `shape_implementors`' own population already excludes ambiguous and
+  // genuinely unbound cases (see the top-level `.Impl` scan), so every
+  // entry sharing `type_name`'s prefix here is already a safe, concrete
+  // candidate - no separate ambiguity check needed on this side.
+  _auto_resolve_bare_generic_shape_target(str type_name, str shape_name) str {
+    if equals(shape_name, "") {
+      ret type_name;
+    }
+    let decl = self.compound_decls.at(type_name);
+    if decl.is_none() || !decl.unwrap().has_type_params {
+      ret type_name;
+    }
+    let bucket_opt = self.shape_implementors.at(shape_name);
+    if bucket_opt.is_none() {
+      ret type_name;
+    }
+    str prefix = format("{str}__", type_name);
+    str match_found = "";
+    num match_count = 0;
+    for candidate : bucket_opt.unwrap() {
+      if starts_with(candidate, prefix) {
+        match_found = candidate;
+        match_count = match_count + 1;
+      }
+    }
+    if match_count == 1 {
+      ret match_found;
+    }
+    ret type_name;
+  }
+
   // Records a finding, unless the program asked for silence. An
   // expectation counts as met whether or not it silences the message.
   // A `Next`-scoped allow/expect is removed the moment it matches here,
@@ -1132,6 +1168,7 @@ impl Analysis {
     Set<str> covered = set_init("", 8);
     defer covered.free();
     str over = "";
+    str subject_shape_name = self._fit_subject_shape(f);
     // A truth value has two cases of its own, which a `fit` over one
     // must both handle.
     num truths = 0;
@@ -1162,6 +1199,7 @@ impl Analysis {
       if equals(variant, "") {
         str shape_type = _pattern_shape_type(branch);
         if !equals(shape_type, "") {
+          shape_type = self._auto_resolve_bare_generic_shape_target(shape_type, subject_shape_name);
           if covered.has(shape_type) {
             self.report(
               .FitUnreachableBranch,
