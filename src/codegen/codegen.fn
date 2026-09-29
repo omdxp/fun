@@ -2917,6 +2917,40 @@ impl Codegen {
     let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
     let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
 
+    // Same ambiguity fixed in `emit_one_generic_impl_method`/
+    // `maybe_emit_shape_vtable_for_instantiation` just above - an exact
+    // positional type_params match is required when one exists, so this
+    // prototype's own return/parameter types come from the SAME impl
+    // `emit_one_generic_impl_method` later fills the body from, instead
+    // of possibly mismatching it (a real "conflicting types" C error).
+    flag exact_proto_match_exists = false;
+    for tmpl0c : self.generic_impl_templates {
+      fit tmpl0c.kind {
+        .Impl(i0c) -> {
+          if !equals(i0c.type_name, base_name) || i0c.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !equals(shape_name, "") &&
+            (!i0c.has_shape_name || !equals(i0c.shape_name, shape_name)) {
+            continue;
+          }
+          flag all_eq_c = true;
+          num pjd = 0;
+          for pjd < i0c.type_params.len {
+            if !equals(i0c.type_params.get(pjd), arg_type_names.get(pjd)) {
+              all_eq_c = false;
+              break;
+            }
+            pjd = pjd + 1;
+          }
+          if all_eq_c {
+            exact_proto_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -2926,6 +2960,20 @@ impl Codegen {
           if !equals(shape_name, "") &&
             (!i.has_shape_name || !equals(i.shape_name, shape_name)) {
             continue;
+          }
+          if exact_proto_match_exists {
+            flag this_is_exact_c = true;
+            num pje = 0;
+            for pje < i.type_params.len {
+              if !equals(i.type_params.get(pje), arg_type_names.get(pje)) {
+                this_is_exact_c = false;
+                break;
+              }
+              pje = pje + 1;
+            }
+            if !this_is_exact_c {
+              continue;
+            }
           }
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
@@ -3599,6 +3647,46 @@ impl Codegen {
     let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
     let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
 
+    // Same ambiguity as `maybe_emit_shape_vtable_for_instantiation`'s own
+    // pre-scan: more than one impl can share (base_name, shape_name,
+    // arity) when an already-declared type stands in for a fresh
+    // type-param name at that parser position (`impl Wrapper<Circle> as
+    // Sized` next to `impl Wrapper<Square> as Sized`). Without requiring
+    // an exact positional match when one exists, this picks whichever
+    // impl's own method text happens to come first in
+    // `generic_impl_templates`, silently emitting the wrong instantiation's
+    // body under the right name - the C compiles fine, it just runs the
+    // wrong code, since there's no name/type mismatch a compiler would
+    // catch. A real unbound template's own param name never happens to
+    // equal the concrete arg it's asked for, so it's unaffected.
+    flag exact_owner_match_exists = false;
+    for tmpl0b : self.generic_impl_templates {
+      fit tmpl0b.kind {
+        .Impl(i0b) -> {
+          if !equals(i0b.type_name, base_name) || i0b.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !equals(shape_name, "") &&
+            (!i0b.has_shape_name || !equals(i0b.shape_name, shape_name)) {
+            continue;
+          }
+          flag all_eq_b = true;
+          num pjb = 0;
+          for pjb < i0b.type_params.len {
+            if !equals(i0b.type_params.get(pjb), arg_type_names.get(pjb)) {
+              all_eq_b = false;
+              break;
+            }
+            pjb = pjb + 1;
+          }
+          if all_eq_b {
+            exact_owner_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -3613,6 +3701,20 @@ impl Codegen {
           if !equals(shape_name, "") &&
             (!i.has_shape_name || !equals(i.shape_name, shape_name)) {
             continue;
+          }
+          if exact_owner_match_exists {
+            flag this_is_exact_b = true;
+            num pjc = 0;
+            for pjc < i.type_params.len {
+              if !equals(i.type_params.get(pjc), arg_type_names.get(pjc)) {
+                this_is_exact_b = false;
+                break;
+              }
+              pjc = pjc + 1;
+            }
+            if !this_is_exact_b {
+              continue;
+            }
           }
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
@@ -10397,6 +10499,38 @@ impl Codegen {
     Vec<str> tmpl_type_params;
     tmpl_type_params.init(0);
     Option<DataType> shape_elem_dt = .None;
+    // Same ambiguity as the shape-vtable/method search above - two
+    // different iterator impls of the same generic base and arity
+    // (`impl SomeIter<Circle> as Iterator<num>` next to `impl
+    // SomeIter<Square> as Iterator<num>`) need an exact type_params
+    // match, or whichever is declared first would splice its own
+    // next() body for every instantiation sharing that arity.
+    flag exact_iter_match_exists = false;
+    for tmpl0d : self.generic_impl_templates {
+      fit tmpl0d.kind {
+        .Impl(i0d) -> {
+          if !equals(i0d.type_name, base_name) || i0d.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !i0d.has_shape_name || !equals(i0d.shape_name, "Iterator") {
+            continue;
+          }
+          flag all_eq_d = true;
+          num pjf = 0;
+          for pjf < i0d.type_params.len {
+            if !equals(i0d.type_params.get(pjf), arg_type_names.get(pjf)) {
+              all_eq_d = false;
+              break;
+            }
+            pjf = pjf + 1;
+          }
+          if all_eq_d {
+            exact_iter_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -10405,6 +10539,20 @@ impl Codegen {
           }
           if !i.has_shape_name || !equals(i.shape_name, "Iterator") {
             continue;
+          }
+          if exact_iter_match_exists {
+            flag this_is_exact_d = true;
+            num pjg = 0;
+            for pjg < i.type_params.len {
+              if !equals(i.type_params.get(pjg), arg_type_names.get(pjg)) {
+                this_is_exact_d = false;
+                break;
+              }
+              pjg = pjg + 1;
+            }
+            if !this_is_exact_d {
+              continue;
+            }
           }
           StringBuilder pfx = string_builder_init(16);
           pfx.append(i.type_name);
@@ -11900,7 +12048,18 @@ impl Codegen {
       // since `Circle(c)` parses as an ordinary call with no
       // `br.bindings` populated (that field only ever comes from the
       // dotted enum-shorthand destructure path handled above).
-      if subj_type.is_some() && self.shape_names.contains(subj_type.unwrap()) {
+      //
+      // Gated on `shape_decl_names` (every shape DECLARATION, registered
+      // eagerly right after the prelude, independent of any impl at
+      // all), not `shape_names` (which only ever gains an entry once
+      // some concrete impl's vtable machinery has actually run - a
+      // chicken-and-egg gap when every implementor of this shape is a
+      // generic instantiation, since those are only triggered from
+      // *inside* this same branch via `ensure_specific_shape_impl_
+      // vtable_emitted` below). Requiring `shape_names` here first would
+      // mean a shape with no non-generic implementor anywhere in the
+      // program could never enter this branch at all.
+      if subj_type.is_some() && self.shape_decl_names.contains(subj_type.unwrap()) {
         str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
           self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
