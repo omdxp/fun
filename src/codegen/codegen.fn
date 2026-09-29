@@ -11075,14 +11075,120 @@ impl Codegen {
     ret "";
   }
 
+  // Triggers `dt`'s real instantiation (struct and, as a side effect of
+  // `ensure_compound_instantiated`/`maybe_emit_shape_vtable_for_
+  // instantiation`, its shape vtable too, when it implements one) ahead
+  // of wherever it would otherwise first happen lazily. Reached directly
+  // from ordinary statement emission deep inside a function body
+  // (`emit_fit`), not from within an already-hoisted type-instantiation
+  // chain - a bare `self.state.write(...)` here would land the result as
+  // a LOCAL declaration inside the enclosing function (legal C, but
+  // scoped only to that function, invisible to any other function
+  // needing the same type). Builds its own scratch buffer, the same
+  // shape `maybe_emit_shape_vtable_for_instantiation` uses for its own
+  // mid-body trigger, and splices the result at file scope via
+  // `emit_hoisted`.
+  _trigger_compound_instantiation_hoisted(DataType dt) {
+    CodegenState scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    let saved_hoist_pos = self.hoist_insert_pos;
+    let saved_scratch_depth = self.hoist_scratch_depth;
+    let saved_stmt_start = self.current_stmt_start_pos;
+    self.state = &scratch;
+    self.hoist_insert_pos = .None;
+    self.hoist_scratch_depth = 0;
+    self.current_stmt_start_pos = .None;
+    let compound_name = self.ensure_compound_instantiated(dt);
+    if compound_name.is_none() {
+      self.ensure_enum_instantiated(dt);
+    }
+    self.state = saved_state;
+    self.hoist_insert_pos = saved_hoist_pos;
+    self.hoist_scratch_depth = saved_scratch_depth;
+    self.current_stmt_start_pos = saved_stmt_start;
+    self.emit_hoisted(scratch.out.build());
+  }
+
+  // Ensures the concrete impl (implementor, shape) pair a shape-downcast
+  // fit arm names is fully instantiated (struct and vtable) before the
+  // arm's own `if (subj.vtable == &__fun_impl_...)` check references it
+  // by name - unlike ordinary shape method dispatch (`recv.vtable->
+  // method(...)`), which only ever reads the pointer already stored in a
+  // fat-pointer value's own `.vtable` field, never the vtable symbol by
+  // name, so it never needs this.
+  //
+  // A genuinely non-generic impl (`impl Circle as HasArea`) is already
+  // handled: the ordinary top-level pass emits its vtable unconditionally
+  // before any function body, so there's nothing to do here.
+  //
+  // A concrete instantiation of a generic type needs an explicit early
+  // trigger, and comes in two AST shapes depending on its own argument:
+  // `impl Box<num> as Sized` (a builtin/scalar argument) resolves its own
+  // `concrete_dtype` immediately, so `has_concrete_dtype` is set and
+  // `type_name` is already the mangled identity. `impl Box<Circle> as
+  // Sized` (an already-declared compound/enum argument) is instead
+  // stored exactly like a generic TEMPLATE (`has_type_params` true,
+  // `type_params` holding the argument's own name) - the parser can't
+  // tell a fresh type-param name from a reference to an existing
+  // concrete type at this position, so it doesn't try, and this is
+  // indistinguishable from `impl Box<T> as Sized` by that flag alone.
+  // Reconstructing the same mangled identity `_mangled_dtype_name` (the
+  // parser) and `ensure_compound_instantiated` (below) both build lets
+  // this recognize which case it actually is before committing either
+  // way - a real, unbound template never matches a real mangled name.
+  ensure_specific_shape_impl_vtable_emitted(str type_name, str shape_name) {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) {
+            continue;
+          }
+          if i.has_concrete_dtype {
+            if equals(i.type_name, type_name) {
+              self._trigger_compound_instantiation_hoisted(*i.concrete_dtype);
+              ret;
+            }
+            continue;
+          }
+          if i.has_type_params {
+            StringBuilder recon_sb = string_builder_init(16);
+            recon_sb.append(i.type_name);
+            for tp : i.type_params {
+              recon_sb.append("__");
+              recon_sb.append(tp);
+            }
+            str reconstructed = recon_sb.build();
+            if !equals(reconstructed, type_name) {
+              continue;
+            }
+            DataType dt = dtype_new();
+            dt.type_str = i.type_name;
+            Vec<DataType*> gargs;
+            gargs.init(i.type_params.len);
+            for tp : i.type_params {
+              DataType* argdt = malloc(sizeof(DataType));
+              *argdt = dtype_new();
+              argdt.type_str = tp;
+              gargs.push(argdt);
+            }
+            dt.generic_args = gargs;
+            self._trigger_compound_instantiation_hoisted(dt);
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
   // Emits one `fit` branch recovering the concrete type behind a
   // shape-typed subject (`Circle(c) -> { ... }`): compares the fat
   // pointer's `vtable` field against that concrete impl's own singleton
-  // vtable instance, already emitted unconditionally for every concrete
-  // shape impl in the whole program (`emit_shape_vtable_machinery`, run
-  // from the top-level impl pass before any function body), so the
-  // symbol referenced here is always already defined by the time a
-  // `fit` block reaches it.
+  // vtable instance. `ensure_specific_shape_impl_vtable_emitted` (called
+  // from `emit_fit` right before this) guarantees it's already defined
+  // by this point, whether it was emitted unconditionally for an
+  // ordinary non-generic impl or triggered early here for a generic
+  // one's concrete instantiation.
   emit_fit_shape_branch(
     str subj_name,
     flag subj_is_pointer,
@@ -11740,6 +11846,7 @@ impl Codegen {
       if subj_type.is_some() && self.shape_names.contains(subj_type.unwrap()) {
         str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
+          self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
           let sherr = self.emit_fit_shape_branch(
             subj_name,
             subj_is_pointer,
