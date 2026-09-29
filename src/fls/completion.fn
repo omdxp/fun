@@ -649,7 +649,7 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
   items.push(_snippet_item(
     "implq",
     .Snippet,
-    "implement a quirk for a type",
+    "implement a shape for a type",
     "impl ${1:Type} as ${2:Shape} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
   ));
   items.push(_snippet_item(
@@ -1167,8 +1167,8 @@ fun _variant_payload_type_from_tokens(Vec<Token>* tokens, str enum_name, str var
 }
 
 // What `type_name` declares, read the same token-only way, for every
-// `compound`/`enum`/`quirk`/`impl` block naming it: a compound's own
-// fields, an enum's own variants, a quirk's or impl's own method
+// `compound`/`enum`/`shape`/`impl` block naming it: a compound's own
+// fields, an enum's own variants, a shape's or impl's own method
 // names. Never confirms `type_name` is real before scanning for it;
 // a name that never appears this way simply adds nothing, the same
 // safe no-op `_bare_type_name` gets from an AST that resolves it.
@@ -1186,7 +1186,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
     str kw = token_word(t);
     flag is_compound = equals(kw, "compound");
     flag is_enum = equals(kw, "enum");
-    flag is_methods = equals(kw, "quirk") || equals(kw, "shape") || equals(kw, "impl");
+    flag is_methods = equals(kw, "shape") || equals(kw, "impl");
     if !is_compound && !is_enum && !is_methods {
       continue;
     }
@@ -1243,7 +1243,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
 // Every distinct name already written in the file, offered when there
 // is no AST to work from. `skip` is the receiver itself. Kind is
 // guessed from raw token shape: followed by '(' anywhere means
-// Function, preceded by compound/enum/quirk means that type.
+// Function, preceded by compound/enum/shape means that type.
 fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
   Vec<str> fn_names;
   fn_names.init(16);
@@ -1273,8 +1273,8 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
           struct_names.push(name);
         } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
           enum_names.push(name);
-        } elif (token_is_keyword(prev, "quirk") || token_is_keyword(prev, "shape")) &&
-          !shape_names.contains(name) {
+        } elif (token_is_keyword(prev, "shape")) &&
+        !shape_names.contains(name) {
           shape_names.push(name);
         }
       }
@@ -2328,7 +2328,7 @@ fun _receiver_own_type(
   ret bare_type_from_detail(field.unwrap().detail);
 }
 
-// `name`, when it is itself a declared compound/enum/quirk. "" for
+// `name`, when it is itself a declared compound/enum/shape. "" for
 // anything else (an ordinary value, an unrelated word).
 fun _bare_type_name(Vec<Node>* program, str name) str {
   num i = 0;
@@ -2373,7 +2373,7 @@ fun _bare_type_name(Vec<Node>* program, str name) str {
 // capitalized condition (`if IsReady { ... }`) being mistaken for one.
 // True when the cursor sits right after a `:` or `|` inside an unclosed
 // `<...>` type-parameter list (`fun f<T: |>`, `fun f<T: num | |>`) - a
-// bound-alternative position, where only a type or quirk name is legal.
+// bound-alternative position, where only a type or shape name is legal.
 // Depth resets at each `;`/`{`/`}`, so an ordinary comparison operator
 // (`a < b`) elsewhere in the file is never mistaken for an open bracket
 // carried across statements. Token-only, like the other lookaheads in
@@ -2442,7 +2442,7 @@ fun _in_type_param_bound_position(Vec<Token>* tokens, num line, num character) f
 }
 
 // Completions legal inside a bound-list constraint alternative: every
-// builtin scalar type keyword, plus every declared compound/enum/quirk
+// builtin scalar type keyword, plus every declared compound/enum/shape
 // name - never a function, variable, or local, none of which are valid
 // there. `program` may be empty (the unparsed-document caller has no
 // tree), in which case only the builtin keywords are offered.
@@ -3128,9 +3128,6 @@ fun _skeleton(str word) str {
   }
   if equals(word, "enum") {
     ret "enum ${1:Name} {\n  $0\n}";
-  }
-  if equals(word, "quirk") {
-    ret "quirk ${1:Name} {\n  ${0:method}() ${2:num};\n}";
   }
   if equals(word, "shape") {
     ret "shape ${1:Name} {\n  ${0:method}() ${2:num};\n}";
