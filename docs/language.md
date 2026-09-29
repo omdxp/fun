@@ -569,10 +569,6 @@ fun main() {
 
 ### Shapes (interfaces)
 
-`shape` and `quirk` are the same declaration, just two accepted
-spellings of the keyword - `quirk` still works, `shape` is the one
-used through the rest of this reference.
-
 ```fun
 shape HasArea {
   area() num;
