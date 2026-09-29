@@ -30,7 +30,7 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
     Diagnostic d = diags.get(i);
     i = i + 1;
     if d.severity == DIAG_SEVERITY_ERROR {
-      str error_fix = _quirk_stub_action(cache, doc, document_uri, d);
+      str error_fix = _shape_stub_action(cache, doc, document_uri, d);
       if equals(error_fix, "") {
         error_fix = _insert_await_action(document_uri, doc.text, d);
       }
@@ -373,11 +373,11 @@ fun _stub_arm(str variant_name, num arity) str {
 }
 
 // The method and quirk names out of `diagnose()`'s own "'Type' does
-// not supply 'method', which 'Quirk' requires" message: its second
+// not supply 'method', which 'Shape' requires" message: its second
 // and third single-quoted segments.
 compound QuirkConformanceRef {
   str method_name;
-  str quirk_name;
+  str shape_name;
 }
 
 // The quick fix for a "does not supply" quirk-conformance error: a
@@ -386,8 +386,8 @@ compound QuirkConformanceRef {
 // before the impl block's own closing brace. "" when the message
 // isn't shaped that way, the quirk or method can't be found, or the
 // enclosing impl block's closing brace can't be found.
-fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
-  let parsed = _quirk_conformance_from_message(d.message);
+fun _shape_stub_action(AnalysisCache* cache, Document doc, str document_uri, Diagnostic d) str {
+  let parsed = _shape_conformance_from_message(d.message);
   if parsed.is_none() {
     ret "";
   }
@@ -396,7 +396,7 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   if !read.lexed || !read.parsed {
     ret "";
   }
-  let method = quirk_method_declaration(&read.program.nodes, qc.quirk_name, qc.method_name);
+  let method = quirk_method_declaration(&read.program.nodes, qc.shape_name, qc.method_name);
   if method.is_none() {
     ret "";
   }
@@ -410,7 +410,7 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   num character = byte_col_to_utf16_char(doc.text, line0, p.col - 1);
   StringBuilder b = string_builder_init(192);
   b.append(`{"title":`);
-  str impl_title = format("Implement missing '{str}.{str}'", qc.quirk_name, qc.method_name);
+  str impl_title = format("Implement missing '{str}.{str}'", qc.shape_name, qc.method_name);
   json_quote_into(&b, impl_title);
   free(impl_title);
   b.append(`,"kind":"quickfix","edit":{"changes":{`);
@@ -434,7 +434,7 @@ fun _quirk_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   ret b.build();
 }
 
-fun _quirk_conformance_from_message(str message) Option<QuirkConformanceRef> {
+fun _shape_conformance_from_message(str message) Option<QuirkConformanceRef> {
   if !contains(message, "does not supply") || !contains(message, "requires") {
     ret .None;
   }
@@ -471,11 +471,11 @@ fun _quirk_conformance_from_message(str message) Option<QuirkConformanceRef> {
   if q6 < 0 {
     ret .None;
   }
-  str quirk_name = substr(after5, 0, q6);
+  str shape_name = substr(after5, 0, q6);
 
   QuirkConformanceRef qc;
   qc.method_name = method_name;
-  qc.quirk_name = quirk_name;
+  qc.shape_name = shape_name;
   ret .Some(qc);
 }
 

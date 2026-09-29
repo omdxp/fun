@@ -817,7 +817,7 @@ pub fun definition_workspace_wide(
     // Restrict to true top-level declarations only (what
     // lookup_top_level itself would have matched), not a field,
     // variant, or method the table also indexes.
-    flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Quirk ||
+    flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Shape ||
       d.kind == .Global || d.kind == .TypeAlias) &&
     equals(
       d.container,
@@ -909,7 +909,7 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
   fit d.kind {
     .Compound -> { ret _location_result(doc, d); }
     .Enum -> { ret _location_result(doc, d); }
-    .Quirk -> { ret _location_result(doc, d); }
+    .Shape -> { ret _location_result(doc, d); }
     .TypeAlias -> { ret _location_result(doc, d); }
     _ -> {}
   }
@@ -1622,13 +1622,13 @@ fun _import_hover_result(str target, Span s) str {
 
 // `as` reads two different ways depending on the statement it sits
 // in: naming an import alias (`use mod as alias;`) or naming the
-// quirk an impl block implements (`impl Type as Quirk { ... }`).
+// quirk an impl block implements (`impl Type as Shape { ... }`).
 // Told apart by walking back from `t` past the identifiers and dots
 // that make up whatever comes before it, to the keyword that started
 // the statement.
 fun _as_keyword_doc(Vec<Token>* tokens, Token t) str {
   str impl_doc = _doc(
-    `impl Type as Quirk { ... }`,
+    `impl Type as Shape { ... }`,
     `Names the quirk an impl block implements for a type.`
   );
   str import_doc = _doc(
@@ -2140,7 +2140,7 @@ pub fun keyword_doc(str word) str {
   if equals(word, "impl") {
     ret _doc(
       `impl Type { ... }
-      `impl Type as Quirk { ... }`,
+      `impl Type as Shape { ... }`,
       `Declares methods on a type, or implements a quirk for it.`
     );
   }
@@ -2204,7 +2204,7 @@ pub fun keyword_doc(str word) str {
     ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
   }
   if equals(word, "as") {
-    ret _doc(`impl Type as Quirk { ... }`, `Names the quirk an impl block implements for a type.`);
+    ret _doc(`impl Type as Shape { ... }`, `Names the quirk an impl block implements for a type.`);
   }
   if equals(word, "enum") {
     ret _doc(
