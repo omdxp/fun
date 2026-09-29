@@ -1,0 +1,125 @@
+// Shape-downcast fit: `Circle(c) -> ...` recovering the concrete type
+// behind a shape-typed value at runtime. Exhaustiveness-warning coverage
+// lives in warning_tests.fn, alongside the rest of fit's exhaustiveness
+// checks; this file covers parsing/typechecking/dispatch.
+
+use harness;
+use std.string;
+
+test "a shape-downcast fit dispatches to the concrete implementor" {
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Square(sq) -> { out = "square"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Square sq; sq.side = 4;
+  `  HasArea hc = &c;
+  `  HasArea hs = &sq;
+  `  printf("%s %s\n", describe(hc), describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_dispatch", "shape-downcast fit dispatch");
+  assert equals(out, "circle square\n"), "expected each concrete type to dispatch to its own arm";
+}
+
+test "a shape-downcast fit dispatch is order-independent, not accidental" {
+  // Same program as above with the arms swapped, to rule out the first
+  // branch always winning regardless of the actual runtime type.
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Square(sq) -> { out = "square"; }
+  `    Circle(c) -> { out = "circle"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Square sq; sq.side = 4;
+  `  HasArea hc = &c;
+  `  HasArea hs = &sq;
+  `  printf("%s %s\n", describe(hc), describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_dispatch_swapped", "shape-downcast fit dispatch, arms swapped");
+  assert equals(out, "circle square\n"), "expected dispatch by runtime type, not by arm order";
+}
+
+test "a shape-downcast fit falls through to the wildcard for an uncovered implementor" {
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    _ -> { out = "other"; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Square sq; sq.side = 4;
+  `  HasArea hs = &sq;
+  `  printf("%s\n", describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_wildcard", "shape-downcast fit wildcard fallback");
+  assert equals(out, "other\n"), "expected the wildcard arm for the uncovered implementor";
+}
+
+test "an ordinary enum fit is unaffected by shape-downcast parsing" {
+  str src = `use std.c.io;
+  `enum Color { Red, Green, Blue }
+  `fun main() num {
+  `  Color c = .Green;
+  `  fit c {
+  `    .Red -> { printf("red\n"); }
+  `    .Green -> { printf("green\n"); }
+  `    .Blue -> { printf("blue\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_enum_unaffected", "ordinary enum fit still works");
+  assert equals(out, "green\n"), "expected ordinary enum fit dispatch to be unaffected";
+}
+
+test "an ordinary data-carrying enum destructure is unaffected by shape-downcast parsing" {
+  str src = `use std.c.io;
+  `enum Shape2D { Circle2D(num), Square2D(num) }
+  `fun main() num {
+  `  Shape2D s = .Circle2D(5);
+  `  fit s {
+  `    .Circle2D(r) -> { printf("circle %lld\n", r); }
+  `    .Square2D(side) -> { printf("square %lld\n", side); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_enum_destructure_unaffected",
+    "ordinary enum destructure fit still works"
+  );
+  assert equals(out, "circle 5\n"), "expected ordinary enum-payload destructure to be unaffected";
+}
