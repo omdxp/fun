@@ -4333,11 +4333,22 @@ fun _lookup_in_body(
         }
       } elif equals(v.name, name) {
         StringBuilder b = string_builder_init(32);
+        if v.is_const {
+          b.append("const ");
+        }
         str local_type_text = render_type(v.var_type);
         b.append(local_type_text);
         free(local_type_text);
         b.append(" ");
         b.append(v.name);
+        if v.is_const && v.has_val {
+          str literal = _literal_value_text(v.val);
+          if !equals(literal, "") {
+            b.append(" = ");
+            b.append(literal);
+          }
+          free(literal);
+        }
         ret .Some(_declaration(name, .Local, b.build(), body.pos));
       }
     }
