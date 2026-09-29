@@ -3259,15 +3259,20 @@ fun _branch_enum_name(Node* condition) str {
 }
 
 // The bare type name a shape-downcast fit arm names (`Circle(c) -> ...`),
-// or empty when `branch` isn't that shape: the parser
+// or empty when `branch` isn't that shape at all: the parser
 // (`_try_parse_fit_shape_destructure`) already commits a bare, undotted
-// `Type(binding)` pattern to exactly this AST shape - a plain
-// `.Identifier` condition with `bindings` populated - never produced by
-// the enum-destructure path, which always builds a `.`-qualified
-// condition instead. So `bindings.len == 1` plus a bare identifier
-// condition is unambiguous here, not just a heuristic.
+// `Type(...)` pattern to exactly this AST shape - a plain `.Identifier`
+// condition with `bindings` populated - never produced by the
+// enum-destructure path, which always builds a `.`-qualified condition
+// instead. So a bare identifier condition with any bindings at all is
+// unambiguously this shape, not just a heuristic - arity is verified
+// separately by `check_shape_destructure_condition`, not here, so a
+// wrong-arity arm (`Circle(a, b)`) still gets a clear error instead of
+// silently falling through to the ordinary value-pattern path (which
+// would leave its bindings undefined and fail confusingly, deep in
+// codegen, instead of here).
 fun _shape_destructure_type_name(FitBranch branch) str {
-  if !branch.has_condition || !branch.has_bindings || branch.bindings.len != 1 {
+  if !branch.has_condition || !branch.has_bindings || branch.bindings.len == 0 {
     ret "";
   }
   fit branch.condition.kind {
@@ -3491,8 +3496,12 @@ impl Checker {
 
   // Verifies a shape-downcast arm (`Circle(c) -> ...`, only reached when
   // the fit subject is itself shape-typed and `_shape_destructure_type_name`
-  // already confirmed the arm binds exactly one name): `type_name` must
-  // be a real `impl type_name as <subject's shape> { ... }`.
+  // already confirmed a bare-identifier condition with at least one
+  // binding): `type_name` must be a real `impl type_name as <subject's
+  // shape> { ... }`, and the arm must bind exactly one name to recover
+  // the concrete value, mirroring `Option.Some(v)`/`Result.Ok(v)`'s
+  // single-payload shape rather than multi-field enum-payload
+  // destructuring.
   check_shape_destructure_condition(FitBranch branch, str type_name, CheckedType subject_type) {
     CheckedType candidate = checked_unknown();
     candidate.name = type_name;
@@ -3503,6 +3512,17 @@ impl Checker {
         "'{str}' does not implement shape '{str}'",
         type_name,
         subject_type.name
+        ),
+        branch.condition
+      );
+      ret;
+    }
+    if branch.bindings.len != 1 {
+      self.fail(
+        format(
+        "expected exactly one binding to recover the concrete '{str}' value, got {num}",
+        type_name,
+        branch.bindings.len
         ),
         branch.condition
       );
