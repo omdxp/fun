@@ -57,6 +57,13 @@ compound Analysis {
   // What each enum declares, so a `fit` over one can be told whether it
   // covers every variant.
   Map<str, Vec<str>> enum_variants;
+  // Every concrete type registered as implementing a shape (shape name
+  // -> implementor type names), so a `fit` recovering the concrete type
+  // behind a shape-typed subject can be told whether it covers every
+  // implementor. Independent copy of what `typecheck.fn`'s own
+  // `Checker.shape_implementors` tracks - this file already keeps its
+  // own separate `enum_variants` rather than sharing `Checker`'s.
+  Map<str, Vec<str>> shape_implementors;
   // The functions a fork can name, and the types whose fields say
   // whether a value guards itself.
   Map<str, FunctionNode> functions;
@@ -106,6 +113,7 @@ fun _analysis_new() Analysis {
   a.report_unused = false;
   a.file = "";
   a.enum_variants.init(8);
+  a.shape_implementors.init(8);
   a.functions.init(16);
   a.compound_decls.init(16);
   a.local_types.init(16);
@@ -174,6 +182,7 @@ impl Analysis {
     self.expected.free();
     self.met.free();
     self.enum_variants.free();
+    self.shape_implementors.free();
     self.functions.free();
     self.compound_decls.free();
     self.local_types.free();
@@ -439,6 +448,24 @@ fun _pattern_variant(Node* condition) str {
       ret "";
     }
     _ -> { ret ""; }
+  }
+  ret "";
+}
+
+// The concrete type name a shape-downcast fit arm names (`Circle(c) ->
+// ...`), or empty when `branch` isn't that shape. The parser
+// (`_try_parse_fit_shape_destructure`) already commits this pattern to a
+// bare `.Identifier` condition with `bindings` populated - never
+// produced by the enum-destructure path above, which always builds a
+// `.`-qualified condition instead - so this is unambiguous. Mirrors
+// `typecheck.fn`'s own `_shape_destructure_type_name`.
+fun _pattern_shape_type(FitBranch branch) str {
+  if !branch.has_condition || !branch.has_bindings || branch.bindings.len != 1 {
+    ret "";
+  }
+  fit branch.condition.kind {
+    .Identifier(name) -> { ret name; }
+    _ -> {}
   }
   ret "";
 }
@@ -1112,6 +1139,17 @@ impl Analysis {
       }
       str variant = _pattern_variant(branch.condition);
       if equals(variant, "") {
+        str shape_type = _pattern_shape_type(branch);
+        if !equals(shape_type, "") {
+          if covered.has(shape_type) {
+            self.report(
+              .FitUnreachableBranch,
+              format("branch '{str}' is already covered by an earlier one", shape_type),
+              stmt
+            );
+          }
+          covered.add(shape_type);
+        }
         continue;
       }
       if covered.has(variant) {
@@ -1161,6 +1199,17 @@ impl Analysis {
       // Every branch was written in shorthand (`.Dot ->`), which names
       // no enum, so what is being matched is what the subject holds.
       over = self._fit_subject_enum(f);
+    }
+    if equals(over, "") {
+      // Every branch recovered a concrete type from a shape-typed
+      // subject rather than naming an enum, so exhaustiveness is
+      // checked against that shape's own registered implementors
+      // instead of `enum_variants`.
+      str shape_over = self._fit_subject_shape(f);
+      if !equals(shape_over, "") {
+        self._check_fit_shape_exhaustiveness(stmt, shape_over, covered);
+        ret;
+      }
     }
     if equals(over, "") {
       // No fixed value set to enumerate, so a catch-all is the only
@@ -1366,6 +1415,50 @@ impl Analysis {
       ret type_name;
     }
     ret "";
+  }
+
+  // The shape a `fit` is downcasting, taken from what its subject was
+  // declared as - empty unless the subject's own type is a registered
+  // shape name (has at least one real `impl ... as <that shape>`
+  // somewhere in the program).
+  _fit_subject_shape(FitStmtNode f) str {
+    str type_name = self._fit_subject_type(f);
+    if !equals(type_name, "") && self.shape_implementors.at(type_name).is_some() {
+      ret type_name;
+    }
+    ret "";
+  }
+
+  // Reports every implementor of `shape_name` that no branch of a
+  // shape-downcast `fit` covered, mirroring the enum-exhaustiveness
+  // reporting just below it but against `shape_implementors` and
+  // without the enum's dotted `Enum.Variant` naming (a shape-downcast
+  // arm names just the bare concrete type, `Circle(c)`, not
+  // `HasArea.Circle`).
+  _check_fit_shape_exhaustiveness(Node* stmt, str shape_name, Set<str> covered) {
+    let declared = self.shape_implementors.at(shape_name);
+    if declared.is_none() {
+      ret;
+    }
+    Vec<str> implementors = declared.unwrap();
+    StringBuilder missing = string_builder_init(32);
+    num missing_count = 0;
+    num i = 0;
+    for i < implementors.len {
+      str name = implementors.get(i);
+      i = i + 1;
+      if covered.has(name) {
+        continue;
+      }
+      if missing_count > 0 {
+        missing.append(", ");
+      }
+      missing.append(format("'{str}'", name));
+      missing_count = missing_count + 1;
+    }
+    if missing_count > 0 {
+      self.report(.FitNonExhaustive, format("fit does not handle {str}", missing.build()), stmt);
+    }
   }
 
   // Reports more sends into a channel than it can hold when nothing in
@@ -2031,6 +2124,18 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
           names.push(v.name);
         }
         state.enum_variants.put(decl.name, names);
+      }
+      .Impl(i) -> {
+        if i.has_shape_name {
+          Vec<str> implementors;
+          implementors.init(1);
+          let existing = state.shape_implementors.at(i.shape_name);
+          if existing.is_some() {
+            implementors = existing.unwrap();
+          }
+          implementors.push(i.type_name);
+          state.shape_implementors.put(i.shape_name, implementors);
+        }
       }
       _ -> {}
     }
