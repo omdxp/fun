@@ -169,7 +169,11 @@ app.post("/api/run", async (req, res) => {
 
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(webDist));
-  app.get("*", (_req, res) => {
+  // Express 5's router (path-to-regexp v7+) rejects a bare "*" - a
+  // wildcard needs a name now, e.g. "*splat". This is the SPA fallback:
+  // any route the static middleware above didn't already serve falls
+  // through to index.html for client-side routing to handle.
+  app.get("/*splat", (_req, res) => {
     res.sendFile(path.join(webDist, "index.html"));
   });
 }
