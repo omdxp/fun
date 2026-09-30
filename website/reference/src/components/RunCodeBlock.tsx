@@ -19,6 +19,81 @@ type RunResponse = {
   error?: string;
 };
 
+type RunOutcome = { stdout: string; stderr: string };
+
+// Matches `prebake-wasm.mjs`'s own `hashCode`: trimmed and CRLF-normalized,
+// so this component's react-markdown-derived text and that script's
+// regex-derived text don't have to be byte-identical, just the same
+// *content*, before hashing.
+async function hashCode(code: string): Promise<string> {
+  const normalized = code.replace(/\r\n/g, "\n").trim();
+  const bytes = new TextEncoder().encode(normalized);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Runs a pre-baked wasm module (built by `prebake-wasm.mjs`, see #189) for
+// `hash` entirely client-side - no backend at all. The module is emscripten's
+// own default (non-modularized) output: it auto-runs on load, reading
+// `print`/`printErr`/`onExit`/`onAbort` off a pre-existing global `Module`
+// object when one is set before the script loads (`var Module = typeof
+// Module != "undefined" ? Module : {}` at the top of every such file) -
+// the classic, well-supported emscripten integration pattern, chosen over
+// `-sMODULARIZE` specifically so the artifact `prebake-wasm.mjs` already
+// produces (and already verified working end to end, #189) needs no
+// compile-flag changes here. Rejects (falling back to the backend, or the
+// "nothing available" message) when no module exists for this hash - a
+// 404 is the normal, expected case for any edited or non-pre-baked code.
+async function runWasm(hash: string): Promise<RunOutcome> {
+  const base = import.meta.env.BASE_URL || "/";
+  const src = `${base}wasm/${hash}.js`;
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  return new Promise<RunOutcome>((resolve, reject) => {
+    let settled = false;
+    let script: HTMLScriptElement | null = null;
+    const previousModule = (window as any).Module;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      (window as any).Module = previousModule;
+      script?.remove();
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") });
+    };
+    const fail = (reason: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(reason);
+    };
+
+    const timeoutId = window.setTimeout(
+      () => fail(new Error("Timed out waiting for the wasm module to finish.")),
+      15000,
+    );
+
+    (window as any).Module = {
+      print: (line: string) => stdoutLines.push(line),
+      printErr: (line: string) => stderrLines.push(line),
+      onExit: () => finish(),
+      onAbort: (what: unknown) => fail(new Error(String(what))),
+    };
+
+    script = document.createElement("script");
+    script.src = src;
+    script.onerror = () => fail(new Error("No pre-baked wasm module for this example."));
+    document.body.appendChild(script);
+  });
+}
+
 export default function RunCodeBlock({ initialCode, title }: Props) {
   const [code, setCode] = useState(initialCode.trimEnd());
   const [stdout, setStdout] = useState("");
@@ -37,30 +112,52 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
   const isGithubPages =
     typeof window !== "undefined" &&
     window.location.hostname.endsWith("github.io");
-  const runtimeDisabled = isGithubPages && configuredApiBase === "";
+  // A pre-baked wasm module only ever exists for the example's own
+  // original text (see `prebake-wasm.mjs`) - an edit means there's
+  // nothing to look up, only the backend (if any) can run it.
+  const isUnedited = code === initialCode.trimEnd();
+  const backendUnavailable = isGithubPages && configuredApiBase === "";
+
+  const runViaBackend = async (): Promise<RunOutcome> => {
+    const res = await fetch(runEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = (await res.json()) as RunResponse;
+    return { stdout: data.stdout ?? "", stderr: data.error ?? data.stderr ?? "" };
+  };
 
   const run = async () => {
-    if (runtimeDisabled) {
-      setStdout("");
-      setStderr(
-        "Runtime execution is disabled on GitHub Pages because there is no backend API available to run code. To use the Run button, run the site locally or set up a remote runner API (see project README).",
-      );
-      return;
-    }
-
     setIsRunning(true);
     setHasRun(true);
     setStdout("");
     setStderr("");
     try {
-      const res = await fetch(runEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
-      const data = (await res.json()) as RunResponse;
-      setStdout(data.stdout ?? "");
-      setStderr(data.error ?? data.stderr ?? "");
+      if (isUnedited) {
+        try {
+          const hash = await hashCode(initialCode);
+          const outcome = await runWasm(hash);
+          setStdout(outcome.stdout);
+          setStderr(outcome.stderr);
+          return;
+        } catch {
+          // No pre-baked module for this example (or it failed to load/
+          // run) - fall through to the backend below, same as an edited
+          // example always does.
+        }
+      }
+      if (backendUnavailable) {
+        setStderr(
+          isUnedited
+            ? "This example has no pre-baked offline version and there is no backend API available to run it. Run the site locally, or set up a remote runner API (see project README)."
+            : "Edited code needs a backend API to run, and none is available on GitHub Pages. Run the site locally, set up a remote runner API (see project README), or Reset to run the original, pre-baked example.",
+        );
+        return;
+      }
+      const outcome = await runViaBackend();
+      setStdout(outcome.stdout);
+      setStderr(outcome.stderr);
     } catch (e: any) {
       setStderr(e?.message ?? "Request failed");
     } finally {
@@ -109,28 +206,16 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           <button
             onClick={() => setCode(initialCode.trimEnd())}
             className="ghost"
-            disabled={runtimeDisabled}
-            title={
-              runtimeDisabled
-                ? "Reset is disabled on GitHub Pages because code execution is not available."
-                : undefined
-            }
-            style={
-              runtimeDisabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
-            }
           >
             Reset
           </button>
           <button
             onClick={run}
-            disabled={isRunning || runtimeDisabled}
+            disabled={isRunning}
             title={
-              runtimeDisabled
-                ? "Run is disabled on GitHub Pages because there is no backend API available to run code. To use the Run button, run the site locally or set up a remote runner API (see project README)."
+              !isUnedited && backendUnavailable
+                ? "Edited code needs a backend API to run, and none is available on GitHub Pages - Run will explain, or Reset to run the original, pre-baked example."
                 : undefined
-            }
-            style={
-              runtimeDisabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
             }
           >
             {isRunning ? "Running..." : "Run"}
