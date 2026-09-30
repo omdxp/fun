@@ -18010,6 +18010,16 @@ impl Codegen {
         ret .Some(.InvalidNode);
       }
     }
+    // Coverage needs every function's body actually compiled in, even
+    // one nothing calls: that's the only way to report a line as
+    // "exists, never executed" rather than making it vanish from the
+    // count entirely (a real regression, caught by the VS Code
+    // extension's own coverage smoke test - a fixture's deliberately
+    // unused function is exactly how it proves an uncovered line
+    // reports correctly). Pruning and coverage are mutually exclusive.
+    if self.coverage {
+      self.prune_unreachable = false;
+    }
     if self.prune_unreachable {
       self.mark_reachable_names(nodes);
     }
