@@ -1911,7 +1911,8 @@ export default function App() {
                               </section>
                             )}
 
-                          {activeSymbol.kind === "quirk" &&
+                          {(activeSymbol.kind === "quirk" ||
+                            activeSymbol.kind === "shape") &&
                             (activeSymbol.members?.length ?? 0) > 0 && (
                               <section className="compound-fields">
                                 <h4>Members</h4>

@@ -145,14 +145,19 @@ function parseStdFile(filePath, source) {
       }
     }
 
-    const m = line.match(/^pub\s+(fun|compound|quirk|enum)\s+([^\s(<{]+)/);
+    // `quirk` and `shape` are the same declaration shape - `shape` is the
+    // current spelling, `quirk` only still matters when this script runs
+    // against an old git tag's stdlib (release.yml regenerates historical
+    // version snapshots this way), from before the rename.
+    const m = line.match(/^pub\s+(fun|compound|quirk|shape|enum)\s+([^\s(<{]+)/);
     if (m) {
       const symbolComment = collectCommentAbove(lines, i);
       const parsedDocs = parseCommentBlock(symbolComment);
       const symbolDocs = ensureDocs(parsedDocs, line, m[1], m[2]);
       const symbolMarkdown = buildDocsMarkdown(symbolDocs);
       const fields = m[1] === "compound" ? extractCompoundFields(lines, i) : [];
-      const members = m[1] === "quirk" ? extractQuirkMembers(lines, i) : [];
+      const members =
+        m[1] === "quirk" || m[1] === "shape" ? extractShapeMembers(lines, i) : [];
       const variants = m[1] === "enum" ? extractEnumVariants(lines, i) : [];
       symbols.push({
         kind: m[1],
@@ -255,7 +260,7 @@ function extractCompoundFields(lines, declLineIdx) {
   return fields;
 }
 
-function extractQuirkMembers(lines, declLineIdx) {
+function extractShapeMembers(lines, declLineIdx) {
   const members = [];
 
   let depth = 0;
