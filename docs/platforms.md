@@ -56,6 +56,45 @@ entirely, and gives deep recursion the same headroom on every target.
 `fork`/`await`'s own worker threads use a separate, smaller stack; see
 [Concurrency](#concurrency).
 
+### WebAssembly target
+
+Set `FUN_CC=emcc` (or `em++`) to target WebAssembly instead of a native
+executable - the [emscripten](https://emscripten.org/) toolchain must
+already be on `PATH`. `fun -in`, `fun build`, and `fun test` all work the
+same way as any other target: the output is a `.js` glue file plus a
+`.wasm` binary (`fun -in` runs it afterward too, the same as a native
+build, via `node`).
+
+```
+FUN_CC=emcc fun -in hello.fn
+```
+
+Most of the language and stdlib works unmodified: file I/O runs against
+emscripten's own in-memory filesystem (real for the length of that one
+run, not persisted across runs), and `Atomic<T>`, `Guarded<T>`, and
+`fork`/`async`/`Channel` (the scheduler's own worker pool) all work.
+`std.net` and `std.process` do not - both are rejected at compile time
+with a clear message naming the unsupported module, rather than failing
+later in a confusing way.
+
+`main()` calls straight through for this target with no worker thread at
+all, unlike the stack-sizing approach described above: a browser's own
+main (document) thread must never block synchronously on `pthread_join`
+the way that approach otherwise relies on everywhere else, so the wasm
+module's stack is instead sized directly at compile time
+(`-sSTACK_SIZE`). Verified working both under Node and embedded in a real
+browser page - see this project's own [reference
+website](https://omdxp.github.io/fun/), whose docs examples run this way
+client-side, with no backend server at all.
+
+This makes Fun **programs** able to target WebAssembly. It does not make
+the *compiler itself* run inside a browser - the compiler's own pipeline
+still needs a native C compiler to finish a build, which a browser
+sandbox can never provide. An interactive, arbitrary-code playground
+running with zero backend would need a dedicated WebAssembly codegen
+backend bypassing that step entirely; that's a separate, future project,
+not this one.
+
 ## Runtime Backend Selection
 
 `std.runtime_backend` selects the runtime backend with this precedence:

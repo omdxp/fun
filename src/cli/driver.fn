@@ -789,26 +789,35 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     // emcc is clang-like enough to share the optimize/debug/output flag
     // shapes below, but not the rest.
     //
-    // `-pthread` is required even for a program that never itself
-    // touches threading: every compiled Fun program's own
-    // generated `main()` unconditionally spawns one pthread worker to run
-    // on an explicit large stack (confirmed directly - without this, the
-    // program silently produces no output at all under Node, since the
-    // stubbed single-threaded pthread_create() emscripten otherwise links
-    // never actually runs the thread body). Node's own worker_threads-based
-    // pthread emulation works with just this - no SharedArrayBuffer or
-    // cross-origin-isolation headers needed there (those are a browser-only
-    // requirement, relevant only once this target is also served to an
-    // actual browser page, not to plain `node` execution).
+    // `main()`'s own generated wrapper calls straight through for this
+    // target with no worker thread at all (`emit_main_thread_wrapper` in
+    // codegen.fn, gated on `emscripten_mode`) - a browser's own main
+    // (document) thread must never block synchronously on `pthread_join`
+    // the way every OTHER platform's wrapper does for its own big-stack
+    // trick; confirmed directly, in a real browser via Playwright, not
+    // just reasoned about: doing so anyway produced a real runtime
+    // warning and the module never completed. `-sSTACK_SIZE` sizes the
+    // main thread's own stack directly at compile time instead, taking
+    // over the job that worker thread existed for elsewhere.
     //
-    // No `-lm`/`-lws2_32` (emscripten's own libc already bundles libm, and
-    // Winsock is native-Windows-only), and no OpenSSL linking (no such
-    // library exists for this target).
+    // `-pthread` is kept regardless: `Atomic<T>`'s own builtins need the
+    // wasm atomics target feature it enables even when nothing ever
+    // spawns a real thread, and a program that genuinely uses
+    // `fork`/`Guarded<T>`/`std.thread_pool` (confirmed working under
+    // Node in #185) still needs it for real. No `-lm`/`-lws2_32`
+    // (emscripten's own libc already bundles libm, and Winsock is
+    // native-Windows-only), and no OpenSSL linking (no such library
+    // exists for this target).
     argv_args.push("-pthread");
-    // Wasm's linear memory starts small (16 MiB default) - nowhere near
-    // enough for `main()`'s own 128 MiB worker-thread stack alone, let
-    // alone anything the program itself allocates. Grow on demand instead
-    // of guessing a fixed initial size.
+    argv_args.push("-sSTACK_SIZE=134217728");
+    // emcc rejects the combination outright (a real link-time check, not
+    // just a warning: "INITIAL_MEMORY must be larger than STACK_SIZE")
+    // unless the initial linear memory already exceeds the stack size -
+    // `-sALLOW_MEMORY_GROWTH` alone only permits growing *beyond* the
+    // initial value at runtime, it doesn't relax this floor. 160 MiB
+    // comfortably covers the 128 MiB stack plus headroom for everything
+    // else (globals, heap) before growth ever needs to kick in.
+    argv_args.push("-sINITIAL_MEMORY=167772160");
     argv_args.push("-sALLOW_MEMORY_GROWTH=1");
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
