@@ -18120,6 +18120,20 @@ impl Codegen {
   // no header of its own.
   emit_main_thread_wrapper() Option<CodegenErrorKind> {
     str real_name = self.effective_function_name("main");
+    if self.emscripten_mode {
+      // A browser's own main (document) thread must never block
+      // synchronously waiting on another thread - `pthread_join` from
+      // there is a documented, real hazard (confirmed directly: it
+      // produces a runtime warning and the module never completes
+      // correctly), unlike Node, which tolerates it fine. Wasm's linear
+      // memory starts small either way, so the 128 MiB stack this
+      // wrapper exists to provide elsewhere is sized directly at compile
+      // time instead (`-sSTACK_SIZE`, see `_append_compile_args` in
+      // driver.fn) - `main` just calls straight through, no worker
+      // thread, no wrapper needed at all for this target.
+      self.state.write(format("int main(int argc, char** argv) {\n  return {str}(argc, argv);\n}\n", real_name));
+      ret .None;
+    }
     self.state.write(format(
       `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
       `static void* __fun_main_run(void* __fun_main_p) {
@@ -18478,17 +18492,28 @@ impl Codegen {
     self.state.write("    __fun_test_a.argc = argc;\n");
     self.state.write("    __fun_test_a.argv = argv;\n");
     self.state.write("    __fun_test_a.result = 0;\n");
-    self.state.write("#ifdef _WIN32\n");
-    self.state.write("    __fun_test_main_worker(&__fun_test_a);\n");
-    self.state.write("#else\n");
-    self.state.write("    pthread_attr_t __fun_test_attr;\n");
-    self.state.write("    pthread_attr_init(&__fun_test_attr);\n");
-    self.state.write("    pthread_attr_setstacksize(&__fun_test_attr, 134217728);\n");
-    self.state.write("    pthread_t __fun_test_thread;\n");
-    self.state.write("    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n");
-    self.state.write("    pthread_attr_destroy(&__fun_test_attr);\n");
-    self.state.write("    pthread_join(__fun_test_thread, (void**)0);\n");
-    self.state.write("#endif\n");
+    if self.emscripten_mode {
+      // Same reasoning as `emit_main_thread_wrapper`: a browser's own
+      // main thread must never block on `pthread_join`, and wasm's stack
+      // is sized directly at compile time (`-sSTACK_SIZE`) instead of
+      // via a dedicated worker thread for this target - call straight
+      // through, matching the existing Windows branch below (which
+      // already skips its own worker-thread wrapper for a different
+      // reason: the /STACK: linker flag sizes the whole process instead).
+      self.state.write("    __fun_test_main_worker(&__fun_test_a);\n");
+    } else {
+      self.state.write("#ifdef _WIN32\n");
+      self.state.write("    __fun_test_main_worker(&__fun_test_a);\n");
+      self.state.write("#else\n");
+      self.state.write("    pthread_attr_t __fun_test_attr;\n");
+      self.state.write("    pthread_attr_init(&__fun_test_attr);\n");
+      self.state.write("    pthread_attr_setstacksize(&__fun_test_attr, 134217728);\n");
+      self.state.write("    pthread_t __fun_test_thread;\n");
+      self.state.write("    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n");
+      self.state.write("    pthread_attr_destroy(&__fun_test_attr);\n");
+      self.state.write("    pthread_join(__fun_test_thread, (void**)0);\n");
+      self.state.write("#endif\n");
+    }
     self.state.write("    return __fun_test_a.result;\n");
     self.state.write("}\n");
     ret .None;
