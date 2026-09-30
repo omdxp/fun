@@ -4780,24 +4780,40 @@ impl Codegen {
   // written right after such an escape is split into its own adjacent
   // literal (`"\x42" "C"`, which C concatenates back), so it is read as
   // the next character rather than swallowed into the same escape.
+  // In MSVC mode the same chunking as `write_raw_string_body` applies to
+  // stay under MSVC's 16380-byte string-literal limit (C2026). Splits are
+  // never inserted after a backslash — that would turn `\"` into `\"` +
+  // `"` and break the following escape.
   write_string_literal_body(str s) {
     num i = 0;
     num n = len(s);
+    num chunk = 0;
+    flag prev_backslash = false;
     for i < n {
+      if self.msvc_mode && chunk >= 8192 && !prev_backslash {
+        self.state.write("\" \"");
+        chunk = 0;
+      }
       chr c = s[i];
       self.write_c_char(c);
+      chunk = chunk + 1;
+      prev_backslash = c == '\\';
       i = i + 1;
       if c == '\\' && i < n && s[i] == 'x' {
         self.write_c_char('x');
+        chunk = chunk + 1;
+        prev_backslash = false;
         i = i + 1;
         num digits = 0;
         for digits < 2 && i < n && _is_hex_digit(s[i]) {
           self.write_c_char(s[i]);
+          chunk = chunk + 1;
           i = i + 1;
           digits = digits + 1;
         }
         if i < n && _is_hex_digit(s[i]) {
           self.state.write("\" \"");
+          chunk = 0;
         }
       }
     }
@@ -4815,25 +4831,37 @@ impl Codegen {
 
   // Writes a raw string literal's bytes as a C string-literal body,
   // escaping backslash, double-quote, and newline; everything else
-  // passes through unchanged.
+  // passes through unchanged. In MSVC mode, splits the literal into
+  // adjacent pieces every 8192 source characters to stay under MSVC's
+  // 16380-byte string-literal limit (C2026).
   write_raw_string_body(str s) {
     num i = 0;
     num n = len(s);
+    num chunk = 0;
     for i < n {
+      if self.msvc_mode && chunk >= 8192 {
+        self.state.write("\" \"");
+        chunk = 0;
+      }
       chr c = s[i];
       if c == '\\' {
         self.state.write("\\\\");
+        chunk = chunk + 2;
       } elif c == '"' {
         self.state.write("\\\"");
+        chunk = chunk + 2;
       } elif c == '\n' {
         self.state.write("\\n");
+        chunk = chunk + 2;
       } elif c == '\r' {
         self.state.write("\\r");
+        chunk = chunk + 2;
       } else {
         str buf = malloc(2);
         buf[0] = c;
         buf[1] = 0;
         self.state.write(buf);
+        chunk = chunk + 1;
       }
       i = i + 1;
     }
@@ -5716,6 +5744,72 @@ impl Codegen {
               }
             }
             _ -> {}
+          }
+        }
+        // `str == str`/`str != str` must use `strcmp`, not C pointer
+        // comparison. On MSVC string literals are not deduplicated across
+        // translation units, so a function returning `""` yields a
+        // different address than a `""` literal in the same condition even
+        // though both are semantically empty strings.
+        //
+        // The check is conservative on purpose: calling `resolve_field_chain`
+        // before `emit_expr` would trigger its call-receiver probe which has
+        // side effects on hoist positions and generic-method draining. Instead
+        // we detect the three safe patterns without a probe:
+        // - either side is a string literal  (covers `func() != ""`)
+        // - left is a bare identifier whose declared type is `str`
+        // (covers `a != b`)
+        // Nil comparisons are skipped — those are null-pointer checks and
+        // pointer comparison is intentional there.
+        if equals(e.op, "==") || equals(e.op, "!=") {
+          flag lhs_is_nil = false;
+          flag rhs_is_nil = false;
+          flag lhs_is_str_lit = false;
+          flag rhs_is_str_lit = false;
+          flag lhs_is_str_ident = false;
+          fit e.left.kind {
+            .Nil -> { lhs_is_nil = true; }
+            .String(_) -> { lhs_is_str_lit = true; }
+            .Identifier(lname) -> {
+              let lt = self.lookup_local_type_name(lname);
+              if lt.is_some() && equals(lt.unwrap(), "str") {
+                lhs_is_str_ident = true;
+              }
+            }
+            _ -> {}
+          }
+          fit e.right.kind {
+            .Nil -> { rhs_is_nil = true; }
+            .String(_) -> { rhs_is_str_lit = true; }
+            _ -> {}
+          }
+          flag use_strcmp = !lhs_is_nil && !rhs_is_nil &&
+            (lhs_is_str_lit || rhs_is_str_lit || lhs_is_str_ident);
+          if use_strcmp {
+            flag sp = !self.suppress_next_expr_parens;
+            self.suppress_next_expr_parens = false;
+            if sp {
+              self.state.write("(");
+            }
+            self.state.write("strcmp(");
+            let lerr2 = self.emit_expr(*e.left);
+            if lerr2.is_some() {
+              ret lerr2;
+            }
+            self.state.write(", ");
+            let rerr2 = self.emit_expr(*e.right);
+            if rerr2.is_some() {
+              ret rerr2;
+            }
+            if equals(e.op, "==") {
+              self.state.write(") == 0");
+            } else {
+              self.state.write(") != 0");
+            }
+            if sp {
+              self.state.write(")");
+            }
+            ret .None;
           }
         }
         // Consumed here, one shot: only this outermost pair is skipped,
@@ -16816,7 +16910,8 @@ impl Codegen {
       `static char* __fun_ed25519_sign(const char* priv_hex, const char* message, long long msg_len) { (void)priv_hex; (void)message; (void)msg_len; return NULL; }
       `static long long __fun_ed25519_verify(const char* pub_hex, const char* message, long long msg_len, const char* signature_hex) { (void)pub_hex; (void)message; (void)msg_len; (void)signature_hex; return 0; }
       `#else
-      `static void* __fun_hash_new(long long algo) {
+      ``);
+      self.state.write(`static void* __fun_hash_new(long long algo) {
       `  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
       `  if (ctx == NULL) return NULL;
       `  const EVP_MD* md = (algo == 1) ? EVP_sha512() : EVP_sha256();
