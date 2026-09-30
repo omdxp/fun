@@ -3536,6 +3536,40 @@ test "hovering a shape-downcast fit arm's binding resolves to the concrete type"
   assert !equals(jumped, "[]"), "expected a real location, not an empty result";
 }
 
+test "hover and completion resolve a bare generic shape-downcast arm auto-resolved to its one concrete instantiation" {
+  // `Wrapper(w)` (no `<Args>`) auto-resolves at typecheck since it's the
+  // only impl of Wrapper<...> for Sized - hover, scope completion, and
+  // dot-completion each keep their own independent copy of this
+  // resolution (mirroring typecheck.fn/codegen.fn/warnings.fn's own
+  // copies), so all three need checking, not just one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapebareauto.fn";
+  doc.path = "shapebareauto.fn";
+  doc.text = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Wrapper(w) -> { ret w.extra; }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 8, 12), "Wrapper__Circle* w"), "expected the binding site to resolve to the auto-resolved concrete type";
+  assert contains(hover(&reads, doc, 8, 24), "Wrapper__Circle* w"), "expected a use site inside the arm body to resolve the same way";
+
+  str scoped = completion(&reads, doc, 8, 24, false);
+  assert contains(scoped, `"label":"w"`), "expected the auto-resolved binding offered in scope completion";
+
+  str dotted = completion(&reads, doc, 8, 26, false);
+  assert contains(dotted, `"label":"extra"`), "expected Wrapper__Circle's own field 'extra' offered through the auto-resolved binding";
+}
+
 test "hover resolves a shape-typed receiver's own method, not just a concrete one" {
   // User-reported. lookup_method only ever searched impl blocks by
   // their own type_name, which is always the concrete implementing
