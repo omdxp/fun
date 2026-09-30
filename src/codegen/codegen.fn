@@ -11493,7 +11493,16 @@ impl Codegen {
     self.state.indent_level = self.state.indent_level + 1;
     str bname = br.bindings.get(0);
     if !equals(bname, "_") {
-      self.state.write_indent();
+      // Pinned, not a plain flush: this declaration is synthesized, not
+      // a real user statement, so without re-pinning it would inherit
+      // whatever `#line` the branch's own guard condition last flushed
+      // (the arm's own line) rather than a debugger showing it on the
+      // binding's actual line.
+      if br.condition != nil && br.condition.has_pos {
+        self.state.write_indent_pinned(br.condition.pos);
+      } else {
+        self.state.write_indent();
+      }
       self.state.write(type_name);
       self.state.write("* ");
       self.state.write(bname);
