@@ -19,6 +19,8 @@ use std.io;
 use std.map;
 use std.range;
 use std.ctype;
+use std.set;
+use ..semantics.warnings;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -528,6 +530,22 @@ pub compound Codegen {
   // posix_spawnp` link error for spawning) - `transpile` rejects both
   // outright with a real Fun-level message instead.
   flag emscripten_mode;
+  // Whole-program-build-only dead code elimination: a top-level
+  // function or impl method whose name never appears in
+  // `reachable_names` skips body emission entirely (its one-line
+  // forward declaration is still written as always, so a false
+  // negative here is a loud link error, never a silent miscompile).
+  // Left false for `compile_c_to_object`/library builds, where code
+  // outside this compilation may call a public symbol nothing inside
+  // it calls itself.
+  flag prune_unreachable;
+  // The set built by `mark_reachable_names` when `prune_unreachable`
+  // is set: every top-level function name, impl `type_name`/
+  // `shape_name`, and impl method name transitively reachable from
+  // `main` (or every `.Test`/`.Fuzz` body in test/fuzz mode) plus
+  // every top-level global's own initializer, since globals are
+  // always emitted regardless of reachability.
+  Set<str> reachable_names;
   // Incremented for each variadic call that uses the hoist path so each
   // call's temporaries get a unique prefix in the surrounding scope.
   num va_call_counter;
@@ -706,6 +724,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.emscripten_mode = false;
+  g.prune_unreachable = false;
+  g.reachable_names = set_init("", 256);
   g.fuzz_mode = false;
   g.debug_info = false;
   g.fuzz_target = "";
@@ -17761,6 +17781,211 @@ impl Codegen {
     ``);
   }
 
+  // The prefix `register_impl_methods` mangles every one of `im`'s own
+  // method names under (`"{type_name}__"`, plus `"{shape_name}__"` too
+  // for a shape impl) - shared so the mark phase and this reachability
+  // check strip a method's mangled `FunctionNode.name` (`RotatingSink__
+  // write`) back to the bare name a call site actually reads (`write`)
+  // the exact same way, rather than two independent derivations
+  // drifting apart.
+  impl_method_mangle_prefix(ImplNode* im) str {
+    StringBuilder pfx = string_builder_init(16);
+    pfx.append(im.type_name);
+    pfx.append("__");
+    if im.has_shape_name {
+      pfx.append(im.shape_name);
+      pfx.append("__");
+    }
+    ret pfx.build();
+  }
+
+  // True when `im` is part of the reachable set already computed by
+  // `mark_reachable_names`: its own `type_name`, its `shape_name` (a
+  // `fit`/shape-typed value can use an impl without naming one of its
+  // methods in text - see `check_unused_declarations`'s identical
+  // `read.add(block.type_name)`/`read.add(block.shape_name)` in
+  // `warnings.fn`), or any one of its methods' own bare name.
+  impl_is_reachable(ImplNode* im) flag {
+    if self.reachable_names.has(im.type_name) {
+      ret true;
+    }
+    if im.has_shape_name && self.reachable_names.has(im.shape_name) {
+      ret true;
+    }
+    str prefix = self.impl_method_mangle_prefix(im);
+    for m : im.methods {
+      fit m.kind {
+        .Function(mf) -> {
+          if self.reachable_names.has(strip_prefix(mf.name, prefix)) {
+            ret true;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
+  // Builds `self.reachable_names`: every top-level function name, impl
+  // `type_name`/`shape_name`, and impl method name transitively
+  // reachable from the program's real entry points. Roots are `main`
+  // in ordinary builds, or every `.Test`/`.Fuzz` body in test/fuzz
+  // mode (mirroring the same `test_mode`/`fuzz_mode` distinction the
+  // body-emission loop below already makes for `skip_main`); every
+  // top-level global's own initializer is a root too, since globals
+  // are emitted unconditionally regardless of reachability, so
+  // whatever a kept global references must stay reachable as well.
+  //
+  // Runs to a simple fixed point (re-scan `nodes`, re-collect reads
+  // from whatever is newly reachable, repeat until a full pass adds
+  // nothing) rather than an explicit worklist: redundant re-collection
+  // from an already-reachable declaration is wasted work, not a
+  // correctness risk, and real call chains are shallow enough that
+  // this converges in a handful of rounds. `collect_function_reads`/
+  // `collect_reads` (`..semantics.warnings`) already correctly
+  // capture a function referenced only as a value (assigned, passed,
+  // never called by `name(args)` syntax), not just direct calls,
+  // since they were built for the unused-declaration lint, which
+  // needs to catch any use, not just calls.
+  //
+  // Only gates *body* emission (see the callers in `transpile`, not
+  // this method) - the forward-declare pass still writes every
+  // prototype unconditionally, so a false negative here surfaces as a
+  // link-time "undefined symbol" error, never a silent miscompile.
+  mark_reachable_names(Vec<Node> nodes) {
+    Set<str> reachable = set_init("", 256);
+    if self.test_mode || self.fuzz_mode {
+      for n : nodes {
+        fit n.kind {
+          .Test(t) -> { collect_reads(t.body, &reachable); }
+          .Fuzz(fz) -> { collect_reads(fz.body, &reachable); }
+          _ -> {}
+        }
+      }
+    } else {
+      for n : nodes {
+        fit n.kind {
+          .Function(f) -> {
+            if equals(f.name, "main") {
+              reachable.add("main");
+              collect_function_reads(f, &reachable);
+            }
+          }
+          _ -> {}
+        }
+      }
+    }
+    for n : nodes {
+      fit n.kind {
+        .Variable(v) -> { collect_reads(&n, &reachable); }
+        _ -> {}
+      }
+    }
+    // Generic functions/impls are emitted through a wholly separate,
+    // pre-existing on-demand mechanism
+    // (`maybe_instantiate_generic_function`/
+    // `maybe_instantiate_generic_impl_methods`, deduped via
+    // `emitted_generic_instantiations`), unconditionally, regardless
+    // of reachability - this pass never gates them. But a generic
+    // body can call an ordinary, non-generic function (`Channel<T>`'s
+    // methods calling `sync_runtime.fn`'s `runtime_mutex_lock`, for
+    // one real example), and that call is otherwise invisible to
+    // this walk: a generic template is never itself a root, and
+    // nothing in `main`'s own text need ever name it directly for a
+    // concrete instantiation to exist. Since a generic template is
+    // always potentially live regardless of what this pass computes,
+    // its own reads are seeded unconditionally too, same as a global.
+    for n : nodes {
+      fit n.kind {
+        .Function(f) -> {
+          if f.has_type_params {
+            collect_function_reads(f, &reachable);
+          }
+        }
+        .Impl(im) -> {
+          if im.has_type_params {
+            for m : im.methods {
+              fit m.kind {
+                .Function(mf) -> { collect_function_reads(mf, &reachable); }
+                _ -> {}
+              }
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    flag changed = true;
+    for changed {
+      num before = reachable.len();
+      for n : nodes {
+        fit n.kind {
+          .Function(f) -> {
+            if !f.has_type_params && reachable.has(f.name) {
+              collect_function_reads(f, &reachable);
+              // Every variadic function's own emitted prologue (see
+              // the `__fun_vtags` switch in `emit_function`/
+              // `emit_function_named`) calls these directly by fixed
+              // C name to convert each raw vararg to `str`, and the
+              // same fixed set covers a caller-side nilable-pointer
+              // fallback (`fmt_str("nil")`) for any call to one -
+              // neither ever appears as an ordinary identifier read
+              // in Fun source, so a plain AST walk can never see
+              // this dependency on its own.
+              if f.is_variadic {
+                reachable.add("fmt_num");
+                reachable.add("fmt_dec");
+                reachable.add("fmt_flag");
+                reachable.add("fmt_chr");
+                reachable.add("fmt_raw");
+                reachable.add("fmt_str");
+              }
+            }
+          }
+          .Impl(im) -> {
+            if !im.has_type_params {
+              flag im_reachable = reachable.has(im.type_name);
+              if !im_reachable && im.has_shape_name {
+                im_reachable = reachable.has(im.shape_name);
+              }
+              str prefix = self.impl_method_mangle_prefix(&im);
+              if !im_reachable {
+                for m : im.methods {
+                  fit m.kind {
+                    .Function(mf) -> {
+                      if reachable.has(strip_prefix(mf.name, prefix)) {
+                        im_reachable = true;
+                      }
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+              if im_reachable {
+                reachable.add(im.type_name);
+                if im.has_shape_name {
+                  reachable.add(im.shape_name);
+                }
+                for m : im.methods {
+                  fit m.kind {
+                    .Function(mf) -> {
+                      reachable.add(strip_prefix(mf.name, prefix));
+                      collect_function_reads(mf, &reachable);
+                    }
+                    _ -> {}
+                  }
+                }
+              }
+            }
+          }
+          _ -> {}
+        }
+      }
+      changed = reachable.len() != before;
+    }
+    self.reachable_names = reachable;
+  }
+
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
   // in `nodes`, skipping anything else without error. Impl methods are
   // pre-registered first, since a generic impl's template must be in
@@ -17784,6 +18009,9 @@ impl Codegen {
         self.error_note = "std.process is not supported when compiling for WebAssembly - no subprocess spawning in this target";
         ret .Some(.InvalidNode);
       }
+    }
+    if self.prune_unreachable {
+      self.mark_reachable_names(nodes);
     }
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.
@@ -18013,21 +18241,25 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
-          // The vtable machinery first: a method returning the very
-          // shape it implements (`self_ref() Chain` on `impl X as
-          // Chain`) needs that shape's own struct typedef to already
-          // exist when its signature is written, and nothing this
-          // writes depends on the method bodies emitted after it.
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let qerr = self.emit_shape_vtable_machinery(n);
-          if qerr.is_some() {
-            ret qerr;
-          }
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let ierr = self.emit_impl(n);
-          if ierr.is_some() {
-            self.note_unsupported(n, "in an impl block");
-            ret ierr;
+          flag prune_this_impl = self.prune_unreachable && !i.has_type_params &&
+            !self.impl_is_reachable(&i);
+          if !prune_this_impl {
+            // The vtable machinery first: a method returning the very
+            // shape it implements (`self_ref() Chain` on `impl X as
+            // Chain`) needs that shape's own struct typedef to already
+            // exist when its signature is written, and nothing this
+            // writes depends on the method bodies emitted after it.
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            let qerr = self.emit_shape_vtable_machinery(n);
+            if qerr.is_some() {
+              ret qerr;
+            }
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            let ierr = self.emit_impl(n);
+            if ierr.is_some() {
+              self.note_unsupported(n, "in an impl block");
+              ret ierr;
+            }
           }
         }
         .Function(f) -> {
@@ -18036,7 +18268,9 @@ impl Codegen {
           // fuzzing engine's own driver supplies `main` too, so a
           // user-defined one would collide with it at link time.
           flag skip_main = equals(f.name, "main") && (self.test_mode || self.fuzz_mode);
-          if !f.has_type_params && !skip_main {
+          flag prune_this_fn = self.prune_unreachable && !equals(f.name, "main") &&
+            !self.reachable_names.has(f.name);
+          if !f.has_type_params && !skip_main && !prune_this_fn {
             if equals(f.name, "main") {
               saw_real_main = true;
             }
