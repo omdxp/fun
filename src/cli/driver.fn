@@ -677,6 +677,7 @@ pub fun compile_to_c_cover(
   cg.fuzz_mode = fuzz_mode;
   cg.fuzz_target = fuzz_target;
   cg.msvc_mode = compiler_is_msvc(resolve_c_compiler());
+  cg.emscripten_mode = compiler_is_emscripten(resolve_c_compiler());
   cg.debug_info = debug_info;
   if cover != nil {
     cg.coverage = true;
@@ -1649,10 +1650,53 @@ test "the emscripten compiler is recognized by name" {
   assert !compiler_is_emscripten("cl.exe"), "expected cl.exe not to be emscripten";
 }
 
-test "the wasm target's own output suffix is .js" {
+sequential test "the wasm target's own output suffix is .js" {
   set_env("FUN_CC", "emcc");
   assert equals(exe_suffix(), ".js"), "expected emscripten's own output suffix to be .js";
   set_env("FUN_CC", "");
+}
+
+sequential test "std.net and std.process are rejected with a real message for the wasm target" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+
+  str net_src = `use std.net;
+  `fun main() num {
+  `  ret tcp_listen(0);
+  `}`;
+  str net_path = "src/cli/driver_wasm_net_reject.test.fn";
+  assert write_string(net_path, net_src), "could not stage the net-reject fixture";
+  defer remove_file(net_path);
+  set_env("FUN_CC", "emcc");
+  let net_lowered = compile_to_c(net_path, "src/cli/driver_wasm_net_reject.test.c", &defines, false);
+  set_env("FUN_CC", "");
+  assert net_lowered.is_err(), "expected std.net to be rejected for the wasm target";
+  assert contains(net_lowered.unwrap_err(), "std.net is not supported when compiling for WebAssembly"), "expected the message to name std.net specifically";
+
+  str proc_src = `use std.process;
+  `fun main() num {
+  `  Vec<str> a;
+  `  a.init(1);
+  `  a.push("echo");
+  `  str[] my_argv = argv_from(&a);
+  `  let result = run(my_argv);
+  `  free_argv(my_argv);
+  `  _ = result;
+  `  ret 0;
+  `}`;
+  str proc_path = "src/cli/driver_wasm_proc_reject.test.fn";
+  assert write_string(proc_path, proc_src), "could not stage the process-reject fixture";
+  defer remove_file(proc_path);
+  set_env("FUN_CC", "emcc");
+  let proc_lowered = compile_to_c(proc_path, "src/cli/driver_wasm_proc_reject.test.c", &defines, false);
+  set_env("FUN_CC", "");
+  assert proc_lowered.is_err(), "expected std.process to be rejected for the wasm target";
+  assert contains(proc_lowered.unwrap_err(), "std.process is not supported when compiling for WebAssembly"), "expected the message to name std.process specifically";
+
+  // Not rejected for an ordinary native build - only the wasm target.
+  let net_native = compile_to_c(net_path, "src/cli/driver_wasm_net_reject.test.c", &defines, false);
+  assert net_native.is_ok(), "expected std.net to compile fine for a native target";
 }
 
 sequential test "wasm target real end to end, through the actual emscripten toolchain when installed" {
