@@ -17981,6 +17981,28 @@ impl Codegen {
           _ -> {}
         }
       }
+      // `one.pick()`/`two.pick()` importing two different modules that
+      // each define their own plain `pick()` collide in C's single
+      // global namespace - `lookup_alias_rename` renames the losing
+      // one (`two__pick`) at merge time, consulted only where a call
+      // site or declaration is actually emitted. A call site's own
+      // text still just reads the bare `pick` either way, so nothing
+      // above ever adds the renamed form itself; a bare name becoming
+      // reachable conservatively carries every alias's own renamed
+      // target for it along too, not just whichever one the program
+      // actually meant.
+      num ari = 0;
+      for ari < self.alias_rename_keys.len {
+        str key = self.alias_rename_keys.get(ari);
+        num sep = index_of_str(key, "::");
+        if sep >= 0 {
+          str bare_name = substr(key, sep + 2, len(key) - sep - 2);
+          if reachable.has(bare_name) {
+            reachable.add(self.alias_rename_targets.get(ari));
+          }
+        }
+        ari = ari + 1;
+      }
       changed = reachable.len() != before;
     }
     self.reachable_names = reachable;
